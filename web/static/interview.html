@@ -99,6 +99,12 @@
   const updateQuestId = window.__fi_update_quest_id || null;
   const isUpdate = !!updateQuestId;
   let schema = null;
+  // The saved author line (core/profile.py), or null when this person has not been asked yet. When there is one, the
+  // new-quest form does not ask it again: it is filled in, and shown on the review screen to change.
+  let savedProfile = null;
+  const PROFILE_FIELDS = ['author', 'affiliation', 'contact_email', 'url'];
+  // Review-screen fields the person changed by hand: a changed paper format re-derives what follows from it, never these.
+  const editedFields = new Set();
   // Holds the quest's current editable answers when isUpdate is true,
   // fetched from GET /api/quests/<id>/answers. Used by renderForm() /
   // makeInput() to seed inputs from the saved YAML instead of the
@@ -126,6 +132,11 @@
       ? fetch(`/api/quests/${encodeURIComponent(updateQuestId)}/answers`)
       : null;
     schema = await schemaP;
+    if (!isUpdate) {
+      try {
+        savedProfile = (await (await fetch('/api/profile')).json()).profile || null;
+      } catch (_) { savedProfile = null; }
+    }
     const title = document.getElementById('page-title');
     const subtitle = document.getElementById('page-subtitle');
     if (isUpdate) {
@@ -329,6 +340,12 @@
 
   function escapeAttr(s) { return escapeHtml(s); }
 
+  // Tier 1: the topic, what the result is for, the provider and model; the author line only while no profile is saved.
+  function firstScreenQuestions() {
+    return schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1
+      && !(savedProfile && PROFILE_FIELDS.includes(q.id)));
+  }
+
   function renderForm() {
     const form = document.getElementById('interview-form');
     form.innerHTML = '';
@@ -339,7 +356,7 @@
     // not building a fresh one from scratch.
     const visibleQs = isUpdate
       ? schema.questions.filter((q) => q.frontends.includes('serve'))
-      : schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
+      : firstScreenQuestions();
     document.getElementById('progress-total').textContent = visibleQs.length;
     document.getElementById('progress-pill').classList.remove('hidden');
     let idx = 0;
@@ -562,8 +579,34 @@
     return SURVEY_TOPIC_MARKERS.some((m) => t.includes(m));
   }
 
+  // Mirrors core/interview.py:slugify: Unicode letters are kept, so a topic in Chinese has a real title.
   function slugifyTopic(t) {
-    return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'quest';
+    return String(t || '').toLowerCase()
+      .replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/_+/g, '-').replace(/\s+/g, '-').replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '').slice(0, 40) || 'quest';
+  }
+
+  // Mirrors core/interview.py:FORMAT_TOPIC_MARKERS / smart_default_paper_format.
+  const FORMAT_TOPIC_MARKERS = [
+    ['policy brief', 'policy_brief'], ['white paper', 'whitepaper'], ['whitepaper', 'whitepaper'],
+    ['an essay', 'essay'], ['essay on', 'essay'], ['business report', 'report'], ['market report', 'report'],
+    ['history of', 'essay'], ['evolution of', 'essay'], ['the story of', 'essay'], ['development of', 'essay'],
+    ['retrospective', 'essay'],
+  ];
+  // Mirrors core/interview.py:smart_default_output_kinds.
+  function outputKindsFor(topic) {
+    const t = String(topic || '').toLowerCase();
+    const kinds = ['paper_md', 'paper_pdf'];
+    if (/\bslides?\b|slide deck|presentation/.test(t)) kinds.push('slides');
+    if (/\bposter\b/.test(t)) kinds.push('poster');
+    if (/\btalk\b|\bspeech\b|talk script/.test(t)) kinds.push('speech');
+    return kinds;
+  }
+
+  function paperFormatFor(topic) {
+    const t = String(topic || '').toLowerCase();
+    const hit = FORMAT_TOPIC_MARKERS.find(([m]) => t.includes(m));
+    return hit ? hit[1] : 'generic';
   }
 
   async function probeAxonReachable() {
@@ -587,8 +630,30 @@
     return [...panel, ...(schema.required_review_roles || []).filter((r) => !panel.includes(r))];
   }
 
-  async function deriveTier2(tier1) {
+  // Mirrors core/interview.py:smart_default_study_depth.
+  function studyDepthFor(paperFormat, topic) {
+    if (paperFormat === 'policy_brief') return 'brief preprint';
+    const t = String(topic || '').toLowerCase();
+    if (['survey', 'review of', 'compar'].some((tok) => t.includes(tok))) return 'comprehensive review';
+    return 'journal-length';
+  }
+
+  function questionDefault(id) {
+    const q = schema.questions.find((x) => x.id === id);
+    return q ? q.default : undefined;
+  }
+
+  async function deriveTier2(given) {
+    // The paper format, deliverables and study depth are worked out here now (tier 2), and what follows reads them:
+    // a value the person already set is kept.
+    const tier1 = { ...given };
+    tier1.paper_format = tier1.paper_format || paperFormatFor(tier1.topic);
+    tier1.output_kinds = tier1.output_kinds || outputKindsFor(tier1.topic);
+    tier1.study_depth = tier1.study_depth || studyDepthFor(tier1.paper_format, tier1.topic);
     return {
+      paper_format: tier1.paper_format,
+      output_kinds: tier1.output_kinds,
+      study_depth: tier1.study_depth,
       title: slugifyTopic(tier1.topic),
       // survey_mode implies no_simulation, so a "history of …" topic forces
       // observational even under a scientific paper_format — keeps the review
@@ -615,13 +680,11 @@
     // quest legitimately benefits from broader retrieval. Without this
     // mirror, the web UI silently drops the bump and a comp-review
     // quest gets the default 20.
-    // ``ensemble_profile`` USED to live here when it was tier-3; it was
-    // promoted to tier-1 (cost multiplier is a launch-time decision)
-    // and the user now picks it on the main form. Re-emitting a default
-    // here would clobber that pick when ``{...pendingAnswers, ...advanced}``
-    // merges back below — so leave it out.
+    // The multi-model ensemble is advanced (tier 3): off unless the person opens Advanced and names the models.
     const compReview = tier1 && tier1.study_depth === 'comprehensive review';
     return {
+      ensemble_profile: 'off',
+      ensemble_models: '',
       comparative_baseline: '',
       success_metric: '',
       budget: '',
@@ -644,7 +707,7 @@
     ev.preventDefault();
     const visibleQs = isUpdate
       ? schema.questions.filter((q) => q.frontends.includes('serve'))
-      : schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
+      : firstScreenQuestions();
     const out = {};
     for (const q of visibleQs) {
       const el = document.getElementById(`q-${q.id}`);
@@ -677,9 +740,11 @@
 
     // New-quest flow: validate tier-1, derive tier-2/3, render review.
     if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
-    pendingAnswers = { ...out };
+    if (!out.provider || !String(out.provider).trim()) { alert('Pick the LLM provider.'); return false; }
+    pendingAnswers = { ...(savedProfile || {}), ...out, profile_seen: savedProfile };
+    editedFields.clear();
     const derived = await deriveTier2(out);
-    const advanced = deriveTier3(out);
+    const advanced = deriveTier3({ ...out, ...derived });
     pendingAnswers = { ...pendingAnswers, ...derived, ...advanced };
 
     // Hide the form, render the review section. Submit button rerenders
@@ -697,7 +762,7 @@
     sec.innerHTML = '';
 
     // Tier-1 summary card (read-only, click "Edit" to go back to form).
-    const tier1 = schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
+    const tier1 = firstScreenQuestions();
     const t1Card = document.createElement('div');
     t1Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
     t1Card.innerHTML = `
@@ -732,6 +797,23 @@
       </div>
     `;
     sec.appendChild(t2Card);
+
+    // The saved author line: filled from the profile, changed here for this quest and the next ones.
+    if (savedProfile) {
+      const authorQs = schema.questions.filter((q) => PROFILE_FIELDS.includes(q.id));
+      const aCard = document.createElement('div');
+      aCard.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+      aCard.innerHTML = `
+        <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">Author line</h2>
+        <p class="font-body-md text-body-md text-on-surface-variant mb-4">
+          From your saved details. A change here is kept for your next quests too.
+        </p>
+        <div class="space-y-1">
+          ${authorQs.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
+        </div>
+      `;
+      sec.appendChild(aCard);
+    }
 
     // Tier-3 advanced (toggle).
     const tier3 = schema.questions.filter((q) => q.tier === 3);
@@ -851,10 +933,28 @@
       value = resolved;
     }
     pendingAnswers[id] = value;
+    editedFields.add(id);
     const savedQ = schema.questions.find((x) => x.id === id);
     document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value, savedQ);
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
+    if (id === 'paper_format' || id === 'study_depth') {
+      rederive();
+    }
   };
+
+  // What follows from the paper format and the depth is worked out again; a value the person set stays.
+  async function rederive() {
+    const held = {};
+    for (const k of editedFields) held[k] = pendingAnswers[k];
+    const given = { topic: pendingAnswers.topic, result_use: pendingAnswers.result_use, ...held };
+    const fresh = { ...(await deriveTier2(given)), ...deriveTier3({ ...given, ...(await deriveTier2(given)) }) };
+    for (const [k, v] of Object.entries(fresh)) {
+      if (editedFields.has(k) || k === 'knowledge_enabled') continue;
+      if (['comparative_baseline', 'success_metric', 'budget'].includes(k)) continue;  // preflight/typed values
+      pendingAnswers[k] = v;
+    }
+    renderReview();
+  }
 
   window.cancelReviewEdit = function (id) {
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
@@ -895,6 +995,9 @@
       return false;
     }
     const body = await res.json();
+    if (!asUpdate && body.profile_saved === false) {
+      alert('The quest was created, but your author line could not be kept for the next quests (the server log says why).');
+    }
     if (!asUpdate && body.quest_id) {
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;

@@ -562,15 +562,11 @@ def test_schema_json_file_matches_export() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_ensemble_profile_question_is_tier_1_and_optional() -> None:
-    """The ensemble profile sits at Tier 1 (visible on the main
-    interview page next to provider/model) and defaults to ``off`` so
-    users who don't opt in see no change. Mid-quest-editable so the
-    user can flip profiles between /resume passes. Earlier this was
-    tier-3 (hidden behind Advanced); promoted because the cost
-    multiplier is a quest-creation decision worth surfacing up-front."""
+def test_ensemble_profile_question_is_advanced_and_optional() -> None:
+    """The ensemble profile is in Advanced (tier 3) and defaults to ``off``, so a person who does not open Advanced
+    runs one model. Mid-quest-editable so the profile can change between /resume passes."""
     q = next(q for q in QUESTIONS if q.id == "ensemble_profile")
-    assert q.tier == 1
+    assert q.tier == 3
     assert q.default == "off"
     assert q.mid_quest_editable is True
     values = {c.value for c in q.choices}

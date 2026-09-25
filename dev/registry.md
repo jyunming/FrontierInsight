@@ -49,6 +49,9 @@ same PR that adds, splits or renames one.
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client, sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
+- `core/profile.py` — the person's author line, asked on the first interview and kept in
+  `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
+  submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).
 - `core/receipts.py` — the receipt each required check (evidence gate, design audit, claim check) writes under
   `needs/receipts/`; `core/evidence.py` reads them for `publication_ready`; `engine._stop_once_for_check` is the
   research profile's one stop and retry.
