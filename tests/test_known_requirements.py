@@ -57,3 +57,13 @@ def test_the_cobra_module_maps_to_a_package_that_exists() -> None:
     import launch
 
     assert launch._MODULE_TO_PIP.get("cobra", "cobra") == "cobra"
+
+
+def test_a_quest_installs_a_preset_skills_packages_even_when_its_record_has_none() -> None:
+    """Most preset skills on a user's machine were imported before pip_requires was recorded: a quest in its own clean
+    environment still gets their packages, pinned (landlab 2.10.1)."""
+    from core import experiment_deps
+
+    old_landlab = SimpleNamespace(name="landlab", provenance=lambda: {})
+    old_scipy = SimpleNamespace(name="scipy", provenance=lambda: {})
+    assert experiment_deps.skill_requirements([old_landlab, old_scipy]) == ["landlab==2.10.1", "scipy"]
