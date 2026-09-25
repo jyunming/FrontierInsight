@@ -1685,7 +1685,7 @@ async def _cli_human_feedback_callback(
     if (snapshot.get("review_status") or "ok") != "ok" or not_ok:
         print("  WARNING      : no reviewer gave this verdict; judge the paper yourself.")
         for p in not_ok:
-            print(f"    - {p.get('persona') or '?'}: {p.get('error') or p.get('status')}")
+            print(f"    - {p.get('persona') or '?'}: {p.get('error') or p.get('status') or 'unknown'}")
     weaknesses = snapshot.get("weaknesses") or []
     if isinstance(weaknesses, list) and weaknesses:
         print("  Weaknesses   :")

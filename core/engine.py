@@ -9628,21 +9628,25 @@ class Engine:
             # once more; a second reply without a verdict stops the quest like a
             # failed call. A stand-in "accept" used to be recorded instead, and
             # an automatic accept and the Axon write-back took it as a review.
-            parsed_review: Any = None
-            for _ask in range(2):
-                try:
-                    text = await self._chat(base_prompt, node="review")
-                except Exception as e:
-                    self._pause_for_review_unavailable(paper_path, [f"the review call failed ({_one_line(e, 300)})"])
-                parsed_review = _parse_json_lenient(text)
-                if _names_a_verdict(parsed_review):
-                    break
-                self._log.warning("[review] the reply named no verdict%s", "; asking again" if _ask == 0 else "")
-            else:
-                self._pause_for_review_unavailable(
-                    paper_path, ["the reviewer answered twice without a verdict (accept or revise)"],
-                )
-            review = parsed_review
+            # The pause normally ends the run here. If it returns instead (a resume that sent a value, such as
+            # `--resume --accept`, answers the pending pause), that is read as "ask again", never as a review.
+            review: Any = None
+            while review is None:
+                problem = "the reviewer answered twice without a verdict (accept or revise)"
+                for _ask in range(2):
+                    try:
+                        text = await self._chat(base_prompt, node="review")
+                    except Exception as e:
+                        problem = f"the review call failed ({_one_line(e, 300)})"
+                        break
+                    parsed_review = _parse_json_lenient(text)
+                    if _names_a_verdict(parsed_review):
+                        review = parsed_review
+                        break
+                    self._log.warning("[review] the reply named no verdict%s", "; asking again" if _ask == 0 else "")
+                if review is None:
+                    self._pause_for_review_unavailable(paper_path, [problem])
+            review["verdict"] = review["verdict"].strip().lower()
             review["status"] = "ok"
             mfh = review.get("must_flag_hits") or []
             if not isinstance(mfh, list):
@@ -9773,7 +9777,7 @@ class Engine:
                 mfh = []
             return {
                 "persona": name,
-                "verdict": parsed["verdict"],
+                "verdict": parsed["verdict"].strip().lower(),
                 "score": parsed.get("score") if isinstance(parsed.get("score"), (int, float)) else 3,
                 "strengths": parsed.get("strengths") or [],
                 "weaknesses": parsed.get("weaknesses") or [],
@@ -9808,6 +9812,9 @@ class Engine:
                 + (r["error"] if r.get("no_verdict") else f"could not be asked ({r.get('error') or 'no reply'})")
                 for r in unasked
             ] or ["a reviewer could not be asked"])
+            # Reached only when a resume answered the pause with a value (`--resume --accept`, say): the panelists
+            # that did not review stay in panel_results with their status, cast no vote in the aggregator, and make
+            # the review's status "error", so nothing takes the result as a panel's accept.
         agg = _aggregate_panel_reviews(list(panel_results))
 
         # Moderator call — best effort for the rationale + suggestion
@@ -14026,8 +14033,14 @@ def _aggregate_panel_reviews(
 
 
 def _names_a_verdict(reply: Any) -> bool:
-    """A review reply is usable only when it names a verdict: a dict with a non-empty ``verdict`` string."""
-    return isinstance(reply, dict) and isinstance(reply.get("verdict"), str) and bool(reply["verdict"].strip())
+    """A review reply is usable only when it names one of the verdicts the review prompt allows (``accept`` or
+    ``revise``, any case). Anything else ("minor revision", a missing key) is asked for again: a verdict the router
+    and the accept checks would not recognise is not a review either."""
+    return (
+        isinstance(reply, dict)
+        and isinstance(reply.get("verdict"), str)
+        and reply["verdict"].strip().lower() in ("accept", "revise")
+    )
 
 
 def _auto_accepts(snapshot: dict[str, Any]) -> bool:

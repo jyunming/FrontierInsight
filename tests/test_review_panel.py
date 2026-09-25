@@ -669,3 +669,31 @@ async def test_review_panel_all_panelists_failure_stops_and_asks_again(tmp_path:
         await eng._node_review({"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
     text = (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
     assert "the methodologist reviewer could not be asked" in text and "the statistician reviewer" in text
+
+
+@pytest.mark.asyncio
+async def test_single_reviewer_a_pause_answered_by_a_resume_asks_again_never_records_a_review(tmp_path: Path) -> None:
+    """A resume that sends a value (`--resume --accept`) makes the pending pause return instead of stopping the run.
+    That must mean "ask again", not "carry on with the reply that had no verdict" (found by the external review)."""
+    eng = Engine(_mk_cfg(tmp_path, panel=[]))
+    paper = _paper_on_disk(eng)
+    replies = iter([json.dumps({"comment": "a"}), json.dumps({"comment": "b"}),
+                    json.dumps({"verdict": "Revise", "score": 2, "suggestions": []})])
+    pauses: list[list[str]] = []
+
+    async def chat(prompt, *, node: str = ""):  # noqa: ANN001
+        return next(replies)
+    eng._chat = chat  # type: ignore[assignment,method-assign]
+    eng._pause_for_review_unavailable = lambda _path, why: pauses.append(why)  # type: ignore[method-assign]
+
+    patch = await eng._node_review({"topic": "t", "design": {}, "analysis": {}, "paper_md": str(paper)})
+    assert len(pauses) == 1
+    assert patch["review"]["verdict"] == "revise" and patch["review"]["status"] == "ok"
+
+
+def test_only_the_verdicts_the_prompt_allows_count() -> None:
+    from core.engine import _names_a_verdict
+
+    assert _names_a_verdict({"verdict": "accept"}) and _names_a_verdict({"verdict": " Revise "})
+    assert not _names_a_verdict({"verdict": "minor revision"})
+    assert not _names_a_verdict({"verdict": ""}) and not _names_a_verdict({"comment": "x"}) and not _names_a_verdict(None)
