@@ -470,7 +470,7 @@ def test_every_level_says_what_it_guarantees_what_it_does_not_and_which_records_
     assert "needs/FROZEN_PROTOCOL.json" in by_level["protocol_runtime_matched"]["evidence_artifacts"]
     assert "needs/ORACLE_CHECK.json" in by_level["independently_validated"]["evidence_artifacts"]
     assert "the script can write" not in by_level["independently_validated"]["assurance_claim"]
-    assert any("script's own statement" in b for b in by_level["protocol_runtime_matched"]["known_blind_spots"])
+    assert any("FI runs the trials" in b and "self_reported" in b for b in by_level["protocol_runtime_matched"]["known_blind_spots"])
     assert any("come from the plan" in b for b in by_level["independently_validated"]["known_blind_spots"])
     assert got["rigor_profile"] == "default"
     assert evidence.assess(root, _state(), settings={**ON, "rigor_profile": "research"})["rigor_profile"] == "research"
