@@ -31,25 +31,17 @@ from core.interview import (
 # ---- Tier-1 contract ----
 
 
-def test_tier1_cli_is_exactly_thirteen_questions() -> None:
-    """CLI and the web --serve interview both ask thirteen tier-1 questions.
-    ``result_use`` ("What is the result for?") comes second: it sets how
-    strictly the quest is checked, so it is asked, never hidden
-    (ensemble_profile was promoted from tier-3 so the multi-model
-    cost decision lives next to provider/model). The last four are the
-    optional author line, asked on every frontend so a poster can carry
-    the author's name without a hidden setting."""
+def test_tier1_cli_asks_the_topic_what_it_is_for_and_the_model() -> None:
+    """The first screen asks what only the person can say: the topic, what the result is for (it sets how strictly the
+    quest is checked, so it is asked, never hidden) and the provider and model. The paper format, the deliverables and
+    the study depth are worked out from the topic and shown on the review screen; the multi-model ensemble is in
+    Advanced. The author line comes last and is asked only while no profile is saved (core/profile.py)."""
     ids = [q.id for q in questions_for_tier(1, "cli")]
     assert ids == [
         "topic",
         "result_use",
-        "paper_format",
-        "output_kinds",
-        "study_depth",
         "provider",
         "provider_model",
-        "ensemble_profile",
-        "ensemble_models",
         "author",
         "affiliation",
         "contact_email",
@@ -66,20 +58,13 @@ def test_tier1_serve_matches_cli() -> None:
     assert cli_ids == serve_ids
 
 
-def test_tier1_vscode_is_eleven_questions_no_provider() -> None:
-    """VSCode pins provider=vscode_extension and grabs the Copilot
-    model the user picked in the chat picker — so its tier-1 set
-    drops both, but still surfaces ensemble_profile and asks which
-    models it fans out over: FI does not choose them."""
+def test_tier1_vscode_asks_the_topic_and_what_it_is_for() -> None:
+    """VSCode pins provider=vscode_extension and takes the Copilot model the person picked in the chat picker, so its
+    first screen is the topic and what the result is for (and the author line on the first interview)."""
     ids = [q.id for q in questions_for_tier(1, "vscode")]
     assert ids == [
         "topic",
         "result_use",
-        "paper_format",
-        "output_kinds",
-        "study_depth",
-        "ensemble_profile",
-        "ensemble_models",
         "author",
         "affiliation",
         "contact_email",
@@ -118,6 +103,9 @@ def test_tier2_covers_the_derived_fields() -> None:
     the mid-quest pause-drop gate was added."""
     ids = [q.id for q in questions_for_tier(2, "cli")]
     assert set(ids) == {
+        "paper_format",
+        "output_kinds",
+        "study_depth",
         "title",
         "no_simulation",
         "survey_mode",
@@ -202,8 +190,8 @@ def test_tier3_covers_the_advanced_fields() -> None:
     ``knowledge_top_k`` lives in Tier-2); ``max_iterations`` is the
     design-revise loop hard cap; ``node_models`` is the per-node model
     override (comma-separated node:model pairs, empty by default).
-    ``ensemble_profile`` was promoted out of tier-3 to tier-1 so the
-    cost multiplier sits with provider/model. ``provider_base_url`` /
+    ``ensemble_profile`` / ``ensemble_models`` are here too: the ensemble
+    multiplies the cost and its models are the person's to name. ``provider_base_url`` /
     ``provider_api_key_env`` / ``provider_fixed_temperature`` are the
     HTTP-direct-transport connection overrides (a custom OpenAI-compatible
     endpoint, its key variable, a model-mandated fixed temperature) — CLI/
@@ -225,6 +213,8 @@ def test_tier3_covers_the_advanced_fields() -> None:
         "provider_base_url",
         "provider_api_key_env",
         "provider_fixed_temperature",
+        "ensemble_profile",
+        "ensemble_models",
     }
 
 
@@ -274,3 +264,17 @@ def test_tiers_partition_the_full_question_list() -> None:
     # VSCode's 2 missing entries by adding them back from raw list.
     missing = by_id - union
     assert missing == set(), f"unclassified question ids: {missing}"
+
+
+
+def test_derive_tier2_works_the_paper_format_out_first_and_the_depth_from_it() -> None:
+    """The paper format is derived from the topic now, not asked, and what follows from it reads the derived one."""
+    derived = derive_tier2({"topic": "A policy brief on congestion pricing"})
+    assert derived["paper_format"] == "policy_brief" and derived["study_depth"] == "brief preprint"
+    assert derived["output_kinds"] == ["paper_md", "paper_pdf"]
+    history = derive_tier2({"topic": "A history of the printing press"})
+    assert history["paper_format"] == "essay" and history["no_simulation"] is True
+    assert derive_tier2({"topic": "Compare Euler and RK4 integrators"})["paper_format"] == "generic"
+    held = derive_tier2({"topic": "t", "paper_format": "policy_brief"})
+    from core.interview import smart_default_study_depth
+    assert held["study_depth"] == smart_default_study_depth({"paper_format": "policy_brief"})
