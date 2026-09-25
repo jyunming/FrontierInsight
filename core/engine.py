@@ -10000,19 +10000,12 @@ class Engine:
         # nothing is rendered.
         checked = Path(paper_path).read_bytes() if paper_path and Path(paper_path).is_file() else None
         page_hits, page_record = await self._page_limit_review(state, paper_path)
-        trim_recheck: dict[str, Any] = {}
         if checked is not None and Path(paper_path).is_file() and Path(paper_path).read_bytes() != checked:
-            now = Path(paper_path).read_bytes()
-            if _without_further_reading(now.decode("utf-8", "replace")) == _without_further_reading(
-                    checked.decode("utf-8", "replace")):
-                # Only Further reading entries went: no claim was in them, so the check's verdict covers what is left.
-                _receipts.carry_over(self.quest_root, "claim_check", "paper", checked, now,
-                                     "the page-limit fit only dropped Further reading entries")
-            elif self.config.engine.claim_grounding:
-                # Sentences of the body went: what is left is checked again, so the receipt is for the final draft.
-                self._log.info("[review] the page-limit fit took sentences out of the body; checking the claims again")
-                trim_recheck = await self._node_claim_check({**state, "paper_md": str(paper_path)})
-                state = {**state, **trim_recheck}  # type: ignore[assignment]  # this review reads the new verdict
+            # The fit only takes Further reading entries or whole sentences out of the draft the claim check judged,
+            # and the claims of a sentence taken out leave its grounding with it (the review reads the grounding of
+            # the paper it reads): no claim is added and none loses its source, so the verdict covers what is left.
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", checked, Path(paper_path).read_bytes(),
+                                 "the page-limit fit only took entries or sentences out of the checked draft")
         # Read after that: it may have dropped Further reading entries from the
         # file, and the review reads the paper as it now is.
         paper_md = ""
@@ -10175,7 +10168,7 @@ class Engine:
                     "[review] verdict=%s score=%s",
                     review.get("verdict"), review.get("score"),
                 )
-            return {**update, **trim_recheck}
+            return update
 
         # Panel path. Fire each persona in parallel; aggregate.
         self._log.info("[review] panel mode: %s", panel_names)
@@ -10353,7 +10346,7 @@ class Engine:
                 "[review] panel verdict=%s (agreement=%s, score=%s)",
                 agg.get("verdict"), agg.get("agreement"), agg.get("score"),
             )
-        return {**update, **trim_recheck}
+        return update
 
     async def _node_human_feedback(self, state: QuestState) -> QuestState:
         """Pause after the review node and ask the user (CLI / web /
@@ -13129,12 +13122,6 @@ def _gate_inputs(state: Any) -> dict[str, Any]:
         "results": state.get("result_json") or {}, "protocol": (state.get("design") or {}).get("protocol") or {},
         "sources": sources, "topic": state.get("topic") or "",
     }
-
-
-def _without_further_reading(markdown: str) -> str:
-    """``markdown`` without its engine-written Further reading section (the whole text when it has none)."""
-    block = _further_reading_block(markdown)
-    return markdown if block is None else markdown[:block.start] + markdown[block.end:]
 
 
 def _trim_further_reading(markdown: str, keep: int) -> str:
