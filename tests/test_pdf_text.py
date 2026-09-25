@@ -144,3 +144,57 @@ def test_a_long_source_is_whole_on_disk_and_bounded_in_the_state(tmp_path: Path)
     assert _item_content(entry) == text
     short = _literature_entry(tmp_path, "short text", {})
     assert "full_text_path" not in short["metadata"] and _item_content(short) == "short text"
+
+
+def test_a_full_width_block_between_columns_keeps_its_place() -> None:
+    def box(x0, x1, y, text):  # noqa: ANN001, ANN202
+        return ([(x0, y - 5), (x1, y - 5), (x1, y + 5), (x0, y + 5)], text)
+
+    items = []
+    for i in range(3):
+        items += [box(50, 480, 100 + i * 20, f"left top {i}"), box(520, 950, 100 + i * 20, f"right top {i}")]
+    items.append(box(100, 900, 200, "Figure 1 across both columns"))
+    for i in range(3):
+        items += [box(50, 480, 300 + i * 20, f"left low {i}"), box(520, 950, 300 + i * 20, f"right low {i}")]
+    lines = pdf_text.ocr_lines(items, width=1000).splitlines()
+    assert lines.index("Figure 1 across both columns") == 6
+    assert lines[:3] == [f"left top {i}" for i in range(3)] and lines[7:10] == [f"left low {i}" for i in range(3)]
+
+
+def test_ocr_stops_at_its_deadline_and_says_so(tmp_path: Path) -> None:
+    result = pdf_text.extract(_scanned_pdf(tmp_path / "s.pdf", ["late page"]), ocr_deadline=0.0)
+    assert result.unread_pages == [1] and not result.ocr_pages
+    assert "OCR ran out of time" in result.summary()
+
+
+def test_a_pdf_with_no_text_and_no_image_is_said_to_be_unreadable(tmp_path: Path) -> None:
+    from PIL import Image
+
+    path = tmp_path / "blank.pdf"
+    import pypdfium2 as pdfium
+
+    doc = pdfium.PdfDocument.new()
+    doc.new_page(612, 792)
+    doc.save(str(path))
+    result = pdf_text.extract(path)
+    assert result.text == "" and "no text on any page" in result.error
+
+
+def test_a_typesetter_hyphen_before_a_capital_is_joined_too() -> None:
+    assert pdf_text.clean("Kermack-￾\nMcKendrick") == "Kermack-McKendrick"
+
+
+def test_a_fetch_that_came_back_as_the_abstract_still_asks_for_the_paper() -> None:
+    from core.engine import _is_abstract_only
+    from core.knowledge import RetrievedDoc
+
+    doc = RetrievedDoc(content="x" * 3000, metadata={"fetched_full_text": True, "content_quality": "abstract_only"})
+    assert _is_abstract_only(doc)
+
+
+def test_a_long_reference_list_is_not_a_preview() -> None:
+    from core.engine import _content_quality
+
+    refs = "\n".join(f"[{i}] A. Author, Some journal title {i}, {100 + i}" for i in range(400))
+    body = "We simulate the model. " * 400 + "\n" + refs
+    assert _content_quality(f"abs\n\n---FULL TEXT (fetched)---\n\n{body}", {"fetched_full_text": True}) == "full_text"

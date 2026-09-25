@@ -1126,7 +1126,7 @@ def _ocr_cache_dir() -> Path:
     return Path.home() / ".frontier-insight" / "ocr_cache"
 
 
-def _ocr_pdf_text(body: bytes, *, cap: int) -> tuple[str, str]:
+def _ocr_pdf_text(body: bytes, *, cap: int, deadline: float | None = None) -> tuple[str, str]:
     """OCR a scanned PDF (core/pdf_text.py), cached on disk by the PDF's SHA-256 so a classic read once is not read
     again by the next quest. Returns ``(text, one-line summary)``."""
     from core import pdf_text
@@ -1138,11 +1138,15 @@ def _ocr_pdf_text(body: bytes, *, cap: int) -> tuple[str, str]:
         return str(hit.get("text") or "")[:cap], str(hit.get("summary") or "")
     except (OSError, ValueError, AttributeError):
         pass
-    result = pdf_text.extract(body, max_bytes=cap, ocr=True)
-    if result.ocr_pages:
+    result = pdf_text.extract(body, max_bytes=cap, ocr=True, ocr_deadline=deadline)
+    # Cached only when read to the end: one cut off by the deadline is read whole next time.
+    if result.ocr_pages and not result.ocr_out_of_time:
         try:
             cache.parent.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps({"text": result.text, "summary": result.summary()}), encoding="utf-8")
+            # Written whole, then renamed: two quests of a --fleet reading the same scan never leave half a file.
+            tmp = cache.with_name(f"{cache.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_text(json.dumps({"text": result.text, "summary": result.summary()}), encoding="utf-8")
+            os.replace(tmp, cache)
         except OSError:
             pass
     return result.text, result.summary()
@@ -2561,7 +2565,7 @@ async def _ocr_scanned(enriched: list[RetrievedDoc], scanned: dict[int, list[byt
             _sf.record_failure("full_text", "ocr_budget", detail=f"{len(todo) - done} scanned PDF(s) not read by OCR")
             break
         try:
-            text, summary = await asyncio.to_thread(_ocr_pdf_text, body, cap=cap)
+            text, summary = await asyncio.to_thread(_ocr_pdf_text, body, cap=cap, deadline=deadline)
         except Exception as e:  # noqa: BLE001 -- one scan that cannot be read costs only itself
             _log.info("full-text OCR failed: %r", e)
             continue

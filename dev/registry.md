@@ -50,7 +50,7 @@ same PR that adds, splits or renames one.
 - `core/pdf_text.py` — every PDF FI reads: all pages in reading order (PyMuPDF if installed, else pypdfium2), scanned
   pages by OCR (tesseract, else RapidOCR), a size cap that names its page. Fetched scans are OCR'd after the fetch
   (`knowledge._ocr_scanned`); `engine._literature_entry` / `_content_quality` / `_item_content` keep the whole text on
-  disk and label what it is.
+  disk (`data/literature/.full_text/`) and label what it is.
 - `core/arxiv_gate.py` — the one shared queue/backoff/cache for every arXiv connection.
 - `core/source_failures.py` — per-quest retrieval-failure bookkeeping, surfaced as `[FI] source failures: ...`.
 - `core/figure_sources.py` — license-clean web-figure enrichment for the no-simulation path.

@@ -35,7 +35,7 @@ OCR_SCALE = 2.0
 
 # Only a hyphen the typesetter added: pdfium marks one with U+FFFE, and U+00AD is the soft hyphen. A plain "-" at a
 # line end may be a real compound ("well-known"), so it is kept.
-_SOFT_BREAK = re.compile(r"[\u00ad\ufffe]\r?\n?(?=[a-z])")
+_SOFT_BREAK = re.compile(r"[\u00ad\ufffe]\r?\n?(?=[A-Za-z])")
 _SPACES = re.compile(r"[ \t\u00a0]+")
 
 
@@ -50,6 +50,7 @@ class PdfText:
     ocr_pages: list[int] = field(default_factory=list)       # 1-based pages read by OCR
     unread_pages: list[int] = field(default_factory=list)    # 1-based scanned pages no OCR engine could read
     truncated_at_page: int | None = None   # the page the size cap stopped at, or None
+    ocr_out_of_time: bool = False          # OCR stopped at its deadline; the rest are in unread_pages
     error: str = ""
 
     def summary(self) -> str:
@@ -58,8 +59,9 @@ class PdfText:
         if self.ocr_pages:
             parts.append(f"{len(self.ocr_pages)} scanned page(s) read by OCR ({self.ocr_engine})")
         if self.unread_pages:
-            parts.append(f"{len(self.unread_pages)} scanned page(s) not read (no OCR engine: pip install rapidocr "
-                         f"onnxruntime, or install tesseract and pip install pytesseract)")
+            why = ("OCR ran out of time" if self.ocr_out_of_time else
+                   "no OCR engine: pip install rapidocr onnxruntime, or install tesseract and pip install pytesseract")
+            parts.append(f"{len(self.unread_pages)} scanned page(s) not read ({why})")
         if self.truncated_at_page:
             parts.append(f"cut at page {self.truncated_at_page} by the size limit")
         if self.error:
@@ -201,10 +203,17 @@ def ocr_lines(items: list[tuple[Any, str]], *, width: float) -> str:
         b["side"] = "L" if b["x1"] <= mid + gap else "R" if b["x0"] >= mid - gap else "W"
     two_columns = sum(b["side"] == "L" for b in boxes) >= 5 and sum(b["side"] == "R" for b in boxes) >= 5
     if two_columns:
-        top = min(b["y"] for b in boxes if b["side"] != "W")
-        groups = [[b for b in boxes if b["side"] == "W" and b["y"] < top],
-                  [b for b in boxes if b["side"] == "L"], [b for b in boxes if b["side"] == "R"],
-                  [b for b in boxes if b["side"] == "W" and b["y"] >= top]]
+        # Full-width boxes (a title, a figure or equation across both columns) cut the page into bands; each is read
+        # in place, and between two of them the left column is read before the right.
+        groups = []
+        band: list[dict[str, Any]] = []
+        for b in sorted(boxes, key=lambda b: b["y"]):
+            if b["side"] == "W":
+                groups += [[x for x in band if x["side"] == "L"], [x for x in band if x["side"] == "R"], [b]]
+                band = []
+            else:
+                band.append(b)
+        groups += [[x for x in band if x["side"] == "L"], [x for x in band if x["side"] == "R"]]
     else:
         groups = [boxes]
     out: list[str] = []
@@ -220,9 +229,17 @@ def ocr_lines(items: list[tuple[Any, str]], *, width: float) -> str:
     return "\n".join(out)
 
 
-def extract(source: bytes | Path | str, *, max_bytes: int = 10 * 1024 * 1024, ocr: bool = True) -> PdfText:
+def extract(
+    source: bytes | Path | str, *, max_bytes: int = 10 * 1024 * 1024, ocr: bool = True,
+    ocr_deadline: float | None = None,
+) -> PdfText:
     """Read every page of a PDF (see the module docstring). Never raises: a PDF that cannot be opened comes back
-    with ``error`` set and no text."""
+    with ``error`` set and no text.
+
+    ``ocr_deadline`` (a ``time.monotonic()`` value) stops OCR mid-document: the scanned pages after it are counted as
+    unread, so a 300-page scan cannot hold a batch far past its budget."""
+    import time
+
     out = PdfText()
     try:
         engine, doc = _open(source)
@@ -241,7 +258,10 @@ def extract(source: bytes | Path | str, *, max_bytes: int = 10 * 1024 * 1024, oc
             if len(text.strip()) < SCANNED_PAGE_CHARS and has_images:
                 if ocr and reader is None:
                     reader = _Ocr()
-                if reader is not None and reader.name:
+                if ocr_deadline is not None and time.monotonic() >= ocr_deadline:
+                    out.unread_pages.append(i + 1)
+                    out.ocr_out_of_time = True
+                elif reader is not None and reader.name:
                     try:
                         text = reader.read(_render_png(engine, doc, i))
                         out.ocr_pages.append(i + 1)
@@ -266,4 +286,8 @@ def extract(source: bytes | Path | str, *, max_bytes: int = 10 * 1024 * 1024, oc
         except Exception:  # noqa: BLE001
             pass
     out.text = "\n\n".join(parts)
+    if not out.text and not out.unread_pages and not out.error and out.pages:
+        # No text layer and no images: the text is drawn as outlines (some print-ready files), or the pages are blank.
+        # Said, so an empty result is never mistaken for a read one.
+        out.error = "no text on any page and no page image to read (text drawn as outlines, or blank pages)"
     return out

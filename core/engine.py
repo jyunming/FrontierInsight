@@ -2787,7 +2787,7 @@ class Engine:
         # than the old first-2000-chars slice that usually held only the
         # abstract. content_quality records whether real full text was
         # recovered or only the search snippet survived.
-        # The whole text goes to disk (data/literature/full_text/, up to knowledge.full_text_max_kb); the state keeps
+        # The whole text goes to disk (data/literature/.full_text/, up to knowledge.full_text_max_kb); the state keeps
         # its first _STATE_TEXT_CHARS, as it always held, so the checkpoint does not grow with a 10 MB source. Readers
         # that need the whole text (the passage selection, the claim check's quote check) read it back through
         # _item_content. content_quality says what the text is: full_text, abstract_only (not much more than the
@@ -16281,7 +16281,9 @@ def _content_quality(content: str, meta: dict[str, Any]) -> str:
     body = text.split("---", 1)[-1] if sep else content
     snippet = head if sep else ""
     lines = [ln.strip() for ln in body.splitlines() if ln.strip()]
-    if len(lines) >= 10 and sum(1 for ln in lines if _TOC_LINE.match(ln)) / len(lines) > 0.4:
+    # A preview is short: a whole paper's reference list (lines ending in page numbers) must not make it one.
+    if (len(lines) >= 10 and len(body) < 20_000
+            and sum(1 for ln in lines if _TOC_LINE.match(ln)) / len(lines) > 0.4):
         return "preview_only"
     if len(body.strip()) < max(4000, 3 * len(snippet.strip())):
         return "abstract_only"
@@ -16292,14 +16294,16 @@ def _literature_entry(
     quest_root: Path, content: str, meta: dict[str, Any], *, quality: str | None = None,
 ) -> dict[str, Any]:
     """A literature entry for the state: the first ``_STATE_TEXT_CHARS`` of ``content``, and, when there is more, the
-    whole text in ``data/literature/full_text/`` with its path in ``full_text_path`` (read back by ``_item_content``)."""
+    whole text in ``data/literature/.full_text/`` with its path in ``full_text_path`` (read back by ``_item_content``)."""
     content = content or ""
     meta = {**meta, "content_quality": quality or _content_quality(content, meta)}
     if len(content) > _STATE_TEXT_CHARS:
         key = hashlib.sha1(
             (str(meta.get("doi") or meta.get("url") or meta.get("path") or "") + content[:2000]).encode("utf-8", "replace")
         ).hexdigest()[:16]
-        target = quest_root / "data" / "literature" / "full_text" / f"{key}.txt"
+        # A dot folder: data_load walks data/ and skips dot folders, so the same text is not read twice (lit_*.md
+        # already carries it for people to read).
+        target = quest_root / "data" / "literature" / ".full_text" / f"{key}.txt"
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
@@ -16430,6 +16434,9 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     on every hit."""
     md = doc.metadata or {}
     if md.get("abstract_only"):
+        return True
+    # A fetch that brought back only the abstract again, or a preview, still needs the paper (the papers gate asks).
+    if md.get("content_quality") in ("abstract_only", "preview_only"):
         return True
     if _has_full_text(md):
         return False
