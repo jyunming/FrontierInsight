@@ -230,9 +230,17 @@ def test_rows_the_simulation_writes_itself_are_not_taken_and_a_trial_reported_tw
 
 
 def test_timeout_s_bounds_the_whole_study_not_each_setting(tmp_path: Path) -> None:
+    # Three settings of 3 s each under a 4 s budget: bounded per setting this took 9 s or more; bounded for the study it
+    # stops near 4 s. Whether the first setting finishes depends on how fast a process starts on the machine, so only
+    # the bound and the reason are asserted.
+    import time as _time
+
+    started = _time.monotonic()
     root, run = _run(tmp_path, SLOW, {"a": [1, 2, 3]}, runs=1, timeout=4)
+    elapsed = _time.monotonic() - started
     reasons = [r.get("reason", "") for c in run.cells for r in c.rows]
-    assert run.ok_trials >= 1 and any("study's time" in why or "ran out" in why for why in reasons), reasons
+    assert elapsed < 8.5, elapsed
+    assert "the study's time (execution.timeout_s) ran out before this setting's trial" in reasons[-1], reasons
 
 
 def test_a_ledger_edited_by_hand_makes_the_trials_run_again(tmp_path: Path) -> None:
