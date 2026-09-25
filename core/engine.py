@@ -159,6 +159,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "cross_check",
     "relevance_guard",
     "literature_screen",
+    "figures",
     "write.trim",
 })
 
@@ -3578,22 +3579,111 @@ class Engine:
         stop here: skills, design and the experiment start on ``--resume`` with
         the literature already in state (the search is not run again). Papers
         dropped in ``inputs/papers/`` meanwhile join it. A node of its own so a
-        resume re-enters this cheap node, not the search."""
-        if not self._pause_stage_enabled("after_literature"):
-            return {}
-        self._maybe_pause_for_user_input(state, "after_literature")
+        resume re-enters this cheap node, not the search.
+
+        Then the papers' figures are read (``_read_literature_figures``), here for the same reason: a stop to change
+        the figure model re-enters this node, not the search."""
         merged = list(state.get("literature") or [])
-        seen = {i for entry in merged for i in _entry_identities(entry)}
-        merged, added = await asyncio.to_thread(  # a scanned paper is read by OCR here
-            _ingest_user_dropped_papers, self.quest_root, merged, seen, self._log,
-        )
-        if not added:
+        added = 0
+        if self._pause_stage_enabled("after_literature"):
+            self._maybe_pause_for_user_input(state, "after_literature")
+            seen = {i for entry in merged for i in _entry_identities(entry)}
+            merged, added = await asyncio.to_thread(  # a scanned paper is read by OCR here
+                _ingest_user_dropped_papers, self.quest_root, merged, seen, self._log,
+            )
+            if added:
+                self._log.info(
+                    "[after_literature] picked up %d paper(s) dropped in inputs/papers/ "
+                    "while paused", added,
+                )
+        read = await self._read_literature_figures(state, merged)
+        if not added and not read:
             return {}
-        self._log.info(
-            "[after_literature] picked up %d paper(s) dropped in inputs/papers/ "
-            "while paused", added,
-        )
+        if read:
+            self._write_literature_files(merged, self.quest_root / "data" / "literature")
         return {"literature": merged}
+
+    async def _read_literature_figures(self, state: QuestState, literature: list[Any]) -> int:
+        """Read the values off the papers' figures (``knowledge.read_figures``), in place: the model for the step
+        ``figures`` picks, from the captions, the figures that show values this question can use, then reads those,
+        ``_FIGURES_PER_CALL`` images a call. Each figure gets ``relevant`` and, when read, ``reading``; a source whose
+        figures were read gets them appended to its text, so every later step sees them. A figure already judged is
+        never sent again. A model that cannot take images stops the quest (a SUPPLY pause: resume re-enters this
+        node). Returns how many figures were read."""
+        if not self.config.knowledge.read_figures:
+            return 0
+        todo: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for idx, item in enumerate(literature, start=1):
+            meta = item.get("metadata") if isinstance(item, dict) else None
+            for fig in (meta or {}).get("figures") or []:
+                if isinstance(fig, dict) and "relevant" not in fig and Path(str(fig.get("image") or "")).is_file():
+                    todo[f"{idx}:{fig.get('number')}"] = (item, fig)
+        if not todo:
+            return 0
+        topic = _lit_query(state)[:1200]
+        lines = [f"[{fid}] {str(item['metadata'].get('title') or '')[:120]} :: {str(fig.get('caption') or '')[:400]}"
+                 for fid, (item, fig) in todo.items()]
+        try:
+            raw = await self._chat(self._prompts["figures_pick"].substitute(topic=topic, figures="\n".join(lines)),
+                                   node="figures")
+            picked = (_parse_json_lenient(raw, node="figures") or {}).get("pick")
+        except Exception as e:  # noqa: BLE001 -- the figures are extra; the quest goes on without their values
+            self._log.info("[figures] could not pick the figures to read (%r); none read", e)
+            return 0
+        wanted = [fid for fid in dict.fromkeys(str(p) for p in picked or []) if fid in todo] \
+            if isinstance(picked, list) else []
+        for fid, (_item, fig) in todo.items():
+            fig["relevant"] = fid in wanted
+        self._log.info("[figures] %d of %d figure(s) picked to read (model: %s)", len(wanted), len(todo),
+                       self._model_for_node("figures") or "the main model")
+        from core.provider import ImageInputUnsupported, image_part
+
+        read = 0
+        for start in range(0, len(wanted), _FIGURES_PER_CALL):
+            batch = wanted[start:start + _FIGURES_PER_CALL]
+            content: list[dict[str, Any]] = [{"type": "text", "text": self._prompts["figures_read"].substitute(
+                count=len(batch), topic=topic)}]
+            for fid in batch:
+                item, fig = todo[fid]
+                content.append({"type": "text", "text": f"[{fid}] {str(item['metadata'].get('title') or '')[:120]} "
+                                                        f":: {str(fig.get('caption') or '')[:600]}"})
+                content.append(image_part(Path(str(fig["image"])).read_bytes()))
+            try:
+                raw = await self._chat_messages([{"role": "user", "content": content}], node="figures",
+                                                temperature=0.0)
+            except ImageInputUnsupported as e:
+                for fid in wanted[start:]:
+                    todo[fid][1].pop("relevant", None)  # judged again after the stop
+                self._pause_for_human(
+                    kind="figures",
+                    interaction="supply",
+                    headline="the model for reading figures cannot read images",
+                    steps=[
+                        f"{len(wanted) - start} figure(s) from the papers show values this question can use, "
+                        f"but the model cannot take images ({e}). The figures are saved in "
+                        "`data/literature/figures/`.",
+                        "To have them read: in the quest's `config.yaml` set a model that reads images for this "
+                        "step, `provider: {node_models: {figures: <model>}}`, then resume.",
+                        "To go on without reading them: set `knowledge: {read_figures: false}`, then resume.",
+                    ],
+                    payload={"quest_id": self.quest_id, "figures_waiting": len(wanted) - start},
+                )
+                return read  # unreachable: a SUPPLY pause does not return
+            except Exception as e:  # noqa: BLE001 -- one failed batch costs only its figures
+                self._log.info("[figures] a batch of %d figure(s) could not be read (%r)", len(batch), e)
+                continue
+            parsed = _parse_json_lenient(raw, node="figures")
+            for entry in (parsed.get("figures") or []) if isinstance(parsed, dict) else []:
+                if not isinstance(entry, dict) or str(entry.get("id")) not in batch:
+                    continue
+                reading = str(entry.get("reading") or "").strip()
+                if reading:
+                    todo[str(entry["id"])][1]["reading"] = reading[:_FIGURE_READING_CHARS]
+                    read += 1
+        for item in {id(item): item for item, _fig in todo.values()}.values():
+            _append_figure_readings(item)
+        self._log.info("[figures] read %d figure(s); their values are in each source's text", read)
+        return read
 
     def _maybe_pause_for_user_input(
         self, state: QuestState, stage: str,
@@ -11372,6 +11462,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "claim_check",          # ground each paper claim to evidence
         "evidence_gate",        # weigh evidence sufficiency before write
         "literature_screen",    # grade retrieved sources 0-3 before they reach the corpus
+        "figures_pick",         # which of the papers' figures carry values this question can use
+        "figures_read",         # read those values off the images
         "write", "review",
         "write_patch",      # a revise for flagged passages: edits, not a new paper
         "write_trim",       # a draft a little over its page limit: sentences to take out
@@ -16215,6 +16307,38 @@ def _figures_section(figures: list[dict[str, Any]]) -> str:
                      f"`figures/{fig['file']}`  ")
         lines.append(f"  {str(fig.get('caption') or '').strip()}")
     return "\n".join(lines)
+
+
+#: Figures sent to the model in one call, and the most kept of what it read off one figure.
+_FIGURES_PER_CALL = 4
+_FIGURE_READING_CHARS = 2000
+_FIGURE_READINGS_MARK = "---VALUES READ FROM THE FIGURES (by a model, from the images)---"
+
+
+def _append_figure_readings(item: dict[str, Any]) -> None:
+    """Append what was read off a source's figures to its text (in the state, and in its whole text on disk), each
+    under its caption, so the design, the analysis and the writer read them like the rest of the paper. A figure is
+    appended once (``in_text``)."""
+    meta = item.get("metadata") or {}
+    new = [f for f in meta.get("figures") or [] if isinstance(f, dict) and f.get("reading") and not f.get("in_text")]
+    if not new:
+        return
+    block = "\n\n".join(
+        f"Figure {f.get('number')} (page {f.get('page')}): {str(f.get('caption') or '').strip()[:600]}\n"
+        f"Read from the image: {f['reading']}"
+        for f in new
+    )
+    text = f"\n\n{_FIGURE_READINGS_MARK}\n\n{block}\n"
+    item["content"] = str(item.get("content") or "") + text
+    path = meta.get("full_text_path")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            pass  # the state's copy has them
+    for f in new:
+        f["in_text"] = True
 
 
 def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:

@@ -1318,6 +1318,12 @@ class KnowledgeConfig(BaseModel):
     # literature_excerpt_chars), and the quest state keeps the first 64 KB; the rest is on disk under
     # data/literature/full_text/. It was 64 KB, which cut most papers before their results.
     full_text_max_kb: int = 10 * 1024
+    # Read the values off the papers' figures. Every figure with a caption is cut out of each PDF (no model; saved in
+    # data/literature/figures/). When this is on, the model picks the figures whose captions show values this question
+    # can use and reads them, once, right after the literature; what it read goes into each source's text. The model
+    # is the one set for the step ``figures`` in provider.node_models (pick a cheap one that reads images), else the
+    # main model. A model that cannot read images stops the quest and asks. Off: the figures are only saved.
+    read_figures: bool = True
     # How many characters of each source's fetched full text to put into a
     # node's prompt. Selected by RELEVANCE to the quest question (see
     # ``passage_ranking``) — the *relevant* N chars, not the first N — so

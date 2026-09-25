@@ -51,6 +51,11 @@ same PR that adds, splits or renames one.
   pages by OCR (tesseract, else RapidOCR), a size cap that names its page. Fetched scans are OCR'd after the fetch
   (`knowledge._ocr_scanned`); `engine._literature_entry` / `_content_quality` / `_item_content` keep the whole text on
   disk (`data/literature/.full_text/`) and label what it is.
+- `core/pdf_figures.py` — captioned figures cut out of a PDF by layout (drawings above the caption; scanned pages from
+  `PdfText.ocr_lines`). `knowledge._pdf_figures` caches them, `knowledge._cut_figures` runs after a fetch,
+  `engine._save_literature_figures` puts them in `data/literature/figures/`, and
+  `engine._read_literature_figures` (in the `pause_after_literature` node; prompts `agents/figures_pick.md` and
+  `agents/figures_read.md`, step `figures`) reads the relevant ones into each source's text.
 - `core/arxiv_gate.py` — the one shared queue/backoff/cache for every arXiv connection.
 - `core/source_failures.py` — per-quest retrieval-failure bookkeeping, surfaced as `[FI] source failures: ...`.
 - `core/figure_sources.py` — license-clean web-figure enrichment for the no-simulation path.
