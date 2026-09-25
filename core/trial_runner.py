@@ -53,8 +53,18 @@ def _number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 def main():
-    spec = json.load(open(sys.argv[1], encoding="utf-8"))
+    import os
+    spec_path = sys.argv[1]
+    spec = json.load(open(spec_path, encoding="utf-8"))
     out = open(sys.argv[2], "w", encoding="utf-8")
+    nonce = spec.pop("nonce")
+    # What names the results file and the nonce goes before the simulation is loaded: the spec file is deleted and argv
+    # cleared, so code that looks for them has to dig through this process's memory rather than read a path.
+    try:
+        os.remove(spec_path)
+    except OSError:
+        pass
+    del sys.argv[1:]
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
@@ -65,12 +75,12 @@ def main():
         if not callable(fn):
             raise AttributeError(f"{spec['module']} has no function {spec['entry']}()")
     except BaseException as e:
-        out.write(json.dumps({"load_error": f"{type(e).__name__}: {e}"[:500]}) + "\n")
+        out.write(json.dumps({"nonce": nonce, "load_error": f"{type(e).__name__}: {e}"[:500]}) + "\n")
         out.close()
         sys.exit(3)
     for trial in spec["trials"]:
         t0 = time.monotonic()
-        row = {"trial": trial["trial"], "seed": trial.get("seed")}
+        row = {"nonce": nonce, "trial": trial["trial"], "seed": trial.get("seed")}
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             try:
@@ -228,24 +238,31 @@ async def run_trials(
     entry = "run_cell" if deterministic else "run_trial"
     per_cell = 1 if deterministic else max(1, int(runs_per_setting))
     runs: list[CellRun] = []
+    started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for index, cell in enumerate(cells(grid)):
         key = cell_key(cell)
         trials = [{"trial": t, "seed": None if deterministic else trial_seed(base_seed, key, t)} for t in range(per_cell)]
         spec_path = work / f"cell{index}.json"
         out_path = work / f"cell{index}.out.jsonl"
         out_path.unlink(missing_ok=True)
-        spec_path.write_text(json.dumps({"module": str(module), "entry": entry, "cell": cell, "trials": trials},
-                                        default=str), encoding="utf-8")
+        nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
+        spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry, "cell": cell,
+                                         "trials": trials, "nonce": nonce}, default=str), encoding="utf-8")
         _append(ledger, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell, "entry": entry,
                          "at": time.time()})
-        result = await executor.execute(
-            [str(python), str(HARNESS_PATH), str(spec_path.relative_to(quest_root)),
-             str(out_path.relative_to(quest_root))],
-            cwd=quest_root, timeout_s=timeout_s, env=env,
-        )
+        left = int(timeout_s - (time.monotonic() - started))
+        if left <= 0:
+            result = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
+        else:
+            result = await executor.execute(
+                [str(python), HARNESS_PATH.as_posix(), spec_path.relative_to(quest_root).as_posix(),
+                 out_path.relative_to(quest_root).as_posix()],
+                cwd=quest_root, timeout_s=max(1, left), env=env,
+            )
         run = CellRun(key=key, cell=cell, planned=per_cell, returncode=result.returncode,
                       timed_out=bool(getattr(result, "timed_out", False)), stderr=result.stderr or "")
         reported: dict[int, dict[str, Any]] = {}
+        twice: set[int] = set()
         try:
             lines = out_path.read_text(encoding="utf-8").splitlines() if out_path.is_file() else []
         except OSError:
@@ -255,13 +272,17 @@ async def run_trials(
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict) and row.get("load_error"):
+            if not isinstance(row, dict) or row.get("nonce") != nonce:
+                continue  # not written by the harness FI started for this cell
+            if row.get("load_error"):
                 run.load_error = str(row["load_error"])
-            elif isinstance(row, dict) and isinstance(row.get("trial"), int) and row["trial"] in range(per_cell):
-                reported.setdefault(row["trial"], row)  # a trial reported twice keeps its first report
+            elif isinstance(row.get("trial"), int) and row["trial"] in range(per_cell):
+                if row["trial"] in reported:
+                    twice.add(row["trial"])
+                reported.setdefault(row["trial"], row)
         why_missing = (
             f"the simulation could not be loaded ({run.load_error})" if run.load_error
-            else "the cell's process ran out of time before this trial" if run.timed_out
+            else "the study's time (execution.timeout_s) ran out before this setting's trial" if run.timed_out
             else f"the cell's process stopped (exit code {result.returncode}) before this trial"
         )
         for t in trials:
@@ -269,6 +290,8 @@ async def run_trials(
                                               "reason": why_missing}
             if row.get("seed") != t["seed"]:
                 row = {**row, "status": "failed", "reason": "the reported seed is not the one FI gave this trial"}
+            if t["trial"] in twice:
+                row = {**row, "status": "failed", "reason": "this trial was reported more than once"}
             run.rows.append(row)
             _append(ledger, {
                 "event": "trial", "run_id": run_id, "cell": key, "trial": t["trial"], "seed": t["seed"],
@@ -326,7 +349,7 @@ class TrialsRunner:
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
         runs = int(protocol.get("runs_per_setting") or 1)
-        key = _run_key(self.simulate, [grid, protocol.get("thresholds")], runs, base, self.deterministic)
+        key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
         run = _load_run(self.quest_root, key)
         if run is not None:
             if self.log is not None:
@@ -364,7 +387,8 @@ RUN_RECORD = Path(".fi") / "trials" / "run.json"
 
 
 def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> str:
-    """What decides a set of trials: the simulation's text, the grid, the count, the base seed and the entry."""
+    """What decides a set of trials: the simulation's text, the protocol (``grid``: the whole of it is passed), the
+    count, the base seed and whether each setting runs once (``run_cell``)."""
     try:
         text = Path(simulate).read_bytes()
     except OSError:
@@ -372,8 +396,18 @@ def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: boo
     return hashlib.sha256(text + json.dumps([grid, runs, base, deterministic], sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _file_hashes(quest_root: Path) -> dict[str, str]:
+    out = {}
+    for name in (LEDGER_NAME, SUMMARY_NAME):
+        try:
+            out[name] = hashlib.sha256((Path(quest_root) / RAW_DIRNAME / name).read_bytes()).hexdigest()
+        except OSError:
+            out[name] = ""
+    return out
+
+
 def _save_run(quest_root: Path, key: str, run: TrialRun) -> None:
-    record = {"key": key, "cells": [
+    record = {"key": key, "files": _file_hashes(quest_root), "cells": [
         {"key": c.key, "cell": c.cell, "planned": c.planned, "rows": c.rows, "returncode": c.returncode,
          "timed_out": c.timed_out, "stderr": c.stderr[-20000:], "load_error": c.load_error} for c in run.cells]}
     try:
@@ -393,6 +427,8 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
         return None
     if record.get("key") != key or not ledger.is_file() or not summary.is_file():
         return None
+    if record.get("files") != _file_hashes(root):
+        return None  # the ledger or the summary was changed since FI wrote them: the trials are run again
     return TrialRun(cells=[CellRun(**c) for c in record.get("cells") or []], ledger_path=ledger, summary_path=summary)
 
 
@@ -406,10 +442,11 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
     spec = work / "oracle.json"
     out = work / "oracle.out.jsonl"
     out.unlink(missing_ok=True)
-    spec.write_text(json.dumps({"module": str(module), "entry": "oracle", "cell": {},
-                                "trials": [{"trial": 0, "seed": None}]}), encoding="utf-8")
+    nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
+    spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": "oracle", "cell": {},
+                                "trials": [{"trial": 0, "seed": None}], "nonce": nonce}), encoding="utf-8")
     result = await executor.execute(
-        [str(python), str(HARNESS_PATH), str(spec.relative_to(quest_root)), str(out.relative_to(quest_root))],
+        [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
     )
     try:
@@ -417,6 +454,8 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
     except (OSError, ValueError):
         rows = []
     for row in rows:
+        if not isinstance(row, dict) or row.get("nonce") != nonce:
+            continue  # not written by the harness FI started
         if row.get("load_error"):
             return None, str(row["load_error"])
         if row.get("status") == "ok":

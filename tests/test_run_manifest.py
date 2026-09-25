@@ -805,6 +805,11 @@ async def test_a_simulation_on_the_trial_contract_is_run_by_fi_and_fis_record_pa
     assert not (engine.quest_root / "raw" / "seed1").exists(), "the trials are the replicates: no second whole run"
     evidence = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
     assert not any("own statement" in g for gaps in evidence.get("all_gaps", {}).values() for g in gaps)
+    # The one result holds every trial: it is what the intervals and the metric statistics are computed from.
+    state = artifacts.raw_state
+    assert state["result_json_trials"] is True and len(state["result_json_replicates"]) == 1
+    values = state["result_json_replicates"][0]["by_cell"]["R0=1.5"]["final_size_values"]
+    assert len(values) == 300
 
 
 @pytest.mark.asyncio

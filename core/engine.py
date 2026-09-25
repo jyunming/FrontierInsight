@@ -273,6 +273,7 @@ class QuestState(TypedDict, total=False):
     # downstream stay unchanged. ``_node_analyze`` reads this list
     # when present and aggregates numeric fields with mean ± std.
     result_json_replicates: list[dict[str, Any]]
+    result_json_trials: bool  # the one result holds every trial FI ran (the trial contract): pool it as the replicates
     # True when two seeds produced byte-identical results, so replication
     # stopped early. Distinguishes "no error bars because the experiment is
     # deterministic" from "no error bars because nothing could be aggregated".
@@ -5622,7 +5623,7 @@ class Engine:
         try:
             missed: list[str] = []
             replicates = state.get("result_json_replicates") or []
-            if len(replicates) > 1:
+            if len(replicates) > 1 or (replicates and state.get("result_json_trials")):
                 aggregate = _aggregate_result_json_replicates(
                     replicates, assertions=_replicate_assertions(state), kinds=_replicate_metric_kinds(state),
                 )
@@ -6997,7 +6998,12 @@ class Engine:
         # downstream path -- the analyze aggregate, the figure captions, the
         # writer's "seed 0 of N" language, the number and claim checks -- falls
         # back to its honest single-run behaviour on its own.
-        if len(result_json_replicates) > 1 and not seed_ignored:
+        patch["result_json_trials"] = bool(getattr(self, "_trial_mode", False)) and bool(result_json)
+        if patch["result_json_trials"]:
+            # The trial contract: the one result holds every trial of every setting FI ran, each with its own seed; the
+            # intervals, precision targets and metric statistics are computed from it (pooled counts and values).
+            patch["result_json_replicates"] = [{"_seed": 0, **result_json}]
+        elif len(result_json_replicates) > 1 and not seed_ignored:
             patch["result_json_replicates"] = result_json_replicates
             # Lets ``analyze`` say "every seed agreed" instead of reporting an
             # empty aggregate, which reads like the aggregator broke.
@@ -7717,7 +7723,7 @@ class Engine:
         # any via the pause-drop gate) into the same block so analyze
         # sees them alongside.
         replicates = state.get("result_json_replicates") or []
-        if replicates and len(replicates) > 1:
+        if replicates and (len(replicates) > 1 or state.get("result_json_trials")):
             assertions = _replicate_assertions(state)
             agg = _aggregate_result_json_replicates(replicates, assertions=assertions, kinds=_replicate_metric_kinds(state))
             # Flattening a crossed design yields one entry per numeric leaf —

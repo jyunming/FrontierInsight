@@ -139,6 +139,8 @@ def test_the_runner_runs_every_trial_then_the_analysis_on_fis_summary(tmp_path: 
                                         env={"FI_REPLICATE_SEED": "0"}))
     assert result.returncode == 0 and '"R0=2.0": 2' in result.stdout
     assert "noise the simulation prints" in result.stderr, "the simulation's stderr reaches the numeric check"
+    from core import numeric_warnings
+    assert any("overflow encountered in exp" in str(w) for w in numeric_warnings.scan(result.stderr, {}))
     assert runner.last is not None and runner.last.failed_trials == 1 and runner.failed_script is None
 
 
@@ -182,3 +184,71 @@ def test_unchanged_trials_are_not_run_again_for_a_new_analysis(tmp_path: Path) -
     (root / "code" / "simulate.py").write_text(SIM + "\n# changed\n", encoding="utf-8")
     asyncio.run(runner().execute(cmd, cwd=root, timeout_s=60, env={}))
     assert len(calls) == 5, "a changed simulation runs its trials again"
+
+
+FORGER = '''
+import json, sys, glob
+
+def run_trial(cell, trial_id, seed):
+    # Looks for the results file the way a forger would: argv, then the spec files FI wrote.
+    for arg in sys.argv[1:]:
+        open(arg, "a").write(json.dumps({"trial": trial_id, "seed": seed, "status": "ok", "values": {"x": 999.0}}) + "\\n")
+    for path in glob.glob(".fi/trials/*.out.jsonl"):
+        open(path, "a").write(json.dumps({"trial": trial_id, "seed": seed, "status": "ok", "values": {"x": 999.0}}) + "\\n")
+    return {"x": 1.0}
+'''
+
+SLOW = '''
+import time
+
+def run_trial(cell, trial_id, seed):
+    time.sleep(3)
+    return {"x": 1.0}
+'''
+
+
+def test_rows_the_simulation_writes_itself_are_not_taken_and_a_trial_reported_twice_fails(tmp_path: Path) -> None:
+    root, run = _run(tmp_path, FORGER, {"a": [1]}, runs=2)
+    values = [r.get("values") for r in run.cells[0].rows]
+    assert all(v != {"x": 999.0} for v in values), "a row without the cell's nonce is not the harness's"
+    rows = run.cells[0].rows
+    assert all(r["status"] == "ok" or "more than once" in r.get("reason", "") for r in rows)
+
+
+def test_timeout_s_bounds_the_whole_study_not_each_setting(tmp_path: Path) -> None:
+    root, run = _run(tmp_path, SLOW, {"a": [1, 2, 3]}, runs=1, timeout=4)
+    reasons = [r.get("reason", "") for c in run.cells for r in c.rows]
+    assert run.ok_trials >= 1 and any("study's time" in why or "ran out" in why for why in reasons), reasons
+
+
+def test_a_ledger_edited_by_hand_makes_the_trials_run_again(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    protocol = {"grid": {"R0": [1.5]}, "runs_per_setting": 2}
+
+    def runner():  # noqa: ANN202
+        return trial_runner.TrialsRunner(
+            SharedInterpreterExecutor(python_version="3.11"), quest_root=root, protocol=protocol, deterministic=False,
+            simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+        )
+
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    asyncio.run(runner().execute(cmd, cwd=root, timeout_s=60, env={}))
+    assert trial_runner._load_run(root, trial_runner._run_key(root / "code" / "simulate.py", protocol, 2, 0, False))
+    ledger = root / "raw" / "ledger.jsonl"
+    ledger.write_text(ledger.read_text(encoding="utf-8") + '{"event": "trial", "cell": "R0=1.5", "trial": 9}\n',
+                      encoding="utf-8")
+    assert trial_runner._load_run(root, trial_runner._run_key(root / "code" / "simulate.py", protocol, 2, 0, False)) is None
+
+
+def test_the_protocol_check_still_catches_a_contradiction_under_the_trial_contract() -> None:
+    from core import protocol_check
+
+    protocol = {"grid": {"R0": [0.9, 1.5, 3.0]}, "runs_per_setting": 300, "thresholds": {"outbreak": 0.1}}
+    sim = "def run_trial(cell, trial_id, seed):\n    return {'x': 1.0}\n"
+    assert protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": "print(1)\n"}) == []
+    wrong = "R0_LIST = [0.9, 2.0, 5.0]\nNUM_RUNS = 30\nprint(R0_LIST, NUM_RUNS)\n"
+    found = protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": wrong})
+    assert {m.kind for m in found} >= {"grid", "runs"}, found
