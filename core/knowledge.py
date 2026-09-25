@@ -2559,10 +2559,11 @@ async def _ocr_scanned(enriched: list[RetrievedDoc], scanned: dict[int, list[byt
         return 0
     deadline = time.monotonic() + OCR_BUDGET_S
     done = 0
-    for idx, body in todo:
+    for tried, (idx, body) in enumerate(todo):
         if time.monotonic() >= deadline:
-            _log.info("full-text OCR: budget of %.0fs used; %d scanned PDF(s) left unread", OCR_BUDGET_S, len(todo) - done)
-            _sf.record_failure("full_text", "ocr_budget", detail=f"{len(todo) - done} scanned PDF(s) not read by OCR")
+            left = len(todo) - tried
+            _log.info("full-text OCR: budget of %.0fs used; %d scanned PDF(s) left unread", OCR_BUDGET_S, left)
+            _sf.record_failure("full_text", "ocr_budget", detail=f"{left} scanned PDF(s) not read by OCR")
             break
         try:
             text, summary = await asyncio.to_thread(_ocr_pdf_text, body, cap=cap, deadline=deadline)
