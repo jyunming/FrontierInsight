@@ -1102,6 +1102,13 @@ _BROWSER_HEADERS = {
 _scanned_pdfs: "contextvars.ContextVar[list[bytes] | None]" = contextvars.ContextVar("fi_scanned_pdfs", default=None)
 #: How long the OCR stage after a fetch may take in all (OCR is about 10 s a page: never inside the fetch budget).
 OCR_BUDGET_S = 600.0
+#: A fetch's readable PDFs, ``(bytes, first 200 characters of their text)``, set per fetch like ``_scanned_pdfs``: the
+#: figure stage after the fetch cuts the figures out of the PDF whose text the fetch kept.
+_fetched_pdfs: "contextvars.ContextVar[list[tuple[bytes, str]] | None]" = contextvars.ContextVar(
+    "fi_fetched_pdfs", default=None,
+)
+#: How long cutting the figures out of a fetch's PDFs may take in all (about a second or two per paper).
+FIGURE_BUDGET_S = 180.0
 
 
 def _pdf_bytes_to_text(body: bytes, *, cap: int) -> str | None:
@@ -1119,11 +1126,71 @@ def _pdf_bytes_to_text(body: bytes, *, cap: int) -> str | None:
         if slot is not None:
             slot.append(body)
         return None
+    if result.text:
+        kept = _fetched_pdfs.get()
+        if kept is not None:
+            kept.append((body, result.text[:200]))
     return result.text or None
 
 
 def _ocr_cache_dir() -> Path:
     return Path.home() / ".frontier-insight" / "ocr_cache"
+
+
+def _figure_cache_dir() -> Path:
+    return Path.home() / ".frontier-insight" / "figure_cache"
+
+
+#: Bumped when the figure cutting changes, so an index cut by an older version is cut again.
+_FIGURE_INDEX_VERSION = 2
+
+
+def _pdf_figures(body: bytes, *, ocr_lines: dict[int, Any] | None = None) -> list[dict[str, Any]]:
+    """The captioned figures of a PDF (core/pdf_figures.py), as ``{number, page, caption, image, scanned, sha256}``
+    with ``image`` a PNG in a cache keyed by the PDF's SHA-256, so the next quest citing the paper does not cut them
+    again. ``ocr_lines`` (from the OCR that read a scanned PDF) lets its scanned pages' figures be found.
+
+    Safe for quests of one ``--fleet`` cutting the same PDF at once: each image is named by its own content hash and
+    written whole then renamed, and the index is renamed into place last; a cached index is used only when every image
+    it names is there with that hash, and it is cut again when OCR lines come for a page it was cut without."""
+    from core import pdf_figures
+
+    key = hashlib.sha256(body).hexdigest()
+    folder = _figure_cache_dir() / key
+    index = folder / "figures.json"
+    try:
+        hit = json.loads(index.read_text(encoding="utf-8"))
+        figures_hit = hit.get("figures") if isinstance(hit, dict) else None
+        if (isinstance(figures_hit, list) and hit.get("version") == _FIGURE_INDEX_VERSION
+                and set(map(int, ocr_lines or {})) <= set(map(int, hit.get("ocr_pages") or []))
+                and all(isinstance(f, dict) and hashlib.sha256(Path(str(f["image"])).read_bytes()).hexdigest()
+                        == f.get("sha256") for f in figures_hit)):
+            return figures_hit
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
+        pass
+    figures = pdf_figures.find(body, ocr_lines=ocr_lines)
+    out: list[dict[str, Any]] = []
+    tag = f"{os.getpid()}.{threading.get_ident()}"
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+        for fig in figures:
+            digest = hashlib.sha256(fig.png).hexdigest()
+            target = folder / f"fig{fig.number}_p{fig.page}_{digest[:16]}.png"
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                tmp = target.with_name(f"{target.name}.{tag}.tmp")
+                tmp.write_bytes(fig.png)
+                os.replace(tmp, target)
+            out.append({"number": fig.number, "page": fig.page, "caption": fig.caption, "image": str(target),
+                        "scanned": fig.scanned, "sha256": digest})
+        tmp = index.with_name(f"figures.json.{tag}.tmp")
+        tmp.write_text(json.dumps({"version": _FIGURE_INDEX_VERSION, "ocr_pages": sorted(map(int, ocr_lines or {})),
+                                   "figures": out}),
+                       encoding="utf-8")
+        os.replace(tmp, index)
+    except OSError as e:
+        _log.info("figures of a PDF not saved: %s", e)
+        return [f for f in out if Path(f["image"]).is_file()]
+    return out
 
 
 def _ocr_pdf_text(body: bytes, *, cap: int, deadline: float | None = None) -> tuple[str, str]:
@@ -1139,6 +1206,11 @@ def _ocr_pdf_text(body: bytes, *, cap: int, deadline: float | None = None) -> tu
     except (OSError, ValueError, AttributeError):
         pass
     result = pdf_text.extract(body, max_bytes=cap, ocr=True, ocr_deadline=deadline)
+    if result.ocr_lines and not result.ocr_out_of_time:
+        try:  # its figures now, while the OCR lines that locate them are at hand (cached like the text)
+            _pdf_figures(body, ocr_lines=result.ocr_lines)
+        except Exception as e:  # noqa: BLE001 -- the text is what was asked for
+            _log.info("figures of a scanned PDF not cut: %r", e)
     # Cached only when read to the end: one cut off by the deadline is read whole next time.
     if result.ocr_pages and not result.ocr_out_of_time:
         try:
@@ -2548,7 +2620,10 @@ def _fetch_full_text(
     return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
 
 
-async def _ocr_scanned(enriched: list[RetrievedDoc], scanned: dict[int, list[bytes]], *, cap: int) -> int:
+async def _ocr_scanned(
+    enriched: list[RetrievedDoc], scanned: dict[int, list[bytes]], *, cap: int,
+    pdfs: dict[int, bytes] | None = None,
+) -> int:
     """Read the scanned PDFs a fetch set aside, by OCR, after its budget: one doc at a time within ``OCR_BUDGET_S``.
 
     Only a doc still without full text is read. Its content gets the OCR text under its own marker, so a reader can
@@ -2579,9 +2654,38 @@ async def _ocr_scanned(enriched: list[RetrievedDoc], scanned: dict[int, list[byt
             metadata={**original.metadata, "fetched_full_text": True, "full_text_ocr": True,
                       "full_text_bytes": len(text.encode("utf-8", errors="replace"))},
         )
+        if pdfs is not None:
+            pdfs[idx] = body  # its figures are listed by the figure stage (from the cache the OCR filled)
         done += 1
         _log.info("full-text OCR: %s -- %s", (original.metadata.get("title") or "")[:60], summary)
     return done
+
+
+async def _cut_figures(enriched: list[RetrievedDoc], pdfs: dict[int, bytes]) -> int:
+    """Cut the captioned figures out of each PDF a fetch kept text from (``_pdf_figures``), one at a time within
+    ``FIGURE_BUDGET_S``, and list them in the doc's ``figures``. Returns how many docs got figures."""
+    if not pdfs:
+        return 0
+    deadline = time.monotonic() + FIGURE_BUDGET_S
+    got = 0
+    for tried, (idx, body) in enumerate(sorted(pdfs.items())):
+        if time.monotonic() >= deadline:
+            _log.info("figures: budget of %.0fs used; %d PDF(s) left uncut", FIGURE_BUDGET_S, len(pdfs) - tried)
+            break
+        if not enriched[idx].metadata.get("fetched_full_text"):
+            continue
+        try:
+            figures = await asyncio.to_thread(_pdf_figures, body)
+        except Exception as e:  # noqa: BLE001 -- a PDF whose figures cannot be cut costs only its figures
+            _log.info("figures not cut: %r", e)
+            continue
+        if figures:
+            original = enriched[idx]
+            enriched[idx] = RetrievedDoc(content=original.content, metadata={**original.metadata, "figures": figures})
+            got += 1
+    if got:
+        _log.info("figures: cut from %d of %d PDF(s)", got, len(pdfs))
+    return got
 
 
 async def _enrich_with_full_text(
@@ -2615,6 +2719,7 @@ async def _enrich_with_full_text(
         return docs
 
     scanned: dict[int, list[bytes]] = {}
+    pdfs: dict[int, bytes] = {}
 
     async def fetch_one(idx: int) -> tuple[int, str | None]:
         # The batch budget is also the arXiv queue's deadline: a fetch that
@@ -2625,6 +2730,8 @@ async def _enrich_with_full_text(
         # The scanned PDFs this doc's routes met (see _pdf_bytes_to_text), for the OCR stage below.
         slot: list[bytes] = []
         scanned_token = _scanned_pdfs.set(slot)
+        readable: list[tuple[bytes, str]] = []
+        readable_token = _fetched_pdfs.set(readable)
         try:
             text = await asyncio.to_thread(
                 fetch_fn,
@@ -2635,8 +2742,14 @@ async def _enrich_with_full_text(
         finally:
             _gate.fetch_deadline.reset(token)
             _scanned_pdfs.reset(scanned_token)
+            _fetched_pdfs.reset(readable_token)
         if slot:
             scanned[idx] = slot
+        # The PDF whose text the fetch returned (a route may read one PDF, find it short, and return another's text).
+        for body, head in reversed(readable):
+            if text and head and text.startswith(head):
+                pdfs[idx] = body
+                break
         return idx, text
 
     start = time.monotonic()
@@ -2712,8 +2825,9 @@ async def _enrich_with_full_text(
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
 
-    ocr_done = await _ocr_scanned(enriched, scanned, cap=max_kb * 1024)
+    ocr_done = await _ocr_scanned(enriched, scanned, cap=max_kb * 1024, pdfs=pdfs)
     successes += ocr_done
+    await _cut_figures(enriched, pdfs)
     if pending:
         _log.info(
             "full-text fetch budget %.1fs exceeded; "

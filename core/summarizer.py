@@ -89,6 +89,10 @@ _PER_FILE_AXON_CHARS = 50_000
 # Directories we always skip during recursion. These tend to be noise
 # (caches, build outputs, version-control metadata) that drown out the
 # user-meaningful files.
+#: Folders skipped by their place under the walked folder: the figures cut out of the literature's PDFs (their
+#: captions are already in each ``lit_*.md``; hundreds of images would only crowd the file list).
+_SKIP_PATHS: frozenset[str] = frozenset({"literature/figures"})
+
 _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".hg", ".svn",
     "node_modules", ".venv", "venv", "env", "__pycache__",
@@ -272,7 +276,8 @@ def _walk_folder(folder: Path) -> list[FileEntry]:
     collected: list[Path] = []
     for dirpath, dirnames, filenames in _walk_sorted(folder):
         # In-place prune of `dirnames` keeps os.walk from descending.
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.startswith(".")
+                       and (dirpath / d).relative_to(folder).as_posix() not in _SKIP_PATHS]
         for fn in filenames:
             if fn.startswith("."):
                 continue
