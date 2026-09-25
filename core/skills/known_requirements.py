@@ -113,7 +113,8 @@ def _parse(requirement: str) -> tuple[str, str, bool]:
         if not m:
             return requirement.strip(), "", True
         rest = m.group(3).strip()
-        return m.group(1), m.group(2) or "", bool(rest) and not rest.startswith(";")
+        marker = f"; {rest[1:].strip()}" if rest.startswith(";") else ""  # a marker with no version is kept
+        return m.group(1), (m.group(2) or "") + marker, bool(rest) and not rest.startswith(";")
 
 
 def pinned(requirement: str, *, python: tuple[int, int] | None = None) -> str:
@@ -147,6 +148,9 @@ def pip_requires(skill: Any) -> list[str]:
     declared = provenance.get("pip_requires") if isinstance(provenance, dict) else None
     if not isinstance(declared, list):
         source = str((provenance or {}).get("imported_from") or "") if isinstance(provenance, dict) else ""
-        preset = "skill-sources" in source.replace("\\", "/")
+        # A folder named exactly skill-sources (the import script's cache: .skill-sources, or skill-sources under
+        # ~/.frontier-insight), not any path that merely contains the words.
+        parts = source.replace("\\", "/").split("/")
+        preset = any(part in (".skill-sources", "skill-sources") for part in parts)
         declared = PRESET_PIP_REQUIRES.get(getattr(skill, "name", ""), []) if preset else []
     return list(dict.fromkeys(pinned(str(x)) for x in declared if str(x).strip()))

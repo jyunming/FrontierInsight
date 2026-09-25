@@ -76,3 +76,25 @@ def test_a_quest_installs_a_preset_skills_packages_even_when_its_record_has_none
     old_scipy = SimpleNamespace(name="scipy", provenance=lambda: dict(PRESET))
     landlab = "landlab==2.10.1" if sys.version_info[:2] < (3, 12) else "landlab"
     assert experiment_deps.skill_requirements([old_landlab, old_scipy]) == [landlab, "scipy"]
+
+
+def test_without_packaging_a_marker_survives_the_pin(monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_packaging(name, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if name.startswith("packaging"):
+            raise ImportError("no packaging here")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", no_packaging)
+    assert kr.pinned('landlab; python_version < "3.13"', python=(3, 11)) == 'landlab==2.10.1; python_version < "3.13"'
+    assert kr.pinned("landlab[all]", python=(3, 11)) == "landlab[all]==2.10.1"
+
+
+def test_only_a_folder_named_skill_sources_marks_a_preset() -> None:
+    near_miss = SimpleNamespace(name="pymc", provenance=lambda: {"imported_from": "C:/dev/my-skill-sources/pymc/SKILL.md"})
+    assert kr.pip_requires(near_miss) == []
+    home_cache = SimpleNamespace(name="pymc", provenance=lambda: {"imported_from": "/home/u/.frontier-insight/skill-sources/kdense/skills/pymc/SKILL.md"})
+    assert kr.pip_requires(home_cache) == kr.PRESET_PIP_REQUIRES["pymc"]
