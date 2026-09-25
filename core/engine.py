@@ -15269,7 +15269,7 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
         (ax, s)
         for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)
         for s in (ax.get("series") or [])
-        if isinstance(s, dict) and s.get("shows") not in ("yes", "vertical line")
+        if isinstance(s, dict) and s.get("shows") not in ("yes", "vertical line", "reference line")
     ]
 
 
@@ -15368,6 +15368,9 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             shows = s.get("shows")
             if shows == "vertical line" and isinstance(s.get("x"), (int, float)):
                 series.append(f"{s.get('label')} a vertical line at x = {s['x']:.3g}")
+                continue
+            if shows == "reference line" and isinstance(s.get("y"), (int, float)):
+                series.append(f"{s.get('label')} a reference line at y = {s['y']:.3g}")
                 continue
             span = f'{s["min"]:.3g} to {s["max"]:.3g}' if "min" in s else "no points"
             tail = "" if shows == "yes" else ", FLAT on this axis" if shows == "flat" else ", NOT SHOWN"

@@ -369,6 +369,13 @@ try:
                             if xs and label and not label.startswith("_"):
                                 verticals.append({"label": label, "x": xs[0], "shows": "vertical line"})
                             continue
+                        if kind == "hline":
+                            # An axhline is a reference drawn flat on purpose (a threshold, a known
+                            # value): a series lying flat is a finding, this is not one.
+                            ys = _fi_values(artist.get_ydata())
+                            if ys and label and not label.startswith("_"):
+                                verticals.append({"label": label, "y": ys[0], "shows": "reference line"})
+                            continue
                         if kind == "other":
                             continue  # drawn in coordinates that are not the data's: nothing to read
                         ys = _fi_values(artist.get_ydata())
@@ -386,13 +393,27 @@ try:
                     # segment collection is not one of its points.
                     if hasattr(artist, "get_ydata") or isinstance(artist, _FiPathCollection):
                         unlabelled.append((style, marker, ys))
+                elif style is not None and style[0] == "line":
+                    # A family of runs drawn in a loop, the label on the first only: the
+                    # others join it when drawn in exactly its style, so the family's range
+                    # is recorded, not the first run's (a real figure's labelled run lay
+                    # flat at 1.0 while the others rose and fell).
+                    unlabelled.append((style, None, ys))
             for style, marker, ys in unlabelled:
                 same_style = [g for g in groups if g[1] == style]
                 same_marker = [g for g in groups if marker is not None and g[2] == marker]
+                if marker is None and not same_style:
+                    continue  # a plain line joins only a series in exactly its style
                 target = same_style[0] if same_style else same_marker[0] if len(same_marker) == 1 else None
                 if target is not None:
                     target[3].extend(ys)
-            series = [_fi_series(label, ys, lo, hi, log) for label, _style, _marker, ys in groups] + verticals
+            series = [
+                {"label": label, "y": ys[0], "shows": "reference line"}
+                if style and style[0] == "line" and style[2] in ("--", ":", "-.", "dashed", "dotted", "dashdot")
+                and len(ys) > 1 and max(ys) == min(ys)
+                else _fi_series(label, ys, lo, hi, log)
+                for label, style, _marker, ys in groups
+            ] + verticals  # a dashed line at one value is a reference drawn flat on purpose, not a flat series
             # The house style puts titles on the left, where get_title() alone misses them.
             title = " ".join(t for t in (ax.get_title("left"), ax.get_title(), ax.get_title("right")) if t)
             return {
