@@ -333,6 +333,9 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             yaml_path.write_text(new_yaml, encoding="utf-8")
             result["yaml_path"] = str(yaml_path)
             result["backup_path"] = str(backup)
+        # An update is how a change to the settings that decide how strictly the quest is checked gets approved
+        # (core/plan_settings.py); the lines it approved are returned for the page to show.
+        result["approved_settings_changes"] = approve_settings(quest_root, Config.from_yaml(yaml_path))
             if keys:
                 ok = await soft_invalidate_checkpoint(quest_root, keys)
                 if ok:

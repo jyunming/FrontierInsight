@@ -303,6 +303,28 @@ def keys_to_clear(stages: list[str]) -> list[str]:
     return out
 
 
+def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any] | None = None) -> list[str]:
+    """``--update`` is how a change to the settings that decide how strictly the quest is checked gets approved
+    (core/plan_settings.py): name every one that differs from the recorded approval, then record the config as it
+    is now. Returns the lines it named."""
+    from core import plan_settings
+
+    fi_dir = quest_root / ".fi"
+    try:
+        import json as _json
+        approved = _json.loads((fi_dir / plan_settings.NAME).read_text(encoding="utf-8"))["settings"]
+    except (OSError, ValueError, KeyError, TypeError):
+        approved = None
+    changed = plan_settings.differences(approved, plan_settings.settings_of(cfg)) if isinstance(approved, dict) else []
+    if changed and say is not None:
+        say("")
+        say("Approving these changes to how strictly the quest is checked:")
+        for line in changed:
+            say(f"  - {line}")
+    plan_settings.record(fi_dir, cfg)
+    return changed
+
+
 def rewrite_yaml_with_new_answers(
     raw: dict[str, Any], new: InterviewAnswers,
 ) -> str:
@@ -689,6 +711,7 @@ async def run_update_flow(
     else:
         print(f"Resuming quest {quest_id}...")
     cfg = Config.from_yaml(yaml_path)
+    approve_settings(quest_root, cfg, say=print)
     apply_vscode_bridge_override(cfg, vscode_bridge_port)
     # The VSCode extension runs ``--update`` in an integrated terminal,
     # which is NOT a child of the extension and so has no per-command TCP
