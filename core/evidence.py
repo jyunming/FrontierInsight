@@ -57,15 +57,13 @@ INFO: dict[str, dict[str, Any]] = {
             "numeric warning was accepted."
         ),
         "known_blind_spots": [
-            "When the script keeps a per-trial ledger (trial_ledger.jsonl), the trial counts (realized_grid, "
-            "attempted_per_cell, successful_per_cell, failed_trials) are derived by the engine from its real lines, not "
-            "read from the script's own summary. Without a ledger, those fields are still the script's own statement, "
-            "as before. Either way, a claimed trial count is also cross-checked against the real per-trial values a "
-            "`kind: \"mean\"` metric reports (core/run_manifest.py's result_json check) — but a script that fabricates "
-            "the ledger rows AND the metric's per-trial values together, consistently, is not caught by either "
-            "mechanism; no check here re-executes the science itself.",
+            "FI runs the trials and writes their record (core/trial_runner.py), so the counts are FI's own; what one "
+            "trial computes is still the simulation's code, and nothing here checks that it computes the right thing "
+            "(the oracle level is for that). A simulation on the older contract, which ran its own loop, is marked "
+            "self_reported and does not reach this level.",
         ],
-        "artifacts": ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_CHECK.json", "needs/RUN_MANIFEST_CHECK.json", "needs/NUMERIC_WARNINGS.json"],
+        "artifacts": ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_CHECK.json", "needs/RUN_MANIFEST_CHECK.json", "needs/NUMERIC_WARNINGS.json",
+                      "raw/ledger.jsonl"],
     },
     "independently_validated": {
         "assurance_claim": "The engine judged the script's oracle measurements against the protocol's expected values and tolerances.",
@@ -207,6 +205,11 @@ def assess(
             matched_gaps.append("the quest ran as one script, which writes no run manifest: nothing shows the run did what the protocol fixed (execution.split_analysis)")
         elif status == "not_applicable":
             pass  # a deterministic study runs as one script and has no per-trial outcomes to record
+        elif status == "self_reported":
+            matched_gaps.append(
+                "the trial record is the simulation's own statement (it ran its own loop): FI did not run the trials "
+                "itself, so nothing independent shows it did what the protocol fixed"
+            )
         elif status != "ok":
             matched_gaps.append(f"the run was not shown to have done what the protocol fixed (run manifest check: {status or 'not run'})")
     warnings = _json(needs / "NUMERIC_WARNINGS.json")

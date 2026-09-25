@@ -255,7 +255,7 @@ execution:
   timeout_s: 600
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
-  split_analysis: auto              # auto (default: on for a stochastic design) | true | false. Keep the simulation (code/simulate.py, raw files in raw/seed<K>/) apart from its analysis (code/experiment.py); not with background_jobs
+  split_analysis: auto              # auto (default: on for a stochastic design) | true | false. Keep the simulation (code/simulate.py: run_trial, run by FI, record in raw/) apart from its analysis (code/experiment.py); not with background_jobs
   raw_dir: ""                       # only with split_analysis: where the raw files go (relative to the quest, or absolute; relative with docker); empty = raw/
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)
