@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +42,7 @@ def save(values: dict[str, Any]) -> dict[str, str]:
     kept = {k: " ".join(str(values.get(k) or "").split())[:300] for k in FIELDS}
     target = path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(kept, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, target)
     return kept

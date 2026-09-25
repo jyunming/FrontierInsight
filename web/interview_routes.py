@@ -75,13 +75,21 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         )
         return HTMLResponse(injected)
 
+    def _local(request: Request) -> bool:
+        # The author line is personal and the server has no login: it is read or kept only for a page opened on this
+        # machine, whatever address --serve was bound to.
+        host = (request.client.host if request.client else "") or ""
+        return host in ("127.0.0.1", "::1", "localhost", "testclient")
+
     @app.get("/api/profile")
-    async def get_profile() -> JSONResponse:
+    async def get_profile(request: Request) -> JSONResponse:
         """The person's saved author line (core/profile.py), or ``null`` when they have not been asked yet: the new-quest
-        page then asks it and keeps it on submit."""
+        page then asks it and keeps it on submit. Only for a page opened on this machine."""
         from core import profile
 
-        return JSONResponse({"profile": profile.load()})
+        if not _local(request):
+            return JSONResponse({"profile": None, "local": False})
+        return JSONResponse({"profile": profile.load(), "local": True})
 
     @app.get("/api/interview/schema")
     async def get_schema() -> JSONResponse:
@@ -188,22 +196,25 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                 "from a plain terminal without a bridge.",
             )
 
-        # The author line asked on the first interview, or changed on the review screen, is kept for later quests
-        # (the same profile the CLI and VS Code read).
-        from core import profile
-
-        if body.get("save_profile", True):
-            try:
-                profile.save({k: getattr(answers, k) for k in profile.FIELDS})
-            except OSError:
-                pass  # the quest goes on; the next interview asks again
-
         yaml_text = answers_to_yaml(answers, frontend="serve")
         drafts = output_root / "_drafts"
         drafts.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y-%m-%d-%H%M")
         yaml_path = drafts / f"{stamp}-{slugify(answers.title) or 'quest'}.yaml"
         yaml_path.write_text(yaml_text, encoding="utf-8")
+
+        # The author line, once the quest's config is written: kept for later quests (the profile the CLI and VS Code
+        # read too) when it is new or was changed on the review screen, and only from a page on this machine.
+        from core import profile
+
+        profile_saved: bool | None = None
+        line = {k: getattr(answers, k) for k in profile.FIELDS}
+        if _local(request) and profile.load() != line:
+            try:
+                profile.save(line)
+                profile_saved = True
+            except OSError:
+                profile_saved = False  # the quest goes on; the page says the line was not kept
 
         # Optional in-server launch. Triggered by the interview form's
         # "Launch immediately after submit" checkbox (default ON). The
@@ -235,6 +246,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                     headers={"Retry-After": "30"},
                 )
             return JSONResponse({
+                "profile_saved": profile_saved,
                 "yaml_path": str(yaml_path),
                 "quest_id": launched.quest_id,
                 "pid": launched.pid,
@@ -243,6 +255,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             })
 
         return JSONResponse({
+            "profile_saved": profile_saved,
             "yaml_path": str(yaml_path),
             "draft_only": True,
             "next_step": (
@@ -390,6 +403,8 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         ("knowledge_enabled", bool),
         ("provider", str),
     )
+    if not str(body.get("provider") or "").strip():
+        raise ValueError("provider: pick the LLM provider")
     for field, expected in required:
         if field not in body:
             raise KeyError(field)
@@ -583,4 +598,26 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         poster_size=poster_size,
         reasoning_effort=reasoning_effort,
         page_limit=page_limit,
+        **_review_extras(body),
     )
+
+
+def _review_extras(body: dict[str, Any]) -> dict[str, Any]:
+    """What the review screen offers beyond the fields above: the pause for your own papers / datasets, the paper style
+    and per-step models. They were offered and then dropped, so the defaults were written instead."""
+    from core.interview import QUESTIONS, parse_node_models_answer
+
+    out: dict[str, Any] = {}
+    for qid in ("pause_for_user_input", "paper_style"):
+        if body.get(qid) in (None, ""):
+            continue
+        q = next(q for q in QUESTIONS if q.id == qid)
+        allowed = {c.value for c in q.choices or ()}
+        if allowed and body[qid] not in allowed:
+            raise ValueError(f"{qid} must be one of {sorted(allowed)}, not {body[qid]!r}")
+        out[qid] = str(body[qid])
+    node_models = str(body.get("node_models") or "").strip()
+    if node_models:
+        parse_node_models_answer(node_models)  # raises ValueError on a malformed pair
+        out["node_models"] = node_models
+    return out

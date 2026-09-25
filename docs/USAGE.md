@@ -433,7 +433,8 @@ Enter to skip any); they are kept in `~/.frontier-insight/profile.json`
 fill them in without asking and show them on the review screen, where a
 change is kept for the next quests too.
 
-These values are written only into the quest's own files. They are not
+These values are written only into the quest's own files and your profile file on this machine (the web page
+reads and keeps it only when opened on this machine). They are not
 sent to the literature or web search services. If the visual check of the
 outputs is on, the page screenshots it sends to your configured LLM
 provider show the author line, as they show the rest of the paper.

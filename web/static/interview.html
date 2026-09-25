@@ -579,8 +579,24 @@
     return SURVEY_TOPIC_MARKERS.some((m) => t.includes(m));
   }
 
+  // Mirrors core/interview.py:slugify: Unicode letters are kept, so a topic in Chinese has a real title.
   function slugifyTopic(t) {
-    return String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'quest';
+    return String(t || '').toLowerCase()
+      .replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/_+/g, '-').replace(/\s+/g, '-').replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '').slice(0, 40) || 'quest';
+  }
+
+  // Mirrors core/interview.py:FORMAT_TOPIC_MARKERS / smart_default_paper_format.
+  const FORMAT_TOPIC_MARKERS = [
+    ['policy brief', 'policy_brief'], ['white paper', 'whitepaper'], ['whitepaper', 'whitepaper'],
+    ['an essay', 'essay'], ['essay on', 'essay'], ['business report', 'report'], ['market report', 'report'],
+    ['history of', 'essay'], ['evolution of', 'essay'], ['the story of', 'essay'], ['development of', 'essay'],
+    ['retrospective', 'essay'],
+  ];
+  function paperFormatFor(topic) {
+    const t = String(topic || '').toLowerCase();
+    const hit = FORMAT_TOPIC_MARKERS.find(([m]) => t.includes(m));
+    return hit ? hit[1] : 'generic';
   }
 
   async function probeAxonReachable() {
@@ -621,7 +637,7 @@
     // The paper format, deliverables and study depth are worked out here now (tier 2), and what follows reads them:
     // a value the person already set is kept.
     const tier1 = { ...given };
-    tier1.paper_format = tier1.paper_format || questionDefault('paper_format') || 'generic';
+    tier1.paper_format = tier1.paper_format || paperFormatFor(tier1.topic);
     tier1.output_kinds = tier1.output_kinds || questionDefault('output_kinds') || ['paper_md', 'paper_pdf'];
     tier1.study_depth = tier1.study_depth || studyDepthFor(tier1.paper_format, tier1.topic);
     return {
@@ -714,6 +730,7 @@
 
     // New-quest flow: validate tier-1, derive tier-2/3, render review.
     if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
+    if (!out.provider || !String(out.provider).trim()) { alert('Pick the LLM provider.'); return false; }
     pendingAnswers = { ...(savedProfile || {}), ...out };
     editedFields.clear();
     const derived = await deriveTier2(out);
@@ -968,6 +985,9 @@
       return false;
     }
     const body = await res.json();
+    if (!asUpdate && body.profile_saved === false) {
+      alert('The quest was created, but your author line could not be kept for the next quests (see the server log).');
+    }
     if (!asUpdate && body.quest_id) {
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;

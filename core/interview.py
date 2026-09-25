@@ -1009,6 +1009,34 @@ def smart_default_survey_mode(partial: dict[str, Any]) -> bool:
     return any(m in topic for m in _SURVEY_TOPIC_MARKERS)
 
 
+#: What a topic says about the kind of text wanted, in the order they are tried: the first marker found picks the format.
+#: Mirrored in web/static/interview.html and vscode-frontier-insight/src/interview.ts (FORMAT_TOPIC_MARKERS).
+FORMAT_TOPIC_MARKERS: tuple[tuple[str, str], ...] = (
+    ("policy brief", "policy_brief"),
+    ("white paper", "whitepaper"),
+    ("whitepaper", "whitepaper"),
+    ("an essay", "essay"),
+    ("essay on", "essay"),
+    ("business report", "report"),
+    ("market report", "report"),
+    ("history of", "essay"),
+    ("evolution of", "essay"),
+    ("the story of", "essay"),
+    ("development of", "essay"),
+    ("retrospective", "essay"),
+)
+
+
+def smart_default_paper_format(partial: dict[str, Any]) -> str:
+    """The paper format the topic asks for: a policy brief, a whitepaper, an essay, a report when it says so, an essay
+    for a history / evolution / story-of question; otherwise the generic scientific paper."""
+    topic = (partial.get("topic") or "").lower()
+    for marker, fmt in FORMAT_TOPIC_MARKERS:
+        if marker in topic:
+            return fmt
+    return "generic"
+
+
 def smart_default_study_depth(partial: dict[str, Any]) -> str:
     """policy_brief is by definition 2-4 pages → 'brief preprint'.
     The other formats keep the journal-length default unless the
@@ -1096,6 +1124,7 @@ def smart_default_knowledge_external_top_k(partial: dict[str, Any]) -> int:
 # ``build_smart_defaults(partial)`` to get a {id: default} dict that
 # considers what's already answered.
 SMART_DEFAULTS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "paper_format": smart_default_paper_format,
     "title": smart_default_title,
     "no_simulation": smart_default_no_simulation,
     "survey_mode": smart_default_survey_mode,

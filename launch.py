@@ -3366,7 +3366,7 @@ async def _run_new(
 
     # ---- Stage 2: preflight LLM + derive tier-2 + tier-3 ----
     derived = derive_tier2(partial)
-    advanced = derive_tier3(partial)
+    advanced = derive_tier3({**partial, **derived})  # the retrieval sizes follow the derived study depth
     print()
     print("⏳ Calling clarify-preflight to suggest topic-tuned defaults...")
     try:
@@ -3461,8 +3461,28 @@ async def _run_new(
                 # again, except what was set by hand.
                 fresh = derive_tier2({**partial, **{k: v for k, v in derived.items() if k in edited}})
                 derived.update({k: v for k, v in fresh.items() if k not in edited})
+                fresh3 = derive_tier3({**partial, **derived})
+                advanced.update({k: v for k, v in fresh3.items()
+                                 if k not in edited and k not in ("comparative_baseline", "success_metric", "budget")})
+                if row["id"] == "paper_format":
+                    # The suggested baseline, metric and budget were for the old format: asked again for this one.
+                    print("⏳ The paper format changed; asking for topic-tuned suggestions again...")
+                    try:
+                        preflight_cache = await preflight_clarify(
+                            topic=str(partial.get("topic", "")),
+                            paper_format=str(derived.get("paper_format") or "generic"),
+                            provider_name=str(partial.get("provider") or "openai"),
+                            provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
+                        )
+                    except Exception as e:  # noqa: BLE001 -- the old suggestions are cleared, not kept
+                        print(f"⚠ preflight failed ({e}); the suggested baseline, metric and budget are left blank.")
+                        preflight_cache = {}
+                    for k in ("comparative_baseline", "success_metric", "budget"):
+                        if k not in edited:
+                            advanced[k] = preflight_cache.get(k) or ""
             else:
                 advanced[row["id"]] = new_val
+                edited.add(row["id"])
     except (KeyboardInterrupt, EOFError):
         print()
         print("— interview cancelled at review screen (Ctrl-C / EOF).")
@@ -3515,19 +3535,21 @@ async def _run_new(
         ),
     )
 
-    if saved_profile is None or edited & set(_profile.FIELDS):
-        try:
-            _profile.save({k: getattr(answers, k) for k in _profile.FIELDS})
-            print(f"  (your author line is kept in {_profile.path()} for the next quests)")
-        except OSError as e:
-            print(f"  ⚠ the author line could not be kept for the next quests ({e})")
-
     yaml_text = answers_to_yaml(answers, frontend="cli")
     drafts_dir = output_root / "_drafts"
     drafts_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y-%m-%d-%H%M")
     yaml_path = drafts_dir / f"{stamp}-{slugify(answers.title)}.yaml"
     yaml_path.write_text(yaml_text, encoding="utf-8")
+
+    # The author line, once the quest's config is written: kept for later quests when it is new or was changed here.
+    line = {k: getattr(answers, k) for k in _profile.FIELDS}
+    if saved_profile != line:
+        try:
+            _profile.save(line)
+            print(f"  (your author line is kept in {_profile.path()} for the next quests)")
+        except OSError as e:
+            print(f"  ⚠ the author line could not be kept for the next quests ({e})")
 
     print()
     print("=" * 72)

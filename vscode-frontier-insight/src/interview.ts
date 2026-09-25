@@ -328,7 +328,7 @@ export async function runInterview(
 
 `);
 
-    const paperFormat: PaperFormat = "generic";
+    const paperFormat: PaperFormat = paperFormatFor(topic);
     const outputKinds = ["paper_md", "paper_pdf"];
     const studyDepth = studyDepthFor(paperFormat, topic);
     const missingNote = missingToolsNote(outputKinds);
@@ -409,6 +409,8 @@ export async function runInterview(
     };
 
     // ─── Review block + action picker loop ──────────────────────────
+    // Fields changed by hand here: a changed paper format works the others out again, never these.
+    const edited = new Set<string>();
     while (true) {
         stream.markdown(reviewBlockMarkdown(answers));
         const action = await vscode.window.showQuickPick(
@@ -430,23 +432,14 @@ export async function runInterview(
             return undefined;
         }
         if (action.value === "launch") {
-            // Kept for the next quests on every interface (the first interview, or a line changed above).
-            const line: AuthorLine = {
-                author: answers.author ?? "", affiliation: answers.affiliation ?? "",
-                contact_email: answers.contact_email ?? "", url: answers.url ?? "",
-            };
-            if (!savedProfile || formatAuthorLine(line) !== formatAuthorLine(savedProfile)
-                || JSON.stringify(line) !== JSON.stringify(savedProfile)) {
-                saveProfile(line);
-            }
-            return answers;
+            return answers;  // the caller keeps the author line once the config is written (keepAuthorLine)
         }
         if (action.value === "edit_default") {
-            await editTier2Field(answers);
+            await editTier2Field(answers, edited);
             continue;
         }
         if (action.value === "edit_advanced") {
-            await editTier3Field(answers);
+            await editTier3Field(answers, edited);
             continue;
         }
     }
@@ -764,8 +757,33 @@ async function pickPaperFormat(): Promise<PaperFormat | undefined> {
 /** Mirrors core/interview.py:smart_default_study_depth. */
 function studyDepthFor(paperFormat: string, topic: string): "brief preprint" | "journal-length" | "comprehensive review" {
     if (paperFormat === "policy_brief") return "brief preprint";
-    if (/\b(survey|review of|compar)/i.test(topic)) return "comprehensive review";
+    const t = topic.toLowerCase();
+    if (["survey", "review of", "compar"].some((tok) => t.includes(tok))) return "comprehensive review";
     return "journal-length";
+}
+
+/** Mirrors core/interview.py:FORMAT_TOPIC_MARKERS / smart_default_paper_format. */
+const FORMAT_TOPIC_MARKERS: [string, PaperFormat][] = [
+    ["policy brief", "policy_brief"], ["white paper", "whitepaper"], ["whitepaper", "whitepaper"],
+    ["an essay", "essay"], ["essay on", "essay"], ["business report", "report"], ["market report", "report"],
+    ["history of", "essay"], ["evolution of", "essay"], ["the story of", "essay"], ["development of", "essay"],
+    ["retrospective", "essay"],
+];
+
+function paperFormatFor(topic: string): PaperFormat {
+    const t = topic.toLowerCase();
+    const hit = FORMAT_TOPIC_MARKERS.find(([m]) => t.includes(m));
+    return hit ? hit[1] : "generic";
+}
+
+/** Keep the author line for the next quests (once the config is written): when it is new or was changed. */
+export function keepAuthorLine(a: InterviewAnswers): void {
+    const line: AuthorLine = {
+        author: a.author ?? "", affiliation: a.affiliation ?? "",
+        contact_email: a.contact_email ?? "", url: a.url ?? "",
+    };
+    const saved = loadProfile();
+    if (!saved || JSON.stringify(saved) !== JSON.stringify(line)) saveProfile(line);
 }
 
 /** The study depth picker (review screen). */
@@ -895,7 +913,7 @@ function saveProfile(line: AuthorLine): void {
 }
 
 /** Inline editor for the tier-2 defaults. */
-async function editTier2Field(a: InterviewAnswers): Promise<void> {
+async function editTier2Field(a: InterviewAnswers, edited: Set<string> = new Set()): Promise<void> {
     const which = await vscode.window.showQuickPick(
         [
             { label: "Paper format / venue", value: "paper_format" },
@@ -918,6 +936,8 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
         { title: "Edit which default?", ignoreFocusOut: true },
     );
     if (!which) return;
+    edited.add(which.value);
+    if (which.value === "no_simulation") edited.add("survey_mode");
     if (which.value === "author_line") {
         const v = await askAuthorLine(a);
         if (v) Object.assign(a, v);
@@ -927,12 +947,13 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
         const v = await pickPaperFormat();
         if (v) {
             a.paper_format = v;
-            // What follows from it, as on the other interfaces (core/interview.py SMART_DEFAULTS).
-            a.study_depth = studyDepthFor(v, a.topic);
-            a.no_simulation = PROSE_FORMATS.has(v) || looksLikeSurvey(a.topic);
+            // What follows from it, as on the other interfaces (core/interview.py SMART_DEFAULTS), except what was
+            // set by hand.
+            if (!edited.has("study_depth")) a.study_depth = studyDepthFor(v, a.topic);
+            if (!edited.has("no_simulation")) a.no_simulation = PROSE_FORMATS.has(v) || looksLikeSurvey(a.topic);
             const comp = a.study_depth === "comprehensive review";
-            a.knowledge_top_k = comp ? 12 : 8;
-            a.knowledge_external_top_k = comp ? 30 : 20;
+            if (!edited.has("knowledge_top_k")) a.knowledge_top_k = comp ? 12 : 8;
+            if (!edited.has("knowledge_external_top_k")) a.knowledge_external_top_k = comp ? 30 : 20;
         }
         return;
     }
@@ -950,8 +971,8 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
         if (v) {
             a.study_depth = v;
             const comp = v === "comprehensive review";
-            a.knowledge_top_k = comp ? 12 : 8;
-            a.knowledge_external_top_k = comp ? 30 : 20;
+            if (!edited.has("knowledge_top_k")) a.knowledge_top_k = comp ? 12 : 8;
+            if (!edited.has("knowledge_external_top_k")) a.knowledge_external_top_k = comp ? 30 : 20;
         }
         return;
     }
@@ -1153,7 +1174,7 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
 }
 
 /** Inline editor for the tier-3 advanced fields. */
-async function editTier3Field(a: InterviewAnswers): Promise<void> {
+async function editTier3Field(a: InterviewAnswers, edited: Set<string> = new Set()): Promise<void> {
     const which = await vscode.window.showQuickPick(
         [
             { label: "Comparative baseline", value: "comparative_baseline" },
@@ -1171,6 +1192,7 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
+    edited.add(which.value);
     if (which.value === "ensemble") {
         const v = await pickEnsemble();
         if (v) {

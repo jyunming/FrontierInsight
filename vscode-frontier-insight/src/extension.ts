@@ -40,7 +40,7 @@ import {
     generateTerminalCommand,
     updateTerminalCommand,
 } from "./terminal-command";
-import { runInterview, writeInterviewYaml } from "./interview";
+import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
 import { runTrace } from "./trace";
@@ -970,6 +970,8 @@ async function runInterviewAndQuest(
     }
     const rel = path.relative(workDir, yamlPath).split(path.sep).join("/");
     stream.markdown(`📝 Wrote config: \`${rel}\`\n\n`);
+    // The author line is kept for later quests now that the config is written (the profile the CLI and web read).
+    keepAuthorLine(answers);
     // Surface which model the user's calls will route through so the
     // budget impact is visible upfront.
     stream.markdown(
