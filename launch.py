@@ -3641,6 +3641,19 @@ def _cli_prompt_for(
         if preflight.get(q.id):
             default = preflight[q.id]
 
+    # An answer the caller already holds for this question wins: the quest's current value on --update, the value
+    # the review screen shows when a row is edited. Without this a blank answer on --update took FI's own default, so
+    # every setting the person had changed (a revise budget of 5, say) went quietly back to it.
+    # A held value that is not one of a closed question's choices (a model from before the provider changed) is not
+    # offered; None (a page limit answered "none") is a value like any other.
+    # Only a question whose choices are single values is closed: a list-valued one (output bundles, reviewer panels)
+    # holds any list, a custom one included, and it must survive a blank answer.
+    scalar_choices = bool(q.choices) and all(not isinstance(c.value, (list, dict)) for c in q.choices)
+    if q.id in partial and (
+        not scalar_choices or q.allow_other or any(c.value == partial[q.id] for c in q.choices)
+    ):
+        default = partial[q.id]
+
     # Provider-model is a derived question — choices depend on the
     # already-picked provider. Build the choice list at render time.
     if q.id == "provider_model":
@@ -3681,6 +3694,10 @@ def _cli_prompt_for(
             print(f"        {c.description}")
     if q.allow_other:
         print(f"    {len(choices) + 1}. Other (type your own)")
+    if default is not None and not any(c.value == default for c in choices):
+        # A value none of the listed choices is (a custom list, a model typed in): say it is the one Enter keeps.
+        shown = ", ".join(str(v) for v in default) if isinstance(default, list) else str(default)
+        print(f"    (now: {shown}; press Enter to keep it)")
 
     while True:
         try:
