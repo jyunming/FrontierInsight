@@ -8442,6 +8442,10 @@ class Engine:
                 "[claim_check] grounding call failed (%s); the review will mark "
                 "this draft's citations unchecked", reason,
             )
+            # The receipt too: an earlier draft's must not stand for this one.
+            self._write_receipt("claim_check", "unknown", started_at=started, inputs={"paper": checked_bytes},
+                                error=reason)
+            self._stop_once_for_check("claim_check", reason, look="the [claim_check] entry in .fi/run.log")
             return {"claim_grounding": {}, "claim_check_failed": reason}
         parsed = _parse_json_lenient(text) or {}
         # A reply that parses as JSON but never names a "claims" list at all is

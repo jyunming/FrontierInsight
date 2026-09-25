@@ -315,6 +315,22 @@ def assess(
             ready_gaps.append(f"{name} recorded itself as not applicable, which this quest does not allow")
         elif check == "claim_check" and paper_hash and (receipt.get("input_hashes") or {}).get("paper") != paper_hash:
             ready_gaps.append("the claim check did not run on the final draft (its record is for an earlier one)")
+    # What the quest's own state and records say about the same checks, as well: a receipt that reads "pass" while the
+    # state says the check failed (a record left from an earlier pass) is not believed over the state.
+    gate = state.get("evidence_assessment") or {}
+    if gate.get("status") == "unknown":
+        ready_gaps.append(f"the evidence gate could not be evaluated ({gate.get('failure') or 'no usable reply'})")
+    elif gate.get("verdict") in ("insufficient", "broaden"):
+        gaps_named = "; ".join(str(g) for g in gate.get("gaps") or []) or "none named"
+        ready_gaps.append(f"the evidence gate judged the evidence {gate['verdict']} and the paper was written on it (gaps: {gaps_named})")
+    critique_history = _json(needs / "DESIGN_CRITIQUE.json")
+    critique_last = critique_history[-1] if isinstance(critique_history, list) and critique_history else None
+    if isinstance(critique_last, dict) and critique_last.get("status") == "failed":
+        ready_gaps.append(f"the design methodology audit did not complete: {critique_last.get('failure') or 'unknown reason'}")
+    claim_failed = str(state.get("claim_check_failed") or "").strip()
+    if claim_failed:
+        ready_gaps.append(f"the claim check failed on the final draft: {claim_failed}")
+    ready_gaps[:] = list(dict.fromkeys(ready_gaps))
     ready = adequate and not ready_gaps
 
     reached = [executed, reconciled, matched, validated, adequate, ready]
