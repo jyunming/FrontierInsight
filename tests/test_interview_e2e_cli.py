@@ -305,3 +305,13 @@ def test_a_blank_answer_keeps_the_value_the_caller_holds(monkeypatch: pytest.Mon
     q = next(x for x in QUESTIONS if x.id == "max_iterations")
     assert str(_cli_prompt_for(q, {"max_iterations": 5}, {})) == "5"
     assert str(_cli_prompt_for(q, {}, {})) == str(q.default), "with nothing held, the question's own default"
+
+
+def test_a_held_value_outside_a_closed_questions_choices_is_not_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.interview import QUESTIONS
+    from launch import _cli_prompt_for
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    q = next(x for x in QUESTIONS if x.id == "result_use")
+    assert _cli_prompt_for(q, {"result_use": "not-a-choice"}, {}) == q.default
+    assert _cli_prompt_for(q, {"result_use": "explore"}, {}) == "explore"

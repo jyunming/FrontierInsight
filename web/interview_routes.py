@@ -340,7 +340,11 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                     result["keys_cleared"] = keys
         # An update is how a change to the settings that decide how strictly the quest is checked gets approved
         # (core/plan_settings.py); the lines it approved are returned for the page to show.
-        result["approved_settings_changes"] = approve_settings(quest_root, Config.from_yaml(yaml_path))
+        try:
+            cfg_now = Config.from_yaml(yaml_path)
+        except Exception as e:  # noqa: BLE001 -- a config that does not load is the person's to fix, said plainly
+            raise HTTPException(400, f"the updated config does not load, so nothing was approved: {e}") from e
+        result["approved_settings_changes"] = approve_settings(quest_root, cfg_now)
         return JSONResponse(result)
 
 

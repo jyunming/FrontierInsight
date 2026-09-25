@@ -41,6 +41,12 @@ SETTINGS: tuple[tuple[str, str], ...] = (
     ("engine.enable_analyze_reroute", "redesign after the analysis"),
     ("engine.evidence_gate", "the evidence check before writing"),
     ("engine.max_iterations", "how many times the design may be revised"),
+    ("engine.execute_replicates", "how many independent runs (seeds) the experiment makes"),
+    ("engine.oracle_repair_attempts", "how many repairs a failed reference check allows"),
+    ("engine.exec_reflect_max_iterations", "how many repairs a crashed script allows"),
+    ("engine.claim_grounding", "checking the paper's claims against the sources"),
+    ("engine.review_loop", "revising the paper after its review"),
+    ("pauses.review", "stopping for you to review the result"),
     ("execution.sandbox", "where the experiment runs"),
     ("execution.shared_interpreter", "sharing FI's own Python with the experiment"),
     ("execution.system_site_packages", "letting the experiment see system packages"),
@@ -88,12 +94,42 @@ def differences(approved: dict[str, Any], now: dict[str, Any]) -> list[str]:
     return out
 
 
-def record(fi_dir: Path, cfg: Any) -> None:
-    """Record ``cfg``'s settings as the approved ones (the first start, or ``--update``)."""
+def _raw(quest_root: Path) -> dict[str, Any] | None:
+    """The quest's config.yaml as a mapping, or None when it cannot be read."""
+    try:
+        import yaml
+
+        data = yaml.safe_load((quest_root / "config.yaml").read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _set_in(raw: Any, path: str) -> bool:
+    """Whether the config file itself sets ``path`` (a dotted key)."""
+    node = raw
+    for part in path.split("."):
+        if not isinstance(node, dict) or part not in node:
+            return False
+        node = node[part]
+    return True
+
+
+def _write(fi_dir: Path, settings: dict[str, Any], explicit: list[str]) -> None:
     fi_dir.mkdir(parents=True, exist_ok=True)
     (fi_dir / NAME).write_text(
-        json.dumps({"schema": SCHEMA, "settings": settings_of(cfg)}, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+        json.dumps({"schema": SCHEMA, "settings": settings, "explicit": sorted(explicit)}, indent=2, sort_keys=True)
+        + chr(10),
+        encoding="utf-8",
     )
+
+
+def record(fi_dir: Path, cfg: Any, quest_root: Path | None = None) -> None:
+    """Record ``cfg``'s settings as the approved ones (the first start, or ``--update``), with which of them the
+    config file set itself (``explicit``): only those can be edited by hand."""
+    raw = _raw(quest_root) if quest_root is not None else None
+    explicit = [p for p, _label in SETTINGS if raw is None or _set_in(raw, p)]
+    _write(fi_dir, settings_of(cfg), explicit)
 
 
 def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
@@ -101,19 +137,34 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
 
     With nothing recorded yet: an interview-written config (``quest_root/config.yaml`` starts with the interview's
     header) is recorded now, as it was approved on the confirm screen; any other config is left unrecorded. A record
-    that cannot be read is treated as missing and written again, never as a difference."""
+    that cannot be read is treated as missing and written again, never as a difference.
+
+    A setting the config file neither set when it was approved nor sets now took FI's default, and a newer FI may
+    have changed that default: not an edit anyone made, so it is recorded as it is now instead of stopping the quest.
+    Removing a line counts as an edit (it was set, and is not now)."""
     path = fi_dir / NAME
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         approved = data["settings"] if data.get("schema") == SCHEMA else None
+        explicit = set(data.get("explicit") or [p for p, _label in SETTINGS])
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        approved = None
+        approved, explicit = None, set()
     if not isinstance(approved, dict):
         try:
             written_by_interview = (quest_root / "config.yaml").read_text(encoding="utf-8").startswith(INTERVIEW_MARK)
         except OSError:
             written_by_interview = False
         if written_by_interview:
-            record(fi_dir, cfg)
+            record(fi_dir, cfg, quest_root)
         return []
-    return differences(approved, settings_of(cfg))
+    now = settings_of(cfg)
+    changed = [p for p, _label in SETTINGS if p in approved and approved.get(p) != now.get(p)]
+    if not changed:
+        return []
+    raw = _raw(quest_root)
+    if raw is not None:
+        drifted = [p for p in changed if p not in explicit and not _set_in(raw, p)]
+        if drifted:
+            approved = {**approved, **{p: now.get(p) for p in drifted}}
+            _write(fi_dir, approved, sorted(explicit))
+    return differences(approved, now)

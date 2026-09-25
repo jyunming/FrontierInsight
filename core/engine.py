@@ -647,9 +647,22 @@ class Engine:
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
             # How strictly this quest is checked was approved on the interview's confirm screen; a hand edit since then
             # (a check turned down, a reviewer dropped, another model) stops here, before anything runs.
+            record = self.fi_dir / _plan_settings.NAME
+            had_record = record.is_file()
+            if not had_record and any(
+                e.get("kind") == "plan_settings_recorded" for e in _audit_log.read(self.audit.path)
+            ):
+                # Deleting the record must not re-approve whatever the config now says: the audit trace (hash-chained)
+                # remembers that one was written.
+                return self._stop_for_changed_settings([
+                    f"the record of the settings this quest was approved with ({record}) is gone, so a change since "
+                    "then cannot be told from none",
+                ])
             changed = _plan_settings.check(self.quest_root, self.fi_dir, self.config)
             if changed:
                 return self._stop_for_changed_settings(changed)
+            if not had_record and record.is_file():
+                self._audit("plan_settings_recorded", sha256=hashlib.sha256(record.read_bytes()).hexdigest())
             # Which interpreter is running FI decides which packages it can
             # see; a `pip install` into a different one changes nothing here.
             self._log.info(

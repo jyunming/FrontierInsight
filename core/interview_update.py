@@ -321,7 +321,7 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
         say("Approving these changes to how strictly the quest is checked:")
         for line in changed:
             say(f"  - {line}")
-    plan_settings.record(fi_dir, cfg)
+    plan_settings.record(fi_dir, cfg, quest_root)
     return changed
 
 
