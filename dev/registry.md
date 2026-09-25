@@ -52,6 +52,7 @@ same PR that adds, splits or renames one.
 - `core/profile.py` — the person's author line, asked on the first interview and kept in
   `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
   submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).
+- `core/todo.py` — the to-do card every stop writes (`NEXT_STEP.md` + `.fi/todo.json`): per-kind decision, recommendation and alternatives (`advice`), the other things waiting (`waiting`), printed by `launch.py`, read by the web `/next-step` endpoint and VS Code.
 - `core/receipts.py` — the receipt each required check (evidence gate, design audit, claim check) writes under
   `needs/receipts/`; `core/evidence.py` reads them for `publication_ready`; `engine._stop_once_for_check` is the
   research profile's one stop and retry.

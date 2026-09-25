@@ -1945,6 +1945,13 @@ async def run_one(
         human_feedback_callback=hf_callback, reopen=reopen,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
+    # The to-do card (core/todo.py): why it stopped, what to decide, the recommendation and the alternatives, or what
+    # a finished quest left worth a look. NEXT_STEP.md has the same card with the commands.
+    from core import todo as _todo
+
+    card = _todo.text(Path(art.quest_root) / ".fi")
+    if card:
+        print(card)
     # On a resume, only (re)generate outputs that are actually missing — don't
     # re-invoke the LLM for slides/poster/speech that already rendered.
     return await _finish_outputs(

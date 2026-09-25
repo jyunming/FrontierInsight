@@ -49,6 +49,7 @@ from core import audit_log as fi_audit
 from core import evidence as fi_evidence
 from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
+from core import todo as fi_todo
 from core.engine import PROGRESS_LOG_NAME, Engine, _aggregate_cost_rows
 from core.provider import ProxySupervisor
 from generation._visual_check import report_summary
@@ -1514,6 +1515,9 @@ def make_app(
             "kind": descriptor.get("kind") or "",
             "upload_targets": descriptor.get("upload_targets") or [],
             "markdown": markdown,
+            # The to-do card's items (core/todo.py): at a pause the first is the pause itself; a finished quest can
+            # still have things worth a look (a check that warned, papers that could not be fetched).
+            "items": fi_todo.read(quest_root / ".fi"),
         })
 
     async def _save_uploads(

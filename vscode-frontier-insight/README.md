@@ -272,7 +272,7 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
-Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
+Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat says the quest is waiting for you and shows that card: why it stopped, what to decide, what FI recommends, the alternatives, what to do and the `@fi /resume <id>` command, with everything else waiting listed under it. When a quest finishes, the chat lists anything still worth a look (a check that warned, papers that could not be downloaded).
 
 ### Fleet (multiple quests in parallel)
 
