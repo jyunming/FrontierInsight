@@ -5,8 +5,8 @@ that list and a run, and all three looked like a broken environment:
 
 - One name pip cannot find (a skill's name, the script's own helper file, a package that does not exist) failed the
   whole ``pip install`` line, so numpy and everything else on it was not installed either, and the run then died on
-  ``import numpy``. Names that are not packages are now left out, with the reason, and a failed batch is retried one
-  package at a time, so one bad name costs only itself.
+  ``import numpy``. A failed line is now retried one package at a time, so one bad name costs only itself; the
+  script's own files are left out, and a skill's name that pip cannot install is explained as the skill.
 - A skill's own packages (``pip_requires``, recorded when it was imported) went only into FI's interpreter, which a
   quest's own environment (the research profile's clean venv) cannot see. They are now installed into the quest's.
 - A library skill's folder was never on the experiment's ``PYTHONPATH``; its self-test (run on FI's interpreter with
@@ -37,14 +37,14 @@ def requirement_name(dep: str) -> str:
 
 
 def split_deps(
-    deps: Iterable[str], *, skills: Iterable[Any], local_modules: Iterable[str],
+    deps: Iterable[str], *, skills: Iterable[Any] = (), local_modules: Iterable[str],
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Split the requested packages into those to install and those left out, each with the reason.
 
-    Left out: a tool skill's name (it is run, not installed), a library skill's name when its own folder holds that
-    module (it is imported from the path), and a module the quest's own ``code/`` folder holds (it shadows any
-    package of that name anyway). Repeats are dropped; order is kept."""
-    by_skill = {normalize(s.name): s for s in skills}
+    Left out before pip is asked: only a module the quest's own ``code/`` folder holds (it shadows any package of that
+    name anyway). A selected skill's name is still asked of pip: many skills are named after the package they teach
+    (matplotlib, seaborn, scipy), whatever their kind, and only pip knows whether a name is a package. When pip cannot
+    install one, ``explain_failures`` says how the skill is used instead. Repeats are dropped; order is kept."""
     local = {normalize(m) for m in local_modules}
     install: list[str] = []
     dropped: list[tuple[str, str]] = []
@@ -55,17 +55,28 @@ def split_deps(
         if not dep or name in seen:
             continue
         seen.add(name)
-        skill = by_skill.get(name)
-        if skill is not None and (not _is_library(skill) or _provides_module(skill, name)):
-            # A tool skill is never a package; a library skill is left out only when its folder holds the module
-            # itself (it is imported from the path). Many library skills are named after the package they teach
-            # (scipy, xarray, astropy): that name is a real PyPI package and is installed as asked.
-            dropped.append((dep, skill_hint(skill)))
-        elif name in local:
+        if name in local:
             dropped.append((dep, f"is the quest's own file code/{name.replace('-', '_')}.py, not a package"))
         else:
             install.append(dep)
     return install, dropped
+
+
+def explain_failures(
+    failed: list[tuple[str, str]], skills: Iterable[Any],
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    """Split pip's failures into ``(skills, others)``: a name pip could not install that is a selected skill's gets
+    how that skill is used (a tool is run, a library is imported from the path), not "remove the import"."""
+    by_skill = {normalize(s.name): s for s in skills}
+    as_skill: list[tuple[str, str]] = []
+    others: list[tuple[str, str]] = []
+    for dep, why in failed:
+        skill = by_skill.get(normalize(requirement_name(dep) or dep))
+        if skill is not None:
+            as_skill.append((dep, skill_hint(skill)))
+        else:
+            others.append((dep, why))
+    return as_skill, others
 
 
 def _kind(skill: Any) -> str:
@@ -74,15 +85,6 @@ def _kind(skill: Any) -> str:
 
 def _is_library(skill: Any) -> bool:
     return _kind(skill) == "library"
-
-
-def _provides_module(skill: Any, name: str) -> bool:
-    """Whether a library skill's folder (or its ``scripts/``) holds a module or package importable as ``name``."""
-    module = normalize(name).replace("-", "_")
-    for base in (Path(skill.path), Path(skill.path) / "scripts"):
-        if (base / f"{module}.py").is_file() or (base / module / "__init__.py").is_file():
-            return True
-    return False
 
 
 def skill_hint(skill: Any) -> str:

@@ -28,20 +28,26 @@ def _skill(tmp_path: Path, name: str, kind: str, pip_requires: list[str] | None 
     )
 
 
-def test_a_tool_skill_a_path_imported_library_or_a_local_file_is_never_asked_of_pip(tmp_path: Path) -> None:
+def test_only_the_quests_own_files_are_kept_from_pip(tmp_path: Path) -> None:
+    """Skill names still go to pip: many are named after the package they teach (matplotlib, scipy), whatever kind."""
+    install, dropped = deps_mod.split_deps(
+        ["numpy>=1.26", "lieflat_charts", "matplotlib", "helpers", "numpy"], local_modules=["experiment", "helpers"],
+    )
+    assert install == ["numpy>=1.26", "lieflat_charts", "matplotlib"]
+    assert dict(dropped) == {"helpers": "is the quest's own file code/helpers.py, not a package"}
+
+
+def test_a_skill_name_pip_cannot_install_is_explained_as_the_skill(tmp_path: Path) -> None:
     tool = _skill(tmp_path, "lieflat-charts", "tool")
     lib = _skill(tmp_path, "sir-kernels", "library")
-    (lib.path / "sir_kernels.py").write_text("x = 1", encoding="utf-8")   # imported from the skill's folder
-    named_after_package = _skill(tmp_path, "scipy", "library")             # a skill that teaches a PyPI package
-    install, dropped = deps_mod.split_deps(
-        ["numpy>=1.26", "lieflat_charts", "Sir.Kernels", "helpers", "numpy", "scipy>=1.11", "matplotlib"],
-        skills=[tool, lib, named_after_package], local_modules=["experiment", "helpers"],
+    as_skill, others = deps_mod.explain_failures(
+        [("lieflat_charts", "no such package on PyPI"), ("Sir.Kernels", "no such package on PyPI"),
+         ("nopkg", "no such package on PyPI")], [tool, lib],
     )
-    assert install == ["numpy>=1.26", "scipy>=1.11", "matplotlib"], "scipy is a real package, not the skill's module"
-    reasons = dict(dropped)
+    reasons = dict(as_skill)
     assert "a tool, not a Python package" in reasons["lieflat_charts"]
     assert "puts on the experiment's path" in reasons["Sir.Kernels"]
-    assert "code/helpers.py" in reasons["helpers"]
+    assert others == [("nopkg", "no such package on PyPI")]
 
 
 def test_the_note_names_a_selected_skill_that_cannot_be_used() -> None:
@@ -115,9 +121,9 @@ async def test_selected_skills_packages_are_installed_and_libraries_are_on_the_p
         return happy
 
     eng.executor.execute = execute  # type: ignore[method-assign]
-    await eng._node_execute({"deps": ["numpy", "lieflat_charts"]})
+    await eng._node_execute({"deps": ["numpy"]})
 
-    assert installed == [["numpy", "scipy"]]      # the tool's name left out, the library's own package added
+    assert installed == [["numpy", "scipy"]]      # the library's own package added
     run_env = envs[-1]
     assert str(lib.path) in run_env.get("PYTHONPATH", "").split(__import__("os").pathsep)
     assert str(tool.path) not in run_env.get("PYTHONPATH", "")

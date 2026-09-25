@@ -6009,7 +6009,7 @@ class Engine:
         # selected skills' own packages, and the library skills' folders on the path. What cannot be installed is
         # written as a note the repair steps read before the run's own error.
         install_list, dropped = _experiment_deps.split_deps(
-            deps, skills=skills, local_modules=[p.stem for p in (self.quest_root / "code").glob("*.py")],
+            deps, local_modules=[p.stem for p in (self.quest_root / "code").glob("*.py")],
         )
         for dep, why in dropped:
             self._log.info("[execute] not asking pip for %r: it %s", dep, why)
@@ -6018,20 +6018,18 @@ class Engine:
             # interpreter they are already there from the skill's approval, and a quest does not change it.
             install_list = list(dict.fromkeys([*install_list, *_experiment_deps.skill_requirements(skills)]))
         failed_installs = await self._install_packages(install_list)
-        # A library skill whose name is not its module's (so it was left on the list) fails on PyPI; the repair is told
-        # how the skill is used, not to drop an import that works from the path.
-        by_skill = {_experiment_deps.normalize(s.name): s for s in skills}
-
-        def _skill_of(dep: str) -> Any:
-            return by_skill.get(_experiment_deps.normalize(_experiment_deps.requirement_name(dep) or dep))
-
-        dropped = [*dropped, *[(dep, _experiment_deps.skill_hint(_skill_of(dep))) for dep, _ in failed_installs
-                               if _skill_of(dep) is not None]]
-        failed_installs = [(dep, why) for dep, why in failed_installs if _skill_of(dep) is None]
+        # A skill's name that pip could not install (a tool skill, a library skill not published as a package): the
+        # repair is told how the skill is used, not to drop an import that may work from the path.
+        skill_failures, failed_installs = _experiment_deps.explain_failures(failed_installs, skills)
+        dropped = [*dropped, *skill_failures]
+        for dep, why in skill_failures:
+            self._log.info("[execute] %r could not be installed: it %s", dep, why)
         self._packages_note = _experiment_deps.repair_note(
             dropped, failed_installs, getattr(self, "_unusable_skills", []),
         )
-        deps = install_list
+        # The warmup below imports what was installed; a name pip could not install would only fail it again.
+        not_installed = {dep for dep, _ in (*skill_failures, *failed_installs)}
+        deps = [d for d in install_list if d not in not_installed]
 
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
