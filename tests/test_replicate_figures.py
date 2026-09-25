@@ -218,6 +218,43 @@ def test_each_line_is_drawn_at_its_mean_within_its_interval() -> None:
     assert line["lower"][2] == pytest.approx(0.7) and line["upper"][2] == pytest.approx(0.7)
 
 
+def test_a_redrawn_band_is_never_called_the_interval_the_experiment_named() -> None:
+    """A real redraw kept the seed-0 legend "Gillespie (Wilson 95% CI)" on bands that were FI's interval over 3 seed
+    means, and the caption repeated "Wilson"."""
+    runs = [_run([0.1, 0.4, 0.7], label="Gillespie (Wilson 95% CI)", ylabel="P(major) +/- 1 SD") for _ in range(2)]
+    runs.append(_run([0.2, 0.5, 0.7], label="Gillespie (Wilson 95% CI)", ylabel="P(major) +/- 1 SD"))
+    plan = _replicate_line_figure("p.png", runs, [])
+    assert plan is not None
+    (panel,) = plan["axes"]
+    assert panel["lines"][0]["label"] == "Gillespie (95% CI over 3 seeds)"
+    assert panel["ylabel"] == "P(major), 95% CI over 3 seeds"
+    from core.engine import _redrawn_band_text
+    assert _redrawn_band_text("a binomial model", 3) == "a binomial model"  # a method named, no interval given
+    assert _redrawn_band_text("Wilson score interval (95%)", 3) == "95% CI over 3 seeds"
+
+
+def test_a_figure_of_several_panels_gets_one_legend_under_it_not_one_beside_each(tmp_path: Path, monkeypatch) -> None:
+    """Three panels, four entries each: a legend moved to the right of each panel left the panels as slivers."""
+    pytest.importorskip("matplotlib")
+    from core import replot_figures
+    kept = []
+    monkeypatch.setattr(replot_figures.plt, "close", lambda fig=None: kept.append(fig))
+    line = {"kind": "data", "x": [100.0, 1000.0, 5000.0], "lower": [0.1, 0.1, 0.1], "upper": [0.3, 0.3, 0.3]}
+    panels = [{
+        "grid": [1, 3, 0, 1, k, k + 1], "title": f"R0 = {r}", "xlabel": "N", "ylabel": "P(major)", "xscale": "log",
+        "yscale": "linear", "legend": True,
+        "lines": [{**line, "label": name, "mean": [0.2, 0.2 + 0.01 * i, 0.2]} for i, name in enumerate(
+            ["Gillespie", "cutoff 5%", "cutoff 20%", f"1 - 1/R0 = {r}"])],
+    } for k, r in enumerate((0.9, 1.5, 3.0))]
+    (tmp_path / "figures").mkdir()
+    replot_figures.draw({"file": "p.png", "size": [10.0, 3.2], "axes": panels}, tmp_path / "figures")
+    (fig,) = [f for f in kept if f is not None]
+    assert all(ax.get_legend() is None for ax in fig.axes) and len(fig.legends) == 1
+    assert len(fig.legends[0].get_texts()) == 6  # the three shared entries once, and each panel's own line
+    assert min(ax.get_position().width for ax in fig.axes) > 0.2  # each panel keeps a real share of the width
+    assert (tmp_path / "figures" / "p.png").is_file()
+
+
 def test_an_interval_of_a_quantity_that_is_not_a_probability_is_not_cut_at_zero() -> None:
     runs = [_run([0.10, 1, 2], ylabel="Cases"), _run([0.20, 1, 2], ylabel="Cases"), _run([0.30, 1, 3], ylabel="Cases")]
     plan = _replicate_line_figure("p.png", runs, [])
@@ -247,7 +284,7 @@ def test_the_writer_is_told_a_figure_is_the_mean_of_the_seeds() -> None:
     listing = _figure_list_for_prompt({"figures": ["p.png"], "figure_records": {"p.png": record}})  # type: ignore[typeddict-item]
     first, note = listing.splitlines()
     assert first.endswith("— each line is the mean of 3 seeds, shaded with its 95% confidence interval")
-    assert note.endswith("and its caption says so.")
+    assert "and its caption says so" in note and "not a Wilson, bootstrap or other interval" in note
 
 
 def _seed_0_state(replicates: int | None) -> dict[str, Any]:

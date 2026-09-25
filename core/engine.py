@@ -14167,6 +14167,42 @@ def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
     }
 
 
+# An interval the experiment's own figure named ("Gillespie (Wilson 95% CI)", "mean +/- 1 SD"). A redrawn band is FI's
+# 95% interval over the seed means, whatever the seed-0 figure's legend said it was: a real quest's redraw kept "Wilson
+# 95% CI" on bands that were the interval over 3 seed means, and the caption repeated it. A method name alone ("a
+# binomial model") is left as it is: only one given as an interval (a percent or a CI word beside it) is rewritten.
+_INTERVAL_METHOD_RE = re.compile(
+    r"(?P<pre>\b\d{2}(?:\.\d+)?\s*%\s*)?"
+    r"\b(?:Wilson(?:\s+score)?|Clopper[\s\-\u2013]*Pearson|Agresti[\s\-\u2013]*Coull|Jeffreys|bootstrap(?:ped)?"
+    r"|binomial|exact|normal[\s\-\u2013]*approximation|Poisson)\b"
+    r"(?P<post>\s*\d{2}(?:\.\d+)?\s*%)?"
+    r"(?P<what>\s*(?:CIs?\b|C\.I\.|confidence\s+intervals?|intervals?|bands?|error\s+bars?))?"
+    r"(?P<paren>\s*\(\s*\d{2}(?:\.\d+)?\s*%\s*\))?",
+    re.IGNORECASE,
+)
+_SPREAD_RE = re.compile(
+    r"\s*(?:\u00b1|\+/-|\+-)\s*(?:1\s*)?(?:SD|s\.d\.|std(?:\.|\s+dev(?:iation)?)?|SE|SEM|s\.e\.(?:m\.)?"
+    r"|standard\s+(?:deviation|error))\b",
+    re.IGNORECASE,
+)
+
+
+def _redrawn_band_text(text: Any, n: int) -> Any:
+    """``text`` (a legend label, a title, an axis label) with any interval the experiment named replaced by what a
+    redrawn band is: the 95% CI over ``n`` seeds."""
+    if not isinstance(text, str) or not text:
+        return text
+    ours = f"95% CI over {n} seeds"
+
+    def method(m: re.Match[str]) -> str:
+        if not (m.group("pre") or m.group("post") or m.group("what")):
+            return m.group(0)
+        return ours
+
+    out = _INTERVAL_METHOD_RE.sub(method, text)
+    return _SPREAD_RE.sub(f", {ours}", out)
+
+
 # The line style a redraw keeps (core/replot_figures.py draws with the same keys).
 _REPLOT_STYLE_KEYS = (
     "color", "linestyle", "marker", "markersize", "markerfacecolor",
@@ -14223,17 +14259,18 @@ def _replicate_line_figure(
                 upper.append(m if ci["ci_upper"] is None else ci["ci_upper"])
             lines.append({
                 **{key: line.get(key) for key in _REPLOT_STYLE_KEYS},
-                "label": line.get("label"), "kind": line.get("kind"),
+                "label": _redrawn_band_text(line.get("label"), len(runs)), "kind": line.get("kind"),
                 "x": x, "mean": mean, "lower": lower, "upper": upper,
             })
         panels.append({
-            **{key: panel.get(key) for key in ("grid", "title", "xlabel", "ylabel", "xscale", "yscale", "legend")},
+            **{key: panel.get(key) for key in ("grid", "xlabel", "xscale", "yscale", "legend")},
+            **{key: _redrawn_band_text(panel.get(key), len(runs)) for key in ("title", "ylabel")},
             "lines": lines,
         })
     if not varies:
         return None
     return {
-        "file": name, "size": runs[0].get("size"), "suptitle": runs[0].get("suptitle") or "",
+        "file": name, "size": runs[0].get("size"), "suptitle": _redrawn_band_text(runs[0].get("suptitle") or "", len(runs)),
         "n": len(runs), "axes": panels,
     }
 
@@ -15183,7 +15220,9 @@ def _figure_list_for_prompt(state: QuestState) -> str:
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
-            "shaded with its 95% confidence interval, and its caption says so."
+            "shaded with its 95% confidence interval, and its caption says so. FI drew that band: it is the "
+            "interval over the seed means, not a Wilson, bootstrap or other interval the experiment's own "
+            "figure may have named, so the caption does not call it one."
         )
     if any((records.get(f) or {}).get("single_seed") is not None for f in figs):
         lines.append(

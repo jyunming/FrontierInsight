@@ -98,6 +98,23 @@ def place_legend(ax) -> bool:
     return True
 
 
+def figure_legend(fig, axes) -> None:
+    """One legend for ``fig``, under its panels, in place of ``axes``' own: every label once, in the order the panels
+    draw them."""
+    entries: dict[str, object] = {}
+    for ax in axes:
+        legend = ax.get_legend()
+        if legend is not None:
+            legend.remove()
+        for handle, label in zip(*ax.get_legend_handles_labels()):
+            entries.setdefault(label, handle)
+    fig.tight_layout()
+    fig.legend(
+        list(entries.values()), list(entries), loc="upper center", bbox_to_anchor=(0.5, 0.0),
+        ncol=min(len(entries), 4), fontsize="small", frameon=False,
+    )
+
+
 def draw(figure: dict, out_dir: Path) -> None:
     fig = plt.figure(figsize=figure["size"]) if figure.get("size") else plt.figure()
     grids: dict[tuple[int, int], object] = {}
@@ -134,7 +151,12 @@ def draw(figure: dict, out_dir: Path) -> None:
         fig.tight_layout()
     # After the layout: where a legend lands depends on the size of its panel.
     moved = [place_legend(ax) for ax in legends]
-    if any(moved):
+    if any(moved) and len(figure["axes"]) > 1:
+        # A legend to the right of each of several panels squeezed the panels beside it to slivers (a real
+        # three-panel redraw, four entries each): one legend for the figure goes under it instead.
+        figure_legend(fig, legends)
+        fig.savefig(out_dir / figure["file"], bbox_inches="tight")
+    elif any(moved):
         if len(figure["axes"]) > 1:
             fig.tight_layout()
         # A legend outside the axes is outside the canvas too, unless the saved image grows to hold it.
