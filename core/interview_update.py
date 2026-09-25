@@ -237,6 +237,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
         pause_for_plan=(pauses.get("plan") == "ask"),
         rigor_profile=("research" if str(raw.get("rigor_profile") or "").strip().lower() == "research" else "default"),
+        result_use=_result_use_of(raw, engine),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
         ensemble_profile=ensemble_profile,
         ensemble_models=ensemble_models,
@@ -253,6 +254,18 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         page_limit=parse_page_limit_answer(output.get("page_limit"), on_error=lambda _message: None),
     )
     return answers, yaml_path, raw
+
+
+def _result_use_of(raw: dict[str, Any], engine: dict[str, Any]) -> str:
+    """Read the "What is the result for?" answer back from a config: the research profile is "research", the
+    draft's engine settings are "explore", and anything else (a config from before the question) is left unset,
+    so re-emitting it writes exactly what it had."""
+    if str(raw.get("rigor_profile") or "").strip().lower() == "research":
+        return "research"
+    from core.interview import DRAFT_ENGINE_SETTINGS
+    if all(str(engine.get(k)).strip().lower() == v for k, v in DRAFT_ENGINE_SETTINGS):
+        return "explore"
+    return ""
 
 
 def diff_answers(old: InterviewAnswers, new: InterviewAnswers) -> dict[str, tuple[Any, Any]]:
@@ -605,6 +618,7 @@ async def run_update_flow(
         supply_papers=bool(new_partial.get("supply_papers", current.supply_papers)),
         pause_for_plan=bool(new_partial.get("pause_for_plan", current.pause_for_plan)),
         rigor_profile=str(new_partial.get("rigor_profile", current.rigor_profile) or "default"),
+        result_use=current.result_use,  # fixed for the quest, like the rigor profile it sets
         ensemble_profile=str(new_partial.get(
             "ensemble_profile", current.ensemble_profile,
         )),

@@ -69,6 +69,6 @@ Want to see what happened, in order? `python launch.py --trace <quest id>` ([tra
 python launch.py --new
 ```
 
-asks a few questions (topic, kind of paper, how deep, which model) and writes the config. The same questions are in the web form (`python launch.py --serve`, then http://127.0.0.1:8765) and in VSCode (`@fi /new`). To read and change the plan before anything runs, answer *Stop to read and edit the plan* (advanced): the quest stops after `plan.md` is written, and `python launch.py --resume <quest id>` runs it.
+asks a few questions (topic, what the result is for, kind of paper, how deep, which model) and writes the config. The default answer to *what the result is for* is research: every check can stop the quest, and it stops once `plan.md` is written so you can read the plan before anything runs (`python launch.py --resume <quest id>` goes on). Answer *exploring* for a quicker, cheaper draft that does not stop. The same questions are in the web form (`python launch.py --serve`, then http://127.0.0.1:8765) and in VSCode (`@fi /new`). To read and change the plan before anything runs, answer *Stop to read and edit the plan* (advanced): the quest stops after `plan.md` is written, and `python launch.py --resume <quest id>` runs it.
 
 Next: the [glossary](glossary.md) for the words, [rigor.md](rigor.md) for how FI checks its own experiments, [USAGE.md](USAGE.md) for every setting.

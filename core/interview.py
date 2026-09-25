@@ -39,7 +39,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
-from core.config import REQUIRED_REVIEW_ROLES
+from core.config import _RESEARCH_PROFILE, REQUIRED_REVIEW_ROLES
+
+# The panel the research profile runs when none is written (core/config.py's profile, one source of truth).
+RESEARCH_REVIEW_PANEL: tuple[str, ...] = tuple(_RESEARCH_PROFILE["engine"]["review_panel"])
 
 
 # ---------------------------------------------------------------------------
@@ -285,12 +288,45 @@ PAUSE_FOR_PLAN_CHOICES: tuple[Choice, ...] = (
 )
 
 
-RIGOR_PROFILE_CHOICES: tuple[Choice, ...] = (
-    Choice("default", "Default",
-           "The checks run and the evidence level says what was and was not shown, but a check can be turned down and the plan does not wait for you. Fine for a quick look or a survey."),
-    Choice("research", "Research (recommended for a simulation study)",
-           "Turns on together what a study needs before its result can be trusted: the plan is held for you to read before the protocol is frozen, the simulation and its analysis stay in two scripts, the protocol / oracle / numeric-warning / run-manifest checks stop the quest and cannot be turned off, and the cross-check verification and a review panel are on. Slower, and it stops for you more often. Written as rigor_profile: research."),
+RESULT_USE_CHOICES: tuple[Choice, ...] = (
+    Choice("research", "Research (default)",
+           "Checked the way a study must be before its result can be trusted: the plan waits for you to read it, "
+           "every check stops the quest instead of only reporting, the experiment runs in its own clean environment, "
+           "and four reviewers (method, statistics, reproducibility, devil's advocate) read the paper. Slower, and it "
+           "stops for you more often."),
+    Choice("decision", "A decision",
+           "The same checks as Research: a result someone will act on needs every one of them."),
+    Choice("explore", "Exploring (cheaper draft)",
+           "A quick look: fewer model calls (no self-critique of the ideas, no per-finding cross-check, no redesign "
+           "after the analysis), and the result is a preliminary draft, never ready to publish as it stands."),
 )
+
+# What each "result use" answer turns into. ``explore`` keeps rigor_profile at its default and writes the three
+# cost-saving engine settings below; ``research`` and ``decision`` are the research profile. The same on every
+# interface: the setting follows the person's answer, never the interface they answered in.
+DRAFT_ENGINE_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("ideate_reflect", "false"),
+    ("cross_check_per_finding_k", "0"),
+    ("enable_analyze_reroute", "false"),
+)
+
+
+def rigor_profile_for(result_use: str) -> str:
+    """The ``rigor_profile`` a "result use" answer sets: ``default`` for exploring, ``research`` otherwise."""
+    return "default" if result_use == "explore" else "research"
+
+
+def resolve_review_panel(panel: list[str], result_use: str) -> list[str]:
+    """The reviewer panel as it will run: under the research profile every role it requires is added (a panel
+    without them is refused at start). Called before anything is shown, so the confirm screen lists the panel
+    that runs, not the one picked before the requirement was applied."""
+    panel = list(panel)
+    if rigor_profile_for(result_use) != "research":
+        return panel
+    if not panel:
+        # A single reviewer is not available under the research profile, which runs its own four-person panel.
+        return list(RESEARCH_REVIEW_PANEL)
+    return [*panel, *[r for r in REQUIRED_REVIEW_ROLES if r not in panel]]
 
 
 ENSEMBLE_PROFILES: tuple[Choice, ...] = (
@@ -448,6 +484,17 @@ QUESTIONS: tuple[Question, ...] = (
         prompt="What do you want to study? Be specific about the question, what's known, and what success looks like.",
         kind="text",
         placeholder="e.g. Compare three numerical integrators on a damped harmonic oscillator and report energy drift.",
+        mid_quest_editable=False,
+        tier=1,
+    ),
+    Question(
+        id="result_use",
+        label="What is the result for?",
+        prompt="Research or a decision gets every check the result needs before it can be trusted; exploring is a cheaper, preliminary draft.",
+        kind="single",
+        choices=RESULT_USE_CHOICES,
+        default="research",
+        # Fixed for the quest: it sets how strictly the experiment is checked, which a quest cannot change midway.
         mid_quest_editable=False,
         tier=1,
     ),
@@ -656,15 +703,6 @@ QUESTIONS: tuple[Question, ...] = (
         choices=PAUSE_FOR_PLAN_CHOICES,
         default=False,
         mid_quest_editable=True,
-        tier=3,
-    ),
-    Question(
-        id="rigor_profile",
-        label="Rigor profile",
-        prompt="How strictly the experiment is checked. 'research' (recommended for a simulation study) makes the plan wait for you, keeps the simulation and its analysis in two scripts, makes every check stop the quest instead of only reporting, and turns on the cross-check verification and a review panel. 'default' changes nothing. The finished quest ends with an evidence level either way.",
-        kind="single",
-        choices=RIGOR_PROFILE_CHOICES,
-        default="default",
         tier=3,
     ),
     Question(
@@ -999,7 +1037,7 @@ def smart_default_clarify_mode(_partial: dict[str, Any]) -> str:
     return "auto"
 
 
-def smart_default_review_panel(_partial: dict[str, Any]) -> list[str]:
+def smart_default_review_panel(partial: dict[str, Any]) -> list[str]:
     """Three-persona heterogeneous panel by default. Three personas
     cost ~3× per review pass relative to single-reviewer, but each
     persona enforces a distinct rubric — methodologist owns the
@@ -1009,8 +1047,11 @@ def smart_default_review_panel(_partial: dict[str, Any]) -> list[str]:
     Without the methodologist firing, the must-flag mechanism added
     in the always-on-review-gate change has no enforcement surface.
     Cost-conscious users flip back to single-reviewer with an empty
-    list (and lose the must-flag enforcement)."""
-    return ["methodologist", "statistician", "devil_advocate"]
+    list (and lose the must-flag enforcement). Research and decision
+    add the reproducibility reviewer the research profile requires."""
+    return resolve_review_panel(
+        ["methodologist", "statistician", "devil_advocate"], str(partial.get("result_use") or "research"),
+    )
 
 
 def smart_default_audience(_partial: dict[str, Any]) -> str:
@@ -1373,8 +1414,11 @@ class InterviewAnswers:
     # Stop once plan.md is written, to read and edit it → ``pauses.plan``.
     pause_for_plan: bool = False
     # ``rigor_profile`` at the top of the config: "default" (writes nothing) or "research". Must stay in sync with
-    # vscode-frontier-insight/src/interview-core.ts.
+    # vscode-frontier-insight/src/interview-core.ts. When ``result_use`` is set it decides this (see
+    # ``rigor_profile_for``); left blank (a caller from before the question existed) this field is used as given.
     rigor_profile: str = "default"
+    # The "What is the result for?" answer: "research" | "decision" | "explore", or "" when not asked.
+    result_use: str = ""
     # Multi-model ensemble preset. Expanded by ``answers_to_yaml`` into
     # the ``provider.node_ensemble`` block when non-"off". See
     # ``ENSEMBLE_PROFILES`` for the four options and their cost
@@ -1544,18 +1588,16 @@ _SUPPLY_TO_PAUSE = {
 def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     """Render the interview answers as a complete config.yaml string.
 
-    ``frontend`` ("cli" / "vscode" / "serve") controls the leading
-    comment header and a handful of cost-discipline defaults that
-    differ between surfaces:
-
-    * ``"vscode"`` writes the original cost-discipline trio
-      (``ideate_reflect: false`` etc.) for parity with the existing
-      VSCode interview output.
-    * ``"cli"`` and ``"serve"`` keep the engine defaults — the CLI
-      user gets the full research-quality loop unless they edit YAML.
+    ``frontend`` ("cli" / "vscode" / "serve") controls only the leading
+    comment header. What is checked, and how strictly, follows the
+    answers alone: the same answers write the same settings from every
+    interface. (The VS Code interview once wrote three cost-saving
+    engine settings on its own; they now follow ``result_use:
+    explore``, on every interface.)
     """
     indent = "  "
     lines: list[str] = []
+    rigor_profile = rigor_profile_for(answers.result_use) if answers.result_use else answers.rigor_profile
 
     if frontend == "vscode":
         lines.append("# Auto-generated by the Frontier Insight VSCode extension.")
@@ -1574,7 +1616,7 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
 
     lines.append(f"title: {json.dumps(answers.title)}")
     lines.append("")
-    if answers.rigor_profile == "research":
+    if rigor_profile == "research":
         lines.append('rigor_profile: "research"')
         lines.append("")
 
@@ -1643,30 +1685,26 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     if survey_mode:
         lines.append(f"{indent}survey_mode: true")
 
-    # Cost-discipline trio — preserved for VSCode parity. CLI and
-    # serve users get the engine defaults.
-    if frontend == "vscode":
-        lines.append(f"{indent}ideate_reflect: false")
-        lines.append(f"{indent}cross_check_per_finding_k: 0")
-        lines.append(f"{indent}enable_analyze_reroute: false")
+    # A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface.
+    if answers.result_use == "explore":
+        for key, value in DRAFT_ENGINE_SETTINGS:
+            lines.append(f"{indent}{key}: {value}")
 
-    if answers.review_panel:
-        panel = list(answers.review_panel)
-        if answers.rigor_profile == "research" and panel == list(REVIEW_PANELS[0].value):
-            # The interview offers exactly three panels (``REVIEW_PANELS``); this is the smart default
-            # (3 personas), which predates the research profile's requirement (methodologist, statistician,
-            # reproducibility) and would otherwise be written out as a panel that contradicts the profile it
-            # sits beside. Complete it here, silently, since nobody chose to leave reproducibility off — the
-            # smart default did, before the profile existed. This narrow match is deliberate: a genuinely
-            # custom panel (round-tripped from ``--update`` on an existing quest, say) is written as given,
-            # and if it still lacks a required role, Config refuses it with the role named, the same as any
-            # other hand-edited config — completing an explicit, non-default choice without saying so would
-            # take away a decision the person actually made.
+    panel = list(answers.review_panel)
+    if answers.result_use:
+        # Every interface completes the panel before its confirm screen (``resolve_review_panel``), so this changes
+        # nothing that was shown; it is here so no caller can write a panel other than the one that runs.
+        panel = resolve_review_panel(panel, answers.result_use)
+    if panel:
+        if not answers.result_use and rigor_profile == "research" and panel == list(REVIEW_PANELS[0].value):
+            # A caller that does not set result_use (from before the question existed): the old narrow completion
+            # of the three-person smart default, which predates the research profile's requirement. A genuinely
+            # custom panel is written as given, and Config refuses it with the missing role named.
             panel = [*panel, *[r for r in REQUIRED_REVIEW_ROLES if r not in panel]]
         lines.append(f"{indent}review_panel:")
         for persona in panel:
             lines.append(f"{indent}{indent}- {json.dumps(persona)}")
-    elif answers.rigor_profile != "research":
+    elif rigor_profile != "research":
         # An empty panel written beside the research profile would contradict it (the profile brings its own panel).
         lines.append(f"{indent}review_panel: []")
 
@@ -1795,6 +1833,10 @@ def export_schema_json() -> dict[str, Any]:
             name: [_choice(c) for c in opts]
             for name, opts in PROVIDER_MODEL_OPTIONS.items()
         },
+        # What the research profile needs on a review panel and runs when none is given: the web review screen
+        # completes the panel from these (``resolve_review_panel``) so it shows the panel that runs.
+        "required_review_roles": list(REQUIRED_REVIEW_ROLES),
+        "research_review_panel": list(RESEARCH_REVIEW_PANEL),
         "editable_fields": sorted(EDITABLE_FIELDS),
         "stage_invalidation": {
             field: list(stages) for field, stages in STAGE_INVALIDATION.items()

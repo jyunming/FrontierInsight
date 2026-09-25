@@ -183,8 +183,10 @@ title: integrator-bakeoff
 # to read (pauses.plan: ask), the simulation and its analysis stay in two scripts and a reply without both stops the quest
 # (execution.split_analysis: true, split_failure: block), the protocol / oracle / numeric-warning / run-manifest checks
 # stop the quest and cannot be turned off, and the cross-check verification and a review panel are on. A config that sets
-# one of those to the opposite is refused with the key named. Default: default (nothing changes). The interview asks for it
-# (advanced question "Rigor profile", research recommended for a simulation study). See docs/rigor.md.
+# one of those to the opposite is refused with the key named. Default: default (nothing changes). The interview sets it
+# from "What is the result for?": research (the default answer) or a decision writes research; exploring leaves it at
+# default and writes the draft's three cheaper engine settings (ideate_reflect: false, cross_check_per_finding_k: 0,
+# enable_analyze_reroute: false), the same on every interface. See docs/rigor.md.
 rigor_profile: default
 
 provider:

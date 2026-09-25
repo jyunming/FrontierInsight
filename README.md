@@ -41,7 +41,7 @@ That runs the bundled example (three numerical integrators on a damped oscillato
 
 If a key is missing FI says which variable before it starts anything. If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
-**Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions and writes the config for you. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
+**Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks a few questions (the first after the topic: what the result is for) and writes the config for you. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 
 ---
 

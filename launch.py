@@ -3310,7 +3310,7 @@ async def _run_new(
     from core.interview import (
         QUESTIONS, InterviewAnswers, answers_to_yaml,
         derive_tier2, derive_tier3, parse_fixed_temperature_answer, parse_page_limit_answer,
-        preflight_clarify, questions_for_tier, slugify,
+        preflight_clarify, questions_for_tier, resolve_review_panel, slugify,
     )
 
     # Choice labels include em-dashes / arrows / Unicode math. Windows
@@ -3394,6 +3394,7 @@ async def _run_new(
     try:
         while True:
             rows = _build_review_rows(derived, advanced, tier2_qs, tier3_qs, show_advanced)
+            _print_plan_summary(partial)
             _print_review(rows, show_advanced=show_advanced)
             choice = input(
                 "\nEdit which? [number to edit, "
@@ -3435,6 +3436,12 @@ async def _run_new(
                 except ValueError as e:
                     print(f"    ({e}; the fixed temperature is unchanged)")
                     continue
+            if row["id"] == "review_panel":
+                # Shown as it will run: the research profile's required reviewers are added now, not after launch.
+                resolved = resolve_review_panel(list(new_val), str(partial.get("result_use") or "research"))  # type: ignore[arg-type]
+                if resolved != list(new_val):  # type: ignore[arg-type]
+                    print(f"    (research needs {', '.join(r for r in resolved if r not in new_val)} on the panel; added)")  # type: ignore[operator]
+                new_val = resolved
             if row["tier"] == 2:
                 derived[row["id"]] = new_val
             else:
@@ -3473,7 +3480,7 @@ async def _run_new(
         web_research=bool(derived.get("web_research", True)),
         supply_papers=bool(advanced.get("supply_papers", True)),
         pause_for_plan=bool(advanced.get("pause_for_plan", False)),
-        rigor_profile=str(advanced.get("rigor_profile") or "default"),
+        result_use=str(partial.get("result_use") or "research"),
         # ensemble_profile is a tier-1 question, so the pick is in
         # ``partial``; ``advanced`` only holds tier-3 slots.
         ensemble_profile=str(
@@ -3531,6 +3538,28 @@ async def _run_new(
     except Exception as e:
         print(f"[FI] quest failed: {e!r}", file=sys.stderr)
         return 1
+
+
+def _print_plan_summary(partial: dict[str, object]) -> None:
+    """The answers that set what the quest costs and how strictly it is checked, above the editable rows, so the
+    confirm screen shows them before launch (they were asked first and never shown again)."""
+    from core.interview import RESULT_USE_CHOICES
+
+    use = str(partial.get("result_use") or "research")
+    label = next((c.label for c in RESULT_USE_CHOICES if c.value == use), use)
+    print()
+    print("─── The plan ──────────────────────────────────────────")
+    print(f"  Result for   : {label}")
+    if use == "explore":
+        print("  Checks       : a preliminary draft, never ready to publish as it stands; skips the idea self-critique,")
+        print("                 the per-finding cross-check and the redesign after the analysis")
+    else:
+        print("  Checks       : every check stops the quest; the plan waits for you; clean environment per quest")
+    model = partial.get("provider_model") or "(provider default)"
+    print(f"  Model        : {partial.get('provider') or 'openai'} / {model}")
+    ensemble = str(partial.get("ensemble_profile") or "off")
+    if ensemble != "off":
+        print(f"  Ensemble     : {ensemble} ({partial.get('ensemble_models') or 'no models named'})")
 
 
 def _build_review_rows(

@@ -132,6 +132,7 @@ async def test_run_new_writes_the_tier1_ensemble_pick_and_author_line(
     # from the review screen.
     answers = iter([
         "Author line probe topic",   # topic
+        "",                          # result_use (default research)
         "",                          # paper_format (default generic)
         "",                          # output_kinds (default)
         "",                          # study_depth (default)
@@ -181,7 +182,7 @@ async def test_run_new_configures_no_ensemble_when_the_user_names_no_models(
 
     monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
     answers = iter([
-        "Ensemble without models probe", "", "", "", "1", "1",
+        "Ensemble without models probe", "", "", "", "", "1", "1",  # topic, result_use, format, kinds, depth, provider, model
         "4",                         # ensemble_profile: full
         "",                          # ensemble_models: none named
     ])
@@ -221,6 +222,7 @@ async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
     row = str(rows.index("page_limit") + 1)
     answers = iter([
         "Page limit probe topic",    # topic
+        "",                          # result_use (default research)
         "", "", "",                  # paper_format, output_kinds, study_depth
         "1", "1",                    # provider, provider_model
         "", "", "", "", "",          # ensemble_profile, author line
@@ -248,14 +250,14 @@ async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
 
 
 @pytest.mark.asyncio
-async def test_run_new_writes_the_research_profile_the_user_picks_on_the_review_screen(
+@pytest.mark.parametrize("pick, profile, draft", [("", "research", False), ("2", "research", False), ("3", "default", True)])
+async def test_run_new_writes_what_the_result_is_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    pick: str, profile: str, draft: bool,
 ) -> None:
-    """The rigor profile is an advanced answer: 'a' shows it, its row number
-    picks it, and the draft that comes out is the research profile — which
-    must load (an empty review panel beside it would have been refused)."""
-    import re
-
+    """"What is the result for?" is the second question. Research (the default) and a decision write the research
+    profile, and the review screen already lists the reviewers that profile runs; exploring writes the cheaper draft's
+    three engine settings. The same answer writes the same settings on every interface."""
     from launch import _run_new
     from core.provider import ProxySupervisor
 
@@ -263,24 +265,15 @@ async def test_run_new_writes_the_research_profile_the_user_picks_on_the_review_
         return {}
 
     monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
-    tier1 = iter(["Rigor profile probe topic", "", "", "", "1", "1", "", ])
-    seen: list[str] = []
-    review_step = {"n": 0}
+    # topic, result_use, paper_format, output_kinds, study_depth, provider, provider_model; then Enter to launch.
+    answers = iter(["Result use probe topic", pick, "", "", "", "1", "1", "", "", "", "", "", ""])
+    reads = {"n": 0}
 
     def fake_input(prompt: str = "") -> str:
-        if "Edit which?" not in prompt and review_step["n"] == 0:
-            return next(tier1, "")
-        seen.append(capsys.readouterr().out)
-        review_step["n"] += 1
-        if review_step["n"] == 1:
-            return "a"
-        if review_step["n"] == 2:
-            row = re.search(r"^\s*(\d+)\. Rigor profile", "".join(seen), re.M)
-            assert row, "the advanced view lists a 'Rigor profile' row"
-            return row.group(1)
-        if review_step["n"] == 3:
-            return "2"          # the picker: 1 = default, 2 = research
-        return ""               # launch
+        reads["n"] += 1
+        # A scripted answer list that falls out of step would otherwise re-ask forever.
+        assert reads["n"] < 60, "the interview asked far more questions than scripted"
+        return next(answers, "")
 
     monkeypatch.setattr("builtins.input", fake_input)
     output_root = tmp_path / "outputs"
@@ -289,8 +282,15 @@ async def test_run_new_writes_the_research_profile_the_user_picks_on_the_review_
         interactive=False, supervisor=ProxySupervisor(),
     )
     assert rc == 0
-    (draft,) = list((output_root / "_drafts").glob("*.yaml"))
-    text = draft.read_text(encoding="utf-8")
-    assert 'rigor_profile: "research"' in text.splitlines()
+    shown = capsys.readouterr().out
+    (path,) = list((output_root / "_drafts").glob("*.yaml"))
+    text = path.read_text(encoding="utf-8")
     cfg = Config.model_validate(yaml.safe_load(text))
-    assert cfg.rigor_profile == "research" and cfg.pauses.plan == "ask"
+    assert cfg.rigor_profile == profile
+    assert (cfg.engine.ideate_reflect is False) is draft
+    assert (cfg.engine.cross_check_per_finding_k == 0) is draft
+    if profile == "research":
+        # The review screen shows the panel that runs, reproducibility included, before launch.
+        assert "reproducibility" in shown.split("Review before launch", 1)[1]
+        assert "reproducibility" in cfg.engine.review_panel
+    assert "Result for" in shown
