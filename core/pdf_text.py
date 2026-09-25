@@ -52,6 +52,9 @@ class PdfText:
     truncated_at_page: int | None = None   # the page the size cap stopped at, or None
     ocr_out_of_time: bool = False          # OCR stopped at its deadline; the rest are in unread_pages
     error: str = ""
+    #: Each OCR-read page's lines with their place, ``{page: [((left, bottom, right, top) in PDF points, text)]}``,
+    #: for core/pdf_figures.py to find a scanned page's figures without reading the page twice.
+    ocr_lines: dict[int, list[tuple[tuple[float, float, float, float], str]]] = field(default_factory=dict)
 
     def summary(self) -> str:
         """One plain line for the log and the file header."""
@@ -141,6 +144,10 @@ def _pdfium_reading_order(page: Any, textpage: Any) -> str:
     return "\n".join(lines)
 
 
+def _page_height(engine: str, page: Any) -> float:
+    return float(page.rect.height) if engine == "pymupdf" else float(page.get_height())
+
+
 def _render_png(engine: str, doc: Any, index: int) -> bytes:
     if engine == "pymupdf":
         return doc[index].get_pixmap(matrix=__import__("fitz").Matrix(OCR_SCALE, OCR_SCALE)).tobytes("png")
@@ -176,17 +183,48 @@ class _Ocr:
         # quote check cannot match. Such a page is counted as unread instead.
         self.name = ""
 
-    def read(self, png: bytes) -> str:
+    def read(self, png: bytes) -> tuple[str, list[tuple[Any, str]]]:
+        """The page's text in reading order, and its lines as ``(corner points in pixels, text)``."""
         from PIL import Image
 
         image = Image.open(io.BytesIO(png)).convert("RGB")
         if self.name == "tesseract":
-            return self._engine.image_to_string(image)
+            return self._engine.image_to_string(image), _tesseract_lines(self._engine, image)
         if self.name == "rapidocr":
             result = self._engine(image)
             items = list(zip(result.boxes if result.boxes is not None else [], result.txts or ()))
-            return ocr_lines(items, width=image.width)
-        return ""
+            return ocr_lines(items, width=image.width), items
+        return "", []
+
+
+def _tesseract_lines(engine: Any, image: Any) -> list[tuple[Any, str]]:
+    """tesseract's words grouped into its own lines, as ``(corner points in pixels, text)``."""
+    try:
+        data = engine.image_to_data(image, output_type=engine.Output.DICT)
+    except Exception:  # noqa: BLE001 -- the text was read; only the places are missing
+        return []
+    lines: dict[tuple[int, int, int], list[int]] = {}
+    for i, word in enumerate(data.get("text") or []):
+        if str(word).strip():
+            lines.setdefault((data["block_num"][i], data["par_num"][i], data["line_num"][i]), []).append(i)
+    out = []
+    for idx in lines.values():
+        x0 = min(data["left"][i] for i in idx)
+        y0 = min(data["top"][i] for i in idx)
+        x1 = max(data["left"][i] + data["width"][i] for i in idx)
+        y1 = max(data["top"][i] + data["height"][i] for i in idx)
+        out.append(([(x0, y0), (x1, y0), (x1, y1), (x0, y1)], " ".join(str(data["text"][i]) for i in idx)))
+    return out
+
+
+def _to_points(items: list[tuple[Any, str]], page_height: float) -> list[tuple[tuple[float, float, float, float], str]]:
+    """OCR lines from pixels of a page rendered at ``OCR_SCALE`` (y down) to PDF points (y up), top to bottom."""
+    out = []
+    for box, text in items:
+        xs = [float(p[0]) / OCR_SCALE for p in box]
+        ys = [float(p[1]) / OCR_SCALE for p in box]
+        out.append(((min(xs), page_height - max(ys), max(xs), page_height - min(ys)), str(text)))
+    return sorted(out, key=lambda item: (-item[0][3], item[0][0]))
 
 
 def ocr_lines(items: list[tuple[Any, str]], *, width: float) -> str:
@@ -263,7 +301,8 @@ def extract(
                     out.ocr_out_of_time = True
                 elif reader is not None and reader.name:
                     try:
-                        text = reader.read(_render_png(engine, doc, i))
+                        text, items = reader.read(_render_png(engine, doc, i))
+                        out.ocr_lines[i + 1] = _to_points(items, _page_height(engine, page))
                         out.ocr_pages.append(i + 1)
                         out.ocr_engine = reader.name
                     except Exception:  # noqa: BLE001 -- one unreadable page is counted, the rest go on
