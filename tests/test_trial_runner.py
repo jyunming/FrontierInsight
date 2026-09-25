@@ -19,7 +19,7 @@ def run_trial(cell, trial_id, seed):
     if cell["R0"] == 2.0 and trial_id == 1:
         raise ValueError("diverged")
     if trial_id == 2:
-        warnings.warn("step size too large", RuntimeWarning)
+        warnings.warn("overflow encountered in exp", RuntimeWarning)
     return {"infected": cell["R0"] * 100 + rng.random(), "peak_day": 10.0 + trial_id}
 '''
 
@@ -72,7 +72,9 @@ def test_fi_writes_the_ledger_and_the_per_cell_summary(tmp_path: Path) -> None:
     first = summary["cells"][0]
     assert first["key"] == "R0=1.5" and first["ok"] == 3 and first["metrics"]["infected"]["count"] == 3
     assert 150 < first["metrics"]["infected"]["total"] / 3 < 151
-    assert "noise the simulation prints" in run.stderr() and "step size too large" not in json.dumps(summary)
+    assert "noise the simulation prints" in run.stderr() and "overflow encountered" not in json.dumps(summary)
+    from core import numeric_warnings
+    assert any("overflow encountered in exp" in str(w) for w in numeric_warnings.scan(run.stderr(), {})),         "a warning inside a trial reaches the numeric check"
     events = [json.loads(line) for line in run.ledger_path.read_text(encoding="utf-8").splitlines()]
     assert [e["event"] for e in events][:1] == ["planned"] and events[-1]["warnings"] in (0, 1)
 
@@ -104,3 +106,50 @@ def test_the_harness_is_written_fresh_so_an_edited_one_never_runs(tmp_path: Path
         runs_per_setting=1, base_seed=0, deterministic=False, timeout_s=60,
     ))
     assert "tampered" not in harness.read_text(encoding="utf-8")
+
+
+ANALYSIS = '''
+import json, os
+data = json.load(open(os.environ["FI_TRIALS"], encoding="utf-8"))
+cells = {c["key"]: c["metrics"]["infected"]["count"] for c in data["cells"]}
+print("RESULT_JSON: " + json.dumps({"counts": cells}))
+'''
+
+ORACLE = '''
+def run_trial(cell, trial_id, seed):
+    return {"x": 1.0}
+
+def oracle():
+    return {"closed_form": 0.5}
+'''
+
+
+def test_the_runner_runs_every_trial_then_the_analysis_on_fis_summary(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    assert trial_runner.entries(root / "code" / "simulate.py") == {"run_trial"}
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version="3.11"), quest_root=root,
+        protocol={"grid": {"R0": [1.5, 2.0]}, "runs_per_setting": 3}, deterministic=False,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+    )
+    result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60,
+                                        env={"FI_REPLICATE_SEED": "0"}))
+    assert result.returncode == 0 and '"R0=2.0": 2' in result.stdout
+    assert "noise the simulation prints" in result.stderr, "the simulation's stderr reaches the numeric check"
+    assert runner.last is not None and runner.last.failed_trials == 1 and runner.failed_script is None
+
+
+def test_the_oracle_is_its_own_function(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(ORACLE, encoding="utf-8")
+    values, why = asyncio.run(trial_runner.run_oracle(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", timeout_s=60))
+    assert values == {"closed_form": 0.5} and not why
+    (root / "code" / "simulate.py").write_text(SIM, encoding="utf-8")
+    values, why = asyncio.run(trial_runner.run_oracle(
+        SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, "code/simulate.py", timeout_s=60))
+    assert values is None and "has no function oracle()" in why

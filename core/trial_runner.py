@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
 from dataclasses import dataclass, field
 from itertools import product
@@ -92,6 +93,8 @@ def main():
                            traceback=traceback.format_exc()[-1500:])
         row["duration_s"] = round(time.monotonic() - t0, 4)
         row["warnings"] = [f"{w.category.__name__}: {w.message}"[:300] for w in caught][:20]
+        for w in caught:  # printed as Python prints them, so the numeric-warning check reads them from stderr
+            sys.stderr.write(f"{w.filename}:{w.lineno}: {w.category.__name__}: {w.message}\n")
         out.write(json.dumps(row, allow_nan=True) + "\n")
         out.flush()
     out.close()
@@ -281,6 +284,102 @@ async def run_trials(
     summary = raw / SUMMARY_NAME
     summary.write_text(json.dumps(_summary(runs), indent=1, allow_nan=True), encoding="utf-8")
     return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
+
+
+_ENTRY_RE = re.compile(r"^def\s+(run_trial|run_cell|oracle)\s*\(", re.MULTILINE)
+
+
+def entries(simulate: Path) -> set[str]:
+    """Which of ``run_trial`` / ``run_cell`` / ``oracle`` the simulation defines at its top level (read, not run)."""
+    try:
+        return set(_ENTRY_RE.findall(Path(simulate).read_text(encoding="utf-8")))
+    except OSError:
+        return set()
+
+
+class TrialsRunner:
+    """Stands in for the executor when the simulation follows the trial contract, as ``split_run.SplitRunner`` does for
+    the older two-script one: running ``experiment.py`` first runs every trial of the protocol (:func:`run_trials`,
+    one process per cell, FI's ledger), then the analysis with ``FI_TRIALS`` naming FI's per-cell summary. What it
+    returns is the analysis's run, its stderr led by every cell's (so the simulation's warnings reach the numeric
+    check). ``failed_script`` says which script to repair; ``last`` keeps the trial run for the checks after it."""
+
+    def __init__(self, executor: Any, *, quest_root: Path, protocol: dict[str, Any], deterministic: bool,
+                 simulate: Path, analysis: Path, log: Any = None) -> None:
+        self.executor = executor
+        self.quest_root = Path(quest_root)
+        self.protocol = protocol or {}
+        self.deterministic = deterministic
+        self.simulate = Path(simulate)
+        self.analysis = Path(analysis)
+        self.log = log
+        self.failed_script: str | None = None
+        self.last: TrialRun | None = None
+
+    async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
+        from core.execution import ExecutionResult
+
+        if len(cmd) != 2 or Path(cmd[1]).name != self.analysis.name:
+            return await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+        started = time.monotonic()
+        base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
+        grid = self.protocol.get("grid") if isinstance(self.protocol.get("grid"), dict) else {}
+        runs = int(self.protocol.get("runs_per_setting") or 1)
+        run = await run_trials(
+            self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
+            runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
+        )
+        self.last = run
+        if self.log is not None:
+            self.log.info("[execute] FI ran %d trial(s) in %d cell(s): %d ok, %d failed (ledger: %s)",
+                          run.ok_trials + run.failed_trials, len(run.cells), run.ok_trials, run.failed_trials,
+                          run.ledger_path.relative_to(self.quest_root).as_posix())
+        load_errors = sorted({c.load_error for c in run.cells if c.load_error})
+        if run.ok_trials == 0:
+            self.failed_script = self.simulate.name
+            reason = load_errors[0] if load_errors else next(
+                (r.get("reason") for c in run.cells for r in c.rows if r.get("reason")), "every trial failed")
+            return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                                   stderr=f"{run.stderr()}\nFI ran no trial successfully: {reason}".strip())
+        analysis_env = {**(env or {}), RESULTS_ENV: str(run.summary_path),
+                        "FI_RAW_DIR": str(run.summary_path.parent)}
+        result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
+        self.failed_script = None if result.returncode == 0 else self.analysis.name
+        return ExecutionResult(
+            returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
+            stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
+        )
+
+
+async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
+                     env: dict[str, str] | None = None) -> tuple[dict[str, float] | None, str]:
+    """Call the simulation's ``oracle()`` in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
+    quest_root = Path(quest_root)
+    work = quest_root / ".fi" / "trials"
+    work.mkdir(parents=True, exist_ok=True)
+    (quest_root / HARNESS_PATH).write_text(HARNESS_SOURCE, encoding="utf-8")
+    spec = work / "oracle.json"
+    out = work / "oracle.out.jsonl"
+    out.unlink(missing_ok=True)
+    spec.write_text(json.dumps({"module": str(module), "entry": "oracle", "cell": {},
+                                "trials": [{"trial": 0, "seed": None}]}), encoding="utf-8")
+    result = await executor.execute(
+        [str(python), str(HARNESS_PATH), str(spec.relative_to(quest_root)), str(out.relative_to(quest_root))],
+        cwd=quest_root, timeout_s=timeout_s, env=env,
+    )
+    try:
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError):
+        rows = []
+    for row in rows:
+        if row.get("load_error"):
+            return None, str(row["load_error"])
+        if row.get("status") == "ok":
+            return dict(row.get("values") or {}), ""
+        if row.get("status") == "failed":
+            return None, str(row.get("reason") or "oracle() failed")
+    return None, ("oracle() ran out of time" if getattr(result, "timed_out", False)
+                  else f"oracle() did not report (exit code {result.returncode})")
 
 
 def read_ledger(quest_root: Path) -> list[dict[str, Any]] | None:
