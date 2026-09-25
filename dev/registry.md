@@ -49,6 +49,9 @@ same PR that adds, splits or renames one.
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client, sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
+- `core/receipts.py` — the receipt each required check (evidence gate, design audit, claim check) writes under
+  `needs/receipts/`; `core/evidence.py` reads them for `publication_ready`; `engine._stop_once_for_check` is the
+  research profile's one stop and retry.
 - `core/pdf_text.py` — every PDF FI reads: all pages in reading order (PyMuPDF if installed, else pypdfium2), scanned
   pages by OCR (tesseract, else RapidOCR), a size cap that names its page. Fetched scans are OCR'd after the fetch
   (`knowledge._ocr_scanned`); `engine._literature_entry` / `_content_quality` / `_item_content` keep the whole text on
