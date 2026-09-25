@@ -49,6 +49,9 @@ same PR that adds, splits or renames one.
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client, sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
+- `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
+  one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
+  `run_oracle` in `_oracle_gate`); the older self-looping contract stays in `core/split_run.py` as `self_reported`.
 - `core/receipts.py` — the receipt each required check (evidence gate, design audit, claim check) writes under
   `needs/receipts/`; `core/evidence.py` reads them for `publication_ready`; `engine._stop_once_for_check` is the
   research profile's one stop and retry.
