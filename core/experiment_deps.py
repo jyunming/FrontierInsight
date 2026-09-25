@@ -37,7 +37,7 @@ def requirement_name(dep: str) -> str:
 
 
 def split_deps(
-    deps: Iterable[str], *, skills: Iterable[Any] = (), local_modules: Iterable[str],
+    deps: Iterable[str], *, local_modules: Iterable[str],
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Split the requested packages into those to install and those left out, each with the reason.
 

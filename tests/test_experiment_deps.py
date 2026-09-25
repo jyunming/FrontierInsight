@@ -151,7 +151,7 @@ async def test_on_the_shared_interpreter_a_quest_does_not_install_the_skills_pac
 
 @pytest.mark.asyncio
 async def test_a_library_skill_named_unlike_its_module_is_explained_not_called_missing(tmp_path: Path, monkeypatch) -> None:
-    """Left on the pip line (its folder holds no module by that name), it fails on PyPI; the note says how the skill
+    """Every skill name goes to pip; one that is not a package fails there, and the note says how the skill
     is used, not to remove an import that works from the path."""
     eng = _mk_engine(tmp_path)
     lib = _skill(tmp_path, "sir-kernels", "library")
