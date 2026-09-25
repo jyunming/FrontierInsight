@@ -90,6 +90,14 @@
             "description": "The quest's audit trace: what ran, why, and a check that nothing was edited. @fi /trace <quest_id> [--node <name>] [--detail summary|checks|debug]. Mirrors `python launch.py --trace` and the web quest page's Trace panel."
           },
           {
+            "name": "follow",
+            "description": "Watch a running quest step by step, live, until it stops for you, finishes or fails. @fi /follow <quest_id> [--detail checks]. Mirrors `python launch.py --trace <id> --follow`; the web quest page shows the same live log."
+          },
+          {
+            "name": "why",
+            "description": "Why a quest did what it did, from what it recorded: why it stopped, why the review asked for a revision, why the evidence is at its level, or why one step decided what it did. @fi /why <quest_id> [stop|review|evidence|<step>]. Mirrors `python launch.py --why` and the quest page's Why?."
+          },
+          {
             "name": "update",
             "description": "Mid-quest re-entry of the interview. Pass the quest_id (or pick from the list). Opens an integrated terminal that runs `python launch.py --update <id>`: pre-fills the editable fields with the quest's current values, computes a diff, soft-invalidates affected LangGraph stages, then resumes — re-opening a finished quest when needed so the invalidated stages actually re-run instead of re-emitting from the old paper."
           },

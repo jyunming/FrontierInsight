@@ -188,7 +188,9 @@
       <label for="trace-node" class="font-label-sm text-label-sm text-outline uppercase">Node</label>
       <select id="trace-node" class="bg-surface-low border border-white/10 rounded px-2 py-1 font-code-md text-code-md text-on-surface"><option value="">all</option></select>
       <span id="trace-count" class="text-on-surface-variant text-body-sm"></span>
+      <button id="why-btn" onclick="loadWhy()" title="Why it stopped, why the review asked for a revision, why the evidence is at its level; with a node chosen, why that step decided what it did." class="cyber-border text-on-surface px-4 py-1 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Why?</button>
     </div>
+    <pre id="why-text" class="hidden whitespace-pre-wrap bg-surface-low rounded p-3 mb-3 font-code-md text-code-md text-on-surface-variant"></pre>
     <ol id="trace-list" class="flex flex-col gap-1 font-code-md text-code-md"></ol>
     <p id="trace-empty" class="hidden text-on-surface-variant">No trace yet: nothing has run, the quest ran before the trace existed, or <code>engine.audit_trace</code> is off.</p>
   </details>
@@ -1019,6 +1021,15 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   // Loaded when the panel is opened, and again when the filters change. The wording of each line comes from the server, so
   // this page, `launch.py --trace` and the chat say the same thing.
   let traceNodesKey = '';
+  // Why? (core/why.py): the same answer as `launch.py --why` and `@fi /why`, for the node chosen above (or overall).
+  async function loadWhy() {
+    const box = document.getElementById('why-text');
+    const about = document.getElementById('trace-node').value;
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/why?about=${encodeURIComponent(about)}`);
+    box.classList.remove('hidden');
+    box.textContent = res.ok ? (await res.json()).text : `Could not answer (${res.status}).`;
+  }
+
   async function loadTrace() {
     const detail = document.getElementById('trace-detail').value;
     const node = document.getElementById('trace-node').value;

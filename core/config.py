@@ -1411,6 +1411,10 @@ class OutputConfig(BaseModel):
     # column regardless of ``paper_format``.
     paper_style: PaperStyle = "latex"
     output_dir: Path = Path("./outputs")
+    # Keep every prompt FI sends a model and every answer, whole, in <quest>/.fi/io/ (one file per call). Off by
+    # default: a quest makes 30-90 calls and the files can reach tens of MB. For finding out exactly what a model was
+    # told; the trace (`--trace`, `--why`) already records every decision without it.
+    save_model_calls: bool = False
     # When True AND ``paper_pdf`` is in ``kinds``, treat a failed PDF
     # compile as a hard quest failure rather than a graceful skip.
     # Pairs with the engine's pre-flight check: at ``Engine.run``

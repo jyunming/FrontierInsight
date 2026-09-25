@@ -95,3 +95,114 @@ export async function runTrace(
         stream.markdown("\n⚠️ The hash chain check failed — see the line above for where.\n");
     }
 }
+
+
+interface LaunchContext {
+    python: string;
+    repo: string;
+    workDir: string;
+    outputRoot: string;
+}
+
+function launchContext(stream: vscode.ChatResponseStream): LaunchContext | undefined {
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const roots = rootsFromConfig(cfg);
+    if ("error" in roots) {
+        stream.markdown(roots.error + "\n");
+        return undefined;
+    }
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    return {
+        python: cfg.get<string>("pythonPath") || "python",
+        repo: roots.repoPath,
+        workDir: roots.workDir,
+        outputRoot: path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(roots.workDir, outputDirSetting),
+    };
+}
+
+/**
+ * `@fi /why <quest_id> [stop|review|evidence|<step>]` (or `--node <step>`) — why the quest did what it did, from what it
+ * recorded (core/why.py). The same answer as `python launch.py --why` and the web quest page's Why?.
+ */
+export async function runWhy(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const parsed = parseTraceArgs(promptArgs.trim());
+    const words = promptArgs.replace(/(?:^|\s)--node(?:=|\s+)\S+/, " ").trim().split(/\s+/).filter((w) => w);
+    const about = parsed.node || words.slice(1).join(" ");
+    if (!parsed.questId) {
+        stream.markdown(
+            "Which quest? Example: `@fi /why 1790003131-my-quest` (why it stopped, why the review asked for a revision, " +
+                "why the evidence is at its level), or add a step: `@fi /why 1790003131-my-quest execute`.\n",
+        );
+        return;
+    }
+    const ctx = launchContext(stream);
+    if (!ctx || token.isCancellationRequested) return;
+    stream.progress(`Reading why ${parsed.questId} did what it did…`);
+    const args = ["--why", parsed.questId, ...(about ? [about] : []), "--output-root", ctx.outputRoot];
+    const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, args);
+    const text = (res.code === 0 ? res.stdout : [res.stdout, res.stderr].filter((t) => t.trim()).join("\n")).trim();
+    const shown = text.length > OUTPUT_CHARS ? text.slice(0, OUTPUT_CHARS) + "\n…" : text;
+    stream.markdown(shown ? "```\n" + shown + "\n```\n" : `No output (exit ${res.code}).\n`);
+}
+
+/**
+ * `@fi /follow <quest_id>` — each step of a running quest as it happens (`python launch.py --trace <id> --follow`),
+ * until it stops for you, finishes or fails. Stopping the chat stops following; the quest goes on.
+ */
+export async function runFollow(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const parsed = parseTraceArgs(promptArgs.trim());
+    if (parsed.error) {
+        stream.markdown(`${parsed.error}\n`);
+        return;
+    }
+    if (!parsed.questId) {
+        stream.markdown("Which quest? Example: `@fi /follow 1790003131-my-quest` (add `--detail checks` for more).\n");
+        return;
+    }
+    const ctx = launchContext(stream);
+    if (!ctx) return;
+    // The plain step-by-step view unless more was asked for.
+    const detail = /--detail/.test(promptArgs) ? parsed.detail : "summary";
+    const args = ["--trace", parsed.questId, "--follow", "--trace-detail", detail, "--output-root", ctx.outputRoot];
+    if (parsed.node) args.push("--trace-node", parsed.node);
+    await new Promise<void>((resolve) => {
+        const child = spawn(ctx.python, [path.join(ctx.repo, "launch.py"), ...args], {
+            cwd: ctx.workDir,
+            env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
+        });
+        child.stdout?.setEncoding("utf8");
+        child.stderr?.setEncoding("utf8");
+        let pending = "";
+        let stderr = "";
+        child.stdout?.on("data", (d: string) => {
+            pending += d;
+            const lines = pending.split(/\r?\n/);
+            pending = lines.pop() ?? "";
+            const shown = lines.filter((l) => l.trim());
+            if (shown.length) stream.markdown(shown.map((l) => "`" + l.trim().replace(/`/g, "'") + "`").join("  \n") + "  \n");
+        });
+        child.stderr?.on("data", (d: string) => (stderr += d));
+        const stop = token.onCancellationRequested(() => child.kill());
+        child.on("error", (e) => {
+            stream.markdown(`Could not follow: ${String(e)}\n`);
+            stop.dispose();
+            resolve();
+        });
+        child.on("close", (code) => {
+            if (pending.trim()) stream.markdown("`" + pending.trim().replace(/`/g, "'") + "`\n");
+            if (code !== 0 && !token.isCancellationRequested && stderr.trim()) {
+                stream.markdown("```\n" + stderr.trim().slice(-2000) + "\n```\n");
+            }
+            stop.dispose();
+            resolve();
+        });
+    });
+}

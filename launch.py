@@ -305,7 +305,7 @@ def _expand_tools_argv(argv: list[str]) -> list[str]:
 
 _SHORT_HELP = """\
 usage: fi [-h] [--help-all] --config CONFIG | --new | --update QUEST_ID | --serve | --resume QUEST_ID |
-          --watch QUEST_ID | --trace QUEST_ID | --skills | tools <name> ...
+          --watch QUEST_ID | --trace QUEST_ID | --why QUEST_ID | --skills | tools <name> ...
 
 Run a research quest end to end: literature, an experiment, the paper, and the checks that hold it to what
 it found. `fi --help-all` lists every flag; `fi tools --help` lists the less common one-shot commands
@@ -319,7 +319,8 @@ Run a quest
 While a quest is running, or after
   --resume QUEST_ID      Continue a quest that paused or stopped mid-run.
   --watch QUEST_ID       Wait for a quest's background job (HPC / a cluster) and continue it when it is done.
-  --trace QUEST_ID       Print what a quest did, in order, and check nothing in its record was edited.
+  --trace QUEST_ID       Print what a quest did, in order, and check nothing in its record was edited. Add --follow to watch it live.
+  --why QUEST_ID [ABOUT] Why it stopped, why the review asked for a revision, why the evidence is at its level.
   --update QUEST_ID      Re-open the setup questions for a running quest's editable answers.
   --approve-amendment QUEST_ID   Approve a change to a quest's frozen protocol that it stopped to ask about.
 
@@ -666,7 +667,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Show what a quest did, in order: each node, every check's verdict, each route with the facts it read, and "
              "the reasons the model gave (labelled as its claims), from the quest's audit trace "
              "(.fi/audit.jsonl); the hash chain is verified and the exit code is 1 when it is broken. QUEST is the quest "
-             "id (looked up under --output-root) or its folder. See --trace-node and --trace-detail.",
+             "id (looked up under --output-root) or its folder. See --trace-node and --trace-detail. With --follow it "
+             "keeps printing each new event as the quest runs, until it stops for you, finishes or fails.",
+    )
+    mode.add_argument(
+        "--why",
+        nargs="+",
+        metavar=("QUEST", "ABOUT"),
+        default=None,
+        help="Why a quest did what it did, from what it recorded (no model is asked): why it stopped, why the review "
+             "asked for a revision, why the evidence is at its level. Add what to ask about: stop, review, evidence, or "
+             "a step's name (design, execute, write, ...) for why that step decided what it did.",
     )
     mode.add_argument(
         "--approve-all-skills",
@@ -760,6 +771,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--trace-node", metavar="NODE", default="",
         help="With --trace: only the events of this node (design, execute, review, ...).",
+    )
+    p.add_argument(
+        "--follow", action="store_true",
+        help="With --trace: keep printing each new event as the quest runs, until it stops for you, finishes or fails.",
     )
     p.add_argument(
         "--trace-detail", choices=("summary", "checks", "debug"), default="checks",
@@ -2537,6 +2552,7 @@ async def main_async(args: argparse.Namespace) -> int:
         or getattr(args, "revise_plan", None) is not None
         or bool(getattr(args, "approve_amendment", ""))
         or bool(getattr(args, "trace", ""))
+        or bool(getattr(args, "why", None))
     )
     if args.no_axon_sidecar:
         # The web server starts the service again for itself (web.server._ensure_axon_sidecar), and it reads the
@@ -2602,7 +2618,12 @@ async def main_async(args: argparse.Namespace) -> int:
             return _approve_amendment(args.approve_amendment, args.approve_as, args.output_root)
 
         if args.trace:
+            if args.follow:
+                return _follow_trace(args.trace, args.trace_node, args.trace_detail, args.output_root)
             return _show_trace(args.trace, args.trace_node, args.trace_detail, args.output_root)
+
+        if args.why:
+            return _show_why(args.why[0], " ".join(args.why[1:]), args.output_root)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -5388,6 +5409,68 @@ def _show_trace(quest: str, node: str, detail: str, output_root: Path) -> int:
     verdict = audit_log.verify(path)
     print(f"[FI] {verdict.line()}")
     return 0 if verdict.ok else 1
+
+
+def _quest_dir(quest: str, output_root: Path) -> Path | None:
+    return next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)
+
+
+def _show_why(quest: str, about: str, output_root: Path) -> int:
+    """Print why a quest did what it did (core/why.py)."""
+    from core import why
+
+    root = _quest_dir(quest, output_root)
+    if root is None:
+        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
+        return 1
+    print(why.explain(root, about))
+    return 0
+
+
+def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll_s: float = 2.0,
+                  max_hours: float = 24.0) -> int:
+    """Print a quest's audit trace as it grows, until the quest stops for a person, finishes or fails."""
+    import time as _time
+
+    from core import audit_log
+
+    root = _quest_dir(quest, output_root)
+    if root is None:
+        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
+        return 1
+    path = root / ".fi" / "audit.jsonl"
+    started = _time.time()
+    seen = 0
+    print(f"Following {root.name} (Ctrl+C stops following; the quest goes on).", flush=True)
+
+    def _ended() -> str:
+        # Written by this run (after following began): a stop, a finished quest, a failure.
+        for rel, what in ((".fi/pause.json", "it stopped for you: see NEXT_STEP.md"),
+                          ("frontier_insight_summary.json", "it finished"),
+                          ("quest_failed.md", "it failed: see quest_failed.md")):
+            f = root / rel
+            try:
+                if f.is_file() and f.stat().st_mtime >= started:
+                    return what
+            except OSError:
+                pass
+        return ""
+
+    try:
+        while _time.time() - started < max_hours * 3600:
+            events = audit_log.read(path)
+            new = audit_log.select(events[seen:], node=node or None, detail=detail)
+            for line in audit_log.render(new):
+                print("  " + line, flush=True)
+            seen = len(events)
+            end = _ended()
+            if end:
+                print(f"[FI] {root.name}: {end}.", flush=True)
+                return 0
+            _time.sleep(poll_s)
+    except KeyboardInterrupt:
+        print("[FI] stopped following; the quest goes on.", flush=True)
+    return 0
 
 
 def _approve_amendment(quest: str, approved_by: str, output_root: Path) -> int:

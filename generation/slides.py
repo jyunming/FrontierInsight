@@ -280,7 +280,8 @@ class SlideGenerator:
                 model=model_for_node(self.config.provider.node_models, "slides"),
                 node="slides",
             )
-            append_cost_row(art.quest_root / ".fi", node="slides", model=client.last_model, usage=client.last_usage)
+            append_cost_row(art.quest_root / ".fi", node="slides", model=client.last_model, usage=client.last_usage,
+                            messages=[{"role": "user", "content": prompt}], response=text)
         finally:
             await client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:

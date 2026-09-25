@@ -43,7 +43,7 @@ import {
 import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
-import { runTrace } from "./trace";
+import { runFollow, runTrace, runWhy } from "./trace";
 
 
 /**
@@ -357,6 +357,17 @@ async function handleRequest(
     if (cmd === "trace") {
         // The quest's audit trace (core/audit_log.py), shown exactly as `launch.py --trace` prints it.
         await runTrace(prompt, stream, token);
+        return;
+    }
+    if (cmd === "why") {
+        // Why it stopped / why the review asked for a revision / why the evidence is at its level / why a step decided
+        // what it did (core/why.py), exactly as `launch.py --why` prints it.
+        await runWhy(prompt, stream, token);
+        return;
+    }
+    if (cmd === "follow") {
+        // Each step of a running quest as it happens (`launch.py --trace <id> --follow`).
+        await runFollow(prompt, stream, token);
         return;
     }
     if (cmd === "install-tectonic" || cmd === "tectonic") {

@@ -1268,6 +1268,18 @@ def make_app(
             "events": [{**e, "description": fi_audit.describe(e, tagged=False)} for e in chosen[-limit:]],
         })
 
+    @app.get("/api/quests/{quest_id}/why")
+    async def get_why(quest_id: str, about: str = "") -> JSONResponse:
+        """Why the quest did what it did (core/why.py, the same answer as ``launch.py --why``): why it stopped, why the
+        review asked for a revision, why the evidence is at its level, or, with ``about=<step>``, why that step decided
+        what it did."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        from core import why as fi_why
+
+        return JSONResponse({"quest_id": quest_id, "about": about,
+                             "text": fi_why.explain(_resolve_quest_root(app.state.output_root, quest_id), about)})
+
     @app.get("/api/quests/{quest_id}/amendment")
     async def get_amendment(quest_id: str) -> JSONResponse:
         """The protocol amendment the quest stopped to ask about (what changes, why, whether results were seen), the

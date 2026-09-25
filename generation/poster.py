@@ -996,7 +996,8 @@ class PosterGenerator:
                 model=model_for_node(self.config.provider.node_models, "poster"),
                 node="poster",
             )
-            append_cost_row(art.quest_root / ".fi", node="poster", model=client.last_model, usage=client.last_usage)
+            append_cost_row(art.quest_root / ".fi", node="poster", model=client.last_model, usage=client.last_usage,
+                            messages=[{"role": "user", "content": prompt}], response=text)
         finally:
             await client.aclose()
             if self.config.provider.name in PROXY_PROVIDERS:
