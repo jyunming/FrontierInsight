@@ -326,8 +326,12 @@ async def test_a_reply_with_no_plan_prose_still_gives_a_usable_file(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_design_uses_the_design_block_as_written_and_asks_the_model_nothing(tmp_path: Path) -> None:
-    eng = _engine(tmp_path, [])
+async def test_design_uses_the_design_block_as_written_and_only_audits_it(tmp_path: Path) -> None:
+    """The person's design runs as written. The model is asked one thing, the methodology audit of that design (no
+    audit has seen it), and nothing it proposes is taken: its objections make the audit's receipt a fail instead."""
+    proposal = {"objections_addressed": [{"objection": "too few runs"}],
+                "amended_design": {**DESIGN, "method": "the audit's own method"}}
+    eng = _engine(tmp_path, [json.dumps(proposal)])
     path = plan.plan_path(eng.quest_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     edited = {**DESIGN, "hypothesis": "the person's own hypothesis", "method": "the person's own method"}
@@ -336,7 +340,9 @@ async def test_design_uses_the_design_block_as_written_and_asks_the_model_nothin
     patch = await eng._node_design({"topic": "OPC", "iteration": 0})
 
     assert patch["design"] == edited
-    assert eng._client.chat.await_count == 0
+    assert eng._client.chat.await_count == 1 and "Design Self-Critique" in _prompt(eng._client.chat.await_args_list[0])
+    receipt = json.loads((eng.quest_root / "needs" / "receipts" / "design_audit.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "fail" and "too few runs" in receipt["detail"]
     first = patch["design_history"][0]
     assert first["plan_sha256"] == plan.sha256(path.read_text(encoding="utf-8"))
     assert "plan.md" in first["reason"]

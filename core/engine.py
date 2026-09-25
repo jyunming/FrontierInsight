@@ -60,6 +60,7 @@ from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
 from . import plan_settings as _plan_settings
+from . import receipts as _receipts
 from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -3065,8 +3066,12 @@ class Engine:
             ),
         )
 
-    async def _audit_design(self, state: QuestState, design: dict[str, Any]) -> tuple[dict[str, Any], Any]:
-        """The second-pass methodology audit of a drafted design: ``(design, objections addressed)``."""
+    async def _audit_design(
+        self, state: QuestState, design: dict[str, Any], *, adopt: bool = True,
+    ) -> tuple[dict[str, Any], Any]:
+        """The second-pass methodology audit of a drafted design: ``(design, objections addressed)``. With
+        ``adopt=False`` it only checks a design that is already settled (one a person edited in plan.md, or an amended
+        one): nothing it proposes is taken, and the receipt passes only when it had no objection."""
         iteration = state.get("iteration", 0)
         # The design's ``rationale`` is the model's own account for the audit trace, not part of what the audit reviews or
         # what its amended design must repeat (its reply shape does not list it): it is set aside here and put back after.
@@ -3098,6 +3103,7 @@ class Engine:
         )
         critique: dict[str, Any] = {}
         failure = ""
+        audit_started = _receipts.now()
         before = json.loads(json.dumps(design, default=str))
         try:
             critique_text = await self._chat(
@@ -3114,6 +3120,17 @@ class Engine:
             )
         amended = critique.get("amended_design") if isinstance(critique, dict) else None
         objections = critique.get("objections_addressed") if isinstance(critique, dict) else None
+        if not failure and not isinstance(objections, list):
+            # An audit judges by naming its objections (none is an empty list). An unreadable reply, or one that names
+            # none, is not an audit that found nothing.
+            failure = "the audit's reply did not list its objections"
+            objections = None
+        proposed_change = (
+            isinstance(amended, dict) and bool(amended)
+            and _receipts.design_core(amended) != _receipts.design_core(design)
+        )
+        if not adopt:
+            amended = None
         if isinstance(amended, dict) and amended:
             # The amended design must keep the original design's shape —
             # otherwise downstream consumers (implement / analyze /
@@ -3139,6 +3156,21 @@ class Engine:
             iteration, n_addressed,
         )
         self._record_design_critique(iteration, before, design, objections, failure)
+        objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt else []
+        if not adopt and not failure and proposed_change and not objected:
+            objected = ["it proposed a different design without naming why"]
+        self._write_receipt(
+            "design_audit", "unknown" if failure else "fail" if objected else "pass", started_at=audit_started,
+            inputs={"design": before}, output=_receipts.design_core(design), error=failure,
+            detail=("it objected to the design that ran: " + "; ".join(str(o)[:160] for o in objected[:3])) if objected else "",
+        )
+        if failure:
+            self._stop_once_for_check(
+                "design_audit", failure, look="needs/DESIGN_CRITIQUE.json and the [design_self_critique] entry in .fi/run.log",
+                inputs={"design": before},
+            )
+        else:
+            self._clear_check_stop("design_audit")
         if rationale is not None:
             design = {**design, "rationale": rationale}
         return design, objections
@@ -3302,6 +3334,9 @@ class Engine:
         if normalized is None:
             self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
             return {}
+        # The plan writes the audited design in its own canonical form: the audit's verdict covers it.
+        _receipts.carry_output(self.quest_root, "design_audit", _receipts.design_core(design),
+                               _receipts.design_core(normalized), "the plan wrote the audited design in its own form")
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
         audit += repaired_notes
@@ -3449,6 +3484,7 @@ class Engine:
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
 
+        await self._audit_the_design_that_runs(state, design)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -5503,6 +5539,83 @@ class Engine:
                 out = {**out, "spec_statistics": spec}
         return out
 
+    async def _audit_the_design_that_runs(self, state: QuestState, design: Any) -> None:
+        """The methodology audit's receipt must be for the design that runs. A design a person edited in plan.md, an
+        amended one, or one the frozen protocol held changed after the audit saw it: the audit checks it again, taking
+        none of its proposals (one more call, only when the design changed)."""
+        if self.config.engine.analyze_local_first or not isinstance(design, dict):
+            return
+        _status, record, problem = _receipts.read(self.quest_root, "design_audit")
+        if not problem and record is not None and record.get("output_hash") == _receipts.sha256(_receipts.design_core(design)):
+            return
+        self._log.info("[design] the design that will run is not the one the methodology audit saw; auditing it (no change taken)")
+        await self._audit_design(state, design, adopt=False)
+
+    def _write_receipt(self, check: str, status: str, **kwargs: Any) -> None:
+        """Leave the receipt of a required check (core/receipts.py). A receipt that cannot be written is logged: the
+        evidence ladder then reads the check as not shown to have run, which is the safe side."""
+        try:
+            _receipts.write(self.quest_root, check, status=status, producer=check, **kwargs)
+        except Exception as e:  # noqa: BLE001 -- the check's own result stands; only its record is missing
+            self._log.warning("[%s] its receipt could not be written: %r", check, e)
+
+    def _clear_check_stop(self, check: str) -> None:
+        """A check that judged: a later failure (another iteration, other inputs) stops the quest again."""
+        marker = self.fi_dir / "check_retries.json"
+        try:
+            tried = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else {}
+            if isinstance(tried, dict) and check in tried:
+                tried.pop(check)
+                marker.write_text(json.dumps(tried, indent=2) + chr(10), encoding="utf-8")
+        except (OSError, ValueError):
+            pass
+
+    def _stop_once_for_check(
+        self, check: str, failure: str, *, look: str, inputs: dict[str, Any] | None = None,
+    ) -> None:
+        """Under ``rigor_profile: research``, a required check that could not judge stops the quest once, and resume
+        tries it again; a second failure is recorded as a gap and the quest goes on (a person asked for one stop, never
+        an endless one). Other profiles go on at once; the evidence level names the gap either way."""
+        name = _receipts.REQUIRED.get(check, check)
+        if self.config.rigor_profile != "research":
+            self._log.warning("[%s] %s could not judge (%s); the evidence level records it as a gap", check, name, failure)
+            return
+        marker = self.fi_dir / "check_retries.json"
+        try:
+            tried = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else {}
+        except (OSError, ValueError):
+            tried = {}
+        tried = tried if isinstance(tried, dict) else {}
+        # One stop per check for the same inputs: the resume's retry of that stop goes on if it fails again, and a
+        # later failure on other inputs (another iteration, another draft) stops again.
+        key = _receipts.sha256(inputs or {})
+        if tried.get(check) == key:
+            self._log.warning(
+                "[%s] %s failed again after the retry (%s); recorded as a gap, the quest goes on", check, name, failure,
+            )
+            return
+        tried[check] = key
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps(tried, indent=2) + "\n", encoding="utf-8")
+        except OSError as e:
+            # Without the marker a resume would stop here again; going on with the gap is the bounded choice.
+            self._log.warning("[%s] could not record the stop (%r); going on with the gap", check, e)
+            return
+        self._pause_for_human(
+            kind=f"{check}_unknown",
+            interaction="supply",
+            headline=f"{name[0].upper()}{name[1:]} could not judge, and the research profile needs it",
+            steps=[
+                f"What failed: {failure}.",
+                f"Look at {look}: this is usually a provider outage, a rate limit, or a reply that could not be read.",
+                "Fix it if you can (another model, a retry later), then resume: the check is tried once more.",
+                "If it fails again, the quest goes on and the result is not marked publication-ready "
+                f"({name} is listed as a gap in needs/EVIDENCE.json).",
+            ],
+            payload={"check": check, "failure": failure},
+        )
+
     def _write_evidence(self, state: QuestState) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
         (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest."""
@@ -5525,7 +5638,8 @@ class Engine:
                 statistics_gaps = _metric_spec.coverage_gaps(protocol_now, replicates_for_specs, computed) if replicates_for_specs else []
             except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
                 self._log.warning("[evidence] the statistics coverage could not be worked out: %r", e)
-                statistics_gaps = []
+                # Never "no gap": a check that crashed has not shown the statistics are adequate.
+                statistics_gaps = [f"the statistics could not be worked out ({type(e).__name__}: {str(e)[:160]})"]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 settings={
@@ -5534,6 +5648,10 @@ class Engine:
                     "numeric_warnings": self.config.engine.numeric_warnings,
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
+                    "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
+                    "claim_check": "on" if self.config.engine.claim_grounding else "off",
+                    # --analyze has no experiment to design, so there is no design to audit.
+                    "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
                 },
             )
             path = self.quest_root / "needs" / "EVIDENCE.json"
@@ -5545,6 +5663,15 @@ class Engine:
             return record
         except Exception as e:  # noqa: BLE001 -- a report about the quest must never stall it
             self._log.warning("[evidence] could not assess the quest: %r", e)
+            # Replace any earlier record: a stale "publication_ready" from a previous pass must not outlive a failed
+            # assessment of this one.
+            try:
+                record = _evidence.unassessed(f"{type(e).__name__}: {str(e)[:200]}")
+                path = self.quest_root / "needs" / "EVIDENCE.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
             return None
 
     def _annotate_precision(self, state: QuestState, aggregate: dict[str, Any]) -> str:
@@ -8061,6 +8188,7 @@ class Engine:
         # it's always recorded in state AND available to the gate prompt
         # below so the sufficiency call is contract-aware.
         protocol = derive_protocol(state, self.config)
+        started = _receipts.now()
         # EVERYTHING below is inside one fail-open guard, including the
         # signal-gathering: a resumed / malformed checkpoint can hand us
         # non-dict literature items, a non-dict analysis, or non-dict
@@ -8211,26 +8339,21 @@ class Engine:
             protocol.source_policy, n_sources, n_findings,
             n_supporting, broadened,
         )
-        if status == "unknown" and self.config.rigor_profile == "research":
-            # A required gate this profile promises is unknown, not passed.
-            # Stop for a human rather than write on unverified evidence — the
-            # pause re-enters this whole node on resume, so a transient
-            # provider failure just needs a retry; a persistent one needs the
-            # person to either fix it or knowingly drop rigor_profile.
-            self._pause_for_human(
-                kind="evidence_gate_unknown",
-                interaction="supply",
-                headline="The evidence gate could not be evaluated, and rigor_profile: research requires it before writing.",
-                steps=[
-                    f"What failed: {failure or 'no usable reply from the gate call'}.",
-                    "Check .fi/run.log for the [evidence_gate] entry — this is usually a provider outage, "
-                    "a rate limit, or a reply the gate could not parse.",
-                    "Fix the underlying issue if there is one, then resume: the gate is tried again from scratch.",
-                    "If you're confident the evidence is fine as it stands, you can drop rigor_profile to "
-                    "\"default\" for this quest to proceed unblocked — but that gives up the research-grade guarantee.",
-                ],
-                payload={"assessment": assessment},
+        self._write_receipt(
+            "evidence_gate", "pass" if status == "ok" and verdict == "sufficient" else "fail" if status == "ok" else "unknown",
+            started_at=started, inputs=_gate_inputs(state),
+            output=assessment, error=failure,
+            detail=f"it judged the evidence {verdict} and the paper was written on it (gaps: "
+                   f"{'; '.join(assessment['gaps']) or 'none named'})" if status == "ok" and verdict != "sufficient" else "",
+        )
+        if status == "unknown":
+            self._stop_once_for_check(
+                "evidence_gate", failure or "no usable reply from the gate call",
+                look="the [evidence_gate] entry in .fi/run.log",
+                inputs=_gate_inputs(state),
             )
+        else:
+            self._clear_check_stop("evidence_gate")
         patch: QuestState = {
             "evidence_assessment": assessment,
             "research_protocol": protocol.model_dump(),
@@ -8515,7 +8638,11 @@ class Engine:
         paper_md = state.get("paper_md")
         if not paper_md or not Path(paper_md).is_file():
             self._log.info("[claim_check] no paper to check; skipping")
+            # An earlier draft's receipt must not stand for a paper that is not there.
+            self._write_receipt("claim_check", "unknown", started_at=_receipts.now(), error="there is no paper to check")
             return {}
+        started = _receipts.now()
+        checked_bytes = Path(paper_md).read_bytes()
         paper_text = _paper_for_prompt(Path(paper_md).read_text(encoding="utf-8"), "claim_check", self._log)
         literature = state.get("literature") or []
         audience = self.config.output.audience
@@ -8586,6 +8713,11 @@ class Engine:
                 "[claim_check] grounding call failed (%s); the review will mark "
                 "this draft's citations unchecked", reason,
             )
+            # The receipt too: an earlier draft's must not stand for this one.
+            self._write_receipt("claim_check", "unknown", started_at=started, inputs={"paper": checked_bytes},
+                                error=reason)
+            self._stop_once_for_check("claim_check", reason, look="the [claim_check] entry in .fi/run.log",
+                                      inputs={"paper": checked_bytes})
             return {"claim_grounding": {}, "claim_check_failed": reason}
         parsed = _parse_json_lenient(text) or {}
         # A reply that parses as JSON but never names a "claims" list at all is
@@ -8675,6 +8807,16 @@ class Engine:
                 grounding["grounded"], grounding["total"], len(unsupported),
             )
         self._write_claims_ledger(grounding)
+        self._write_receipt(
+            "claim_check", "unknown" if failed else "fail" if unsupported else "pass", started_at=started,
+            inputs={"paper": checked_bytes}, output=grounding, error=failed,
+            detail=f"{len(unsupported)} of {len(claims)} claim(s) in the final draft are unsupported" if unsupported else "",
+        )
+        if failed:
+            self._stop_once_for_check("claim_check", failed, look="the [claim_check] entry in .fi/run.log",
+                                      inputs={"paper": checked_bytes})
+        else:
+            self._clear_check_stop("claim_check")
         return {"claim_grounding": grounding, "claim_check_failed": failed}
 
     async def _node_select_skills(self, state: QuestState) -> QuestState:
@@ -9903,7 +10045,14 @@ class Engine:
         # With a page limit, this draft is rendered the way paper.pdf will be
         # and its pages counted, for both review paths below. Without one,
         # nothing is rendered.
+        checked = Path(paper_path).read_bytes() if paper_path and Path(paper_path).is_file() else None
         page_hits, page_record = await self._page_limit_review(state, paper_path)
+        if checked is not None and Path(paper_path).is_file() and Path(paper_path).read_bytes() != checked:
+            # The fit only takes Further reading entries or whole sentences out of the draft the claim check judged,
+            # and the claims of a sentence taken out leave its grounding with it (the review reads the grounding of
+            # the paper it reads): no claim is added and none loses its source, so the verdict covers what is left.
+            _receipts.carry_over(self.quest_root, "claim_check", "paper", checked, Path(paper_path).read_bytes(),
+                                 "the page-limit fit only took entries or sentences out of the checked draft")
         # Read after that: it may have dropped Further reading entries from the
         # file, and the review reads the paper as it now is.
         paper_md = ""
@@ -13038,6 +13187,20 @@ def further_reading_listed(markdown: str) -> list[str] | None:
     engine. What the ``further_reading`` bib export follows."""
     block = _further_reading_block(markdown)
     return None if block is None else block.labels
+
+
+def _gate_inputs(state: Any) -> dict[str, Any]:
+    """What the evidence gate weighs, for its receipt and its one stop: the analysis, the cross-check, the results, the
+    protocol and the sources (by title and link)."""
+    sources = [
+        [str((i.get("metadata") or {}).get(k) or "") for k in ("title", "url", "doi")]
+        for i in state.get("literature") or [] if isinstance(i, dict)
+    ]
+    return {
+        "analysis": state.get("analysis") or {}, "cross_check": state.get("cross_check") or {},
+        "results": state.get("result_json") or {}, "protocol": (state.get("design") or {}).get("protocol") or {},
+        "sources": sources, "topic": state.get("topic") or "",
+    }
 
 
 def _trim_further_reading(markdown: str, keep: int) -> str:

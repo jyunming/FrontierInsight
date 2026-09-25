@@ -429,3 +429,18 @@ literature; the model picks from the captions and reads every figure it picked, 
 paper: the pick took the three result plots and left the diagrams and the Transformer's attention figures; Sonnet's
 readings matched the curves and the paper's tables (ResNet-110 about 6.5% against the table's 6.43%), Haiku's were
 several points off (ImageNet plain-18 validation read as 38-40% where the curve ends near 31%).
+
+## Required checks must leave a receipt (re-audit P0-1)
+
+The 2026-09-24 re-audit showed `publication_ready` was reached by absence of error: an evidence gate, design audit or
+claim check that never ran left nothing to report, a statistics computation that crashed became "no gap", and a failed
+assessment left the previous `EVIDENCE.json` in place. Each of the three checks now writes a receipt
+(`needs/receipts/<check>.json`: schema version, status, start and end, producer, input and output hashes, error) every
+time it runs, and the ladder needs all three to say `pass`, the claim check's for the final draft (a page-limit trim,
+which only removes text, carries it over). Missing, unreadable, malformed, other-schema, `unknown`, `fail` and
+`not_applicable` receipts each block the level, one test per case per check; a check turned off is a gap (the user's
+choice, matching the oracle and protocol checks). Under `rigor_profile: research` a check that could not judge stops the
+quest once; resume retries it, and a second failure is recorded as a gap and the quest goes on (the user's choice). A
+test found a stale-receipt bug on the way: a claim-check call that failed returned before writing, leaving an earlier
+draft's receipt. The same work found that any SUPPLY stop other than the named ones (the evidence gate's included) fell
+through to the clarify handling in the run loop; that is fixed in the figures change, which merges first.

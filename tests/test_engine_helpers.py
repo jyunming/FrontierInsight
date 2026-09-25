@@ -601,6 +601,11 @@ async def test_evidence_gate_unknown_pauses_under_research_profile(
             {"topic": "t", "literature": [{"content": "x"}], "analysis": {}})
     assert paused["kind"] == "evidence_gate_unknown"
     assert paused["interaction"] == "supply"
+    receipt = json.loads((engine.quest_root / "needs" / "receipts" / "evidence_gate.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "unknown" and receipt["error"]
+    # The resume tries once more; a second failure goes on (recorded as a gap), never a second stop.
+    patch = await engine._node_evidence_gate({"topic": "t", "literature": [{"content": "x"}], "analysis": {}})
+    assert patch["evidence_assessment"]["status"] == "unknown"
 
 
 async def test_evidence_gate_ok_does_not_pause_under_research_profile(
