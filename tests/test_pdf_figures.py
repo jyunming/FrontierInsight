@@ -344,11 +344,15 @@ async def _stop_here(self, state):  # noqa: ANN001
 
 def test_a_plot_in_the_next_column_never_joins_a_one_column_figure() -> None:
     """Two plots 10 points apart across the gutter; the caption is under the left one."""
-    caption = (50.0, 400.0, 280.0, 410.0)
+    caption = (50.0, 400.0, 285.0, 410.0)
     left_plot = (50.0, 420.0, 290.0, 600.0)
     right_plot = (300.0, 420.0, 560.0, 600.0)
-    box = pdf_figures._figure_box(caption, [], [left_plot, right_plot], 792.0, 612.0)
+    body_beside = ((320.0, 399.0, 560.0, 409.0), "the body text runs on in the right column")
+    box = pdf_figures._figure_box(caption, [body_beside], [left_plot, right_plot], 792.0, 612.0)
     assert box is not None and box[2] <= 312, box
+    # The same two panels over a short caption with nothing beside it: one full-width figure.
+    box = pdf_figures._figure_box((50.0, 400.0, 230.0, 410.0), [], [left_plot, right_plot], 792.0, 612.0)
+    assert box is not None and box[2] >= 560, box
 
 
 def test_a_caption_stops_at_the_paragraph_break_before_the_body_text() -> None:
@@ -480,3 +484,55 @@ def test_the_whole_text_keeps_readings_the_file_could_not_take(tmp_path: Path) -
         "full_text_path": str(whole)}}
     text = _item_content(item)
     assert text.startswith("the whole paper") and "peak 40" in text
+
+
+def test_a_figure_left_out_of_a_reply_is_asked_for_again_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _reading_engine(tmp_path)
+    lit = _literature_with_figures(tmp_path)
+    asked: list[list[str]] = []
+
+    async def pick(*_a, **_k):  # noqa: ANN002, ANN003
+        return '{"pick": ["1:1", "2:1"]}'
+
+    async def partial(messages, **_k):  # noqa: ANN001, ANN003
+        ids = [p["text"][:5] for p in messages[0]["content"][1:] if p.get("type") == "text"]
+        asked.append(ids)
+        if len(asked) == 1:
+            return '{"figures": [{"id": "1:1", "reading": "peak about 4,200"}]}'
+        return '{"figures": [{"id": "2:1", "reading": "peak day 60 at R0 1.5"}]}'
+
+    monkeypatch.setattr(engine, "_chat", pick)
+    monkeypatch.setattr(engine, "_chat_messages", partial)
+    assert asyncio.run(engine._read_literature_figures({}, lit)) == 2
+    assert asked == [["[1:1]", "[2:1]"], ["[2:1]"]], "only the figure left out is sent again"
+
+
+def test_the_cache_is_cut_again_for_a_page_its_ocr_did_not_cover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import knowledge
+
+    monkeypatch.setattr(knowledge, "_figure_cache_dir", lambda: tmp_path / "cache")
+    body = _paper_pdf(tmp_path / "p.pdf").read_bytes()
+    knowledge._pdf_figures(body, ocr_lines={1: []})
+    calls = []
+    real = pdf_figures.find
+    monkeypatch.setattr(pdf_figures, "find", lambda *a, **k: calls.append(1) or real(*a, **k))
+    knowledge._pdf_figures(body, ocr_lines={1: []})
+    assert calls == []
+    knowledge._pdf_figures(body, ocr_lines={1: [], 2: []})
+    assert calls == [1]
+
+
+def test_readings_reach_the_whole_text_exactly_once(tmp_path: Path) -> None:
+    from core.engine import _append_figure_readings, _item_content
+
+    whole = tmp_path / "whole.txt"
+    whole.write_text("the whole paper", encoding="utf-8")
+    figs = [{"number": "1", "page": 2, "caption": "Figure 1.", "reading": "peak 40"},
+            {"number": "2", "page": 3, "caption": "Figure 2.", "reading": "falls to 5"}]
+    item = {"content": "first part", "metadata": {"full_text_path": str(whole), "figures": [dict(figs[0])]}}
+    _append_figure_readings(item)
+    # A resume starts from a state without the readings, and both are appended again.
+    again = {"content": "first part", "metadata": {"full_text_path": str(whole), "figures": [dict(f) for f in figs]}}
+    _append_figure_readings(again)
+    text = _item_content(again)
+    assert text.count("peak 40") == 1 and text.count("falls to 5") == 1, text

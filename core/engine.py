@@ -3673,8 +3673,11 @@ class Engine:
             ledger = {}
         ledger = ledger if isinstance(ledger, dict) else {}
 
-        def key_of(fig: dict[str, Any]) -> str:
-            return str(fig.get("sha256") or fig.get("image") or "")
+        def key_of(fig: dict[str, Any], item: dict[str, Any]) -> str:
+            # The image and the source and figure it belongs to: the same image in two sources is two decisions.
+            meta = item.get("metadata") or {}
+            return "|".join(str(x) for x in (fig.get("sha256") or fig.get("image"), meta.get("doi") or meta.get("url")
+                                               or meta.get("title"), fig.get("number")))
 
         def save_ledger() -> None:
             try:
@@ -3691,7 +3694,7 @@ class Engine:
             for fig in (meta or {}).get("figures") or []:
                 if not isinstance(fig, dict):
                     continue
-                known = ledger.get(key_of(fig))
+                known = ledger.get(key_of(fig, item))
                 if isinstance(known, dict) and "relevant" not in fig:  # judged on an earlier pass of this quest
                     fig["relevant"] = bool(known.get("relevant"))
                     if known.get("reading"):
@@ -3726,7 +3729,7 @@ class Engine:
                     wanted.append(fid)
                 else:
                     todo[fid][1]["relevant"] = False
-                    ledger[key_of(todo[fid][1])] = {"relevant": False}
+                    ledger[key_of(todo[fid][1], todo[fid][0])] = {"relevant": False}
             save_ledger()
         self._log.info("[figures] %d of %d figure(s) picked to read (model: %s)", len(wanted), len(todo),
                        self._model_for_node("figures") or "the main model")
@@ -3746,12 +3749,16 @@ class Engine:
                 self._log.info("[figures] %d figure image(s) could not be read from disk (%r); left for a later pass",
                                len(batch), e)
                 continue
-            parsed: Any = None
-            for attempt in (1, 2):  # a transient failure (a rate limit, an unreadable reply) is tried once more
+            pending = list(batch)
+            for attempt in (1, 2):  # a failed call, an unreadable reply or a figure left out is tried once more
+                if attempt == 2:
+                    content = [content[0]] + [part for i, fid in enumerate(batch) if fid in pending
+                                              for part in content[1 + 2 * i:3 + 2 * i]]
                 try:
                     raw = await self._chat_messages([{"role": "user", "content": content}], node="figures",
                                                     temperature=0.0)
                 except ImageInputUnsupported as e:
+                    save_ledger()
                     self._pause_for_human(
                         kind="figures",
                         interaction="supply",
@@ -3768,23 +3775,23 @@ class Engine:
                     )
                     return read  # unreachable: a SUPPLY pause does not return
                 except Exception as e:  # noqa: BLE001 -- retried once, then left for a later pass
-                    self._log.info("[figures] reading %d figure(s) failed (attempt %d: %r)", len(batch), attempt, e)
+                    self._log.info("[figures] reading %d figure(s) failed (attempt %d: %r)", len(pending), attempt, e)
                     continue
                 parsed = _parse_json_lenient(raw, node="figures")
-                if isinstance(parsed, dict) and isinstance(parsed.get("figures"), list):
+                for entry in (parsed.get("figures") or []) if isinstance(parsed, dict) else []:
+                    if not isinstance(entry, dict) or str(entry.get("id")) not in pending:
+                        continue
+                    reading = str(entry.get("reading") or "").strip()
+                    if not reading:
+                        continue
+                    item, fig = todo[str(entry["id"])]
+                    fig["relevant"], fig["reading"] = True, reading[:_FIGURE_READING_CHARS]
+                    ledger[key_of(fig, item)] = {"relevant": True, "reading": fig["reading"]}
+                    pending.remove(str(entry["id"]))
+                    read += 1
+                if not pending:
                     break
-                self._log.info("[figures] the reading reply named no figures list (attempt %d)", attempt)
-                parsed = None
-            for entry in (parsed or {}).get("figures") or []:
-                if not isinstance(entry, dict) or str(entry.get("id")) not in batch:
-                    continue
-                reading = str(entry.get("reading") or "").strip()
-                if not reading:
-                    continue
-                fig = todo[str(entry["id"])][1]
-                fig["relevant"], fig["reading"] = True, reading[:_FIGURE_READING_CHARS]
-                ledger[key_of(fig)] = {"relevant": True, "reading": fig["reading"]}
-                read += 1
+                self._log.info("[figures] %d figure(s) not read on attempt %d", len(pending), attempt)
             save_ledger()
         for item in {id(item): item for item, _fig in todo.values()}.values():
             _append_figure_readings(item)
@@ -12549,8 +12556,12 @@ def _item_content(item: Any) -> str:
         if text is not None:
             # Values read off the figures that could not be appended to the file are still in the state's copy.
             state_text = str(content or "")
-            if _FIGURE_READINGS_MARK in state_text and _FIGURE_READINGS_MARK not in text:
-                text += state_text[state_text.index(_FIGURE_READINGS_MARK) - 2:]
+            if _FIGURE_READINGS_MARK in state_text:
+                tail = state_text[state_text.index(_FIGURE_READINGS_MARK) + len(_FIGURE_READINGS_MARK):]
+                missing = [b.strip() for b in tail.split(_PARA)
+                           if b.strip() and b.strip() != _FIGURE_READINGS_MARK and b.strip() not in text]
+                if missing:
+                    text += _PARA + _FIGURE_READINGS_MARK + _PARA + _PARA.join(missing) + _NL
             return text
     return str(content or "")
 
@@ -16427,6 +16438,8 @@ _FIGURES_PER_CALL = 4
 _FIGURE_PICK_BATCH = 150
 _FIGURE_READING_CHARS = 2000
 _FIGURE_READINGS_MARK = "---VALUES READ FROM THE FIGURES (by a model, from the images)---"
+_NL = chr(10)
+_PARA = _NL + _NL
 
 
 def _append_figure_readings(item: dict[str, Any]) -> int:
@@ -16437,20 +16450,23 @@ def _append_figure_readings(item: dict[str, Any]) -> int:
     new = [f for f in meta.get("figures") or [] if isinstance(f, dict) and f.get("reading") and not f.get("in_text")]
     if not new:
         return 0
-    block = "\n\n".join(
-        f"Figure {f.get('number')} (page {f.get('page')}): {str(f.get('caption') or '').strip()[:600]}\n"
+    blocks = [
+        f"Figure {f.get('number')} (page {f.get('page')}): {str(f.get('caption') or '').strip()[:600]}{_NL}"
         f"Read from the image: {f['reading']}"
         for f in new
-    )
+    ]
+    block = _PARA.join(blocks)
     text = f"\n\n{_FIGURE_READINGS_MARK}\n\n{block}\n"
     item["content"] = str(item.get("content") or "") + text
     path = meta.get("full_text_path")
     if path:
         try:
             # A resume after a stop part-way through re-applies readings already appended to the file: never twice.
-            if f"Read from the image: {new[-1]['reading']}" not in Path(path).read_text(encoding="utf-8"):
+            on_disk = Path(path).read_text(encoding="utf-8")
+            fresh = [b for b in blocks if b.strip() not in on_disk]
+            if fresh:
                 with open(path, "a", encoding="utf-8") as fh:
-                    fh.write(text)
+                    fh.write(_PARA + _FIGURE_READINGS_MARK + _PARA + _PARA.join(fresh) + _NL)
         except OSError:
             pass  # the state's copy has them, and _item_content adds them back
     for f in new:

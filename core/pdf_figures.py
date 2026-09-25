@@ -142,21 +142,37 @@ def _figure_box(
     seed = min(over, key=lambda g: g[1])
     if seed[1] - top > _MAX_GAP:
         return None
+    mid, slack = width / 2, width * 0.02
+    in_left = seed[2] <= mid + slack
+    other = (mid + slack, width) if in_left else (0.0, mid - slack)
+    # The page is in two columns where the figure sits when the other column holds text beside the caption (the body
+    # running on) or a caption of its own: then a drawing there belongs to that column. A short caption under a figure
+    # whose other column is empty beside it may sit under a full-width figure, which is then allowed to grow across.
+    two_columns = any(
+        b[0] >= other[0] - 2 and b[2] <= other[1] + 2 and b[3] > _bottom - 12 and b[1] < top + 12
+        for b, _t in rects
+    ) or any(
+        b[0] >= other[0] - 2 and b[2] <= other[1] + 2 and _ANY_CAPTION.match(t) and b[1] < ceiling
+        for b, t in rects
+    )
+    caption_spans = left < mid - slack and right > mid + slack
+    seed_spans = seed[0] < mid - slack and seed[2] > mid + slack
+    span = (0.0, width) if caption_spans or seed_spans or not two_columns else (
+        (0.0, mid + slack) if in_left else (mid - slack, width))
+
+    def inside(g: Box) -> bool:
+        return span[0] - 2 <= g[0] and g[2] <= span[1] + 2
+
     box = seed
     for g in over:  # panels side by side resting on the same caption
         overlap = min(g[3], seed[3]) - max(g[1], seed[1])
-        if g[1] - top <= _MAX_GAP and overlap > 0.5 * min(g[3] - g[1], seed[3] - seed[1]):
+        if inside(g) and g[1] - top <= _MAX_GAP and overlap > 0.5 * min(g[3] - g[1], seed[3] - seed[1]):
             box = _union(box, g)
-    mid, slack = width / 2, width * 0.02
-    spans_middle = (box[0] < mid - slack and box[2] > mid + slack) or (left < mid - slack and right > mid + slack)
-    span = (0.0, width) if spans_middle else ((0.0, mid + slack) if box[2] <= mid + slack else (mid - slack, width))
     grown = True
     while grown:  # panels above, arrows and frames touching the drawing, within the figure's column
         grown = False
         for g in candidates:
-            if g[0] < span[0] - 2 or g[2] > span[1] + 2:
-                continue
-            if _union(box, g) != box and _near(box, g, 14):
+            if inside(g) and _union(box, g) != box and _near(box, g, 14):
                 box, grown = _union(box, g), True
     for b, _text in rects:  # axis labels, legends and panel titles at the drawing's edge
         if b[1] > top + 1 and b[3] <= ceiling and _near(box, b, 4) and (b[2] - b[0]) < 0.5 * (box[2] - box[0]):

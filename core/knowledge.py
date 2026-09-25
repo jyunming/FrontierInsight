@@ -1152,7 +1152,7 @@ def _pdf_figures(body: bytes, *, ocr_lines: dict[int, Any] | None = None) -> lis
 
     Safe for quests of one ``--fleet`` cutting the same PDF at once: each image is named by its own content hash and
     written whole then renamed, and the index is renamed into place last; a cached index is used only when every image
-    it names is there with that hash, and an index cut without OCR lines is cut again when they are given."""
+    it names is there with that hash, and it is cut again when OCR lines come for a page it was cut without."""
     from core import pdf_figures
 
     key = hashlib.sha256(body).hexdigest()
@@ -1162,7 +1162,7 @@ def _pdf_figures(body: bytes, *, ocr_lines: dict[int, Any] | None = None) -> lis
         hit = json.loads(index.read_text(encoding="utf-8"))
         figures_hit = hit.get("figures") if isinstance(hit, dict) else None
         if (isinstance(figures_hit, list) and hit.get("version") == _FIGURE_INDEX_VERSION
-                and (hit.get("with_ocr") or not ocr_lines)
+                and set(map(int, ocr_lines or {})) <= set(map(int, hit.get("ocr_pages") or []))
                 and all(isinstance(f, dict) and hashlib.sha256(Path(str(f["image"])).read_bytes()).hexdigest()
                         == f.get("sha256") for f in figures_hit)):
             return figures_hit
@@ -1183,7 +1183,8 @@ def _pdf_figures(body: bytes, *, ocr_lines: dict[int, Any] | None = None) -> lis
             out.append({"number": fig.number, "page": fig.page, "caption": fig.caption, "image": str(target),
                         "scanned": fig.scanned, "sha256": digest})
         tmp = index.with_name(f"figures.json.{tag}.tmp")
-        tmp.write_text(json.dumps({"version": _FIGURE_INDEX_VERSION, "with_ocr": bool(ocr_lines), "figures": out}),
+        tmp.write_text(json.dumps({"version": _FIGURE_INDEX_VERSION, "ocr_pages": sorted(map(int, ocr_lines or {})),
+                                   "figures": out}),
                        encoding="utf-8")
         os.replace(tmp, index)
     except OSError as e:
