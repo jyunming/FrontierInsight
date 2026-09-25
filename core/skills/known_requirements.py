@@ -109,12 +109,13 @@ def _parse(requirement: str) -> tuple[str, str, bool]:
         marker = f"; {req.marker}" if req.marker else ""
         return req.name, extras + marker, bool(str(req.specifier)) or bool(req.url)
     except Exception:  # noqa: BLE001 -- packaging missing, or an odd string: a plain parse
-        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*(.*)", requirement)
+        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(\[[^\]]*\])?\s*(.*)", requirement)
         if not m:
             return requirement.strip(), "", True
         rest = m.group(3).strip()
+        extras = re.sub(r"\s+", "", m.group(2) or "")
         marker = f"; {rest[1:].strip()}" if rest.startswith(";") else ""  # a marker with no version is kept
-        return m.group(1), (m.group(2) or "") + marker, bool(rest) and not rest.startswith(";")
+        return m.group(1), extras + marker, bool(rest) and not rest.startswith(";")
 
 
 def pinned(requirement: str, *, python: tuple[int, int] | None = None) -> str:

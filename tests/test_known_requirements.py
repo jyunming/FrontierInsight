@@ -91,6 +91,8 @@ def test_without_packaging_a_marker_survives_the_pin(monkeypatch) -> None:
     monkeypatch.setattr(builtins, "__import__", no_packaging)
     assert kr.pinned('landlab; python_version < "3.13"', python=(3, 11)) == 'landlab==2.10.1; python_version < "3.13"'
     assert kr.pinned("landlab[all]", python=(3, 11)) == "landlab[all]==2.10.1"
+    assert kr.pinned('landlab [all]; python_version < "3.13"', python=(3, 11)) == 'landlab[all]==2.10.1; python_version < "3.13"'
+    assert kr.pinned("landlab>=2.9", python=(3, 11)) == "landlab>=2.9"
 
 
 def test_only_a_folder_named_skill_sources_marks_a_preset() -> None:
