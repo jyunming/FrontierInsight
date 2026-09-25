@@ -246,6 +246,17 @@ def test_engine_does_not_record_a_rejected_quest(
     assert history(skill) == []
 
 
+@pytest.mark.parametrize("status", ["unreviewed", "error"])
+def test_engine_does_not_record_an_accept_no_reviewer_gave(skill: Skill, monkeypatch, status: str) -> None:
+    from core.engine import Engine
+
+    monkeypatch.setenv("FI_SKILLS_DIR", str(skill.path.parent))
+    Engine._record_skill_usage(  # type: ignore[arg-type]
+        _engine(), {"selected_skills": ["demo"], "review": {"verdict": "accept", "status": status}},
+    )
+    assert history(skill) == []
+
+
 def test_engine_no_skills_selected_is_a_no_op(skill: Skill, monkeypatch) -> None:
     from core.engine import Engine
 

@@ -1319,6 +1319,14 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     return false;
   }
 
+  // A verdict no reviewer gave (review_status other than "ok") is said so, with each panelist that did not review.
+  function reviewStatusHtml(snap) {
+    const notOk = (snap.panel || []).filter(p => (p.status || 'ok') !== 'ok');
+    if ((snap.review_status || 'ok') === 'ok' && !notOk.length) return '';
+    return `<div class="text-error">No reviewer gave this verdict; judge the paper yourself.` +
+      notOk.map(p => ` ${escapeHtml(p.persona || '?')}: ${escapeHtml(p.error || p.status)}.`).join('') + `</div>`;
+  }
+
   function renderHumanReviewPanel(snap) {
     const sec = document.getElementById('human-review-section');
     sec.classList.remove('hidden'); sec.classList.add('flex');
@@ -1329,6 +1337,7 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       `<div><b>Verdict:</b> <code class="font-code-md text-secondary">${escapeHtml(verdict)}</code> &nbsp; ` +
       `<b>Score:</b> <code class="font-code-md text-secondary">${escapeHtml(String(score))}</code> &nbsp; ` +
       `<b>Iteration:</b> <code class="font-code-md text-secondary">${escapeHtml(String(snap.iteration ?? 0))}</code></div>` +
+      reviewStatusHtml(snap) +
       (snap.rationale ? `<div class="text-on-surface-variant">${escapeHtml(snap.rationale)}</div>` : '') +
       (snap.paper_md_path ? `<div class="font-code-md text-code-md text-outline">paper: ${escapeHtml(snap.paper_md_path)}</div>` : '');
     const mfh = document.getElementById('human-review-must-flag');
