@@ -321,6 +321,9 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
         say("Approving these changes to how strictly the quest is checked:")
         for line in changed:
             say(f"  - {line}")
+    elif not isinstance(approved, dict) and say is not None and (quest_root / "config.yaml").is_file():
+        say("")
+        say("No earlier record of the settings this quest was approved with; approving them as they are now.")
     plan_settings.record(fi_dir, cfg, quest_root)
     return changed
 

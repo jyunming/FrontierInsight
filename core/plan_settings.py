@@ -146,7 +146,8 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         approved = data["settings"] if data.get("schema") == SCHEMA else None
-        explicit = set(data.get("explicit") or [p for p, _label in SETTINGS])
+        # An empty list is a record that the file set none of them; only a record from before the list is "all".
+        explicit = set(data["explicit"]) if isinstance(data.get("explicit"), list) else {p for p, _label in SETTINGS}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         approved, explicit = None, set()
     if not isinstance(approved, dict):

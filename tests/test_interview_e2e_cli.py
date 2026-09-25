@@ -315,3 +315,15 @@ def test_a_held_value_outside_a_closed_questions_choices_is_not_offered(monkeypa
     q = next(x for x in QUESTIONS if x.id == "result_use")
     assert _cli_prompt_for(q, {"result_use": "not-a-choice"}, {}) == q.default
     assert _cli_prompt_for(q, {"result_use": "explore"}, {}) == "explore"
+
+
+def test_a_custom_list_answer_survives_a_blank_answer(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Output bundles are lists; a person's own mix (not one of the bundles) must not be replaced on --update."""
+    from core.interview import QUESTIONS
+    from launch import _cli_prompt_for
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    q = next(x for x in QUESTIONS if x.id == "output_kinds")
+    own = ["paper_md", "poster"]
+    assert _cli_prompt_for(q, {"output_kinds": own}, {}) == own
+    assert "now: paper_md, poster; press Enter to keep it" in capsys.readouterr().out
