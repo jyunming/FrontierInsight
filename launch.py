@@ -3341,11 +3341,17 @@ async def _run_new(
     tier2_qs = questions_for_tier(2, frontend)
     tier3_qs = questions_for_tier(3, frontend)
 
+    # The author line is asked on the first interview only, then kept (core/profile.py) and shown for editing below.
+    from core import profile as _profile
+
+    saved_profile = _profile.load()
+    if saved_profile is not None:
+        partial.update(saved_profile)
+
     # ---- Stage 1: ask tier-1 sequentially ----
     try:
         for q in tier1:
-            if q.id == "ensemble_models" and str(partial.get("ensemble_profile") or "off") == "off":
-                partial[q.id] = ""      # no ensemble, nothing to name
+            if saved_profile is not None and q.id in _profile.FIELDS:
                 continue
             answer = _cli_prompt_for(q, partial, {})
             if answer is None:
@@ -3353,25 +3359,20 @@ async def _run_new(
                 print("— interview cancelled.")
                 return 1
             partial[q.id] = answer
-            if q.id == "ensemble_models":
-                from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
-                if len(parse_ensemble_models(answer)) < ENSEMBLE_MIN_MODELS:
-                    print(
-                        f"    ⚠ fewer than {ENSEMBLE_MIN_MODELS} models named — no ensemble will be "
-                        "configured (FI does not pick models for you)."
-                    )
     except (KeyboardInterrupt, EOFError):
         print()
         print("— interview cancelled (Ctrl-C / EOF).")
         return 1
 
     # ---- Stage 2: preflight LLM + derive tier-2 + tier-3 ----
+    derived = derive_tier2(partial)
+    advanced = derive_tier3(partial)
     print()
     print("⏳ Calling clarify-preflight to suggest topic-tuned defaults...")
     try:
         preflight_cache = await preflight_clarify(
             topic=str(partial.get("topic", "")),
-            paper_format=str(partial.get("paper_format", "generic")),
+            paper_format=str(derived.get("paper_format") or "generic"),
             provider_name=str(partial.get("provider") or "openai"),
             provider_model=partial.get("provider_model"),  # type: ignore[arg-type]
         )
@@ -3381,8 +3382,6 @@ async def _run_new(
         preflight_cache = {}
     print()
 
-    derived = derive_tier2(partial)
-    advanced = derive_tier3(partial)
     # Overlay preflight-suggested values onto tier-3 placeholders so
     # the user sees the LLM's suggestions in the review screen.
     for k in ("comparative_baseline", "success_metric", "budget"):
@@ -3391,10 +3390,13 @@ async def _run_new(
 
     # ---- Stage 3: review-and-edit loop ----
     show_advanced = False
+    edited: set[str] = set()
+    author_qs = tuple(q for q in tier1 if q.id in _profile.FIELDS)
     try:
         while True:
-            rows = _build_review_rows(derived, advanced, tier2_qs, tier3_qs, show_advanced)
-            _print_plan_summary(partial)
+            rows = _build_review_rows(derived, advanced, tier2_qs, tier3_qs, show_advanced,
+                                      author=(author_qs, partial))
+            _print_plan_summary({**partial, **derived, **advanced})
             _print_review(rows, show_advanced=show_advanced)
             choice = input(
                 "\nEdit which? [number to edit, "
@@ -3442,8 +3444,23 @@ async def _run_new(
                 if resolved != list(new_val):  # type: ignore[arg-type]
                     print(f"    (research needs {', '.join(r for r in resolved if r not in new_val)} on the panel; added)")  # type: ignore[operator]
                 new_val = resolved
-            if row["tier"] == 2:
+            if row["id"] == "ensemble_models":
+                from core.interview import ENSEMBLE_MIN_MODELS, parse_ensemble_models
+                if len(parse_ensemble_models(new_val)) < ENSEMBLE_MIN_MODELS:
+                    print(
+                        f"    ⚠ fewer than {ENSEMBLE_MIN_MODELS} models named — no ensemble will be "
+                        "configured (FI does not pick models for you)."
+                    )
+            if row["tier"] == 1:  # the author line: this quest, and kept in the profile for later ones
+                partial[row["id"]] = new_val
+                edited.add(row["id"])
+            elif row["tier"] == 2:
                 derived[row["id"]] = new_val
+                edited.add(row["id"])
+                # What follows from it (study depth and retrieval size from the paper format, ...) is worked out
+                # again, except what was set by hand.
+                fresh = derive_tier2({**partial, **{k: v for k, v in derived.items() if k in edited}})
+                derived.update({k: v for k, v in fresh.items() if k not in edited})
             else:
                 advanced[row["id"]] = new_val
     except (KeyboardInterrupt, EOFError):
@@ -3456,13 +3473,13 @@ async def _run_new(
     answers = InterviewAnswers(
         topic=str(partial["topic"]),
         title=str(derived["title"]),
-        output_kinds=list(partial["output_kinds"]),  # type: ignore[arg-type]
-        paper_format=str(partial["paper_format"]),
+        output_kinds=list(derived["output_kinds"]),  # type: ignore[arg-type]
+        paper_format=str(derived["paper_format"]),
         # survey_mode implies no_simulation (no experiment, no dataset) — OR
         # them so the answers object is never internally inconsistent.
         no_simulation=bool(derived["no_simulation"]) or _survey_mode,
         survey_mode=_survey_mode,
-        study_depth=str(partial["study_depth"]),
+        study_depth=str(derived["study_depth"]),
         comparative_baseline=str(advanced.get("comparative_baseline") or ""),
         success_metric=str(advanced.get("success_metric") or ""),
         budget=str(advanced.get("budget") or ""),
@@ -3481,12 +3498,9 @@ async def _run_new(
         supply_papers=bool(advanced.get("supply_papers", True)),
         pause_for_plan=bool(advanced.get("pause_for_plan", False)),
         result_use=str(partial.get("result_use") or "research"),
-        # ensemble_profile is a tier-1 question, so the pick is in
-        # ``partial``; ``advanced`` only holds tier-3 slots.
-        ensemble_profile=str(
-            partial.get("ensemble_profile") or advanced.get("ensemble_profile") or "off"
-        ),
-        ensemble_models=str(partial.get("ensemble_models") or ""),
+        # Advanced (tier 3): off unless the person opened Advanced and named the models.
+        ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
+        ensemble_models=str(advanced.get("ensemble_models") or ""),
         max_iterations=int(advanced.get("max_iterations", 2) or 2),
         author=" ".join(str(partial.get("author") or "").split()),
         affiliation=" ".join(str(partial.get("affiliation") or "").split()),
@@ -3500,6 +3514,13 @@ async def _run_new(
             on_error=lambda message: print(f"⚠ {message}; no page limit set."),
         ),
     )
+
+    if saved_profile is None or edited & set(_profile.FIELDS):
+        try:
+            _profile.save({k: getattr(answers, k) for k in _profile.FIELDS})
+            print(f"  (your author line is kept in {_profile.path()} for the next quests)")
+        except OSError as e:
+            print(f"  ⚠ the author line could not be kept for the next quests ({e})")
 
     yaml_text = answers_to_yaml(answers, frontend="cli")
     drafts_dir = output_root / "_drafts"
@@ -3560,6 +3581,8 @@ def _print_plan_summary(partial: dict[str, object]) -> None:
     ensemble = str(partial.get("ensemble_profile") or "off")
     if ensemble != "off":
         print(f"  Ensemble     : {ensemble} ({partial.get('ensemble_models') or 'no models named'})")
+    byline = ", ".join(str(partial.get(k)) for k in ("author", "affiliation") if partial.get(k))
+    print(f"  Author line  : {byline or '(none: the Frontier Insight byline)'}")
 
 
 def _build_review_rows(
@@ -3568,16 +3591,26 @@ def _build_review_rows(
     tier2_qs: tuple,  # type: ignore[type-arg]
     tier3_qs: tuple,  # type: ignore[type-arg]
     show_advanced: bool,
+    author: tuple | None = None,  # type: ignore[type-arg]
 ) -> list[dict[str, object]]:
     """Pack tier-2 (always) + tier-3 (when ``show_advanced``) into a
     numbered list the review screen prints. Each row carries the
-    Question so the edit handler can re-prompt that exact slot."""
+    Question so the edit handler can re-prompt that exact slot. ``author``
+    is ``(questions, answers)`` for the author line, listed last among the
+    always-shown rows so it can be changed (and kept) here."""
     rows: list[dict[str, object]] = []
     for q in tier2_qs:
         rows.append({
             "id": q.id, "tier": 2, "label": q.label,
             "value": derived.get(q.id), "question": q,
         })
+    if author is not None:
+        author_qs, answers = author
+        for q in author_qs:
+            rows.append({
+                "id": q.id, "tier": 1, "label": q.label,
+                "value": answers.get(q.id) or "", "question": q,
+            })
     if show_advanced:
         for q in tier3_qs:
             rows.append({

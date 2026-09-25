@@ -426,8 +426,11 @@ the title (and uses the author as the PDF's Author field), the slides put
 them on the title slide, and the poster puts them in its header, with the
 link as a QR code. Every field is optional: with no author set the byline
 stays "Frontier Insight", and a field left empty is simply not printed.
-All three interviews ask for them right after the main questions; press
-Enter to skip any of them.
+The first interview on any of the three interfaces asks for them (press
+Enter to skip any); they are kept in `~/.frontier-insight/profile.json`
+(`FI_PROFILE_PATH` moves it), which all three read, so later interviews
+fill them in without asking and show them on the review screen, where a
+change is kept for the next quests too.
 
 These values are written only into the quest's own files. They are not
 sent to the literature or web search services. If the visual check of the

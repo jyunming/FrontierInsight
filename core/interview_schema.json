@@ -112,7 +112,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 2
     },
     {
       "id": "output_kinds",
@@ -168,7 +168,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 2
     },
     {
       "id": "paper_style",
@@ -262,7 +262,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 2
     },
     {
       "id": "provider",
@@ -788,7 +788,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 3
     },
     {
       "id": "ensemble_models",
@@ -805,7 +805,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 3
     },
     {
       "id": "max_iterations",

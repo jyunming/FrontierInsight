@@ -11,6 +11,9 @@
  */
 import * as vscode from "vscode";
 import { execSync } from "child_process";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import {
     ENSEMBLE_MIN_MODELS,
     InterviewAnswers,
@@ -265,7 +268,7 @@ export async function runInterview(
     stream: vscode.ChatResponseStream,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** Five quick questions and an optional author line, then I'll show you the auto-derived defaults — edit anything before launch.\n\n",
+        "🧪 **Let's set up a new research quest.** Two questions (and your author line the first time), then I'll show you the defaults worked out from your topic — edit anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
@@ -289,75 +292,9 @@ export async function runInterview(
     // different folder name.
     const suggestedTitle = slugify(topic).slice(0, 40) || "quest";
 
-    // 3. Output kinds — multi-select.
-    const outputChoice = await vscode.window.showQuickPick(
-        [
-            {
-                label: "$(book) paper + PDF (recommended)",
-                description: "MD + PDF; needs pandoc + LaTeX on PATH",
-                value: ["paper_md", "paper_pdf"],
-            },
-            {
-                label: "$(symbol-class) everything",
-                description: "paper, PDF, slides, poster, talk script",
-                value: ["paper_md", "paper_pdf", "slides", "poster", "speech"],
-            },
-            {
-                label: "$(layout) paper + PDF + slides",
-                description: "PDF via pandoc+LaTeX; slides via Marp + .pptx via pandoc",
-                value: ["paper_md", "paper_pdf", "slides"],
-            },
-            {
-                label: "$(file-text) paper only (Markdown)",
-                description: "fastest; no extra system tools needed",
-                value: ["paper_md"],
-            },
-        ],
-        {
-            title: "Frontier Insight — which deliverables?",
-            placeHolder:
-                "Default is paper + PDF — most users want the rendered file. PDF gracefully degrades to MD if pandoc isn't installed.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!outputChoice) return undefined;
-    stream.markdown(
-        `  **Outputs:** ${(outputChoice.value as string[]).join(", ")}\n\n`,
-    );
-
-    // If the user asked for paper_pdf or slides or poster, check that
-    // the required system tools are installed BEFORE the quest fires.
-    // We don't refuse the choice — generators degrade gracefully and
-    // skip the missing format — but the user should know upfront so
-    // the "wait, where's my PDF" question doesn't happen later.
-    const kinds = outputChoice.value as string[];
-    const missing: string[] = [];
-    if (kinds.includes("paper_pdf") && !(isOnPath("pandoc") && isOnPath("pdflatex"))) {
-        missing.push(
-            "`paper_pdf` requires **pandoc** + a LaTeX engine (`pdflatex`) on PATH. " +
-            "Install: pandoc.org/installing.html + miktex.org (Windows) / tinytex.org (mac/Linux). " +
-            "Without these, the quest produces `paper.md` only.",
-        );
-    }
-    if (kinds.includes("slides") && !isOnPath("marp")) {
-        missing.push(
-            "`slides` requires **marp** CLI. Install: `npm i -g @marp-team/marp-cli`. " +
-            "Without it, the quest produces `slides.md` only (no `.html`/`.pdf`).",
-        );
-    }
-    if (kinds.includes("poster") && !isOnPath("pdflatex")) {
-        missing.push(
-            "`poster` requires `pdflatex`. See the PDF prerequisites above.",
-        );
-    }
-    if (missing.length > 0) {
-        stream.markdown(
-            "⚠️ **Missing tools** (selected outputs will be partial):\n\n" +
-            missing.map((m) => `  - ${m}`).join("\n") +
-            "\n\n",
-        );
-    }
-
+    // The deliverables, the paper format and the study depth are worked out (tier 2 in core/interview.py) and shown on
+    // the review screen to change; the multi-model ensemble is an advanced field (tier 3). Only the topic, what the
+    // result is for and (on the first interview) the author line are asked.
     // 3b. What is the result for? Sets how strictly the quest is checked (core/interview.py:RESULT_USE_CHOICES, same
     // wording): research or a decision is the research profile; exploring is a cheaper draft. The same answer writes
     // the same settings on every interface.
@@ -391,199 +328,23 @@ export async function runInterview(
 
 `);
 
-    // 4. Paper format (article type) — the venue/style for the
-    // written deliverable. Must stay in sync with PaperFormat in
-    // core/config.py (scientific venues + non-scientific prose).
-    // The clarify agent picks this slot when clarify_mode != "off";
-    // exposing it here lets a user lock the format upfront without
-    // burning a clarify call to "discover" what they already know.
-    const paperFormatChoice = await vscode.window.showQuickPick(
-        [
-            // Scientific venues — pick when the topic is computational
-            // / experimental. The clarify agent maps these to
-            // simulatability == "yes". Order: most generic first.
-            {
-                label: "$(file) generic — scientific paper, IMRAD",
-                description: "Default. Surveys, comparative reviews, theoretical derivations, brief preprints.",
-                value: "generic" as const,
-            },
-            {
-                label: "$(beaker) NeurIPS — ML benchmark / algorithm",
-                description: "Empirical ML, neural networks, learning algorithms, journal-length.",
-                value: "neurips" as const,
-            },
-            {
-                label: "$(beaker) ICLR — representation learning",
-                description: "Representations, generative models, ML theory.",
-                value: "iclr" as const,
-            },
-            {
-                label: "$(circuit-board) IEEE Access — engineering / systems",
-                description: "Hardware/software architectures, measurement studies, engineering experiments.",
-                value: "ieee_access" as const,
-            },
-            {
-                label: "$(symbol-namespace) Nature MI — physical sciences",
-                description: "Physics / chemistry / materials simulation, scientific-method experiments.",
-                value: "nature_mi" as const,
-            },
-            // Non-scientific prose — pick when the topic is
-            // qualitative / historical / cultural / business / policy.
-            // The clarify agent maps these to simulatability == "no".
-            {
-                label: "$(book) essay — long-form argumentative prose",
-                description: "Cultural / historical / intellectual / qualitative cross-case analysis. Argue a thesis.",
-                value: "essay" as const,
-            },
-            {
-                label: "$(briefcase) report — consulting-style exec report",
-                description: "Business / operational / market analysis with cover + TOC. Decision-maker audience.",
-                value: "report" as const,
-            },
-            {
-                label: "$(law) policy brief — 2-4 page recommendation",
-                description: "Single decision for policymakers. Issue + context + recommendation.",
-                value: "policy_brief" as const,
-            },
-            {
-                label: "$(file-pdf) whitepaper — 8-20 page industry analysis",
-                description: "Vendor-neutral tech trends / standards / architecture comparisons. Practitioner audience.",
-                value: "whitepaper" as const,
-            },
-        ],
-        {
-            title: "Frontier Insight — paper format / venue?",
-            placeHolder:
-                "Picks the LaTeX template + writing persona. 'generic' is the safe default for scientific topics; 'essay' for non-computational humanities/social-science.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!paperFormatChoice) return undefined;
-    const paperFormat: PaperFormat = paperFormatChoice.value;
-    stream.markdown(`  **Paper format:** \`${paperFormat}\`\n\n`);
+    const paperFormat: PaperFormat = "generic";
+    const outputKinds = ["paper_md", "paper_pdf"];
+    const studyDepth = studyDepthFor(paperFormat, topic);
+    const missingNote = missingToolsNote(outputKinds);
+    if (missingNote) stream.markdown(missingNote);
 
-    // 5. Research approach — auto-derived in tier-2 (PROSE_FORMATS
-    // → no_simulation=true). The user can override it from the
-    // review screen.
-
-    // 6. Study depth — drives paper length + citation depth.
-    //    Smart-defaulted off the chosen paper_format: policy_brief
-    //    is by definition 2-4 pages, so we default it to "brief
-    //    preprint"; other formats default to "journal-length"
-    //    unless the topic looks survey-shaped. Matches
-    //    core/interview.py:smart_default_study_depth.
-    const isPolicyBrief = paperFormat === "policy_brief";
-    const looksSurvey = /\b(survey|review of|compar)/i.test(topic);
-    const studyDepthDefaultLabel = isPolicyBrief
-        ? "brief preprint (recommended for policy_brief)"
-        : looksSurvey
-            ? "comprehensive review (recommended for survey topics)"
-            : "journal-length (recommended)";
-    const studyDepthChoice = await vscode.window.showQuickPick(
-        [
-            {
-                label: `$(symbol-file) ${studyDepthDefaultLabel}`,
-                description: isPolicyBrief
-                    ? "1–2 pages; terse opening; novel findings only. Default for policy_brief."
-                    : looksSurvey
-                        ? "10–15 pages with Background + Comparison + Synthesis. ~4000+ words, 10+ discussed citations."
-                        : "4–8 pages, full IMRAD or prose equivalent. ~1500–2500 words, ~15 citations.",
-                value: (isPolicyBrief
-                    ? "brief preprint"
-                    : looksSurvey
-                        ? "comprehensive review"
-                        : "journal-length") as
-                    | "brief preprint"
-                    | "journal-length"
-                    | "comprehensive review",
-            },
-            {
-                label: "$(book) journal-length",
-                description: "4–8 pages, full IMRAD. ~1500–2500 words, ~15 citations.",
-                value: "journal-length" as const,
-            },
-            {
-                label: "$(zap) brief preprint",
-                description: "1–2 pages, terse, novel findings only.",
-                value: "brief preprint" as const,
-            },
-            {
-                label: "$(library) comprehensive review",
-                description: "10–15 pages with extensive prior-work discussion.",
-                value: "comprehensive review" as const,
-            },
-        ],
-        {
-            title: "Frontier Insight — study depth?",
-            placeHolder:
-                "Gates the paper's length and citation count. journal-length is the safe default.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!studyDepthChoice) return undefined;
-    const studyDepth = studyDepthChoice.value;
-    stream.markdown(`  **Study depth:** \`${studyDepth}\`\n\n`);
-
-    // 7. Multi-model ensemble — tier 1 in core/interview.py, because the
-    // cost multiplier is a launch-time decision rather than a hidden
-    // tweak. Labels and descriptions are taken verbatim from
-    // ENSEMBLE_PROFILES so a VS Code user and a CLI user are choosing
-    // between the same four options with the same stated costs.
-    const ensembleChoice = await vscode.window.showQuickPick(
-        [
-            {
-                label: "$(circle-outline) Single model (default, cheapest)",
-                description: "One LLM call per node. Cost baseline = 1×.",
-                value: "off" as const,
-            },
-            {
-                label: "$(git-compare) Fan out cross_check only (~1.3× cost)",
-                description: "3 models vote per finding; catches issues the writer might miss. Minimal extra spend.",
-                value: "cross_check_only" as const,
-            },
-            {
-                label: "$(lightbulb) Fan out ideate + cross_check (~2.0× cost)",
-                description: "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding.",
-                value: "ideate_and_check" as const,
-            },
-            {
-                label: "$(organization) Fan out ideate + analyze + cross_check (~2.5× cost)",
-                description: "Multi-model on the three highest-leverage nodes. Best signal; highest cost.",
-                value: "full" as const,
-            },
-        ],
-        {
-            title: "Frontier Insight — multi-model ensemble?",
-            placeHolder:
-                "Run the same node across multiple LLMs and merge their answers. Cost multiplies; agreement signal increases.",
-            ignoreFocusOut: true,
-        },
-    );
-    if (!ensembleChoice) return undefined;
-    const ensembleProfile = ensembleChoice.value;
-    stream.markdown(`  **Ensemble:** \`${ensembleProfile}\`\n\n`);
-
-    // 7b. Which models? FI does not choose them: the list is what THIS VSCode
-    // offers (Copilot, an Ollama server, a BYOK endpoint...), and the user ticks.
-    let ensembleModels = "";
-    if (ensembleProfile !== "off") {
-        const picked = await pickEnsembleModels();
-        if (picked === undefined) return undefined;
-        ensembleModels = picked.join(", ");
-        stream.markdown(
-            picked.length >= ENSEMBLE_MIN_MODELS
-                ? `  **Ensemble models:** ${picked.map((m) => `\`${m}\``).join(", ")}\n\n`
-                : `  ⚠ **Fewer than ${ENSEMBLE_MIN_MODELS} models picked** — no ensemble will be configured. FI does not choose models for you.\n\n`,
-        );
+    // Author line — asked on the first interview only, then kept in the profile every interface reads
+    // (core/profile.py); a later interview fills it from there and shows it below to change.
+    const savedProfile = loadProfile();
+    let authorLine: AuthorLine | undefined = savedProfile ?? undefined;
+    if (!authorLine) {
+        authorLine = await askAuthorLine();
+        if (!authorLine) return undefined;
     }
-
-    // 8. Author line — optional, printed on the paper, slides and poster.
-    // Mirrors the tier-1 author questions in core/interview.py.
-    const authorLine = await askAuthorLine();
-    if (!authorLine) return undefined;
     const byline = formatAuthorLine(authorLine);
     if (byline) {
-        stream.markdown(`  **Author line:** ${truncate(byline, 200)}\n\n`);
+        stream.markdown(`  **Author line:** ${truncate(byline, 200)}${savedProfile ? " _(from your saved details)_" : ""}\n\n`);
     }
 
     // ─── Tier-2 derivation (mirrors core/interview.py SMART_DEFAULTS) ───
@@ -596,7 +357,7 @@ export async function runInterview(
     const answers: InterviewAnswers = {
         topic: topic.trim(),
         title: suggestedTitle,
-        output_kinds: outputChoice.value as string[],
+        output_kinds: outputKinds,
         paper_format: paperFormat,
         clarify_mode: "auto",
         // Match the Python smart default: a 3-persona panel. An empty list
@@ -622,10 +383,9 @@ export async function runInterview(
         node_models: "",
         reasoning_effort: "default",
         provider_model: "",
-        // Asked above (tier 1 in the schema). "off" keeps single-call
-        // semantics; anything else expands into provider.node_ensemble.
-        ensemble_profile: ensembleProfile,
-        ensemble_models: ensembleModels,
+        // Advanced (tier 3): off unless changed there; anything else expands into provider.node_ensemble.
+        ensemble_profile: "off",
+        ensemble_models: "",
         // Schema defaults, editable from the review screen below.
         paper_style: "latex",
         pause_for_user_input: "never",
@@ -670,6 +430,15 @@ export async function runInterview(
             return undefined;
         }
         if (action.value === "launch") {
+            // Kept for the next quests on every interface (the first interview, or a line changed above).
+            const line: AuthorLine = {
+                author: answers.author ?? "", affiliation: answers.affiliation ?? "",
+                contact_email: answers.contact_email ?? "", url: answers.url ?? "",
+            };
+            if (!savedProfile || formatAuthorLine(line) !== formatAuthorLine(savedProfile)
+                || JSON.stringify(line) !== JSON.stringify(savedProfile)) {
+                saveProfile(line);
+            }
             return answers;
         }
         if (action.value === "edit_default") {
@@ -718,6 +487,9 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push("\n### Review before launch\n");
     lines.push("| Field | Value |");
     lines.push("|---|---|");
+    lines.push(`| Paper format | \`${a.paper_format}\` |`);
+    lines.push(`| Deliverables | ${a.output_kinds.join(", ")} |`);
+    lines.push(`| Study depth | \`${a.study_depth}\` |`);
     lines.push(`| Title (auto-slug) | \`${a.title}\` |`);
     lines.push(`| Research approach | ${a.survey_mode === true ? "literature synthesis (survey — no experiment/data)" : a.no_simulation ? "observational" : "computational"} |`);
     lines.push(`| Clarify mode | \`${a.clarify_mode}\` |`);
@@ -861,10 +633,274 @@ function formatAuthorLine(a: Partial<AuthorLine>): string {
 }
 
 
-/** Inline editor for the seven tier-2 defaults. */
+/** The deliverables picker (review screen). */
+async function pickOutputKinds(): Promise<string[] | undefined> {
+    const outputChoice = await vscode.window.showQuickPick(
+        [
+            {
+                label: "$(book) paper + PDF (recommended)",
+                description: "MD + PDF; needs pandoc + LaTeX on PATH",
+                value: ["paper_md", "paper_pdf"],
+            },
+            {
+                label: "$(symbol-class) everything",
+                description: "paper, PDF, slides, poster, talk script",
+                value: ["paper_md", "paper_pdf", "slides", "poster", "speech"],
+            },
+            {
+                label: "$(layout) paper + PDF + slides",
+                description: "PDF via pandoc+LaTeX; slides via Marp + .pptx via pandoc",
+                value: ["paper_md", "paper_pdf", "slides"],
+            },
+            {
+                label: "$(file-text) paper only (Markdown)",
+                description: "fastest; no extra system tools needed",
+                value: ["paper_md"],
+            },
+        ],
+        {
+            title: "Frontier Insight — which deliverables?",
+            placeHolder:
+                "Default is paper + PDF — most users want the rendered file. PDF gracefully degrades to MD if pandoc isn't installed.",
+            ignoreFocusOut: true,
+        },
+    );
+    return outputChoice ? (outputChoice.value as string[]) : undefined;
+}
+
+/** What is missing on PATH for the chosen deliverables, as markdown ("" when nothing is). */
+function missingToolsNote(kinds: string[]): string {
+    const missing: string[] = [];
+    if (kinds.includes("paper_pdf") && !(isOnPath("pandoc") && isOnPath("pdflatex"))) {
+        missing.push(
+            "`paper_pdf` requires **pandoc** + a LaTeX engine (`pdflatex`) on PATH. " +
+            "Install: pandoc.org/installing.html + miktex.org (Windows) / tinytex.org (mac/Linux). " +
+            "Without these, the quest produces `paper.md` only.",
+        );
+    }
+    if (kinds.includes("slides") && !isOnPath("marp")) {
+        missing.push(
+            "`slides` requires **marp** CLI. Install: `npm i -g @marp-team/marp-cli`. " +
+            "Without it, the quest produces `slides.md` only (no `.html`/`.pdf`).",
+        );
+    }
+    if (kinds.includes("poster") && !isOnPath("pdflatex")) {
+        missing.push(
+            "`poster` requires `pdflatex`. See the PDF prerequisites above.",
+        );
+    }
+    if (missing.length === 0) return "";
+    return "⚠️ **Missing tools** (selected outputs will be partial):\n\n" +
+        missing.map((m) => `  - ${m}`).join("\n") + "\n\n";
+
+}
+
+/** The paper format picker (review screen). */
+async function pickPaperFormat(): Promise<PaperFormat | undefined> {
+    const paperFormatChoice = await vscode.window.showQuickPick(
+        [
+            // Scientific venues — pick when the topic is computational
+            // / experimental. The clarify agent maps these to
+            // simulatability == "yes". Order: most generic first.
+            {
+                label: "$(file) generic — scientific paper, IMRAD",
+                description: "Default. Surveys, comparative reviews, theoretical derivations, brief preprints.",
+                value: "generic" as const,
+            },
+            {
+                label: "$(beaker) NeurIPS — ML benchmark / algorithm",
+                description: "Empirical ML, neural networks, learning algorithms, journal-length.",
+                value: "neurips" as const,
+            },
+            {
+                label: "$(beaker) ICLR — representation learning",
+                description: "Representations, generative models, ML theory.",
+                value: "iclr" as const,
+            },
+            {
+                label: "$(circuit-board) IEEE Access — engineering / systems",
+                description: "Hardware/software architectures, measurement studies, engineering experiments.",
+                value: "ieee_access" as const,
+            },
+            {
+                label: "$(symbol-namespace) Nature MI — physical sciences",
+                description: "Physics / chemistry / materials simulation, scientific-method experiments.",
+                value: "nature_mi" as const,
+            },
+            // Non-scientific prose — pick when the topic is
+            // qualitative / historical / cultural / business / policy.
+            // The clarify agent maps these to simulatability == "no".
+            {
+                label: "$(book) essay — long-form argumentative prose",
+                description: "Cultural / historical / intellectual / qualitative cross-case analysis. Argue a thesis.",
+                value: "essay" as const,
+            },
+            {
+                label: "$(briefcase) report — consulting-style exec report",
+                description: "Business / operational / market analysis with cover + TOC. Decision-maker audience.",
+                value: "report" as const,
+            },
+            {
+                label: "$(law) policy brief — 2-4 page recommendation",
+                description: "Single decision for policymakers. Issue + context + recommendation.",
+                value: "policy_brief" as const,
+            },
+            {
+                label: "$(file-pdf) whitepaper — 8-20 page industry analysis",
+                description: "Vendor-neutral tech trends / standards / architecture comparisons. Practitioner audience.",
+                value: "whitepaper" as const,
+            },
+        ],
+        {
+            title: "Frontier Insight — paper format / venue?",
+            placeHolder:
+                "Picks the LaTeX template + writing persona. 'generic' is the safe default for scientific topics; 'essay' for non-computational humanities/social-science.",
+            ignoreFocusOut: true,
+        },
+    );
+    return paperFormatChoice ? paperFormatChoice.value : undefined;
+}
+
+/** Mirrors core/interview.py:smart_default_study_depth. */
+function studyDepthFor(paperFormat: string, topic: string): "brief preprint" | "journal-length" | "comprehensive review" {
+    if (paperFormat === "policy_brief") return "brief preprint";
+    if (/\b(survey|review of|compar)/i.test(topic)) return "comprehensive review";
+    return "journal-length";
+}
+
+/** The study depth picker (review screen). */
+async function pickStudyDepth(paperFormat: string, topic: string): Promise<"brief preprint" | "journal-length" | "comprehensive review" | undefined> {
+    const isPolicyBrief = paperFormat === "policy_brief";
+    const looksSurvey = /\b(survey|review of|compar)/i.test(topic);
+    const studyDepthDefaultLabel = isPolicyBrief
+        ? "brief preprint (recommended for policy_brief)"
+        : looksSurvey
+            ? "comprehensive review (recommended for survey topics)"
+            : "journal-length (recommended)";
+    const studyDepthChoice = await vscode.window.showQuickPick(
+        [
+            {
+                label: `$(symbol-file) ${studyDepthDefaultLabel}`,
+                description: isPolicyBrief
+                    ? "1–2 pages; terse opening; novel findings only. Default for policy_brief."
+                    : looksSurvey
+                        ? "10–15 pages with Background + Comparison + Synthesis. ~4000+ words, 10+ discussed citations."
+                        : "4–8 pages, full IMRAD or prose equivalent. ~1500–2500 words, ~15 citations.",
+                value: (isPolicyBrief
+                    ? "brief preprint"
+                    : looksSurvey
+                        ? "comprehensive review"
+                        : "journal-length") as
+                    | "brief preprint"
+                    | "journal-length"
+                    | "comprehensive review",
+            },
+            {
+                label: "$(book) journal-length",
+                description: "4–8 pages, full IMRAD. ~1500–2500 words, ~15 citations.",
+                value: "journal-length" as const,
+            },
+            {
+                label: "$(zap) brief preprint",
+                description: "1–2 pages, terse, novel findings only.",
+                value: "brief preprint" as const,
+            },
+            {
+                label: "$(library) comprehensive review",
+                description: "10–15 pages with extensive prior-work discussion.",
+                value: "comprehensive review" as const,
+            },
+        ],
+        {
+            title: "Frontier Insight — study depth?",
+            placeHolder:
+                "Gates the paper's length and citation count. journal-length is the safe default.",
+            ignoreFocusOut: true,
+        },
+    );
+    return studyDepthChoice ? studyDepthChoice.value : undefined;
+}
+
+/** The multi-model ensemble picker and its models (advanced). FI does not choose the models. */
+async function pickEnsemble(): Promise<{ profile: string; models: string } | undefined> {
+    const ensembleChoice = await vscode.window.showQuickPick(
+        [
+            {
+                label: "$(circle-outline) Single model (default, cheapest)",
+                description: "One LLM call per node. Cost baseline = 1×.",
+                value: "off" as const,
+            },
+            {
+                label: "$(git-compare) Fan out cross_check only (~1.3× cost)",
+                description: "3 models vote per finding; catches issues the writer might miss. Minimal extra spend.",
+                value: "cross_check_only" as const,
+            },
+            {
+                label: "$(lightbulb) Fan out ideate + cross_check (~2.0× cost)",
+                description: "3 models brainstorm + moderator picks the strongest; 3 models vote on each finding.",
+                value: "ideate_and_check" as const,
+            },
+            {
+                label: "$(organization) Fan out ideate + analyze + cross_check (~2.5× cost)",
+                description: "Multi-model on the three highest-leverage nodes. Best signal; highest cost.",
+                value: "full" as const,
+            },
+        ],
+        {
+            title: "Frontier Insight — multi-model ensemble?",
+            placeHolder:
+                "Run the same node across multiple LLMs and merge their answers. Cost multiplies; agreement signal increases.",
+            ignoreFocusOut: true,
+        },
+    );
+    if (!ensembleChoice) return undefined;
+    if (ensembleChoice.value === "off") return { profile: "off", models: "" };
+    const picked = await pickEnsembleModels();
+    if (picked === undefined) return undefined;
+    if (picked.length < ENSEMBLE_MIN_MODELS) {
+        void vscode.window.showWarningMessage(
+            `Fewer than ${ENSEMBLE_MIN_MODELS} models picked — no ensemble will be configured. FI does not choose models for you.`,
+        );
+    }
+    return { profile: ensembleChoice.value, models: picked.join(", ") };
+}
+
+/** The saved author line (core/profile.py; FI_PROFILE_PATH overrides the place), or undefined when not asked yet. */
+function profilePath(): string {
+    return process.env.FI_PROFILE_PATH || path.join(os.homedir(), ".frontier-insight", "profile.json");
+}
+
+function loadProfile(): AuthorLine | undefined {
+    try {
+        const raw = JSON.parse(fs.readFileSync(profilePath(), "utf-8"));
+        if (!raw || typeof raw !== "object") return undefined;
+        const clean = (v: unknown) => String(v ?? "").trim().replace(/\s+/g, " ").slice(0, 300);
+        return { author: clean(raw.author), affiliation: clean(raw.affiliation),
+            contact_email: clean(raw.contact_email), url: clean(raw.url) };
+    } catch {
+        return undefined;
+    }
+}
+
+function saveProfile(line: AuthorLine): void {
+    try {
+        const target = profilePath();
+        fs.mkdirSync(path.dirname(target), { recursive: true });
+        const tmp = `${target}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(line, null, 2) + "\n", "utf-8");
+        fs.renameSync(tmp, target);
+    } catch (e) {
+        console.warn(`[fi] the author line could not be kept for the next quests: ${e}`);
+    }
+}
+
+/** Inline editor for the tier-2 defaults. */
 async function editTier2Field(a: InterviewAnswers): Promise<void> {
     const which = await vscode.window.showQuickPick(
         [
+            { label: "Paper format / venue", value: "paper_format" },
+            { label: "Deliverables", value: "output_kinds" },
+            { label: "Study depth", value: "study_depth" },
             { label: "Title (folder slug)", value: "title" },
             { label: "Research approach (no_simulation)", value: "no_simulation" },
             { label: "Clarify mode", value: "clarify_mode" },
@@ -885,6 +921,38 @@ async function editTier2Field(a: InterviewAnswers): Promise<void> {
     if (which.value === "author_line") {
         const v = await askAuthorLine(a);
         if (v) Object.assign(a, v);
+        return;
+    }
+    if (which.value === "paper_format") {
+        const v = await pickPaperFormat();
+        if (v) {
+            a.paper_format = v;
+            // What follows from it, as on the other interfaces (core/interview.py SMART_DEFAULTS).
+            a.study_depth = studyDepthFor(v, a.topic);
+            a.no_simulation = PROSE_FORMATS.has(v) || looksLikeSurvey(a.topic);
+            const comp = a.study_depth === "comprehensive review";
+            a.knowledge_top_k = comp ? 12 : 8;
+            a.knowledge_external_top_k = comp ? 30 : 20;
+        }
+        return;
+    }
+    if (which.value === "output_kinds") {
+        const v = await pickOutputKinds();
+        if (v) {
+            a.output_kinds = v;
+            const note = missingToolsNote(v);
+            if (note) void vscode.window.showWarningMessage(note.replace(/[*`#⚠️]/g, "").trim());
+        }
+        return;
+    }
+    if (which.value === "study_depth") {
+        const v = await pickStudyDepth(a.paper_format, a.topic);
+        if (v) {
+            a.study_depth = v;
+            const comp = v === "comprehensive review";
+            a.knowledge_top_k = comp ? 12 : 8;
+            a.knowledge_external_top_k = comp ? 30 : 20;
+        }
         return;
     }
     if (which.value === "knowledge_top_k") {
@@ -1098,10 +1166,19 @@ async function editTier3Field(a: InterviewAnswers): Promise<void> {
             { label: "Reasoning effort", value: "reasoning_effort" },
             { label: "Design-revise iteration budget", value: "max_iterations" },
             { label: "Page limit", value: "page_limit" },
+            { label: "Multi-model ensemble (and its models)", value: "ensemble" },
         ],
         { title: "Edit which advanced field?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "ensemble") {
+        const v = await pickEnsemble();
+        if (v) {
+            a.ensemble_profile = v.profile as InterviewAnswers["ensemble_profile"];
+            a.ensemble_models = v.models;
+        }
+        return;
+    }
     if (which.value === "page_limit") {
         // Written to output.page_limit. Blank is no set limit, and a limit the
         // topic states ("≤ 4 pages") still applies.

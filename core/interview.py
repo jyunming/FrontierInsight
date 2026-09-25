@@ -96,15 +96,18 @@ class Question:
     # Interview presentation tier. Frontends consult this to decide
     # which questions to show by default:
     #
-    #   tier=1 — always-ask. The handful of slots that genuinely need a
-    #            user decision (topic, paper_format, outputs, depth,
-    #            and on CLI/web also provider + model).
+    #   tier=1 — always-ask: the topic, what the result is for, and on
+    #            CLI/web the provider + model. The author line is tier 1
+    #            too but asked only while no profile is saved
+    #            (core/profile.py): the first interview asks it, later
+    #            ones fill it from the profile.
     #
     #   tier=2 — auto-derive. Smart defaults populate these from tier-1
-    #            answers (title from slug, no_simulation from format,
-    #            knowledge from Axon-sidecar status, etc.). Frontends
-    #            still SHOW them on a review screen so the user can
-    #            click-to-edit before launch.
+    #            answers (title from slug, paper format, deliverables,
+    #            study depth, no_simulation from format, knowledge from
+    #            Axon-sidecar status, etc.). Frontends still SHOW them on
+    #            a review screen so the user can click-to-edit before
+    #            launch.
     #
     #   tier=3 — advanced. Topic-tuned slots whose default is good
     #            enough for 95% of quests (the preflight LLM call
@@ -506,7 +509,7 @@ QUESTIONS: tuple[Question, ...] = (
         choices=PAPER_FORMATS,
         default="generic",
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
     Question(
         id="output_kinds",
@@ -516,7 +519,7 @@ QUESTIONS: tuple[Question, ...] = (
         choices=OUTPUT_BUNDLES,
         default=["paper_md", "paper_pdf"],
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
     Question(
         id="paper_style",
@@ -546,7 +549,7 @@ QUESTIONS: tuple[Question, ...] = (
         choices=STUDY_DEPTHS,
         default="journal-length",
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
     Question(
         id="provider",
@@ -760,12 +763,9 @@ QUESTIONS: tuple[Question, ...] = (
         choices=ENSEMBLE_PROFILES,
         default="off",
         mid_quest_editable=True,
-        # Promoted from tier-3 to tier-1 so the picker sits alongside
-        # provider / model on the main interview page (the cost
-        # multiplier is a tier-1 decision, not a hidden-in-Advanced
-        # tweak — users routinely want to opt in to ensemble at quest
-        # creation without clicking through the Advanced disclosure).
-        tier=1,
+        # Advanced: it multiplies the cost, and the models are the
+        # person's to name, so it is off unless they open Advanced.
+        tier=3,
     ),
     Question(
         id="ensemble_models",
@@ -775,7 +775,7 @@ QUESTIONS: tuple[Question, ...] = (
         default="",
         placeholder="e.g. model-a, model-b, model-c",
         mid_quest_editable=True,
-        tier=1,
+        tier=3,
     ),
     Question(
         id="max_iterations",
@@ -851,8 +851,9 @@ QUESTIONS: tuple[Question, ...] = (
         tier=3,
     ),
     # ─── Author line (tier 1, every field optional) ──────────────────
-    # Printed on the paper, slides and poster. Asked on every frontend so
-    # nobody has to find a hidden setting to put their name on a poster.
+    # Printed on the paper, slides and poster. Asked on the first
+    # interview on any frontend and kept in the profile
+    # (core/profile.py); later interviews fill it from there.
     Question(
         id="author",
         label="Author (optional)",
@@ -1159,6 +1160,9 @@ def derive_tier2(tier1_answers: dict[str, Any]) -> dict[str, Any]:
             out[q.id] = q.default
         else:
             out[q.id] = None
+        # A later default reads an earlier one (study depth, no_simulation and the retrieval sizes follow the paper
+        # format, now derived here rather than asked), unless the caller already holds a value for it.
+        merged.setdefault(q.id, out[q.id])
     return out
 
 

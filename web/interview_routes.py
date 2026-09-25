@@ -75,6 +75,14 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         )
         return HTMLResponse(injected)
 
+    @app.get("/api/profile")
+    async def get_profile() -> JSONResponse:
+        """The person's saved author line (core/profile.py), or ``null`` when they have not been asked yet: the new-quest
+        page then asks it and keeps it on submit."""
+        from core import profile
+
+        return JSONResponse({"profile": profile.load()})
+
     @app.get("/api/interview/schema")
     async def get_schema() -> JSONResponse:
         # Start from the canonical interview schema (the same payload
@@ -179,6 +187,16 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                 "providers (openai, claude_cli, copilot_cli, ...) work "
                 "from a plain terminal without a bridge.",
             )
+
+        # The author line asked on the first interview, or changed on the review screen, is kept for later quests
+        # (the same profile the CLI and VS Code read).
+        from core import profile
+
+        if body.get("save_profile", True):
+            try:
+                profile.save({k: getattr(answers, k) for k in profile.FIELDS})
+            except OSError:
+                pass  # the quest goes on; the next interview asks again
 
         yaml_text = answers_to_yaml(answers, frontend="serve")
         drafts = output_root / "_drafts"
