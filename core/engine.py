@@ -3106,9 +3106,15 @@ class Engine:
             )
         amended = critique.get("amended_design") if isinstance(critique, dict) else None
         objections = critique.get("objections_addressed") if isinstance(critique, dict) else None
-        if not failure and not isinstance(objections, list) and not isinstance(amended, dict):
-            # An unreadable reply, or one that names neither objections nor a design, is not an audit that found nothing.
-            failure = "the audit's reply named neither its objections nor an amended design"
+        if not failure and not isinstance(objections, list):
+            # An audit judges by naming its objections (none is an empty list). An unreadable reply, or one that names
+            # none, is not an audit that found nothing.
+            failure = "the audit's reply did not list its objections"
+            objections = None
+        proposed_change = (
+            isinstance(amended, dict) and bool(amended)
+            and _receipts.design_core(amended) != _receipts.design_core(design)
+        )
         if not adopt:
             amended = None
         if isinstance(amended, dict) and amended:
@@ -3137,6 +3143,8 @@ class Engine:
         )
         self._record_design_critique(iteration, before, design, objections, failure)
         objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt else []
+        if not adopt and not failure and proposed_change and not objected:
+            objected = ["it proposed a different design without naming why"]
         self._write_receipt(
             "design_audit", "unknown" if failure else "fail" if objected else "pass", started_at=audit_started,
             inputs={"design": before}, output=_receipts.design_core(design), error=failure,
@@ -8121,7 +8129,7 @@ class Engine:
         )
         self._write_receipt(
             "evidence_gate", "pass" if status == "ok" and verdict == "sufficient" else "fail" if status == "ok" else "unknown",
-            started_at=started, inputs={"analysis": state.get("analysis") or {}, "cross_check": state.get("cross_check") or {}},
+            started_at=started, inputs=_gate_inputs(state),
             output=assessment, error=failure,
             detail=f"it judged the evidence {verdict} and the paper was written on it (gaps: "
                    f"{'; '.join(assessment['gaps']) or 'none named'})" if status == "ok" and verdict != "sufficient" else "",
@@ -8130,7 +8138,7 @@ class Engine:
             self._stop_once_for_check(
                 "evidence_gate", failure or "no usable reply from the gate call",
                 look="the [evidence_gate] entry in .fi/run.log",
-                inputs={"analysis": state.get("analysis") or {}, "cross_check": state.get("cross_check") or {}},
+                inputs=_gate_inputs(state),
             )
         else:
             self._clear_check_stop("evidence_gate")
@@ -9839,6 +9847,7 @@ class Engine:
                 # Sentences of the body went: what is left is checked again, so the receipt is for the final draft.
                 self._log.info("[review] the page-limit fit took sentences out of the body; checking the claims again")
                 trim_recheck = await self._node_claim_check({**state, "paper_md": str(paper_path)})
+                state = {**state, **trim_recheck}  # type: ignore[assignment]  # this review reads the new verdict
         # Read after that: it may have dropped Further reading entries from the
         # file, and the review reads the paper as it now is.
         paper_md = ""
@@ -12929,6 +12938,20 @@ def further_reading_listed(markdown: str) -> list[str] | None:
     engine. What the ``further_reading`` bib export follows."""
     block = _further_reading_block(markdown)
     return None if block is None else block.labels
+
+
+def _gate_inputs(state: Any) -> dict[str, Any]:
+    """What the evidence gate weighs, for its receipt and its one stop: the analysis, the cross-check, the results, the
+    protocol and the sources (by title and link)."""
+    sources = [
+        [str((i.get("metadata") or {}).get(k) or "") for k in ("title", "url", "doi")]
+        for i in state.get("literature") or [] if isinstance(i, dict)
+    ]
+    return {
+        "analysis": state.get("analysis") or {}, "cross_check": state.get("cross_check") or {},
+        "results": state.get("result_json") or {}, "protocol": (state.get("design") or {}).get("protocol") or {},
+        "sources": sources, "topic": state.get("topic") or "",
+    }
 
 
 def _without_further_reading(markdown: str) -> str:

@@ -744,8 +744,11 @@ def test_the_design_audit_must_have_judged_the_design_that_ran(tmp_path: Path) -
     root = _ready_quest(tmp_path)
     got = evidence.assess(root, _state(design={"hypothesis": "edited by hand", "protocol": PROTOCOL}), settings=ON)
     assert got["status"] == "statistically_adequate" and any("different design" in g for g in got["gaps"])
-    # The protocol is not part of it: the frozen protocol's own checks hold the run to that.
+    # The protocol is part of what the audit judged: a changed one is a different design too.
     got = evidence.assess(root, _state(design={"hypothesis": "h", "protocol": {**PROTOCOL, "oracles": []}}), settings=ON)
+    assert any("different design" in g for g in got["gaps"])
+    # The model's own rationale is not.
+    got = evidence.assess(root, _state(design={"hypothesis": "h", "protocol": PROTOCOL, "rationale": "why"}), settings=ON)
     assert got["status"] == "publication_ready"
 
 
@@ -766,3 +769,11 @@ def test_a_crashed_assessment_replaces_an_earlier_record(tmp_path: Path, monkeyp
     assert engine._write_evidence({}) is None
     kept = json.loads(record.read_text(encoding="utf-8"))
     assert kept["status"] == "not_executed" and "could not be assessed" in kept["gaps"][0]
+
+
+def test_a_receipt_with_times_that_are_not_times_is_not_believed(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    path = _receipts.path(root, "evidence_gate")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**record, "started_at": "yesterday", "completed_at": "later"}), encoding="utf-8")
+    assert any("malformed" in g for g in evidence.assess(root, _state(), settings=ON)["gaps"])

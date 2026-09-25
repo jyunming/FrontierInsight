@@ -59,12 +59,18 @@ def _is_hash(value: Any) -> bool:
 
 
 def design_core(design: Any) -> Any:
-    """What of a design the methodology audit vouches for: all of it but its ``rationale`` (the model's own account)
-    and its ``protocol``, which the frozen protocol's own checks hold the run to (the engine may add an oracle there
-    after the audit)."""
+    """What of a design the methodology audit vouches for: all of it, protocol included (its precision, thresholds and
+    oracles are what the audit judges), but its ``rationale``, the model's own account of it."""
     if not isinstance(design, dict):
         return design
-    return {k: v for k, v in design.items() if k not in ("rationale", "protocol")}
+    return {k: v for k, v in design.items() if k != "rationale"}
+
+
+def _when(value: Any) -> Any:
+    try:
+        return _dt.datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
 
 
 def path(quest_root: Path, check: str) -> Path:
@@ -149,8 +155,10 @@ def read(quest_root: Path, check: str) -> tuple[str, dict[str, Any] | None, str]
     if status not in STATUSES:
         return "unknown", None, f"its record has no valid status ({status!r})"
     hashes = record.get("input_hashes")
-    if (not isinstance(record.get("started_at"), str) or not record["started_at"]
-            or not isinstance(record.get("completed_at"), str) or not record["completed_at"]
+    started, completed = _when(record.get("started_at")), _when(record.get("completed_at"))
+    if (started is None or completed is None or started.tzinfo is None or completed.tzinfo is None
+            or completed < started
+            or not isinstance(record.get("error"), str) or not isinstance(record.get("detail"), str)
             or record.get("producer") != check or not isinstance(hashes, dict)
             or not all(_is_hash(v) for v in hashes.values())
             or not (record.get("output_hash") == "" or _is_hash(record.get("output_hash")))):
