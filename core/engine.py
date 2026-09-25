@@ -6013,9 +6013,14 @@ class Engine:
         )
         for dep, why in dropped:
             self._log.info("[execute] not asking pip for %r: it %s", dep, why)
-        install_list = list(dict.fromkeys([*install_list, *_experiment_deps.skill_requirements(skills)]))
+        if not getattr(self.config.execution, "shared_interpreter", False) or self.config.execution.sandbox == "docker":
+            # A quest's own environment (a clean venv, a container) gets the skills' packages. On FI's shared
+            # interpreter they are already there from the skill's approval, and a quest does not change it.
+            install_list = list(dict.fromkeys([*install_list, *_experiment_deps.skill_requirements(skills)]))
         failed_installs = await self._install_packages(install_list)
-        self._packages_note = _experiment_deps.repair_note(dropped, failed_installs)
+        self._packages_note = _experiment_deps.repair_note(
+            dropped, failed_installs, getattr(self, "_unusable_skills", []),
+        )
         deps = install_list
 
         py = self.executor.python_path(self.quest_root)
@@ -6572,7 +6577,8 @@ class Engine:
                 "duration_s": result.duration_s,
                 "timed_out": result.timed_out,
                 "stdout_tail": result.stdout[-2000:],
-                "stderr_tail": (getattr(self, "_packages_note", "") if result.returncode != 0 else "") + result.stderr[-2000:],
+                # Always first: a run that exits 0 on a caught ImportError still goes to repair as degenerate.
+                "stderr_tail": getattr(self, "_packages_note", "") + result.stderr[-2000:],
                 # The script a two-script quest's failure is in ("simulate.py" or
                 # "experiment.py"): the repair rewrites that one. None for one script.
                 "failed_script": failed_script,
@@ -8738,11 +8744,18 @@ class Engine:
     def _experiment_skill_states(self, state: Any) -> list[Any]:
         """The approved skills this quest selected for its experiment (as ``_resolve_selected_skills`` returns them).
         Resolving them can run their self-tests; a failure here only means no skill is offered."""
+        selection = (state or {}).get("skill_selection") or {}
+        uses = dict(selection.get("uses") or {})
+        wanted = [n for n in list((state or {}).get("selected_skills") or []) if uses.get(n, "experiment") == "experiment"]
         try:
             usable, _ = _resolve_selected_skills(state, self._log, use="experiment", external_dirs=self._skill_dirs)
         except Exception as exc:  # noqa: BLE001 -- the run goes on without skills rather than not at all
             self._log.warning("[execute] the selected skills could not be resolved: %s", exc)
-            return []
+            usable = []
+        # A skill selected but not usable now (its self-test fails, it was changed since approval) was only logged;
+        # the code written for it then failed on an import nobody explained. The repair step is told (repair_note).
+        found = {st.skill.name for st in usable}
+        self._unusable_skills = [n for n in wanted if n not in found]
         return list(usable)
 
     async def _install_packages(self, packages: list[str]) -> list[tuple[str, str]]:

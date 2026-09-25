@@ -41,8 +41,9 @@ def split_deps(
 ) -> tuple[list[str], list[tuple[str, str]]]:
     """Split the requested packages into those to install and those left out, each with the reason.
 
-    Left out: a selected skill's name (a library skill is put on the path, a tool skill is run, neither is on PyPI)
-    and a module the quest's own ``code/`` folder holds. Repeats are dropped; order is kept."""
+    Left out: a tool skill's name (it is run, not installed), a library skill's name when its own folder holds that
+    module (it is imported from the path), and a module the quest's own ``code/`` folder holds (it shadows any
+    package of that name anyway). Repeats are dropped; order is kept."""
     by_skill = {normalize(s.name): s for s in skills}
     local = {normalize(m) for m in local_modules}
     install: list[str] = []
@@ -55,7 +56,10 @@ def split_deps(
             continue
         seen.add(name)
         skill = by_skill.get(name)
-        if skill is not None:
+        if skill is not None and (not _is_library(skill) or _provides_module(skill, name)):
+            # A tool skill is never a package; a library skill is left out only when its folder holds the module
+            # itself (it is imported from the path). Many library skills are named after the package they teach
+            # (scipy, xarray, astropy): that name is a real PyPI package and is installed as asked.
             dropped.append((dep, skill_hint(skill)))
         elif name in local:
             dropped.append((dep, f"is the quest's own file code/{name.replace('-', '_')}.py, not a package"))
@@ -64,12 +68,28 @@ def split_deps(
     return install, dropped
 
 
+def _kind(skill: Any) -> str:
+    return str(getattr(getattr(skill, "kind", None), "value", getattr(skill, "kind", ""))).lower()
+
+
+def _is_library(skill: Any) -> bool:
+    return _kind(skill) == "library"
+
+
+def _provides_module(skill: Any, name: str) -> bool:
+    """Whether a library skill's folder (or its ``scripts/``) holds a module or package importable as ``name``."""
+    module = normalize(name).replace("-", "_")
+    for base in (Path(skill.path), Path(skill.path) / "scripts"):
+        if (base / f"{module}.py").is_file() or (base / module / "__init__.py").is_file():
+            return True
+    return False
+
+
 def skill_hint(skill: Any) -> str:
     """How a skill is used, for a name that was asked of pip."""
-    kind = str(getattr(getattr(skill, "kind", None), "value", getattr(skill, "kind", ""))).lower()
-    if kind == "library":
-        return (f"is the skill {skill.name}, not a PyPI package: FI puts its folder on the experiment's path, so import "
-                f"it as its API surface says")
+    if _is_library(skill):
+        return (f"is the skill {skill.name}, whose folder FI puts on the experiment's path: import it from there as "
+                f"its API surface says; it is not a PyPI package")
     return (f"is the skill {skill.name}, a tool, not a Python package: it cannot be imported or pip-installed; run its "
             f"scripts as its instructions say")
 
@@ -91,8 +111,7 @@ def library_paths(skills: Iterable[Any]) -> list[Path]:
     """The folders a library skill's code is imported from: the skill's folder, and its ``scripts/`` when it has one."""
     out: list[Path] = []
     for s in skills:
-        kind = str(getattr(getattr(s, "kind", None), "value", getattr(s, "kind", ""))).lower()
-        if kind != "library":
+        if not _is_library(s):
             continue
         out.append(Path(s.path))
         if (Path(s.path) / "scripts").is_dir():
@@ -113,11 +132,17 @@ def failure_reason(stderr: str) -> str:
     return (lines[-1] if lines else "pip failed")[:200]
 
 
-def repair_note(dropped: list[tuple[str, str]], failed: list[tuple[str, str]]) -> str:
-    """The note the repair steps read first: what was not installed, and why."""
-    if not dropped and not failed:
+def repair_note(
+    dropped: list[tuple[str, str]], failed: list[tuple[str, str]], unusable_skills: Iterable[str] = (),
+) -> str:
+    """The note the repair steps read first: what was not installed and why, and selected skills that cannot be used."""
+    unusable = list(unusable_skills)
+    if not dropped and not failed and not unusable:
         return ""
-    lines = ["FI NOTE (packages): these requested packages were not installed:"]
+    lines = ["FI NOTE (packages): these requested packages were not installed:"] if dropped or failed else []
     lines += [f"- {dep}: {why}" for dep, why in dropped]
     lines += [f"- {dep}: {why}; remove the import, or use a package that exists" for dep, why in failed]
+    if unusable:
+        lines.append("FI NOTE (skills): selected for this quest but not usable now (see run.log), so do not import "
+                     "or run them: " + ", ".join(unusable))
     return "\n".join(lines) + "\n"

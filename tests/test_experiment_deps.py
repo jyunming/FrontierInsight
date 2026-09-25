@@ -28,18 +28,25 @@ def _skill(tmp_path: Path, name: str, kind: str, pip_requires: list[str] | None 
     )
 
 
-def test_a_skill_name_or_a_local_file_is_never_asked_of_pip(tmp_path: Path) -> None:
+def test_a_tool_skill_a_path_imported_library_or_a_local_file_is_never_asked_of_pip(tmp_path: Path) -> None:
     tool = _skill(tmp_path, "lieflat-charts", "tool")
     lib = _skill(tmp_path, "sir-kernels", "library")
+    (lib.path / "sir_kernels.py").write_text("x = 1", encoding="utf-8")   # imported from the skill's folder
+    named_after_package = _skill(tmp_path, "scipy", "library")             # a skill that teaches a PyPI package
     install, dropped = deps_mod.split_deps(
-        ["numpy>=1.26", "lieflat_charts", "Sir.Kernels", "helpers", "numpy", "matplotlib"],
-        skills=[tool, lib], local_modules=["experiment", "helpers"],
+        ["numpy>=1.26", "lieflat_charts", "Sir.Kernels", "helpers", "numpy", "scipy>=1.11", "matplotlib"],
+        skills=[tool, lib, named_after_package], local_modules=["experiment", "helpers"],
     )
-    assert install == ["numpy>=1.26", "matplotlib"]
+    assert install == ["numpy>=1.26", "scipy>=1.11", "matplotlib"], "scipy is a real package, not the skill's module"
     reasons = dict(dropped)
     assert "a tool, not a Python package" in reasons["lieflat_charts"]
-    assert "puts its folder on the experiment's path" in reasons["Sir.Kernels"]
+    assert "puts on the experiment's path" in reasons["Sir.Kernels"]
     assert "code/helpers.py" in reasons["helpers"]
+
+
+def test_the_note_names_a_selected_skill_that_cannot_be_used() -> None:
+    note = deps_mod.repair_note([], [], ["broken-skill"])
+    assert note.startswith("FI NOTE (skills)") and "broken-skill" in note and "do not import" in note
 
 
 def test_skill_requirements_and_library_paths(tmp_path: Path) -> None:
@@ -89,6 +96,8 @@ async def test_selected_skills_packages_are_installed_and_libraries_are_on_the_p
     lib = _skill(tmp_path, "sir-kernels", "library", ["scipy"])
     tool = _skill(tmp_path, "lieflat-charts", "tool")
     monkeypatch.setattr(eng, "_experiment_skill_states", lambda _state: [SimpleNamespace(skill=lib), SimpleNamespace(skill=tool)])
+    # A quest's own clean environment (the research profile's): the skills' packages go into it.
+    monkeypatch.setattr(eng.config.execution, "shared_interpreter", False)
     installed: list[list[str]] = []
 
     async def install(pkgs, *, quest_root):  # noqa: ANN001
@@ -110,3 +119,23 @@ async def test_selected_skills_packages_are_installed_and_libraries_are_on_the_p
     run_env = envs[-1]
     assert str(lib.path) in run_env.get("PYTHONPATH", "").split(__import__("os").pathsep)
     assert str(tool.path) not in run_env.get("PYTHONPATH", "")
+
+
+@pytest.mark.asyncio
+async def test_on_the_shared_interpreter_a_quest_does_not_install_the_skills_packages(tmp_path: Path, monkeypatch) -> None:
+    """They are in FI's own interpreter from the skill's approval; a quest does not change it."""
+    eng = _mk_engine(tmp_path)
+    lib = _skill(tmp_path, "sir-kernels", "library", ["scipy"])
+    monkeypatch.setattr(eng, "_experiment_skill_states", lambda _state: [SimpleNamespace(skill=lib)])
+    monkeypatch.setattr(eng.config.execution, "shared_interpreter", True)
+    installed: list[list[str]] = []
+
+    async def install(pkgs, *, quest_root):  # noqa: ANN001
+        installed.append(list(pkgs))
+        return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.1)
+
+    eng.executor.install = install  # type: ignore[method-assign]
+    eng.executor.execute = _mock_execute_router(  # type: ignore[method-assign]
+        ExecutionResult(returncode=0, stdout='RESULT_JSON: {"v": 1}', stderr="", duration_s=1.0))
+    await eng._node_execute({"deps": ["numpy"]})
+    assert installed == [["numpy"]]
