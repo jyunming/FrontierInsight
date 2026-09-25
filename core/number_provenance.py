@@ -359,7 +359,8 @@ def _a_list_the_run_holds(token: str, traceable: "Traceable") -> bool:
     called one untraceable number, and the rewrite then cut from Methods). A group with a leading zero ("1,050") is a
     thousands group, never a list member, so such a run is left as one number."""
     groups = token.split(",")
-    digits = [g.lstrip("+-") if i == 0 else g for i, g in enumerate(groups)]  # a sign belongs to the first member
+    # One sign, on the first member only ("-100,250,500"); "+-100" is not a number and fails the digit check.
+    digits = [g[1:] if i == 0 and g[:1] in "+-" else g for i, g in enumerate(groups)]
     if len(groups) < 2 or any(len(d) > 1 and d.startswith("0") for d in digits) or not all(d.isdigit() for d in digits):
         return False
     return all(traceable.find(float(g), 0) is not None for g in groups)

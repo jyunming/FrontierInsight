@@ -14223,11 +14223,12 @@ _INTERVAL_METHOD_RE = re.compile(
     r"(?P<paren>\s*\(\s*\d{2}(?:\.\d+)?\s*%\s*\))?",
     re.IGNORECASE,
 )
-_SPREAD_RE = re.compile(
-    r"\s*(?:\u00b1|\+/-|\+-)\s*(?:1\s*)?(?:SD|s\.d\.|std(?:\.|\s+dev(?:iation)?)?|SE|SEM|s\.e\.(?:m\.)?"
-    r"|standard\s+(?:deviation|error))\b",
-    re.IGNORECASE,
+_SPREAD = (
+    r"(?:\u00b1|\+/-|\+-)\s*(?:1\s*)?(?:SD|s\.d\.|std(?:\.|\s+dev(?:iation)?)?|SE|SEM|s\.e\.(?:m\.)?"
+    r"|standard\s+(?:deviation|error))\b"
 )
+_SPREAD_RE = re.compile(r"\s*" + _SPREAD, re.IGNORECASE)
+_SPREAD_IN_PARENS_RE = re.compile(r"\(\s*" + _SPREAD + r"\s*\)", re.IGNORECASE)
 
 
 def _redrawn_band_text(text: Any, n: int) -> Any:
@@ -14244,7 +14245,7 @@ def _redrawn_band_text(text: Any, n: int) -> Any:
 
     out = _INTERVAL_METHOD_RE.sub(method, text)
     # "(+/- 1 SD)" in parentheses is replaced whole, so no "(, 95% ...)" is left behind.
-    out = re.sub(r"\(\s*" + _SPREAD_RE.pattern.lstrip(r"\s*") + r"\s*\)", f"({ours})", out, flags=re.IGNORECASE)
+    out = _SPREAD_IN_PARENS_RE.sub(f"({ours})", out)
     return _SPREAD_RE.sub(f", {ours}", out)
 
 

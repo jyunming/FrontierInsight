@@ -760,3 +760,13 @@ def test_a_comma_list_of_three_digit_values_the_run_holds_is_a_list_not_one_numb
 def test_a_comma_list_whose_first_member_is_negative_is_still_a_list() -> None:
     assert check("Offsets -100,250,500 and peak 0.4121.",
                  result_json={"o": [-100, 250, 500], "peak": 0.4121}).untraceable == 0
+
+
+def test_two_signs_in_front_of_a_comma_run_are_not_a_list_member() -> None:
+    from core.number_provenance import _a_list_the_run_holds
+
+    class Held:
+        def find(self, value: float, _decimals: int) -> float:
+            return value
+
+    assert _a_list_the_run_holds("-100,250", Held()) and not _a_list_the_run_holds("+-100,250", Held())

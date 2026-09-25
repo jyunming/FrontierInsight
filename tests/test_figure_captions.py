@@ -109,3 +109,11 @@ def test_renumbering_leaves_file_names_alone_and_keeps_a_range_in_order() -> Non
     out = numbers_off_figure_captions(md)
     assert "See Figure 2 and Figs. 2-3;" in out
     assert out.count("figures/figure3.png") == 2 and "and figure3.png stay" in out
+
+
+def test_a_range_whose_figures_are_no_longer_consecutive_is_listed() -> None:
+    from generation._figure_captions import _renumbered
+    assert _renumbered("Figs. 2-3 show it.", {1: 2, 2: 1, 3: 3}) == "Figs. 1 and 3 show it."
+    assert _renumbered("Figs. 2-3 show it.", {2: 3, 3: 2}) == "Figs. 2-3 show it."
+    assert _renumbered("Figs. 2-3 show it.", {2: 4, 3: 1, 4: 2, 1: 3}) == "Figs. 1 and 4 show it."
+    assert _renumbered("Figures 2 to 3.", {2: 3, 3: 2}) == "Figures 2 to 3."

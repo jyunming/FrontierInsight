@@ -74,10 +74,17 @@ def _figure_order(lines: list[str]) -> dict[int, int] | None:
 
 def _renumbered(text: str, order: dict[int, int]) -> str:
     def one(m: re.Match[str]) -> str:
-        nums = re.sub(r"\d+", lambda d: str(order.get(int(d.group(0)), int(d.group(0)))), m.group("nums"))
-        span = re.fullmatch(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)", nums)
-        if span and int(span.group(1)) > int(span.group(3)):  # "Figs. 2-3" with the two swapped reads "2-3", not "3-2"
-            nums = span.group(3) + span.group(2) + span.group(1)
+        span = re.fullmatch(r"(\d+)(\s*[–—-]\s*|\s+to\s+)(\d+)", m.group("nums"))
+        if span and int(span.group(1)) < int(span.group(3)):
+            # A range names every figure in it: renumbered, those figures are a range again only when their new
+            # numbers are consecutive ("Figs. 2-3" with the two swapped is still "2-3"); otherwise they are listed.
+            new = sorted(order.get(k, k) for k in range(int(span.group(1)), int(span.group(3)) + 1))
+            if new == list(range(new[0], new[-1] + 1)):
+                nums = f"{new[0]}{span.group(2)}{new[-1]}"
+            else:
+                nums = ", ".join(map(str, new[:-1])) + f" and {new[-1]}"
+        else:
+            nums = re.sub(r"\d+", lambda d: str(order.get(int(d.group(0)), int(d.group(0)))), m.group("nums"))
         return m.group("word") + m.group("gap") + nums
 
     return _REFERENCE_RE.sub(one, text)
