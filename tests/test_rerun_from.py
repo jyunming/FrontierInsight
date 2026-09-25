@@ -98,3 +98,29 @@ async def test_a_step_the_quest_never_reached_changes_nothing(tmp_path: Path, mo
 
 
 _ = (_FAKE_EXPERIMENT_CODE, Any)
+
+
+class _Snap:
+    def __init__(self, nxt: tuple[str, ...], n: int) -> None:
+        self.next, self.config = nxt, {"configurable": {"checkpoint_id": str(n)}}
+
+
+class _Graph:
+    def __init__(self, nexts: list[tuple[str, ...]]) -> None:
+        self.nexts = nexts  # oldest first, as the quest ran
+
+    async def aget_state_history(self, _config):  # newest first, as LangGraph gives it
+        for n, nxt in reversed(list(enumerate(self.nexts))):
+            yield _Snap(nxt, n)
+
+
+@pytest.mark.asyncio
+async def test_a_step_of_several_nodes_is_done_again_from_its_first_node_of_the_latest_pass() -> None:
+    # Two passes of a no-simulation quest; the second is paused at wait_for_data.
+    graph = _Graph([("design",), ("auto_collect_data",), ("wait_for_data",), ("data_load",), ("analyze",),
+                    ("review",), ("design",), ("auto_collect_data",), ("wait_for_data",)])
+    found = await rerun_from.checkpoint_before(graph, {}, "run")
+    assert found == {"configurable": {"checkpoint_id": "7"}}, "the second pass's collection, not the first pass's"
+    graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("analyze",)])
+    assert (await rerun_from.checkpoint_before(graph, {}, "code"))["configurable"]["checkpoint_id"] == "1"
+    assert await rerun_from.checkpoint_before(graph, {}, "review") is None

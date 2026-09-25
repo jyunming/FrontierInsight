@@ -511,15 +511,16 @@ async function runResume(
     // pick just the first whitespace-separated token so the lookup is
     // deterministic instead of silently failing with a confusing
     // "no quest with id '"178…-x" extra'" message.
-    const rawArg = promptArgs.trim();
+    // /resume <quest_id> --from <step> (or --from=<step>): the step is taken out first, so a quest id is never read
+    // from it and `/resume --from code` still offers the picker.
+    const fromMatch = !plan && !watch ? /(?:^|\s)--from(?:\s+|=)(\S+)/.exec(promptArgs) : null;
+    const fromStep = fromMatch ? fromMatch[1].toLowerCase() : undefined;
+    const rawArg = (fromMatch ? promptArgs.replace(fromMatch[0], " ") : promptArgs).trim();
     const firstToken = rawArg.split(/\s+/)[0] || "";
     // Also strip surrounding quotes a user might paste from a log line.
     const sanitized = firstToken.replace(/^["']+|["']+$/g, "");
     // /plan <quest_id> <what to change>: the words after the id are the request.
     const planRequest = plan ? rawArg.slice(firstToken.length).trim() : "";
-    // /resume <quest_id> --from <step>: run it again from that step (launch.py --from).
-    const fromMatch = !plan && !watch ? /(?:^|\s)--from\s+(\S+)/.exec(rawArg) : null;
-    const fromStep = fromMatch ? fromMatch[1].toLowerCase() : undefined;
     if (fromStep && !RERUN_STEPS.includes(fromStep)) {
         stream.markdown(
             `❌ \`${fromStep}\` is not a step a quest can be run again from. Choose one of: ` +

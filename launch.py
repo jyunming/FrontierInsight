@@ -2529,6 +2529,10 @@ async def main_async(args: argparse.Namespace) -> int:
         args.resume = args.rerun
     # --from names the step to rerun from when it comes with --resume / --rerun (with --teach-skill it names a module).
     _from_step: str | None = None
+    if args.teach_from and not args.resume and not getattr(args, "teach_skill", ""):
+        print("[FI] --from names the step to run a quest again from, so it needs --resume <quest_id> (or --rerun); "
+              "with --teach-skill it names a module.", file=sys.stderr)
+        return 2
     if args.teach_from and args.resume and not getattr(args, "teach_skill", ""):
         from core import rerun_from as _rerun_from
 

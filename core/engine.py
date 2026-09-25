@@ -722,6 +722,8 @@ class Engine:
                                   f"to rerun from there; nothing was changed. Resume it with "
                                   f"`python launch.py --resume {self.quest_id}`.")
                             return self._collect_artifacts({})
+                        if reopen:
+                            self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
                         where, moved = _rerun_from.back_up(self.quest_root, from_step)
                         self._audit("rerun_from", step=from_step, moved=moved)
                         self._log.info("[run] rerunning from the %s step; the earlier outputs are in %s (%s)",

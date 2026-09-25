@@ -16,16 +16,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-# Plain name -> the graph nodes that begin that step, in the order to look for them. The node names are accepted too.
+# Plain name -> the graph nodes the step is made of (run in that order). The node names are accepted too.
 STEPS: dict[str, tuple[str, ...]] = {
     "code": ("implement_outline", "implement"),
-    "run": ("execute", "data_load"),
+    # The no-simulation path's run is the data: collected, waited for, loaded.
+    "run": ("execute", "auto_collect_data", "wait_for_data", "data_load"),
     "analysis": ("analyze",),
     "writing": ("write",),
     "review": ("review",),
 }
 _ALIASES = {
-    "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run", "analyze": "analysis",
+    "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run", "auto_collect_data": "run", "analyze": "analysis",
     "write": "writing", "paper": "writing",
 }
 
@@ -40,7 +41,8 @@ OUTPUTS: dict[str, list[str]] = {
     "review": _DELIVERED,
     "writing": _PAPER,
     "analysis": _PAPER,
-    "run": ["figures", "raw", "results.json", *_PAPER],
+    # The mean-over-seeds redraw is written into code/ by the run.
+    "run": ["figures", "raw", "results.json", "code/replot_figures.py", "code/replot_figures.json", *_PAPER],
     "code": ["code", "figures", "raw", "results.json", *_PAPER],
 }
 
@@ -56,16 +58,21 @@ def choices() -> str:
 
 
 async def checkpoint_before(graph: Any, run_config: dict[str, Any], step: str) -> dict[str, Any] | None:
-    """The config of the latest checkpoint taken just before ``step`` ran, or ``None`` when the quest never reached it.
+    """The config of the checkpoint taken just before ``step`` last began, or ``None`` when the quest never reached it.
 
-    The history is newest first; the first node of a step is looked for before the next one ("code" is the outline
-    when there is one, else the script), so the whole step is done again."""
-    history = [s async for s in graph.aget_state_history(run_config)]
-    for node in STEPS[step]:
-        for snapshot in history:
-            if node in (snapshot.next or ()):
-                return snapshot.config
-    return None
+    The history is newest first. The newest checkpoint about to run one of the step's nodes is found, then the walk
+    goes on to older ones for as long as each is still about to run one of them: a step of several nodes (the outline
+    then the script; the data collected, waited for, loaded) is done again from its first node, and never from a node
+    of an earlier pass."""
+    nodes = set(STEPS[step])
+    best = None
+    async for snapshot in graph.aget_state_history(run_config):
+        about_to = set(snapshot.next or ())
+        if about_to & nodes:
+            best = snapshot
+        elif best is not None:
+            break
+    return best.config if best is not None else None
 
 
 def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
