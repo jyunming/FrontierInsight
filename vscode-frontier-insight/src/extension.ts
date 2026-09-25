@@ -514,7 +514,7 @@ async function runResume(
     // /resume <quest_id> --from <step> (or --from=<step>): the step is taken out first, so a quest id is never read
     // from it and `/resume --from code` still offers the picker.
     const fromMatch = !plan && !watch ? /(?:^|\s)--from(?:\s+|=)(\S+)/.exec(promptArgs) : null;
-    const fromStep = fromMatch ? fromMatch[1].toLowerCase() : undefined;
+    const fromStep = fromMatch ? fromMatch[1].replace(/^["']+|["']+$/g, "").toLowerCase() : undefined;
     const rawArg = (fromMatch ? promptArgs.replace(fromMatch[0], " ") : promptArgs).trim();
     const firstToken = rawArg.split(/\s+/)[0] || "";
     // Also strip surrounding quotes a user might paste from a log line.

@@ -124,3 +124,6 @@ async def test_a_step_of_several_nodes_is_done_again_from_its_first_node_of_the_
     graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("analyze",)])
     assert (await rerun_from.checkpoint_before(graph, {}, "code"))["configurable"]["checkpoint_id"] == "1"
     assert await rerun_from.checkpoint_before(graph, {}, "review") is None
+    # A crashed script repaired and run again is still the one run step: it restarts at the first execute.
+    graph = _Graph([("implement",), ("execute",), ("execute_reflect",), ("execute",), ("analyze",)])
+    assert (await rerun_from.checkpoint_before(graph, {}, "run"))["configurable"]["checkpoint_id"] == "1"

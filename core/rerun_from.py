@@ -25,6 +25,8 @@ STEPS: dict[str, tuple[str, ...]] = {
     "writing": ("write",),
     "review": ("review",),
 }
+# Nodes a step loops through without leaving it: the run's repair of a crashed script goes back to execute.
+_WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect",)}
 _ALIASES = {
     "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run", "auto_collect_data": "run", "analyze": "analysis",
     "write": "writing", "paper": "writing",
@@ -64,13 +66,14 @@ async def checkpoint_before(graph: Any, run_config: dict[str, Any], step: str) -
     goes on to older ones for as long as each is still about to run one of them: a step of several nodes (the outline
     then the script; the data collected, waited for, loaded) is done again from its first node, and never from a node
     of an earlier pass."""
-    nodes = set(STEPS[step])
+    starts = set(STEPS[step])
+    inside = starts | set(_WITHIN.get(step, ()))
     best = None
     async for snapshot in graph.aget_state_history(run_config):
         about_to = set(snapshot.next or ())
-        if about_to & nodes:
+        if about_to & starts:
             best = snapshot
-        elif best is not None:
+        elif best is not None and not about_to & inside:
             break
     return best.config if best is not None else None
 
