@@ -305,13 +305,13 @@ def _record(engine: Engine) -> dict[str, Any]:
 
 
 @pytest.mark.asyncio
-async def test_a_simulation_whose_manifest_matches_the_protocol_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_simulation_on_the_older_contract_is_checked_and_marked_as_its_own_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_reply(SIM_OK)))
     engine = Engine(_cfg(tmp_path))
     artifacts = await engine.run()
     assert artifacts.paper_md is not None
-    assert _record(engine)["status"] == "ok" and "ExecuteReflect" not in calls
+    assert _record(engine)["status"] == "self_reported" and "ExecuteReflect" not in calls
     assert (engine.quest_root / "raw" / "seed0" / "run_manifest.json").is_file()
 
 
@@ -348,7 +348,7 @@ async def test_a_loop_that_runs_fewer_trials_than_its_constant_says_is_sent_back
     protocol_record = json.loads((engine.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
     assert protocol_record["status"] == "ok" and protocol_record["differences"] == []
     record = _record(engine)
-    assert record["status"] == "ok"
+    assert record["status"] == "self_reported"
     log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert "[run_manifest] the run differs from the frozen protocol (1)" in log and "ran another number" in log
     assert "sending simulate.py back (1 of 1)" in log
@@ -395,7 +395,7 @@ async def test_an_analysis_that_prints_no_values_is_sent_back_alone_and_the_simu
     assert "Rewrite experiment.py (not simulate.py)" in reflect
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8").strip() == SIM_OK.strip()
     assert "final_size_values" in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
-    assert _record(engine)["status"] == "ok"
+    assert _record(engine)["status"] == "self_reported"
 
 
 @pytest.mark.asyncio
@@ -420,7 +420,7 @@ async def test_a_simulation_that_still_differs_after_the_repair_stops_the_quest_
     (first.quest_root / "code" / "simulate.py").write_text(SIM_OK, encoding="utf-8")
     second = Engine(cfg, resume_quest_id=first.quest_id)
     artifacts = await second.run()
-    assert artifacts.paper_md is not None and _record(second)["status"] == "ok"
+    assert artifacts.paper_md is not None and _record(second)["status"] == "self_reported"
 
 
 @pytest.mark.asyncio
@@ -492,12 +492,12 @@ async def test_scripts_that_break_the_contract_are_named_and_stop_a_strict_quest
 
 
 @pytest.mark.asyncio
-async def test_the_two_script_directive_asks_for_the_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_two_script_directive_asks_for_the_trial_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     prompts: list[str] = []
-    monkeypatch.setattr("core.engine.LLMClient.chat", _fake([], implement=_reply(SIM_OK), prompts=prompts))
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake([], implement=_reply(SIM_TRIAL, ANALYSIS_TRIAL), prompts=prompts))
     await Engine(_cfg(tmp_path)).run()
-    implement = [p for p in prompts if "run_manifest.json" in p]
-    assert implement and "fi.run-manifest/v1" in implement[0] and "attempted_per_cell" in implement[0]
+    implement = [p for p in prompts if "run_trial(cell: dict, trial_id: int, seed: int)" in p]
+    assert implement and "FI_TRIALS" in implement[0] and "fi.run-manifest/v1" not in implement[0]
 
 
 def test_the_pages_label_the_new_pauses() -> None:
@@ -517,15 +517,14 @@ async def test_the_other_seeds_are_checked_and_a_replicate_that_was_never_run_is
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake([], implement=_reply(SIM_OK)))
     engine = Engine(_cfg(tmp_path / "det", engine={"execute_replicates": 3}))
     await engine.run()
-    assert _record(engine)["status"] == "ok" and not (engine.quest_root / "raw" / "seed2").exists()
+    assert _record(engine)["status"] == "self_reported" and not (engine.quest_root / "raw" / "seed2").exists()
 
     liar = SIM_OK.replace("(raw / \"run_manifest.json\").write_text", "(raw / (\"run_manifest.json\" if os.environ.get(\"FI_REPLICATE_SEED\", \"0\") == \"0\" else \"other.json\")).write_text")
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake([], implement=_reply(liar)))
     other = Engine(_cfg(tmp_path / "seeds", engine={"execute_replicates": 2}))
     await other.run()
     record = _record(other)
-    assert record["status"] == "differs_in_replicates" and "1" in record["seeds"]
-    assert "was not written" in record["seeds"]["1"][0]
+    assert record["status"] == "self_reported", "the other seeds are compared only when the first seed's record is FI's own"
 
 
 def test_an_axis_the_protocol_does_not_list_is_a_difference_that_needs_an_amendment() -> None:
@@ -758,3 +757,100 @@ def test_a_failed_ledger_row_is_counted_attempted_but_not_successful() -> None:
     assert derived["successful_per_cell"]["R0=0.9"] == 299
     assert derived["failed_trials"] == [{"cell": "R0=0.9", "trial": 299, "reason": "solver diverged"}]
     assert rm.problems({**PROTOCOL, "failure_policy": "excluded from the pooled estimate"}, derived) == []
+
+
+
+# --- the trial contract: FI runs the trials and keeps their record ------------------------------------------------------
+
+SIM_TRIAL = """\
+import random
+
+def run_trial(cell, trial_id, seed):
+    rng = random.Random(seed)
+    return {"outbreak": 1.0 if rng.random() < cell["R0"] / 4 else 0.0, "final_size": 100.0 * cell["R0"] + rng.random()}
+"""
+ANALYSIS_TRIAL = """\
+import json, os
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+data = json.load(open(os.environ["FI_TRIALS"], encoding="utf-8"))
+out = {}
+for c in data["cells"]:
+    m = c["metrics"]["final_size"]
+    out[c["key"]] = {"final_size_values": m["values"], "final_size_count": m["count"]}
+os.makedirs('figures', exist_ok=True)
+plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
+print('RESULT_JSON: ' + json.dumps({'score': 0.987, 'by_cell': out}))
+"""
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_on_the_trial_contract_is_run_by_fi_and_fis_record_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the real graph: simulate.py only defines run_trial; FI runs 300 trials in each of the three settings, one
+    process per setting, writes the ledger itself, and the checker counts FI's rows. The simulation cannot write the
+    record: it writes no file at all."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_reply(SIM_TRIAL, ANALYSIS_TRIAL)))
+    engine = Engine(_cfg(tmp_path, engine={"execute_replicates": 3}))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and "ExecuteReflect" not in calls
+    assert _record(engine)["status"] == "ok"
+    ledger = [json.loads(line) for line in (engine.quest_root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    trials = [e for e in ledger if e["event"] == "trial"]
+    assert len(trials) == 900 and {e["cell"] for e in trials} == {"R0=0.9", "R0=1.5", "R0=3.0"}
+    assert len({e["seed"] for e in trials}) == 900, "every trial its own seed"
+    assert not (engine.quest_root / "raw" / "seed1").exists(), "the trials are the replicates: no second whole run"
+    evidence = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
+    assert not any("own statement" in g for gaps in evidence.get("all_gaps", {}).values() for g in gaps)
+    # The one result holds every trial: it is what the intervals and the metric statistics are computed from.
+    state = artifacts.raw_state
+    assert state["result_json_trials"] is True and len(state["result_json_replicates"]) == 1
+    values = state["result_json_replicates"][0]["by_cell"]["R0=1.5"]["final_size_values"]
+    assert len(values) == 300
+
+
+@pytest.mark.asyncio
+async def test_the_older_contract_under_research_is_sent_back_for_the_trial_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Research needs FI's own record: a simulation that runs its own loop is sent back once, asked for run_trial, and the
+    repaired one runs through FI."""
+    calls: list[str] = []
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat",
+                        _fake(calls, implement=_reply(SIM_OK), repair=SIM_TRIAL, prompts=prompts))
+    cfg = _cfg(tmp_path).model_copy(update={"rigor_profile": "research"})
+    engine = Engine(cfg)
+    await engine.run()
+    reflect = [p for p in prompts if _classify(p) == "ExecuteReflect"]
+    assert reflect and "run_trial(cell, trial_id, seed)" in reflect[0]
+    assert "def run_trial" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
+    assert (engine.quest_root / "raw" / "ledger.jsonl").is_file()
+
+
+@pytest.mark.asyncio
+async def test_the_oracle_of_the_trial_contract_is_its_own_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FI calls simulate.py's oracle() and judges its value against the protocol: no FI_ORACLE run, no ORACLE_JSON."""
+    protocol = {**PROTOCOL, "oracles": [{"name": "half", "check": "a known case", "expected": 0.5, "tolerance": 0.01}]}
+    sim = SIM_TRIAL + "\n\ndef oracle():\n    return {\"half\": 0.5004}\n"
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        if kind == "Experiment Design":
+            body = json.loads(_FAKE_RESPONSES["design"])
+            body["protocol"] = protocol
+            return json.dumps(body)
+        if kind == "Implementation":
+            return _reply(sim, ANALYSIS_TRIAL)
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path, engine={"oracle_check": "block"}))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok", record

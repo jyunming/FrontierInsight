@@ -299,10 +299,19 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
     return out
 
 
+_FI_RUNS_TRIALS = re.compile(r"^def\s+(run_trial|run_cell)\s*\(", re.MULTILINE)
+
+
 def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mismatch]:
-    """The ways ``scripts`` (file name -> source) contradict ``protocol``; empty when they do not."""
+    """The ways ``scripts`` (file name -> source) contradict ``protocol``; empty when they do not.
+
+    Under the trial contract (simulate.py defines ``run_trial`` or ``run_cell``) FI itself hands the simulation every
+    setting of the grid, runs ``runs_per_setting`` trials of each and gives the analysis the protocol's thresholds, so
+    none of those has to appear in the scripts: a script that names a different grid or run count is still a
+    contradiction, a script that names none is not."""
     if not isinstance(protocol, dict) or not scripts:
         return []
+    fi_runs_trials = bool(_FI_RUNS_TRIALS.search(scripts.get("simulate.py", "")))
     lists, scalars, numbers = _read(scripts)
     out: list[Mismatch] = []
 
@@ -325,7 +334,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
             if not any(_same_set(f.values, want) for f in candidates):
                 best = max(candidates, key=lambda f: sum(_has(want, v) for v in f.values))
                 out.append(Mismatch("grid", str(axis), want, best.values, f"{best.name} in {best.script}, line {best.line}"))
-        else:
+        elif not fi_runs_trials:  # under the trial contract FI hands the grid in: absent is expected, a contradiction is not
             absent = [v for v in want if not _has(numbers, v)]
             if absent:
                 out.append(Mismatch("grid", str(axis), want, [], "", absent))
@@ -350,7 +359,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
             for fn_name, line in rng_reuse(source):
                 out.append(Mismatch("rng", fn_name, [], [], f"`{fn_name}` in {script}, line {line}"))
 
-    thresholds = protocol.get("thresholds")
+    thresholds = protocol.get("thresholds") if not fi_runs_trials else None  # FI hands them to the analysis
     for name, v in (thresholds.items() if isinstance(thresholds, dict) else []):
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             forms = (float(v), float(v) * 100.0, float(v) / 100.0)
