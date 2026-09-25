@@ -52,6 +52,7 @@ from langgraph.types import Command, interrupt
 from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
+from . import rerun_from as _rerun_from
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import goal_coverage
@@ -600,6 +601,7 @@ class Engine:
         clarify_callback: ClarifyCallback | None = None,
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
         reopen: bool = False,
+        from_step: str | None = None,
     ) -> QuestArtifacts:
         """Run the quest to terminal state.
 
@@ -709,7 +711,26 @@ class Engine:
                     prior_snapshot = await graph.aget_state(run_config)
                     # `values` is empty dict for never-run threads.
                     payload: Any
-                    if prior_snapshot and prior_snapshot.values:
+                    # ``--from <step>``: the first call continues from the checkpoint taken just before that step; every
+                    # call after it (a resume after a pause) continues the thread as it now is.
+                    fork_config: dict[str, Any] | None = None
+                    if from_step:
+                        fork_config = await _rerun_from.checkpoint_before(graph, run_config, from_step)
+                        if fork_config is None:
+                            self._log.warning("[run] --from %s: this quest never reached that step", from_step)
+                            print(f"[FI] quest {self.quest_id} never reached the {from_step} step, so there is nothing "
+                                  f"to rerun from there; nothing was changed. Resume it with "
+                                  f"`python launch.py --resume {self.quest_id}`.")
+                            return self._collect_artifacts({})
+                        where, moved = _rerun_from.back_up(self.quest_root, from_step)
+                        self._audit("rerun_from", step=from_step, moved=moved)
+                        self._log.info("[run] rerunning from the %s step; the earlier outputs are in %s (%s)",
+                                       from_step, where or "(nothing to move)", ", ".join(moved) or "none")
+                        self._progress(f"Rerunning from the {from_step} step; the earlier outputs are kept in "
+                                       f"{where.relative_to(self.quest_root).as_posix() if where else 'nothing to keep'}")
+                    if fork_config is not None:
+                        payload = None
+                    elif prior_snapshot and prior_snapshot.values:
                         self._log.info(
                             "[run] found checkpoint with keys=%s next=%s — resuming",
                             sorted((prior_snapshot.values or {}).keys()),
@@ -780,7 +801,8 @@ class Engine:
                     #       sees the files and proceeds without pausing.
                     data_paused = False
                     while True:
-                        final_state = await graph.ainvoke(payload, config=run_config)
+                        final_state = await graph.ainvoke(payload, config=fork_config or run_config)
+                        fork_config = None
                         interrupts = (final_state or {}).get("__interrupt__")
                         if not interrupts:
                             break

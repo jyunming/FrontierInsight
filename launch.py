@@ -634,10 +634,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--from",
         dest="teach_from",
-        metavar="MODULE",
+        metavar="STEP|MODULE",
         default="",
-        help="Importable module the skill wraps, e.g. `ambit`. Required with "
-             "--teach-skill.",
+        help="With --resume or --rerun: the step to run again from — code, run, analysis, writing or review; "
+             "what that step and the later ones made is first moved to .fi/previous/<time>/. With --teach-skill: "
+             "the importable module the skill wraps, e.g. `ambit`.",
     )
     mode.add_argument(
         "--approve-skill",
@@ -1892,6 +1893,7 @@ async def run_one(
     source_yaml_path: Path | None = None,
     auto_accept_on_pass: bool | None = None,
     reopen: bool = False,
+    from_step: str | None = None,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -1942,7 +1944,7 @@ async def run_one(
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive)
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
-        human_feedback_callback=hf_callback, reopen=reopen,
+        human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
     # On a resume, only (re)generate outputs that are actually missing — don't
@@ -2343,12 +2345,14 @@ async def _maybe_profiled(
     clarify_callback: object = None,
     human_feedback_callback: object = None,
     reopen: bool = False,
+    from_step: str | None = None,
 ) -> QuestArtifacts:
     if not profile:
         return await engine.run(
             clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
+            from_step=from_step,
         )
     try:
         from viztracer import VizTracer  # type: ignore[import-not-found]
@@ -2358,6 +2362,7 @@ async def _maybe_profiled(
             clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
+            from_step=from_step,
         )
     trace_path = engine.fi_dir / "profile.json"
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
@@ -2366,6 +2371,7 @@ async def _maybe_profiled(
             clarify_callback=clarify_callback,
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
+            from_step=from_step,
         )
     print(f"[FI] {art.quest_id} profile -> {trace_path}")
     return art
@@ -2521,6 +2527,16 @@ async def main_async(args: argparse.Namespace) -> int:
         return 2
     if _reopen and not args.resume:
         args.resume = args.rerun
+    # --from names the step to rerun from when it comes with --resume / --rerun (with --teach-skill it names a module).
+    _from_step: str | None = None
+    if args.teach_from and args.resume and not getattr(args, "teach_skill", ""):
+        from core import rerun_from as _rerun_from
+
+        _from_step = _rerun_from.resolve(args.teach_from)
+        if _from_step is None:
+            print(f"[FI] --from {args.teach_from!r} is not a step this quest can be rerun from; choose one of: "
+                  f"{_rerun_from.choices()}. (To change the plan, use --revise-plan.)", file=sys.stderr)
+            return 2
     # Ensure Axon sidecar is up before anything that touches the
     # knowledge layer. Idempotent: returns fast if already running.
     # Skipped for the install-tectonic / list-drafts modes that
@@ -2829,6 +2845,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 source_yaml_path=args.config.resolve(),
                 auto_accept_on_pass=args.auto_accept_on_pass,
                 reopen=_reopen,
+                from_step=_from_step,
             )
             return 0
 
