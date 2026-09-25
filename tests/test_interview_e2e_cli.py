@@ -294,3 +294,36 @@ async def test_run_new_writes_what_the_result_is_for(
         assert "reproducibility" in shown.split("Review before launch", 1)[1]
         assert "reproducibility" in cfg.engine.review_panel
     assert "Result for" in shown
+
+
+def test_a_blank_answer_keeps_the_value_the_caller_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On --update a blank answer took FI's own default, so a revise budget of 5 went quietly back to 2."""
+    from core.interview import QUESTIONS
+    from launch import _cli_prompt_for
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    q = next(x for x in QUESTIONS if x.id == "max_iterations")
+    assert str(_cli_prompt_for(q, {"max_iterations": 5}, {})) == "5"
+    assert str(_cli_prompt_for(q, {}, {})) == str(q.default), "with nothing held, the question's own default"
+
+
+def test_a_held_value_outside_a_closed_questions_choices_is_not_offered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.interview import QUESTIONS
+    from launch import _cli_prompt_for
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    q = next(x for x in QUESTIONS if x.id == "result_use")
+    assert _cli_prompt_for(q, {"result_use": "not-a-choice"}, {}) == q.default
+    assert _cli_prompt_for(q, {"result_use": "explore"}, {}) == "explore"
+
+
+def test_a_custom_list_answer_survives_a_blank_answer(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    """Output bundles are lists; a person's own mix (not one of the bundles) must not be replaced on --update."""
+    from core.interview import QUESTIONS
+    from launch import _cli_prompt_for
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    q = next(x for x in QUESTIONS if x.id == "output_kinds")
+    own = ["paper_md", "poster"]
+    assert _cli_prompt_for(q, {"output_kinds": own}, {}) == own
+    assert "now: paper_md, poster; press Enter to keep it" in capsys.readouterr().out

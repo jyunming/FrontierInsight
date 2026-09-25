@@ -404,6 +404,17 @@ cached by its SHA-256. `content_quality` tells `full_text` from `abstract_only` 
 (ResNet, 3 pages) with RapidOCR 3.9: 95.8% of its words recovered, columns in reading order, about 11 s a page. The
 older `rapidocr_onnxruntime` dropped the spaces between English words, so it is not used.
 
+## What was approved is what runs
+
+The re-audit asked that the settings shown on the confirm screen be the ones that run. The interview now resolves them
+before the screen (#385); this closes the other end. The first start of an interview-written quest records the settings
+that decide how strictly it is checked in `.fi/approved_plan.json`; a later start whose config differs (a hand edit, or
+a different `--config` passed to `--resume`) stops before anything runs and names each change; `--update` shows the
+changes and records them. Verified with the real CLI: an interview config started once, `max_iterations` edited 2 -> 5,
+`--resume` stopped with the change named, `--update` approved it and the quest went on. Building it found a bug that
+predates it: on `--update` a blank answer took FI's own default instead of the quest's current value, so the 5 went
+quietly back to 2; fixed, with a test.
+
 ## The papers' figures: cut by layout, read by a model the person chooses
 
 The same user noted FI never got the figures out of a paper, where the numbers a comparison needs often are.

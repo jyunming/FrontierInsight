@@ -58,6 +58,7 @@ from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
+from . import plan_settings as _plan_settings
 from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -647,6 +648,24 @@ class Engine:
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
+            # How strictly this quest is checked was approved on the interview's confirm screen; a hand edit since then
+            # (a check turned down, a reviewer dropped, another model) stops here, before anything runs.
+            record = self.fi_dir / _plan_settings.NAME
+            had_record = record.is_file()
+            if not had_record and any(
+                e.get("kind") == "plan_settings_recorded" for e in _audit_log.read(self.audit.path)
+            ):
+                # Deleting the record must not re-approve whatever the config now says: the audit trace (hash-chained)
+                # remembers that one was written.
+                return self._stop_for_changed_settings([
+                    f"the record of the settings this quest was approved with ({record}) is gone, so a change since "
+                    "then cannot be told from none",
+                ])
+            changed = _plan_settings.check(self.quest_root, self.fi_dir, self.config)
+            if changed:
+                return self._stop_for_changed_settings(changed)
+            if not had_record and record.is_file():
+                self._audit("plan_settings_recorded", sha256=hashlib.sha256(record.read_bytes()).hexdigest())
             # Which interpreter is running FI decides which packages it can
             # see; a `pip install` into a different one changes nothing here.
             self._log.info(
@@ -3471,6 +3490,28 @@ class Engine:
                 len(ds_added),
             )
         return out
+
+    def _stop_for_changed_settings(self, changed: list[str]) -> QuestArtifacts:
+        """Stop before anything runs because a setting that decides how strictly the quest is checked differs from
+        the one approved when it started (core/plan_settings.py). Nothing is run and nothing is changed: the person
+        either puts the setting back, or approves the change with ``--update``, which records it."""
+        self._log.warning("[plan] stopped: %d setting(s) changed since the quest was approved: %s",
+                          len(changed), "; ".join(changed))
+        self._audit("plan_settings_changed", changed=changed)
+        self._write_next_step(
+            kind="plan_changed",
+            interaction="answer",
+            headline="settings that decide how strictly this quest is checked changed after you approved it",
+            steps=[
+                "Nothing was run. Changed since the quest was approved:\n" + "\n".join(f"  - {c}" for c in changed),
+                "To keep the change, approve it: `python launch.py --update " + self.quest_id + "` (web: the quest page's "
+                "Update, VS Code: `@fi /update " + self.quest_id + "`); it shows the settings and records them.",
+                f"To undo it, put the setting back in `{self.quest_root / 'config.yaml'}` (or resume with the config "
+                f"you started with), then `python launch.py --resume {self.quest_id}`.",
+            ],
+        )
+        print(f"[FI] stopped before running: settings changed since quest {self.quest_id} was approved; see NEXT_STEP.md")
+        return self._collect_artifacts({})
 
     def _write_next_step(
         self,
