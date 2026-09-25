@@ -357,6 +357,12 @@ Grading the re-bench of every non-gemma4 arm on 09a26b3 traced two lost results 
   "sufficient" for te2 and cb2 on literature alone, with no note to the writer (the papers themselves did say the
   experiment produced nothing). By the user's choice a simulation that ran and produced no results goes back to design
   once while an iteration is left, then is ruled insufficient with the reason; the analysis gets a note too.
+- **An API error was taken as the model's answer.** With the home network down, the claude CLI retried, then ended
+  with a result envelope marked `is_error: true` whose text was "API Error: Can't reach the API server … (ENOTFOUND)"
+  and exited 1. Because text had arrived, FI logged "exited rc=1 but emitted 78 text chars — returning result" and
+  about a dozen nodes of sn1–sn3 ran on that sentence (those three runs were discarded). An error envelope is now the
+  call's error: the call is retried and, if it keeps failing, fails with the CLI's reason instead of returning text.
+  Checked with the real CLI pointed at an unreachable API: the old code returned the sentence, the new code raises.
 
 ## The 2026-09-24 re-audit: a review nobody gave
 

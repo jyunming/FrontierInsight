@@ -84,6 +84,22 @@ def test_parse_stream_json_result_event_captures_final_text() -> None:
     assert is_result is True
 
 
+def test_parse_stream_json_error_result_envelope_is_an_error_not_the_answer() -> None:
+    """The envelope a failed call ends with (captured from the real claude CLI with the network down) carries the
+    error sentence as its ``result``; it must come back as the error, not as text."""
+    raw = json.dumps({
+        "type": "result", "subtype": "success", "is_error": True,
+        "result": "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+    }).encode()
+    text, thinking, err, is_result = _parse_stream_json_line(raw)
+    assert text == ""
+    assert err is not None and "ENOTFOUND" in err
+    assert is_result is False
+    text, _, err, _ = _parse_stream_json_line(
+        json.dumps({"type": "result", "subtype": "error_max_turns"}).encode())
+    assert text == "" and err == "error_max_turns"
+
+
 def test_parse_stream_json_error_event_returns_error_message() -> None:
     raw = json.dumps({"type": "error", "error": "rate_limit_exceeded"}).encode()
     text, thinking, err, is_result = _parse_stream_json_line(raw)
@@ -142,20 +158,22 @@ def _make_fake_streaming_binary(
     events: list[dict],
     pre_delay_s: float = 0.0,
     inter_delay_s: float = 0.0,
+    exit_code: int = 0,
 ) -> tuple[Path, _CliSpec]:
     """Build a tiny Python script that mimics a CLI emitting stream-json
-    events on stdout, then exits 0. ``pre_delay_s`` is the silence
+    events on stdout, then exits ``exit_code``. ``pre_delay_s`` is the silence
     before the first event (used to test the inactivity timer);
     ``inter_delay_s`` paces events apart.
     """
     script = tmp_path / "fake_claude.py"
     script.write_text(
         "import json, sys, time\n"
-        f"events = {json.dumps(events)}\n"
+        f"events = json.loads({json.dumps(json.dumps(events))})\n"
         f"time.sleep({pre_delay_s})\n"
         "for ev in events:\n"
         "    print(json.dumps(ev), flush=True)\n"
-        f"    time.sleep({inter_delay_s})\n",
+        f"    time.sleep({inter_delay_s})\n"
+        f"sys.exit({exit_code})\n",
         encoding="utf-8",
     )
     # Use the current python as the "binary" so it works on any platform.
@@ -294,6 +312,25 @@ async def test_run_cli_streaming_error_event_raises_transient(
             timeout_s=5.0, inactivity_timeout_s=3.0,
         )
     assert "internal_server_error" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_run_cli_streaming_error_envelope_with_nonzero_exit_raises(tmp_path: Path) -> None:
+    """The real failure shape: retries, a synthetic assistant message holding the error sentence, an ``is_error``
+    result envelope, exit 1. The rc != 0 path used to return that sentence as the answer because text had arrived."""
+    err_text = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)"
+    events = [
+        {"type": "system", "subtype": "api_retry", "attempt": 1},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": err_text}}},
+        {"type": "assistant", "message": {"model": "<synthetic>", "role": "assistant",
+                                          "content": [{"type": "text", "text": err_text}]}},
+        {"type": "result", "subtype": "success", "is_error": True, "result": err_text},
+    ]
+    _, spec = _make_fake_streaming_binary(tmp_path, events=events, exit_code=1)
+    with pytest.raises(_CliTransientError) as exc_info:
+        await _run_cli(spec, "any prompt", timeout_s=5.0, inactivity_timeout_s=3.0)
+    assert "ENOTFOUND" in str(exc_info.value)
 
 
 def _make_lingering_streaming_binary(
