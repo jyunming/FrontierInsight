@@ -112,6 +112,7 @@ def test_the_web_form_carries_the_answer_and_refuses_an_unknown_one(tmp_path: Pa
     res = client.post("/api/interview/submit", json={**_ok_answers_payload(), "rigor_profile": "research"})
     assert Config.from_yaml(Path(res.json()["yaml_path"])).rigor_profile == "research"
     assert client.post("/api/interview/submit", json={**_ok_answers_payload(), "result_use": "strict"}).status_code == 400
+    assert client.post("/api/interview/submit", json={**_ok_answers_payload(), "rigor_profile": "strict"}).status_code == 400
     page = (Path(__file__).resolve().parent.parent / "web" / "static" / "interview.html").read_text(encoding="utf-8")
     assert "function resolveReviewPanel" in page and "rigor_profile: 'default'" not in page
 

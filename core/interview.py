@@ -293,7 +293,7 @@ RESULT_USE_CHOICES: tuple[Choice, ...] = (
            "Checked the way a study must be before its result can be trusted: the plan waits for you to read it, "
            "every check stops the quest instead of only reporting, the experiment runs in its own clean environment, "
            "and four reviewers (method, statistics, reproducibility, devil's advocate) read the paper. Slower, and it "
-           "stops for you more often. Written as rigor_profile: research."),
+           "stops for you more often."),
     Choice("decision", "A decision",
            "The same checks as Research: a result someone will act on needs every one of them."),
     Choice("explore", "Exploring (cheaper draft)",
