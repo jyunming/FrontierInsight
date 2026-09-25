@@ -1215,8 +1215,11 @@ class Engine:
                 self._log.warning(
                     "[run] could not write quest_failed.md: %r", diag_err,
                 )
-            # The failure is on the to-do card (the run's start cleared the last one).
-            _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
+            # The failure is on the to-do card (the run's start cleared the last one). Never in the way of the error.
+            try:
+                _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
+            except Exception:  # noqa: BLE001
+                pass
             raise
         finally:
             # Outer cleanup: releases the per-quest run.log FileHandler

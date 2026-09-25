@@ -242,9 +242,9 @@ def write(quest_root: Path, fi_dir: Path, quest_id: str, pause: Item | None) -> 
     ``NEXT_STEP.md`` and ``.fi/todo.json``; with no pause (a finished quest) only ``.fi/todo.json``, since a
     ``NEXT_STEP.md`` means "paused" to every interface, and none at all when nothing is waiting. Best-effort: a card
     that cannot be written never stops a quest."""
-    items = ([pause] if pause else []) + waiting(quest_root)
     todo = Path(fi_dir) / TODO_NAME
     try:
+        items = ([pause] if pause else []) + waiting(quest_root)
         if pause:
             (Path(quest_root) / "NEXT_STEP.md").write_text(render(quest_id, items), encoding="utf-8")
         if items:
@@ -255,8 +255,8 @@ def write(quest_root: Path, fi_dir: Path, quest_id: str, pause: Item | None) -> 
             )
         else:
             todo.unlink(missing_ok=True)
-    except OSError:
-        pass
+    except Exception:  # noqa: BLE001 -- a card that cannot be written must never stop a quest or hide its error
+        items = [pause] if pause else []
     return items
 
 

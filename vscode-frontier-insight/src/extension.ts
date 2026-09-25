@@ -1095,11 +1095,16 @@ async function runQuest(
     // raw `[FI]` prefix.
     child.stdout.setEncoding("utf-8");
     let stdoutBuf = "";
+    // The quest this run is: launch.py prints `[FI] <quest_id> -> <quest folder>` when it stops or ends, so the card
+    // shown after it is that quest's, never another's written about the same time.
+    let questIdSeen: string | undefined;
     child.stdout.on("data", (chunk: string) => {
         stdoutBuf += chunk;
         const lines = stdoutBuf.split(/\r?\n/);
         stdoutBuf = lines.pop() || "";
         for (const line of lines) {
+            const ran = line.match(/^\[FI\] (\d+-[\w-]+) -> /);
+            if (ran && !fleet) questIdSeen = ran[1];
             const wrote = line.match(/^\[FI\] wrote (\w+) -> (.+)$/);
             if (wrote) {
                 stream.markdown(`  ✅ wrote ${wrote[1]} → \`${path.basename(wrote[2])}\`\n\n`);
@@ -1161,12 +1166,13 @@ async function runQuest(
             ? outDirSetting
             : path.join(workDir, outDirSetting);
         // A quest that stopped for you also exits 0: say it is waiting, not that it finished.
-        const card = await readNextStep(outputsDir, resumeQuestId, startedAt);
+        const card = await readNextStep(outputsDir, resumeQuestId ?? questIdSeen, startedAt);
         if (card) {
             stream.markdown(`\n\n---\n\n⏸ **The quest is waiting for you.**\n\n${card.markdown}\n`);
         } else {
             stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
-            if (resumeQuestId) await surfaceWorthALook(outputsDir, stream, resumeQuestId);
+            const finishedId = resumeQuestId ?? questIdSeen;
+            if (finishedId) await surfaceWorthALook(outputsDir, stream, finishedId);
         }
         await surfaceWantedPapers(outputsDir, stream, resumeQuestId);
     } else {
