@@ -1123,3 +1123,21 @@ def test_the_check_sees_how_the_study_was_run_and_the_results_the_paper_quotes(t
     assert "- two_person_exact: measured 0.6, expected 0.6 within 0.01: passed" in prompt
     assert "These verdicts are the ones that count" in prompt
     assert "0.6938" in prompt.split("## How the study was run")[0]  # in the results, not only in the paper
+
+
+def test_a_rewrite_is_told_which_citations_the_check_confirmed() -> None:
+    """A rewrite for the page limit dropped a citation the check had confirmed (Whittle 1955) and cited title-only books."""
+    from core.engine import _format_review_for_writer
+
+    state = {
+        "review": {"verdict": "revise", "must_flag_hits": ["over_page_limit: cut about 200 words"]},
+        "claim_grounding": {"claims": [
+            {"claim": "Below threshold no major outbreak occurs.", "basis": "citation", "citation_index": 4},
+            {"claim": "p_major was 0.36 at R0 = 1.5.", "basis": "experiment", "citation_index": None},
+            {"claim": "An uncited aside.", "basis": "unsupported", "citation_index": None},
+        ], "unsupported": ["An uncited aside."]},
+    }
+    text = _format_review_for_writer(state)  # type: ignore[arg-type]
+    assert "Citations the check confirmed" in text and "[4] for: Below threshold no major outbreak occurs." in text
+    assert "p_major was 0.36" not in text
+    assert "Citations the check confirmed" not in _format_review_for_writer({"claim_grounding": state["claim_grounding"]})  # type: ignore[arg-type]

@@ -15076,6 +15076,17 @@ def _format_review_for_writer(state: QuestState) -> str:
             "Claims that neither this study's results nor a cited source backs:",
             *(f"  - {claim}" for claim in unsupported),
         ]
+    # A rewrite for another reason (the page limit) dropped a citation the check had confirmed against its source's
+    # text, and cited title-only books instead: the confirmed ones are named so a rewrite keeps them.
+    confirmed = [
+        c for c in (state.get("claim_grounding") or {}).get("claims") or []
+        if isinstance(c, dict) and c.get("basis") == "citation" and c.get("citation_index") is not None
+    ]
+    if confirmed and review:
+        lines += [
+            "Citations the check confirmed against the source's own text (keep each where its sentence stays):",
+            *(f"  - [{c['citation_index']}] for: {str(c.get('claim') or '').strip()[:160]}" for c in confirmed[:20]),
+        ]
     rounds = [
         h for h in state.get("feedback_history") or []
         if isinstance(h, dict) and str(h.get("text") or "").strip()
