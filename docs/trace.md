@@ -22,7 +22,7 @@ On the web, open a quest and expand **Trace** (same detail and step filters). Th
 python launch.py --trace <quest> --follow                      # each new event as it happens, until the quest stops for you, finishes or fails
 ```
 
-In VSCode, `@fi /follow <quest_id>` shows each step in chat as it happens (`--detail checks` for more); stopping the chat stops following, and the quest goes on. The web quest page already shows the live log.
+In VSCode, `@fi /follow <quest_id>` shows each step in chat as it happens (`--detail checks` for more); stopping the chat stops following, and the quest goes on. A quest whose process is killed outright (out of memory, the machine off) leaves no record to end on: stop following with Ctrl+C (or by stopping the chat). The web quest page already shows the live log.
 
 ## Ask why
 

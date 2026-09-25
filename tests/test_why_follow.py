@@ -146,3 +146,10 @@ def test_the_web_answers_why_like_the_cli(tmp_path: Path) -> None:
     res = client.get(f"/api/quests/{root.name}/why?about=execute")
     assert res.status_code == 200 and res.json()["text"] == why.explain(root, "execute")
     assert "Why?" in (REPO / "web" / "static" / "quest.html").read_text(encoding="utf-8")
+
+
+def test_follow_ends_on_a_failed_step_only_once_nothing_came_after_it(tmp_path: Path) -> None:
+    root = _quest(tmp_path)
+    audit_log.AuditLog(root / ".fi" / "audit.jsonl", quest_id="q1").append("node_failed", node="execute", error="boom")
+    out = _launch("--trace", str(root), "--follow", "--trace-detail", "debug", timeout=60)
+    assert out.returncode == 0 and out.stdout.rstrip().endswith("a step failed.")

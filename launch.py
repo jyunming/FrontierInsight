@@ -5443,6 +5443,8 @@ def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll
     seen = 0
     print(f"Following {root.name} (Ctrl+C stops following; the quest goes on).", flush=True)
 
+    last_failed_seen: list[int] = []
+
     def _ended(events: list[dict]) -> str:
         # Where the quest is now, whenever following began: stopped for a person (the trace's last event), failed, or
         # finished (a record written after the trace's last event: a resumed quest clears or rewrites these first).
@@ -5450,7 +5452,12 @@ def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll
         if last == "node_paused" and (root / ".fi" / "pause.json").is_file():
             return "it stopped for you: see NEXT_STEP.md"
         if last == "node_failed":
-            return "a step failed" + ("; see quest_failed.md" if (root / "quest_failed.md").is_file() else "")
+            # Still the last event one poll later: the run did not go on past it.
+            seq = int(events[-1].get("seq") or 0)
+            if last_failed_seen and last_failed_seen[-1] == seq:
+                return "a step failed" + ("; see quest_failed.md" if (root / "quest_failed.md").is_file() else "")
+            last_failed_seen.append(seq)
+            return ""
         try:
             trace_time = path.stat().st_mtime
         except OSError:
