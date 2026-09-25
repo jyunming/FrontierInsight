@@ -11,8 +11,8 @@ lost its results and discussion.
   hyphen are joined, ligatures are spelt out, and (on the pypdfium2 path) a two-column page whose text was stored
   line by line across the columns is read column by column.
 - Scanned pages (almost no text layer) are rendered and read by OCR: tesseract when its program is installed and
-  ``pytesseract`` is importable, otherwise RapidOCR (``pip install rapidocr onnxruntime``; its models, about 32 MB,
-  are fetched from modelscope.cn the first time). With neither, the page is counted as unread and the result says so;
+  ``pytesseract`` is importable, otherwise RapidOCR (``pip install rapidocr onnxruntime``; its default models, about
+  31 MB, are inside the wheel, so it runs offline once installed). With neither, the page is counted as unread and the result says so;
   it is never silently empty. No language model is involved.
 - ``max_bytes`` bounds the text (10 MB by default); a PDF cut there says at which page.
 """
@@ -163,7 +163,7 @@ class _Ocr:
         except ImportError:
             pass
         try:
-            from rapidocr import RapidOCR  # type: ignore[import-not-found]  # rapidocr >= 2 (models fetched on first use)
+            from rapidocr import RapidOCR  # type: ignore[import-not-found]  # rapidocr >= 2 (default models ship in the wheel)
 
             self._engine, self.name = RapidOCR(), "rapidocr"
             return
