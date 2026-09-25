@@ -8630,7 +8630,10 @@ class Engine:
             )
         evidence_block += _claim_results_block(
             state.get("result_json") or {},
-            query=evidence_block,
+            # The claims are the paper's: the branches that hold the numbers it writes are the ones to keep. Ranked by
+            # the findings alone, a real run's per-setting values the paper quoted were left out, and 6 true
+            # sentences were called unsupported.
+            query=evidence_block + "\n" + paper_text,
             budget=_CLAIM_EVIDENCE_CHARS - len(evidence_block),
         )
         # The paper reports means over the seeds with their intervals, which
@@ -8648,6 +8651,7 @@ class Engine:
         prompt = self._prompts["claim_check"].substitute(
             topic=state["topic"],
             evidence_block=evidence_block,
+            method_block=_claim_method_block(self.quest_root, state),
             references=refs_block,
             paper=paper_text,
         )
@@ -12713,6 +12717,36 @@ def _item_content(item: Any) -> str:
                     text += _PARA + _FIGURE_READINGS_MARK + _PARA + _PARA.join(missing) + _NL
             return text
     return str(content or "")
+
+
+# The scripts as the claim check sees them. A sentence about how the study was run (the generator, the solver, how
+# many oracle trials) is checked against the code that ran it: without it a real run had four true method sentences
+# called unsupported, and the revise that followed rewrote them.
+_CLAIM_SCRIPT_CHARS = 8000
+_CLAIM_PROTOCOL_CHARS = 3000
+
+
+def _claim_method_block(quest_root: Path, state: QuestState) -> str:
+    """How the study was run, for the claim check: the frozen protocol, the scripts that ran (each cut at
+    ``_CLAIM_SCRIPT_CHARS``, and saying so), and what each figure draws."""
+    parts: list[str] = []
+    protocol = _frozen.protocol_of(quest_root)
+    if protocol:
+        text = json.dumps(protocol, indent=1, default=str)
+        if len(text) > _CLAIM_PROTOCOL_CHARS:
+            text = text[:_CLAIM_PROTOCOL_CHARS] + f"\n... ({len(text) - _CLAIM_PROTOCOL_CHARS:,} more characters)"
+        parts.append("The frozen protocol:\n" + text)
+    for name in (_split_run.SIMULATE_NAME, "experiment.py"):
+        try:
+            source = (quest_root / "code" / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if len(source) > _CLAIM_SCRIPT_CHARS:
+            source = source[:_CLAIM_SCRIPT_CHARS] + f"\n# ... ({len(source) - _CLAIM_SCRIPT_CHARS:,} more characters not shown)"
+        parts.append(f"code/{name}:\n```python\n{source}\n```")
+    if state.get("figures"):
+        parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
+    return "\n\n".join(parts) or "(nothing recorded)"
 
 
 def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str]) -> str:
