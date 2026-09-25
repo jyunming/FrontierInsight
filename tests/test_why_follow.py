@@ -21,7 +21,7 @@ def _quest(tmp_path: Path) -> Path:
     log = audit_log.AuditLog(root / ".fi" / "audit.jsonl", quest_id="q1")
     log.append("node_started", node="review")
     log.append("model_claim", node="review", provenance=audit_log.MODEL_CLAIM, topic="review_verdict",
-               claim="revise: two claims are unsupported")
+               claim="Summary: two claims are unsupported")
     log.append("route_decision", node="review", chosen="rewrite",
                facts={"verdict": "revise", "must_flag_hits": ["unsupported_claim"]})
     log.append("node_started", node="execute")
@@ -39,7 +39,7 @@ def test_why_answers_the_review_the_evidence_and_any_step_from_the_records(tmp_p
     assert "Why it stopped" not in answer, "not paused: no pause section"
     assert "Decided: next is rewrite because must_flag_hits=['unsupported_claim'], verdict=revise." in answer
     assert "The model's own reasons (what it said, not something FI checked):" in answer
-    assert "revise: two claims are unsupported" in answer
+    assert "    - Summary: two claims are unsupported" in answer
     assert "Next: the audits did not run (+1 more)" in answer and "internally_reconciled" not in answer
     step = why.explain(root, "execute")
     assert "Check oracle: failed" in step and "N=2 mean is 1.3, not 1.5" in step
@@ -69,13 +69,18 @@ def test_the_cli_why_and_follow(tmp_path: Path) -> None:
     # --follow prints what is there, then what is added, and ends when the quest stops for a person.
     def later() -> None:
         time.sleep(4)
-        audit_log.AuditLog(root / ".fi" / "audit.jsonl", quest_id="q1").append("node_started", node="write")
+        log = audit_log.AuditLog(root / ".fi" / "audit.jsonl", quest_id="q1")
+        log.append("node_started", node="write")
         (root / ".fi" / "pause.json").write_text("{}", encoding="utf-8")
+        log.append("node_paused", node="write", pause="review")
 
     threading.Thread(target=later, daemon=True).start()
     out = _launch("--trace", str(root), "--follow", "--trace-detail", "debug", timeout=90)
     assert out.returncode == 0, out.stderr
     assert "execute: check oracle: failed" in out.stdout and "write: started" in out.stdout
+    assert out.stdout.rstrip().endswith("it stopped for you: see NEXT_STEP.md.")
+    # Following a quest that has already stopped ends at once, and a claim's own colon is kept.
+    out = _launch("--trace", str(root), "--follow", timeout=60)
     assert out.stdout.rstrip().endswith("it stopped for you: see NEXT_STEP.md.")
 
 
@@ -92,10 +97,15 @@ def test_model_calls_are_kept_only_when_asked_and_without_image_bytes(tmp_path: 
     record = json.loads(kept[0].read_text(encoding="utf-8"))
     assert record["response"] == "looks fine" and record["usage"] == {"prompt_tokens": 3}
     assert record["messages"][0]["content"][0]["image_url"]["url"] == "[image, 5,022 characters]"
+    long = "x" * 5000 + " sk-" + "a" * 40
+    append_cost_row(fi, node="write", model="m", usage=None, messages=[{"role": "user", "content": long}], response=long)
+    whole = [json.loads(p.read_text(encoding="utf-8")) for p in (fi / "io").iterdir() if p.name.endswith("-write.json")]
+    assert len(whole) == 1 and whole[0]["messages"][0]["content"].startswith("x" * 5000), "kept whole, not cut at 2,000"
+    assert "sk-" + "a" * 40 not in whole[0]["response"], "a key-shaped token is still redacted"
     set_model_call_archive(fi, False)
     append_cost_row(fi, node="write", model="m", usage=None, messages=[], response="r")
-    assert len([p for p in (fi / "io").iterdir() if p.suffix == ".json"]) == 1, "off again: nothing more kept"
-    assert len((fi / "cost.jsonl").read_text(encoding="utf-8").splitlines()) == 3
+    assert len([p for p in (fi / "io").iterdir() if p.suffix == ".json"]) == 2, "off again: nothing more kept"
+    assert len((fi / "cost.jsonl").read_text(encoding="utf-8").splitlines()) == 4
 
 
 def test_an_engine_call_is_kept_whole_when_the_quest_keeps_its_model_calls(tmp_path: Path) -> None:

@@ -2703,10 +2703,13 @@ def _archive_model_call(fi_dir: Path, record: dict[str, Any], messages: Any, res
         return value
 
     messages = _no_images(messages)
-    name = f"{time.time_ns()}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', record['node'] or 'call')[:60]}.json"
+    import uuid
+
+    # A random part too: calls made at once (an ensemble) can share a clock tick.
+    name = f"{time.time_ns()}-{uuid.uuid4().hex[:6]}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', record['node'] or 'call')[:60]}.json"
     try:
         (folder / name).write_text(json.dumps({
-            **record, "messages": redact(messages), "response": redact(response),
+            **record, "messages": redact(messages, whole=True), "response": redact(response, whole=True),
         }, ensure_ascii=False, indent=1), encoding="utf-8")
     except OSError as e:
         _log.debug("[io] failed to keep a model call: %r", e)

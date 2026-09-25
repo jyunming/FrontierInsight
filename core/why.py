@@ -66,6 +66,16 @@ def _passes(events: list[dict[str, Any]], node: str) -> list[list[dict[str, Any]
     return runs
 
 
+def _claim(e: dict[str, Any]) -> str:
+    """A model's stated reason, from the event's own fields (its text may hold a colon of its own)."""
+    text = str(e.get("claim") or "")
+    if e.get("decision"):
+        text += f" -> {e['decision']}"
+    if e.get("reason"):
+        text += f" ({e['reason']})"
+    return text
+
+
 def _step(events: list[dict[str, Any]], node: str, heading: str) -> list[str]:
     runs = _passes(events, node)
     if not runs:
@@ -83,7 +93,7 @@ def _step(events: list[dict[str, Any]], node: str, heading: str) -> list[str]:
     claims = [e for e in last if e.get("kind") == "model_claim"]
     if claims:
         lines.append("  The model's own reasons (what it said, not something FI checked):")
-        lines += [f"    - {audit_log.describe(e, tagged=False).split(': ', 1)[-1]}" for e in claims[:_MAX_REASONS]]
+        lines += [f"    - {_claim(e)}" for e in claims[:_MAX_REASONS]]
         if len(claims) > _MAX_REASONS:
             lines.append(f"    (and {len(claims) - _MAX_REASONS} more: `--trace <quest_id> --trace-node {node}`)")
     failed = [e for e in last if e.get("kind") == "node_failed"]

@@ -187,7 +187,8 @@ export async function runFollow(
             const lines = pending.split(/\r?\n/);
             pending = lines.pop() ?? "";
             const shown = lines.filter((l) => l.trim());
-            if (shown.length) stream.markdown(shown.map((l) => "`" + l.trim().replace(/`/g, "'") + "`").join("  \n") + "  \n");
+            // One code block per batch keeps each line exactly as launch.py printed it, backticks included.
+            if (shown.length) stream.markdown("```\n" + shown.join("\n").replace(/```/g, "` ` `") + "\n```\n");
         });
         child.stderr?.on("data", (d: string) => (stderr += d));
         const stop = token.onCancellationRequested(() => child.kill());
@@ -197,7 +198,8 @@ export async function runFollow(
             resolve();
         });
         child.on("close", (code) => {
-            if (pending.trim()) stream.markdown("`" + pending.trim().replace(/`/g, "'") + "`\n");
+            if (pending.trim()) stream.markdown("```\n" + pending.trim().replace(/```/g, "` ` `") + "\n```\n");
+            if (token.isCancellationRequested) stream.markdown("Stopped following; the quest goes on.\n");
             if (code !== 0 && !token.isCancellationRequested && stderr.trim()) {
                 stream.markdown("```\n" + stderr.trim().slice(-2000) + "\n```\n");
             }

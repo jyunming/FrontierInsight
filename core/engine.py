@@ -1269,6 +1269,7 @@ class Engine:
         Returns an artifacts bundle built from whatever the checkpoint holds;
         raises ``FileNotFoundError`` if there is no checkpoint to read.
         """
+        _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
         checkpoint_path = self.fi_dir / "state.sqlite"
         if not checkpoint_path.is_file():
             raise FileNotFoundError(

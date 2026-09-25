@@ -5443,14 +5443,23 @@ def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll
     seen = 0
     print(f"Following {root.name} (Ctrl+C stops following; the quest goes on).", flush=True)
 
-    def _ended() -> str:
-        # Written by this run (after following began): a stop, a finished quest, a failure.
-        for rel, what in ((".fi/pause.json", "it stopped for you: see NEXT_STEP.md"),
-                          ("frontier_insight_summary.json", "it finished"),
-                          ("quest_failed.md", "it failed: see quest_failed.md")):
+    def _ended(events: list[dict]) -> str:
+        # Where the quest is now, whenever following began: stopped for a person (the trace's last event), failed, or
+        # finished (a record written after the trace's last event: a resumed quest clears or rewrites these first).
+        last = events[-1].get("kind") if events else None
+        if last == "node_paused" and (root / ".fi" / "pause.json").is_file():
+            return "it stopped for you: see NEXT_STEP.md"
+        if last == "node_failed":
+            return "a step failed" + ("; see quest_failed.md" if (root / "quest_failed.md").is_file() else "")
+        try:
+            trace_time = path.stat().st_mtime
+        except OSError:
+            return ""
+        for rel, what in (("quest_failed.md", "it failed: see quest_failed.md"),
+                          ("frontier_insight_summary.json", "it finished")):
             f = root / rel
             try:
-                if f.is_file() and f.stat().st_mtime >= started:
+                if f.is_file() and f.stat().st_mtime >= trace_time - 1:
                     return what
             except OSError:
                 pass
@@ -5463,7 +5472,7 @@ def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll
             for line in audit_log.render(new):
                 print("  " + line, flush=True)
             seen = len(events)
-            end = _ended()
+            end = _ended(events)
             if end:
                 print(f"[FI] {root.name}: {end}.", flush=True)
                 return 0
