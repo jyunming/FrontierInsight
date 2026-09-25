@@ -1313,9 +1313,11 @@ class KnowledgeConfig(BaseModel):
     # Total budget across all docs in one literature batch — caps wall
     # time so a slow VPN can't stall the literature node indefinitely.
     full_text_fetch_total_s: float = 90.0
-    # Hard cap on extracted text per doc so a 200-page review doesn't
-    # blow up downstream prompts. Truncates the middle.
-    full_text_max_kb: int = 64
+    # Most text kept of one source (its PDF read whole, scanned pages by OCR). 10 MB: only a whole book or a broken
+    # file reaches it. Prompts never take a source whole (they take the passages relevant to the question, see
+    # literature_excerpt_chars), and the quest state keeps the first 64 KB; the rest is on disk under
+    # data/literature/full_text/. It was 64 KB, which cut most papers before their results.
+    full_text_max_kb: int = 10 * 1024
     # How many characters of each source's fetched full text to put into a
     # node's prompt. Selected by RELEVANCE to the quest question (see
     # ``passage_ranking``) — the *relevant* N chars, not the first N — so
