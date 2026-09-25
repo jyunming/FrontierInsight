@@ -415,6 +415,21 @@ changes and records them. Verified with the real CLI: an interview config starte
 predates it: on `--update` a blank answer took FI's own default instead of the quest's current value, so the 5 went
 quietly back to 2; fixed, with a test.
 
+## The papers' figures: cut by layout, read by a model the person chooses
+
+The same user noted FI never got the figures out of a paper, where the numbers a comparison needs often are.
+`core/pdf_figures.py` cuts every captioned figure out of each PDF from the page's layout (the drawing above the
+caption; on a scanned page, the region the OCR lines leave between the caption and the body text), saves them under
+`data/literature/figures/` and lists them with their captions in each `lit_*.md`. Checked at full size and pixel by
+pixel against the page render on the ResNet and Transformer papers: 12 of 12 figures on the text PDFs and 5 of 5 on
+an image-only copy, after fixing two cuts the first version got wrong (a caption line's taller neighbour raised the
+bottom edge; a scanned figure lost its left 18 points). The user's choices: read the figures once, right after the
+literature; the model picks from the captions and reads every figure it picked, four a call; the model is the step
+`figures` in `provider.node_models`; a model without image input stops the quest and asks. Real run on the ResNet
+paper: the pick took the three result plots and left the diagrams and the Transformer's attention figures; Sonnet's
+readings matched the curves and the paper's tables (ResNet-110 about 6.5% against the table's 6.43%), Haiku's were
+several points off (ImageNet plain-18 validation read as 38-40% where the curve ends near 31%).
+
 ## Required checks must leave a receipt (re-audit P0-1)
 
 The 2026-09-24 re-audit showed `publication_ready` was reached by absence of error: an evidence gate, design audit or

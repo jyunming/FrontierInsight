@@ -192,7 +192,13 @@ provider:
     speech: claude-haiku-4-5
 ```
 
-Unset, all three use the primary model like any other node — no
+`figures` is a key too: the step that reads values off the papers' figures
+(`knowledge.read_figures`). It needs a model that takes images. Measured on
+the ResNet paper's result plots, a mid-size model read the curves to within
+the tick precision and the smallest was several points off, so try yours on
+a paper you know before relying on a cheap one.
+
+Unset, all four use the primary model like any other node — no
 behavior change until you opt in. There is no automatic "pick a cheap
 model for me": the string you set here is passed straight to whichever
 provider is already active, exactly like every other `node_models`

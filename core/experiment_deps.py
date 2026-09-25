@@ -97,15 +97,14 @@ def skill_hint(skill: Any) -> str:
 
 
 def skill_requirements(skills: Iterable[Any]) -> list[str]:
-    """The packages the selected skills recorded as needing (``pip_requires`` in their provenance)."""
+    """The packages the selected skills need: their recorded ``pip_requires``, or for a preset skill imported before
+    provenance recorded one, the preset table's list (core/skills/known_requirements.py); each pinned where a bare name
+    installs a broken version."""
+    from core.skills import known_requirements
+
     out: list[str] = []
     for s in skills:
-        try:
-            declared = s.provenance().get("pip_requires")
-        except Exception:  # noqa: BLE001 -- unreadable provenance is "none declared"
-            declared = None
-        if isinstance(declared, list):
-            out.extend(str(x).strip() for x in declared if str(x).strip())
+        out.extend(known_requirements.pip_requires(s))
     return list(dict.fromkeys(out))
 
 

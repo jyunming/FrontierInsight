@@ -232,12 +232,13 @@ def test_repositories_that_cannot_be_fetched_are_named_and_only_their_skills_are
     code = _run_main(isk, monkeypatch, tmp_path, imported=imported)
     out = capsys.readouterr().out
     assert code == 1
-    assert "Could not fetch 10 of 11 source repos" in out and "clawbio" in out
+    assert f"Could not fetch {len(isk.REPOS) - 1} of {len(isk.REPOS)} source repos" in out and "clawbio" in out
     # and it says exactly what to run by hand
     assert f"git -c core.longpaths=true clone --depth 1 https://github.com/ClawBio/ClawBio.git {tmp_path / 'clawbio'}" in out
     assert "analyze-fasta: skipped (its source repo clawbio was not fetched)" in out
     assert "pymc" in imported and "analyze-fasta" not in imported
-    assert "Imported 1/12" in out and "Not attempted, because their source repo could not be fetched" in out
+    kdense = sum(1 for repo, *_ in isk.SKILLS.values() if repo == "kdense")
+    assert f"Imported 1/{kdense}" in out and "Not attempted, because their source repo could not be fetched" in out
     # the closing lines print, as text and not as a syntax error
     assert "Replace <you> with the name of whoever actually reviewed the skills." in out
     assert "Or one at a time:" in out
@@ -245,7 +246,7 @@ def test_repositories_that_cannot_be_fetched_are_named_and_only_their_skills_are
 
 def test_when_everything_is_there_the_exit_code_is_zero(isk, tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setattr(isk, "REPOS", {"kdense": "u"})
-    monkeypatch.setattr(isk, "SKILLS", {"pymc": ("kdense", "skills/pymc", ["pymc"], False)})
+    monkeypatch.setattr(isk, "SKILLS", {"pymc": ("kdense", "skills/pymc", False)})
     (tmp_path / "kdense" / ".git").mkdir(parents=True)
     (tmp_path / "kdense" / "skills" / "pymc").mkdir(parents=True)
     (tmp_path / "kdense" / "skills" / "pymc" / "SKILL.md").write_text("# pymc\n", encoding="utf-8")
