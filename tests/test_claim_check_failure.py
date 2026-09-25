@@ -160,3 +160,27 @@ def test_a_runaway_paper_is_cut_with_a_note() -> None:
     assert out.startswith("x" * 100)
     assert "only its first" in out and len(out) < len(long) + 200
     assert _paper_for_prompt("short", "review") == "short"
+
+
+def test_the_claim_check_leaves_a_receipt_for_the_draft_it_judged(tmp_path: Path) -> None:
+    from core import receipts
+
+    eng = _engine(tmp_path)
+    paper = tmp_path / "paper.md"
+    paper.write_text("# T\n\nA claim [1].\n", encoding="utf-8")
+
+    async def ok(prompt, *, node=""):  # noqa: ANN001, ARG001
+        return json.dumps({"claims": [{"claim": "A claim", "basis": "unsupported", "evidence": ""}]})
+
+    eng._chat = ok  # type: ignore[assignment,method-assign]
+    asyncio.run(eng._node_claim_check({"topic": "t", "paper_md": str(paper), "literature": []}))  # type: ignore[arg-type]
+    status, record, problem = receipts.read(tmp_path, "claim_check")
+    assert not problem and status == "fail" and "1 of 1 claim(s)" in record["detail"]
+    assert record["input_hashes"]["paper"] == receipts.sha256(paper.read_bytes())
+
+    async def boom(prompt, *, node=""):  # noqa: ANN001, ARG001
+        raise RuntimeError("UNAVAILABLE (code 503)")
+
+    eng._chat = boom  # type: ignore[assignment,method-assign]
+    asyncio.run(eng._node_claim_check({"topic": "t", "paper_md": str(paper), "literature": []}))  # type: ignore[arg-type]
+    assert receipts.read(tmp_path, "claim_check")[0] == "unknown"

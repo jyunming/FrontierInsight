@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from core import evidence, frozen_protocol
+from core import receipts as _receipts
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
@@ -24,7 +25,7 @@ ACCEPT = {"verdict": "accept", "must_flag_hits": []}
 
 def _quest(tmp_path: Path, *, audits: bool = True, protocol_status: str | None = None, oracle_status: str | None = None,
           warnings: list[Any] | None = None, protocol: dict[str, Any] | None = PROTOCOL, freeze: bool = True,
-          manifest_status: str | None = "ok") -> Path:
+          manifest_status: str | None = "ok", receipts: bool = True) -> Path:
     root = tmp_path / "quest"
     (root / "needs").mkdir(parents=True)
     if freeze:  # the protocol the run was held to is the frozen one (None: the study froze without one)
@@ -39,7 +40,23 @@ def _quest(tmp_path: Path, *, audits: bool = True, protocol_status: str | None =
         (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": oracle_status, "judged_by": "engine"}), encoding="utf-8")
     if warnings is not None:
         (root / "needs" / "NUMERIC_WARNINGS.json").write_text(json.dumps(warnings), encoding="utf-8")
+    if receipts:  # the evidence gate, the design audit and the claim check ran and passed, on what the state holds
+        paper = root / "paper" / "paper.md"
+        paper.parent.mkdir(parents=True, exist_ok=True)
+        if not paper.is_file():
+            paper.write_text("# The final draft", encoding="utf-8")
+        _write_passes(root)
     return root
+
+
+def _write_passes(root: Path, design: dict[str, Any] | None = None) -> None:
+    now = _receipts.now()
+    _receipts.write(root, "evidence_gate", status="pass", producer="evidence_gate", started_at=now,
+                    inputs={"analysis": {}, "cross_check": {}}, output={"verdict": "sufficient"})
+    _receipts.write(root, "design_audit", status="pass", producer="design_audit", started_at=now,
+                    inputs={"design": {}}, output=_receipts.design_core(design or {"hypothesis": "h", "protocol": PROTOCOL}))
+    _receipts.write(root, "claim_check", status="pass", producer="claim_check", started_at=now,
+                    inputs={"paper": (root / "paper" / "paper.md").read_bytes()}, output={"claims": []})
 
 
 def _state(**over: Any) -> dict[str, Any]:
@@ -80,7 +97,7 @@ def test_one_clean_audit_does_not_stand_in_for_the_other_two_never_having_run(tm
     """The counterexample a paper could actually hit: only `numeric_audit.json` was ever written (the statistics and
     provenance checks crashed before they could write theirs), and that alone must not read as 'all three passed.'"""
     root = _quest(tmp_path, audits=False)
-    (root / "paper").mkdir(parents=True)
+    (root / "paper").mkdir(parents=True, exist_ok=True)
     (root / "paper" / "numeric_audit.json").write_text(json.dumps({"ok": True}), encoding="utf-8")
     got = evidence.assess(root, _state(), settings=ON)
     assert got["status"] == "executed", got
@@ -632,3 +649,131 @@ async def test_a_hung_pip_freeze_is_killed_instead_of_leaked(tmp_path: Path, mon
     assert killed == {"called": True, "waited": True}
     record = json.loads((engine.quest_root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
     assert "packages_error" in record and "TimeoutError" in record["packages_error"]
+
+
+# ---- required receipts: a check that did not run, or whose record is broken, is never a pass ----------------------
+
+
+def _ready_quest(tmp_path: Path) -> Path:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    assert evidence.assess(root, _state(), settings=ON)["status"] == "publication_ready"
+    return root
+
+
+@pytest.mark.parametrize("check", list(_receipts.REQUIRED))
+@pytest.mark.parametrize("damage, says", [
+    ("delete", "did not run"),
+    ("corrupt", "unreadable"),
+    ("empty", "unreadable"),
+    ("missing_field", "incomplete"),
+    ("other_schema", "not a receipt of this check"),
+    ("unknown", "could not judge"),
+    ("fail", "did not pass"),
+    ("not_applicable", "not applicable"),
+])
+def test_every_required_receipt_that_is_missing_broken_or_not_a_pass_blocks_publication_ready(
+    tmp_path: Path, check: str, damage: str, says: str,
+) -> None:
+    root = _ready_quest(tmp_path)
+    path = _receipts.path(root, check)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    if damage == "delete":
+        path.unlink()
+    elif damage == "corrupt":
+        path.write_text("{not json", encoding="utf-8")
+    elif damage == "empty":
+        path.write_text("", encoding="utf-8")
+    elif damage == "missing_field":
+        del record["producer"]
+        path.write_text(json.dumps(record), encoding="utf-8")
+    elif damage == "other_schema":
+        path.write_text(json.dumps({**record, "schema_version": 99}), encoding="utf-8")
+    else:
+        _receipts.write(root, check, status=damage, producer=check, started_at=_receipts.now(), error="no reply")
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "statistically_adequate", (check, damage)
+    assert any(_receipts.REQUIRED[check] in g and says in g for g in got["gaps"]), got["gaps"]
+
+
+@pytest.mark.parametrize("check", ["evidence_gate", "claim_check"])
+def test_a_required_check_the_person_turned_off_is_a_gap(tmp_path: Path, check: str) -> None:
+    root = _ready_quest(tmp_path)
+    got = evidence.assess(root, _state(), settings={**ON, check: "off"})
+    assert got["status"] == "statistically_adequate" and any("turned off" in g for g in got["gaps"])
+
+
+def test_the_design_audit_is_not_asked_of_a_quest_with_no_design(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    _receipts.path(root, "design_audit").unlink()
+    assert evidence.assess(root, _state(), settings={**ON, "design_audit": "not_applicable"})["status"] == "publication_ready"
+
+
+def test_a_claim_check_of_an_earlier_draft_does_not_cover_the_final_one(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    paper = root / "paper" / "paper.md"
+    paper.write_text("the final draft", encoding="utf-8")
+    _receipts.write(root, "claim_check", status="pass", producer="claim_check", started_at=_receipts.now(),
+                    inputs={"paper": b"an earlier draft"}, output={"claims": []})
+    got = evidence.assess(root, _state(paper_md=str(paper)), settings=ON)
+    assert got["status"] == "statistically_adequate" and any("earlier one" in g for g in got["gaps"])
+    assert _receipts.carry_over(root, "claim_check", "paper", b"an earlier draft", paper.read_bytes(), "trimmed")
+    assert evidence.assess(root, _state(paper_md=str(paper)), settings=ON)["status"] == "publication_ready"
+
+
+def test_a_failed_assessment_replaces_the_record_and_claims_no_level() -> None:
+    record = evidence.unassessed("KeyError: 'x'")
+    assert record["status"] == "not_executed" and not any(record["levels"].values())
+    assert "could not be assessed" in evidence.summary_line(record)
+
+
+def test_a_pass_that_names_nothing_it_judged_is_not_believed(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    _receipts.write(root, "evidence_gate", status="pass", producer="evidence_gate", started_at=_receipts.now())
+    got = evidence.assess(root, _state(), settings=ON)
+    assert got["status"] == "statistically_adequate" and any("names nothing it judged" in g for g in got["gaps"])
+
+
+def test_no_final_paper_is_a_gap_whatever_the_claim_check_receipt_says(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    (root / "paper" / "paper.md").unlink()
+    got = evidence.assess(root, _state(), settings=ON)
+    assert any("no final paper" in g for g in got["gaps"])
+
+
+def test_the_design_audit_must_have_judged_the_design_that_ran(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    got = evidence.assess(root, _state(design={"hypothesis": "edited by hand", "protocol": PROTOCOL}), settings=ON)
+    assert got["status"] == "statistically_adequate" and any("different design" in g for g in got["gaps"])
+    # The protocol is part of what the audit judged: a changed one is a different design too.
+    got = evidence.assess(root, _state(design={"hypothesis": "h", "protocol": {**PROTOCOL, "oracles": []}}), settings=ON)
+    assert any("different design" in g for g in got["gaps"])
+    # The model's own rationale is not.
+    got = evidence.assess(root, _state(design={"hypothesis": "h", "protocol": PROTOCOL, "rationale": "why"}), settings=ON)
+    assert got["status"] == "publication_ready"
+
+
+def test_a_crashed_assessment_replaces_an_earlier_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = Engine(Config(
+        topic="t", title="t", provider=ProviderConfig(name="openai"), engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60), knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+    ))
+    record = engine.quest_root / "needs" / "EVIDENCE.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({"status": "publication_ready"}), encoding="utf-8")
+
+    def boom(*_a, **_k):  # noqa: ANN002, ANN003
+        raise KeyError("x")
+
+    monkeypatch.setattr(evidence, "assess", boom)
+    assert engine._write_evidence({}) is None
+    kept = json.loads(record.read_text(encoding="utf-8"))
+    assert kept["status"] == "not_executed" and "could not be assessed" in kept["gaps"][0]
+
+
+def test_a_receipt_with_times_that_are_not_times_is_not_believed(tmp_path: Path) -> None:
+    root = _ready_quest(tmp_path)
+    path = _receipts.path(root, "evidence_gate")
+    record = json.loads(path.read_text(encoding="utf-8"))
+    path.write_text(json.dumps({**record, "started_at": "yesterday", "completed_at": "later"}), encoding="utf-8")
+    assert any("malformed" in g for g in evidence.assess(root, _state(), settings=ON)["gaps"])

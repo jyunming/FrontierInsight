@@ -113,3 +113,28 @@ def test_the_audit_asks_about_precision_the_estimand_thresholds_streams_converge
         assert check in text, check
     for words in ("0.98/sqrt(n)", "not a sample size", "common-random-numbers", "protocol.oracles", "Never drop a key the draft has"):
         assert words in text, words
+
+
+@pytest.mark.asyncio
+async def test_each_audit_leaves_a_receipt_and_a_research_quest_stops_once_when_it_could_not_judge(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [json.dumps({"objections_addressed": [], "amended_design": DRAFT})])
+    await eng._audit_design({"topic": "OPC", "iteration": 0}, dict(DRAFT))
+    receipt = json.loads((eng.quest_root / "needs" / "receipts" / "design_audit.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "pass" and receipt["input_hashes"]["design"]
+
+    eng.config = eng.config.model_copy(update={"rigor_profile": "research"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=RuntimeError("provider down"))})()
+    stops: list[dict] = []
+
+    def pause(**kwargs):  # noqa: ANN003
+        stops.append(kwargs)
+        raise RuntimeError("stopped")
+
+    eng._pause_for_human = pause  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="stopped"):
+        await eng._audit_design({"topic": "OPC", "iteration": 0}, dict(DRAFT))
+    assert stops[0]["kind"] == "design_audit_unknown"
+    receipt = json.loads((eng.quest_root / "needs" / "receipts" / "design_audit.json").read_text(encoding="utf-8"))
+    assert receipt["status"] == "unknown" and "provider down" in receipt["error"]
+    await eng._audit_design({"topic": "OPC", "iteration": 0}, dict(DRAFT))  # the retry fails too: no second stop
+    assert len(stops) == 1

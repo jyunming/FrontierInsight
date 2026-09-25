@@ -129,6 +129,8 @@ def _classify(prompt: str) -> str:
     prefix = prompt[:200]
     if "scoping a research quest BEFORE the autonomous loop" in prefix:
         return "Clarify"
+    if "Design Self-Critique" in head:
+        return "DesignAudit"
     if "Ideation Reflection" in head:
         return "IdeateReflect"
     if "Execute-Reflect" in head:
@@ -152,6 +154,8 @@ def _fake_response_for(prompt: str) -> str:
         "Ideation": _FAKE_RESPONSES["ideate"],
         "IdeateReflect": _FAKE_RESPONSES["ideate_reflect"],
         "Experiment Design": _FAKE_RESPONSES["design"],
+        # The methodology audit found nothing to change (a reply naming neither is an audit that could not judge).
+        "DesignAudit": '{"objections_addressed": []}',
         "Implementation": _FAKE_RESPONSES["implement"],
         "ExecuteReflect": "{}",  # default: no patch needed for happy-path smokes
         "Analysis": _FAKE_RESPONSES["analyze"],

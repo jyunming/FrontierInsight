@@ -15,8 +15,9 @@ checks behind it prove:
   and tolerances;
 * ``statistically_adequate`` — and every headline metric has a declared estimator matched to its data, the contrasts carry
   engine-computed p-values, and every precision target was reached;
-* ``publication_ready`` — and the review accepted the paper with no must-fix finding and the protocol was not amended after the
-  results were seen.
+* ``publication_ready`` — and the review accepted the paper with no must-fix finding, the protocol was not amended after the
+  results were seen, and the evidence gate, the design methodology audit and the claim check each left a receipt that says it
+  passed (core/receipts.py; a missing one is a gap).
 
 ``gaps`` lists, one sentence each, what stands between the quest and the next level. This module reads the quest's records and
 the final state; it needs no model.
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import receipts as _receipts
 from . import run_manifest as _run_manifest
 
 LEVELS = (
@@ -84,11 +86,13 @@ INFO: dict[str, dict[str, Any]] = {
     "publication_ready": {
         "assurance_claim": (
             "The review accepted the paper with no must-fix finding, the protocol was not amended after the results were "
-            "seen, and the evidence gate, the design methodology audit and the claim check each actually ran and produced "
-            "a real judgement (none of them defaulted silently on a provider or parse failure)."
+            "seen, and the evidence gate, the design methodology audit and the claim check each ran and passed, the claim "
+            "check on the final draft (each left a record saying so; a check that is missing, was turned off or could not "
+            "judge is not a pass)."
         ),
         "known_blind_spots": ["The review is a model's opinion (and a person's decision when one was asked for); it does not re-run anything."],
-        "artifacts": ["needs/DESIGN_HISTORY.json", "paper/review.json"],
+        "artifacts": ["needs/DESIGN_HISTORY.json", "paper/review.json", "needs/receipts/evidence_gate.json",
+                      "needs/receipts/design_audit.json", "needs/receipts/claim_check.json"],
     },
 }
 
@@ -151,7 +155,8 @@ def assess(
     ``state`` is the final (or paused) state; ``precision_missed`` names the probabilities whose pooled interval did not
     reach the protocol's target; ``statistics_gaps`` says what keeps the statistics from being adequate
     (:func:`core.metric_spec.coverage_gaps`); ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
-    ``run_manifest_check`` and ``rigor_profile`` as the run had them (a check that was turned off is a gap, not a pass)."""
+    ``run_manifest_check`` and ``rigor_profile`` as the run had them (a check that was turned off is a gap, not a pass), and
+    ``evidence_gate`` / ``claim_check`` / ``design_audit`` as ``off`` or ``not_applicable`` when the run had them so."""
     settings = settings or {}
     needs = quest_root / "needs"
     gaps: dict[str, list[str]] = {level: [] for level in LEVELS}
@@ -286,18 +291,42 @@ def assess(
             ready_gaps.append(f"the review verdict is {review.get('verdict') or 'not accept'}")
         if review.get("must_flag_hits"):
             ready_gaps.append(f"the review left {len(review['must_flag_hits'])} must-fix finding(s)")
-    # The evidence gate, the design methodology audit and the claim check must
-    # each have actually run and produced a real judgement -- a fail-open
-    # default (a broken provider call, an unparseable reply) must never look
-    # the same here as a genuine pass. Each of these can fail independently of
-    # the review above, so each gets its own check rather than riding on
-    # must_flag_hits alone.
+    # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
+    # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
+    # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
+    # so three checks that never ran left a quest publication-ready.
+    paper = state.get("paper_md") or quest_root / "paper" / "paper.md"
+    paper_hash = _receipts.sha256(Path(str(paper)).read_bytes()) if Path(str(paper)).is_file() else ""
+    design_now = state.get("design")
+    for check, name in _receipts.REQUIRED.items():
+        setting = settings.get(check)
+        if setting == "off":
+            ready_gaps.append(f"{name} was turned off")
+            continue
+        if setting == "not_applicable":  # e.g. no design to audit when the data already exists (--analyze)
+            continue
+        status, receipt, problem = _receipts.read(quest_root, check)
+        if problem or receipt is None:
+            ready_gaps.append(f"{name} is not shown to have run: {problem} (needs/receipts/{check}.json)")
+        elif status == "unknown":
+            ready_gaps.append(f"{name} could not judge ({receipt.get('error') or 'no usable reply'})")
+        elif status == "fail":
+            ready_gaps.append(f"{name} did not pass: {receipt.get('detail') or 'see needs/receipts/' + check + '.json'}")
+        elif status == "not_applicable":
+            ready_gaps.append(f"{name} recorded itself as not applicable, which this quest does not allow")
+        elif check == "claim_check" and not paper_hash:
+            ready_gaps.append("there is no final paper for the claim check to cover")
+        elif check == "claim_check" and (receipt.get("input_hashes") or {}).get("paper") != paper_hash:
+            ready_gaps.append("the claim check did not run on the final draft (its record is for an earlier one)")
+        elif (check == "design_audit" and isinstance(design_now, dict)
+              and receipt.get("output_hash") != _receipts.sha256(_receipts.design_core(design_now))):
+            ready_gaps.append("the design methodology audit judged a different design from the one that ran")
+    # What the quest's own state and records say about the same checks, as well: a receipt that reads "pass" while the
+    # state says the check failed (a record left from an earlier pass) is not believed over the state.
     gate = state.get("evidence_assessment") or {}
     if gate.get("status") == "unknown":
         ready_gaps.append(f"the evidence gate could not be evaluated ({gate.get('failure') or 'no usable reply'})")
     elif gate.get("verdict") in ("insufficient", "broaden"):
-        # The gate judged the evidence thin and the paper was written on it anyway (the broaden budget was spent, or
-        # there was no literature step to broaden). The writer is told to frame its limits; the level must say so too.
         gaps_named = "; ".join(str(g) for g in gate.get("gaps") or []) or "none named"
         ready_gaps.append(f"the evidence gate judged the evidence {gate['verdict']} and the paper was written on it (gaps: {gaps_named})")
     critique_history = _json(needs / "DESIGN_CRITIQUE.json")
@@ -307,6 +336,7 @@ def assess(
     claim_failed = str(state.get("claim_check_failed") or "").strip()
     if claim_failed:
         ready_gaps.append(f"the claim check failed on the final draft: {claim_failed}")
+    ready_gaps[:] = list(dict.fromkeys(ready_gaps))
     ready = adequate and not ready_gaps
 
     reached = [executed, reconciled, matched, validated, adequate, ready]
@@ -381,6 +411,21 @@ def upgrade(record: Any) -> Any:
 _NOT_EXECUTED_CLAIM = "The experiment has not produced results (it has not run, or it failed)."
 
 
+def unassessed(error: str) -> dict[str, Any]:
+    """The record kept when the assessment itself failed: no level is claimed, and the reason is the one gap. It replaces
+    an earlier record, so a level worked out on a previous pass never outlives a failed assessment of this one."""
+    gap = f"the evidence could not be assessed ({error})"
+    return {
+        "status": "not_executed",
+        "assessment_failed": error,
+        "levels": {level: False for level in LEVELS},
+        "next_level": LEVELS[0],
+        "gaps": [gap],
+        "all_gaps": {LEVELS[0]: [gap]},
+        "ladder": [],
+    }
+
+
 def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
     """One plain sentence for the CLI and the VSCode chat: what was shown, then what stands in the way of more — never the
     six level identifiers themselves (a scientist reading this after a run should not have to look up what
@@ -392,6 +437,8 @@ def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
     if technical:
         tail = f"; to reach {record.get('next_level')}: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
         return f"{status}{tail}"
+    if record.get("assessment_failed"):
+        return f"The evidence could not be assessed ({record['assessment_failed']}); no level is claimed."
     claim = INFO.get(status, {}).get("assurance_claim") or _NOT_EXECUTED_CLAIM
     tail = f" Next: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
     return f"{claim}{tail}"
