@@ -758,3 +758,17 @@ def test_a_failed_ledger_row_is_counted_attempted_but_not_successful() -> None:
     assert derived["successful_per_cell"]["R0=0.9"] == 299
     assert derived["failed_trials"] == [{"cell": "R0=0.9", "trial": 299, "reason": "solver diverged"}]
     assert rm.problems({**PROTOCOL, "failure_policy": "excluded from the pooled estimate"}, derived) == []
+
+
+def test_a_count_repeated_outside_its_setting_is_not_added_twice() -> None:
+    """A live run printed 933 + 96 = 1,029 trials: the top level repeated one setting's count beside the per-setting
+    ones. Counts are taken beside the values they back."""
+    result = {
+        "p_major_count": 96,  # a headline copy of one setting's count, with no values beside it
+        "by_R0": {
+            "1.5": {"p_major_count": 96, "p_major_total": 300, "final_size_values": [0.5] * 96},
+            "3.0": {"p_major_count": 837, "p_major_total": 300, "final_size_values": [0.9] * 837},
+        },
+    }
+    assert rm._total_counts_reported(result, "p_major_count", beside="final_size_values") == 933
+    assert rm._total_counts_reported(result, "p_major_count") == 1029, "without a pairing, every count as before"
