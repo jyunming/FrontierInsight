@@ -59,3 +59,25 @@ def test_a_finished_quest_writes_no_next_step_and_only_what_is_worth_a_look(tmp_
     assert not item["blocking"] and "Next: the audits did not run (+1 more)" in item["why"]
     assert "internally_reconciled" not in item["why"], "a level is named in words, never by its identifier"
     assert todo.text(fi).startswith("[FI] Also:")
+
+
+def test_papers_supplied_since_and_a_clean_source_record_are_not_listed(tmp_path: Path) -> None:
+    import os
+    import time
+
+    root = tmp_path / "q"
+    (root / "needs").mkdir(parents=True)
+    (root / ".fi").mkdir()
+    wanted = root / "needs" / "WANTED_PAPERS.md"
+    wanted.write_text("- a paper\n", encoding="utf-8")
+    (root / ".fi" / "source_failures.json").write_text(json.dumps({"total": 0, "summary": "none"}), encoding="utf-8")
+    assert [i.kind for i in todo.waiting(root)] == ["papers"]
+    (root / "inputs" / "papers").mkdir(parents=True)
+    paper = root / "inputs" / "papers" / "a.pdf"
+    paper.write_bytes(b"%PDF")
+    later = time.time() + 5
+    os.utime(paper, (later, later))
+    assert todo.waiting(root) == []
+    (root / ".fi" / "source_failures.json").write_text(json.dumps({"total": 2}), encoding="utf-8")
+    assert [i.kind for i in todo.waiting(root)] == ["sources"]
+    assert todo.advice("split")[1] == "Go on: the two scripts are asked for again."

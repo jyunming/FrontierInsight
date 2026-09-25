@@ -53,9 +53,10 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         [],
     ),
     "split": (
-        "The simulation does not do what the plan fixed. Fix it, or accept it as it is?",
-        "Fix the script as listed, then go on.",
-        ["Accept it: set `execution.split_failure: warn` (the result is then marked as the script's own record)."],
+        "The simulation and the analysis did not come as the two scripts this quest keeps. Ask for them again, or run "
+        "one script?",
+        "Go on: the two scripts are asked for again.",
+        ["Let the quest run as one script: set `execution.split_failure: warn`."],
     ),
     "manifest": (
         "The run's record does not match the plan. Fix it, or accept it as it is?",
@@ -149,6 +150,15 @@ def _read_json(path: Path) -> Any:
         return None
 
 
+def _supplied_since(folder: Path, record: Path) -> bool:
+    """Whether a file was put in ``folder`` after ``record`` was written: the papers asked for were supplied."""
+    try:
+        written = record.stat().st_mtime
+        return any(p.is_file() and p.stat().st_mtime > written for p in folder.iterdir())
+    except OSError:
+        return False
+
+
 def waiting(quest_root: Path) -> list[Item]:
     """Things that did not stop the quest but are waiting for the person: each from a record the quest already keeps."""
     root = Path(quest_root)
@@ -174,12 +184,13 @@ def waiting(quest_root: Path) -> list[Item]:
                                       f"on (needs/{name}).",
                             recommended="Read the differences; nothing to do if they are expected."))
     wanted = needs / "WANTED_PAPERS.md"
-    if wanted.is_file():
+    if wanted.is_file() and not _supplied_since(root / "inputs" / "papers", wanted):
         out.append(Item("papers", "Some papers could not be downloaded (needs/WANTED_PAPERS.md lists them, most "
                                   "relevant first).",
                         recommended="Nothing to do unless one of them matters: put its PDF in inputs/papers/ and go on."))
     failures = _read_json(root / ".fi" / "source_failures.json")
-    if isinstance(failures, (list, dict)) and failures:
+    # The record is written on every run; only one that counts a failure is worth a look.
+    if (isinstance(failures, dict) and failures.get("total")) or (isinstance(failures, list) and failures):
         out.append(Item("sources", "Some literature sources could not be reached (.fi/source_failures.json).",
                         recommended="Nothing to do unless the literature looks thin: go on later, or add papers to "
                                     "inputs/papers/."))

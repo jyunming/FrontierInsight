@@ -1189,6 +1189,10 @@ async function runQuest(
  * deletes it on completion. So its presence means "waiting for you". Returns
  * the card, or null. Mirrors the Web quest page's Action-needed banner.
  */
+// A file written by this run can carry a time a few seconds before the run started, by the extension's clock, when the
+// quest runs on another machine (Remote SSH, WSL, a container).
+const CLOCK_SLACK_MS = 10_000;
+
 async function readNextStep(
     outputsDir: string,
     knownQuestId: string | undefined,
@@ -1209,7 +1213,7 @@ async function readNextStep(
                 if (!e.isDirectory() || e.name.startsWith("_")) { continue; }
                 try {
                     const st = await fsPromises.stat(path.join(outputsDir, e.name, "NEXT_STEP.md"));
-                    if (st.mtimeMs >= since && (!best || st.mtimeMs > best.mtime)) { best = { id: e.name, mtime: st.mtimeMs }; }
+                    if (st.mtimeMs >= since - CLOCK_SLACK_MS && (!best || st.mtimeMs > best.mtime)) { best = { id: e.name, mtime: st.mtimeMs }; }
                 } catch { /* no NEXT_STEP in this quest */ }
             }
             if (!best) { return null; }
