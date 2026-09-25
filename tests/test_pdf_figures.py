@@ -279,3 +279,204 @@ def test_the_step_after_the_literature_reads_the_figures_and_rewrites_the_files(
     written = (engine.quest_root / "data" / "literature").glob("lit_002_*.md")
     text = next(written).read_text(encoding="utf-8")
     assert "peak day 60 at R0 1.5" in text and "`figures/lit_002_fig1_p5.png`" in text
+
+
+async def test_a_stop_to_change_the_figure_model_exits_cleanly_through_the_real_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Through the real graph and run loop: the figure step's stop (a SUPPLY pause) exits the run, asks nothing (it
+    once fell through to the clarify handling and wrote an empty question file), and a resume re-enters that step."""
+    from core.config import (Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig,
+                             ProviderConfig)
+    from core.engine import Engine
+    from tests.test_engine_smoke import _fake_response_for
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001, ANN003
+        return _fake_response_for(messages[-1]["content"])
+
+    entered = {"n": 0}
+
+    async def read_figures(self, state, literature):  # noqa: ANN001
+        entered["n"] += 1
+        if entered["n"] == 1:
+            self._pause_for_human(kind="figures", interaction="supply", headline="the model cannot read images",
+                                  steps=["set a model"], payload={"quest_id": self.quest_id})
+        return 0
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    monkeypatch.setattr(Engine, "_read_literature_figures", read_figures)
+    cfg = Config(
+        topic="smoke topic for the figure stop", title="fig-stop", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=1, pilot_run=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
+        pauses=PausesConfig(review="off"),
+    )
+    asked: list = []
+
+    async def clarify(questions):  # noqa: ANN001
+        asked.append(questions)
+        return {}
+
+    first = Engine(cfg)
+    await first.run(clarify_callback=clarify)
+    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert descriptor["kind"] == "figures" and entered["n"] == 1
+    assert not asked and not (first.fi_dir / "clarify_questions.json").exists(), "the stop asks no questions"
+    assert not (first.quest_root / "code").exists() or not any((first.quest_root / "code").iterdir())
+    resumed = Engine(cfg, resume_quest_id=first.quest_id)
+    monkeypatch.setattr(Engine, "_node_select_skills", _stop_here)
+    with pytest.raises(_Reached):
+        await resumed.run()
+    assert entered["n"] == 2, "the resume re-entered the figure step"
+
+
+class _Reached(Exception):
+    pass
+
+
+async def _stop_here(self, state):  # noqa: ANN001
+    raise _Reached
+
+
+# ---- the review's findings: columns, caption paragraphs, the cache, a stop part-way, a failed call -------------------
+
+
+def test_a_plot_in_the_next_column_never_joins_a_one_column_figure() -> None:
+    """Two plots 10 points apart across the gutter; the caption is under the left one."""
+    caption = (50.0, 400.0, 280.0, 410.0)
+    left_plot = (50.0, 420.0, 290.0, 600.0)
+    right_plot = (300.0, 420.0, 560.0, 600.0)
+    box = pdf_figures._figure_box(caption, [], [left_plot, right_plot], 792.0, 612.0)
+    assert box is not None and box[2] <= 312, box
+
+
+def test_a_caption_stops_at_the_paragraph_break_before_the_body_text() -> None:
+    rects = [
+        ((50.0, 400.0, 280.0, 409.0), "Figure 2. The baseline run."),
+        ((50.0, 389.0, 280.0, 398.0), "Shaded bands are 95% intervals."),  # same pitch: the caption goes on
+        ((50.0, 366.0, 280.0, 375.0), "In the next section we describe"),  # a paragraph break before the body
+        ((50.0, 355.0, 280.0, 364.0), "the model and its parameters."),
+    ]
+    box = pdf_figures._caption_box(rects, rects[0][0])
+    assert box[1] == 389.0, box
+
+
+def test_a_cached_image_that_changed_is_cut_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import knowledge
+
+    monkeypatch.setattr(knowledge, "_figure_cache_dir", lambda: tmp_path / "cache")
+    body = _paper_pdf(tmp_path / "p.pdf").read_bytes()
+    first = knowledge._pdf_figures(body)
+    Path(first[0]["image"]).write_bytes(b"half written")  # another quest's write caught part-way
+    again = knowledge._pdf_figures(body)
+    assert Path(again[0]["image"]).read_bytes().startswith(b"\x89PNG")
+
+
+def test_a_cache_cut_without_ocr_is_cut_again_when_ocr_lines_come(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import knowledge
+
+    monkeypatch.setattr(knowledge, "_figure_cache_dir", lambda: tmp_path / "cache")
+    body = _paper_pdf(tmp_path / "p.pdf").read_bytes()
+    knowledge._pdf_figures(body)
+    calls = []
+    real = pdf_figures.find
+
+    def spy(*a, **k):  # noqa: ANN002, ANN003
+        calls.append(k.get("ocr_lines"))
+        return real(*a, **k)
+
+    monkeypatch.setattr(pdf_figures, "find", spy)
+    knowledge._pdf_figures(body)
+    assert calls == [], "a plain second call is a cache hit"
+    knowledge._pdf_figures(body, ocr_lines={1: []})
+    assert len(calls) == 1, "OCR lines the first cut did not have"
+
+
+def test_a_stop_part_way_through_keeps_what_was_read_and_never_reads_it_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import engine as eng
+    from core.provider import ImageInputUnsupported
+
+    monkeypatch.setattr(eng, "_FIGURES_PER_CALL", 1)
+    engine = _reading_engine(tmp_path)
+    lit = _literature_with_figures(tmp_path)
+    for i, fig in enumerate(f for item in lit for f in item["metadata"]["figures"]):
+        fig["sha256"] = f"h{i}"
+
+    async def pick(*_a, **_k):  # noqa: ANN002, ANN003
+        return '{"pick": ["1:1", "2:1"]}'
+
+    sent: list[str] = []
+
+    async def read_one_then_fail(messages, **_k):  # noqa: ANN001, ANN003
+        label = messages[0]["content"][1]["text"]
+        sent.append(label[:5])
+        if len(sent) == 1:
+            return '{"figures": [{"id": "1:1", "reading": "peak about 4,200 on day 38"}]}'
+        raise ImageInputUnsupported("no images")
+
+    class Paused(Exception):
+        pass
+
+    def pause(**_k):  # noqa: ANN003
+        raise Paused
+
+    monkeypatch.setattr(engine, "_chat", pick)
+    monkeypatch.setattr(engine, "_chat_messages", read_one_then_fail)
+    monkeypatch.setattr(engine, "_pause_for_human", pause)
+    with pytest.raises(Paused):
+        asyncio.run(engine._read_literature_figures({}, lit))
+    assert sent == ["[1:1]", "[2:1]"]
+
+    fresh = _literature_with_figures(tmp_path)  # the resume starts from the checkpoint, before any of it
+    for i, fig in enumerate(f for item in fresh for f in item["metadata"]["figures"]):
+        fig["sha256"] = f"h{i}"
+    sent.clear()
+
+    async def pick_rest(prompt, **_k):  # noqa: ANN001, ANN003
+        assert "[1:1]" not in prompt and "[1:2]" not in prompt, "judged figures are not shown again"
+        return '{"pick": ["2:1"]}'
+
+    async def read_rest(messages, **_k):  # noqa: ANN001, ANN003
+        sent.append(messages[0]["content"][1]["text"][:5])
+        return '{"figures": [{"id": "2:1", "reading": "peak day 60 at R0 1.5"}]}'
+
+    monkeypatch.setattr(engine, "_chat", pick_rest)
+    monkeypatch.setattr(engine, "_chat_messages", read_rest)
+    assert asyncio.run(engine._read_literature_figures({}, fresh)) == 2
+    assert sent == ["[2:1]"], "the figure read before the stop is not read again"
+    assert "day 38" in fresh[0]["content"] and "R0 1.5" in fresh[1]["content"]
+
+
+def test_a_failed_reading_call_is_tried_once_more_then_left_unjudged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _reading_engine(tmp_path)
+    lit = _literature_with_figures(tmp_path)
+    calls = {"n": 0}
+
+    async def pick(*_a, **_k):  # noqa: ANN002, ANN003
+        return '{"pick": ["1:1"]}'
+
+    async def flaky(*_a, **_k):  # noqa: ANN002, ANN003
+        calls["n"] += 1
+        raise RuntimeError("429 rate limit")
+
+    monkeypatch.setattr(engine, "_chat", pick)
+    monkeypatch.setattr(engine, "_chat_messages", flaky)
+    assert asyncio.run(engine._read_literature_figures({}, lit)) == 0
+    assert calls["n"] == 2
+    assert "relevant" not in lit[0]["metadata"]["figures"][0], "left for a later pass, not recorded as judged"
+
+
+def test_the_whole_text_keeps_readings_the_file_could_not_take(tmp_path: Path) -> None:
+    from core.engine import _FIGURE_READINGS_MARK, _item_content
+
+    whole = tmp_path / "whole.txt"
+    whole.write_text("the whole paper", encoding="utf-8")
+    item = {"content": f"the first part\n\n{_FIGURE_READINGS_MARK}\n\nFigure 1: peak 40", "metadata": {
+        "full_text_path": str(whole)}}
+    text = _item_content(item)
+    assert text.startswith("the whole paper") and "peak 40" in text

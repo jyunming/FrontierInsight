@@ -1141,10 +1141,18 @@ def _figure_cache_dir() -> Path:
     return Path.home() / ".frontier-insight" / "figure_cache"
 
 
+#: Bumped when the figure cutting changes, so an index cut by an older version is cut again.
+_FIGURE_INDEX_VERSION = 2
+
+
 def _pdf_figures(body: bytes, *, ocr_lines: dict[int, Any] | None = None) -> list[dict[str, Any]]:
-    """The captioned figures of a PDF (core/pdf_figures.py), as ``{number, page, caption, image, scanned}`` with
-    ``image`` a PNG in a cache keyed by the PDF's SHA-256, so the next quest citing the paper does not cut them again.
-    ``ocr_lines`` (from the OCR that read a scanned PDF) lets its scanned pages' figures be found."""
+    """The captioned figures of a PDF (core/pdf_figures.py), as ``{number, page, caption, image, scanned, sha256}``
+    with ``image`` a PNG in a cache keyed by the PDF's SHA-256, so the next quest citing the paper does not cut them
+    again. ``ocr_lines`` (from the OCR that read a scanned PDF) lets its scanned pages' figures be found.
+
+    Safe for quests of one ``--fleet`` cutting the same PDF at once: each image is named by its own content hash and
+    written whole then renamed, and the index is renamed into place last; a cached index is used only when every image
+    it names is there with that hash, and an index cut without OCR lines is cut again when they are given."""
     from core import pdf_figures
 
     key = hashlib.sha256(body).hexdigest()
@@ -1152,25 +1160,35 @@ def _pdf_figures(body: bytes, *, ocr_lines: dict[int, Any] | None = None) -> lis
     index = folder / "figures.json"
     try:
         hit = json.loads(index.read_text(encoding="utf-8"))
-        if isinstance(hit, list) and all(isinstance(f, dict) and Path(str(f.get("image"))).is_file() for f in hit):
-            return hit
-    except (OSError, ValueError, AttributeError):
+        figures_hit = hit.get("figures") if isinstance(hit, dict) else None
+        if (isinstance(figures_hit, list) and hit.get("version") == _FIGURE_INDEX_VERSION
+                and (hit.get("with_ocr") or not ocr_lines)
+                and all(isinstance(f, dict) and hashlib.sha256(Path(str(f["image"])).read_bytes()).hexdigest()
+                        == f.get("sha256") for f in figures_hit)):
+            return figures_hit
+    except (OSError, ValueError, AttributeError, KeyError, TypeError):
         pass
     figures = pdf_figures.find(body, ocr_lines=ocr_lines)
     out: list[dict[str, Any]] = []
+    tag = f"{os.getpid()}.{threading.get_ident()}"
     try:
         folder.mkdir(parents=True, exist_ok=True)
         for fig in figures:
-            target = folder / fig.file_name("fig")
-            target.write_bytes(fig.png)
+            digest = hashlib.sha256(fig.png).hexdigest()
+            target = folder / f"fig{fig.number}_p{fig.page}_{digest[:16]}.png"
+            if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+                tmp = target.with_name(f"{target.name}.{tag}.tmp")
+                tmp.write_bytes(fig.png)
+                os.replace(tmp, target)
             out.append({"number": fig.number, "page": fig.page, "caption": fig.caption, "image": str(target),
-                        "scanned": fig.scanned})
-        # The index last, written whole then renamed: a reader never sees an index naming a half-written image.
-        tmp = index.with_name(f"figures.json.{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(out), encoding="utf-8")
+                        "scanned": fig.scanned, "sha256": digest})
+        tmp = index.with_name(f"figures.json.{tag}.tmp")
+        tmp.write_text(json.dumps({"version": _FIGURE_INDEX_VERSION, "with_ocr": bool(ocr_lines), "figures": out}),
+                       encoding="utf-8")
         os.replace(tmp, index)
     except OSError as e:
         _log.info("figures of a PDF not saved: %s", e)
+        return [f for f in out if Path(f["image"]).is_file()]
     return out
 
 

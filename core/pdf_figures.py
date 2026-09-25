@@ -101,25 +101,33 @@ def _caption_line(rects: list[tuple[Box, str]], start: Box) -> Box:
 
 
 def _caption_box(rects: list[tuple[Box, str]], first: Box) -> Box:
-    """The caption paragraph: its first line, then each line just below that starts at its left edge."""
+    """The caption paragraph: its first line, then each line just below that starts at its left edge and follows at the
+    caption's own line pitch (top to top). A paragraph break (a wider gap) or body text set at another pitch ends it; a
+    single-line caption followed by body text keeps only what is within a normal line gap."""
     box = first
     line = first
     height = max(first[3] - first[1], 4.0)
+    pitch: float | None = None
     for _ in range(12):
         below = [b for b, _ in rects
-                 if b[3] <= line[1] + height * 0.3 and line[1] - b[3] < height * 0.9 and abs(b[0] - first[0]) < 15]
+                 if b[3] <= line[1] + height * 0.3 and line[1] - b[3] < height * 0.6 and abs(b[0] - first[0]) < 15]
         if not below:
             break
         nxt = _caption_line(rects, max(below, key=lambda b: b[3]))
-        if nxt[2] - nxt[0] < 5:
+        step = line[3] - nxt[3]
+        if nxt[2] - nxt[0] < 5 or (pitch is not None and abs(step - pitch) > 0.25 * pitch):
             break
+        pitch = step if pitch is None else pitch
         box = _union(box, nxt)
         line = nxt
     return box
 
 
-def _figure_box(caption: Box, rects: list[tuple[Box, str]], graphics: list[Box], height: float) -> Box | None:
-    """The drawing above a caption (see the module docstring), or None when there is none close above it."""
+def _figure_box(
+    caption: Box, rects: list[tuple[Box, str]], graphics: list[Box], height: float, width: float,
+) -> Box | None:
+    """The drawing above a caption (see the module docstring), or None when there is none close above it. On a
+    two-column page a figure in one column grows only within that column, so a plot in the next column never joins it."""
     left, _bottom, right, top = caption
     ceiling = height
     for b, text in rects:
@@ -139,10 +147,15 @@ def _figure_box(caption: Box, rects: list[tuple[Box, str]], graphics: list[Box],
         overlap = min(g[3], seed[3]) - max(g[1], seed[1])
         if g[1] - top <= _MAX_GAP and overlap > 0.5 * min(g[3] - g[1], seed[3] - seed[1]):
             box = _union(box, g)
+    mid, slack = width / 2, width * 0.02
+    spans_middle = (box[0] < mid - slack and box[2] > mid + slack) or (left < mid - slack and right > mid + slack)
+    span = (0.0, width) if spans_middle else ((0.0, mid + slack) if box[2] <= mid + slack else (mid - slack, width))
     grown = True
-    while grown:  # panels above, arrows and frames touching the drawing
+    while grown:  # panels above, arrows and frames touching the drawing, within the figure's column
         grown = False
         for g in candidates:
+            if g[0] < span[0] - 2 or g[2] > span[1] + 2:
+                continue
             if _union(box, g) != box and _near(box, g, 14):
                 box, grown = _union(box, g), True
     for b, _text in rects:  # axis labels, legends and panel titles at the drawing's edge
@@ -174,7 +187,7 @@ def _figures_on_text_page(page: Any, index: int, seen: set[str]) -> list[Figure]
             if not m or m.group(1) in seen:
                 continue
             first = _caption_line(rects, box)
-            figure = _figure_box(first, rects, graphics, height)
+            figure = _figure_box(first, rects, graphics, height, width)
             if figure is None:
                 continue
             cap = _caption_box(rects, first)
