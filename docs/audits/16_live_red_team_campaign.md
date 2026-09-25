@@ -376,3 +376,17 @@ asked for once more and then stops the quest like a failed call; only panelists 
 consumers require a reviewer's own accept; and the review screen (CLI, Web, VS Code) says when no reviewer gave the
 verdict, naming the panelist. The two counterexamples about the review no longer reproduce; ten new tests fail on the
 old code.
+
+## A skill's name on the pip line, and skills a clean environment could not see
+
+A user's quest on another machine stopped at the oracle check: `import numpy` failed, and so did `lieflat_charts`.
+The code-writing step had asked pip for `lieflat_charts` (the lieflat-charts skill, a Node.js tool, not a Python
+package) together with numpy; one name pip could not find failed the whole line, FI logged a warning and ran on, and
+nothing was installed. Behind it, a second gap: the research profile's clean per-quest environment never received the
+selected skills' own packages (`pip_requires`, installed only into FI's interpreter) nor a library skill's folder on
+its path, so preset skills that imported fine under the shared interpreter could not be imported at all. Now skill
+names and the quest's own files are never handed to pip, a failed line is retried one package at a time, the skills'
+packages go into the quest's environment and library skills onto its path, and the repair step reads what could not
+be installed and why. Reproduced with a real venv and the real skill: the old code logged `pip install ['numpy',
+'lieflat_charts']` rc=1 and died on `ModuleNotFoundError: No module named 'numpy'`; the new code installed numpy and
+the script ran.
