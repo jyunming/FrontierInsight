@@ -4,7 +4,7 @@ FI is graded by hand on one fixed topic, a stochastic SIR epidemic study, run ag
 and different models. The grades live here:
 
 - [rubric.md](rubric.md) — what is graded, and how.
-- [scores.md](scores.md) — every graded run: its six dimension scores, the three gates, pages and tokens.
+- [scores.md](scores.md) — every graded run's paper: its six dimension scores, the three gates, pages and tokens. (The slides and poster were graded for a few runs only and are not in the table.)
 
 ## What these scores are for
 

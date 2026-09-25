@@ -2,7 +2,7 @@
 
 Rubric in force: D3 is scored over three canonical works (Kermack–McKendrick 1927, Gillespie 1976/77, Whittle/Bartlett). D6 is scored over six items (the page item was removed 2026-09-16; the "figure after References" item was added 2026-09-17). Mean = Σ round(Dᵢ) / 6. Gates: G1 numbers correct, G2 D1 = 100, G3 D4 = 100. Page count is recorded; it is not a gate.
 
-The 38 runs graded 2026-09-15/16 are shown with their values **recomputed on this rubric** (from `_recompute_current.py`, which grading_sheet.md cites as the recomputation of 2026-09-17), not with the numbers their grades files print. Where a later grader recorded a headline figure and a strict or lenient alternative, the table shows the headline figure.
+The runs graded 2026-09-15/16 (39: the 38 of the recomputation and agy1, recomputed on its own) are shown with their values **recomputed on this rubric** (from `_recompute_current.py`, which grading_sheet.md cites as the recomputation of 2026-09-17), not with the numbers their grades files print. Where a later grader recorded a headline figure and a strict or lenient alternative, the table shows the headline figure.
 
 "—" means the value was not recorded. G1 to G3 are "—" for runs graded before the gates existed (2026-09-15, before main7), even where D1 or D4 would imply G2 or G3.
 
@@ -12,7 +12,7 @@ Run-name collisions: `cb1`–`cb3` and `cr1`–`cr3` (cost experiment, 2026-09-1
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | agy1 | 2026-09-15 | 46f7c56 | antigravity_cli gemini-3.8-flash-high | 71 | 100 | 67 | 0 | 100 | 83 | 70.2 | fail | fail | fail | 11 | 1,532,676 / 27 | paper states wrong values; D4 0; recomputed from 68.8 in grading_sheet.md |
 | g4h1 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high (ollama) | 85 | 80 | 33 | 33 | 83 | 67 | 63.5 | fail | fail | fail | 6 | 288,715 / 20 | "no major outbreaks" at R0=0.9 is wrong (G1 narrow fail) |
-| g4h2 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high | 100 | 100 | 67 | 33 | 83 | 100 | 80.5 | pass (borderline) | pass | fail | 6 | 325,131 / 25 | thinking high bought no measurable quality vs main7–9 |
+| g4h2 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high | 100 | 100 | 67 | 33 | 83 | 100 | 80.5 | pass (borderline) | pass | fail | 6 | 325,131 / 25 | thinking high; scores within the spread of main7–9 |
 | g4h3 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high | 100 | 100 | 67 | 67 | 100 | 100 | 89.0 | pass | pass | fail | 6 | 344,141 / 25 | Fig 3 draws every deterministic reference at N=100 |
 | main | 2026-09-15 | f05f3d1 (after #253) | gemma4:31b-cloud (ollama) | 100 | 100 | 67 | 67 | 100 | 100 | 89.0 | — | — | — | 5 | 261,252 / 25 | review revise at cap; Fig 3 text quotes pooled values |
 | main2 | 2026-09-15 | f05f3d1 | gemma4:31b-cloud | 100 | 100 | 0 | 67 | 83 | 100 | 75.0 | — | — | — | 6 | 249,848 / — | one scholarly citation only |
@@ -23,7 +23,7 @@ Run-name collisions: `cb1`–`cb3` and `cr1`–`cr3` (cost experiment, 2026-09-1
 | main7 | 2026-09-15 | 46f7c56 | gemma4:31b-cloud | 100 | 100 | 67 | 100 | 100 | 83 | 91.7 | pass | pass | pass | 5 | 212,118 / 23 | all gates; fails figure-after-References item |
 | main8 | 2026-09-15 | 46f7c56 | gemma4:31b-cloud | 83 | 100 | 67 | 67 | 100 | 100 | 86.2 | pass | fail | fail | 5 | 270,121 / 27 | Fig 2 caption says R0=1.5 across N on a 3×3 grid |
 | main9 | 2026-09-15 | 46f7c56 | gemma4:31b-cloud | 100 | 100 | 67 | 100 | 100 | 83 | 91.7 | pass | pass | pass | 6 | 240,030 / 23 | all gates; 78%-empty last page |
-| pagelimit1 | 2026-09-15 | c2bfc8c (page-limit branch) | gemma4:31b-cloud | 100 | 100 | 67 | 33 | 100 | 100 | 83.3 | pass | pass | fail | 4 | 312,714 / 30 | first 4-page paper with 3 figures embedded |
+| pagelimit1 | 2026-09-15 | c2bfc8c (page-limit branch) | gemma4:31b-cloud | 100 | 100 | 67 | 33 | 100 | 100 | 83.3 | pass | pass | fail | 4 | 312,714 / 30 | 4 pages with 3 figures embedded |
 | token | 2026-09-15 | afd82ba (feat/token-savings) | gemma4:31b-cloud | 100 | 100 | 67 | 100 | 67 | 100 | 89.0 | — | — | — | 5 | 244,570 / 27 | ODE final size 0.0 (trivial root) |
 | token_final | 2026-09-15 | 06976d1 | gemma4:31b-cloud | 100 | 100 | 67 | 67 | 67 | 100 | 83.5 | — | — | — | 5 | 223,653 / 24 | trivial root; the 0.58 printed is the textbook value |
 | tokf2 | 2026-09-15 | 06976d1 | gemma4:31b-cloud | 100 | 100 | 0 | 67 | 83 | 67 | 69.5 | — | — | — | 5 | 207,605 / — | Gillespie 2009 not counted for D3 |
@@ -91,13 +91,13 @@ Run-name collisions: `cb1`–`cb3` and `cr1`–`cr3` (cost experiment, 2026-09-1
 | rb-gf1 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.8-flash-high | 87 | 100 | 67 | 0 | 67 | 100 | 70.2 | fail | fail | fail | 6 | 6,639,520 / 38 | repair budget not reset lost the figures; 3 invented table numbers |
 | rb-gf2 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.8-flash-high | 93 | 100 | 67 | 67 | 100 | 100 | 87.8 | fail* | fail | fail | 5 | 4,464,962 / 25 | Fig 2 text claim false |
 | rb-gf3 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.8-flash-high | 84 | 100 | 67 | 33 | 100 | 83 | 77.8 | fail | fail | fail | 6 | 3,036,080 / 29 | seed-0 figures vs pooled text numbers docked |
-| rb-gp1 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.1-pro-high | 100 | 100 | 100 | 33 | 100 | 100 | 88.8 | pass | pass | fail | 4 | 720,281 / 26 | first Gemini run to cite Whittle |
+| rb-gp1 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.1-pro-high | 100 | 100 | 100 | 33 | 100 | 100 | 88.8 | pass | pass | fail | 4 | 720,281 / 26 | cites Whittle |
 | rb-gp2 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.1-pro-high | n/a | n/a | 0 | 60 | 67 | 100 | not comparable (56.8 over D3–D6) | fail | fail | fail | 4 | 571,418 / 21 | literature ran without the model during an outage; re-run as rb-gp4 |
 | rb-gp3 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.1-pro-high | 50 | 100 | 67 | 100 | 100 | 100 | 86.2 | pass | fail | pass | 4 | 710,885 / 27 | title-only Andersson & Britton cited 4 times |
 | rb-gp4 | 2026-09-24/25 | 09a26b3 | antigravity_cli gemini-3.1-pro-high | 58 | 100 | 67 | 67 | 100 | 100 | 82.0 | pass | fail | fail | 4 | 768,589 / 27 | page-limit rewrite dropped Whittle and added title-only books |
 | rb-lu1 | 2026-09-24/25 | 09a26b3 | codex_cli gpt-5.6-luna, effort max | 83 | 100 | 100 | 67 | 100 | 100 | 91.7 | fail | fail | fail | 4 | 1,141,024 / 29 | codex limit: FI accepted the paper as-is (synthetic accept) |
 | rb-lu2 | 2026-09-24/25 | 09a26b3 | codex_cli gpt-5.6-luna, effort max | 100 | 100 | 67 | 100 | 100 | 100 | 94.5 | pass | pass | pass | 4 | 1,336,042 / 40 | all gates; resumed in warn mode and after the codex limit |
-| rb-lu3 | 2026-09-24/25 | 09a26b3 | codex_cli gpt-5.6-luna, effort max | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | fail* | pass | pass | 4 | 1,044,270 / 27 | first 100; G1 strict fail on unlabelled contrasts |
+| rb-lu3 | 2026-09-24/25 | 09a26b3 | codex_cli gpt-5.6-luna, effort max | 100 | 100 | 100 | 100 | 100 | 100 | 100.0 | fail* | pass | pass | 4 | 1,044,270 / 27 | mean 100; G1 strict fail on unlabelled contrasts |
 | rb-sn2 | 2026-09-24/25 | 09a26b3 | claude_cli claude-sonnet-5, effort high | 0 | 0 | 0 | 0 | 0 | 83 | invalid (13.8) | fail | fail | fail | 4 | 84,199 / 28 (8 real) | network outage: FI took error strings as answers; re-run as rb-sn4–6 |
 | rb-sn3 | 2026-09-24/25 | 09a26b3 | claude_cli claude-sonnet-5, effort high | 0 | 0 | 0 | 0 | 0 | 100 | invalid (16.7) | fail | fail | fail | 4 | 88,254 / 28 (11 real) | whole run inside the outage |
 | rb-sn4 | 2026-09-24/25 | 09a26b3 | claude_cli claude-sonnet-5, effort high | 100 | 100 | 67 | 67 | 100 | 100 | 89.0 | fail | pass | fail | 4 | 722,835 / 32 | $3.46; 2 sentences contradict its own Table 1 |
@@ -114,6 +114,8 @@ Not in the table because they were never scored: sn1–sn3 (Sonnet 5 on 17a025c,
 An asterisk in a gate cell is the grader's own mark for a caveated pass or fail (terra3, cr2, rb-cb1, rb-cr3, rb-gf2, rb-lu3).
 
 ## How these numbers were compiled
+
+The table holds the paper's scores. The slides and poster rubric in [rubric.md](rubric.md) was applied to a few runs only; those scores are not tabulated here.
 
 Each run was graded by hand from its delivered outputs, and its grader's notes (the item-level record: which
 citations failed, which canonical works were found, which D6 items failed) are what every re-score starts from.
