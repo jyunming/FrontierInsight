@@ -376,3 +376,14 @@ asked for once more and then stops the quest like a failed call; only panelists 
 consumers require a reviewer's own accept; and the review screen (CLI, Web, VS Code) says when no reviewer gave the
 verdict, naming the panelist. The two counterexamples about the review no longer reproduce; ten new tests fail on the
 old code.
+
+## What was approved is what runs
+
+The re-audit asked that the settings shown on the confirm screen be the ones that run. The interview now resolves them
+before the screen (#385); this closes the other end. The first start of an interview-written quest records the settings
+that decide how strictly it is checked in `.fi/approved_plan.json`; a later start whose config differs (a hand edit, or
+a different `--config` passed to `--resume`) stops before anything runs and names each change; `--update` shows the
+changes and records them. Verified with the real CLI: an interview config started once, `max_iterations` edited 2 -> 5,
+`--resume` stopped with the change named, `--update` approved it and the quest went on. Building it found a bug that
+predates it: on `--update` a blank answer took FI's own default instead of the quest's current value, so the 5 went
+quietly back to 2; fixed, with a test.

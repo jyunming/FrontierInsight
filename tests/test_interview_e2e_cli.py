@@ -294,3 +294,14 @@ async def test_run_new_writes_what_the_result_is_for(
         assert "reproducibility" in shown.split("Review before launch", 1)[1]
         assert "reproducibility" in cfg.engine.review_panel
     assert "Result for" in shown
+
+
+def test_a_blank_answer_keeps_the_value_the_caller_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On --update a blank answer took FI's own default, so a revise budget of 5 went quietly back to 2."""
+    from core.interview import QUESTIONS
+    from launch import _cli_prompt_for
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    q = next(x for x in QUESTIONS if x.id == "max_iterations")
+    assert str(_cli_prompt_for(q, {"max_iterations": 5}, {})) == "5"
+    assert str(_cli_prompt_for(q, {}, {})) == str(q.default), "with nothing held, the question's own default"

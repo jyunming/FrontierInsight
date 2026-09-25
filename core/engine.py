@@ -3492,9 +3492,7 @@ class Engine:
             interaction="answer",
             headline="settings that decide how strictly this quest is checked changed after you approved it",
             steps=[
-                "Nothing was run. Changed since the quest was approved:
-" + "
-".join(f"  - {c}" for c in changed),
+                "Nothing was run. Changed since the quest was approved:\n" + "\n".join(f"  - {c}" for c in changed),
                 "To keep the change, approve it: `python launch.py --update " + self.quest_id + "` (web: the quest page's "
                 "Update, VS Code: `@fi /update " + self.quest_id + "`); it shows the settings and records them.",
                 f"To undo it, put the setting back in `{self.quest_root / 'config.yaml'}` (or resume with the config "

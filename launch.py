@@ -3641,6 +3641,12 @@ def _cli_prompt_for(
         if preflight.get(q.id):
             default = preflight[q.id]
 
+    # An answer the caller already holds for this question wins: the quest's current value on --update, the value
+    # the review screen shows when a row is edited. Without this a blank answer on --update took FI's own default, so
+    # every setting the person had changed (a revise budget of 5, say) went quietly back to it.
+    if q.id in partial and partial[q.id] is not None:
+        default = partial[q.id]
+
     # Provider-model is a derived question — choices depend on the
     # already-picked provider. Build the choice list at render time.
     if q.id == "provider_model":

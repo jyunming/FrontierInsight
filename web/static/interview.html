@@ -899,7 +899,12 @@
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;
     }
-    div.innerHTML = `<pre class="max-h-96 overflow-auto">${escapeHtml(JSON.stringify(body, null, 2))}</pre>`;
+    // An update is how a change to the settings that decide how strictly the quest is checked gets approved: say which.
+    const approved = Array.isArray(body.approved_settings_changes) ? body.approved_settings_changes : [];
+    const approvedHtml = approved.length
+      ? `<p class="mb-2"><strong>Approved these changes to how strictly the quest is checked:</strong></p><ul class="list-disc ml-6 mb-3">${approved.map((c) => `<li>${escapeHtml(c)}</li>`).join('')}</ul>`
+      : '';
+    div.innerHTML = `${approvedHtml}<pre class="max-h-96 overflow-auto">${escapeHtml(JSON.stringify(body, null, 2))}</pre>`;
     return false;
   }
 
