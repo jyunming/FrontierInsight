@@ -114,92 +114,113 @@ async def test_run_new_draft_only_produces_valid_config_yaml(
     assert cfg.provider.model == first_model
 
 
-@pytest.mark.asyncio
-async def test_run_new_writes_the_tier1_ensemble_pick_and_author_line(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The ensemble profile and the author line are tier-1 answers. The CLI
-    used to read the ensemble pick from the tier-3 dict, where it never is,
-    so every CLI quest ran with the ensemble off whatever the user chose."""
-    from launch import _run_new
+def _review_row(qid: str) -> str:
+    """The number the review screen gives ``qid`` once Advanced is shown: tier 2, then the author line, then tier 3."""
+    from core.interview import questions_for_tier
+
+    author = [q.id for q in questions_for_tier(1, "cli") if q.id in ("author", "affiliation", "contact_email", "url")]
+    rows = [q.id for q in questions_for_tier(2, "cli")] + author + [q.id for q in questions_for_tier(3, "cli")]
+    return str(rows.index(qid) + 1)
+
+
+async def _new(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: list[str]) -> Config:
     from core.provider import ProxySupervisor
+    from launch import _run_new
 
     async def fake_preflight(**_kw: Any) -> dict[str, str]:
         return {}
 
     monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
-    # One answer per tier-1 question, in order, then Enter to launch
-    # from the review screen.
-    answers = iter([
-        "Author line probe topic",   # topic
-        "",                          # result_use (default research)
-        "",                          # paper_format (default generic)
-        "",                          # output_kinds (default)
-        "",                          # study_depth (default)
-        "1",                         # provider
-        "1",                         # provider_model
-        "4",                         # ensemble_profile: full
-        "model-a, model-b, model-c",  # ensemble_models: the user's own pick
-        "  Jane   Chen ",            # author
-        "R&D Lab",                   # affiliation
-        "",                          # contact_email (skipped)
-        "https://example.org/p",     # url
-        "",                          # review screen: launch
-    ])
+    answers = iter(typed)
     monkeypatch.setattr("builtins.input", lambda prompt="": next(answers, ""))
-
     output_root = tmp_path / "outputs"
-    rc = await _run_new(
-        output_root=output_root,
-        draft_only=True,
-        vscode_bridge_port=0,
-        interactive=False,
-        supervisor=ProxySupervisor(),
-    )
-    assert rc == 0
-    (draft,) = list((output_root / "_drafts").glob("*.yaml"))
-    cfg = Config.model_validate(yaml.safe_load(draft.read_text(encoding="utf-8")))
-    assert set(cfg.provider.node_ensemble) == {"cross_check", "ideate", "analyze"}
-    # Exactly the models the user typed, in their order; FI added none.
-    assert list(cfg.provider.node_ensemble["cross_check"].models) == [
-        "model-a", "model-b", "model-c",
-    ]
-    assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "R&D Lab")
-    assert (cfg.output.contact_email, cfg.output.url) == ("", "https://example.org/p")
-
-
-@pytest.mark.asyncio
-async def test_run_new_configures_no_ensemble_when_the_user_names_no_models(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Picking a fan-out profile but naming no models must not fall back to
-    models FI likes: the quest runs single-model and the draft says why."""
-    from launch import _run_new
-    from core.provider import ProxySupervisor
-
-    async def fake_preflight(**_kw: Any) -> dict[str, str]:
-        return {}
-
-    monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
-    answers = iter([
-        "Ensemble without models probe", "", "", "", "", "1", "1",  # topic, result_use, format, kinds, depth, provider, model
-        "4",                         # ensemble_profile: full
-        "",                          # ensemble_models: none named
-    ])
-    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers, ""))
-
-    output_root = tmp_path / "outputs"
+    for old in (output_root / "_drafts").glob("*.yaml") if (output_root / "_drafts").is_dir() else []:
+        old.unlink()
     rc = await _run_new(
         output_root=output_root, draft_only=True, vscode_bridge_port=0,
         interactive=False, supervisor=ProxySupervisor(),
     )
     assert rc == 0
     (draft,) = list((output_root / "_drafts").glob("*.yaml"))
-    text = draft.read_text(encoding="utf-8")
-    cfg = Config.model_validate(yaml.safe_load(text))
+    return Config.model_validate(yaml.safe_load(draft.read_text(encoding="utf-8")))
+
+
+@pytest.mark.asyncio
+async def test_run_new_asks_the_author_line_once_and_keeps_it_for_the_next_quest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first interview asks the author line after the topic, what the result is for and the model; it is kept
+    (core/profile.py) and the next interview asks only the first four and fills the author line from it."""
+    from core import profile
+
+    assert profile.load() is None
+    cfg = await _new(tmp_path, monkeypatch, [
+        "Author line probe topic",   # topic
+        "",                          # result_use (default research)
+        "1", "1",                    # provider, provider_model
+        "  Jane   Chen ",            # author
+        "R&D Lab",                   # affiliation
+        "",                          # contact_email (skipped)
+        "https://example.org/p",     # url
+        "",                          # review screen: launch
+    ])
+    assert (cfg.output.author, cfg.output.affiliation) == ("Jane Chen", "R&D Lab")
+    assert (cfg.output.contact_email, cfg.output.url) == ("", "https://example.org/p")
+    assert profile.load() == {"author": "Jane Chen", "affiliation": "R&D Lab", "contact_email": "",
+                              "url": "https://example.org/p"}
+
+    again = await _new(tmp_path, monkeypatch, ["A second topic", "", "1", "1", ""])
+    assert (again.output.author, again.output.affiliation, again.output.url) == (
+        "Jane Chen", "R&D Lab", "https://example.org/p")
+
+    # Changed on the review screen: this quest and the next ones.
+    changed = await _new(tmp_path, monkeypatch, ["A third topic", "", "1", "1", _review_row("affiliation"), "New Lab", ""])
+    assert changed.output.affiliation == "New Lab" and profile.load()["affiliation"] == "New Lab"
+
+
+@pytest.mark.asyncio
+async def test_run_new_writes_the_ensemble_named_in_advanced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ensemble is in Advanced now. Picked there with the models the person named, it is written as they named it;
+    FI adds none."""
+    cfg = await _new(tmp_path, monkeypatch, [
+        "Ensemble probe topic", "", "1", "1", "", "", "", "",   # topic, result_use, provider, model, author line
+        "a", _review_row("ensemble_profile"), "4",              # Advanced: the full profile
+        _review_row("ensemble_models"), "model-a, model-b, model-c",
+        "",                                                     # launch
+    ])
+    assert set(cfg.provider.node_ensemble) == {"cross_check", "ideate", "analyze"}
+    assert list(cfg.provider.node_ensemble["cross_check"].models) == ["model-a", "model-b", "model-c"]
+
+
+@pytest.mark.asyncio
+async def test_run_new_configures_no_ensemble_when_the_user_names_no_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Picking a fan-out profile but naming no models must not fall back to models FI likes: the quest runs
+    single-model."""
+    cfg = await _new(tmp_path, monkeypatch, [
+        "Ensemble without models probe", "", "1", "1", "", "", "", "",
+        "a", _review_row("ensemble_profile"), "4", "",
+    ])
     assert not cfg.provider.node_ensemble
-    assert "no ensemble is configured" in text
-    assert "opus" not in text and "gemini" not in text
+
+
+@pytest.mark.asyncio
+async def test_run_new_takes_a_paper_format_changed_on_the_review_screen_and_what_follows_from_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The paper format is derived now and shown for editing; changing it there works the study depth out again."""
+    from core.interview import PAPER_FORMATS, smart_default_study_depth
+
+    essay = str([c.value for c in PAPER_FORMATS].index("essay") + 1)
+    cfg = await _new(tmp_path, monkeypatch, [
+        "A history of the printing press", "", "1", "1", "", "", "", "",
+        _review_row("paper_format"), essay, "",
+    ])
+    assert cfg.output.paper_format == "essay"
+    assert cfg.engine.clarify_overrides["study_depth"] == smart_default_study_depth({"paper_format": "essay"})
 
 
 @pytest.mark.asyncio
@@ -218,14 +239,12 @@ async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
         return {}
 
     monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
-    rows = [q.id for q in questions_for_tier(2, "cli")] + [q.id for q in questions_for_tier(3, "cli")]
-    row = str(rows.index("page_limit") + 1)
+    row = _review_row("page_limit")
     answers = iter([
         "Page limit probe topic",    # topic
         "",                          # result_use (default research)
-        "", "", "",                  # paper_format, output_kinds, study_depth
         "1", "1",                    # provider, provider_model
-        "", "", "", "", "",          # ensemble_profile, author line
+        "", "", "", "",              # author line
         "a", row, "four",            # review screen: show advanced, a typo (refused)
         row, "4",                    # the page limit
         "",                          # launch

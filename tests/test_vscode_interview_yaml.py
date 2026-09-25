@@ -208,9 +208,13 @@ def test_vscode_interview_asks_the_newly_reachable_questions() -> None:
     """The emitter half is useless if nothing collects the answer — these
     are the UI hooks each question hangs from."""
     ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
-    # ensemble_profile is tier 1: asked inline, not hidden in a submenu.
+    # ensemble_profile is an advanced field (tier 3): off by default, picked from the advanced menu.
     assert "multi-model ensemble?" in ts.lower()
-    assert "ensemble_profile: ensembleProfile" in ts
+    assert '{ label: "Multi-model ensemble (and its models)", value: "ensemble" }' in ts
+    assert "a.ensemble_profile = v.profile" in ts
+    # The paper format, deliverables and depth are tier-2 defaults, changed from the defaults menu.
+    for value in ("paper_format", "output_kinds", "study_depth"):
+        assert f'value: "{value}" }}' in ts and f'which.value === "{value}"' in ts
     # paper_style + max_iterations are tier-3 advanced fields.
     assert '{ label: "Paper style", value: "paper_style" }' in ts
     assert 'which.value === "paper_style"' in ts

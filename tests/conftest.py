@@ -121,6 +121,13 @@ def _isolate_skill_library(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_profile(tmp_path_factory, monkeypatch):
+    """No test may read or write the person's real profile (~/.frontier-insight/profile.json): a saved name there would
+    change which questions an interview test is asked. Each test starts with none saved."""
+    monkeypatch.setenv("FI_PROFILE_PATH", str(tmp_path_factory.mktemp("fi_profile") / "profile.json"))
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_arxiv_gate(tmp_path_factory, monkeypatch):
     """The arXiv queue keeps its pacing state and a 24-hour response cache
     under ``FI_CACHE_DIR`` (default ``~/.frontier-insight/cache``). No test may

@@ -28,27 +28,23 @@ def core_ts() -> str:
     return INTERVIEW_CORE_TS.read_text(encoding="utf-8")
 
 
-# ---- Tier-1 surface (4 modals) ----
+# ---- The first screen asks the topic and what the result is for; the rest are review-screen pickers ----
 
 
-@pytest.mark.parametrize(
-    "needle",
-    [
-        "quest topic",          # topic modal title fragment
-        "paper format / venue", # paper_format modal
-        "which deliverables",   # output_kinds modal
-        "study depth",          # study_depth modal
-    ],
-)
-def test_interview_keeps_four_tier1_modal_titles(
-    interview_ts: str, needle: str,
-) -> None:
-    """The first four QuickPick/InputBox titles correspond to the
-    tier-1 questions VSCode users see. A future edit that removes
-    one of these regresses the always-ask scope."""
-    assert needle in interview_ts.lower(), (
-        f"interview.ts lost the {needle!r} tier-1 modal title"
-    )
+def test_the_first_screen_asks_only_the_topic_and_what_it_is_for(interview_ts: str) -> None:
+    """runInterview asks the topic and what the result is for (and the author line while no profile is saved); the
+    paper format, deliverables and study depth are review-screen pickers, not questions asked up front."""
+    run = interview_ts[interview_ts.index("export async function runInterview("):]
+    run = run[:run.index("\n}\n")]
+    assert "quest topic" in run.lower() and "what is the result for?" in run.lower()
+    for asked_before in ("pickPaperFormat(", "pickOutputKinds(", "pickStudyDepth(", "pickEnsemble("):
+        assert asked_before not in run, f"{asked_before} is asked up front again"
+    assert "paperFormatFor(topic)" in run and "studyDepthFor(paperFormat, topic)" in run
+
+
+@pytest.mark.parametrize("needle", ["paper format / venue", "which deliverables", "study depth"])
+def test_the_review_screen_keeps_the_three_pickers(interview_ts: str, needle: str) -> None:
+    assert needle in interview_ts.lower(), f"interview.ts lost the {needle!r} picker"
 
 
 def test_interview_no_longer_asks_title_modal(interview_ts: str) -> None:

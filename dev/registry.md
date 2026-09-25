@@ -52,6 +52,9 @@ same PR that adds, splits or renames one.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
   one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
   `run_oracle` in `_oracle_gate`); the older self-looping contract stays in `core/split_run.py` as `self_reported`.
+- `core/profile.py` — the person's author line, asked on the first interview and kept in
+  `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
+  submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).
 - `core/receipts.py` — the receipt each required check (evidence gate, design audit, claim check) writes under
   `needs/receipts/`; `core/evidence.py` reads them for `publication_ready`; `engine._stop_once_for_check` is the
   research profile's one stop and retry.
