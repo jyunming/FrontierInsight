@@ -1041,11 +1041,12 @@ def smart_default_output_kinds(partial: dict[str, Any]) -> list[str]:
     """Paper + PDF, and the slides, poster or talk script when the topic asks for them."""
     topic = (partial.get("topic") or "").lower()
     kinds = ["paper_md", "paper_pdf"]
-    if re.search(r"\bslides?\b|slide deck|presentation", topic):
+    # ASCII word boundaries, as the web page's and the VS Code extension's regular expressions have.
+    if re.search(r"\bslides?\b|slide deck|presentation", topic, re.ASCII):
         kinds.append("slides")
-    if re.search(r"\bposter\b", topic):
+    if re.search(r"\bposter\b", topic, re.ASCII):
         kinds.append("poster")
-    if re.search(r"\btalk\b|\bspeech\b|talk script", topic):
+    if re.search(r"\btalk\b|\bspeech\b|talk script", topic, re.ASCII):
         kinds.append("speech")
     return kinds
 

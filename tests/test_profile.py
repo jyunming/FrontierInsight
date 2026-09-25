@@ -95,3 +95,20 @@ def test_a_malformed_per_step_model_entry_is_refused() -> None:
 
     with pytest.raises(ValueError, match="node_models"):
         _parse_answers(_author_payload(node_models="bogus"))
+
+
+def test_an_update_that_does_not_send_the_review_fields_keeps_the_quests_own() -> None:
+    from types import SimpleNamespace
+
+    from web.interview_routes import _review_extras
+
+    current = SimpleNamespace(pause_for_user_input="after_design", paper_style="briefing", node_models="write:m")
+    assert _review_extras({}, current) == {"pause_for_user_input": "after_design", "paper_style": "briefing",
+                                           "node_models": "write:m"}
+    assert _review_extras({"paper_style": "latex"}, current)["paper_style"] == "latex"
+
+
+def test_the_deliverables_rule_reads_word_boundaries_as_the_other_interfaces_do() -> None:
+    from core.interview import smart_default_output_kinds
+
+    assert "poster" in smart_default_output_kinds({"topic": "an époster session"})

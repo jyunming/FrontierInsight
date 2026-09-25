@@ -322,7 +322,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         # MUST be threaded through here — omitting them silently
         # dropped non-default values on every web --update submit.
         new = InterviewAnswers(
-            **_review_extras(body),
+            **_review_extras(body, current),
             topic=current.topic,
             title=current.title,
             output_kinds=new_answers.output_kinds,
@@ -615,12 +615,17 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
     )
 
 
-def _review_extras(body: dict[str, Any]) -> dict[str, Any]:
+def _review_extras(body: dict[str, Any], current: Any = None) -> dict[str, Any]:
     """What the review screen offers beyond the fields above: the pause for your own papers / datasets, the paper style
-    and per-step models. They were offered and then dropped, so the defaults were written instead."""
+    and per-step models. They were offered and then dropped, so the defaults were written instead. On an update
+    (``current``), a field the page did not send keeps the quest's current value."""
     from core.interview import QUESTIONS, parse_node_models_answer
 
     out: dict[str, Any] = {}
+    if current is not None:
+        for qid in ("pause_for_user_input", "paper_style", "node_models"):
+            if body.get(qid) in (None, "") and getattr(current, qid, None) not in (None, ""):
+                out[qid] = getattr(current, qid)
     for qid in ("pause_for_user_input", "paper_style"):
         if body.get(qid) in (None, ""):
             continue

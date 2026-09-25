@@ -434,7 +434,9 @@ fill them in without asking and show them on the review screen, where a
 change is kept for the next quests too.
 
 These values are written only into the quest's own files and your profile file on this machine (the web page
-reads and keeps it only when opened on this machine). They are not
+reads and keeps it only for a page opened on this machine; a request that came through a proxy
+saying so is refused, but a plain port forward to this machine looks local, so do not expose
+`--serve` that way). They are not
 sent to the literature or web search services. If the visual check of the
 outputs is on, the page screenshots it sends to your configured LLM
 provider show the author line, as they show the rest of the paper.
