@@ -363,3 +363,16 @@ Grading the re-bench of every non-gemma4 arm on 09a26b3 traced two lost results 
   about a dozen nodes of sn1–sn3 ran on that sentence (those three runs were discarded). An error envelope is now the
   call's error: the call is retried and, if it keeps failing, fails with the CLI's reason instead of returning text.
   Checked with the real CLI pointed at an unreachable API: the old code returned the sentence, the new code raises.
+
+## The 2026-09-24 re-audit: a review nobody gave
+
+An outside re-audit of `09a26b3` found three structural holes in the checks and six counterexamples that reproduce
+them; all six still reproduced after #382. This entry covers the review one. #382 stopped the quest when the review
+**call** failed, but a reviewer that answered without naming a verdict still got a stand-in `accept` (status
+`unreviewed`); the panel's vote counter counted panelists marked `error`, so two stand-in accepts outvoted a real
+revise; and the automatic accept, the skills' usage record and the Axon write-back checked only the verdict, so a
+stand-in accept could be accepted for the person and written into long-term memory. Now a reply with no verdict is
+asked for once more and then stops the quest like a failed call; only panelists that reviewed vote; those three
+consumers require a reviewer's own accept; and the review screen (CLI, Web, VS Code) says when no reviewer gave the
+verdict, naming the panelist. The two counterexamples about the review no longer reproduce; ten new tests fail on the
+old code.

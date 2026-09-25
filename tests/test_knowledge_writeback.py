@@ -382,3 +382,51 @@ def test_a_genuinely_distinct_discriminator_is_still_kept() -> None:
         "fi_summary_input", {"summary_id": "s1", "rel_path": "b/two.md"}
     )
     assert a != b
+
+
+def _bare_engine_for_writeback(tmp_path: Path, captured: list) -> tuple[Engine, object]:
+    from types import SimpleNamespace
+
+    from core.engine import QuestArtifacts
+
+    paper = tmp_path / "paper.md"
+    paper.write_text("# Probe\n", encoding="utf-8")
+
+    class _Knowledge:
+        enabled = True
+
+        def add_quest_artifacts(self, **kwargs):
+            captured.append(kwargs)
+            return True
+
+    eng = object.__new__(Engine)
+    eng.quest_id = "probe"
+    eng.knowledge = _Knowledge()
+    eng.config = SimpleNamespace(
+        knowledge=SimpleNamespace(write_back_quests=True, write_back_only_on_accept=True),
+        provider=SimpleNamespace(name="fake", model="fake"),
+    )
+    eng._log = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None)
+    artifacts = QuestArtifacts(quest_id="probe", quest_root=tmp_path, paper_md=paper, paper_pdf=None,
+                               figures_dir=None, bundle_manifest=None, raw_state={})
+    return eng, artifacts
+
+
+@pytest.mark.parametrize("status", ["unreviewed", "error"])
+def test_an_accept_no_reviewer_gave_is_not_written_to_axon(tmp_path: Path, status: str) -> None:
+    """The 2026-09-24 re-audit's counterexample: a stand-in accept was ingested into long-term memory."""
+    captured: list = []
+    eng, artifacts = _bare_engine_for_writeback(tmp_path, captured)
+    eng._write_back_knowledge(artifacts, {
+        "review": {"verdict": "accept", "status": status, "must_flag_hits": []}, "analysis": {}, "design": {},
+    })
+    assert captured == []
+
+
+def test_a_real_accept_is_still_written_to_axon(tmp_path: Path) -> None:
+    captured: list = []
+    eng, artifacts = _bare_engine_for_writeback(tmp_path, captured)
+    eng._write_back_knowledge(artifacts, {
+        "review": {"verdict": "accept", "status": "ok", "must_flag_hits": []}, "analysis": {}, "design": {},
+    })
+    assert len(captured) == 1

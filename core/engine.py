@@ -865,7 +865,6 @@ class Engine:
                         if "human_review" in intr_value:
                             snap = intr_value["human_review"]
                             verdict = snap.get("verdict")
-                            mfh = snap.get("must_flag_hits") or []
                             snapshot_path = self.fi_dir / "human_review.json"
                             answer_path = self.fi_dir / "human_review_answer.json"
 
@@ -882,11 +881,7 @@ class Engine:
                                     except OSError:
                                         pass
 
-                            if (
-                                self.auto_accept_on_pass
-                                and verdict == "accept"
-                                and not mfh
-                            ):
+                            if self.auto_accept_on_pass and _auto_accepts(snap):
                                 self._log.info(
                                     "[run] human_feedback auto-accept "
                                     "(verdict=accept, no must_flag_hits)",
@@ -9625,30 +9620,34 @@ class Engine:
             # must NOT abort the quest and forfeit the finished paper + its
             # outputs. Fail open to "accept" (the same degrade the parse-miss
             # path below already uses, and the pattern applied to claim_check).
-            try:
-                text = await self._chat(base_prompt, node="review")
-            except Exception as e:
-                self._pause_for_review_unavailable(paper_path, [f"the review call failed ({_one_line(e, 300)})"])
-            call_ok = True
-            parsed_review = _parse_json_lenient(text) if call_ok else None
             # A reply that parses as JSON but never names a "verdict" at all
             # (a real case, not hypothetical: a reply shaped like
             # {"comment": "..."}) is exactly as unusable as no reply — checked
             # explicitly rather than trusting "the dict is non-empty", which a
-            # provider that answers off-format would still satisfy.
-            verdict_named = (
-                isinstance(parsed_review, dict)
-                and isinstance(parsed_review.get("verdict"), str)
-                and bool(parsed_review["verdict"].strip())
-            )
-            review = parsed_review if verdict_named else {"verdict": "accept", "score": 3, "suggestions": []}
-            # A fabricated "accept" (call failed, reply didn't parse, or parsed
-            # but named no verdict) is a flow decision, not a review outcome:
-            # it must not read as "the reviewer accepted this paper" to
-            # anything checking evidence status. ``verdict`` stays "accept" so
-            # routing/output rendering are unaffected; ``status`` is the field
-            # evidence.py reads.
-            review["status"] = "ok" if verdict_named else "unreviewed"
+            # provider that answers off-format would still satisfy. It is asked
+            # once more; a second reply without a verdict stops the quest like a
+            # failed call. A stand-in "accept" used to be recorded instead, and
+            # an automatic accept and the Axon write-back took it as a review.
+            # The pause normally ends the run here. If it returns instead (a resume that sent a value, such as
+            # `--resume --accept`, answers the pending pause), that is read as "ask again", never as a review.
+            review: Any = None
+            while review is None:
+                problem = "the reviewer answered twice without a verdict (accept or revise)"
+                for _ask in range(2):
+                    try:
+                        text = await self._chat(base_prompt, node="review")
+                    except Exception as e:
+                        problem = f"the review call failed ({_one_line(e, 300)})"
+                        break
+                    parsed_review = _parse_json_lenient(text)
+                    if _names_a_verdict(parsed_review):
+                        review = parsed_review
+                        break
+                    self._log.warning("[review] the reply named no verdict%s", "; asking again" if _ask == 0 else "")
+                if review is None:
+                    self._pause_for_review_unavailable(paper_path, [problem])
+            review["verdict"] = review["verdict"].strip().lower()
+            review["status"] = "ok"
             mfh = review.get("must_flag_hits") or []
             if not isinstance(mfh, list):
                 mfh = []
@@ -9754,40 +9753,44 @@ class Engine:
                         "suggestions": [], "blocking": "",
                         "must_flag_hits": [], "status": "error", "error": str(e)}
             prompt = f"{prefix}\n\n{base_prompt}"
-            try:
-                text = await self._chat(prompt, node=f"review_panel.{name}")
-                call_ok = True
-            except Exception as e:
-                self._log.warning("[review] panelist %s could not be asked (%s)", name, e)
-                return {"persona": name, "status": "call_failed", "error": _one_line(e, 300)}
-            parsed = (_parse_json_lenient(text) if call_ok else None) or {}
-            mfh = parsed.get("must_flag_hits") or []
-            if not isinstance(mfh, list):
-                mfh = []
             # A reply that parses but names no "verdict" at all (e.g.
             # {"comment": "..."}) is exactly as unusable as no reply — a
             # non-empty dict alone is not proof the persona actually answered.
-            verdict_named = isinstance(parsed.get("verdict"), str) and bool(parsed["verdict"].strip())
+            # Asked once more; then the panelist has not reviewed, the same as
+            # one that could not be asked.
+            parsed: Any = None
+            for _ask in range(2):
+                try:
+                    text = await self._chat(prompt, node=f"review_panel.{name}")
+                except Exception as e:
+                    self._log.warning("[review] panelist %s could not be asked (%s)", name, e)
+                    return {"persona": name, "status": "call_failed", "error": _one_line(e, 300)}
+                parsed = _parse_json_lenient(text)
+                if _names_a_verdict(parsed):
+                    break
+                self._log.warning("[review] panelist %s named no verdict%s", name, "; asking again" if _ask == 0 else "")
+            else:
+                return {"persona": name, "status": "call_failed", "no_verdict": True,
+                        "error": "answered twice without a verdict (accept or revise)"}
+            mfh = parsed.get("must_flag_hits") or []
+            if not isinstance(mfh, list):
+                mfh = []
             return {
                 "persona": name,
-                "verdict": parsed.get("verdict") or "accept",
+                "verdict": parsed["verdict"].strip().lower(),
                 "score": parsed.get("score") if isinstance(parsed.get("score"), (int, float)) else 3,
                 "strengths": parsed.get("strengths") or [],
                 "weaknesses": parsed.get("weaknesses") or [],
                 "suggestions": parsed.get("suggestions") or [],
                 "blocking": parsed.get("blocking") or "",
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
-                # "accept" above is the flow decision (never abort the quest for
-                # a broken persona); "status" is the receipt evidence.py reads
-                # to tell a real accept from a fabricated one.
-                "status": "ok" if verdict_named else "error",
+                "status": "ok",
             }
 
-        # return_exceptions=True is defense in depth: run_persona already
-        # degrades a failed persona to a neutral accept, but a panelist must
-        # never be able to abort the whole (post-write) review and forfeit the
-        # paper's outputs. Drop any unexpected raise, propagate genuine
-        # cancellation, and if EVERY panelist somehow failed, accept as-is.
+        # return_exceptions=True is defense in depth: a panelist must never be
+        # able to abort the whole (post-write) review and forfeit the paper's
+        # outputs. Drop any unexpected raise (it stops the quest below, as a
+        # reviewer that could not be asked) and propagate genuine cancellation.
         panel_results_raw = await asyncio.gather(
             *(run_persona(n) for n in panel_names),
             return_exceptions=True,
@@ -9805,20 +9808,13 @@ class Engine:
         unasked = [r for r in panel_results if r.get("status") == "call_failed"]
         if unasked or len(panel_results) < len(panel_names):
             self._pause_for_review_unavailable(paper_path, [
-                f"the {r['persona']} reviewer could not be asked ({r.get('error') or 'no reply'})" for r in unasked
+                f"the {r['persona']} reviewer "
+                + (r["error"] if r.get("no_verdict") else f"could not be asked ({r.get('error') or 'no reply'})")
+                for r in unasked
             ] or ["a reviewer could not be asked"])
-        if not panel_results:
-            self._log.warning(
-                "[review] all panelists failed; accepting the paper as-is",
-            )
-            # One receipt per required role, all marked failed — not just the
-            # first — so evidence.py can name exactly which required roles
-            # never produced a real review.
-            panel_results = [{
-                "persona": name, "verdict": "accept", "score": 3,
-                "strengths": [], "weaknesses": [], "suggestions": [],
-                "blocking": "", "must_flag_hits": [], "status": "error",
-            } for name in panel_names]
+            # Reached only when a resume answered the pause with a value (`--resume --accept`, say): the panelists
+            # that did not review stay in panel_results with their status, cast no vote in the aggregator, and make
+            # the review's status "error", so nothing takes the result as a panel's accept.
         agg = _aggregate_panel_reviews(list(panel_results))
 
         # Moderator call — best effort for the rationale + suggestion
@@ -9955,6 +9951,14 @@ class Engine:
             "iteration": state.get("iteration", 0),
             "verdict": verdict,
             "score": review.get("score"),
+            # Whether a reviewer actually gave this verdict ("ok"), and each panelist's own status, so a stand-in
+            # verdict is never shown, or auto-accepted, as a review.
+            "review_status": "ok" if _review_was_real(review) else str(review.get("status")),
+            "panel": [
+                {"persona": r.get("persona"), "verdict": r.get("verdict"), "score": r.get("score"),
+                 "status": r.get("status", "ok"), **({"error": r["error"]} if r.get("error") else {})}
+                for r in (state.get("review_panel") or []) if isinstance(r, dict)
+            ],
             "strengths": review.get("strengths") or [],
             "weaknesses": review.get("weaknesses") or [],
             "suggestions": review.get("suggestions") or [],
@@ -9990,8 +9994,11 @@ class Engine:
         payload = self._pause_for_human(
             kind="review",
             interaction="answer",
-            headline=f"review the result (verdict: {verdict}, "
-                     f"score: {review.get('score')})",
+            headline=(
+                f"review the result (verdict: {verdict}, score: {review.get('score')})"
+                if _review_was_real(review) else
+                f"review the result yourself: no reviewer gave a verdict (review status {review.get('status')})"
+            ),
             steps=[
                 "Accept, reject, or refine the paper in the panel "
                 "(Web / VSCode), or at the CLI prompt.",
@@ -11029,6 +11036,10 @@ class Engine:
                 "says nothing about the skill", verdict or "unknown",
             )
             return
+        if not _review_was_real(state.get("review")):
+            self._log.info("[skills] usage not recorded: the accept was not a reviewer's (review status %s)",
+                           (state.get("review") or {}).get("status"))
+            return
         try:
             from core.skills.usage import record_quest
 
@@ -11059,6 +11070,10 @@ class Engine:
                 "[write-back] skipped: verdict=%s (write_back_only_on_accept=True)",
                 verdict,
             )
+            return
+        # An accept no reviewer gave is not research the review signed off on.
+        if self.config.knowledge.write_back_only_on_accept and not _review_was_real(review):
+            self._log.info("[write-back] skipped: the accept was not a reviewer's (review status %s)", review.get("status"))
             return
 
         analysis = state.get("analysis") or {}
@@ -13889,13 +13904,23 @@ def _aggregate_panel_reviews(
       - Strengths = intersection.
       - Suggestions = deduped union, persona-attributed.
       - Agreement = "unanimous" / "split" / "controversial".
+
+    Only a panelist with a real review votes: an entry whose ``status`` says it
+    did not review (``error``, ``call_failed``, ``unreviewed``) is left out of
+    every rule above, and ``status`` on the result is ``"ok"`` only when every
+    panelist reviewed. Two failed panelists' stand-in accepts once outvoted a real
+    revise. An entry with no ``status`` (a checkpoint from before it existed)
+    counts as reviewed.
     """
+    failed = [r for r in panel if r.get("status", "ok") != "ok"]
+    panel = [r for r in panel if r.get("status", "ok") == "ok"]
+    status = "ok" if panel and not failed else "error"
     if not panel:
         return {"verdict": fallback_verdict, "score": 3,
                 "rigor_score": 3, "depth_score": 3,
                 "agreement": "unanimous", "strengths": [],
                 "weaknesses": [], "suggestions": [], "blocking": "",
-                "must_flag_hits": []}
+                "must_flag_hits": [], "status": status}
 
     verdicts = [(r.get("verdict") or "accept") for r in panel]
 
@@ -14003,7 +14028,38 @@ def _aggregate_panel_reviews(
         "strengths": strengths, "weaknesses": weaknesses,
         "suggestions": suggestions, "blocking": blocking,
         "must_flag_hits": mfh_out,
+        "status": status,
     }
+
+
+def _names_a_verdict(reply: Any) -> bool:
+    """A review reply is usable only when it names one of the verdicts the review prompt allows (``accept`` or
+    ``revise``, any case). Anything else ("minor revision", a missing key) is asked for again: a verdict the router
+    and the accept checks would not recognise is not a review either."""
+    return (
+        isinstance(reply, dict)
+        and isinstance(reply.get("verdict"), str)
+        and reply["verdict"].strip().lower() in ("accept", "revise")
+    )
+
+
+def _auto_accepts(snapshot: dict[str, Any]) -> bool:
+    """Whether ``auto_accept_on_pass`` may accept this human-review snapshot for the person: a reviewer's own accept
+    (``review_status`` "ok") with no must-flag hit. A stand-in accept is never accepted automatically."""
+    return (
+        snapshot.get("verdict") == "accept"
+        and not (snapshot.get("must_flag_hits") or [])
+        and snapshot.get("review_status", "ok") == "ok"
+    )
+
+
+def _review_was_real(review: dict[str, Any] | None) -> bool:
+    """True when the recorded review is one a reviewer actually gave (``status == "ok"``), not a stand-in.
+
+    An automatic accept, the skills' usage record and the Axon write-back take an ``accept`` as a reviewer's sign-off;
+    this is the check they share. A review from before ``status`` existed has none and is taken as real, as the
+    aggregator does."""
+    return isinstance(review, dict) and review.get("status", "ok") == "ok"
 
 
 #: Sources a simulation quest needs before one supported finding settles the
