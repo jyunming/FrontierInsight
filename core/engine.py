@@ -58,6 +58,7 @@ from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
+from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import protocol_check as _protocol
@@ -5537,7 +5538,8 @@ class Engine:
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
                     )
                     reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
-                    stderr_tail = (ran.stderr or "")[-2000:]
+                    # What could not be installed comes first: the repair then fixes the import, not a symptom.
+                    stderr_tail = getattr(self, "_packages_note", "") + (ran.stderr or "")[-2000:]
                 except Exception as e:  # noqa: BLE001 -- an oracle run that cannot start is a problem to report
                     returncode, stderr_tail = -1, repr(e)
                 if reported is None and returncode not in (0, -1):
@@ -5996,14 +5998,33 @@ class Engine:
         if self.config.execution.sandbox == "docker":
             await asyncio.to_thread(self._mount_selected_skills, state)
         deps = state.get("deps") or []
-        if deps:
-            self._log.info("[execute] pip install %s", deps)
-            install = await self.executor.install(deps, quest_root=self.quest_root)
-            if install.returncode != 0:
-                self._log.warning(
-                    "[execute] pip install rc=%d: %s",
-                    install.returncode, pip_failure_summary(install.stderr),
-                )
+        usable_skills = self._experiment_skill_states(state)
+        skills = [st.skill for st in usable_skills]
+        # What the quest environment is given (core/experiment_deps.py): the requested packages that are packages, the
+        # selected skills' own packages, and the library skills' folders on the path. What cannot be installed is
+        # written as a note the repair steps read before the run's own error.
+        install_list, dropped = _experiment_deps.split_deps(
+            deps, local_modules=[p.stem for p in (self.quest_root / "code").glob("*.py")],
+        )
+        for dep, why in dropped:
+            self._log.info("[execute] not asking pip for %r: it %s", dep, why)
+        if not getattr(self.config.execution, "shared_interpreter", False) or self.config.execution.sandbox == "docker":
+            # A quest's own environment (a clean venv, a container) gets the skills' packages. On FI's shared
+            # interpreter they are already there from the skill's approval, and a quest does not change it.
+            install_list = list(dict.fromkeys([*install_list, *_experiment_deps.skill_requirements(skills)]))
+        failed_installs = await self._install_packages(install_list)
+        # A skill's name that pip could not install (a tool skill, a library skill not published as a package): the
+        # repair is told how the skill is used, not to drop an import that may work from the path.
+        skill_failures, failed_installs = _experiment_deps.explain_failures(failed_installs, skills)
+        dropped = [*dropped, *skill_failures]
+        for dep, why in skill_failures:
+            self._log.info("[execute] %r could not be installed: it %s", dep, why)
+        self._packages_note = _experiment_deps.repair_note(
+            dropped, failed_installs, getattr(self, "_unusable_skills", []),
+        )
+        # The warmup below imports what was installed; a name pip could not install would only fail it again.
+        not_installed = {dep for dep, _ in (*skill_failures, *failed_installs)}
+        deps = [d for d in install_list if d not in not_installed]
 
         py = self.executor.python_path(self.quest_root)
         code_path = self.quest_root / "code" / "experiment.py"
@@ -6062,6 +6083,19 @@ class Engine:
             }
         except Exception as exc:  # styling must never break execution
             self._log.warning("[execute] plot-style bootstrap skipped: %s", exc)
+
+        # A library skill is imported by the experiment: its folder goes on the path, as its self-test's did.
+        lib_paths = [str(p) for p in _experiment_deps.library_paths(skills)]
+        if self.config.execution.sandbox == "docker":
+            mounts = _skill_mount_plan(self.config, usable_skills).mounts
+            lib_paths = [str(mounts[s.name].container) for s in skills if s.name in mounts
+                         and str(getattr(s.kind, "value", s.kind)) == "library"]
+        if lib_paths:
+            base_env = exec_env or dict(os.environ)
+            exec_env = {**base_env, "PYTHONPATH": os.pathsep.join(
+                p for p in (*lib_paths, base_env.get("PYTHONPATH", "")) if p
+            )}
+            self._log.info("[execute] library skills on the experiment's path: %s", ", ".join(lib_paths))
 
         from core.example_inputs import ENV_VAR as _INPUT_ENV, examples_dir, list_inputs
 
@@ -6547,6 +6581,11 @@ class Engine:
                 "timed_out": result.timed_out,
                 "stdout_tail": result.stdout[-2000:],
                 "stderr_tail": result.stderr[-2000:],
+                # What could not be installed (core/experiment_deps.py), kept apart from the run's own stderr so the
+                # analysis does not read it as an error and no slice of the stderr cuts the traceback's last line.
+                # The repair step reads it first, on every run: one that exits 0 on a caught ImportError still goes
+                # there as degenerate.
+                "packages_note": getattr(self, "_packages_note", ""),
                 # The script a two-script quest's failure is in ("simulate.py" or
                 # "experiment.py"): the repair rewrites that one. None for one script.
                 "failed_script": failed_script,
@@ -6862,7 +6901,7 @@ class Engine:
             previous_code=script_code,
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
-            stderr_tail=exec_result.get("stderr_tail", "")[:2000],
+            stderr_tail=exec_result.get("packages_note", "") + exec_result.get("stderr_tail", "")[-2000:],
             duration_s=f"{exec_result.get('duration_s', 0):.2f}",
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
@@ -8708,6 +8747,47 @@ class Engine:
                 for rel in refs:
                     parts.append(f"- `{rel}` (reference)")
         return "\n".join(parts).strip()
+
+    def _experiment_skill_states(self, state: Any) -> list[Any]:
+        """The approved skills this quest selected for its experiment (as ``_resolve_selected_skills`` returns them).
+        Resolving them can run their self-tests; a failure here only means no skill is offered."""
+        selection = (state or {}).get("skill_selection") or {}
+        uses = dict(selection.get("uses") or {})
+        wanted = [n for n in list((state or {}).get("selected_skills") or []) if uses.get(n, "experiment") == "experiment"]
+        try:
+            usable, _ = _resolve_selected_skills(state, self._log, use="experiment", external_dirs=self._skill_dirs)
+        except Exception as exc:  # noqa: BLE001 -- the run goes on without skills rather than not at all
+            self._log.warning("[execute] the selected skills could not be resolved: %s", exc)
+            usable = []
+        # A skill selected but not usable now (its self-test fails, it was changed since approval) was only logged;
+        # the code written for it then failed on an import nobody explained. The repair step is told (repair_note).
+        found = {st.skill.name for st in usable}
+        self._unusable_skills = [n for n in wanted if n not in found]
+        return list(usable)
+
+    async def _install_packages(self, packages: list[str]) -> list[tuple[str, str]]:
+        """Install ``packages`` into the quest environment; return the ones that could not be, each with the reason.
+
+        One line first; if it fails, one package at a time, so a single name pip cannot find no longer leaves every
+        other package (numpy, matplotlib) uninstalled."""
+        if not packages:
+            return []
+        self._log.info("[execute] pip install %s", packages)
+        batch = await self.executor.install(packages, quest_root=self.quest_root)
+        if batch.returncode == 0:
+            return []
+        self._log.warning(
+            "[execute] pip install rc=%d: %s; installing one package at a time",
+            batch.returncode, pip_failure_summary(batch.stderr),
+        )
+        failed: list[tuple[str, str]] = []
+        for pkg in packages:
+            one = await self.executor.install([pkg], quest_root=self.quest_root)
+            if one.returncode != 0:
+                failed.append((pkg, _experiment_deps.failure_reason(one.stderr)))
+        for pkg, why in failed:
+            self._log.warning("[execute] could not install %s: %s", pkg, why)
+        return failed
 
     def _mount_selected_skills(self, state: Any, *, record: bool = True) -> None:
         """Docker sandbox only: mount the folders of the approved external skills

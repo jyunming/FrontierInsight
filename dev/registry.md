@@ -62,6 +62,9 @@ same PR that adds, splits or renames one.
 
 - `core/execution.py` — `Executor` protocol, `VenvExecutor` / `SharedInterpreterExecutor` / `DockerExecutor`,
   `make_executor`.
+- `core/experiment_deps.py` — what a quest environment is given before a run: requested packages minus the quest's
+  own files, the selected skills' `pip_requires`, library skills on `PYTHONPATH`, one-at-a-time install fallback,
+  skill names pip cannot install explained as the skill, the repair note for what could not be installed.
 - `core/split_run.py` — the two-script contract (`simulate.py` / `experiment.py`), raw-dir naming, replicate seeding.
 - `core/job_watch.py` — background jobs (HPC / a cluster) that outlive one `execute` call; `--watch`.
 - `core/example_inputs.py` — staging a user's own example files into a quest.
