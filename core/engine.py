@@ -12744,6 +12744,15 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
         if len(source) > _CLAIM_SCRIPT_CHARS:
             source = source[:_CLAIM_SCRIPT_CHARS] + f"\n# ... ({len(source) - _CLAIM_SCRIPT_CHARS:,} more characters not shown)"
         parts.append(f"code/{name}:\n```python\n{source}\n```")
+    try:
+        record = json.loads((quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    # The engine's own oracle verdicts: a real run's script re-read its oracle results from the wrong folder and
+    # reported them failed, and the check called the paper's true "every oracle passed" unsupported.
+    oracle_note = _oracle.analysis_note(_oracle.last_judged(record)).strip()
+    if oracle_note:
+        parts.append(oracle_note.replace("[FI NOTE] ", "", 1).replace("the results below", "the results above"))
     if state.get("figures"):
         parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
     return "\n\n".join(parts) or "(nothing recorded)"

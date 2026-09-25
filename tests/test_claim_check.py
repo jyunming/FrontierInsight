@@ -1093,6 +1093,11 @@ def test_the_check_sees_how_the_study_was_run_and_the_results_the_paper_quotes(t
         "rng = np.random.Generator(np.random.PCG64(seed))\nORACLE_TRIALS = 10_000\n", encoding="utf-8")
     frozen_protocol.freeze(tmp_path, {"grid": {"R0": [1.5, 3.0]}, "runs_per_setting": 300},
                            approved_by="test", source="test")
+    # The engine judged the oracle and it passed, while the script's own results (read from the wrong folder) say not.
+    (tmp_path / "needs").mkdir(exist_ok=True)
+    (tmp_path / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "two_person_exact", "value": 0.6, "expected": 0.6, "limit": 0.01, "passed_by_engine": True}]}]}),
+        encoding="utf-8")
     seen: list[str] = []
 
     async def fake_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
@@ -1115,4 +1120,6 @@ def test_the_check_sees_how_the_study_was_run_and_the_results_the_paper_quotes(t
     assert "PCG64" in prompt and "ORACLE_TRIALS = 10_000" in prompt
     assert '"runs_per_setting": 300' in prompt
     assert "figures/p.png" in prompt and "FLAT" in prompt
+    assert "- two_person_exact: measured 0.6, expected 0.6 within 0.01: passed" in prompt
+    assert "These verdicts are the ones that count" in prompt
     assert "0.6938" in prompt.split("## How the study was run")[0]  # in the results, not only in the paper
