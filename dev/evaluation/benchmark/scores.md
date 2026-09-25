@@ -12,7 +12,7 @@ Run-name collisions: `cb1`–`cb3` and `cr1`–`cr3` (cost experiment, 2026-09-1
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | agy1 | 2026-09-15 | 46f7c56 | antigravity_cli gemini-3.8-flash-high | 71 | 100 | 67 | 0 | 100 | 83 | 70.2 | fail | fail | fail | 11 | 1,532,676 / 27 | paper states wrong values; D4 0; recomputed from 68.8 in grading_sheet.md |
 | g4h1 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high (ollama) | 85 | 80 | 33 | 33 | 83 | 67 | 63.5 | fail | fail | fail | 6 | 288,715 / 20 | "no major outbreaks" at R0=0.9 is wrong (G1 narrow fail) |
-| g4h2 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high | 100 | 100 | 67 | 33 | 83 | 100 | 80.5 | pass (borderline) | pass | fail | 6 | 325,131 / 25 | thinking high; scores within the spread of main7–9 |
+| g4h2 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high | 100 | 100 | 67 | 33 | 83 | 100 | 80.5 | pass (borderline) | pass | fail | 6 | 325,131 / 25 | thinking high; mean 80.5, below main7–9 (86.2–91.7) on the same build |
 | g4h3 | 2026-09-15 | 130ee29 | gemma4:31b-cloud, thinking high | 100 | 100 | 67 | 67 | 100 | 100 | 89.0 | pass | pass | fail | 6 | 344,141 / 25 | Fig 3 draws every deterministic reference at N=100 |
 | main | 2026-09-15 | f05f3d1 (after #253) | gemma4:31b-cloud (ollama) | 100 | 100 | 67 | 67 | 100 | 100 | 89.0 | — | — | — | 5 | 261,252 / 25 | review revise at cap; Fig 3 text quotes pooled values |
 | main2 | 2026-09-15 | f05f3d1 | gemma4:31b-cloud | 100 | 100 | 0 | 67 | 83 | 100 | 75.0 | — | — | — | 6 | 249,848 / — | one scholarly citation only |
