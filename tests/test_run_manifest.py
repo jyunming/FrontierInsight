@@ -824,3 +824,28 @@ async def test_the_older_contract_under_research_is_sent_back_for_the_trial_cont
     assert reflect and "run_trial(cell, trial_id, seed)" in reflect[0]
     assert "def run_trial" in (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8")
     assert (engine.quest_root / "raw" / "ledger.jsonl").is_file()
+
+
+@pytest.mark.asyncio
+async def test_the_oracle_of_the_trial_contract_is_its_own_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """FI calls simulate.py's oracle() and judges its value against the protocol: no FI_ORACLE run, no ORACLE_JSON."""
+    protocol = {**PROTOCOL, "oracles": [{"name": "half", "check": "a known case", "expected": 0.5, "tolerance": 0.01}]}
+    sim = SIM_TRIAL + "\n\ndef oracle():\n    return {\"half\": 0.5004}\n"
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        if kind == "Experiment Design":
+            body = json.loads(_FAKE_RESPONSES["design"])
+            body["protocol"] = protocol
+            return json.dumps(body)
+        if kind == "Implementation":
+            return _reply(sim, ANALYSIS_TRIAL)
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(_cfg(tmp_path, engine={"oracle_check": "block"}))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok", record

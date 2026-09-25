@@ -5782,6 +5782,9 @@ class Engine:
                 if reported is None and returncode not in (0, -1):
                     self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail[-300:])
             found = incomplete or _oracle.problems(oracles, reported, returncode, timed_out)
+            if getattr(self, "_trial_mode", False) and reported is None and not incomplete:
+                # The trial contract: FI calls oracle(); there is no FI_ORACLE run and no ORACLE_JSON line to print.
+                found = [f"simulate.py's oracle() did not give its values: {stderr_tail.strip()[-300:] or 'no reason given'}"]
             attempts.append({
                 "attempt": attempt, "oracles": [o["name"] for o in oracles], "problems": found,
                 "checks": (reported or {}).get("checks"),
@@ -5894,7 +5897,7 @@ class Engine:
         prompt = self._prompts["execute_reflect"].substitute(
             previous_code=code,
             returncode="(the oracle run did not pass)",
-            stdout_tail=_oracle.directive(oracles, found),
+            stdout_tail=_oracle.directive(oracles, found) + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else ""),
             stderr_tail=stderr_tail,
             duration_s="0.00",
             figures_count="0",
@@ -5922,11 +5925,14 @@ class Engine:
             new_code, _deps = _parse_implement_response(text)
         try:
             ast.parse(new_code)
-            usable = bool(new_code.strip()) and "FI_ORACLE" in new_code
+            usable = bool(new_code.strip()) and (
+                "def oracle" in new_code if getattr(self, "_trial_mode", False) else "FI_ORACLE" in new_code
+            )
         except (SyntaxError, ValueError):
             usable = False
         if not usable:
-            self._log.warning("[oracle] the repair of %s is not usable (it must parse and honour FI_ORACLE); keeping it as written", path.name)
+            self._log.warning("[oracle] the repair of %s is not usable (it must parse and %s); keeping it as written", path.name,
+                              "define oracle()" if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
             return None, False
         path.write_text(new_code, encoding="utf-8")
         self._log.info(
@@ -12571,6 +12577,14 @@ _SPLIT_REPLY_REMINDER = """
 
 ## Your last reply did not hold both scripts
 Reply with exactly two fenced Python blocks: the first starting with the line `# file: simulate.py`, the second starting with the line `# file: experiment.py`, then the `DEPS:` line. Nothing else.
+"""
+
+_TRIAL_ORACLE_NOTE = """
+
+THE TRIAL CONTRACT: simulate.py defines run_trial (or run_cell), and FI calls its `oracle()` function directly: there is
+no FI_ORACLE variable and no ORACLE_JSON line. Fix `def oracle() -> dict` in simulate.py so that it computes, with the
+same simulation code, each check the protocol names and returns them as a dict keyed by the check's name, e.g.
+`{"closed_form_limit": 0.4987}`. Return the whole of simulate.py.
 """
 
 _SPLIT_RERUN_NOTE = """
