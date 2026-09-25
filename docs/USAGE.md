@@ -304,7 +304,7 @@ knowledge:
   try_fetch_full_text: true         # fetch legal full text: open-access copies, and publisher PDFs your own network can reach. false = abstracts only
   full_text_fetch_timeout_s: 15.0   # per-URL fetch timeout in seconds
   full_text_fetch_total_s: 90.0     # wall-clock cap across all URLs in one query
-  full_text_max_kb: 64              # accepted-PDF size cap, KB; larger PDFs are dropped
+  full_text_max_kb: 10240           # most text kept of one source, KB (10 MB: every page of a paper, scans read by OCR)
 
 output:
   kinds: [paper_md, paper_pdf]
