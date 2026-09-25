@@ -86,8 +86,10 @@ async def test_one_missing_package_no_longer_leaves_numpy_uninstalled(tmp_path: 
 
     assert installed[0] == ["numpy", "nopkg", "matplotlib"]   # one line first
     assert ["numpy"] in installed and ["matplotlib"] in installed  # then each on its own
-    stderr = update["exec_result"]["stderr_tail"]
-    assert stderr.startswith("FI NOTE (packages)") and "nopkg: no such package on PyPI" in stderr
+    note = update["exec_result"]["packages_note"]
+    assert note.startswith("FI NOTE (packages)") and "nopkg: no such package on PyPI" in note
+    # Kept apart from the run's own stderr: the analysis reads that, and no slice of it cuts the traceback's end.
+    assert update["exec_result"]["stderr_tail"] == "ModuleNotFoundError: No module named 'nopkg'"
 
 
 @pytest.mark.asyncio
@@ -139,3 +141,36 @@ async def test_on_the_shared_interpreter_a_quest_does_not_install_the_skills_pac
         ExecutionResult(returncode=0, stdout='RESULT_JSON: {"v": 1}', stderr="", duration_s=1.0))
     await eng._node_execute({"deps": ["numpy"]})
     assert installed == [["numpy"]]
+
+
+@pytest.mark.asyncio
+async def test_a_library_skill_named_unlike_its_module_is_explained_not_called_missing(tmp_path: Path, monkeypatch) -> None:
+    """Left on the pip line (its folder holds no module by that name), it fails on PyPI; the note says how the skill
+    is used, not to remove an import that works from the path."""
+    eng = _mk_engine(tmp_path)
+    lib = _skill(tmp_path, "sir-kernels", "library")
+    monkeypatch.setattr(eng, "_experiment_skill_states", lambda _state: [SimpleNamespace(skill=lib)])
+
+    async def install(pkgs, *, quest_root):  # noqa: ANN001
+        bad = "sir-kernels" in pkgs
+        return ExecutionResult(returncode=1 if bad else 0, stdout="",
+                               stderr="ERROR: No matching distribution found for sir-kernels" if bad else "", duration_s=0.1)
+
+    eng.executor.install = install  # type: ignore[method-assign]
+    eng.executor.execute = _mock_execute_router(  # type: ignore[method-assign]
+        ExecutionResult(returncode=0, stdout='RESULT_JSON: {"v": 1}', stderr="", duration_s=1.0))
+    update = await eng._node_execute({"deps": ["numpy", "sir-kernels"]})
+    note = update["exec_result"]["packages_note"]
+    assert "sir-kernels: is the skill sir-kernels" in note and "remove the import" not in note
+
+
+def test_unusable_selected_skills_are_recorded(tmp_path: Path, monkeypatch) -> None:
+    import core.engine as engine_mod
+
+    eng = _mk_engine(tmp_path)
+    ok = SimpleNamespace(skill=_skill(tmp_path, "good", "library"))
+    monkeypatch.setattr(engine_mod, "_resolve_selected_skills", lambda *a, **k: ([ok], {}))
+    state = {"selected_skills": ["good", "broken", "a-writing-skill"],
+             "skill_selection": {"uses": {"a-writing-skill": "writing"}}}
+    assert eng._experiment_skill_states(state) == [ok]
+    assert eng._unusable_skills == ["broken"]

@@ -6018,6 +6018,16 @@ class Engine:
             # interpreter they are already there from the skill's approval, and a quest does not change it.
             install_list = list(dict.fromkeys([*install_list, *_experiment_deps.skill_requirements(skills)]))
         failed_installs = await self._install_packages(install_list)
+        # A library skill whose name is not its module's (so it was left on the list) fails on PyPI; the repair is told
+        # how the skill is used, not to drop an import that works from the path.
+        by_skill = {_experiment_deps.normalize(s.name): s for s in skills}
+
+        def _skill_of(dep: str) -> Any:
+            return by_skill.get(_experiment_deps.normalize(_experiment_deps.requirement_name(dep) or dep))
+
+        dropped = [*dropped, *[(dep, _experiment_deps.skill_hint(_skill_of(dep))) for dep, _ in failed_installs
+                               if _skill_of(dep) is not None]]
+        failed_installs = [(dep, why) for dep, why in failed_installs if _skill_of(dep) is None]
         self._packages_note = _experiment_deps.repair_note(
             dropped, failed_installs, getattr(self, "_unusable_skills", []),
         )
@@ -6577,8 +6587,12 @@ class Engine:
                 "duration_s": result.duration_s,
                 "timed_out": result.timed_out,
                 "stdout_tail": result.stdout[-2000:],
-                # Always first: a run that exits 0 on a caught ImportError still goes to repair as degenerate.
-                "stderr_tail": getattr(self, "_packages_note", "") + result.stderr[-2000:],
+                "stderr_tail": result.stderr[-2000:],
+                # What could not be installed (core/experiment_deps.py), kept apart from the run's own stderr so the
+                # analysis does not read it as an error and no slice of the stderr cuts the traceback's last line.
+                # The repair step reads it first, on every run: one that exits 0 on a caught ImportError still goes
+                # there as degenerate.
+                "packages_note": getattr(self, "_packages_note", ""),
                 # The script a two-script quest's failure is in ("simulate.py" or
                 # "experiment.py"): the repair rewrites that one. None for one script.
                 "failed_script": failed_script,
@@ -6894,7 +6908,7 @@ class Engine:
             previous_code=script_code,
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
-            stderr_tail=exec_result.get("stderr_tail", "")[:2000],
+            stderr_tail=exec_result.get("packages_note", "") + exec_result.get("stderr_tail", "")[-2000:],
             duration_s=f"{exec_result.get('duration_s', 0):.2f}",
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
