@@ -33,24 +33,30 @@ def test_the_node_chart_tool_is_gone_and_python_plotting_skills_are_in() -> None
         assert kr.PRESET_PIP_REQUIRES[name]
 
 
-def test_landlab_is_pinned_wherever_it_comes_from() -> None:
+PRESET = {"imported_from": "C:/dev/FrontierInsight/.skill-sources/geoscience/landlab/SKILL.md"}
+
+
+def test_landlab_is_pinned_wherever_it_comes_from_on_the_python_that_needs_it() -> None:
     """landlab 2.11.0 declares Python >= 3.11 but cannot be imported under 3.11 (3.12-only syntax)."""
-    assert kr.PRESET_PIP_REQUIRES["landlab"] == ["landlab==2.10.1"]
-    assert kr.pinned("landlab") == "landlab==2.10.1"
-    assert kr.pinned("Landlab") == "landlab==2.10.1"
-    assert kr.pinned("landlab>=2.9") == "landlab>=2.9", "a requirement that names a version is the person's choice"
-    assert kr.pinned("numpy") == "numpy"
+    on311 = (3, 11)
+    assert kr.pinned("landlab", python=on311) == "landlab==2.10.1"
+    assert kr.pinned("Landlab", python=on311) == "Landlab==2.10.1"
+    assert kr.pinned("landlab[all]", python=on311) == "landlab[all]==2.10.1", "extras kept"
+    assert kr.pinned('landlab; python_version < "3.13"', python=on311) == 'landlab==2.10.1; python_version < "3.13"'
+    assert kr.pinned("landlab>=2.9", python=on311) == "landlab>=2.9", "a requirement that names a version is the person's choice"
+    assert kr.pinned("landlab", python=(3, 12)) == "landlab", "2.11.0 imports fine on 3.12"
+    assert kr.pinned("numpy", python=on311) == "numpy"
 
 
-def test_pip_requires_prefers_what_the_skill_recorded_and_falls_back_to_the_table() -> None:
-    recorded = SimpleNamespace(name="landlab", provenance=lambda: {"pip_requires": ["landlab", "numpy"]})
-    assert kr.pip_requires(recorded) == ["landlab==2.10.1", "numpy"]
-    old_import = SimpleNamespace(name="scipy", provenance=lambda: {})          # imported before pip_requires existed
-    assert kr.pip_requires(old_import) == kr.PRESET_PIP_REQUIRES["scipy"]
-    declared_none = SimpleNamespace(name="scipy", provenance=lambda: {"pip_requires": []})
+def test_pip_requires_prefers_what_the_skill_recorded_and_falls_back_to_the_table_for_a_preset() -> None:
+    recorded = SimpleNamespace(name="scipy", provenance=lambda: {"pip_requires": ["scipy", "numpy"]})
+    assert kr.pip_requires(recorded) == ["scipy", "numpy"]
+    old_preset = SimpleNamespace(name="scipy", provenance=lambda: dict(PRESET))  # imported before pip_requires existed
+    assert kr.pip_requires(old_preset) == kr.PRESET_PIP_REQUIRES["scipy"]
+    declared_none = SimpleNamespace(name="scipy", provenance=lambda: {"pip_requires": [], **PRESET})
     assert kr.pip_requires(declared_none) == [], "an empty list is a declaration, not a missing record"
-    unknown = SimpleNamespace(name="my-own-skill", provenance=lambda: {})
-    assert kr.pip_requires(unknown) == []
+    own_named_like_a_preset = SimpleNamespace(name="pymc", provenance=lambda: {"imported_from": "C:/me/skills/pymc/SKILL.md"})
+    assert kr.pip_requires(own_named_like_a_preset) == [], "a skill of one's own gets nothing it did not declare"
 
 
 def test_the_cobra_module_maps_to_a_package_that_exists() -> None:
@@ -64,6 +70,9 @@ def test_a_quest_installs_a_preset_skills_packages_even_when_its_record_has_none
     environment still gets their packages, pinned (landlab 2.10.1)."""
     from core import experiment_deps
 
-    old_landlab = SimpleNamespace(name="landlab", provenance=lambda: {})
-    old_scipy = SimpleNamespace(name="scipy", provenance=lambda: {})
-    assert experiment_deps.skill_requirements([old_landlab, old_scipy]) == ["landlab==2.10.1", "scipy"]
+    import sys
+
+    old_landlab = SimpleNamespace(name="landlab", provenance=lambda: dict(PRESET))
+    old_scipy = SimpleNamespace(name="scipy", provenance=lambda: dict(PRESET))
+    landlab = "landlab==2.10.1" if sys.version_info[:2] < (3, 12) else "landlab"
+    assert experiment_deps.skill_requirements([old_landlab, old_scipy]) == [landlab, "scipy"]

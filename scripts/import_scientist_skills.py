@@ -5,7 +5,7 @@ FI ships no skills — the discovery root is user state
 content, so a fresh clone of this repo starts with an empty skill library
 (see ``core/skills/registry.py``). The skills below were sourced and
 reviewed across two working sessions; this script reproduces the
-*sourcing* step so nobody has to re-derive eleven source repos, seventy-odd
+*sourcing* step so nobody has to re-derive ten source repos, seventy-odd
 folder names, and the command sequence by hand. It does NOT approve
 anything for you — approval binds to a person's judgement
 (``--approve-skill --approve-as WHO``) and is deliberately not a thing a

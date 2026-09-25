@@ -5106,7 +5106,7 @@ def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:
     for mod in _MISSING_MODULE_RE.findall(selftest_output or ""):
         # Pinned too: an inferred bare "landlab" installed 2.11.0, which cannot be imported under Python 3.11.
         pkg = known_requirements.pinned(_MODULE_TO_PIP.get(mod, mod))
-        if pkg not in out and pkg.split("==")[0] not in {o.split("==")[0] for o in out}:
+        if known_requirements.requirement_key(pkg) not in {known_requirements.requirement_key(o) for o in out}:
             out.append(pkg)
     return out
 

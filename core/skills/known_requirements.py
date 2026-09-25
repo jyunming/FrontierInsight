@@ -11,6 +11,7 @@ the two cannot drift. ``PINS`` holds versions known to break a skill: landlab 2.
 from __future__ import annotations
 
 import re
+import sys
 from typing import Any
 
 PRESET_PIP_REQUIRES: dict[str, list[str]] = {
@@ -87,25 +88,65 @@ PRESET_PIP_REQUIRES: dict[str, list[str]] = {
     "spikeinterface": ["spikeinterface"],
 }
 
-#: A bare requirement that is known to install a broken version, and what to install instead.
-PINS: dict[str, str] = {
-    "landlab": "landlab==2.10.1",
+#: A requirement with no version that is known to install a broken one: the pin to use, and the Python versions it is
+#: needed on (below the given version). landlab 2.11.0 uses 3.12-only syntax, so only Python < 3.12 needs 2.10.1.
+PINS: dict[str, tuple[str, tuple[int, int]]] = {
+    "landlab": ("==2.10.1", (3, 12)),
 }
 
 
-def pinned(requirement: str) -> str:
-    """``requirement`` with a known-bad bare name replaced by its pin (a requirement that names a version is kept)."""
-    bare = requirement.strip()
-    key = re.sub(r"[-_.]+", "-", bare).lower()
-    return PINS.get(key, bare) if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", bare) else bare
+def _normal(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _parse(requirement: str) -> tuple[str, str, bool]:
+    """``(name, extras + specifier + marker text, has_version)`` of a requirement string."""
+    try:
+        from packaging.requirements import Requirement
+
+        req = Requirement(requirement)
+        extras = f"[{','.join(sorted(req.extras))}]" if req.extras else ""
+        marker = f"; {req.marker}" if req.marker else ""
+        return req.name, extras + marker, bool(str(req.specifier)) or bool(req.url)
+    except Exception:  # noqa: BLE001 -- packaging missing, or an odd string: a plain parse
+        m = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)(\[[^\]]*\])?\s*(.*)", requirement)
+        if not m:
+            return requirement.strip(), "", True
+        rest = m.group(3).strip()
+        return m.group(1), m.group(2) or "", bool(rest) and not rest.startswith(";")
+
+
+def pinned(requirement: str, *, python: tuple[int, int] | None = None) -> str:
+    """``requirement`` with a known-bad unversioned package pinned (extras and markers kept). A requirement that names
+    a version is the person's choice and is kept; so is any requirement on a Python the pin is not needed on."""
+    requirement = requirement.strip()
+    name, extras, has_version = _parse(requirement)
+    pin = PINS.get(_normal(name))
+    if pin is None or has_version:
+        return requirement
+    version, below = pin
+    if (python or sys.version_info[:2]) >= below:
+        return requirement
+    extras_only, _, marker = extras.partition(";")
+    return f"{name}{extras_only.strip()}{version}" + (f"; {marker.strip()}" if marker.strip() else "")
+
+
+def requirement_key(requirement: str) -> str:
+    """The package a requirement names, normalized (for telling two requirements of one package apart)."""
+    return _normal(_parse(requirement)[0])
 
 
 def pip_requires(skill: Any) -> list[str]:
-    """What a skill needs installed: its recorded ``pip_requires``, else the preset table's entry, each pinned."""
+    """What a skill needs installed: its recorded ``pip_requires``; for a preset skill imported before provenance
+    recorded one (its source is the import script's ``skill-sources`` cache), the preset table's entry. Each pinned.
+    A skill of one's own that happens to share a preset's name gets nothing it did not declare."""
     try:
-        declared = skill.provenance().get("pip_requires")
+        provenance = skill.provenance()
     except Exception:  # noqa: BLE001 -- unreadable provenance is "none recorded"
-        declared = None
+        provenance = {}
+    declared = provenance.get("pip_requires") if isinstance(provenance, dict) else None
     if not isinstance(declared, list):
-        declared = PRESET_PIP_REQUIRES.get(getattr(skill, "name", ""), [])
+        source = str((provenance or {}).get("imported_from") or "") if isinstance(provenance, dict) else ""
+        preset = "skill-sources" in source.replace("\\", "/")
+        declared = PRESET_PIP_REQUIRES.get(getattr(skill, "name", ""), []) if preset else []
     return list(dict.fromkeys(pinned(str(x)) for x in declared if str(x).strip()))
