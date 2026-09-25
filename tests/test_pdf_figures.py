@@ -258,3 +258,24 @@ def test_reading_figures_can_be_turned_off(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(engine, "_chat", never)
     assert asyncio.run(engine._read_literature_figures({}, _literature_with_figures(tmp_path))) == 0
+
+
+def test_the_step_after_the_literature_reads_the_figures_and_rewrites_the_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _reading_engine(tmp_path)
+    lit = _literature_with_figures(tmp_path)
+
+    async def chat(*_a, **_k):  # noqa: ANN002, ANN003
+        return '{"pick": ["2:1"]}'
+
+    async def chat_messages(*_a, **_k):  # noqa: ANN002, ANN003
+        return '{"figures": [{"id": "2:1", "reading": "peak day 60 at R0 1.5, 20 at R0 4"}]}'
+
+    monkeypatch.setattr(engine, "_chat", chat)
+    monkeypatch.setattr(engine, "_chat_messages", chat_messages)
+    out = asyncio.run(engine._node_pause_after_literature({"literature": lit, "topic": "SIR"}))
+    assert "peak day 60" in out["literature"][1]["content"]
+    written = (engine.quest_root / "data" / "literature").glob("lit_002_*.md")
+    text = next(written).read_text(encoding="utf-8")
+    assert "peak day 60 at R0 1.5" in text and "`figures/lit_002_fig1_p5.png`" in text
