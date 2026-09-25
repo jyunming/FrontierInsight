@@ -5021,7 +5021,7 @@ _MODULE_TO_PIP: dict[str, str] = {
     "yaml": "pyyaml",
     "bs4": "beautifulsoup4",
     "skbio": "scikit-bio",
-    "cobra": "cobrapy",
+    # ``import cobra`` is the PyPI package ``cobra`` (COBRApy); there is no ``cobrapy`` on PyPI.
     "Bio": "biopython",
     "serial": "pyserial",
     "dateutil": "python-dateutil",
@@ -5085,25 +5085,28 @@ def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:
 
     Two sources, in order of trust:
 
-    1. ``pip_requires`` in ``provenance.json`` -- declared, so exact.
+    1. ``pip_requires`` in ``provenance.json`` -- declared, so exact; for a
+       preset skill imported before provenance recorded it, the list in
+       ``core/skills/known_requirements.py``.
     2. ``ModuleNotFoundError`` lines in a failing self-test -- inferred, and
        mapped through ``_MODULE_TO_PIP`` because the import name a traceback
        reports is not always the installable name.
+
+    Every name is pinned where a bare one installs a broken version
+    (``known_requirements.PINS``: landlab 2.11.0 cannot be imported under 3.11).
 
     Inference exists because provenance carries no dependency key today for
     skills imported before this landed; without it, bulk approval could not
     help the very skills that are quarantined for a missing library.
     """
-    out: list[str] = []
-    try:
-        declared = skill.provenance().get("pip_requires")
-    except Exception:  # noqa: BLE001 — unreadable provenance is just "none"
-        declared = None
-    if isinstance(declared, list):
-        out.extend(str(x).strip() for x in declared if str(x).strip())
+    from core.skills import known_requirements
+
+    # Declared, or for a preset skill imported before provenance recorded it, the preset table's list; pinned.
+    out: list[str] = known_requirements.pip_requires(skill)
     for mod in _MISSING_MODULE_RE.findall(selftest_output or ""):
-        pkg = _MODULE_TO_PIP.get(mod, mod)
-        if pkg not in out:
+        # Pinned too: an inferred bare "landlab" installed 2.11.0, which cannot be imported under Python 3.11.
+        pkg = known_requirements.pinned(_MODULE_TO_PIP.get(mod, mod))
+        if pkg not in out and pkg.split("==")[0] not in {o.split("==")[0] for o in out}:
             out.append(pkg)
     return out
 
