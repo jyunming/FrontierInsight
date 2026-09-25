@@ -3861,7 +3861,10 @@ class Engine:
                 str(meta.get("title") or meta.get("source") or f"lit{idx}")
             )[:40] or f"lit{idx}"
             target = out_dir / f"lit_{idx:03d}_{slug}.md"
-            body = _render_auto_collected_md(idx, meta, content)
+            figures = _save_literature_figures(meta.get("figures"), out_dir / "figures", f"lit_{idx:03d}")
+            body = _render_auto_collected_md(idx, {k: v for k, v in meta.items() if k != "figures"}, content)
+            if figures:
+                body = body.rstrip("\n") + "\n\n" + _figures_section(figures) + "\n"
             try:
                 out_dir.mkdir(parents=True, exist_ok=True)
                 target.write_text(body, encoding="utf-8")
@@ -16184,6 +16187,36 @@ def _slugify(s: str) -> str:
     return "untitled"
 
 
+def _save_literature_figures(figures: Any, folder: Path, stem: str) -> list[dict[str, Any]]:
+    """Copy a source's figures (cut from its PDF by core/pdf_figures.py, kept in a cache) into ``folder`` as
+    ``<stem>_fig<N>_p<page>.png`` for people to look at. Returns the figures copied, each with ``file`` (its name in
+    ``folder``); one that cannot be copied is left out."""
+    out: list[dict[str, Any]] = []
+    for fig in figures if isinstance(figures, list) else []:
+        if not isinstance(fig, dict) or not fig.get("image"):
+            continue
+        name = f"{stem}_fig{fig.get('number')}_p{fig.get('page')}.png"
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(str(fig["image"]), folder / name)
+        except OSError:
+            continue
+        fig["file"] = name
+        out.append(fig)
+    return out
+
+
+def _figures_section(figures: list[dict[str, Any]]) -> str:
+    """The ``## Figures`` section of a literature file: each figure's caption and where its image is."""
+    lines = ["## Figures", ""]
+    for fig in figures:
+        where = " (from a scanned page, read by OCR)" if fig.get("scanned") else ""
+        lines.append(f"- **Figure {fig.get('number')}**, page {fig.get('page')}{where}: "
+                     f"`figures/{fig['file']}`  ")
+        lines.append(f"  {str(fig.get('caption') or '').strip()}")
+    return "\n".join(lines)
+
+
 def _render_auto_collected_md(idx: int, meta: dict[str, Any], content: str) -> str:
     """Render an Axon retrieval hit as a Markdown file with YAML front
     matter. Used by ``_node_auto_collect_data``.
@@ -16301,10 +16334,12 @@ def _ingest_user_dropped_papers(
         if suffix not in (".pdf", ".md", ".txt"):
             continue
         ocr_note = ""
+        figures: list[dict[str, Any]] = []
         try:
             if suffix == ".pdf":
-                content, ocr_note = _extract_pdf_text(p)
-                log.info("[literature] %s: %s", p.name, ocr_note)
+                content, ocr_note, figures = _extract_pdf(p)
+                log.info("[literature] %s: %s%s", p.name, ocr_note,
+                         f"; {len(figures)} figure(s) with captions" if figures else "")
             else:
                 content = p.read_text(encoding="utf-8", errors="replace")
         except (OSError, ValueError) as e:
@@ -16328,18 +16363,26 @@ def _ingest_user_dropped_papers(
             "abstract_only": False,
             "fetched_full_text": True,
             **({"full_text_ocr": True} if "by OCR" in ocr_note else {}),
+            **({"figures": figures} if figures else {}),
         }, quality="full_text"))
         count += 1
     return merged, count
 
 
-def _extract_pdf_text(path: Path) -> tuple[str, str]:
+def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]]]:
     """Text of a PDF the person dropped in ``inputs/papers/`` (core/pdf_text.py: every page, scanned pages read by
-    OCR, up to 10 MB). Returns ``(text, one-line summary)``; the text is empty when nothing could be read."""
+    OCR, up to 10 MB), its one-line summary, and its captioned figures (core/knowledge.py ``_pdf_figures``: cut once
+    and cached; a scanned page's figures too when OCR read it)."""
     from core import pdf_text
+    from core.knowledge import _pdf_figures
 
-    result = pdf_text.extract(path)
-    return result.text, result.summary()
+    data = path.read_bytes()
+    result = pdf_text.extract(data)
+    try:
+        figures = _pdf_figures(data, ocr_lines=result.ocr_lines or None)
+    except Exception:  # noqa: BLE001 -- the text is what the source is for; its figures are extra
+        figures = []
+    return result.text, result.summary(), figures
 
 
 #: What the quest state keeps of a source's text: the first this many characters, as it always held (64 KB). The
