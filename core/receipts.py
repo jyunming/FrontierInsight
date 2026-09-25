@@ -29,7 +29,14 @@ REQUIRED = {
     "claim_check": "the claim check",
 }
 _FIELDS = ("schema_version", "check", "status", "started_at", "completed_at", "producer", "input_hashes",
-           "output_hash", "error")
+           "output_hash", "error", "detail")
+#: What each check's pass must name as judged (a pass that names nothing it judged is not believed).
+REQUIRED_INPUTS = {
+    "evidence_gate": ("analysis", "cross_check"),
+    "design_audit": ("design",),
+    "claim_check": ("paper",),
+}
+_HEX = set("0123456789abcdef")
 
 
 def now() -> str:
@@ -45,6 +52,19 @@ def sha256(value: Any) -> str:
     else:
         data = json.dumps(value, sort_keys=True, default=str, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(data).hexdigest()
+
+
+def _is_hash(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and set(value) <= _HEX
+
+
+def design_core(design: Any) -> Any:
+    """What of a design the methodology audit vouches for: all of it but its ``rationale`` (the model's own account)
+    and its ``protocol``, which the frozen protocol's own checks hold the run to (the engine may add an oracle there
+    after the audit)."""
+    if not isinstance(design, dict):
+        return design
+    return {k: v for k, v in design.items() if k not in ("rationale", "protocol")}
 
 
 def path(quest_root: Path, check: str) -> Path:
@@ -77,6 +97,22 @@ def write(
     tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     os.replace(tmp, target)
     return record
+
+
+def carry_output(quest_root: Path, check: str, before: Any, after: Any, why: str) -> bool:
+    """Move a receipt from its verdict ``before`` to ``after``, when the engine turned the one into the other without
+    changing what was judged (the plan step writing the audited design in its own canonical form). Only a receipt whose
+    output was exactly ``before`` is moved; returns whether it was."""
+    status, record, problem = read(quest_root, check)
+    if problem or record is None or record.get("output_hash") != sha256(before):
+        return False
+    record["output_hash"] = sha256(after)
+    record["detail"] = (str(record.get("detail") or "") + f" (carried over: {why})").strip()
+    target = path(quest_root, check)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False) + chr(10), encoding="utf-8")
+    os.replace(tmp, target)
+    return True
 
 
 def carry_over(quest_root: Path, check: str, key: str, before: Any, after: Any, why: str) -> bool:
@@ -112,4 +148,14 @@ def read(quest_root: Path, check: str) -> tuple[str, dict[str, Any] | None, str]
     status = record.get("status")
     if status not in STATUSES:
         return "unknown", None, f"its record has no valid status ({status!r})"
+    hashes = record.get("input_hashes")
+    if (not isinstance(record.get("started_at"), str) or not record["started_at"]
+            or not isinstance(record.get("completed_at"), str) or not record["completed_at"]
+            or record.get("producer") != check or not isinstance(hashes, dict)
+            or not all(_is_hash(v) for v in hashes.values())
+            or not (record.get("output_hash") == "" or _is_hash(record.get("output_hash")))):
+        return "unknown", None, "its record is malformed"
+    if status == "pass" and (any(k not in hashes for k in REQUIRED_INPUTS.get(check, ()))
+                             or not _is_hash(record.get("output_hash"))):
+        return "unknown", None, "its record names nothing it judged"
     return str(status), record, ""

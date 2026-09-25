@@ -295,8 +295,9 @@ def assess(
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
     # so three checks that never ran left a quest publication-ready.
-    paper = state.get("paper_md")
-    paper_hash = _receipts.sha256(Path(str(paper)).read_bytes()) if paper and Path(str(paper)).is_file() else ""
+    paper = state.get("paper_md") or quest_root / "paper" / "paper.md"
+    paper_hash = _receipts.sha256(Path(str(paper)).read_bytes()) if Path(str(paper)).is_file() else ""
+    design_now = state.get("design")
     for check, name in _receipts.REQUIRED.items():
         setting = settings.get(check)
         if setting == "off":
@@ -313,8 +314,13 @@ def assess(
             ready_gaps.append(f"{name} did not pass: {receipt.get('detail') or 'see needs/receipts/' + check + '.json'}")
         elif status == "not_applicable":
             ready_gaps.append(f"{name} recorded itself as not applicable, which this quest does not allow")
-        elif check == "claim_check" and paper_hash and (receipt.get("input_hashes") or {}).get("paper") != paper_hash:
+        elif check == "claim_check" and not paper_hash:
+            ready_gaps.append("there is no final paper for the claim check to cover")
+        elif check == "claim_check" and (receipt.get("input_hashes") or {}).get("paper") != paper_hash:
             ready_gaps.append("the claim check did not run on the final draft (its record is for an earlier one)")
+        elif (check == "design_audit" and isinstance(design_now, dict)
+              and receipt.get("output_hash") != _receipts.sha256(_receipts.design_core(design_now))):
+            ready_gaps.append("the design methodology audit judged a different design from the one that ran")
     # What the quest's own state and records say about the same checks, as well: a receipt that reads "pass" while the
     # state says the check failed (a record left from an earlier pass) is not believed over the state.
     gate = state.get("evidence_assessment") or {}
