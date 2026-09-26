@@ -155,6 +155,14 @@
     </div>
   </div>
 
+  <!-- Worth a look: what did not stop the quest but is waiting for you (the to-do card's other items). -->
+  <div id="todo-banner" class="hidden fi-banner">
+    <div class="flex flex-col gap-2 w-full">
+      <b>Worth a look</b>
+      <ul id="todo-list" class="list-disc pl-5 text-on-surface-variant text-body-sm"></ul>
+    </div>
+  </div>
+
   <!-- The plan (plan.md): written after the literature and before the experiment is designed. -->
   <section id="plan-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
     <div class="flex flex-wrap items-baseline justify-between gap-2">
@@ -374,7 +382,7 @@
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_action) {
-      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'oracle', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts' }[data.pending_action] || 'input';
+      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'oracle', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', figures: 'figure model', results: 'background job', review: 'review', clarify: 'setup', review_unavailable: 'review', plan_changed: 'changed settings', replicate_seed_unrepairable: 'seed' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (${kind})</span>`;
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {
@@ -504,6 +512,17 @@
   // it is the only time the watcher's status is worth asking for.
   let resultsPaused = false;
 
+  // The to-do card's items that did not stop the quest, shown when it is not paused (at a pause they are in the
+  // banner's own text, under "Also waiting for you").
+  function renderTodo(items) {
+    const box = document.getElementById('todo-banner');
+    const list = document.getElementById('todo-list');
+    if (!box || !list) return;
+    const rest = (items || []).filter((i) => !i.blocking);
+    box.classList.toggle('hidden', !rest.length);
+    list.innerHTML = rest.map((i) => `<li><b>${escapeHtml(i.why || '')}</b> ${escapeHtml(i.recommended || '')}</li>`).join('');
+  }
+
   async function refreshNextStep() {
     const banner = document.getElementById('next-step-banner');
     const answerEl = document.getElementById('next-step-answer');
@@ -514,6 +533,7 @@
       // "Action needed" showing after the pause was resolved.
       if (!res.ok) { banner.classList.add('hidden'); resultsPaused = false; return; }
       const data = await res.json();
+      renderTodo(data.waiting ? [] : (data.items || []));
       if (!data.waiting) { banner.classList.add('hidden'); resultsPaused = false; return; }
       banner.classList.remove('hidden');
       const wasResultsPaused = resultsPaused;

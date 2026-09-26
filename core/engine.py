@@ -52,6 +52,7 @@ from langgraph.types import Command, interrupt
 from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
+from . import todo as _todo
 from . import rerun_from as _rerun_from
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
@@ -1161,6 +1162,8 @@ class Engine:
                     p.unlink(missing_ok=True)
                 except OSError:
                     pass
+            # Nothing is paused now; what did not stop the quest but is worth a look stays on the card (.fi/todo.json).
+            _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
             self._write_back_knowledge(artifacts, final_state)
             self._record_skill_usage(final_state)
             self._write_cost_summary()
@@ -1238,6 +1241,11 @@ class Engine:
                 self._log.warning(
                     "[run] could not write quest_failed.md: %r", diag_err,
                 )
+            # The failure is on the to-do card (the run's start cleared the last one). Never in the way of the error.
+            try:
+                _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
+            except Exception:  # noqa: BLE001
+                pass
             raise
         finally:
             # Outer cleanup: releases the per-quest run.log FileHandler
@@ -3584,6 +3592,15 @@ class Engine:
                 f"you started with), then `python launch.py --resume {self.quest_id}`.",
             ],
         )
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "pause.json").write_text(json.dumps({
+                "kind": "plan_changed", "interaction": "answer", "quest_id": self.quest_id,
+                "headline": "settings that decide how strictly this quest is checked changed after you approved it",
+                "next_step_file": "NEXT_STEP.md", "upload_targets": [],
+            }, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
         print(f"[FI] stopped before running: settings changed since quest {self.quest_id} was approved; see NEXT_STEP.md")
         return self._collect_artifacts({})
 
@@ -3594,34 +3611,16 @@ class Engine:
         interaction: str,
         headline: str,
         steps: list[str],
-    ) -> None:
-        """Write the one consistent ``NEXT_STEP.md`` the user looks at whenever
-        the quest pauses — same shape for every pause, whether the quest is
-        asking a question (ANSWER) or waiting on files (SUPPLY). It says why it
-        stopped, exactly what to do, and the resume command. Best-effort; a
-        write failure is logged but never quest-fatal."""
-        verb = "ANSWER" if interaction == "answer" else "SUPPLY"
-        body = [
-            f"# Action needed — {headline}",
-            "",
-            f"Quest **{self.quest_id}** is paused and waiting for you "
-            f"(**{verb}**).",
-            "",
-            "## What to do",
-            *[f"{i}. {s}" for i, s in enumerate(steps, 1)],
-            "",
-            "## Then resume",
-            f"- **CLI:** `fi --resume {self.quest_id}`",
-            "- **Web / VSCode:** open the quest and click **Resume** — an "
-            "*Action needed* banner shows there too.",
-            "",
-        ]
-        try:
-            (self.quest_root / "NEXT_STEP.md").write_text(
-                "\n".join(body), encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[%s] couldn't write NEXT_STEP.md: %r", kind, e)
+        recommended: str | None = None,
+        alternatives: list[str] | None = None,
+    ) -> "_todo.Item":
+        """Write the to-do card (``NEXT_STEP.md`` and ``.fi/todo.json``, :mod:`core.todo`) whenever the quest stops for
+        the person: why it stopped, what there is to decide, the recommendation, the alternatives, what to do, and
+        everything else waiting, then how to go on. ``interaction`` (answer / supply) is kept in ``pause.json``.
+        Best-effort; a write failure never stops a quest."""
+        item = _todo.pause_item(kind, headline, steps, recommended=recommended, alternatives=alternatives)
+        _todo.write(self.quest_root, self.fi_dir, self.quest_id, item)
+        return item
 
     def _pause_for_human(
         self,
@@ -3632,6 +3631,8 @@ class Engine:
         steps: list[str],
         payload: dict[str, Any],
         upload_targets: list[str] | None = None,
+        recommended: str | None = None,
+        alternatives: list[str] | None = None,
     ) -> Any:
         """The single way the engine stops for a human. Writes the unified
         ``NEXT_STEP.md``, logs a consistent line, then fires LangGraph's
@@ -3650,13 +3651,19 @@ class Engine:
         """
         self._audit_pause = kind
         self._audit("pause_requested", pause=kind, interaction=interaction, headline=headline)
-        self._write_next_step(
+        item = self._write_next_step(
             kind=kind, interaction=interaction, headline=headline, steps=steps,
+            recommended=recommended, alternatives=alternatives,
         )
         descriptor = {
             "kind": kind,
             "interaction": interaction,
             "headline": headline,
+            # The card's parts, so the web page and VS Code show the same card NEXT_STEP.md is (core/todo.py).
+            "decide": item.decide,
+            "recommended": item.recommended,
+            "alternatives": item.alternatives,
+            "steps": list(steps),
             "quest_id": self.quest_id,
             "next_step_file": "NEXT_STEP.md",
             # For a SUPPLY pause: which upload target(s) the web banner should
@@ -6163,6 +6170,12 @@ class Engine:
             interaction="supply",
             headline="the script has not passed its oracle checks",
             steps=steps,
+            # After the freeze the plan no longer changes an oracle: only going on with the failure recorded, and an
+            # amendment later, does.
+            alternatives=[
+                "Set `engine.oracle_check: warn` and go on: the failure is recorded, and the oracle can be changed "
+                "later through an amendment approved at the review.",
+            ] if frozen else None,
             payload={
                 "oracle_stage": True, "quest_id": self.quest_id, "problems": found,
                 "plan_file": str(_plan.plan_path(self.quest_root)),
@@ -10942,6 +10955,7 @@ class Engine:
         for p in (
             self.quest_root / "NEXT_STEP.md",
             self.fi_dir / "pause.json",
+            self.fi_dir / _todo.TODO_NAME,
             self.fi_dir / "human_review.json",
             self.fi_dir / "clarify_questions.json",
         ):
