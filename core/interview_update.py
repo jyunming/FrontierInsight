@@ -331,12 +331,11 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
 
         from core import audit_log
 
-        trace = fi_dir / "audit.jsonl"
-        if trace.is_file():
-            audit_log.AuditLog(trace, quest_root.name).append(
-                "plan_settings_recorded", node="update",
-                sha256=hashlib.sha256((fi_dir / plan_settings.NAME).read_bytes()).hexdigest(),
-            )
+        # Written also when the quest has not run yet: the first run then compares against this approval.
+        audit_log.AuditLog(fi_dir / "audit.jsonl", quest_root.name).append(
+            "plan_settings_recorded", node="update",
+            sha256=hashlib.sha256((fi_dir / plan_settings.NAME).read_bytes()).hexdigest(),
+        )
     except OSError:
         pass
     return changed

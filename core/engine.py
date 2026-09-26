@@ -669,21 +669,34 @@ class Engine:
                     f"the record of the settings this quest was approved with ({record}) is gone, so a change since "
                     "then cannot be told from none",
                 ])
-            changed = _plan_settings.check(self.quest_root, self.fi_dir, self.config)
-            if changed:
-                return self._stop_for_changed_settings(changed)
             if had_record:
                 # The record as it was last approved (its hash is in the hash-chained trace): one edited by hand to
-                # match a weaker config agrees with that config, so only its own hash shows the edit.
+                # match a weaker config agrees with that config, so only its own hash shows the edit. Compared before
+                # check() runs, since check() itself rewrites the record when an FI default changed.
+                trace_ok = _audit_log.verify(self.audit.path).ok if self.audit.path.is_file() else True
                 recorded = [e.get("sha256") for e in _audit_log.read(self.audit.path)
                             if e.get("kind") == "plan_settings_recorded"]
+                if recorded and not trace_ok:
+                    return self._stop_for_changed_settings([
+                        f"the quest's trace ({self.audit.path}) no longer checks out, so the hash of the approved "
+                        "settings it holds cannot be trusted; approve the settings again with --update",
+                    ])
                 if recorded and recorded[-1] != hashlib.sha256(record.read_bytes()).hexdigest():
                     return self._stop_for_changed_settings([
                         f"the record of the settings this quest was approved with ({record}) was changed after it was "
                         "approved; approve the settings again with --update",
                     ])
-            if not had_record and record.is_file():
-                self._audit("plan_settings_recorded", sha256=hashlib.sha256(record.read_bytes()).hexdigest())
+            before = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
+            changed = _plan_settings.check(self.quest_root, self.fi_dir, self.config)
+            if changed:
+                return self._stop_for_changed_settings(changed)
+            after = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
+            # A first record, FI's own rewrite of it (an FI default that changed), or a record from before its hash was
+            # kept: its hash goes into the trace now, so an edit from here on is found.
+            if after and (after != before or not any(
+                e.get("kind") == "plan_settings_recorded" for e in _audit_log.read(self.audit.path)
+            )):
+                self._audit("plan_settings_recorded", sha256=after)
             # Which interpreter is running FI decides which packages it can
             # see; a `pip install` into a different one changes nothing here.
             self._log.info(

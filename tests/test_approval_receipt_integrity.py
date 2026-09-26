@@ -110,3 +110,76 @@ def test_an_evidence_gate_receipt_for_earlier_inputs_does_not_stand(tmp_path: Pa
 def test_a_receipt_names_each_input_that_changed() -> None:
     record = {"input_hashes": {"a": receipts.sha256(1), "b": receipts.sha256(2)}}
     assert receipts.stale_inputs(record, {"a": 1, "b": 3, "c": 4}) == ["b", "c"]
+
+
+def test_fis_own_rewrite_of_the_record_is_not_taken_for_an_edit(tmp_path: Path, monkeypatch) -> None:
+    """check() rewrites the record when an FI default changed (a setting the config never set): FI's own write, whose
+    hash then goes into the trace; the next start goes on."""
+    import asyncio
+
+    from core.engine import Engine
+
+    cfg = _cfg(tmp_path, oracle_check="block")
+    engine = Engine(cfg)
+    root, fi = engine.quest_root, engine.fi_dir
+    (root / "config.yaml").write_text(HEADER + "topic: probe\n", encoding="utf-8")
+    plan_settings.record(fi, cfg, root)
+    engine.audit.append("plan_settings_recorded",
+                        sha256=hashlib.sha256((fi / plan_settings.NAME).read_bytes()).hexdigest())
+    data = json.loads((fi / plan_settings.NAME).read_text(encoding="utf-8"))
+    data["settings"]["engine.max_iterations"] = 99  # an older FI's default, never set in the config
+    (fi / plan_settings.NAME).write_text(json.dumps(data), encoding="utf-8")
+    engine.audit.append("plan_settings_recorded",
+                        sha256=hashlib.sha256((fi / plan_settings.NAME).read_bytes()).hexdigest())
+
+    stopped: list[list[str]] = []
+    engine._stop_for_changed_settings = lambda changed: stopped.append(changed) or engine._collect_artifacts({})
+    monkeypatch.setattr(engine, "_preflight_paper_pdf", lambda: (_ for _ in ()).throw(SystemExit("reached the run")))
+    try:
+        asyncio.run(engine.run())
+    except SystemExit:
+        pass
+    assert not stopped, stopped
+    last = [e["sha256"] for e in audit_log.read(engine.audit.path) if e.get("kind") == "plan_settings_recorded"][-1]
+    assert last == hashlib.sha256((fi / plan_settings.NAME).read_bytes()).hexdigest(), "FI's rewrite is in the trace"
+
+
+def test_update_before_the_first_run_starts_the_trace(tmp_path: Path) -> None:
+    from core.interview_update import approve_settings
+
+    root, fi = _approved(tmp_path)
+    approve_settings(root, _cfg(tmp_path, oracle_check="warn"))
+    events = [e for e in audit_log.read(fi / "audit.jsonl") if e.get("kind") == "plan_settings_recorded"]
+    assert len(events) == 1
+
+
+def test_a_trace_edited_to_match_an_edited_record_does_not_check_out(tmp_path: Path) -> None:
+    import asyncio
+
+    from core.engine import Engine
+
+    cfg = _cfg(tmp_path, oracle_check="block")
+    engine = Engine(cfg)
+    root, fi = engine.quest_root, engine.fi_dir
+    (root / "config.yaml").write_text(HEADER + "topic: probe\nengine:\n  oracle_check: block\n", encoding="utf-8")
+    plan_settings.record(fi, cfg, root)
+    engine.audit.append("plan_settings_recorded",
+                        sha256=hashlib.sha256((fi / plan_settings.NAME).read_bytes()).hexdigest())
+    weaker = _cfg(tmp_path, oracle_check="warn")
+    (root / "config.yaml").write_text(HEADER + "topic: probe\nengine:\n  oracle_check: warn\n", encoding="utf-8")
+    plan_settings.record(fi, weaker, root)
+    lines = engine.audit.path.read_text(encoding="utf-8").splitlines()
+    last = json.loads(lines[-1])
+    last["sha256"] = hashlib.sha256((fi / plan_settings.NAME).read_bytes()).hexdigest()
+    engine.audit.path.write_text("\n".join([*lines[:-1], json.dumps(last)]) + "\n", encoding="utf-8")
+    engine.config = weaker
+    stopped: list[list[str]] = []
+    engine._stop_for_changed_settings = lambda changed: stopped.append(changed) or engine._collect_artifacts({})
+    asyncio.run(engine.run())
+    assert stopped and "no longer checks out" in stopped[0][0]
+
+
+def test_the_writer_trimming_the_sources_does_not_make_the_gate_receipt_stale(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    trimmed = _state(literature=[{"metadata": {"title": "the one source the paper cites"}}])
+    assert evidence.assess(root, trimmed, settings=ON)["status"] == "publication_ready"

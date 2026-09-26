@@ -326,8 +326,9 @@ def assess(
             ready_gaps.append("the design methodology audit judged a different design from the one that ran")
         elif check == "evidence_gate" and (stale := _receipts.stale_inputs(receipt, {
             k: v for k, v in _receipts.gate_inputs(state).items()
-            # every input the receipt names, and always the analysis and the cross-check it judged
-            if k in (receipt.get("input_hashes") or {}) or k in ("analysis", "cross_check")
+            # every input the receipt names, and always the analysis and the cross-check it judged; not the sources,
+            # which the writing step trims to the ones the paper cites after the gate has judged them
+            if k != "sources" and (k in (receipt.get("input_hashes") or {}) or k in ("analysis", "cross_check"))
         })):
             # The gate judged the analysis, the cross-check, the results... it was shown; any of them changed since is
             # evidence it did not judge.
