@@ -432,9 +432,48 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
     if computed.get("unsupported"):
         first = computed["unsupported"][0]
         gaps.append(f"{len(computed['unsupported'])} estimate(s) or contrast(s) could not be made (first: {first['id']}: {first['reason']})")
+    by_position = [c for c in computed.get("contrasts") or [] if c.get("paired_id_verified") is False]
+    if by_position:
+        gaps.append(
+            f"{len(by_position)} paired contrast(s) joined the two settings' trials by their position in the lists, not by "
+            "a pair id (`<id>_pair_id`): a trial missing or out of order pairs the wrong trials"
+        )
     if computed.get("contrasts") and not computed.get("contrasts_prespecified"):
         gaps.append(
             "the protocol names no prespecified contrasts, so every pairwise comparison of each factor's settings was "
             "computed after the fact (protocol.contrasts can fix the comparisons before the results are seen)"
         )
     return gaps
+
+
+def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[str]:
+    """The paired metrics whose per-trial values the results print with no ``<id>_pair_id`` beside them: one sentence
+    each. Without an id a paired comparison can only join trials by position (``rigor_profile: research`` stops for
+    this; otherwise it is a gap in the evidence)."""
+    paired = [spec["id"] for spec in declared(protocol) if spec.get("paired")]
+    lacking: set[str] = set()
+
+    def walk(node: Any) -> None:
+        # Looked for in each mapping on its own: one setting's ids do not stand for another setting's missing ones. A
+        # single value (a setting run once) has nothing to pair.
+        if isinstance(node, dict):
+            for mid in paired:
+                values = node.get(f"{mid}_values")
+                if isinstance(values, list) and len(values) > 1 and f"{mid}_pair_id" not in node:
+                    lacking.add(mid)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node[:200]:
+                walk(value)
+
+    walk(result_json)
+    out = []
+    for mid in paired:
+        if mid in lacking:
+            out.append(
+                f"the paired metric `{mid}` prints `{mid}_values` with no `{mid}_pair_id` beside them: print, beside "
+                f"each `{mid}_values`, the trial each value came from as `{mid}_pair_id` (FI_TRIALS gives it: "
+                f"`metrics[...][\"trials\"]`), so the two settings' trials are joined by id, not by position"
+            )
+    return out

@@ -1667,6 +1667,9 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     if rigor_profile == "research":
         lines.append('rigor_profile: "research"')
         lines.append("")
+    if answers.result_use:
+        lines.append(f"result_use: {json.dumps(answers.result_use)}")
+        lines.append("")
 
     lines.append("provider:")
     lines.append(f"{indent}name: {json.dumps(answers.provider)}")

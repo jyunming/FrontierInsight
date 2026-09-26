@@ -1346,8 +1346,15 @@ class Engine:
     # quest.
 
     # Files whose bytes are worth a sha256 in the trace, hashed after every node and logged when they change.
+    _AUDIT_CACHE_BYTES = 8 * 1024 * 1024
     _AUDIT_WATCHED = (
-        "plan.md", "code/simulate.py", "code/experiment.py", "needs/FROZEN_PROTOCOL.json", "paper/paper.md", "paper/paper.pdf",
+        "plan.md", "code/simulate.py", "code/experiment.py", "code/submit.py", "needs/FROZEN_PROTOCOL.json",
+        "paper/paper.md", "paper/paper.pdf",
+        # The records the evidence level is read from: a change to one after it was written shows in the trace.
+        ".fi/approved_plan.json", "needs/receipts/evidence_gate.json", "needs/receipts/design_audit.json",
+        "needs/receipts/claim_check.json", "needs/ENVIRONMENT.json", "needs/RUN_MANIFEST_CHECK.json",
+        "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json", "raw/ledger.jsonl", "raw/trials.json",
+        ".fi/trials/run.json", "paper/claims.json",
     )
 
     def _audit(self, kind: str, *, node: str | None = None, provenance: str = _audit_log.DETERMINISTIC, **fields: Any) -> None:
@@ -1357,9 +1364,22 @@ class Engine:
             self._log.debug("[audit] could not record %s: %r", kind, e)
 
     def _audit_artifacts(self, node: str) -> None:
+        # A large file (the trial ledger) whose size and modification time are those it had when last hashed is not
+        # read again, since this runs after every step; a small one is hashed every time, so an edit that keeps its size
+        # and resets its time still shows.
+        stats = self.__dict__.setdefault("_audit_stat", {})
         for rel in self._AUDIT_WATCHED:
             path = self.quest_root / rel
+            try:
+                stat = path.stat()
+                mark = (stat.st_size, stat.st_mtime_ns)
+            except OSError:
+                mark = None
+            if mark is not None and mark[0] >= self._AUDIT_CACHE_BYTES and rel in self._audit_seen and stats.get(rel) == mark:
+                continue
             digest = _audit_log.file_sha256(path) if path.is_file() else None
+            if digest is not None:
+                stats[rel] = mark
             if digest is None or self._audit_seen.get(rel) == digest:
                 continue
             self._audit_seen[rel] = digest
@@ -5232,8 +5252,12 @@ class Engine:
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
             # again).
+            # A paired design joins its trials by id in research; with none it would join them by position.
+            no_ids = (_metric_spec.missing_pair_ids(protocol, result_json)
+                      if self.config.rigor_profile == "research" else [])
+            found = found + no_ids
             self._manifest_analysis_problems = (
-                _run_manifest.analysis_output_problems(protocol, manifest, result_json) + not_run
+                _run_manifest.analysis_output_problems(protocol, manifest, result_json) + not_run + no_ids
             )
             return ("differs" if found else "ok"), found
         if self.config.rigor_profile == "research":
@@ -5724,6 +5748,7 @@ class Engine:
                     "numeric_warnings": self.config.engine.numeric_warnings,
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
+                    "result_use": getattr(self.config, "result_use", ""),
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -6468,6 +6493,8 @@ class Engine:
             # interpreter they are already there from the skill's approval, and a quest does not change it.
             install_list = list(dict.fromkeys([*install_list, *_experiment_deps.skill_requirements(skills)]))
         failed_installs = await self._install_packages(install_list)
+        # What the experiment runs on is the environment after these installs: recorded now, over the start's record.
+        await self._record_environment(stage="after installing the experiment's packages")
         # A skill's name that pip could not install (a tool skill, a library skill not published as a package): the
         # repair is told how the skill is used, not to drop an import that may work from the path.
         skill_failures, failed_installs = _experiment_deps.explain_failures(failed_installs, skills)
@@ -11313,7 +11340,7 @@ class Engine:
 
         stage_inputs(sources, self.quest_root, self._log)
 
-    async def _record_environment(self) -> None:
+    async def _record_environment(self, stage: str = "at the start of the run") -> None:
         """The interpreter, platform and installed packages this quest's experiment actually runs on, and whether
         that environment is this quest's own or shared with every other quest on the machine.
 
@@ -11334,6 +11361,7 @@ class Engine:
             "shared_interpreter": self.config.execution.shared_interpreter,
             "system_site_packages": self.config.execution.system_site_packages,
             "isolated": isolated,
+            "recorded": stage,
         }
         try:
             py = self.executor.python_path(self.quest_root)
@@ -12823,12 +12851,14 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 **experiment.py is the analysis.** FI runs it once, after all the trials. It reads FI's record of them from the file
 the environment variable `FI_TRIALS` names: `json.load(open(os.environ["FI_TRIALS"]))` gives
 `{"thresholds": {"<name>": <value>}, "cells": [{"cell": {...}, "key": "R0=1.5,N=1000", "planned": n, "ok": k,
-"failed": f, "metrics": {"<name>": {"values": [...], "count": k, "total": ...}}}]}`, one entry per setting, the values of
-the trials that succeeded, and the protocol's thresholds: a threshold the analysis applies (what counts as an outbreak,
+"failed": f, "metrics": {"<name>": {"values": [...], "trials": [...], "count": k, "total": ...}}}]}`, one entry per
+setting, the values of the trials that succeeded (`trials` gives the trial each value came from), and the protocol's
+thresholds: a threshold the analysis applies (what counts as an outbreak,
 a success, a pass) is read from there, never written into a script as a number of its own. It never imports or calls simulate.py. It computes the summary statistics from those values, draws the
 figures into `figures/` and prints the `RESULT_JSON: {...}` last line, exactly as the rules above ask: the figure
 rules, the stratification rule and the no-clamping rule are its rules, and every `<name>_values` / `_count` / `_total`
-it reports comes from those lists, never from a number of its own. A setting with failed trials is reported with the
+it reports comes from those lists, never from a number of its own. For a PAIRED metric it also prints, beside each
+`<name>_values`, `<name>_pair_id`: the `trials` of those values, so the settings' trials are joined by id. A setting with failed trials is reported with the
 trials that succeeded and says how many failed.
 
 If an outline is given, it describes the whole experiment as one program: put the code of one trial in `run_trial` (or
