@@ -73,11 +73,14 @@ def main():
     nonce = spec.pop("nonce")
     # What names the results file and the nonce goes before the simulation is loaded: the spec file is deleted and argv
     # cleared, so code that looks for them has to dig through this process's memory rather than read a path.
-    try:
-        os.remove(spec_path)
-    except OSError:
-        pass
+    if not spec.pop("keep_spec", False):  # a cluster's scheduler may run a task again: its spec stays there
+        try:
+            os.remove(spec_path)
+        except OSError:
+            pass
     del sys.argv[1:]
+    # The simulation's own folder is where its imports are (a helper module beside simulate.py).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(spec["module"])))
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
@@ -233,7 +236,7 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
 
 
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
-          deterministic: bool, folder: Path, out_name: str) -> list[dict[str, Any]]:
+          deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False) -> list[dict[str, Any]]:
     """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
     ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
     ``quest_root``."""
@@ -249,7 +252,8 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry, "cell": cell,
-                                         "trials": trials, "nonce": nonce}, default=str), encoding="utf-8")
+                                         "trials": trials, "nonce": nonce, "keep_spec": keep_spec}, default=str),
+                             encoding="utf-8")
         plan.append({"index": index, "key": key, "cell": cell, "trials": trials, "nonce": nonce, "entry": entry,
                      "spec": spec_path.relative_to(quest_root).as_posix(),
                      "out": out_path.relative_to(quest_root).as_posix()})
@@ -303,6 +307,8 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
             why_missing = not_reported
         elif run.timed_out:
             why_missing = "the study's time (execution.timeout_s) ran out before this setting's trial"
+        elif result.returncode == 0:
+            why_missing = "the cell's process ended normally but never reported this trial"
         else:
             why_missing = f"the cell's process stopped (exit code {result.returncode}) before this trial"
         for t in trials:
@@ -375,9 +381,12 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
     for old in folder.glob("*"):
         if old.is_file():
             old.unlink()
+    # A job submitted for an earlier plan is not this plan's: submit.py submits again (its state goes), and the new
+    # tasks write to files named for this plan, so a task of the old job still running cannot write into them.
+    (quest_root / "job" / "state.json").unlink(missing_ok=True)
     (folder / "harness.py").write_text(HARNESS_SOURCE, encoding="utf-8")
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
-                 deterministic=deterministic, folder=folder, out_name="out{index}.jsonl")
+                 deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True)
     harness = (CLUSTER_DIR / "harness.py").as_posix()
     tasks = {
         "count": len(plan),
@@ -459,7 +468,7 @@ class TrialsRunner:
             )
             submitted = await self.executor.execute(
                 [cmd[0], str(self.submit)], cwd=cwd, timeout_s=timeout_s,
-                env={**(env or {}), TASKS_ENV: str(self.quest_root / CLUSTER_DIR / TASKS_NAME)},
+                env={**(env or {}), TASKS_ENV: (CLUSTER_DIR / TASKS_NAME).as_posix()},
             )
             job = job_watch.job_of(_last_result_json(submitted.stdout or ""))
             if submitted.returncode != 0 or job is None or job.get("status") == job_watch.FAILED:
@@ -472,6 +481,7 @@ class TrialsRunner:
                                        stderr=((submitted.stderr or "") + why).strip(), timed_out=submitted.timed_out)
             if job.get("status") == job_watch.PENDING:
                 self.failed_script = None
+                _note_job(self.quest_root, record, job)
                 return submitted
             run = collect_cluster(
                 self.quest_root, record,
@@ -499,14 +509,30 @@ class TrialsRunner:
                 (r.get("reason") for c in run.cells for r in c.rows if r.get("reason")), "every trial failed")
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI ran no trial successfully: {reason}".strip())
-        analysis_env = {**(env or {}), RESULTS_ENV: str(run.summary_path),
-                        "FI_RAW_DIR": str(run.summary_path.parent)}
+        # Relative to the quest folder the analysis runs in: the same path inside a container (/work) as on the host.
+        analysis_env = {**(env or {}), RESULTS_ENV: run.summary_path.relative_to(self.quest_root).as_posix(),
+                        "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
         return ExecutionResult(
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+
+def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:
+    """A job id FI has not seen for this plan is a new submission (the last one failed or was cancelled): the results
+    an earlier job left are removed, so only this job's are read when it is done."""
+    job_id = str(job.get("id") or "")
+    if not job_id or record.get("job_id") == job_id:
+        return
+    for task in record.get("plan") or []:
+        (Path(quest_root) / task["out"]).unlink(missing_ok=True)
+    record["job_id"] = job_id
+    try:
+        (Path(quest_root) / CLUSTER_RECORD).write_text(json.dumps(record, default=str), encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _last_result_json(stdout: str) -> dict[str, Any] | None:

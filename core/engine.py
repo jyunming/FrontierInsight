@@ -5856,7 +5856,10 @@ class Engine:
         or fails asks for a repair of the script; each is up to ``engine.oracle_repair_attempts`` attempts. If the
         oracles still do not pass, ``block`` stops the quest before its main sweep and ``warn`` records it and goes on.
         Every attempt is in ``needs/ORACLE_CHECK.json``."""
-        if self.config.engine.oracle_check == "off" or self.config.execution.background_jobs:
+        # A background job's one script cannot be run here for a check; a job array's oracle() can (it is a function).
+        if self.config.engine.oracle_check == "off" or (
+            self.config.execution.background_jobs and not self._split_on(state)
+        ):
             self._oracle_record_clear()
             return None
         protocol = self._protocol_block(state)
@@ -11388,7 +11391,8 @@ class Engine:
         if tasks.is_file() and submit.is_file():
             # FI's trials run as a job array: submit.py says whether it is done; the resume then collects the results.
             code_path = submit
-            env = {**(env or os.environ), _trial_runner.TASKS_ENV: str(tasks)}
+            env = {**(env or os.environ),
+                   _trial_runner.TASKS_ENV: (_trial_runner.CLUSTER_DIR / _trial_runner.TASKS_NAME).as_posix()}
         result = await self.executor.execute(
             [str(py), str(code_path)], cwd=self.quest_root,
             timeout_s=self.config.execution.timeout_s, env=env,
@@ -12703,7 +12707,8 @@ running, and which Python the tasks use.
   `RESULT_JSON: {"fi_job": {"status": "pending", "id": "<job id>", "note": "<short state>", "poll_s": <seconds>}}` and
   exit 0. Every later run: check the job; still running: print the pending line again; never submit a second job.
 - All tasks finished (whatever each one's own result): print `RESULT_JSON: {"fi_job": {"status": "done", "id": "<job id>"}}`
-  and exit 0. FI then reads every task's results itself, writes the record and runs experiment.py.
+  and exit 0. FI then reads every task's results itself, writes the record and runs experiment.py. FI may run
+  submit.py again after that: it must print the same done line again, so never delete `job/state.json`.
 - The job could not be submitted or was cancelled: print the reason on stderr and exit non-zero.
 submit.py never reads or writes the tasks' results, and experiment.py does not submit anything: it reads FI_TRIALS as
 above.
