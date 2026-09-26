@@ -250,6 +250,9 @@ class QuestState(TypedDict, total=False):
     # ``literature_queries``.
     literature_query: str
     literature_queries: list[str]
+    # True when ``literature_query`` is a keyword query (derived from the topic, or the requery that found sources),
+    # False when it is the fallback ``title + topic`` concatenation.
+    literature_query_derived: bool
     design: dict[str, Any]
     # Every version of the design, in order. Entry 0 is the pre-registration
     # (stated before any result existed); later entries are flagged
@@ -2497,7 +2500,7 @@ class Engine:
         # literature step uses turns the topic into the field's terms first
         # (the topic as written when it gives none, as before).
         seed_queries = await self._derive_literature_queries(
-            state["topic"], work_scope=self._work_scope(state),
+            state["topic"], work_scope=self._work_scope(state), node="ideate_query",
         ) if self.knowledge.enabled else []
         if seed_queries:
             self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
@@ -2804,6 +2807,7 @@ class Engine:
         queries = await self._derive_literature_queries(
             state["topic"], chosen.get("title") or "", hypothesis, work_scope=scope,
         )
+        derived = bool(queries)
         if queries:
             self._log.info("[literature] search queries derived from the topic: %r", queries)
             query = queries[0]
@@ -2916,6 +2920,8 @@ class Engine:
                     "%d doc(s) now clear the floor",
                     attempt, stats.get("above_floor", 0),
                 )
+                # The query that found sources is the one later searches reuse, not the one that found none.
+                query, derived = tried_queries[-1], True
         docs = filtered
         # The original papers and textbooks a keyword search does not reach
         # join the candidates, and the screen judges them like the rest.
@@ -3083,6 +3089,7 @@ class Engine:
             "literature_iter": this_iter,
             "literature_query": query.strip(),
             "literature_queries": queries,
+            "literature_query_derived": derived,
         }
 
     def _design_prompt(self, state: QuestState) -> str:
@@ -4085,8 +4092,10 @@ class Engine:
             hypothesis = str(design.get("hypothesis", "")).strip()
         # The keyword query the literature step derived from the topic (search engines and the dataset adapters
         # match terms, not the topic's sentences); the topic and hypothesis as written when there is none.
-        derived = str(state.get("literature_query") or "").strip()
-        query = derived or f"{topic} {hypothesis}".strip() or topic
+        derived = str(state.get("literature_query") or "").strip() if state.get("literature_query_derived") else ""
+        # What a source must be about is judged against the question as written, not the few keywords.
+        relevance_topic = f"{topic} {hypothesis}".strip() or topic
+        query = derived or relevance_topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
         # ---- Reuse already-downloaded literature -------------------
@@ -4111,7 +4120,7 @@ class Engine:
             and (d.get("metadata") or {}).get("kind") not in _FI_INTERNAL_KINDS
         ]
         if lit_docs and self.config.knowledge.relevance_guard:
-            relevant = await self._filter_relevant_docs(query, lit_docs)
+            relevant = await self._filter_relevant_docs(relevance_topic, lit_docs)
             lit_written = len(relevant)
             if lit_written < len(lit_docs):
                 self._log.info(
@@ -4134,7 +4143,7 @@ class Engine:
         axon_written = 0
         if lit_written == 0:
             axon_written = await self._axon_collect_step(
-                query, auto_dir, work_scope=self._work_scope(state),
+                query, auto_dir, work_scope=self._work_scope(state), relevance_topic=relevance_topic,
             )
 
         # ---- Dataset adapters --------------------------------------
@@ -4235,7 +4244,7 @@ class Engine:
         return written
 
     async def _axon_collect_step(
-        self, query: str, auto_dir: Path, *, work_scope: str = WORK_SCOPE_PAPERS,
+        self, query: str, auto_dir: Path, *, work_scope: str = WORK_SCOPE_PAPERS, relevance_topic: str = "",
     ) -> int:
         """Axon-backed retrieval. Returns the
         count of files written under ``auto_dir`` (not in a
@@ -4289,7 +4298,7 @@ class Engine:
         # off-topic ones so we don't write a paper on garbage; if NOTHING
         # is on-topic, return 0 so wait_for_data pauses for real user data
         # instead of proceeding.
-        docs = await self._filter_relevant_docs(query, docs)
+        docs = await self._filter_relevant_docs(relevance_topic or query, docs)
         if not docs:
             self._log.info(
                 "[auto_collect] relevance guard dropped every auto-collected "
@@ -4548,7 +4557,7 @@ class Engine:
 
     async def _derive_literature_queries(
         self, topic: str, idea_title: str = "", hypothesis: str = "",
-        *, work_scope: str = WORK_SCOPE_PAPERS,
+        *, work_scope: str = WORK_SCOPE_PAPERS, node: str = "literature_query",
     ) -> list[str]:
         """Turn a topic statement into up to three keyword search queries,
         one per facet of the topic.
@@ -4609,8 +4618,8 @@ class Engine:
             'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
         )
         try:
-            raw = await self._chat(prompt, node="literature_query")
-            parsed = _parse_json_lenient(raw, node="literature_query")
+            raw = await self._chat(prompt, node=node)
+            parsed = _parse_json_lenient(raw, node=node)
         except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
             self._log.info("[literature] query derivation failed: %r", e)
             return []
@@ -5668,7 +5677,8 @@ class Engine:
         declares metric specs, the engine's own estimates and contrasts with their p-values (``spec_statistics``,
         :mod:`core.metric_spec`). The audits that compare the paper with the numbers read the same dictionary."""
         protocol = self._protocol_block(state)
-        out = _result_comparison_stats(replicates, factor_levels=_factor_levels(protocol), **kw)
+        metric_ids = {str(m.get("id")).lower() for m in _metric_spec.declared(protocol) if m.get("id")} or None
+        out = _result_comparison_stats(replicates, metric_ids=metric_ids, **kw)
         if protocol is not None and len(replicates) >= 1 and _metric_spec.declared(protocol):
             try:
                 spec = _metric_spec.statistics(replicates, protocol)
@@ -7385,8 +7395,8 @@ class Engine:
                 "NEVER clamp, cap or clip a result to the bound or replace it "
                 "with any constant: a capped value is detected and rejected, and "
                 "it would state something false."
-                + ("\n\nA value above is already capped at its bound by the "
-                   "script itself; remove that cap." if clamped else "")
+                + ("\n\nA value above is capped by the script itself (at its bound, or at a constant the "
+                   "script caps that very quantity at, inside the range); remove that cap." if clamped else "")
                 + ("\n\nA quantity above sits exactly on a bound in several "
                    "settings. That is what a computation returning a trivial "
                    "answer looks like: a root finder settling on the solution at "
@@ -14645,31 +14655,9 @@ def _replicate_line_figure(
     }
 
 
-def _factor_levels(protocol: Any) -> set[str] | None:
-    """Every value a factor of the protocol's grid takes, as the names a result can group by (``"0.5"``, ``"rk4"``,
-    ``"r0=0.9"``; lower case, compared without case), or ``None`` when the protocol has no grid."""
-    grid = protocol.get("grid") if isinstance(protocol, dict) else None
-    if not isinstance(grid, dict) or not grid:
-        return None
-    levels: set[str] = set()
-    for factor, values in grid.items():
-        for v in values if isinstance(values, list) else [values]:
-            text = f"{v:g}" if isinstance(v, float) else str(v)
-            levels |= {str(v).lower(), text.lower(), f"{factor}={v}".lower(), f"{factor}={text}".lower()}
-    return levels
-
-
-def _numeric_key(key: str) -> bool:
-    try:
-        float(key)
-    except (TypeError, ValueError):
-        return False
-    return True
-
-
 def _result_comparison_stats(
     replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
-    max_depth: int = 6, assertions: list[Any] | None = None, factor_levels: set[str] | None = None,
+    max_depth: int = 6, assertions: list[Any] | None = None, metric_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the strata
     the experiment broke results down by, plus a multiple-comparison guard.
@@ -14685,10 +14673,10 @@ def _result_comparison_stats(
     (``RK4.err`` at the step-size level, ``err`` at the method level). A
     nested level counts only when its children share one key structure:
     ``{"errors": {...}, "timing": {...}}`` groups unlike things, and pairing
-    them would be noise. With the protocol's grid (``factor_levels``), a nested
-    level counts only when its children are also named for values of the
-    grid's factors (or are numbers): unlike groups can share a key structure
-    too (``errors`` and ``timing`` each with ``mean`` and ``max``). The
+    them would be noise. Unlike groups can share a key structure too
+    (``errors`` and ``timing`` each with ``mean`` and ``max``): a nested level
+    whose children are named for the protocol's declared metrics
+    (``metric_ids``) groups measures, not settings, and is not compared. The
     ``by_*`` level itself is always a factor.
 
     Returns ``{"strata": {factor: {stratum: {metric: {mean, ci_lower,
@@ -14734,7 +14722,7 @@ def _result_comparison_stats(
         comparable = len(strata) >= 2 and (
             depth == 0 or (
                 len({_shape(nodes[0][s]) for s in strata}) == 1
-                and (factor_levels is None or all(s.lower() in factor_levels or _numeric_key(s) for s in strata))
+                and not (metric_ids and any(s.lower() in metric_ids for s in strata))
             )
         )
         if comparable:

@@ -163,6 +163,7 @@ run's own manifest does not contradict, is exempt (the engine passes it as
 from __future__ import annotations
 
 import ast
+import builtins as _builtins
 import math
 import re
 from dataclasses import dataclass
@@ -247,8 +248,8 @@ class Violation:
             return (
                 (f"{self.path} = {self.value:g} sits exactly on a bound ({self.assertion.describe()}){why}, and the "
                  f"script caps values at {self.value:g}" if on_bound else
-                 f"{self.path} = {self.value:g} sits exactly on {self.value:g}, a value the script caps this "
-                 f"quantity at")
+                 f"{self.path} = {self.value:g} is exactly the constant the script caps (or floors) this quantity at, "
+                 f"inside its range ({self.assertion.describe()}){why}")
                 + ": a clamped number, not a measurement"
             )
         return (
@@ -328,24 +329,64 @@ def clamp_constants(code: str) -> set[float]:
     return out
 
 
-def _names_in(node: ast.AST) -> set[str]:
-    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+_BUILTIN_NAMES = frozenset(dir(_builtins))
+# Keys many metrics share: a path ending in one of these does not say which quantity it is.
+_GENERIC_KEYS = frozenset({
+    "mean", "avg", "average", "median", "max", "min", "std", "sd", "sem", "var", "value", "values", "val",
+    "result", "results", "total", "count", "n", "ci", "lower", "upper", "lo", "hi", "estimate",
+})
 
 
-def clamp_targets(code: str) -> list[tuple[float, frozenset[str]]]:
-    """Each cap in the script with the variables it acts on: ``(constant, names)``.
+def _variables_in(node: ast.AST, skip: set[str]) -> set[str]:
+    """The variables an expression reads: names in load position, not a called function (``float(...)``), not the
+    base of an attribute (``np.clip``), not a builtin or an imported module (``skip``)."""
+    callee_or_base: set[int] = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
+            callee_or_base.add(id(n.func))
+        elif isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+            callee_or_base.add(id(n.value))
+    return {
+        n.id for n in ast.walk(node)
+        if isinstance(n, ast.Name) and id(n) not in callee_or_base and n.id not in skip
+    }
 
-    The names are the variable a capped value is assigned to and the variables
-    inside the cap (``rmse = min(rmse, 10.0)`` gives ``{"rmse"}``;
-    ``if rmse > 1e6: rmse = 10.0`` gives ``{"rmse"}``). What
-    :func:`clamp_constants` finds, tied to what it caps, so a cap on one
-    quantity (a softmax clipped to 1.0) is not read as a cap on another (an
-    accuracy that is 1.0). Unparseable code yields nothing.
+
+def _imported(tree: ast.AST) -> set[str]:
+    out: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                out.add((a.asname or a.name).split(".")[0])
+    return out
+
+
+def _parents(tree: ast.AST) -> dict[int, ast.AST]:
+    return {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+
+def _assign_targets(stmt: ast.AST, skip: set[str]) -> set[str]:
+    if isinstance(stmt, ast.Assign):
+        return {n for t in stmt.targets for n in _variables_in(t, skip)} | {
+            t.id for t in stmt.targets if isinstance(t, ast.Name)}
+    if isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        return {stmt.target.id} if isinstance(stmt.target, ast.Name) else _variables_in(stmt.target, skip)
+    return set()
+
+
+def clamp_targets(code: str) -> list[tuple[float, frozenset[str], frozenset[str]]]:
+    """Each cap in the script: ``(constant, assigned_to, reads)``.
+
+    ``assigned_to`` is the variable a capped value is assigned to (``rmse = min(rmse, 10.0)``, ``if rmse > 1e6:
+    rmse = 10.0``); ``reads`` is what the cap reads, the receiver of ``x.clip(...)`` included. A cap outside an
+    assignment (inside ``json.dumps(...)``, a ``return``, an ``append``) has no ``assigned_to``. What
+    :func:`clamp_constants` finds, tied to what it caps. Unparseable code yields nothing.
     """
     try:
         tree = ast.parse(code or "")
     except (SyntaxError, ValueError):
         return []
+    skip = set(_BUILTIN_NAMES) | _imported(tree)
     names: dict[str, float] = {}
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -353,6 +394,7 @@ def clamp_targets(code: str) -> list[tuple[float, frozenset[str]]]:
             v = _literal(node.value)
             if v is not None:
                 names[node.targets[0].id] = v
+    parents = _parents(tree)
 
     def value(node: ast.AST) -> float | None:
         v = _literal(node)
@@ -360,63 +402,89 @@ def clamp_targets(code: str) -> list[tuple[float, frozenset[str]]]:
             v = names.get(node.id)
         return v
 
-    def targets(stmt: ast.AST) -> set[str]:
-        if isinstance(stmt, ast.Assign):
-            return {n for t in stmt.targets for n in _names_in(t)}
-        if isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
-            return _names_in(stmt.target)
-        return set()
+    def enclosing_targets(node: ast.AST) -> set[str]:
+        cur = parents.get(id(node))
+        while cur is not None and not isinstance(cur, ast.stmt):
+            cur = parents.get(id(cur))
+        return _assign_targets(cur, skip) if cur is not None else set()
 
-    out: list[tuple[float, frozenset[str]]] = []
-    for stmt in ast.walk(tree):
-        assigned = targets(stmt)
-        rhs = getattr(stmt, "value", None) if assigned else None
-        if isinstance(stmt, ast.If):
-            for inner in (*stmt.body, *stmt.orelse):
+    out: list[tuple[float, frozenset[str], frozenset[str]]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else "")
+            if name not in _CLAMP_CALLS:
+                continue
+            args = [*node.args, *(k.value for k in node.keywords)]
+            reads: set[str] = set()
+            for a in args:
+                reads |= _variables_in(a, skip)
+            if isinstance(fn, ast.Attribute):
+                reads |= _variables_in(fn.value, skip)  # the receiver of x.clip(...)
+            for arg in args:
+                v = value(arg)
+                if v is not None:
+                    out.append((v, frozenset(enclosing_targets(node)), frozenset(reads)))
+        elif isinstance(node, ast.IfExp):
+            reads = _variables_in(node, skip)
+            for branch in (node.body, node.orelse):
+                v = value(branch)
+                if v is not None:
+                    out.append((v, frozenset(enclosing_targets(node)), frozenset(reads)))
+        elif isinstance(node, ast.If):
+            for inner in (*node.body, *node.orelse):
                 if isinstance(inner, (ast.Assign, ast.AnnAssign)) and inner.value is not None:
                     v = value(inner.value)
                     if v is not None:
-                        out.append((v, frozenset(targets(inner))))
-        for node in ast.walk(rhs) if rhs is not None else ():
-            if isinstance(node, ast.Call):
-                fn = node.func
-                name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else "")
-                if name in _CLAMP_CALLS:
-                    args = (*node.args, *(k.value for k in node.keywords))
-                    inside = set().union(*(_names_in(a) for a in args)) if args else set()
-                    for arg in args:
-                        v = value(arg)
-                        if v is not None:
-                            out.append((v, frozenset(assigned | (inside - set(names)))))
-            elif isinstance(node, ast.IfExp):
-                inside = _names_in(node) - set(names)
-                for branch in (node.body, node.orelse):
-                    v = value(branch)
-                    if v is not None:
-                        out.append((v, frozenset(assigned | inside)))
+                        out.append((v, frozenset(_assign_targets(inner, skip)), frozenset(_variables_in(node.test, skip))))
     return out
 
 
-def metric_variables(code: str, key: str) -> set[str] | None:
-    """The variables a reported quantity named ``key`` is read from, or ``None`` when the script does not say.
+def metric_ties(code: str, key: str) -> tuple[set[str], set[float]] | None:
+    """What the script says a reported quantity named ``key`` is read from: ``(variables, caps)``, or ``None``.
 
-    Read from the dict literals that report it (``{"rmse": rmse_mean}`` gives ``{"rmse_mean"}``) and from a variable
-    of the same name. ``None`` means the tie cannot be made, and every cap in the script then counts, as before."""
+    ``variables`` come from the dict literals that report it (``{"rmse": rmse_mean}``), a variable of the same name,
+    and an item assigned under that key (``results["rmse"] = ...``); ``caps`` are constants the reported value is
+    capped at right there (``{"rmse": min(rmse, 10.0)}``, ``if diverged: results["rmse"] = 10.0``). ``None`` when the
+    key is one many quantities share (``mean``, ``max``) or the script names it nowhere: the tie cannot be made, and
+    every cap counts, as before."""
+    if not key or key.lower() in _GENERIC_KEYS:
+        return None
     try:
         tree = ast.parse(code or "")
     except (SyntaxError, ValueError):
         return None
-    found: set[str] = set()
+    skip = set(_BUILTIN_NAMES) | _imported(tree)
+    variables: set[str] = set()
+    caps: set[float] = set()
+    found = False
+
+    def caps_in(expr: ast.AST) -> set[float]:
+        return {c for c, _t, _r in clamp_targets(ast.unparse(expr))}
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values):
                 if isinstance(k, ast.Constant) and k.value == key and v is not None:
-                    found |= _names_in(v)
+                    found = True
+                    variables |= _variables_in(v, skip)
+                    caps |= caps_in(v)
         elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
             tgts = node.targets if isinstance(node, ast.Assign) else [node.target]
-            if any(isinstance(t, ast.Name) and t.id == key for t in tgts):
-                found.add(key)
-    return found or None
+            for t in tgts:
+                if isinstance(t, ast.Name) and t.id == key:
+                    found = True
+                    variables.add(key)
+                elif (isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) and t.slice.value == key
+                      and node.value is not None):
+                    found = True
+                    variables |= _variables_in(node.value, skip)
+                    lit = _literal(node.value)
+                    if lit is not None and any(isinstance(n, ast.If) and node in (*n.body, *n.orelse)
+                                               for n in ast.walk(tree)):
+                        caps.add(lit)  # if diverged: results["rmse"] = 10.0
+                    caps |= caps_in(node.value)
+    return (variables, caps) if found else None
 
 
 # A value this close to a bound is ON that bound. The at-bound and clamped
@@ -781,11 +849,21 @@ def violations(
     literals = numeric_literals(code) if code else set()
     out: list[Violation] = []
     for a in assertions:
-        # The caps that act on this quantity, when the script says which variables it is read from; else every cap.
+        # When the script says which variables this quantity is read from, a cap that plainly acts on other variables
+        # does not count for it (a softmax clipped to 1.0 is not a cap on an accuracy); every other cap still does,
+        # one inside a json.dumps(...) or a return included. When it does not say, every cap counts, as before.
         key = a.path.split(".")[-1].strip("*[]")
-        variables = metric_variables(code, key) if code and key else None
-        own = {c for c, acted_on in tied if acted_on & variables} if variables is not None else None
-        caps = own if own is not None else clamps
+        ties = metric_ties(code, key) if code and key else None
+        caps = set(clamps)
+        own: set[float] = set()
+        if ties is not None:
+            variables, direct = ties
+            elsewhere = {c for c, assigned, reads in tied
+                         if (assigned or reads) and not ((assigned | reads) & variables)}
+            ours = {c for c, assigned, reads in tied if (assigned | reads) & variables}
+            caps = (clamps - elsewhere) | ours | direct
+            # A cap written right where the value is reported, or assigned to the variable it is read from.
+            own = set(direct) | {c for c, assigned, _reads in tied if assigned & variables}
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for tokens, path, value in leaves:
