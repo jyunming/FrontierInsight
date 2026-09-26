@@ -83,12 +83,6 @@ def test_a_cap_written_where_the_quantity_is_reported_catches_a_value_inside_the
     assert on_bound.kind == "clamped"
 
 
-def test_a_value_put_under_its_key_when_a_run_diverges_counts() -> None:
-    code = 'results = {"rmse": rmse}\nif diverged:\n    results["rmse"] = 10.0\n'
-    (found,) = violations({"rmse": 10.0}, RMSE, code=code)
-    assert found.kind == "clamped"
-
-
 def test_what_is_not_a_cap_where_the_quantity_is_reported_is_not_taken_for_one() -> None:
     # A guard against dividing by zero, an axis, an indicator: none of them caps the reported value.
     ratio = [Assertion(path="events_per_run", min=0.0, max=10.0)]
@@ -165,12 +159,6 @@ def test_a_fallback_query_is_not_taken_for_keywords(tmp_path: Path) -> None:
     assert eng._run_dataset_adapters.await_args.args[0] == f"{TOPIC} h"
 
 
-def test_a_named_constant_put_under_its_key_counts_too() -> None:
-    code = 'CAP = 10.0\nresults = {"rmse": rmse}\nif diverged:\n    results["rmse"] = CAP\n'
-    (found,) = violations({"rmse": 10.0}, RMSE, code=code)
-    assert found.kind == "clamped"
-
-
 def test_a_nested_level_with_one_declared_metric_among_its_groups_is_not_compared() -> None:
     from core.engine import _result_comparison_stats
 
@@ -178,3 +166,32 @@ def test_a_nested_level_with_one_declared_metric_among_its_groups_is_not_compare
                            for m, e, t in (("RK4", 1.0, 5.0), ("Euler", 3.0, 1.0))}} for i in range(3)]
     out = _result_comparison_stats(reps, metric_ids={"errors"})
     assert not any(f.startswith("by_method.") for f in out.get("strata", {}))
+
+
+def test_a_value_put_under_its_key_when_a_run_diverges_counts_on_its_bound() -> None:
+    for code in (
+        'results = {"rmse": rmse}\nif diverged:\n    results["rmse"] = 10.0\n',
+        'CAP = 10.0\nresults = {"rmse": rmse}\nif diverged:\n    results["rmse"] = CAP\n',
+    ):
+        (found,) = violations({"rmse": 10.0}, RMSE_10, code=code)
+        assert found.kind == "clamped", code
+
+
+def test_only_an_upper_cap_where_the_quantity_is_reported_counts_inside_the_range() -> None:
+    upper = 'print(json.dumps({"rmse": np.clip(r, 0.5, 10.0)}))\n'
+    (found,) = violations({"rmse": 10.0}, RMSE, code=upper)
+    assert found.kind == "clamped"
+    assert violations({"rmse": 0.5}, RMSE, code=upper) == [], "0.5 is its floor, not a cap"
+    counts = [Assertion(path="n_peaks", min=0.0, max=50.0)]
+    for code in (
+        'out = {"n_peaks": int((x.max(1) > thr).sum())}\n',  # an axis, written as a position
+        'out = {"n_peaks": int(np.max(x, 1).sum())}\n',
+        'out = {"n_peaks": max(1, len(set(labels)) - 1)}\n',  # a floor
+    ):
+        assert violations({"n_peaks": 1.0}, counts, code=code) == [], code
+    config = (
+        'params = {"n_trials": 300}\nif os.environ.get("FI_PILOT"):\n    params["n_trials"] = 20\n'
+        'else:\n    params["n_trials"] = 300\nresults = {"n_trials": params["n_trials"]}\n'
+    )
+    trials = [Assertion(path="n_trials", min=1.0, max=1e5)]
+    assert violations({"n_trials": 300.0}, trials, code=config) == []

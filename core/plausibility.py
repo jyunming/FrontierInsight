@@ -333,21 +333,35 @@ _GENERIC_KEYS = frozenset({
     "mean", "avg", "average", "median", "max", "min", "std", "sd", "sem", "var", "value", "values", "val",
     "result", "results", "total", "count", "n", "ci", "lower", "upper", "lo", "hi", "estimate",
 })
-# The calls that cap a value, for a cap written where a quantity is reported: `where` and `nan_to_num` choose or
-# replace values rather than cap one, and are left to the general check.
-_DIRECT_CAP_CALLS = frozenset({"min", "max", "clip", "clamp", "clip_by_value", "minimum", "maximum", "fmin", "fmax"})
-# Keyword arguments that are a cap's bound (not ``axis``, ``keepdims``, ``out``).
-_BOUND_KEYWORDS = frozenset({"a_min", "a_max", "min", "max", "lower", "upper", "clip_value_min", "clip_value_max"})
+def _upper_cap(call: ast.Call) -> ast.AST | None:
+    """The upper bound a call caps its value at, or ``None``: builtin ``min(x, C)``, ``np.minimum(x, C)`` /
+    ``fmin``, the upper bound of ``np.clip(x, lo, HI)`` / ``x.clip(lo, HI)`` / ``clamp(x, lo, HI)`` or their ``a_max=``
+    / ``max=`` / ``upper=`` keyword. A floor (``max(1, n)``), a reduction (``x.max(1)``, ``np.min(x, 1)`` with an
+    axis) and a keyword like ``axis=`` are not upper caps."""
+    fn = call.func
+    if isinstance(fn, ast.Name) and fn.id == "min" and len(call.args) == 2 and not call.keywords:
+        return call.args[1]
+    name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
+    if name in ("minimum", "fmin") and len(call.args) == 2:
+        return call.args[1]
+    if name in ("clip", "clamp", "clip_by_value"):
+        for k in call.keywords:
+            if k.arg in ("a_max", "max", "upper", "clip_value_max"):
+                return k.value
+        method = isinstance(fn, ast.Attribute) and name == "clip" and not (
+            isinstance(fn.value, ast.Name) and fn.value.id in ("np", "numpy", "torch", "tf", "jnp"))
+        pos = 1 if method else 2  # x.clip(lo, HI) vs np.clip(x, lo, HI)
+        if len(call.args) > pos:
+            return call.args[pos]
+    return None
 
 
 def direct_caps(code: str, key: str) -> set[float]:
-    """Constants a quantity named ``key`` is capped at right where it is reported.
-
-    Two shapes only, both with nothing between the cap and the reported value: a cap in the value of a dict literal
-    that reports it (``{"rmse": min(rmse, 10.0)}``, ``{"rmse": np.clip(r, 0, 10.0)}``), and a literal put under its
-    key inside an ``if`` (``if diverged: results["rmse"] = 10.0``). A cap in a denominator (``x / max(n, 1)``) guards a
-    division and is not one. A key many quantities share (``mean``, ``max``) gives nothing. Unparseable code gives
-    nothing. Every other cap is left to :func:`clamp_constants`, which counts them all."""
+    """Constants a quantity named ``key`` is capped at from above right where it is reported: an upper cap
+    (:func:`_upper_cap`) in the value of a dict literal that reports it (``{"rmse": min(rmse, 10.0)}``), not inside a
+    denominator (``x / min(n, 1)`` guards a division). A key many quantities share (``mean``, ``max``) gives nothing,
+    and so does unparseable code. Every other cap, a floor or one set inside an ``if`` included, is left to
+    :func:`clamp_constants`, which counts them all for a value on a bound."""
     if not key or key.lower() in _GENERIC_KEYS:
         return set()
     try:
@@ -368,40 +382,21 @@ def direct_caps(code: str, key: str) -> set[float]:
             v = names.get(node.id)
         return v
 
-    def denominators(expr: ast.AST) -> set[int]:
-        return {id(n) for b in ast.walk(expr) if isinstance(b, ast.BinOp)
-                and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
-
-    def caps_in(expr: ast.AST) -> set[float]:
-        guarded = denominators(expr)
-        out: set[float] = set()
-        for n in ast.walk(expr):
-            if not isinstance(n, ast.Call) or id(n) in guarded:
-                continue
-            fn = n.func
-            name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else "")
-            if name not in _DIRECT_CAP_CALLS:
-                continue
-            for arg in (*n.args, *(k.value for k in n.keywords if k.arg in _BOUND_KEYWORDS)):
-                v = value(arg)
-                if v is not None:
-                    out.add(v)
-        return out
-
     found: set[float] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Dict):
-            for k, v in zip(node.keys, node.values):
-                if isinstance(k, ast.Constant) and k.value == key and v is not None:
-                    found |= caps_in(v)
-        elif isinstance(node, ast.If):
-            for inner in (*node.body, *node.orelse):
-                if (isinstance(inner, ast.Assign) and len(inner.targets) == 1
-                        and isinstance(inner.targets[0], ast.Subscript)
-                        and isinstance(inner.targets[0].slice, ast.Constant) and inner.targets[0].slice.value == key):
-                    lit = value(inner.value)  # a literal, or a name bound to one (``CAP = 10.0``)
-                    if lit is not None:
-                        found.add(lit)
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if not (isinstance(k, ast.Constant) and k.value == key and v is not None):
+                continue
+            guarded = {id(n) for b in ast.walk(v) if isinstance(b, ast.BinOp)
+                       and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
+            for n in ast.walk(v):
+                if isinstance(n, ast.Call) and id(n) not in guarded:
+                    bound = _upper_cap(n)
+                    c = value(bound) if bound is not None else None
+                    if c is not None:
+                        found.add(c)
     return found
 
 
@@ -769,7 +764,6 @@ def violations(
         # Every cap in the script counts for a value on a bound, as before. A value exactly on a cap written right where
         # this quantity is reported is rejected even inside the range (an RMSE capped at 10 and reported as 10).
         own = direct_caps(code, a.path.split(".")[-1].strip("*[]")) if code else set()
-        caps = clamps | own
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for tokens, path, value in leaves:
@@ -785,7 +779,7 @@ def violations(
                 elif own and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in own):
                     # Inside the range, but exactly on a constant the script caps this very quantity at.
                     out.append(Violation(path, value, a, kind="clamped"))
-            elif caps and _pinned(value, a, caps):
+            elif clamps and _pinned(value, a, clamps):
                 out.append(Violation(path, value, a, kind="clamped"))
             elif bound != 0 or value == 0:
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
