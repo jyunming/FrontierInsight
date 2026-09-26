@@ -1104,6 +1104,32 @@ def make_app(
         )
         return HTMLResponse(injected)
 
+    @app.get("/api/quests/{quest_id}/rerun-steps")
+    async def rerun_steps(quest_id: str) -> JSONResponse:
+        """The steps this quest reached, each with what running it again from there does: the ones the Redo menu
+        offers (the same list as ``launch.py --resume <id> --from`` with no step). Reads the checkpoints only."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        yaml_path = quest_root / "config.yaml"
+        if not yaml_path.is_file() or not (quest_root / ".fi" / "state.sqlite").is_file():
+            return JSONResponse({"quest_id": quest_id, "steps": []})
+        from core import rerun_from as _rerun_from
+        from core.config import Config
+        from core.engine import Engine, _close_quest_logger
+
+        cfg = Config.from_yaml(yaml_path)
+        cfg.output.output_dir = quest_root.parent
+        try:
+            steps = await Engine(cfg, resume_quest_id=quest_id).rerun_steps()
+        finally:
+            # The Engine opened the quest's log files for this process; nothing is logged, so they are closed now.
+            _close_quest_logger(quest_id)
+        return JSONResponse({
+            "quest_id": quest_id,
+            "steps": [{"step": step, "redoes": _rerun_from.REDOES[step]} for step in steps],
+        })
+
     @app.post("/api/quests/{quest_id}/resume")
     async def resume_quest(quest_id: str, rerun: bool = False, from_step: str = Query("", alias="from")) -> JSONResponse:
         """Spawn ``python launch.py --config <quest_root>/config.yaml

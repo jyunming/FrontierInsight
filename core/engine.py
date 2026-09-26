@@ -44,7 +44,19 @@ ClarifyCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 # and returns ``{"action": <accept|reject|refine>, "feedback": "..."}``.
 HumanFeedbackCallback = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+import warnings
+
+# langchain_core adds its own "always show" filter for its deprecation warnings when it is first imported: imported first,
+# so the one below comes before it.
+import langchain_core._api.deprecation  # noqa: E402,F401
+
+with warnings.catch_warnings():
+    # langgraph's checkpoint serializer builds langchain_core's Reviver at import without `allowed_objects`, which warns
+    # that the default will change. FI's checkpoints hold only plain state (dicts, lists, text, numbers), never a
+    # LangChain object, so the new default does not touch them. Only this warning, only for this import: it was printed
+    # before even `--help`.
+    warnings.filterwarnings("ignore", message=r"The default value of `allowed_objects` will change")
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
@@ -748,7 +760,8 @@ class Engine:
                             self._log.warning("[run] --from %s: this quest never reached that step", from_step)
                             print(f"[FI] quest {self.quest_id} never reached the {from_step} step, so there is nothing "
                                   f"to rerun from there; nothing was changed. Resume it with "
-                                  f"`python launch.py --resume {self.quest_id}`.")
+                                  f"`python launch.py --resume {self.quest_id}`; "
+                                  f"`--resume {self.quest_id} --from` with no step lists the steps it did reach.")
                             return self._collect_artifacts({})
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
@@ -1562,6 +1575,22 @@ class Engine:
             return chosen
 
         return wrapper
+
+    async def rerun_steps(self) -> list[str]:
+        """The steps this quest reached, which ``--from`` can run it again from (read from its checkpoint history; no
+        model call, nothing written)."""
+        import aiosqlite
+
+        path = self.fi_dir / "state.sqlite"
+        if not path.is_file():
+            return []
+        # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
+        # own setup would write to its database.
+        async with aiosqlite.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+            saver = AsyncSqliteSaver(conn)
+            saver.is_setup = True
+            graph = self._build_graph().compile(checkpointer=saver)
+            return await _rerun_from.reached(graph, {"configurable": {"thread_id": self.quest_id}})
 
     # ---- graph topology --------------------------------------------------
 

@@ -312,7 +312,7 @@ You can also pass the quest_id directly:
 @fi /resume 1778650105-mammal-evolution-69ef80
 ```
 
-To do a quest again from one of its steps, add `--from` and the step: `code`, `run`, `analysis`, `writing` or `review`. `@fi /resume 1778650105-mammal-evolution-69ef80 --from writing` writes the paper again from the same results. What that step and the later ones made is first moved to `.fi/previous/<time>/`, so you can compare. To change the plan itself, use `@fi /plan <quest_id> <what to change>`.
+To do a quest again from one of its steps, add `--from` and the step: `code`, `run`, `analysis`, `writing` or `review` (`@fi /resume <quest_id> --from` with no step lists the ones that quest reached). `@fi /resume 1778650105-mammal-evolution-69ef80 --from writing` writes the paper again from the same results. What that step and the later ones made is first moved to `.fi/previous/<time>/`, so you can compare. To change the plan itself, use `@fi /plan <quest_id> <what to change>`.
 
 A quest can also be run in two steps, the literature first and the experiment second: set `pauses.supply: after_literature` in its YAML, or answer *Pause after literature* in the `@fi /new` interview. The quest stops once the literature is saved (`data/literature/`, and `NEXT_STEP.md` says what to do); add papers to `inputs/papers/`, data to `inputs/data/` or your own simulation files to `inputs/examples/`, then `@fi /resume <quest_id>` runs skills, design and the experiment with that literature in hand, without searching again.
 

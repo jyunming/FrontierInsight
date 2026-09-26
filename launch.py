@@ -336,6 +336,10 @@ Less common
 """
 
 
+# `--from` given with no value: list the steps the quest can be run again from.
+_LIST_STEPS = "<list the steps>"
+
+
 def _config_from_quest(p: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """``--resume ID`` (or ``--watch ID``) without ``--config``: use the ``config.yaml`` the quest saved in its own folder.
 
@@ -636,9 +640,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--from",
         dest="teach_from",
         metavar="STEP|MODULE",
+        nargs="?",
+        const=_LIST_STEPS,
         default="",
         help="With --resume or --rerun: the step to run again from — code, run, analysis, writing or review; "
-             "what that step and the later ones made is first moved to .fi/previous/<time>/. With --teach-skill: "
+             "what that step and the later ones made is first moved to .fi/previous/<time>/. Given with no step, "
+             "lists the steps this quest reached, which are the ones it can be run again from. With --teach-skill: "
              "the importable module the skill wraps, e.g. `ambit`.",
     )
     mode.add_argument(
@@ -1857,6 +1864,15 @@ def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:
         return
 
 
+async def _list_rerun_steps(cfg: Config, quest_id: str, *, supervisor: ProxySupervisor) -> int:
+    """``--resume <id> --from`` with no step: the steps this quest reached, each with what running again from it does."""
+    from core import rerun_from as _rerun_from
+
+    engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
+    print(_rerun_from.listing(engine.quest_id, await engine.rerun_steps()))
+    return 0
+
+
 async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxySupervisor) -> int:
     """``--watch``: re-run the paused quest's experiment script on a timer until
     the job it submitted is no longer pending, then resume the quest.
@@ -2551,17 +2567,21 @@ async def main_async(args: argparse.Namespace) -> int:
         args.resume = args.rerun
     # --from names the step to rerun from when it comes with --resume / --rerun (with --teach-skill it names a module).
     _from_step: str | None = None
+    _list_steps = args.teach_from == _LIST_STEPS
+    if _list_steps and getattr(args, "teach_skill", ""):
+        args.teach_from, _list_steps = "", False  # --teach-skill asks for its module as before
     if args.teach_from and not args.resume and not getattr(args, "teach_skill", ""):
         print("[FI] --from names the step to run a quest again from, so it needs --resume <quest_id> (or --rerun); "
               "with --teach-skill it names a module.", file=sys.stderr)
         return 2
-    if args.teach_from and args.resume and not getattr(args, "teach_skill", ""):
+    if args.teach_from and args.resume and not getattr(args, "teach_skill", "") and not _list_steps:
         from core import rerun_from as _rerun_from
 
         _from_step = _rerun_from.resolve(args.teach_from)
         if _from_step is None:
             print(f"[FI] --from {args.teach_from!r} is not a step this quest can be rerun from; choose one of: "
-                  f"{_rerun_from.choices()}. (To change the plan, use --revise-plan.)", file=sys.stderr)
+                  f"{_rerun_from.choices()}; `--from` with no step lists the ones this quest reached. "
+                  "(To change the plan, use --revise-plan.)", file=sys.stderr)
             return 2
     # Ensure Axon sidecar is up before anything that touches the
     # knowledge layer. Idempotent: returns fast if already running.
@@ -2580,6 +2600,8 @@ async def main_async(args: argparse.Namespace) -> int:
         or bool(getattr(args, "approve_amendment", ""))
         or bool(getattr(args, "trace", ""))
         or bool(getattr(args, "why", None))
+        # Listing the steps a quest can be run again from reads its checkpoints only.
+        or _list_steps
     )
     if args.no_axon_sidecar:
         # The web server starts the service again for itself (web.server._ensure_axon_sidecar), and it reads the
@@ -2862,6 +2884,8 @@ async def main_async(args: argparse.Namespace) -> int:
                 return await _revise_plan_once(
                     cfg, args.resume, args.revise_plan, supervisor=supervisor,
                 )
+            if _list_steps:
+                return await _list_rerun_steps(cfg, args.resume, supervisor=supervisor)
             if args.emit:
                 if not args.resume:
                     print("[FI] --emit requires --resume <quest_id>",
