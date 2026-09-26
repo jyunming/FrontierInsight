@@ -1182,3 +1182,6 @@ def test_a_reading_picked_for_relevance_keeps_its_label_and_a_readings_only_sour
     assert excerpt.index(_FIGURE_READINGS_MARK) < excerpt.index("99%"), "a reading never reaches a prompt unlabelled"
     only_readings = "\n\n" + _FIGURE_READINGS_MARK + "\n\n" + readings * 20
     assert _thin_source({"title": "t"}, only_readings) == "title"
+    # Room the source's own text leaves goes to its readings.
+    short = "Short abstract.\n\n" + _FIGURE_READINGS_MARK + "\n\n" + ("r" * 900)
+    assert _format_lit_excerpt(short, "t", budget=1000).count("r") >= 800

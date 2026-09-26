@@ -12047,7 +12047,8 @@ def _format_lit_excerpt(
     # What a model read off the source's figures is excerpted apart from the source's own text and always shown under
     # its label: a passage picked for relevance must never carry a reading without the words saying what it is.
     content, readings = _split_figure_readings(content)
-    readings_budget = min(len(readings), budget // 4) if readings.strip() else 0
+    # A quarter of the budget, or all the source's own text leaves unused.
+    readings_budget = min(len(readings), max(budget // 4, budget - len(content))) if readings.strip() else 0
 
     def pick(text: str, room: int) -> str:
         if query and len(text) > room:
