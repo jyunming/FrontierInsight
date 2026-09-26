@@ -274,3 +274,18 @@ def test_the_protocol_check_still_catches_a_contradiction_under_the_trial_contra
     wrong = "R0_LIST = [0.9, 2.0, 5.0]\nNUM_RUNS = 30\nprint(R0_LIST, NUM_RUNS)\n"
     found = protocol_check.check(protocol, {"simulate.py": sim, "experiment.py": wrong})
     assert {m.kind for m in found} >= {"grid", "runs"}, found
+
+
+def test_a_value_printed_to_fewer_places_matches_the_trial_it_rounds_from() -> None:
+    from collections import Counter
+
+    from core.trial_runner import _not_among, _value_key
+
+    def rec(xs):
+        return Counter(_value_key(x) for x in xs)
+
+    assert _not_among([1.2, 1.23], rec([1.234, 1.24])) == [], "the precise one is matched first"
+    assert _not_among([0.0], rec([1e-05])) == [] and _not_among([1], rec([1.4])) == []
+    assert _not_among([1.2346], rec([1.23456789])) == []
+    assert _not_among([2], rec([1.4])) == [2.0] and _not_among([5.0], rec([1.0])) == [5.0]
+    assert _not_among([1.0, 1.0], rec([1.0])) == [1.0], "each trial's value is used once"

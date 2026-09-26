@@ -540,12 +540,24 @@ def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
     return out, problems
 
 
+def _half_step(x: Any) -> float:
+    """Half the last printed place of ``x``: what rounding to it could have moved a value by. ``1.2346`` -> 0.00005,
+    ``0.0`` -> 0.05, ``1e-05`` -> 0.000005, an int -> 0.5."""
+    if isinstance(x, int) and not isinstance(x, bool):
+        return 0.5
+    text = repr(float(x))
+    mantissa, _, exponent = text.partition("e")
+    places = len(mantissa.split(".")[1]) if "." in mantissa else 0
+    return 0.5 * 10 ** (-(places - int(exponent or 0)))
+
+
 def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     """The numbers of ``values`` that are not trial values, each trial's value used once. A number printed to fewer
-    digits than the trial returned (``1.2346`` for ``1.23456789``) is that value: it matches a recorded value that
-    rounds to it at the digits it was printed with."""
+    places than the trial returned (``1.2346`` for ``1.23456789``, ``0.0`` for ``1e-05``, ``3`` for ``2.8``) is that
+    value: it matches a recorded value within half its last printed place. The most precise numbers are matched first,
+    each to the nearest value left, so a coarse one cannot take the value a precise one needed."""
     left = Counter(recorded)
-    pending: list[float] = []
+    pending: list[Any] = []
     for x in values:
         key = _value_key(x)
         if key is None:
@@ -553,20 +565,18 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
         if left[key] > 0:
             left[key] -= 1
         else:
-            pending.append(float(x))
+            pending.append(x)
     if not pending:
         return []
-    pool = sorted(float(k) for k, n in left.items() for _ in range(n) if n > 0)
+    pool = [float(k) for k, n in left.items() for _ in range(max(n, 0))]
     extra = []
-    for x in pending:
-        text = repr(x)
-        digits = len(text.split("e")[0].replace("-", "").replace(".", "").lstrip("0")) or 1
-        half = 0.5 * 10 ** (math.floor(math.log10(abs(x))) - digits + 1) if x and math.isfinite(x) else 0.0
-        match = next((i for i, v in enumerate(pool) if abs(v - x) <= half * (1 + 1e-9)), None)
-        if match is None:
-            extra.append(x)
+    for x in sorted(pending, key=_half_step):
+        value, half = float(x), _half_step(x)
+        near = [(abs(v - value), i) for i, v in enumerate(pool) if math.isfinite(v) and abs(v - value) <= half * (1 + 1e-9)]
+        if near:
+            pool.pop(min(near)[1])
         else:
-            pool.pop(match)
+            extra.append(value)
     return extra
 
 
