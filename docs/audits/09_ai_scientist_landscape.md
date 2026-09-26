@@ -1,5 +1,14 @@
 # 09 — AI Scientist Competitive Landscape
 
+> **Historical snapshot (May 2026).** Superseded where it describes FI as it is now; see
+> `sakana_strengths_reaudit_2026-09-26.md` in this folder. In particular these are no longer current facts:
+> "FI has no ideate tournament" (an optional one exists); "a pairwise tournament gives measurably better ranking"
+> (not measured in FI); "Sakana's tree search is high impact for FI" (a mechanism worth testing, impact unmeasured);
+> "FI is 3–8× cheaper with comparable output" (different scope, hardware, providers and success definitions);
+> "failures should never be written to any corpus" (not to accepted scientific evidence; a separate, context-scoped
+> record of attempts is planned); "no VLM figure refinement" (a grounded, advisory VLM check is worth having, never as
+> a correctness oracle).
+
 **Audit date:** 2026-05-15
 **Scope:** Where does FrontierInsight sit among end-to-end LLM research agents in May 2026, and what is actually worth borrowing?
 **Author:** parallel-worker 09

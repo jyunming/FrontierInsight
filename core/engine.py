@@ -723,6 +723,9 @@ class Engine:
             # silent-skip incident that motivated both this check and
             # the ``paper_pdf_skipped.md`` diagnostic.
             self._preflight_paper_pdf()
+            stopped = self._review_models_stop()
+            if stopped is not None:
+                return stopped
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
             await self.executor.setup(self.quest_root)
@@ -8687,6 +8690,8 @@ class Engine:
                 "drew; placed %s in the paper before the review",
                 len(placed), ", ".join(placed),
             )
+        if self.config.result_use == "explore":
+            markdown = _mark_preliminary(markdown)
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -10441,6 +10446,8 @@ class Engine:
                 "blocking": parsed.get("blocking") or "",
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
                 "status": "ok",
+                # Which model gave this review: panelists on one model are one reviewer's view in several roles.
+                "model": self._reviewer_model(name),
             }
 
         # return_exceptions=True is defense in depth: a panelist must never be
@@ -11351,6 +11358,46 @@ class Engine:
         if not node:
             return None
         return model_for_node(self.config.provider.node_models, node)
+
+    def _reviewer_model(self, persona: str) -> str:
+        """The model a review-panel persona is asked on: its own ``provider.node_models`` entry, else the quest's."""
+        return self._model_for_node(f"review_panel.{persona}") or self.config.provider.model or "(the provider's default)"
+
+    def _review_models_stop(self) -> QuestArtifacts | None:
+        """``rigor_profile: research``: the review panel needs at least one reviewer on a different model. Personas all
+        on one model are one model's view in several roles; its errors are shared, not caught. Stops before anything
+        runs and says how to give one persona another model (the person chooses which). ``None`` when there is one."""
+        if self.config.rigor_profile != "research" or not self.config.engine.review_panel:
+            return None
+        models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
+        if len(set(models.values())) > 1:
+            return None
+        only = next(iter(models.values()))
+        persona = "statistician" if "statistician" in models else next(iter(models))
+        self._log.warning("[review] stopped: every review-panel persona is on %s; research needs one on another model", only)
+        headline = "the review panel needs one reviewer on a different model"
+        self._write_next_step(
+            kind="review_models",
+            interaction="answer",
+            headline=headline,
+            steps=[
+                f"Nothing was run. Every reviewer on this research quest's panel ({', '.join(models)}) would be asked on "
+                f"the same model ({only}): one model's view in several roles, whose mistakes the others share.",
+                "Choose another model for one of them and add it to the quest's config.yaml, for example:\n"
+                f"  provider:\n    node_models:\n      review_panel.{persona}: <another model your provider offers>",
+                f"Then `python launch.py --resume {self.quest_id}`. (Without rigor_profile: research there is no such "
+                "requirement.)",
+            ],
+        )
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "pause.json").write_text(json.dumps({
+                "kind": "review_models", "interaction": "answer", "quest_id": self.quest_id, "headline": headline,
+                "next_step_file": "NEXT_STEP.md", "upload_targets": [],
+            }, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return self._collect_artifacts({})
 
     async def _preflight_required_skills(self) -> None:
         """A skill named in ``engine.skills_required`` that cannot be used stops
@@ -14632,6 +14679,23 @@ def _replicate_line_figure(
         "file": name, "size": runs[0].get("size"), "suptitle": _redrawn_band_text(runs[0].get("suptitle") or "", len(runs)),
         "n": len(runs), "axes": panels,
     }
+
+
+#: The line an exploration's paper carries under its title (what the result is for: explore, or not said).
+PRELIMINARY_NOTE = (
+    "> **Preliminary result.** This quest was set up to explore, or did not say what its result is for, so what it "
+    "found is a first look, not a publication-ready result. Run it again for research (`result_use: research`) to "
+    "check it."
+)
+
+
+def _mark_preliminary(markdown: str) -> str:
+    """``markdown`` with :data:`PRELIMINARY_NOTE` under its title (at the top when there is none), once."""
+    if PRELIMINARY_NOTE in markdown:
+        return markdown
+    lines = markdown.split("\n")
+    at = next((i + 1 for i, line in enumerate(lines) if line.startswith("# ")), 0)
+    return "\n".join([*lines[:at], "", PRELIMINARY_NOTE, "", *lines[at:]])
 
 
 def _result_comparison_stats(

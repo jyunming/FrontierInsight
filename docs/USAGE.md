@@ -203,8 +203,14 @@ title: integrator-bakeoff
 # one of those to the opposite is refused with the key named. Default: default (nothing changes). The interview sets it
 # from "What is the result for?": research (the default answer) or a decision writes research; exploring leaves it at
 # default and writes the draft's three cheaper engine settings (ideate_reflect: false, cross_check_per_finding_k: 0,
-# enable_analyze_reroute: false), the same on every interface. See docs/rigor.md.
+# enable_analyze_reroute: false), the same on every interface. research also keeps the decision trace on and needs one
+# reviewer on a model other than the rest (provider.node_models["review_panel.<role>"]); a panel all on one model stops
+# the quest before it runs, saying how to set one. See docs/rigor.md.
 rigor_profile: default
+# What the result is for: explore, research or decision (the interview writes it). Left out, the quest is an
+# exploration: it runs, its paper opens with a note that the result is preliminary, and it never reaches
+# publication-ready (with rigor_profile: research, left out means research).
+result_use: explore
 
 provider:
   name: vscode_extension           # see PROVIDERS.md
