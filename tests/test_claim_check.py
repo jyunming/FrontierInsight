@@ -1080,3 +1080,64 @@ def test_the_evidence_block_stays_within_its_budget() -> None:
     # every one of them in the heading would itself overrun the budget.
     assert len(distilled) <= budget
     assert len(distilled) + len(results) <= budget
+
+
+def test_the_check_sees_how_the_study_was_run_and_the_results_the_paper_quotes(tmp_path: Path) -> None:
+    """A real run had true method sentences (the generator, the solver, 10,000 oracle trials) and per-setting values
+    called unsupported: the check was given neither the scripts nor the branch of the results the paper quoted."""
+    from core import frozen_protocol
+
+    eng = _engine(tmp_path)
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text(
+        "rng = np.random.Generator(np.random.PCG64(seed))\nORACLE_TRIALS = 10_000\n", encoding="utf-8")
+    frozen_protocol.freeze(tmp_path, {"grid": {"R0": [1.5, 3.0]}, "runs_per_setting": 300},
+                           approved_by="test", source="test")
+    # The engine judged the oracle and it passed, while the script's own results (read from the wrong folder) say not.
+    (tmp_path / "needs").mkdir(exist_ok=True)
+    (tmp_path / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
+        {"name": "two_person_exact", "value": 0.6, "expected": 0.6, "limit": 0.01, "passed_by_engine": True}]}]}),
+        encoding="utf-8")
+    seen: list[str] = []
+
+    async def fake_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
+        seen.append(prompt)
+        return '{"claims": [], "summary": ""}'
+    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
+    # A results tree too big for the budget: the paper quotes the per-setting branch, the findings do not mention it.
+    results = {f"outbreak_growth_{i}": {"values": [0.001 * i + k for k in range(9)], "note": "outbreak growth " * 30}
+               for i in range(60)}
+    results["tbl"] = {f"cell_{k}": {"p": round(0.6931 + k * 1e-4, 4), "desc": "setting value " * 20} for k in range(20)}
+    state = {
+        "topic": "t", "paper_md": _paper(tmp_path, "# Paper\n\nIn cell_7 the tbl value p was 0.6938.\n"),
+        "analysis": {"key_findings": ["outbreak growth"]}, "result_json": results,
+        "figures": ["p.png"], "figure_records": {"p.png": {"file": "p.png", "axes": [
+            {"title": "T", "ylabel": "y", "yscale": "linear", "ylim": [0, 1],
+             "series": [{"label": "R0 = 1.5", "min": 0.2, "max": 0.2, "shows": "flat"}]}]}},
+    }
+    asyncio.run(eng._node_claim_check(state))  # type: ignore[arg-type]
+    (prompt,) = seen
+    assert "PCG64" in prompt and "ORACLE_TRIALS = 10_000" in prompt
+    assert '"runs_per_setting": 300' in prompt
+    assert "figures/p.png" in prompt and "FLAT" in prompt
+    assert "- two_person_exact: measured 0.6, expected 0.6 within 0.01: passed" in prompt
+    assert "These verdicts are the ones that count" in prompt
+    assert "0.6938" in prompt.split("## How the study was run")[0]  # in the results, not only in the paper
+
+
+def test_a_rewrite_is_told_which_citations_the_check_confirmed() -> None:
+    """A rewrite for the page limit dropped a citation the check had confirmed (Whittle 1955) and cited title-only books."""
+    from core.engine import _format_review_for_writer
+
+    state = {
+        "review": {"verdict": "revise", "must_flag_hits": ["over_page_limit: cut about 200 words"]},
+        "claim_grounding": {"claims": [
+            {"claim": "Below threshold no major outbreak occurs.", "basis": "citation", "citation_index": 4},
+            {"claim": "p_major was 0.36 at R0 = 1.5.", "basis": "experiment", "citation_index": None},
+            {"claim": "An uncited aside.", "basis": "unsupported", "citation_index": None},
+        ], "unsupported": ["An uncited aside."]},
+    }
+    text = _format_review_for_writer(state)  # type: ignore[arg-type]
+    assert "Citations the check confirmed" in text and "[4] for: Below threshold no major outbreak occurs." in text
+    assert "p_major was 0.36" not in text
+    assert "Citations the check confirmed" not in _format_review_for_writer({"claim_grounding": state["claim_grounding"]})  # type: ignore[arg-type]
