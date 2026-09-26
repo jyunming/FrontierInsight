@@ -137,12 +137,15 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
 
     With nothing recorded yet: an interview-written config (``quest_root/config.yaml`` starts with the interview's
     header) is recorded now, as it was approved on the confirm screen; any other config is left unrecorded. A record
-    that cannot be read is treated as missing and written again, never as a difference.
+    that is there but cannot be read (not JSON, another schema, its fields missing) is a difference of its own, never
+    written again: rewriting it would approve whatever the config says now, weaker or not. Only ``--update``, which
+    shows the settings to the person, records them again.
 
     A setting the config file neither set when it was approved nor sets now took FI's default, and a newer FI may
     have changed that default: not an edit anyone made, so it is recorded as it is now instead of stopping the quest.
     Removing a line counts as an edit (it was set, and is not now)."""
     path = fi_dir / NAME
+    present = path.is_file()
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         approved = data["settings"] if data.get("schema") == SCHEMA else None
@@ -150,6 +153,9 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
         explicit = set(data["explicit"]) if isinstance(data.get("explicit"), list) else {p for p, _label in SETTINGS}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         approved, explicit = None, set()
+    if present and not isinstance(approved, dict):
+        return [f"the record of the settings this quest was approved with ({path}) cannot be read, so a change since "
+                f"then cannot be told from none; approve the settings again with --update"]
     if not isinstance(approved, dict):
         try:
             written_by_interview = (quest_root / "config.yaml").read_text(encoding="utf-8").startswith(INTERVIEW_MARK)

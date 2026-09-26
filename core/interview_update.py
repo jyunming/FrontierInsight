@@ -325,6 +325,20 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
         say("")
         say("No earlier record of the settings this quest was approved with; approving them as they are now.")
     plan_settings.record(fi_dir, cfg, quest_root)
+    # The approval, by its hash, in the quest's hash-chained trace: the engine checks the record against the last one.
+    try:
+        import hashlib
+
+        from core import audit_log
+
+        trace = fi_dir / "audit.jsonl"
+        if trace.is_file():
+            audit_log.AuditLog(trace, quest_root.name).append(
+                "plan_settings_recorded", node="update",
+                sha256=hashlib.sha256((fi_dir / plan_settings.NAME).read_bytes()).hexdigest(),
+            )
+    except OSError:
+        pass
     return changed
 
 

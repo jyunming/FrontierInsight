@@ -167,3 +167,25 @@ def read(quest_root: Path, check: str) -> tuple[str, dict[str, Any] | None, str]
                              or not _is_hash(record.get("output_hash"))):
         return "unknown", None, "its record names nothing it judged"
     return str(status), record, ""
+
+
+def gate_inputs(state: Any) -> dict[str, Any]:
+    """What the evidence gate weighs, for its receipt, its one stop and the check that the receipt is still for them:
+    the analysis, the cross-check, the results, the protocol and the sources (by title and link)."""
+    sources = [
+        [str((i.get("metadata") or {}).get(k) or "") for k in ("title", "url", "doi")]
+        for i in (state.get("literature") or []) if isinstance(i, dict)
+    ]
+    return {
+        "analysis": state.get("analysis") or {}, "cross_check": state.get("cross_check") or {},
+        "results": state.get("result_json") or {}, "protocol": (state.get("design") or {}).get("protocol") or {},
+        "sources": sources, "topic": state.get("topic") or "",
+    }
+
+
+def stale_inputs(record: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """The inputs a receipt was made for that are not the ones there are now: each key of ``current`` whose SHA-256
+    differs from the one the receipt holds, or that the receipt does not hold at all. A check that judged something
+    else does not stand for what is there now."""
+    held = record.get("input_hashes") or {}
+    return [k for k, v in current.items() if held.get(k) != sha256(v)]
