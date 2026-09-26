@@ -205,3 +205,16 @@ async def test_agy_opens_the_images_from_files_its_prompt_names_and_the_folder_i
     first, second = str(seen["folder"] / "image_1.png"), str(seen["folder"] / "image_2.png")
     assert prompt.index(first) < prompt.index(second) < prompt.index("Name the shapes.")
     assert not seen["folder"].exists(), "the images and their folder are removed after the call"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_that_cannot_be_encoded_leaves_no_agy_image_folder(tmp_path: Path) -> None:
+    import tempfile
+
+    before = set(Path(tempfile.gettempdir()).glob("fi_cli_images_*"))
+    with patch("core.provider.shutil.which", return_value="/usr/bin/agy"), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+        with pytest.raises(UnicodeEncodeError):
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "a lone surrogate \ud800", images=[("image/png", PNG)])
+    spawn.assert_not_awaited()
+    assert set(Path(tempfile.gettempdir()).glob("fi_cli_images_*")) == before

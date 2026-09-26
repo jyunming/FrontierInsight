@@ -1729,9 +1729,14 @@ async def _run_cli(
                 argv.extend(flags)
         elif spec.image_input == "file_ref" and spec.add_dir_flag:
             image_dir = Path(tempfile.mkdtemp(prefix="fi_cli_images_"))
-            for n, (mime, data) in enumerate(images, 1):
-                image_paths.append(image_dir / f"image_{n}{_IMAGE_SUFFIXES.get(mime, '.png')}")
-                image_paths[-1].write_bytes(data)
+            try:
+                for n, (mime, data) in enumerate(images, 1):
+                    image_paths.append(image_dir / f"image_{n}{_IMAGE_SUFFIXES.get(mime, '.png')}")
+                    image_paths[-1].write_bytes(data)
+            except BaseException:
+                # Before the call's own try/finally: a failed write (a full disk) leaves no folder behind.
+                shutil.rmtree(image_dir, ignore_errors=True)
+                raise
             argv.extend([spec.add_dir_flag, str(image_dir)])
             # The images, in the order the request refers to them: the first file is the first image it mentions.
             prompt = (
@@ -1764,11 +1769,19 @@ async def _run_cli(
         argv.append(prompt)
         stdin_bytes: bytes | None = None
     else:  # stdin
-        if images and spec.image_input == "stream_json":
-            payload = _encode_claude_stream_json(prompt, images)
-        else:
-            payload = spec.stdin_encoder(prompt) if spec.stdin_encoder else prompt
-        stdin_bytes = payload.encode("utf-8")
+        try:
+            if images and spec.image_input == "stream_json":
+                payload = _encode_claude_stream_json(prompt, images)
+            else:
+                payload = spec.stdin_encoder(prompt) if spec.stdin_encoder else prompt
+            stdin_bytes = payload.encode("utf-8")
+        except BaseException:
+            # Still before the call's own try/finally: the image files written above go with the failure.
+            for image_path in image_paths:
+                image_path.unlink(missing_ok=True)
+            if image_paths and image_paths[0].parent.name.startswith("fi_cli_images_"):
+                shutil.rmtree(image_paths[0].parent, ignore_errors=True)
+            raise
 
     # When the real answer lands in `tmp_out_path`, the CLI's stdout is just
     # an agent log; capturing it into a PIPE for a long prompt wastes memory,
