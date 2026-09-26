@@ -1936,8 +1936,19 @@ def _write_cli_home(home: Path, settings: dict[str, Any]) -> None:
 #: conversations folder in a fresh home, ...), and one of those shown with a failure would read as its cause.
 _AGY_FAILURE_LINES = (
     "Print mode: run ended with error",
-    "Print mode: silent auth failed",
+    "Print mode: turn ended with error after partial response",
+    "Print mode: stream failed before the cascade started",
+    "Print mode: timed out waiting for cascade to start running",
+    "Print mode: print timeout after",
+    "Print mode: SendUserMessage failed",
+    "Print mode: WaitForConversationFullyIdle failed",
     "Print mode: conversation update stream failed",
+    "Print mode: not logged in and no controlling terminal",
+    "Print mode: silent auth failed",
+    "Print mode: auth error",
+    "Print mode: auth timed out",
+    "Print mode: auth cancelled or interrupted",
+    "Print mode: eligibility check failed",
 )
 
 
