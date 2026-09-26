@@ -1546,6 +1546,9 @@ class Config(BaseModel):
     # profile does not name are left as they are. A config that sets one of these to the opposite is refused, naming the key:
     # the profile is a guarantee, and a later line of YAML must not take it apart quietly. ``default``: nothing changes.
     rigor_profile: Literal["default", "research"] = "default"
+    # What the result is for, as the interview asked it (explore / research / decision; empty for a config written by
+    # hand). Kept because it bounds the evidence: an exploration's result is preliminary, never publication-ready.
+    result_use: Literal["", "explore", "research", "decision"] = ""
 
     @model_validator(mode="before")
     @classmethod

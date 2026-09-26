@@ -225,6 +225,12 @@ def assess(
     elif isinstance(warnings, list) and warnings and settings.get("numeric_warnings") == "warn":
         matched_gaps.append("the run's numerics warned and the check only recorded it (engine.numeric_warnings: warn)")
     environment = _json(needs / "ENVIRONMENT.json")
+    if isinstance(environment, dict) and environment.get("packages_error"):
+        # Not "no packages": which packages the run had is unknown, so it cannot be set up again as it ran.
+        matched_gaps.append(
+            "the packages the run had could not be listed, so its environment cannot be reproduced "
+            f"({str(environment['packages_error'])[:160]}; see needs/ENVIRONMENT.json)"
+        )
     if isinstance(environment, dict) and environment.get("isolated") is False:
         matched_gaps.append(
             "the run shared its Python environment with other quests (execution.shared_interpreter / "
@@ -294,6 +300,12 @@ def assess(
             ready_gaps.append(f"the review verdict is {review.get('verdict') or 'not accept'}")
         if review.get("must_flag_hits"):
             ready_gaps.append(f"the review left {len(review['must_flag_hits'])} must-fix finding(s)")
+    # A quest set up to explore: its result is preliminary whatever it passed (the person said so at the start).
+    if settings.get("result_use") == "explore":
+        ready_gaps.append(
+            "this quest was set up to explore (what the result is for: explore), so its result is preliminary: run it "
+            "again for research to make it publication-ready"
+        )
     # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),

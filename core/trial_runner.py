@@ -212,11 +212,13 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
     out = []
     for run in runs:
         metrics: dict[str, list[float]] = {}
+        trials_of: dict[str, list[int]] = {}
         for row in run.rows:
             if row.get("status") != "ok":
                 continue
             for name, value in (row.get("values") or {}).items():
                 metrics.setdefault(name, []).append(value)
+                trials_of.setdefault(name, []).append(row.get("trial"))
         out.append({
             "cell": run.cell,
             "key": run.key,
@@ -226,6 +228,8 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
             "metrics": {
                 name: {
                     "values": values,
+                    # The trial each value came from (FI's own number): what a paired design joins on.
+                    "trials": trials_of.get(name, []),
                     "count": len(values),
                     "total": math.fsum(v for v in values if math.isfinite(v)),
                     "non_finite": sum(1 for v in values if not math.isfinite(v)),

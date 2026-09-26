@@ -432,9 +432,44 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
     if computed.get("unsupported"):
         first = computed["unsupported"][0]
         gaps.append(f"{len(computed['unsupported'])} estimate(s) or contrast(s) could not be made (first: {first['id']}: {first['reason']})")
+    by_position = [c for c in computed.get("contrasts") or [] if c.get("paired_id_verified") is False]
+    if by_position:
+        gaps.append(
+            f"{len(by_position)} paired contrast(s) joined the two settings' trials by their position in the lists, not by "
+            "a pair id (`<id>_pair_id`): a trial missing or out of order pairs the wrong trials"
+        )
     if computed.get("contrasts") and not computed.get("contrasts_prespecified"):
         gaps.append(
             "the protocol names no prespecified contrasts, so every pairwise comparison of each factor's settings was "
             "computed after the fact (protocol.contrasts can fix the comparisons before the results are seen)"
         )
     return gaps
+
+
+def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[str]:
+    """The paired metrics whose per-trial values the results print with no ``<id>_pair_id`` beside them: one sentence
+    each. Without an id a paired comparison can only join trials by position (``rigor_profile: research`` stops for
+    this; otherwise it is a gap in the evidence)."""
+    names: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(key, str):
+                    names.add(key)
+                walk(value)
+        elif isinstance(node, list):
+            for value in node[:200]:
+                walk(value)
+
+    walk(result_json)
+    out = []
+    for spec in declared(protocol):
+        mid = spec.get("id")
+        if spec.get("paired") and f"{mid}_values" in names and f"{mid}_pair_id" not in names:
+            out.append(
+                f"the paired metric `{mid}` prints `{mid}_values` with no `{mid}_pair_id` beside them: print, beside "
+                f"each `{mid}_values`, the trial each value came from as `{mid}_pair_id` (FI_TRIALS gives it: "
+                f"`metrics[...][\"trials\"]`), so the two settings' trials are joined by id, not by position"
+            )
+    return out
