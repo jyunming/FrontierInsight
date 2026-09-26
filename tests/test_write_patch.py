@@ -29,6 +29,8 @@ from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
 )
 from core.engine import (
+    PRELIMINARY_NOTE,
+    _mark_preliminary,
     Engine, _aggregate_cost_rows, _finalize_paper_sources, _hit_name, _paper_basis, build_references,
     cited_references,
 )
@@ -484,7 +486,10 @@ def test_through_the_graph_the_second_write_edits_the_first(tmp_path: Path) -> N
     assert client.nodes == ["write", "write.patch"]
     final = graph.get_state(config).values
     first = _finalize_paper_sources(DRAFT, LIT, "external")[0]
-    assert Path(final["paper_md"]).read_text(encoding="utf-8") == first.replace(CLAIM, NEW_CLAIM)
+    # The config does not say what the result is for, so the paper is an exploration's: marked preliminary once.
+    written = Path(final["paper_md"]).read_text(encoding="utf-8")
+    assert written == _mark_preliminary(first.replace(CLAIM, NEW_CLAIM))
+    assert written.count(PRELIMINARY_NOTE) == 1
     assert final["paper_basis"] == _paper_basis(_study())  # type: ignore[arg-type]
 
 
