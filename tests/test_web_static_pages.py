@@ -1369,3 +1369,12 @@ def test_generalized_upload_targets(tmp_path: Path) -> None:
     # Unknown target → 400.
     assert client.post(f"/api/quests/{qid}/upload", data={"target": "nope"},
                        files=[("files", ("x.csv", io.BytesIO(b"x"), "text/csv"))]).status_code == 400
+
+
+def test_redoing_a_step_is_offered_at_an_answer_pause_too() -> None:
+    """A paper waiting for review can be written again from the web: the step menu shows at an answer pause, and its
+    button (Redo) appears once a step is chosen; going on from where it stopped is still that pause's own form."""
+    page = (Path(__file__).resolve().parent.parent / "web" / "static" / "quest.html").read_text(encoding="utf-8")
+    assert "menu.classList.toggle('hidden', !(resumable || questAnswerPaused))" in page
+    assert "btn.classList.toggle('hidden', !(resumable || (questAnswerPaused && step)))" in page
+    assert "'Redo from a step…'" in page and 'onchange="showResumeButton(questResumable)"' in page
