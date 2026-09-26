@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 import math
 import re
 import time
@@ -484,3 +485,87 @@ def read_ledger(quest_root: Path) -> list[dict[str, Any]] | None:
             rows.append({"cell": row.get("cell"), "trial": row.get("trial"), "status": row.get("status"),
                          **({"reason": row["reason"]} if row.get("reason") else {})})
     return rows
+
+
+def _value_key(v: Any) -> str | None:
+    """A number as the ledger and a JSON round trip both keep it (12 significant digits), or ``None`` if not a number."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return f"{float(v):.12g}"
+
+
+def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
+    """Every value FI's trials returned, per name (the keys of ``run_trial``'s dict), counted, and what stood in the way.
+
+    The values are in FI's run record (``.fi/trials/run.json``, each trial's dict as the harness reported it); each
+    trial's dict is checked against the hash FI's ledger holds for it, so a record edited after the trials ran is found
+    rather than believed. Only trials that ran to the end count."""
+    root = Path(quest_root)
+    try:
+        record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, []
+    hashes: dict[tuple[str, int], str] = {}
+    try:
+        for line in (root / RAW_DIRNAME / LEDGER_NAME).read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok":
+                hashes[(str(row.get("cell")), int(row.get("trial") or 0))] = str(row.get("values_sha256") or "")
+    except OSError:
+        return {}, []
+    out: dict[str, Counter] = {}
+    altered = 0
+    for cell in record.get("cells") or []:
+        for row in cell.get("rows") or []:
+            if not isinstance(row, dict) or row.get("status") != "ok":
+                continue
+            values = row.get("values") or {}
+            digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
+            if hashes.get((str(cell.get("key")), int(row.get("trial") or 0))) != digest:
+                altered += 1
+                continue
+            for name, value in values.items():
+                key = _value_key(value)
+                if key is not None:
+                    out.setdefault(str(name), Counter())[key] += 1
+    problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
+                f"values: the record was changed after the trials ran"] if altered else []
+    return out, problems
+
+
+def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
+    """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
+    trials never produced (or more copies of one than they did): one sentence each.
+
+    The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
+    of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
+    checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
+    FI's to check here."""
+    out: list[str] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                here = f"{path}.{k}" if path else str(k)
+                if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
+                    keys = [_value_key(x) for x in v]
+                    reported = Counter(x for x in keys if x is not None)
+                    extra = reported - recorded[k[:-7]]
+                    if extra:
+                        n = sum(extra.values())
+                        example = next(iter(extra))
+                        out.append(
+                            f"the analysis reports `{here}` with {n} value(s) FI's trials of `{k[:-7]}` never produced "
+                            f"(e.g. {example}): experiment.py must print the values FI_TRIALS holds, as they are"
+                        )
+                else:
+                    walk(v, here)
+        elif isinstance(node, list):
+            for i, v in enumerate(node[:200]):
+                walk(v, f"{path}[{i}]")
+
+    walk(result_json, "")
+    return out
