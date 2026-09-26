@@ -235,6 +235,7 @@ async def run_trials(
     work.mkdir(parents=True, exist_ok=True)
     harness = quest_root / HARNESS_PATH
     harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
+    (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     ledger = raw / LEDGER_NAME
     ledger.write_text("", encoding="utf-8")
     entry = "run_cell" if deterministic else "run_trial"
@@ -531,9 +532,42 @@ def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
                 key = _value_key(value)
                 if key is not None:
                     out.setdefault(str(name), Counter())[key] += 1
-    problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
-                f"values: the record was changed after the trials ran"] if altered else []
+    problems = []
+    if altered:
+        problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
+                    f"values: the record was changed after the trials ran, so FI runs the trials again"]
+        (root / RUN_RECORD).unlink(missing_ok=True)  # the next run cannot reuse it: the trials are run afresh
     return out, problems
+
+
+def _not_among(values: list[Any], recorded: Counter) -> list[float]:
+    """The numbers of ``values`` that are not trial values, each trial's value used once. A number printed to fewer
+    digits than the trial returned (``1.2346`` for ``1.23456789``) is that value: it matches a recorded value that
+    rounds to it at the digits it was printed with."""
+    left = Counter(recorded)
+    pending: list[float] = []
+    for x in values:
+        key = _value_key(x)
+        if key is None:
+            continue
+        if left[key] > 0:
+            left[key] -= 1
+        else:
+            pending.append(float(x))
+    if not pending:
+        return []
+    pool = sorted(float(k) for k, n in left.items() for _ in range(n) if n > 0)
+    extra = []
+    for x in pending:
+        text = repr(x)
+        digits = len(text.split("e")[0].replace("-", "").replace(".", "").lstrip("0")) or 1
+        half = 0.5 * 10 ** (math.floor(math.log10(abs(x))) - digits + 1) if x and math.isfinite(x) else 0.0
+        match = next((i for i, v in enumerate(pool) if abs(v - x) <= half * (1 + 1e-9)), None)
+        if match is None:
+            extra.append(x)
+        else:
+            pool.pop(match)
+    return extra
 
 
 def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
@@ -551,15 +585,12 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
             for k, v in node.items():
                 here = f"{path}.{k}" if path else str(k)
                 if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
-                    keys = [_value_key(x) for x in v]
-                    reported = Counter(x for x in keys if x is not None)
-                    extra = reported - recorded[k[:-7]]
+                    extra = _not_among(v, recorded[k[:-7]])
                     if extra:
-                        n = sum(extra.values())
-                        example = next(iter(extra))
                         out.append(
-                            f"the analysis reports `{here}` with {n} value(s) FI's trials of `{k[:-7]}` never produced "
-                            f"(e.g. {example}): experiment.py must print the values FI_TRIALS holds, as they are"
+                            f"the analysis reports `{here}` with {len(extra)} value(s) FI's trials of `{k[:-7]}` never "
+                            f"produced (e.g. {extra[0]:g}): experiment.py must print the values FI_TRIALS holds, as they "
+                            f"are; a list of something derived from them needs a name of its own"
                         )
                 else:
                     walk(v, here)
