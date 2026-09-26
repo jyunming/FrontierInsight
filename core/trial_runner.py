@@ -383,7 +383,9 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
             old.unlink()
     # A job submitted for an earlier plan is not this plan's: submit.py submits again (its state goes), and the new
     # tasks write to files named for this plan, so a task of the old job still running cannot write into them.
-    (quest_root / "job" / "state.json").unlink(missing_ok=True)
+    state = quest_root / "job" / "state.json"
+    if state.is_file():
+        state.replace(state.with_name("state.previous.json"))  # kept, not deleted: it may name a job still running
     (folder / "harness.py").write_text(HARNESS_SOURCE, encoding="utf-8")
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True)
@@ -526,8 +528,11 @@ def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> 
     job_id = str(job.get("id") or "")
     if not job_id or record.get("job_id") == job_id:
         return
-    for task in record.get("plan") or []:
-        (Path(quest_root) / task["out"]).unlink(missing_ok=True)
+    if record.get("job_id"):
+        # Another job than the one FI saw for this plan. The first id FI sees is this plan's first job: its tasks may
+        # already be writing, and there is nothing earlier to clear.
+        for task in record.get("plan") or []:
+            (Path(quest_root) / task["out"]).unlink(missing_ok=True)
     record["job_id"] = job_id
     try:
         (Path(quest_root) / CLUSTER_RECORD).write_text(json.dumps(record, default=str), encoding="utf-8")

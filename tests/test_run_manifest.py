@@ -954,6 +954,7 @@ def test_a_new_plan_or_a_new_job_starts_from_no_results_and_a_task_can_run_again
     record = trial_runner.prepare_cluster(root, "code/simulate.py", {"R0": [1.5]}, runs_per_setting=2, base_seed=0,
                                           deterministic=False, key="k1")
     assert not (root / "job" / "state.json").exists(), "a new plan: the old job's state goes, so submit.py submits again"
+    assert (root / "job" / "state.previous.json").read_text(encoding="utf-8") == '{"id": "OLD"}', "kept, not deleted"
     task = json.loads((root / "job" / "fi" / "tasks.json").read_text(encoding="utf-8"))["tasks"][0]
     assert task["argv"][2].endswith("-k1.jsonl")
     for _ in range(2):  # the scheduler ran the task twice (a requeue): the spec is still there the second time
@@ -961,6 +962,7 @@ def test_a_new_plan_or_a_new_job_starts_from_no_results_and_a_task_can_run_again
     assert trial_runner.collect_cluster(root, record).ok_trials == 2
     # submit.py reports another job id (the last one failed and it submitted again): the old results are not read.
     trial_runner._note_job(root, record, {"id": "J1"})
+    assert trial_runner.collect_cluster(root, record).ok_trials == 2, "the first job FI sees keeps what it wrote"
     trial_runner._note_job(root, record, {"id": "J2"})
     run = trial_runner.collect_cluster(root, record)
     assert run.ok_trials == 0 and all("reported no result" in r["reason"] for r in run.cells[0].rows)
