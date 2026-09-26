@@ -854,3 +854,87 @@ async def test_the_oracle_of_the_trial_contract_is_its_own_function(tmp_path: Pa
     assert artifacts.paper_md is not None
     record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
     assert record["status"] == "ok", record
+
+
+# --- the trial contract on a cluster: one job-array task per setting ----------------------------------------------------
+
+SUBMIT_FAKE = """\
+import json, os, pathlib, subprocess, sys
+
+cluster = pathlib.Path(os.environ["FAKE_CLUSTER_DIR"])
+tasks = json.loads(pathlib.Path(os.environ["FI_TASKS"]).read_text(encoding="utf-8"))
+job = pathlib.Path("job"); job.mkdir(exist_ok=True)
+state = job / "state.json"
+if not state.exists():
+    state.write_text(json.dumps({"id": "A1", "n": tasks["count"]}))
+    (cluster / "submitted").write_text(str(tasks["count"]))
+    print("RESULT_JSON: " + json.dumps({"fi_job": {"status": "pending", "id": "A1", "note": "queued", "poll_s": 5}}))
+elif not (cluster / "done").exists():
+    print("RESULT_JSON: " + json.dumps({"fi_job": {"status": "pending", "id": "A1", "note": "running"}}))
+else:
+    # The array ran: each task ran FI's harness for its setting (here, on this machine).
+    if not (cluster / "ran").exists():
+        for t in tasks["tasks"]:
+            subprocess.run([sys.executable, *t["argv"]], check=False)
+        (cluster / "ran").write_text("1")
+    print("RESULT_JSON: " + json.dumps({"fi_job": {"status": "done", "id": "A1"}}))
+"""
+
+
+def _reply3(simulate: str, analysis: str, submit: str) -> str:
+    return _reply(simulate, analysis).replace(
+        "DEPS: matplotlib", f"```python\n# file: submit.py\n{submit}\n```\nDEPS: matplotlib")
+
+
+@pytest.mark.asyncio
+async def test_on_a_cluster_fi_runs_the_trials_as_a_job_array_and_keeps_their_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real HPC is not exercised: the cluster is a folder, and the 'array' runs FI's tasks on this machine once the test
+    says the job is done. What is tested is FI's half: the tasks are FI's, the quest waits on the pending job, and the
+    record of what ran is written by FI from each task's results."""
+    cluster = tmp_path / "cluster"
+    cluster.mkdir()
+    monkeypatch.setenv("FAKE_CLUSTER_DIR", str(cluster))
+    calls: list[str] = []
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(
+        calls, implement=_reply3(SIM_TRIAL, ANALYSIS_TRIAL, SUBMIT_FAKE), prompts=prompts))
+    cfg = _cfg(tmp_path, execution={"background_jobs": True})
+    first = Engine(cfg)
+    await first.run()
+    tasks = json.loads((first.quest_root / "job" / "fi" / "tasks.json").read_text(encoding="utf-8"))
+    assert tasks["count"] == 3 and [t["setting"] for t in tasks["tasks"]] == ["R0=0.9", "R0=1.5", "R0=3.0"]
+    assert (cluster / "submitted").read_text() == "3"
+    assert json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "results"
+    assert not (first.quest_root / "raw" / "ledger.jsonl").exists(), "nothing is recorded before the job is done"
+    assert any("# file: submit.py" in p for p in prompts), "the code-writing step is told to write submit.py"
+
+    (cluster / "done").write_text("1")
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await second.run()
+    assert artifacts.paper_md is not None and "ExecuteReflect" not in calls
+    trials = [json.loads(line) for line in (second.quest_root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    trials = [e for e in trials if e["event"] == "trial"]
+    assert len(trials) == 900 and all(e["status"] == "ok" for e in trials)
+    assert _record(second)["status"] == "ok"
+
+
+def test_a_cluster_task_that_reported_nothing_is_a_failed_setting_with_why(tmp_path: Path) -> None:
+    from core import trial_runner
+
+    root = tmp_path / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM_TRIAL, encoding="utf-8")
+    record = trial_runner.prepare_cluster(root, "code/simulate.py", {"R0": [1.5, 3.0]}, runs_per_setting=4,
+                                          base_seed=0, deterministic=False, key="k1")
+    assert trial_runner.prepare_cluster(root, "code/simulate.py", {"R0": [1.5]}, runs_per_setting=1, base_seed=0,
+                                        deterministic=False, key="k1") == record, "kept while the key is the same"
+    import subprocess
+    import sys
+
+    first = json.loads((root / "job" / "fi" / "tasks.json").read_text(encoding="utf-8"))["tasks"][0]
+    subprocess.run([sys.executable, *first["argv"]], cwd=root, check=True)  # only the first task ran
+    run = trial_runner.collect_cluster(root, record)
+    assert run.ok_trials == 4 and run.failed_trials == 4
+    assert all("reported no result" in r["reason"] for r in run.cells[1].rows)
