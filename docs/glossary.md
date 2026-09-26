@@ -24,7 +24,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Metric spec**: for each headline number, what it estimates (a proportion, a mean, a difference), so the matching interval and test are used. [rigor.md](rigor.md)
 
-**Two scripts**: the simulation (`simulate.py`, slow, writes raw data) kept apart from the analysis (`experiment.py`, reads it), so the analysis can be redone without re-simulating. Set with `execution.split_analysis`. [USAGE.md](USAGE.md)
+**Two scripts**: the simulation (`simulate.py`, which only says what one trial does; FI runs every trial and keeps the record) kept apart from the analysis (`experiment.py`, which reads FI's results), so the analysis can be redone without re-simulating. Set with `execution.split_analysis`. [USAGE.md](USAGE.md)
 
 **Evidence level**: how far a result was checked, from `executed` (it ran) through `internally_reconciled`, `protocol_runtime_matched`, `independently_validated` and `statistically_adequate` to `publication_ready`. Each level says what it guarantees and what it does not. [rigor.md](rigor.md)
 
