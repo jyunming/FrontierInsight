@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 import math
 import re
 import time
@@ -347,6 +348,7 @@ async def run_trials(
     work.mkdir(parents=True, exist_ok=True)
     harness = quest_root / HARNESS_PATH
     harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
+    (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl")
     results: dict[int, Any] = {}
@@ -651,3 +653,127 @@ def read_ledger(quest_root: Path) -> list[dict[str, Any]] | None:
             rows.append({"cell": row.get("cell"), "trial": row.get("trial"), "status": row.get("status"),
                          **({"reason": row["reason"]} if row.get("reason") else {})})
     return rows
+
+
+def _value_key(v: Any) -> str | None:
+    """A number as the ledger and a JSON round trip both keep it (12 significant digits), or ``None`` if not a number."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return f"{float(v):.12g}"
+
+
+def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
+    """Every value FI's trials returned, per name (the keys of ``run_trial``'s dict), counted, and what stood in the way.
+
+    The values are in FI's run record (``.fi/trials/run.json``, each trial's dict as the harness reported it); each
+    trial's dict is checked against the hash FI's ledger holds for it, so a record edited after the trials ran is found
+    rather than believed. Only trials that ran to the end count."""
+    root = Path(quest_root)
+    try:
+        record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, []
+    hashes: dict[tuple[str, int], str] = {}
+    try:
+        for line in (root / RAW_DIRNAME / LEDGER_NAME).read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok":
+                hashes[(str(row.get("cell")), int(row.get("trial") or 0))] = str(row.get("values_sha256") or "")
+    except OSError:
+        return {}, []
+    out: dict[str, Counter] = {}
+    altered = 0
+    for cell in record.get("cells") or []:
+        for row in cell.get("rows") or []:
+            if not isinstance(row, dict) or row.get("status") != "ok":
+                continue
+            values = row.get("values") or {}
+            digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
+            if hashes.get((str(cell.get("key")), int(row.get("trial") or 0))) != digest:
+                altered += 1
+                continue
+            for name, value in values.items():
+                key = _value_key(value)
+                if key is not None:
+                    out.setdefault(str(name), Counter())[key] += 1
+    problems = []
+    if altered:
+        problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
+                    f"values: the record was changed after the trials ran, so FI runs the trials again"]
+        (root / RUN_RECORD).unlink(missing_ok=True)  # the next run cannot reuse it: the trials are run afresh
+    return out, problems
+
+
+def _half_step(x: Any) -> float:
+    """Half the last printed place of ``x``: what rounding to it could have moved a value by. ``1.2346`` -> 0.00005,
+    ``0.0`` -> 0.05, ``1e-05`` -> 0.000005, an int -> 0.5."""
+    if isinstance(x, int) and not isinstance(x, bool):
+        return 0.5
+    text = repr(float(x))
+    mantissa, _, exponent = text.partition("e")
+    places = len(mantissa.split(".")[1]) if "." in mantissa else 0
+    return 0.5 * 10 ** (-(places - int(exponent or 0)))
+
+
+def _not_among(values: list[Any], recorded: Counter) -> list[float]:
+    """The numbers of ``values`` that are not trial values, each trial's value used once. A number printed to fewer
+    places than the trial returned (``1.2346`` for ``1.23456789``, ``0.0`` for ``1e-05``, ``3`` for ``2.8``) is that
+    value: it matches a recorded value within half its last printed place. The most precise numbers are matched first,
+    each to the nearest value left, so a coarse one cannot take the value a precise one needed."""
+    left = Counter(recorded)
+    pending: list[Any] = []
+    for x in values:
+        key = _value_key(x)
+        if key is None:
+            continue
+        if left[key] > 0:
+            left[key] -= 1
+        else:
+            pending.append(x)
+    if not pending:
+        return []
+    pool = [float(k) for k, n in left.items() for _ in range(max(n, 0))]
+    extra = []
+    for x in sorted(pending, key=_half_step):
+        value, half = float(x), _half_step(x)
+        near = [(abs(v - value), i) for i, v in enumerate(pool) if math.isfinite(v) and abs(v - value) <= half * (1 + 1e-9)]
+        if near:
+            pool.pop(min(near)[1])
+        else:
+            extra.append(value)
+    return extra
+
+
+def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
+    """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
+    trials never produced (or more copies of one than they did): one sentence each.
+
+    The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
+    of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
+    checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
+    FI's to check here."""
+    out: list[str] = []
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                here = f"{path}.{k}" if path else str(k)
+                if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
+                    extra = _not_among(v, recorded[k[:-7]])
+                    if extra:
+                        out.append(
+                            f"the analysis reports `{here}` with {len(extra)} value(s) FI's trials of `{k[:-7]}` never "
+                            f"produced (e.g. {extra[0]:g}): experiment.py must print the values FI_TRIALS holds, as they "
+                            f"are; a list of something derived from them needs a name of its own"
+                        )
+                else:
+                    walk(v, here)
+        elif isinstance(node, list):
+            for i, v in enumerate(node[:200]):
+                walk(v, f"{path}[{i}]")
+
+    walk(result_json, "")
+    return out

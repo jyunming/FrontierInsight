@@ -979,3 +979,70 @@ def test_a_new_plan_or_a_new_job_starts_from_no_results_and_a_task_can_run_again
     trial_runner._note_job(root, record, {"id": "J2"})
     run = trial_runner.collect_cluster(root, record)
     assert run.ok_trials == 0 and all("reported no result" in r["reason"] for r in run.cells[0].rows)
+
+
+ANALYSIS_MADE_UP = ANALYSIS_TRIAL.replace(
+    'out[c["key"]] = {"final_size_values": m["values"], "final_size_count": m["count"]}',
+    'out[c["key"]] = {"final_size_values": [123.456] * m["count"], "final_size_count": m["count"]}',
+)
+
+
+def test_values_the_trials_never_produced_are_found_value_by_value(tmp_path: Path) -> None:
+    """A count that matches is not enough: FI holds every trial's value, so a list the analysis prints for a trial
+    outcome must hold those values."""
+    import asyncio
+    import sys
+
+    from core import trial_runner
+    from core.execution import SharedInterpreterExecutor
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(SIM_TRIAL, encoding="utf-8")
+    run = asyncio.run(trial_runner.run_trials(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable,
+        root, "code/simulate.py", {"R0": [1.5, 3.0]}, runs_per_setting=20, base_seed=0, deterministic=False,
+        timeout_s=60, run_id="r1",
+    ))
+    trial_runner._save_run(root, "k", run)  # what TrialsRunner does after every run of the trials
+    recorded, altered = trial_runner.recorded_values(root)
+    assert altered == [] and sum(recorded["final_size"].values()) == 40
+    summary = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
+    honest = {c["key"]: {"final_size_values": c["metrics"]["final_size"]["values"]} for c in summary["cells"]}
+    assert trial_runner.reported_values_not_run(recorded, {"by_cell": honest}) == []
+    # A subset (a conditional mean over the major outbreaks) is fine; a derived name is not FI's to check.
+    subset = {"major": {"final_size_values": honest["R0=3.0"]["final_size_values"][:5]}, "p_values": [0.1, 0.2]}
+    assert trial_runner.reported_values_not_run(recorded, subset) == []
+    made_up = {"by_cell": {"R0=1.5": {"final_size_values": [123.456] * 20}}}
+    (found,) = trial_runner.reported_values_not_run(recorded, made_up)
+    assert "`by_cell.R0=1.5.final_size_values` with 20 value(s)" in found and "never produced" in found
+    rounded = {"final_size_values": [round(x, 4) for x in honest["R0=1.5"]["final_size_values"]]}
+    assert trial_runner.reported_values_not_run(recorded, rounded) == [], "printed to fewer digits is still the value"
+    near = {"final_size_values": [honest["R0=1.5"]["final_size_values"][0] + 0.01]}
+    assert trial_runner.reported_values_not_run(recorded, near), "a different value is not a rounding"
+    twice = {"final_size_values": honest["R0=1.5"]["final_size_values"] * 2}
+    assert trial_runner.reported_values_not_run(recorded, twice), "each trial's value counts once"
+    # A run record edited after the trials ran no longer matches the ledger's hashes, and says so.
+    record_path = root / ".fi" / "trials" / "run.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["cells"][0]["rows"][0]["values"]["final_size"] = 123.456
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    _recorded, altered = trial_runner.recorded_values(root)
+    assert len(altered) == 1 and altered[0].startswith("1 trial(s)")
+    assert not record_path.exists(), "a record changed on disk is not reused: the trials run again"
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_that_prints_values_of_its_own_is_sent_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(
+        calls, implement=_reply(SIM_TRIAL, ANALYSIS_MADE_UP), repair=ANALYSIS_TRIAL, prompts=prompts,
+    ))
+    engine = Engine(_cfg(tmp_path, engine={"execute_replicates": 3}))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and "ExecuteReflect" in calls
+    assert any("never produced" in p for p in prompts), "the repair is told which values were not the trials'"
+    assert _record(engine)["status"] == "ok"
