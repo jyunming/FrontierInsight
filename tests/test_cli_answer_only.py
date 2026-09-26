@@ -628,3 +628,21 @@ def test_agy_is_told_its_tools_are_off() -> None:
     content = json.loads(_encode_antigravity_stdin("What is 2+2?"))["message"]["content"]
     assert content.startswith("Answer this request directly") and content.endswith("What is 2+2?")
     assert "search the web" in content and "image files the request names" in content
+
+
+def test_agys_log_note_skips_the_noise_it_writes_on_every_call(tmp_path: Path) -> None:
+    from core.provider import _cli_home_errors
+
+    log = tmp_path / ".gemini" / "antigravity-cli" / "cli.log"
+    log.parent.mkdir(parents=True)
+    noise = [
+        "E0926 errorreport.go:224] error getting token source: You are not logged into Antigravity.",
+        "E0926 file_watcher.go:194] skipping empty or temp file:",
+    ]
+    log.write_text("\n".join(["I0926 silent auth succeeded", *noise]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == "", "a killed call must not read as 'not logged in'"
+    ended = "E0926 session.go:259] Print mode: run ended with error and no response: RESOURCE_EXHAUSTED (code 429)"
+    log.write_text("\n".join([noise[0], ended, noise[1], "E0926 other.go:1] something else"]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == ended
+    log.write_text("\n".join([noise[0], "E0926 other.go:1] something else"]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == "E0926 other.go:1] something else"

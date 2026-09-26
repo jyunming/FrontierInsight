@@ -1931,14 +1931,25 @@ def _write_cli_home(home: Path, settings: dict[str, Any]) -> None:
     (folder / "last_check.timestamp").write_bytes(b"")
 
 
+#: Error lines agy writes on every call, successful ones included: the sign-in check before its silent sign-in, and
+#: its file watcher. Shown with a failure they would read as its cause.
+_AGY_LOG_NOISE = ("error getting token source", "not logged into antigravity", "file_watcher.go")
+
+
 def _cli_home_errors(home: str, lines: int = 3) -> str:
-    """The last error lines of the CLI's own log in a call's home (agy writes ``cli.log`` there), or ''."""
+    """What the CLI's own log in a call's home (agy writes ``cli.log`` there) says went wrong, or '': the line where
+    its run ended with an error when there is one, else its last error lines that are not noise it writes on every
+    call."""
     try:
         text = (Path(home) / ".gemini" / "antigravity-cli" / "cli.log").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     errors = [line.strip() for line in text.splitlines() if line.startswith("E")]
-    return " | ".join(errors[-lines:])[:600]
+    ended = [line for line in errors if "run ended with error" in line]
+    if ended:
+        return ended[-1][:600]
+    real = [line for line in errors if not any(noise in line.lower() for noise in _AGY_LOG_NOISE)]
+    return " | ".join(real[-lines:])[:600]
 
 
 def _remove_call_dir(path: str) -> None:

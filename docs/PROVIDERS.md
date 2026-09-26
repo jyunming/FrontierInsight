@@ -244,8 +244,8 @@ it has to be a model that provider accepts. Providers named in
 `provider.reasoning_effort` sets how hard the model reasons before it
 answers. Leave it unset (the default) and FI sends nothing, so each
 provider keeps its own default: `claude_cli` uses its own setting,
-`antigravity_cli` uses agy's built-in default (FI's calls use their own agy
-settings; see [Answer-only CLI calls](#answer-only-cli-calls)), `codex_cli` uses codex's built-in default (FI's calls do
+`antigravity_cli` uses the level in the name of the model you chose for agy
+(e.g. `Gemini 3.1 Pro (High)`; see [Answer-only CLI calls](#answer-only-cli-calls)), `codex_cli` uses codex's built-in default (FI's calls do
 not read `~/.codex/config.toml`, so a `model_reasoning_effort` there does
 not apply; see [Answer-only CLI calls](#answer-only-cli-calls)), and a local
 Ollama model does not think at all. Set it in the YAML, or from the interview's
