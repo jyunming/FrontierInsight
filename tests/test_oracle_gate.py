@@ -498,7 +498,10 @@ async def test_a_two_script_oracle_check_gets_a_real_raw_dir_not_a_keyerror(
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
     cfg = Config(
         topic="split oracle smoke", title="split-oracle-smoke", provider=ProviderConfig(name="openai"),
-        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1, pilot_run=False),
+        # The fixture's simulation writes no run manifest; this test is about the oracle pre-check, so that
+        # difference is recorded, not stopped on (a stop is what block does when no repair removes it).
+        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1, pilot_run=False,
+                            run_manifest_check="warn"),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
     )
