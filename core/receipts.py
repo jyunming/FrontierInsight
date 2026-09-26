@@ -94,6 +94,10 @@ def write(
         "producer": producer,
         "input_hashes": {k: sha256(v) for k, v in (inputs or {}).items()},
         "output_hash": sha256(output) if output is not None else "",
+        # Each source one by one as well: the writing step later keeps only the ones the paper cites, so the list as a
+        # whole changes, but every source still there must be one of these (see :func:`unjudged_sources`).
+        **({"source_hashes": sorted({sha256(x) for x in inputs["sources"]})}
+           if isinstance((inputs or {}).get("sources"), list) else {}),
         "error": str(error or ""),
         "detail": str(detail or ""),
     }
@@ -181,6 +185,15 @@ def gate_inputs(state: Any) -> dict[str, Any]:
         "results": state.get("result_json") or {}, "protocol": (state.get("design") or {}).get("protocol") or {},
         "sources": sources, "topic": state.get("topic") or "",
     }
+
+
+def unjudged_sources(record: dict[str, Any], current: dict[str, Any]) -> int:
+    """How many of the sources there are now the receipt did not judge (0 for a receipt from before sources were
+    hashed one by one): trimming the list keeps this at 0, a source added after the gate does not."""
+    held = record.get("source_hashes")
+    if not isinstance(held, list):
+        return 0
+    return sum(1 for x in current.get("sources") or [] if sha256(x) not in set(held))
 
 
 def stale_inputs(record: dict[str, Any], current: dict[str, Any]) -> list[str]:

@@ -336,6 +336,8 @@ def assess(
                 "the evidence gate judged earlier inputs than the ones there are now (changed since: "
                 + ", ".join(stale) + ")"
             )
+        elif check == "evidence_gate" and (added := _receipts.unjudged_sources(receipt, _receipts.gate_inputs(state))):
+            ready_gaps.append(f"{added} of the paper's sources were not among the ones the evidence gate judged")
     # What the quest's own state and records say about the same checks, as well: a receipt that reads "pass" while the
     # state says the check failed (a record left from an earlier pass) is not believed over the state.
     gate = state.get("evidence_assessment") or {}

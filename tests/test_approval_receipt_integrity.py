@@ -183,3 +183,20 @@ def test_the_writer_trimming_the_sources_does_not_make_the_gate_receipt_stale(tm
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     trimmed = _state(literature=[{"metadata": {"title": "the one source the paper cites"}}])
     assert evidence.assess(root, trimmed, settings=ON)["status"] == "publication_ready"
+
+
+def test_a_source_the_gate_never_judged_is_a_gap(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    judged = [{"metadata": {"title": "judged", "doi": "10.1/a"}}, {"metadata": {"title": "also judged"}}]
+    target = receipts.path(root, "evidence_gate")
+    record = json.loads(target.read_text(encoding="utf-8"))
+    record["source_hashes"] = receipts.write(
+        tmp_path / "scratch", "evidence_gate", status="pass", producer="evidence_gate", started_at=receipts.now(),
+        inputs=receipts.gate_inputs(_state(literature=judged)),
+    )["source_hashes"]
+    target.write_text(json.dumps(record), encoding="utf-8")
+    assert evidence.assess(root, _state(literature=judged[:1]), settings=ON)["status"] == "publication_ready"
+    added = _state(literature=[judged[0], {"metadata": {"title": "slipped in after the gate"}}])
+    record = evidence.assess(root, added, settings=ON)
+    assert record["status"] != "publication_ready"
+    assert any("1 of the paper's sources were not among" in g for g in record["gaps"])
