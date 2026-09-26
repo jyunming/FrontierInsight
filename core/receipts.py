@@ -94,6 +94,10 @@ def write(
         "producer": producer,
         "input_hashes": {k: sha256(v) for k, v in (inputs or {}).items()},
         "output_hash": sha256(output) if output is not None else "",
+        # Each source one by one as well: the writing step later keeps only the ones the paper cites, so the list as a
+        # whole changes, but every source still there must be one of these (see :func:`unjudged_sources`).
+        **({"source_hashes": sorted({sha256(x) for x in inputs["sources"]})}
+           if isinstance((inputs or {}).get("sources"), list) else {}),
         "error": str(error or ""),
         "detail": str(detail or ""),
     }
@@ -167,3 +171,34 @@ def read(quest_root: Path, check: str) -> tuple[str, dict[str, Any] | None, str]
                              or not _is_hash(record.get("output_hash"))):
         return "unknown", None, "its record names nothing it judged"
     return str(status), record, ""
+
+
+def gate_inputs(state: Any) -> dict[str, Any]:
+    """What the evidence gate weighs, for its receipt, its one stop and the check that the receipt is still for them:
+    the analysis, the cross-check, the results, the protocol and the sources (by title and link)."""
+    sources = [
+        [str((i.get("metadata") or {}).get(k) or "") for k in ("title", "url", "doi")]
+        for i in (state.get("literature") or []) if isinstance(i, dict)
+    ]
+    return {
+        "analysis": state.get("analysis") or {}, "cross_check": state.get("cross_check") or {},
+        "results": state.get("result_json") or {}, "protocol": (state.get("design") or {}).get("protocol") or {},
+        "sources": sources, "topic": state.get("topic") or "",
+    }
+
+
+def unjudged_sources(record: dict[str, Any], current: dict[str, Any]) -> int:
+    """How many of the sources there are now the receipt did not judge (0 for a receipt from before sources were
+    hashed one by one): trimming the list keeps this at 0, a source added after the gate does not."""
+    held = record.get("source_hashes")
+    if not isinstance(held, list):
+        return 0
+    return sum(1 for x in current.get("sources") or [] if sha256(x) not in set(held))
+
+
+def stale_inputs(record: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """The inputs a receipt was made for that are not the ones there are now: each key of ``current`` whose SHA-256
+    differs from the one the receipt holds, or that the receipt does not hold at all. A check that judged something
+    else does not stand for what is there now."""
+    held = record.get("input_hashes") or {}
+    return [k for k, v in current.items() if held.get(k) != sha256(v)]

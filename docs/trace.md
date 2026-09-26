@@ -2,7 +2,7 @@
 
 Every quest keeps a diary of what it did, in order: `<quest folder>/.fi/audit.jsonl`. It answers three questions after the fact:
 
-- **What ran, and what did each check say?** Every step, every check's verdict (protocol, oracle, run manifest, numeric warnings, evidence, methodology audit), and the files the quest wrote with their sha256.
+- **What ran, and what did each check say?** Every step, every check's verdict (protocol, oracle, run manifest, numeric warnings, evidence, methodology audit), and the files the quest wrote with their sha256: the scripts, the plan, the frozen protocol and the paper, and the records the evidence level is read from (the approved settings, the three checks' receipts, the environment, the run-manifest, oracle and protocol records, FI's trial ledger, summary and run record, the claim ledger), so a change to one after it was written shows in the trace.
 - **Why did it go this way?** Each time the quest chose its next step (redo the design, write, stop for you) it writes down the facts it looked at.
 - **What did the model say about why?** The assumptions and the options the model weighed, and what the reviewer objected to. These are marked **model claim**: the model's own account, kept so you can argue with it. They are never mixed with a check result and no check reads them.
 

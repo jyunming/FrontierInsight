@@ -153,7 +153,9 @@ def cell_key(cell: dict[str, Any]) -> str:
 
 def trial_seed(base: int, key: str, trial: int) -> int:
     """A 32-bit seed for one trial, fixed by the quest's base seed, the cell and the trial number: the same trial gets
-    the same seed on a rerun, and no two trials of a study share one by construction of their inputs."""
+    the same seed on a rerun, and no two trials of a study share one by construction of their inputs. A paired design
+    passes ``key=""``: trial ``t`` of every setting then gets the same seed (common random numbers), which is what makes
+    joining the settings' trials by their number a pairing."""
     digest = hashlib.sha256(f"{int(base)}|{key}|{int(trial)}".encode("utf-8")).hexdigest()
     return int(digest[:8], 16)
 
@@ -212,11 +214,13 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
     out = []
     for run in runs:
         metrics: dict[str, list[float]] = {}
+        trials_of: dict[str, list[int]] = {}
         for row in run.rows:
             if row.get("status") != "ok":
                 continue
             for name, value in (row.get("values") or {}).items():
                 metrics.setdefault(name, []).append(value)
+                trials_of.setdefault(name, []).append(row.get("trial"))
         out.append({
             "cell": run.cell,
             "key": run.key,
@@ -226,6 +230,8 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
             "metrics": {
                 name: {
                     "values": values,
+                    # The trial each value came from (FI's own number): what a paired design joins on.
+                    "trials": trials_of.get(name, []),
                     "count": len(values),
                     "total": math.fsum(v for v in values if math.isfinite(v)),
                     "non_finite": sum(1 for v in values if not math.isfinite(v)),
@@ -237,7 +243,8 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
 
 
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
-          deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False) -> list[dict[str, Any]]:
+          deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False,
+          paired: bool = False) -> list[dict[str, Any]]:
     """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
     ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
     ``quest_root``."""
@@ -247,7 +254,8 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
     plan = []
     for index, cell in enumerate(cells(grid)):
         key = cell_key(cell)
-        trials = [{"trial": t, "seed": None if deterministic else trial_seed(base_seed, key, t)} for t in range(per_cell)]
+        trials = [{"trial": t, "seed": None if deterministic else trial_seed(base_seed, "" if paired else key, t)}
+                  for t in range(per_cell)]
         spec_path = folder / f"cell{index}.json"
         out_path = folder / out_name.format(index=index)
         out_path.unlink(missing_ok=True)
@@ -339,7 +347,7 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
 async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
-    run_id: str = "", thresholds: dict[str, Any] | None = None,
+    run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
     the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study."""
@@ -350,7 +358,7 @@ async def run_trials(
     harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
-                 deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl")
+                 deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired)
     results: dict[int, Any] = {}
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for task in plan:
@@ -366,7 +374,7 @@ async def run_trials(
 
 
 def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int,
-                    base_seed: int, deterministic: bool, key: str) -> dict[str, Any]:
+                    base_seed: int, deterministic: bool, key: str, paired: bool = False) -> dict[str, Any]:
     """The job array for a cluster: FI's harness, one spec per setting and the task list in ``job/fi/``, and FI's own
     record of the plan (``.fi/trials/cluster.json``). Kept as it is while ``key`` (the simulation and the protocol) is
     the same, so every check of a submitted job sees the tasks that were submitted. Returns the record."""
@@ -390,7 +398,8 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
         state.replace(state.with_name("state.previous.json"))  # kept, not deleted: it may name a job still running
     (folder / "harness.py").write_text(HARNESS_SOURCE, encoding="utf-8")
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
-                 deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True)
+                 deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True,
+                 paired=paired)
     harness = (CLUSTER_DIR / "harness.py").as_posix()
     tasks = {
         "count": len(plan),
@@ -457,6 +466,8 @@ class TrialsRunner:
         grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
         runs = int(protocol.get("runs_per_setting") or 1)
         key = _run_key(self.simulate, protocol, runs, base, self.deterministic)
+        # A paired metric compares the settings trial by trial: each trial number gets one seed across the settings.
+        paired = any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or [])
         run = _load_run(self.quest_root, key)
         if run is not None:
             if self.log is not None:
@@ -468,7 +479,7 @@ class TrialsRunner:
 
             record = prepare_cluster(
                 self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
-                runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, key=key,
+                runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, key=key, paired=paired,
             )
             submitted = await self.executor.execute(
                 [cmd[0], str(self.submit)], cwd=cwd, timeout_s=timeout_s,
@@ -499,6 +510,7 @@ class TrialsRunner:
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+                paired=paired,
             )
             _save_run(self.quest_root, key, run)
         self.last = run
