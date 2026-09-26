@@ -4330,7 +4330,7 @@ class Engine:
             facts = ", ".join(
                 str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type"), md.get("foundational")) if v
             )
-            excerpt = " ".join(str(d.content or "").split())[:300]
+            excerpt = " ".join(_split_figure_readings(str(d.content or ""))[0].split())[:300]
             lines.append(
                 f"[{i}] ({kind}) {title}" + (f" — {facts}" if facts else "") + f" :: {excerpt}"
             )
@@ -8291,7 +8291,8 @@ class Engine:
             lit = lit if isinstance(lit, list) else []
             n_sources = sum(
                 1 for d in lit
-                if isinstance(d, dict) and str(d.get("content") or "").strip()
+                # the source's own text: a model's reading of its figures is not a source with text
+                if isinstance(d, dict) and _split_figure_readings(str(d.get("content") or ""))[0].strip()
             )
             # The gate is asked to judge whether sources are real / on-topic /
             # off-topic — so it must actually SEE them. Pass each source's
@@ -8308,7 +8309,7 @@ class Engine:
                 title = str(md.get("title") or "").strip()
                 # Slice BEFORE normalising whitespace so we don't .split()
                 # a 16k-char body just to keep 240 chars (Copilot, #199).
-                snippet = " ".join(str(d.get("content") or "")[:400].split())[:240]
+                snippet = " ".join(_split_figure_readings(str(d.get("content") or "")[:400])[0].split())[:240]
                 if title or snippet:
                     source_previews.append({
                         "title": title[:160] or "(untitled)",
