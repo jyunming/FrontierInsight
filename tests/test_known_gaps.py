@@ -195,3 +195,25 @@ def test_only_an_upper_cap_where_the_quantity_is_reported_counts_inside_the_rang
     )
     trials = [Assertion(path="n_trials", min=1.0, max=1e5)]
     assert violations({"n_trials": 300.0}, trials, code=config) == []
+
+
+def test_a_clip_is_read_by_its_arguments_not_its_module_name() -> None:
+    probs = [Assertion(path="p_hat", min=0.0, max=1.0)]
+    for code in ('out = {"p_hat": float(cp.clip(p, 0.05, 0.95))}\n', 'out = {"p_hat": float(jax.numpy.clip(p, 0.05, 0.95))}\n'):
+        assert violations({"p_hat": 0.05}, probs, code=code) == [], "0.05 is the floor"
+        (found,) = violations({"p_hat": 0.95}, probs, code=code)
+        assert found.kind == "clamped", code
+    (tensor,) = violations({"p_hat": 0.95}, probs, code='out = {"p_hat": float(t.clamp(0.05, 0.95))}\n')
+    assert tensor.kind == "clamped"
+
+
+def test_a_cap_written_first_counts_too() -> None:
+    for code in ('out = {"rmse": min(10.0, rmse)}\n', 'out = {"rmse": float(np.minimum(10.0, r))}\n'):
+        (found,) = violations({"rmse": 10.0}, RMSE, code=code)
+        assert found.kind == "clamped", code
+
+
+def test_a_cap_in_a_denominator_is_a_guard_not_a_cap() -> None:
+    ratio = [Assertion(path="rate", min=0.0, max=10.0)]
+    assert violations({"rate": 1.0}, ratio, code='out = {"rate": total / min(max(n, 1), 1.0)}\n') == []
+

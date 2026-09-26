@@ -333,27 +333,26 @@ _GENERIC_KEYS = frozenset({
     "mean", "avg", "average", "median", "max", "min", "std", "sd", "sem", "var", "value", "values", "val",
     "result", "results", "total", "count", "n", "ci", "lower", "upper", "lo", "hi", "estimate",
 })
-def _upper_cap(call: ast.Call) -> ast.AST | None:
-    """The upper bound a call caps its value at, or ``None``: builtin ``min(x, C)``, ``np.minimum(x, C)`` /
-    ``fmin``, the upper bound of ``np.clip(x, lo, HI)`` / ``x.clip(lo, HI)`` / ``clamp(x, lo, HI)`` or their ``a_max=``
-    / ``max=`` / ``upper=`` keyword. A floor (``max(1, n)``), a reduction (``x.max(1)``, ``np.min(x, 1)`` with an
-    axis) and a keyword like ``axis=`` are not upper caps."""
+def _upper_caps(call: ast.Call) -> list[ast.AST]:
+    """The arguments a call caps its value at from above: either argument of a two-argument ``min`` /
+    ``np.minimum`` / ``fmin`` (the one that is a constant is the cap, written first or second); the upper bound of a
+    clip or clamp, by keyword (``a_max=``, ``max=``, ``upper=``, ``clip_value_max=``) or by position (the method form
+    ``x.clip(lo, HI)`` / ``t.clamp(lo, HI)`` has two positional arguments, the function form ``np.clip(x, lo, HI)``
+    three, whatever the module is called). A floor (``max(1, n)``), a reduction (``x.max(1)``, ``np.min(x, 1)``) and a
+    keyword like ``axis=`` are none."""
     fn = call.func
-    if isinstance(fn, ast.Name) and fn.id == "min" and len(call.args) == 2 and not call.keywords:
-        return call.args[1]
     name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
-    if name in ("minimum", "fmin") and len(call.args) == 2:
-        return call.args[1]
+    if (name == "min" and isinstance(fn, ast.Name)) or name in ("minimum", "fmin"):
+        return list(call.args) if len(call.args) == 2 and not call.keywords else []
     if name in ("clip", "clamp", "clip_by_value"):
         for k in call.keywords:
             if k.arg in ("a_max", "max", "upper", "clip_value_max"):
-                return k.value
-        method = isinstance(fn, ast.Attribute) and name == "clip" and not (
-            isinstance(fn.value, ast.Name) and fn.value.id in ("np", "numpy", "torch", "tf", "jnp"))
-        pos = 1 if method else 2  # x.clip(lo, HI) vs np.clip(x, lo, HI)
-        if len(call.args) > pos:
-            return call.args[pos]
-    return None
+                return [k.value]
+        if len(call.args) >= 3:
+            return [call.args[2]]
+        if len(call.args) == 2 and isinstance(fn, ast.Attribute):
+            return [call.args[1]]
+    return []
 
 
 def direct_caps(code: str, key: str) -> set[float]:
@@ -393,10 +392,10 @@ def direct_caps(code: str, key: str) -> set[float]:
                        and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
             for n in ast.walk(v):
                 if isinstance(n, ast.Call) and id(n) not in guarded:
-                    bound = _upper_cap(n)
-                    c = value(bound) if bound is not None else None
-                    if c is not None:
-                        found.add(c)
+                    for bound in _upper_caps(n):
+                        c = value(bound)
+                        if c is not None:
+                            found.add(c)
     return found
 
 
