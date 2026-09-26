@@ -122,6 +122,10 @@ def _drive_node(eng: Engine, state: dict, payload: dict) -> dict[str, Any]:
     real_interrupt = engine_mod.interrupt
 
     def fake_interrupt(_value: Any) -> dict[str, Any]:
+        # What a UI sees while the gate waits: the node removes its snapshot once it has an answer.
+        snap = eng.fi_dir / "human_review.json"
+        if snap.is_file():
+            (eng.fi_dir / "human_review.at_pause.json").write_text(snap.read_text(encoding="utf-8"), encoding="utf-8")
         return payload
 
     engine_mod.interrupt = fake_interrupt
@@ -219,7 +223,7 @@ def test_human_feedback_snapshot_uses_state_paper_md_path(
     }
     _drive_node(gated_engine, state, {"action": "accept"})
     snap = json.loads(
-        (gated_engine.fi_dir / "human_review.json").read_text(encoding="utf-8"),
+        (gated_engine.fi_dir / "human_review.at_pause.json").read_text(encoding="utf-8"),
     )
     assert snap["paper_md_path"] == custom
 
@@ -238,7 +242,7 @@ def test_human_feedback_writes_snapshot_json(gated_engine: Engine) -> None:
         "iteration": 1,
     }
     _drive_node(gated_engine, state, {"action": "accept"})
-    snap_path = gated_engine.fi_dir / "human_review.json"
+    snap_path = gated_engine.fi_dir / "human_review.at_pause.json"
     assert snap_path.is_file()
     snap = json.loads(snap_path.read_text(encoding="utf-8"))
     assert snap["verdict"] == "revise"
@@ -246,6 +250,8 @@ def test_human_feedback_writes_snapshot_json(gated_engine: Engine) -> None:
     assert snap["score"] == 2
     assert "weaknesses" in snap and snap["weaknesses"] == ["unsupported claim in §3"]
     assert snap["review_status"] == "ok" and snap["panel"] == []
+    # Answered, the gate no longer waits: the snapshot goes, so the evidence does not read the review as waiting.
+    assert not (gated_engine.fi_dir / "human_review.json").exists()
 
 
 def test_human_feedback_snapshot_says_when_no_reviewer_gave_the_verdict(gated_engine: Engine) -> None:
@@ -258,7 +264,7 @@ def test_human_feedback_snapshot_says_when_no_reviewer_gave_the_verdict(gated_en
         "iteration": 0,
     }
     _drive_node(gated_engine, state, {"action": "accept"})
-    snap = json.loads((gated_engine.fi_dir / "human_review.json").read_text(encoding="utf-8"))
+    snap = json.loads((gated_engine.fi_dir / "human_review.at_pause.json").read_text(encoding="utf-8"))
     assert snap["review_status"] == "error"
     assert snap["panel"][1] == {"persona": "statistician", "verdict": None, "score": None, "status": "error",
                                 "error": "invalid persona name"}
