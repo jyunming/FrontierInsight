@@ -8741,13 +8741,17 @@ class Engine:
         # Each source the paper cites comes with its text, and a citation must
         # quote it: the model checks what the source says, and the quote is
         # then looked up in the source.
-        sources = {
-            label: (meta, _item_content(item))
+        # A quote is looked up in the source's own text only: what a model read off its figures is shown beside it,
+        # labelled, and a claim that rests on it is an unverified model observation, never a citation.
+        split_sources = {
+            label: (meta, *_split_figure_readings(_item_content(item)))
             for label, meta, item in _labelled_sources(literature, audience)
         }
+        sources = {label: (meta, text) for label, (meta, text, _readings) in split_sources.items()}
+        readings_of = {label: readings for label, (_meta, _text, readings) in split_sources.items()}
         citing = _citing_sentences(paper_text)
         refs_block = "\n\n".join(
-            _claim_source_block(label, meta, text, citing.get(label) or [])
+            _claim_source_block(label, meta, text, citing.get(label) or [], readings=readings_of.get(label, ""))
             for label, (meta, text) in sorted(
                 sources.items(), key=lambda kv: (kv[0].startswith("W"), int(kv[0].lstrip("W")))
             )
@@ -8853,6 +8857,9 @@ class Engine:
                 # from that text is not one the source supports.
                 basis = "unsupported"
                 why = f"no quote from [{cite_idx}] given" if not quote else f"the quote is not in the text of [{cite_idx}]"
+                if quote and _quote_in_source(quote, readings_of.get(str(cite_idx), "")):
+                    why = (f"the quote is a model's reading of a figure of [{cite_idx}], not the source's text: an "
+                           "unverified model observation")
                 evidence = f"{evidence} ({why})".strip()
             claims.append({
                 "claim": str(c["claim"]).strip(),
@@ -12971,10 +12978,10 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     return "\n\n".join(parts) or "(nothing recorded)"
 
 
-def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str]) -> str:
+def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str], *, readings: str = "") -> str:
     """One source for the claim check: its label and title, and, when the
     paper cites it, the passages of its text most related to the citing
-    sentences."""
+    sentences, then what a model read off its figures, labelled as that."""
     title = str(meta.get("title") or "").strip()
     ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
     head = f"[{label}] {title}" + (f" · {ident}" if ident else "")
@@ -12983,7 +12990,13 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
     if not text.strip():
         return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
     excerpt = _format_lit_excerpt(text, title, query=" ".join(sentences), budget=_CLAIM_SOURCE_CHARS)
-    return head + "\nText:\n" + excerpt.strip()
+    block = head + "\nText:\n" + excerpt.strip()
+    if readings.strip():
+        block += (
+            "\nValues a model read off this source's figures (NOT the source's words: a claim resting only on these is"
+            " unsupported, and they are never a quote):\n" + readings.strip()[:_CLAIM_READINGS_CHARS]
+        )
+    return block
 
 
 def _claim_distilled_block(analysis: dict[str, Any], budget: int) -> tuple[str, int]:
@@ -16912,9 +16925,22 @@ _FIGURES_PER_CALL = 4
 #: Captions shown to the picker in one call (thirty figure-heavy papers can hold over a thousand).
 _FIGURE_PICK_BATCH = 150
 _FIGURE_READING_CHARS = 2000
+#: What a model read off one source's figures, shown to the claim check beside the source's own text.
+_CLAIM_READINGS_CHARS = 1500
 _FIGURE_READINGS_MARK = "---VALUES READ FROM THE FIGURES (by a model, from the images)---"
 _NL = chr(10)
 _PARA = _NL + _NL
+
+
+def _split_figure_readings(text: str) -> tuple[str, str]:
+    """``(the source's own text, what a model read off its figures)``. The readings are appended to a source's text for
+    the design, the analysis and the writer to read (:func:`_append_figure_readings`); they are a model's observation,
+    not the source's words, so nothing that checks a quotation against a source may take them for its text."""
+    if _FIGURE_READINGS_MARK not in text:
+        return text, ""
+    head, _, tail = text.partition(_FIGURE_READINGS_MARK)
+    readings = [b.strip() for b in tail.split(_FIGURE_READINGS_MARK) if b.strip()]
+    return head.rstrip(), _PARA.join(readings)
 
 
 def _append_figure_readings(item: dict[str, Any]) -> int:
