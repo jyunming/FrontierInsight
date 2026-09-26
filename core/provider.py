@@ -715,9 +715,11 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # does) caps the prompt at the Windows ~8 KB command-line limit.
         #
         # ``--dangerously-skip-permissions`` is deliberately NOT passed. FI
-        # asks this CLI for text completion, not for agentic work, so there
-        # is nothing to auto-approve — and handing a coding agent blanket
-        # tool permission to save a prompt round-trip is the wrong trade.
+        # asks this CLI for text completion, not for agentic work. Not passing
+        # it is not enough on its own: agy follows the user's settings.json,
+        # often "always-proceed", so its tools are refused through settings
+        # in a home of the call's own (``home_settings``,
+        # ``_ANTIGRAVITY_SETTINGS``).
         argv=(
             "agy", "--print", "",
             "--input-format", "stream-json",
