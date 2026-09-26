@@ -61,69 +61,59 @@ def test_data_collection_searches_with_the_literature_steps_keywords(tmp_path: P
     assert eng._run_dataset_adapters.await_args.args[0] == f"{TOPIC} a larger R0 gives a larger outbreak"
 
 
-# --- the cap check: a cap that plainly acts on another quantity does not count ------------------------------------------
+# --- the cap check: every cap still counts on a bound; a cap written where the quantity is reported counts inside it -
 
 from core.plausibility import Assertion, violations  # noqa: E402
 
 ACC = [Assertion(path="accuracy", min=0.0, max=1.0)]
 RMSE = [Assertion(path="rmse", min=0.0, max=100.0)]
+RMSE_10 = [Assertion(path="rmse", min=0.0, max=10.0)]
 
 
 def _kinds(found: list) -> list[str]:
     return [v.kind for v in found]
 
 
-def test_a_softmax_clipped_to_one_does_not_make_a_real_accuracy_of_one_clamped() -> None:
-    code = (
-        "import numpy as np\n"
-        "p = np.clip(np.exp(z) / np.exp(z).sum(), 1e-9, 1.0)\n"
-        "acc = float(np.mean(pred == y))\n"
-        'print("RESULT_JSON: " + json.dumps({"accuracy": acc}))\n'
-    )
-    assert "clamped" not in _kinds(violations({"accuracy": 1.0}, ACC, code=code))
-
-
-def test_function_and_module_names_do_not_tie_a_cap_to_a_quantity() -> None:
-    # The reviewer's case: `int(np.sqrt(n))` capped at 1 and a ratio of 1.0 both "read" np, float, int.
-    code = (
-        "import numpy as np\n"
-        "w = max(1, int(np.sqrt(n)))\n"
-        'rows.append({"rel_rmse": float(np.mean(e) / base)})\n'
-    )
-    assert violations({"rel_rmse": 1.0}, [Assertion(path="rel_rmse", min=0.0, max=10.0)], code=code) == []
-
-
-def test_a_cap_inside_the_reported_value_still_counts() -> None:
+def test_a_cap_written_where_the_quantity_is_reported_catches_a_value_inside_the_range() -> None:
     code = 'print("RESULT_JSON: " + json.dumps({"rmse": min(rmse, 10.0)}))\n'
-    (found,) = violations({"rmse": 10.0}, [Assertion(path="rmse", min=0.0, max=10.0)], code=code)
-    assert found.kind == "clamped"
     (inside,) = violations({"rmse": 10.0}, RMSE, code=code)
     assert inside.kind == "clamped" and "inside its range" in inside.describe()
-
-
-def test_a_cap_assigned_to_the_reported_variable_catches_a_value_inside_the_range() -> None:
-    code = "rmse = compute()\nrmse = min(rmse, 10.0)\n" 'print("RESULT_JSON: " + json.dumps({"rmse": rmse}))\n'
-    (found,) = violations({"rmse": 10.0}, RMSE, code=code)
-    assert found.kind == "clamped"
     assert violations({"rmse": 3.2}, RMSE, code=code) == []
+    (on_bound,) = violations({"rmse": 10.0}, RMSE_10, code=code)
+    assert on_bound.kind == "clamped"
 
 
-def test_a_cap_set_under_the_key_when_a_run_diverges_counts() -> None:
+def test_a_value_put_under_its_key_when_a_run_diverges_counts() -> None:
     code = 'results = {"rmse": rmse}\nif diverged:\n    results["rmse"] = 10.0\n'
     (found,) = violations({"rmse": 10.0}, RMSE, code=code)
     assert found.kind == "clamped"
 
 
-def test_a_cap_outside_any_assignment_counts_for_every_quantity_as_before() -> None:
-    code = "errs.append(min(e, 1.0))\nout = {k: v for k, v in zip(names, vals)}\n"
-    (found,) = violations({"accuracy": 1.0}, ACC, code=code)
-    assert found.kind == "clamped"
+def test_what_is_not_a_cap_where_the_quantity_is_reported_is_not_taken_for_one() -> None:
+    # A guard against dividing by zero, an axis, an indicator: none of them caps the reported value.
+    ratio = [Assertion(path="events_per_run", min=0.0, max=10.0)]
+    assert violations({"events_per_run": 1.0}, ratio, code='out = {"events_per_run": total / max(n_runs, 1)}\n') == []
+    peak = [Assertion(path="peak", min=0.0, max=10.0)]
+    assert violations({"peak": 1.0}, peak, code='out = {"peak": float(np.max(x, axis=1).mean())}\n') == []
+    peaks = [Assertion(path="n_peaks", min=0.0, max=50.0)]
+    code = 'out = {"n_peaks": int(np.where(np.diff(np.sign(np.diff(I))) < 0, 1, 0).sum())}\n'
+    assert violations({"n_peaks": 1.0}, peaks, code=code) == []
 
 
-def test_a_generic_key_keeps_the_old_behaviour() -> None:
-    code = "p = np.clip(q, 0.0, 1.0)\nsummary = {'mean': float(np.mean(acc))}\n"
-    (found,) = violations({"mean": 1.0}, [Assertion(path="mean", min=0.0, max=1.0)], code=code)
-    assert found.kind == "clamped", "'mean' does not say which quantity: every cap counts"
+def test_every_cap_in_the_script_still_counts_for_a_value_on_its_bound() -> None:
+    """The common shapes a narrower tie missed: cap each trial, then report an aggregate."""
+    for code in (
+        'import numpy as np\nerrs = np.minimum(errs, 10.0)\nprint(json.dumps({"rmse": float(errs.mean())}))\n',
+        'errs = np.minimum(errs, 10.0)\nrmse = float(np.sqrt(np.mean(errs**2)))\nprint(json.dumps({"rmse": rmse}))\n',
+        'rmses.append(min(e, 10.0))\nprint(json.dumps({"rmse": float(np.mean(rmses))}))\n',
+    ):
+        (found,) = violations({"rmse": 10.0}, RMSE_10, code=code)
+        assert found.kind == "clamped", code
+
+
+def test_a_generic_key_gets_no_cap_of_its_own() -> None:
+    code = "summary = {'mean': min(float(np.mean(acc)), 0.5)}\n"
+    assert violations({"mean": 0.5}, [Assertion(path="mean", min=0.0, max=1.0)], code=code) == []
 
 
 # --- nested comparisons: a level of declared metrics is not a level of a factor ----------------------------------------
@@ -173,3 +163,18 @@ def test_a_fallback_query_is_not_taken_for_keywords(tmp_path: Path) -> None:
              "literature_query_derived": False, "literature": []}
     asyncio.run(eng._node_auto_collect_data(state))  # type: ignore[arg-type]
     assert eng._run_dataset_adapters.await_args.args[0] == f"{TOPIC} h"
+
+
+def test_a_named_constant_put_under_its_key_counts_too() -> None:
+    code = 'CAP = 10.0\nresults = {"rmse": rmse}\nif diverged:\n    results["rmse"] = CAP\n'
+    (found,) = violations({"rmse": 10.0}, RMSE, code=code)
+    assert found.kind == "clamped"
+
+
+def test_a_nested_level_with_one_declared_metric_among_its_groups_is_not_compared() -> None:
+    from core.engine import _result_comparison_stats
+
+    reps = [{"by_method": {m: {"errors": {"mean": e + i * 0.01}, "timing": {"mean": t + i * 0.01}}
+                           for m, e, t in (("RK4", 1.0, 5.0), ("Euler", 3.0, 1.0))}} for i in range(3)]
+    out = _result_comparison_stats(reps, metric_ids={"errors"})
+    assert not any(f.startswith("by_method.") for f in out.get("strata", {}))

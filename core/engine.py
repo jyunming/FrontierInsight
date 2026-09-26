@@ -7376,15 +7376,16 @@ class Engine:
             at_bound = any(getattr(v, "kind", "") == "at_bound" for v in implausible)
             self._log.warning(
                 "[execute_reflect] rc=0 but %d value(s) break the design's "
-                "declared bounds%s — attempting repair (iter %d)",
+                "declared bounds or are capped by the script%s — attempting repair (iter %d)",
                 len(implausible),
-                " (at least one is capped at its bound)" if clamped else "",
+                " (at least one is a capped number)" if clamped else "",
                 iters + 1,
             )
             rj_preview = json.dumps(state.get("result_json") or {}, indent=2)[:1500]
             stdout_for_prompt = (
                 "IMPLAUSIBLE RESULT: the script exited 0 and printed RESULT_JSON, "
-                "but these values break the bounds the DESIGN declared for them:\n"
+                "but these values break the bounds the DESIGN declared for them, or are a number the script "
+                "capped rather than computed:\n"
                 + "\n".join(f"- {v.describe()}" for v in implausible[:10])
                 + "\n\nFind the cause before changing anything. If it is a bug "
                 "(wrong units, a factor of two, a sign error, a mis-set "
