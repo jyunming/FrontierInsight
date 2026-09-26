@@ -130,11 +130,16 @@ def test_the_trace_command_is_wired_into_the_chat_dispatcher() -> None:
     extension = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
     assert 'cmd === "trace"' in extension
     assert "runTrace(prompt, stream, token)" in extension
-    assert 'import { runTrace } from "./trace";' in extension
+    assert 'import { runFollow, runTrace, runWhy } from "./trace";' in extension
+    # /why and /follow go through the same module, and each reaches launch.py's own flags.
+    assert 'cmd === "why"' in extension and "runWhy(prompt, stream, token)" in extension
+    assert 'cmd === "follow"' in extension and "runFollow(prompt, stream, token)" in extension
+    trace = (EXT / "src" / "trace.ts").read_text(encoding="utf-8")
+    assert '"--why"' in trace and '"--follow"' in trace
 
 
 def test_the_trace_command_is_declared_in_package_json() -> None:
     package = json.loads((EXT / "package.json").read_text(encoding="utf-8"))
     commands = package["contributes"]["chatParticipants"][0]["commands"]
     names = [c["name"] for c in commands]
-    assert "trace" in names
+    assert "trace" in names and "why" in names and "follow" in names
