@@ -655,3 +655,12 @@ def test_agys_log_note_is_only_a_line_saying_its_run_failed(tmp_path: Path) -> N
     auth = "E0926 session.go:120] Print mode: silent auth failed: token expired"
     log.write_text("\n".join([noise[0], auth]) + "\n", encoding="utf-8")
     assert _cli_home_errors(str(tmp_path)) == auth
+    # Every failure message agy has (its own wording) is chosen; with two, the last is.
+    from core.provider import _AGY_FAILURE_LINES
+
+    for mark in _AGY_FAILURE_LINES:
+        line = f"E0926 session.go:1] {mark}: some cause"
+        log.write_text("\n".join([noise[0], line, noise[4]]) + "\n", encoding="utf-8")
+        assert _cli_home_errors(str(tmp_path)) == line, mark
+    log.write_text("\n".join([ended, auth]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == auth
