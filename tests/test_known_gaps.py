@@ -203,8 +203,10 @@ def test_a_clip_is_read_by_its_arguments_not_its_module_name() -> None:
         assert violations({"p_hat": 0.05}, probs, code=code) == [], "0.05 is the floor"
         (found,) = violations({"p_hat": 0.95}, probs, code=code)
         assert found.kind == "clamped", code
-    (tensor,) = violations({"p_hat": 0.95}, probs, code='out = {"p_hat": float(t.clamp(0.05, 0.95))}\n')
-    assert tensor.kind == "clamped"
+    # Two positional arguments read as no cap: the method's cap (t.clamp(lo, HI)) and the function's floor
+    # (torch.clamp(x, lo)) look alike.
+    assert violations({"p_hat": 0.05}, probs, code='out = {"p_hat": float(torch.clamp(p, 0.05))}\n') == []
+    assert violations({"p_hat": 0.95}, probs, code='out = {"p_hat": float(t.clamp(0.05, 0.95))}\n') == []
 
 
 def test_a_cap_written_first_counts_too() -> None:
@@ -216,4 +218,10 @@ def test_a_cap_written_first_counts_too() -> None:
 def test_a_cap_in_a_denominator_is_a_guard_not_a_cap() -> None:
     ratio = [Assertion(path="rate", min=0.0, max=10.0)]
     assert violations({"rate": 1.0}, ratio, code='out = {"rate": total / min(max(n, 1), 1.0)}\n') == []
+
+
+def test_a_min_of_two_computed_values_is_no_cap_and_minimum_with_out_still_is() -> None:
+    assert violations({"rmse": 4.0}, RMSE, code='out = {"rmse": min(a, b)}\n') == []
+    (found,) = violations({"rmse": 10.0}, RMSE, code='out = {"rmse": float(np.minimum(r, 10.0, out=r))}\n')
+    assert found.kind == "clamped"
 

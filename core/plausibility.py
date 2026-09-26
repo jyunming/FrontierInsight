@@ -336,28 +336,29 @@ _GENERIC_KEYS = frozenset({
 def _upper_caps(call: ast.Call) -> list[ast.AST]:
     """The arguments a call caps its value at from above: either argument of a two-argument ``min`` /
     ``np.minimum`` / ``fmin`` (the one that is a constant is the cap, written first or second); the upper bound of a
-    clip or clamp, by keyword (``a_max=``, ``max=``, ``upper=``, ``clip_value_max=``) or by position (the method form
-    ``x.clip(lo, HI)`` / ``t.clamp(lo, HI)`` has two positional arguments, the function form ``np.clip(x, lo, HI)``
-    three, whatever the module is called). A floor (``max(1, n)``), a reduction (``x.max(1)``, ``np.min(x, 1)``) and a
-    keyword like ``axis=`` are none."""
+    clip or clamp, by keyword (``a_max=``, ``max=``, ``upper=``, ``clip_value_max=``) or as the third positional
+    argument of the function form (``np.clip(x, lo, HI)``, whatever the module is called). Two positional arguments are
+    read as none: ``x.clip(lo, HI)`` and ``torch.clamp(x, lo)`` look alike and the second is a cap in one and a floor
+    in the other (a value on the cap still meets :func:`clamp_constants` on its bound). A floor (``max(1, n)``), a
+    reduction (``x.max(1)``, ``np.min(x, 1)``) and a keyword like ``axis=`` are none."""
     fn = call.func
     name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
-    if (name == "min" and isinstance(fn, ast.Name)) or name in ("minimum", "fmin"):
-        return list(call.args) if len(call.args) == 2 and not call.keywords else []
+    if name == "min" and isinstance(fn, ast.Name):
+        return list(call.args) if len(call.args) == 2 and not call.keywords else []  # min(a, b, key=...) is no cap
+    if name in ("minimum", "fmin"):
+        return list(call.args) if len(call.args) == 2 else []  # np.minimum(r, 10.0, out=r) is one
     if name in ("clip", "clamp", "clip_by_value"):
         for k in call.keywords:
             if k.arg in ("a_max", "max", "upper", "clip_value_max"):
                 return [k.value]
         if len(call.args) >= 3:
             return [call.args[2]]
-        if len(call.args) == 2 and isinstance(fn, ast.Attribute):
-            return [call.args[1]]
     return []
 
 
 def direct_caps(code: str, key: str) -> set[float]:
     """Constants a quantity named ``key`` is capped at from above right where it is reported: an upper cap
-    (:func:`_upper_cap`) in the value of a dict literal that reports it (``{"rmse": min(rmse, 10.0)}``), not inside a
+    (:func:`_upper_caps`) in the value of a dict literal that reports it (``{"rmse": min(rmse, 10.0)}``), not inside a
     denominator (``x / min(n, 1)`` guards a division). A key many quantities share (``mean``, ``max``) gives nothing,
     and so does unparseable code. Every other cap, a floor or one set inside an ``if`` included, is left to
     :func:`clamp_constants`, which counts them all for a value on a bound."""
