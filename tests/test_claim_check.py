@@ -1169,3 +1169,16 @@ def test_a_value_a_model_read_off_a_figure_is_not_a_quote_of_the_source(tmp_path
     assert claim["basis"] == "unsupported" and "unverified model observation" in claim["evidence"]
     # The check still sees the reading, labelled as a model's, apart from the source's text.
     assert "NOT the source's words" in seen[0] and invented in seen[0]
+
+
+def test_a_reading_picked_for_relevance_keeps_its_label_and_a_readings_only_source_is_title_only() -> None:
+    from core.engine import _FIGURE_READINGS_MARK, _format_lit_excerpt, _thin_source
+
+    own = "The paper studies epidemics on networks. " * 60
+    readings = "Read from the image: the attack rate is 99% at R0 = 3."
+    content = own + "\n\n" + _FIGURE_READINGS_MARK + "\n\n" + readings
+    excerpt = _format_lit_excerpt(content, "t", query="attack rate 99%", budget=600)
+    assert "99%" in excerpt
+    assert excerpt.index(_FIGURE_READINGS_MARK) < excerpt.index("99%"), "a reading never reaches a prompt unlabelled"
+    only_readings = "\n\n" + _FIGURE_READINGS_MARK + "\n\n" + readings * 20
+    assert _thin_source({"title": "t"}, only_readings) == "title"

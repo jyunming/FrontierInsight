@@ -8309,7 +8309,7 @@ class Engine:
                 title = str(md.get("title") or "").strip()
                 # Slice BEFORE normalising whitespace so we don't .split()
                 # a 16k-char body just to keep 240 chars (Copilot, #199).
-                snippet = " ".join(_split_figure_readings(str(d.get("content") or "")[:400])[0].split())[:240]
+                snippet = " ".join(_split_figure_readings(str(d.get("content") or ""))[0][:400].split())[:240]
                 if title or snippet:
                     source_previews.append({
                         "title": title[:160] or "(untitled)",
@@ -11943,7 +11943,8 @@ def _thin_source(meta: dict[str, Any], content: str) -> str | None:
     if _has_full_text(meta):
         return None
     title = str(meta.get("title") or meta.get("source") or "")
-    if len(_format_lit_excerpt(content or "", title).strip()) < _THIN_TEXT_CHARS:
+    # The source's own text: a model's reading of its figures is not text the source has.
+    if len(_format_lit_excerpt(_split_figure_readings(content or "")[0], title).strip()) < _THIN_TEXT_CHARS:
         return "title"
     return "blurb" if str(meta.get("work_type") or "") == "book" else None
 
@@ -12043,17 +12044,24 @@ def _format_lit_excerpt(
     used to see ``[i] Title\\nTitle. abstract...`` and propagated the
     title-twice pattern into the References section."""
     budget = _LIT_EXCERPT_CHARS if budget is None else budget
-    if query and len(content) > budget:
-        from .passages import select_relevant_excerpt
-        excerpt = select_relevant_excerpt(
-            content, query, budget_chars=budget, mode=mode,
-        )
-    else:
-        excerpt = content[:budget]
+    # What a model read off the source's figures is excerpted apart from the source's own text and always shown under
+    # its label: a passage picked for relevance must never carry a reading without the words saying what it is.
+    content, readings = _split_figure_readings(content)
+    readings_budget = min(len(readings), budget // 4) if readings.strip() else 0
+
+    def pick(text: str, room: int) -> str:
+        if query and len(text) > room:
+            from .passages import select_relevant_excerpt
+            return select_relevant_excerpt(text, query, budget_chars=room, mode=mode)
+        return text[:room]
+
+    excerpt = pick(content, budget - readings_budget)
     if title and excerpt.lstrip().startswith(title):
         # Drop the leading title + immediately-following separator
         # (newline or ". "). Keep everything after as the real abstract.
-        return excerpt.lstrip()[len(title):].lstrip(".\n ")
+        excerpt = excerpt.lstrip()[len(title):].lstrip(".\n ")
+    if readings_budget:
+        excerpt = excerpt.rstrip() + _PARA + _FIGURE_READINGS_MARK + _PARA + pick(readings, readings_budget).strip()
     return excerpt
 
 
@@ -12932,8 +12940,11 @@ def _item_content(item: Any) -> str:
             state_text = str(content or "")
             if _FIGURE_READINGS_MARK in state_text:
                 tail = state_text[state_text.index(_FIGURE_READINGS_MARK) + len(_FIGURE_READINGS_MARK):]
+                # Compared with the readings the file already holds, not its whole text: a short reading paragraph
+                # ("Conclusion:") that happens to occur in the paper is still a reading.
+                on_disk = _split_figure_readings(text)[1]
                 missing = [b.strip() for b in tail.split(_PARA)
-                           if b.strip() and b.strip() != _FIGURE_READINGS_MARK and b.strip() not in text]
+                           if b.strip() and b.strip() != _FIGURE_READINGS_MARK and b.strip() not in on_disk]
                 if missing:
                     text += _PARA + _FIGURE_READINGS_MARK + _PARA + _PARA.join(missing) + _NL
             return text
