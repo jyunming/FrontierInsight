@@ -5181,9 +5181,17 @@ class Engine:
                 return "differs", ["FI's own trial record (raw/ledger.jsonl) is missing: the trials did not run through FI"]
             thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
             manifest, row_problems = _run_manifest.manifest_from_ledger(protocol, ledger, thresholds)
-            found = row_problems + _run_manifest.problems(protocol, manifest, result_json=result_json)
+            # FI holds every trial's value: a list the analysis reports for one of the trials' own outcomes is checked
+            # value by value, not only counted.
+            recorded, altered = _trial_runner.recorded_values(self.quest_root)
+            not_run = _trial_runner.reported_values_not_run(recorded, result_json)
+            found = row_problems + altered + _run_manifest.problems(protocol, manifest, result_json=result_json) + not_run
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
-            self._manifest_analysis_problems = _run_manifest.analysis_output_problems(protocol, manifest, result_json)
+            # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
+            # again).
+            self._manifest_analysis_problems = (
+                _run_manifest.analysis_output_problems(protocol, manifest, result_json) + not_run
+            )
             return ("differs" if found else "ok"), found
         if self.config.rigor_profile == "research":
             # The older contract: the simulation ran its own loop and wrote its own record. Research needs FI's record,
