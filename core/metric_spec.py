@@ -450,13 +450,18 @@ def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[
     """The paired metrics whose per-trial values the results print with no ``<id>_pair_id`` beside them: one sentence
     each. Without an id a paired comparison can only join trials by position (``rigor_profile: research`` stops for
     this; otherwise it is a gap in the evidence)."""
-    names: set[str] = set()
+    paired = [spec["id"] for spec in declared(protocol) if spec.get("paired")]
+    lacking: set[str] = set()
 
     def walk(node: Any) -> None:
+        # Looked for in each mapping on its own: one setting's ids do not stand for another setting's missing ones. A
+        # single value (a setting run once) has nothing to pair.
         if isinstance(node, dict):
-            for key, value in node.items():
-                if isinstance(key, str):
-                    names.add(key)
+            for mid in paired:
+                values = node.get(f"{mid}_values")
+                if isinstance(values, list) and len(values) > 1 and f"{mid}_pair_id" not in node:
+                    lacking.add(mid)
+            for value in node.values():
                 walk(value)
         elif isinstance(node, list):
             for value in node[:200]:
@@ -464,9 +469,8 @@ def missing_pair_ids(protocol: dict[str, Any] | None, result_json: Any) -> list[
 
     walk(result_json)
     out = []
-    for spec in declared(protocol):
-        mid = spec.get("id")
-        if spec.get("paired") and f"{mid}_values" in names and f"{mid}_pair_id" not in names:
+    for mid in paired:
+        if mid in lacking:
             out.append(
                 f"the paired metric `{mid}` prints `{mid}_values` with no `{mid}_pair_id` beside them: print, beside "
                 f"each `{mid}_values`, the trial each value came from as `{mid}_pair_id` (FI_TRIALS gives it: "

@@ -37,13 +37,32 @@ def test_a_paired_contrast_joined_by_position_is_a_gap_and_one_joined_by_id_is_n
 
 
 def test_research_asks_for_the_pair_ids_a_paired_metric_is_printed_without() -> None:
-    no_ids = {"by_method": {"a": {"score_values": [1.0]}, "b": {"score_values": [0.5]}}}
+    no_ids = {"by_method": {"a": {"score_values": [1.0, 2.0]}, "b": {"score_values": [0.5, 1.5]}}}
     (found,) = metric_spec.missing_pair_ids(PAIRED, no_ids)
     assert "`score_pair_id`" in found and "FI_TRIALS" in found
-    with_ids = {"by_method": {"a": {"score_values": [1.0], "score_pair_id": [0]},
-                              "b": {"score_values": [0.5], "score_pair_id": [0]}}}
+    with_ids = {"by_method": {"a": {"score_values": [1.0, 2.0], "score_pair_id": [0, 1]},
+                              "b": {"score_values": [0.5, 1.5], "score_pair_id": [0, 1]}}}
     assert metric_spec.missing_pair_ids(PAIRED, with_ids) == []
     assert metric_spec.missing_pair_ids({"metrics": [{**PAIRED["metrics"][0], "paired": False}]}, no_ids) == []
+    # One setting's ids do not stand for another's; a setting run once has nothing to pair.
+    one_side = {"by_method": {"a": with_ids["by_method"]["a"], "b": no_ids["by_method"]["b"]}}
+    assert len(metric_spec.missing_pair_ids(PAIRED, one_side)) == 1
+    once = {"by_method": {"a": {"score_values": [1.0]}, "b": {"score_values": [0.5]}}}
+    assert metric_spec.missing_pair_ids(PAIRED, once) == []
+
+
+def test_a_paired_design_gives_each_trial_number_one_seed_across_the_settings(tmp_path: Path) -> None:
+    from core.trial_runner import _plan
+
+    grid = {"method": ["a", "b"]}
+    folder = tmp_path / "specs"
+    folder.mkdir()
+    kw = dict(runs_per_setting=3, base_seed=7, deterministic=False, folder=folder, out_name="o{index}.jsonl")
+    paired = _plan(tmp_path, "code/simulate.py", grid, paired=True, **kw)
+    assert [t["seed"] for t in paired[0]["trials"]] == [t["seed"] for t in paired[1]["trials"]]
+    assert len({t["seed"] for t in paired[0]["trials"]}) == 3
+    unpaired = _plan(tmp_path, "code/simulate.py", grid, **kw)
+    assert [t["seed"] for t in unpaired[0]["trials"]] != [t["seed"] for t in unpaired[1]["trials"]]
 
 
 def test_fis_summary_names_the_trial_behind_every_value() -> None:
