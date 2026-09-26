@@ -336,6 +336,20 @@ def assess(
         elif (check == "design_audit" and isinstance(design_now, dict)
               and receipt.get("output_hash") != _receipts.sha256(_receipts.design_core(design_now))):
             ready_gaps.append("the design methodology audit judged a different design from the one that ran")
+        elif check == "evidence_gate" and (stale := _receipts.stale_inputs(receipt, {
+            k: v for k, v in _receipts.gate_inputs(state).items()
+            # every input the receipt names, and always the analysis and the cross-check it judged; not the sources,
+            # which the writing step trims to the ones the paper cites after the gate has judged them
+            if k != "sources" and (k in (receipt.get("input_hashes") or {}) or k in ("analysis", "cross_check"))
+        })):
+            # The gate judged the analysis, the cross-check, the results... it was shown; any of them changed since is
+            # evidence it did not judge.
+            ready_gaps.append(
+                "the evidence gate judged earlier inputs than the ones there are now (changed since: "
+                + ", ".join(stale) + ")"
+            )
+        elif check == "evidence_gate" and (added := _receipts.unjudged_sources(receipt, _receipts.gate_inputs(state))):
+            ready_gaps.append(f"{added} of the paper's sources were not among the ones the evidence gate judged")
     # What the quest's own state and records say about the same checks, as well: a receipt that reads "pass" while the
     # state says the check failed (a record left from an earlier pass) is not believed over the state.
     gate = state.get("evidence_assessment") or {}
