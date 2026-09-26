@@ -38,6 +38,14 @@
       <a href="/" id="back-link" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-mid transition-colors flex items-center gap-2">
         <span class="material-symbols-outlined text-[16px]">arrow_back</span> Dashboard
       </a>
+      <select id="rerun-from" class="hidden bg-surface-mid cyber-border text-on-surface px-4 py-2 rounded-full font-label-sm text-label-sm" title="Where to go on from. Redoing a step first moves what that step and the later ones made to .fi/previous/.">
+        <option value="">Go on from where it stopped</option>
+        <option value="code">Redo from the code</option>
+        <option value="run">Redo from the run</option>
+        <option value="analysis">Redo from the analysis</option>
+        <option value="writing">Redo from the writing</option>
+        <option value="review">Redo from the review</option>
+      </select>
       <button id="resume-btn" onclick="resumeQuest()" class="hidden cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume</button>
       <a id="update-link" href="#" class="bg-surface-mid cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Update settings</a>
       <a id="download-link" href="#" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-mid transition-colors">Download .zip</a>
@@ -433,6 +441,7 @@
     const resumable = !data.alive && data.has_config && !answerPause;
     const resumeBtn = document.getElementById('resume-btn');
     resumeBtn.classList.toggle('hidden', !resumable);
+    document.getElementById('rerun-from').classList.toggle('hidden', !resumable);
     // Label it "Re-run" for a finished quest (re-open for another pass / apply
     // updated settings), else "Resume" (continue a pause / crash).
     const finished = data.summary && !data.pending_action && !data.pending_human_review;
@@ -1446,8 +1455,11 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   // a paused/crashed quest plain-resumes.
   let questFinishedForRerun = false;
   async function resumeQuest() {
-    const url = `/api/quests/${encodeURIComponent(questId)}/resume`
-      + (questFinishedForRerun ? '?rerun=true' : '');
+    const fromStep = document.getElementById('rerun-from').value;
+    const params = new URLSearchParams();
+    if (questFinishedForRerun && !fromStep) params.set('rerun', 'true');
+    if (fromStep) params.set('from', fromStep);
+    const url = `/api/quests/${encodeURIComponent(questId)}/resume` + (params.toString() ? `?${params}` : '');
     const res = await fetch(url, { method: 'POST' });
     if (!res.ok) { alert('Resume failed: ' + await res.text()); return; }
     if (!pollHandle) pollHandle = setInterval(refresh, 3000);
