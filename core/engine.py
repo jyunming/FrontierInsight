@@ -1323,6 +1323,7 @@ class Engine:
     # quest.
 
     # Files whose bytes are worth a sha256 in the trace, hashed after every node and logged when they change.
+    _AUDIT_CACHE_BYTES = 8 * 1024 * 1024
     _AUDIT_WATCHED = (
         "plan.md", "code/simulate.py", "code/experiment.py", "code/submit.py", "needs/FROZEN_PROTOCOL.json",
         "paper/paper.md", "paper/paper.pdf",
@@ -1340,8 +1341,9 @@ class Engine:
             self._log.debug("[audit] could not record %s: %r", kind, e)
 
     def _audit_artifacts(self, node: str) -> None:
-        # A file whose size and modification time are those it had when last hashed is not read again: the trial
-        # ledger can be large, and this runs after every step.
+        # A large file (the trial ledger) whose size and modification time are those it had when last hashed is not
+        # read again, since this runs after every step; a small one is hashed every time, so an edit that keeps its size
+        # and resets its time still shows.
         stats = self.__dict__.setdefault("_audit_stat", {})
         for rel in self._AUDIT_WATCHED:
             path = self.quest_root / rel
@@ -1350,7 +1352,7 @@ class Engine:
                 mark = (stat.st_size, stat.st_mtime_ns)
             except OSError:
                 mark = None
-            if mark is not None and rel in self._audit_seen and stats.get(rel) == mark:
+            if mark is not None and mark[0] >= self._AUDIT_CACHE_BYTES and rel in self._audit_seen and stats.get(rel) == mark:
                 continue
             digest = _audit_log.file_sha256(path) if path.is_file() else None
             if digest is not None:
