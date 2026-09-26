@@ -210,7 +210,7 @@ def test_the_human_review_snapshot_carries_the_notes(gated_engine, tmp_path: Pat
     state = {"review": {"verdict": "accept", "goal_coverage_notes": ["The topic asks for 3 figures; the run drew 5."]},
              "iteration": 0}
     _drive_node(gated_engine, state, {"action": "accept"})
-    snapshot = json.loads((gated_engine.fi_dir / "human_review.json").read_text(encoding="utf-8"))
+    snapshot = json.loads((gated_engine.fi_dir / "human_review.at_pause.json").read_text(encoding="utf-8"))
     assert snapshot["goal_coverage_notes"] == ["The topic asks for 3 figures; the run drew 5."]
 
 
