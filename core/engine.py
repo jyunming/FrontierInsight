@@ -4373,7 +4373,7 @@ class Engine:
             facts = ", ".join(
                 str(v) for v in (md.get("venue"), md.get("year"), md.get("work_type"), md.get("foundational")) if v
             )
-            excerpt = " ".join(str(d.content or "").split())[:300]
+            excerpt = " ".join(_split_figure_readings(str(d.content or ""))[0].split())[:300]
             lines.append(
                 f"[{i}] ({kind}) {title}" + (f" — {facts}" if facts else "") + f" :: {excerpt}"
             )
@@ -8341,7 +8341,8 @@ class Engine:
             lit = lit if isinstance(lit, list) else []
             n_sources = sum(
                 1 for d in lit
-                if isinstance(d, dict) and str(d.get("content") or "").strip()
+                # the source's own text: a model's reading of its figures is not a source with text
+                if isinstance(d, dict) and _split_figure_readings(str(d.get("content") or ""))[0].strip()
             )
             # The gate is asked to judge whether sources are real / on-topic /
             # off-topic — so it must actually SEE them. Pass each source's
@@ -8358,7 +8359,7 @@ class Engine:
                 title = str(md.get("title") or "").strip()
                 # Slice BEFORE normalising whitespace so we don't .split()
                 # a 16k-char body just to keep 240 chars (Copilot, #199).
-                snippet = " ".join(str(d.get("content") or "")[:400].split())[:240]
+                snippet = " ".join(_split_figure_readings(str(d.get("content") or ""))[0][:400].split())[:240]
                 if title or snippet:
                     source_previews.append({
                         "title": title[:160] or "(untitled)",
@@ -8791,13 +8792,17 @@ class Engine:
         # Each source the paper cites comes with its text, and a citation must
         # quote it: the model checks what the source says, and the quote is
         # then looked up in the source.
-        sources = {
-            label: (meta, _item_content(item))
+        # A quote is looked up in the source's own text only: what a model read off its figures is shown beside it,
+        # labelled, and a claim that rests on it is an unverified model observation, never a citation.
+        split_sources = {
+            label: (meta, *_split_figure_readings(_item_content(item)))
             for label, meta, item in _labelled_sources(literature, audience)
         }
+        sources = {label: (meta, text) for label, (meta, text, _readings) in split_sources.items()}
+        readings_of = {label: readings for label, (_meta, _text, readings) in split_sources.items()}
         citing = _citing_sentences(paper_text)
         refs_block = "\n\n".join(
-            _claim_source_block(label, meta, text, citing.get(label) or [])
+            _claim_source_block(label, meta, text, citing.get(label) or [], readings=readings_of.get(label, ""))
             for label, (meta, text) in sorted(
                 sources.items(), key=lambda kv: (kv[0].startswith("W"), int(kv[0].lstrip("W")))
             )
@@ -8903,6 +8908,9 @@ class Engine:
                 # from that text is not one the source supports.
                 basis = "unsupported"
                 why = f"no quote from [{cite_idx}] given" if not quote else f"the quote is not in the text of [{cite_idx}]"
+                if quote and _quote_in_source(quote, readings_of.get(str(cite_idx), "")):
+                    why = (f"the quote is a model's reading of a figure of [{cite_idx}], not the source's text: an "
+                           "unverified model observation")
                 evidence = f"{evidence} ({why})".strip()
             claims.append({
                 "claim": str(c["claim"]).strip(),
@@ -11986,7 +11994,8 @@ def _thin_source(meta: dict[str, Any], content: str) -> str | None:
     if _has_full_text(meta):
         return None
     title = str(meta.get("title") or meta.get("source") or "")
-    if len(_format_lit_excerpt(content or "", title).strip()) < _THIN_TEXT_CHARS:
+    # The source's own text: a model's reading of its figures is not text the source has.
+    if len(_format_lit_excerpt(_split_figure_readings(content or "")[0], title).strip()) < _THIN_TEXT_CHARS:
         return "title"
     return "blurb" if str(meta.get("work_type") or "") == "book" else None
 
@@ -12086,17 +12095,25 @@ def _format_lit_excerpt(
     used to see ``[i] Title\\nTitle. abstract...`` and propagated the
     title-twice pattern into the References section."""
     budget = _LIT_EXCERPT_CHARS if budget is None else budget
-    if query and len(content) > budget:
-        from .passages import select_relevant_excerpt
-        excerpt = select_relevant_excerpt(
-            content, query, budget_chars=budget, mode=mode,
-        )
-    else:
-        excerpt = content[:budget]
+    # What a model read off the source's figures is excerpted apart from the source's own text and always shown under
+    # its label: a passage picked for relevance must never carry a reading without the words saying what it is.
+    content, readings = _split_figure_readings(content)
+    # A quarter of the budget, or all the source's own text leaves unused.
+    readings_budget = min(len(readings), max(budget // 4, budget - len(content))) if readings.strip() else 0
+
+    def pick(text: str, room: int) -> str:
+        if query and len(text) > room:
+            from .passages import select_relevant_excerpt
+            return select_relevant_excerpt(text, query, budget_chars=room, mode=mode)
+        return text[:room]
+
+    excerpt = pick(content, budget - readings_budget)
     if title and excerpt.lstrip().startswith(title):
         # Drop the leading title + immediately-following separator
         # (newline or ". "). Keep everything after as the real abstract.
-        return excerpt.lstrip()[len(title):].lstrip(".\n ")
+        excerpt = excerpt.lstrip()[len(title):].lstrip(".\n ")
+    if readings_budget:
+        excerpt = excerpt.rstrip() + _PARA + _FIGURE_READINGS_MARK + _PARA + pick(readings, readings_budget).strip()
     return excerpt
 
 
@@ -12977,8 +12994,11 @@ def _item_content(item: Any) -> str:
             state_text = str(content or "")
             if _FIGURE_READINGS_MARK in state_text:
                 tail = state_text[state_text.index(_FIGURE_READINGS_MARK) + len(_FIGURE_READINGS_MARK):]
+                # Compared with the readings the file already holds, not its whole text: a short reading paragraph
+                # ("Conclusion:") that happens to occur in the paper is still a reading.
+                on_disk = _split_figure_readings(text)[1]
                 missing = [b.strip() for b in tail.split(_PARA)
-                           if b.strip() and b.strip() != _FIGURE_READINGS_MARK and b.strip() not in text]
+                           if b.strip() and b.strip() != _FIGURE_READINGS_MARK and b.strip() not in on_disk]
                 if missing:
                     text += _PARA + _FIGURE_READINGS_MARK + _PARA + _PARA.join(missing) + _NL
             return text
@@ -13024,10 +13044,10 @@ def _claim_method_block(quest_root: Path, state: QuestState) -> str:
     return "\n\n".join(parts) or "(nothing recorded)"
 
 
-def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str]) -> str:
+def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str], *, readings: str = "") -> str:
     """One source for the claim check: its label and title, and, when the
     paper cites it, the passages of its text most related to the citing
-    sentences."""
+    sentences, then what a model read off its figures, labelled as that."""
     title = str(meta.get("title") or "").strip()
     ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
     head = f"[{label}] {title}" + (f" · {ident}" if ident else "")
@@ -13036,7 +13056,13 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
     if not text.strip():
         return head + "\n(no text of this source was retrieved, so nothing can be quoted from it)"
     excerpt = _format_lit_excerpt(text, title, query=" ".join(sentences), budget=_CLAIM_SOURCE_CHARS)
-    return head + "\nText:\n" + excerpt.strip()
+    block = head + "\nText:\n" + excerpt.strip()
+    if readings.strip():
+        block += (
+            "\nValues a model read off this source's figures (NOT the source's words: a claim resting only on these is"
+            " unsupported, and they are never a quote):\n" + readings.strip()[:_CLAIM_READINGS_CHARS]
+        )
+    return block
 
 
 def _claim_distilled_block(analysis: dict[str, Any], budget: int) -> tuple[str, int]:
@@ -16957,9 +16983,22 @@ _FIGURES_PER_CALL = 4
 #: Captions shown to the picker in one call (thirty figure-heavy papers can hold over a thousand).
 _FIGURE_PICK_BATCH = 150
 _FIGURE_READING_CHARS = 2000
+#: What a model read off one source's figures, shown to the claim check beside the source's own text.
+_CLAIM_READINGS_CHARS = 1500
 _FIGURE_READINGS_MARK = "---VALUES READ FROM THE FIGURES (by a model, from the images)---"
 _NL = chr(10)
 _PARA = _NL + _NL
+
+
+def _split_figure_readings(text: str) -> tuple[str, str]:
+    """``(the source's own text, what a model read off its figures)``. The readings are appended to a source's text for
+    the design, the analysis and the writer to read (:func:`_append_figure_readings`); they are a model's observation,
+    not the source's words, so nothing that checks a quotation against a source may take them for its text."""
+    if _FIGURE_READINGS_MARK not in text:
+        return text, ""
+    head, _, tail = text.partition(_FIGURE_READINGS_MARK)
+    readings = [b.strip() for b in tail.split(_FIGURE_READINGS_MARK) if b.strip()]
+    return head.rstrip(), _PARA.join(readings)
 
 
 def _append_figure_readings(item: dict[str, Any]) -> int:

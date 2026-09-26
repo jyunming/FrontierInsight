@@ -1141,3 +1141,47 @@ def test_a_rewrite_is_told_which_citations_the_check_confirmed() -> None:
     assert "Citations the check confirmed" in text and "[4] for: Below threshold no major outbreak occurs." in text
     assert "p_major was 0.36" not in text
     assert "Citations the check confirmed" not in _format_review_for_writer({"claim_grounding": state["claim_grounding"]})  # type: ignore[arg-type]
+
+
+def test_a_value_a_model_read_off_a_figure_is_not_a_quote_of_the_source(tmp_path: Path) -> None:
+    """The 2026-09-26 re-audit's P0-2: a figure reading was appended to the source's text and a quote of it passed the
+    quote check, so a model's (possibly invented) value counted as the source's words."""
+    from core.engine import _append_figure_readings
+
+    invented = "The reported accuracy at the right edge is 99.9 percent."
+    item = {"content": "The paper body contains no numerical accuracy statement at all, anywhere in its text.",
+            "metadata": {"title": "A figure-heavy paper", "doi": "10.1/fig", "source": "openalex",
+                         "figures": [{"number": 1, "page": 4, "reading": invented}]}}
+    assert _append_figure_readings(item) == 1
+    eng = _engine(tmp_path)
+    seen: list[str] = []
+
+    async def fake_chat(prompt: str, *, node: str = "") -> str:  # noqa: ARG001
+        seen.append(prompt)
+        return json.dumps({"claims": [{"claim": "Accuracy reaches 99.9 percent [1].", "basis": "citation",
+                                       "citation_index": 1, "quote": invented, "evidence": "Fig. 1"}],
+                           "summary": ""})
+    eng._chat = fake_chat  # type: ignore[assignment,method-assign]
+    state = {"topic": "t", "paper_md": _paper(tmp_path, "# P\n\nAccuracy reaches 99.9 percent [1].\n"),
+             "literature": [item]}
+    g = asyncio.run(eng._node_claim_check(state))["claim_grounding"]  # type: ignore[arg-type]
+    (claim,) = g["claims"]
+    assert claim["basis"] == "unsupported" and "unverified model observation" in claim["evidence"]
+    # The check still sees the reading, labelled as a model's, apart from the source's text.
+    assert "NOT the source's words" in seen[0] and invented in seen[0]
+
+
+def test_a_reading_picked_for_relevance_keeps_its_label_and_a_readings_only_source_is_title_only() -> None:
+    from core.engine import _FIGURE_READINGS_MARK, _format_lit_excerpt, _thin_source
+
+    own = "The paper studies epidemics on networks. " * 60
+    readings = "Read from the image: the attack rate is 99% at R0 = 3."
+    content = own + "\n\n" + _FIGURE_READINGS_MARK + "\n\n" + readings
+    excerpt = _format_lit_excerpt(content, "t", query="attack rate 99%", budget=600)
+    assert "99%" in excerpt
+    assert excerpt.index(_FIGURE_READINGS_MARK) < excerpt.index("99%"), "a reading never reaches a prompt unlabelled"
+    only_readings = "\n\n" + _FIGURE_READINGS_MARK + "\n\n" + readings * 20
+    assert _thin_source({"title": "t"}, only_readings) == "title"
+    # Room the source's own text leaves goes to its readings.
+    short = "Short abstract.\n\n" + _FIGURE_READINGS_MARK + "\n\n" + ("r" * 900)
+    assert _format_lit_excerpt(short, "t", budget=1000).count("r") >= 800
