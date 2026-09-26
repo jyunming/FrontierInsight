@@ -241,6 +241,19 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     for reason in dropped
                 )
                 continue
+        if key == "thresholds" and isinstance(out["thresholds"], dict):
+            # Likewise one threshold, not the block: a real plan listed a sweep of five cut-offs under one name beside
+            # the numeric headline threshold, and lost both.
+            kept_t = {name: v for name, v in out["thresholds"].items() if _number(v)}
+            left_out = [name for name in out["thresholds"] if name not in kept_t]
+            if kept_t and left_out:
+                out["thresholds"] = kept_t
+                notes.extend(
+                    f"the threshold `{name}` was left out of `protocol.thresholds` because it is not one number "
+                    f"({out_value!r}); put it right here if it matters"
+                    for name, out_value in ((n, protocol["thresholds"][n]) for n in left_out)
+                )
+                continue
         notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
         del out[key]
     return None, notes

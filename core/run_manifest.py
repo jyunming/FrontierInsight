@@ -361,8 +361,9 @@ def _value_count_findings(
                     True,
                 ))
                 continue
-            base, over = _total_counts_reported(result_json, f"{given}_count"), f"the trials `{given}` counts"
-            given_total = _total_counts_reported(result_json, f"{given}_total")
+            base, over = _total_counts_reported(result_json, f"{given}_count", beside=f"{metric}_values"), \
+                f"the trials `{given}` counts"
+            given_total = _total_counts_reported(result_json, f"{given}_total", beside=f"{metric}_values")
             if given_total < expected_total * 0.5:
                 out.append((
                     f"the manifest reports {expected_total:g} successful trial(s) in total, but `{given}`, the "
@@ -399,15 +400,26 @@ def _value_count_findings(
     return out
 
 
-def _total_counts_reported(result_json: Any, key: str) -> float:
-    """The sum of every number found anywhere in ``result_json`` under ``key`` (a ``<id>_count`` or ``<id>_total``)."""
-    total = 0.0
+def _total_counts_reported(result_json: Any, key: str, *, beside: str | None = None) -> float:
+    """The sum of the numbers in ``result_json`` under ``key`` (a ``<id>_count`` or ``<id>_total``).
+
+    With ``beside`` (a ``<metric>_values`` key), only the counts that sit in the same object as those values are summed:
+    they are what the values are backed by. A copy of one setting's count elsewhere in the result (a headline repeated
+    at the top level) was added to the per-setting ones: a live run's 933 + 96 was printed in its paper as 1,029 trials.
+    When no count sits beside the values, every count found is summed, as before."""
+    total, paired, found_paired = 0.0, 0.0, False
+
+    def number(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
 
     def walk(node: Any) -> None:
-        nonlocal total
+        nonlocal total, paired, found_paired
         if isinstance(node, dict):
+            if beside and key in node and number(node[key]) and isinstance(node.get(beside), list):
+                paired += float(node[key])
+                found_paired = True
             for k, v in node.items():
-                if k == key and isinstance(v, (int, float)) and not isinstance(v, bool):
+                if k == key and number(v):
                     total += float(v)
                 else:
                     walk(v)
@@ -416,7 +428,7 @@ def _total_counts_reported(result_json: Any, key: str) -> float:
                 walk(v)
 
     walk(result_json)
-    return total
+    return paired if found_paired else total
 
 
 def _counts_listed(result_json: Any, key: str) -> bool:

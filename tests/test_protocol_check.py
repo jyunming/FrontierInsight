@@ -433,3 +433,27 @@ def test_the_dashboard_and_the_quest_page_name_the_protocol_stop() -> None:
     static = Path(__file__).resolve().parent.parent / "web" / "static"
     for page in ("index.html", "quest.html"):
         assert "protocol: 'protocol'" in (static / page).read_text(encoding="utf-8"), page
+
+
+def test_a_list_of_indices_is_not_read_as_an_axis_that_shares_its_numbers() -> None:
+    """A real run's REPRESENTATIVE_RUN_INDICES = [0, 1, 2] was read as the initial_infectives axis (1, 2): two repairs."""
+    script = (
+        "REPRESENTATIVE_RUN_INDICES = [0, 1, 2]\n"
+        "for i0 in json.load(open('cells.json'))['initial_infectives']:\n"
+        "    run(i0)\n"
+    )
+    found = pc.check({"grid": {"initial_infectives": [1, 2]}}, {"experiment.py": script})
+    assert not [m for m in found if m.kind == "grid"]
+
+
+def test_a_threshold_that_is_not_one_number_is_left_out_alone_not_with_the_block() -> None:
+    """A real plan listed five cut-offs under one name beside the numeric headline threshold, and lost both."""
+    fixed, notes = plan.repair_protocol({
+        "grid": {"R0": [0.9, 1.5]},
+        "thresholds": {"major_fraction": 0.1, "sensitivity_fractions": [0.02, 0.05, 0.2], "absolute_count": 20},
+    })
+    assert fixed is not None and fixed["thresholds"] == {"major_fraction": 0.1, "absolute_count": 20}
+    assert len(notes) == 1 and "`sensitivity_fractions`" in notes[0]
+    # Nothing numeric at all: the block goes, as before.
+    fixed, notes = plan.repair_protocol({"grid": {"R0": [0.9]}, "thresholds": {"major": "about a tenth"}})
+    assert fixed is not None and "thresholds" not in fixed and "`protocol.thresholds` was left out" in notes[0]

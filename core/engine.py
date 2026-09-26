@@ -8686,7 +8686,10 @@ class Engine:
             )
         evidence_block += _claim_results_block(
             state.get("result_json") or {},
-            query=evidence_block,
+            # The claims are the paper's: the branches that hold the numbers it writes are the ones to keep. Ranked by
+            # the findings alone, a real run's per-setting values the paper quoted were left out, and 6 true
+            # sentences were called unsupported.
+            query=evidence_block + "\n" + paper_text,
             budget=_CLAIM_EVIDENCE_CHARS - len(evidence_block),
         )
         # The paper reports means over the seeds with their intervals, which
@@ -8704,6 +8707,7 @@ class Engine:
         prompt = self._prompts["claim_check"].substitute(
             topic=state["topic"],
             evidence_block=evidence_block,
+            method_block=_claim_method_block(self.quest_root, state),
             references=refs_block,
             paper=paper_text,
         )
@@ -12803,6 +12807,45 @@ def _item_content(item: Any) -> str:
     return str(content or "")
 
 
+# The scripts as the claim check sees them. A sentence about how the study was run (the generator, the solver, how
+# many oracle trials) is checked against the code that ran it: without it a real run had four true method sentences
+# called unsupported, and the revise that followed rewrote them.
+_CLAIM_SCRIPT_CHARS = 8000
+_CLAIM_PROTOCOL_CHARS = 3000
+
+
+def _claim_method_block(quest_root: Path, state: QuestState) -> str:
+    """How the study was run, for the claim check: the frozen protocol, the scripts that ran (each cut at
+    ``_CLAIM_SCRIPT_CHARS``, and saying so), and what each figure draws."""
+    parts: list[str] = []
+    protocol = _frozen.protocol_of(quest_root)
+    if protocol:
+        text = json.dumps(protocol, indent=1, default=str)
+        if len(text) > _CLAIM_PROTOCOL_CHARS:
+            text = text[:_CLAIM_PROTOCOL_CHARS] + f"\n... ({len(text) - _CLAIM_PROTOCOL_CHARS:,} more characters)"
+        parts.append("The frozen protocol:\n" + text)
+    for name in (_split_run.SIMULATE_NAME, "experiment.py"):
+        try:
+            source = (quest_root / "code" / name).read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if len(source) > _CLAIM_SCRIPT_CHARS:
+            source = source[:_CLAIM_SCRIPT_CHARS] + f"\n# ... ({len(source) - _CLAIM_SCRIPT_CHARS:,} more characters not shown)"
+        parts.append(f"code/{name}:\n```python\n{source}\n```")
+    try:
+        record = json.loads((quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    # The engine's own oracle verdicts: a real run's script re-read its oracle results from the wrong folder and
+    # reported them failed, and the check called the paper's true "every oracle passed" unsupported.
+    oracle_note = _oracle.analysis_note(_oracle.last_judged(record)).strip()
+    if oracle_note:
+        parts.append(oracle_note.replace("[FI NOTE] ", "", 1).replace("the results below", "the results above"))
+    if state.get("figures"):
+        parts.append("What each figure draws:\n" + _figure_list_for_prompt(state))
+    return "\n\n".join(parts) or "(nothing recorded)"
+
+
 def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: list[str]) -> str:
     """One source for the claim check: its label and title, and, when the
     paper cites it, the passages of its text most related to the citing
@@ -14255,6 +14298,45 @@ def _replicate_result_intervals(state: QuestState) -> dict[str, dict[str, Any]]:
     }
 
 
+# An interval the experiment's own figure named ("Gillespie (Wilson 95% CI)", "mean +/- 1 SD"). A redrawn band is FI's
+# 95% interval over the seed means, whatever the seed-0 figure's legend said it was: a real quest's redraw kept "Wilson
+# 95% CI" on bands that were the interval over 3 seed means, and the caption repeated it. A method name alone ("a
+# binomial model") is left as it is: only one given as an interval (a percent or a CI word beside it) is rewritten.
+_INTERVAL_METHOD_RE = re.compile(
+    r"(?P<pre>\b\d{2}(?:\.\d+)?\s*%\s*)?"
+    r"\b(?:Wilson(?:\s+score)?|Clopper[\s\-\u2013]*Pearson|Agresti[\s\-\u2013]*Coull|Jeffreys|bootstrap(?:ped)?"
+    r"|binomial|exact|normal[\s\-\u2013]*approximation|Poisson)\b"
+    r"(?P<post>\s*\d{2}(?:\.\d+)?\s*%)?"
+    r"(?P<what>\s*(?:CIs?\b|C\.I\.|confidence\s+intervals?|intervals?|bands?|error\s+bars?))?"
+    r"(?P<paren>\s*\(\s*\d{2}(?:\.\d+)?\s*%\s*\))?",
+    re.IGNORECASE,
+)
+_SPREAD = (
+    r"(?:\u00b1|\+/-|\+-)\s*(?:1\s*)?(?:SD|s\.d\.|std(?:\.|\s+dev(?:iation)?)?|SE|SEM|s\.e\.(?:m\.)?"
+    r"|standard\s+(?:deviation|error))\b"
+)
+_SPREAD_RE = re.compile(r"\s*" + _SPREAD, re.IGNORECASE)
+_SPREAD_IN_PARENS_RE = re.compile(r"\(\s*" + _SPREAD + r"\s*\)", re.IGNORECASE)
+
+
+def _redrawn_band_text(text: Any, n: int) -> Any:
+    """``text`` (a legend label, a title, an axis label) with any interval the experiment named replaced by what a
+    redrawn band is: the 95% CI over ``n`` seeds."""
+    if not isinstance(text, str) or not text:
+        return text
+    ours = f"95% CI over {n} seeds"
+
+    def method(m: re.Match[str]) -> str:
+        if not (m.group("pre") or m.group("post") or m.group("what") or m.group("paren")):
+            return m.group(0)
+        return ours
+
+    out = _INTERVAL_METHOD_RE.sub(method, text)
+    # "(+/- 1 SD)" in parentheses is replaced whole, so no "(, 95% ...)" is left behind.
+    out = _SPREAD_IN_PARENS_RE.sub(f"({ours})", out)
+    return _SPREAD_RE.sub(f", {ours}", out)
+
+
 # The line style a redraw keeps (core/replot_figures.py draws with the same keys).
 _REPLOT_STYLE_KEYS = (
     "color", "linestyle", "marker", "markersize", "markerfacecolor",
@@ -14311,17 +14393,18 @@ def _replicate_line_figure(
                 upper.append(m if ci["ci_upper"] is None else ci["ci_upper"])
             lines.append({
                 **{key: line.get(key) for key in _REPLOT_STYLE_KEYS},
-                "label": line.get("label"), "kind": line.get("kind"),
+                "label": _redrawn_band_text(line.get("label"), len(runs)), "kind": line.get("kind"),
                 "x": x, "mean": mean, "lower": lower, "upper": upper,
             })
         panels.append({
-            **{key: panel.get(key) for key in ("grid", "title", "xlabel", "ylabel", "xscale", "yscale", "legend")},
+            **{key: panel.get(key) for key in ("grid", "xlabel", "xscale", "yscale", "legend")},
+            **{key: _redrawn_band_text(panel.get(key), len(runs)) for key in ("title", "ylabel")},
             "lines": lines,
         })
     if not varies:
         return None
     return {
-        "file": name, "size": runs[0].get("size"), "suptitle": runs[0].get("suptitle") or "",
+        "file": name, "size": runs[0].get("size"), "suptitle": _redrawn_band_text(runs[0].get("suptitle") or "", len(runs)),
         "n": len(runs), "axes": panels,
     }
 
@@ -15084,6 +15167,17 @@ def _format_review_for_writer(state: QuestState) -> str:
             "Claims that neither this study's results nor a cited source backs:",
             *(f"  - {claim}" for claim in unsupported),
         ]
+    # A rewrite for another reason (the page limit) dropped a citation the check had confirmed against its source's
+    # text, and cited title-only books instead: the confirmed ones are named so a rewrite keeps them.
+    confirmed = [
+        c for c in (state.get("claim_grounding") or {}).get("claims") or []
+        if isinstance(c, dict) and c.get("basis") == "citation" and c.get("citation_index") is not None
+    ]
+    if confirmed and review:
+        lines += [
+            "Citations the check confirmed against the source's own text (keep each where its sentence stays):",
+            *(f"  - [{c['citation_index']}] for: {str(c.get('claim') or '').strip()[:160]}" for c in confirmed[:20]),
+        ]
     rounds = [
         h for h in state.get("feedback_history") or []
         if isinstance(h, dict) and str(h.get("text") or "").strip()
@@ -15271,7 +15365,9 @@ def _figure_list_for_prompt(state: QuestState) -> str:
     if any((records.get(f) or {}).get("replicate_mean") for f in figs):
         lines.append(
             "A figure drawn as the mean of several seeds shows each line at its mean, "
-            "shaded with its 95% confidence interval, and its caption says so."
+            "shaded with its 95% confidence interval, and its caption says so. FI drew that band: it is the "
+            "interval over the seed means, not a Wilson, bootstrap or other interval the experiment's own "
+            "figure may have named, so the caption does not call it one."
         )
     if any((records.get(f) or {}).get("single_seed") is not None for f in figs):
         lines.append(
@@ -15357,7 +15453,7 @@ def _hidden_series(record: dict[str, Any] | None) -> list[tuple[dict[str, Any], 
         (ax, s)
         for ax in ((record or {}).get("axes") or []) if isinstance(ax, dict)
         for s in (ax.get("series") or [])
-        if isinstance(s, dict) and s.get("shows") not in ("yes", "vertical line")
+        if isinstance(s, dict) and s.get("shows") not in ("yes", "vertical line", "reference line")
     ]
 
 
@@ -15456,6 +15552,9 @@ def _figure_record_note(record: dict[str, Any] | None, *, n_seeds: int | None = 
             shows = s.get("shows")
             if shows == "vertical line" and isinstance(s.get("x"), (int, float)):
                 series.append(f"{s.get('label')} a vertical line at x = {s['x']:.3g}")
+                continue
+            if shows == "reference line" and isinstance(s.get("y"), (int, float)):
+                series.append(f"{s.get('label')} a reference line at y = {s['y']:.3g}")
                 continue
             span = f'{s["min"]:.3g} to {s["max"]:.3g}' if "min" in s else "no points"
             tail = "" if shows == "yes" else ", FLAT on this axis" if shows == "flat" else ", NOT SHOWN"
