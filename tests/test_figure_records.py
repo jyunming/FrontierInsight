@@ -442,3 +442,4 @@ def test_review_sends_the_figure_check_and_keeps_its_findings(tmp_path: Path) ->
     assert "## Figures (what each figure draws" in prompts[0]
     assert 'names "velocity_verlet"' in prompts[0]
     assert len(review["figure_caption_warnings"]) == 2
+

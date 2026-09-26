@@ -218,3 +218,21 @@ def test_a_range_in_math_prints_a_dash_under_every_template(tmp_path: Path, fmt:
         assert expected in text, (fmt, expected, text)
     # Two minus signs would print as U+2212 with spaces around them.
     assert "−" not in text, (fmt, text)
+
+
+def test_set_and_logic_symbols_in_prose_become_latex() -> None:
+    """A model writes "R0 ∈ {0.9, 1.5}" in prose; pdflatex stopped on the first "∈" in every run of one model, so the
+    PDF fell back to another renderer and the page-limit check was skipped. Each glyph is spelt as a LaTeX command."""
+    from generation import paper
+
+    text = "R0 ∈ A ∉ B ⊆ C ∪ D ∩ E = ∅, ∀x ∃y, a ≡ b ∼ c, x ∈ ℝ"
+    out = text.translate(paper._LATEX_UNICODE_TRANSLATOR)
+    assert not any(ord(ch) > 127 for ch in out), out
+    assert r"\ensuremath{\in}" in out and r"\ensuremath{\mathbb{R}}" in out
+
+
+def test_per_mille_is_set_so_it_works_inside_math_too() -> None:
+    """``\\textperthousand`` alone is text-only: inside $...$ pdflatex warned it invalid in math mode."""
+    from generation import paper
+
+    assert "5‰".translate(paper._LATEX_UNICODE_TRANSLATOR) == r"5\ensuremath{\text{\textperthousand}}"
