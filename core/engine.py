@@ -66,6 +66,7 @@ from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
 from . import rerun_from as _rerun_from
+from . import attempt_records as _attempts
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
@@ -1179,7 +1180,15 @@ class Engine:
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
-            self._write_evidence(final_state)
+            evidence_record = self._write_evidence(final_state)
+            self._record(_attempts.ATTEMPTS, {
+                "kind": "quest",
+                "outcome": _attempts.quest_outcome(dict(final_state), evidence_record),
+                "evidence": (evidence_record or {}).get("status"),
+                "review": (final_state.get("review") or {}).get("verdict"),
+                "skills": list(final_state.get("selected_skills") or []),
+                "context": await self._attempt_context(final_state),
+            })
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
@@ -2602,6 +2611,17 @@ class Engine:
             out["ideate_critique"] = critique
         if tournament_result:
             out["ideate_tournament"] = tournament_result
+        self._record(_attempts.LEDGER, {
+            "kind": "ideas",
+            "candidates": [{"title": i.get("title"), "hypothesis": i.get("hypothesis")}
+                           for i in ideas if isinstance(i, dict)],
+            "chosen": chosen.get("title") if isinstance(chosen, dict) else None,
+            "rule": ("tournament: most wins" if tournament_ran
+                     else "reflection" if critique else "the model's own pick"),
+            "why": (chosen.get("rationale") if isinstance(chosen, dict) else "") or "",
+            "reflection": {"swap_to": critique.get("swap_to")} if critique else None,
+            "tournament": tournament_result or None,
+        })
         return out
 
     async def _run_ideate_tournament(
@@ -3607,6 +3627,14 @@ class Engine:
         out["design_history"] = _append_design_revision(
             state, design, self.quest_root, self._log, plan_sha,
         )
+        latest = (out["design_history"] or [{}])[-1]
+        self._record(_attempts.LEDGER, {
+            "kind": "design",
+            "revision": len(out["design_history"]),
+            "parent": len(out["design_history"]) - 1 or None,
+            "reason": latest.get("reason") or latest.get("trigger") or "",
+            "design_sha256": _attempts._json_sha(design),
+        })
         # Range assertions contributed by the trusted skills this quest may
         # call. Stashed in state because ``_assertion_violations`` is a
         # module-level function with no access to the engine, and the
@@ -7128,6 +7156,20 @@ class Engine:
         }
         patch["numeric_warnings_accepted"] = False
         patch["run_manifest_failures"] = manifest_attempts_next
+        try:
+            oracle_status = str((json.loads((self.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+                                 or {}).get("status") or "")
+        except (OSError, ValueError, AttributeError):
+            oracle_status = ""
+        self._record(_attempts.ATTEMPTS, {
+            "kind": "run",
+            "outcome": _attempts.run_outcome(
+                returncode=result.returncode, has_result=bool(result_json), manifest_status=manifest_status,
+                oracle_status=oracle_status,
+            ),
+            "returncode": result.returncode,
+            "context": await self._attempt_context({**state, **patch}),
+        })
         patch["manifest_failed_trials"] = getattr(self, "_manifest_failed_trials", None)
         if result_json:
             patch["bounded_seen"] = _bounded_seen_after(state, result_json)
@@ -7529,7 +7571,13 @@ class Engine:
             else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"
         )
         code_path.parent.mkdir(parents=True, exist_ok=True)
+        parent_sha = _attempts._file_sha(code_path)
         code_path.write_text(new_code, encoding="utf-8")
+        self._record(_attempts.LEDGER, {
+            "kind": "repair", "script": code_path.name, "attempt": iters + 1,
+            "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
+            "summary": patch_summary[:300],
+        })
 
         patch: QuestState = {
             **spent,
@@ -11342,6 +11390,25 @@ class Engine:
             model = getattr(self._client, "last_model", None) or ""
         append_cost_row(self.fi_dir, node=node, model=model, usage=usage, messages=messages, response=response)
 
+    async def _attempt_context(self, state: QuestState) -> dict[str, Any]:
+        """The conditions an attempt ran under (core/attempt_records.py); an empty dict if they cannot be read. Hashing
+        the quest's files and asking git for FI's commit run in a worker thread, off the event loop."""
+        try:
+            return await asyncio.to_thread(
+                _attempts.context_fingerprint,
+                self.config, self.quest_root, dict(state), prompts=self._prompts,
+                fi_repo=Path(__file__).resolve().parent.parent,
+            )
+        except Exception as e:  # noqa: BLE001 -- a record never touches the quest
+            self._log.debug("[attempts] context not read: %r", e)
+            return {}
+
+    def _record(self, name: str, record: dict[str, Any]) -> None:
+        """Append to one of the quest's attempt records (core/attempt_records.py). Records only: read by nothing
+        that decides a route."""
+        if not _attempts.append(self.fi_dir, name, record):
+            self._log.debug("[attempts] %s not written", name)
+
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node via the shared
         ``core.provider.model_for_node`` lookup — None when the lookup
@@ -11812,6 +11879,14 @@ class Engine:
             "hypothesis": design.get("hypothesis", ""),
             "method_summary": design.get("method", ""),
             "key_findings": list(analysis.get("key_findings", []) or [])[:20],
+            # The idea this study pursued and the ones it chose it over, with how: what a later quest reads to know
+            # the direction was one of several (the full record, pairwise verdicts included, is .fi/branch_ledger.jsonl).
+            "chosen_idea": ((state.get("chosen_idea") or {}).get("title") or "") if isinstance(state.get("chosen_idea"), dict) else "",
+            "alternative_ideas": [str(i.get("title") or "") for i in (state.get("ideas") or [])
+                                  if isinstance(i, dict) and i.get("title")
+                                  and i.get("title") != (state.get("chosen_idea") or {}).get("title")][:10],
+            "idea_selection": ("tournament" if state.get("ideate_tournament")
+                               else "reflection" if state.get("ideate_critique") else "model pick"),
             "result_json": state.get("result_json") or {},
             "figures": list(state.get("figures", []) or []),
             "provider": self.config.provider.name,
