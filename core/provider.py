@@ -205,6 +205,9 @@ class _CliSpec:
     image_input: str | None = None
     image_flag: str | None = None
     add_dir_flag: str | None = None
+    # Settings a CLI reads only from a file in the user's home (agy): written to a fresh home folder of the call's
+    # own, which the CLI is pointed at through HOME / USERPROFILE, so the user's own settings are never used or changed.
+    home_settings: dict[str, Any] | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -268,6 +271,21 @@ def _child_env(spec: _CliSpec) -> dict[str, str] | None:
     return env
 
 
+#: agy answer-only. It has no flag that turns its tools off (``--mode plan`` and ``--sandbox`` do not; checked), and
+#: in print mode it follows the user's ``~/.gemini/antigravity-cli/settings.json``, which is often
+#: ``"toolPermission": "always-proceed"``: one figure reading ran 66 shell commands, fetched a paper from arXiv and read
+#: FI's own source. These settings, given to every call in a home of its own: a tool that needs approval is refused
+#: (print mode cannot ask), and the deny rules refuse shell commands, file writes, URL fetches and MCP tools outright;
+#: files outside the call's folder and the image folder FI adds cannot be read. Web search cannot be turned off this
+#: way (no setting or rule reaches it; checked), so an agy call can still search the web.
+_ANTIGRAVITY_SETTINGS: dict[str, Any] = {
+    "toolPermission": "request-review",
+    "allowNonWorkspaceAccess": False,
+    "artifactReviewPolicy": "asks-for-review",
+    "permissions": {"deny": ["command(*)", "write_file(*)", "read_url(*)", "mcp(*)"]},
+}
+
+
 def _encode_antigravity_stdin(prompt: str) -> str:
     """Wrap a prompt as one antigravity stream-json turn.
 
@@ -285,8 +303,17 @@ def _encode_antigravity_stdin(prompt: str) -> str:
     """
     return json.dumps({
         "event": "user",
-        "message": {"role": "user", "content": prompt},
+        "message": {"role": "user", "content": _ANTIGRAVITY_PREFACE + prompt},
     }, ensure_ascii=False) + "\n"
+
+
+#: Said to agy before every request: its shell, file writes and URL fetches are refused (``_ANTIGRAVITY_SETTINGS``), and
+#: a model that tries one and is refused may end its turn with no answer, which FI would take for a failed call.
+_ANTIGRAVITY_PREFACE = (
+    "Answer this request directly in your reply, from what it contains. Do not run commands, write files, fetch web "
+    "pages or search the web: those tools are turned off for this request. The only files you may open are image "
+    "files the request names.\n\n"
+)
 
 
 def _encode_claude_stream_json(prompt: str, images: list[tuple[str, bytes]]) -> str:
@@ -688,9 +715,11 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # does) caps the prompt at the Windows ~8 KB command-line limit.
         #
         # ``--dangerously-skip-permissions`` is deliberately NOT passed. FI
-        # asks this CLI for text completion, not for agentic work, so there
-        # is nothing to auto-approve — and handing a coding agent blanket
-        # tool permission to save a prompt round-trip is the wrong trade.
+        # asks this CLI for text completion, not for agentic work. Not passing
+        # it is not enough on its own: agy follows the user's settings.json,
+        # often "always-proceed", so its tools are refused through settings
+        # in a home of the call's own (``home_settings``,
+        # ``_ANTIGRAVITY_SETTINGS``).
         argv=(
             "agy", "--print", "",
             "--input-format", "stream-json",
@@ -724,6 +753,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # against the real CLI, it named the shapes and colours in a test image.
         image_input="file_ref",
         add_dir_flag="--add-dir",
+        home_settings=_ANTIGRAVITY_SETTINGS,
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -1711,6 +1741,7 @@ async def _run_cli(
     # with the answer file. The flags go before a trailing prompt flag.
     image_paths: list[Path] = []
     image_folder: Path | None = None  # agy's images: a folder of their own, removed with them
+    home_dir: str | None = None  # agy's settings home (``home_settings``), removed with the call folder
     # The call's one try/finally starts here, before the images are written, so a failure anywhere after it (a full
     # disk while writing them, the prompt's encoding) still removes them.
     call_dir: str | None = None
@@ -1803,6 +1834,14 @@ async def _run_cli(
         # for the call (the answer file, images) live elsewhere, by absolute path,
         # so the directory is still empty when the CLI starts.
         call_dir = tempfile.mkdtemp(prefix="fi_cli_call_")
+        child_env = _child_env(spec)
+        if spec.home_settings is not None:
+            home_dir = tempfile.mkdtemp(prefix="fi_cli_home_")
+            _write_cli_home(Path(home_dir), spec.home_settings)
+            child_env = {**(child_env if child_env is not None else os.environ), "HOME": home_dir,
+                         "USERPROFILE": home_dir}
+            # A grant inherited from an agy or Antigravity terminal FI was started from would reach the call.
+            child_env.pop("ANTIGRAVITY_PERM_GRANTS", None)
         if spec.cwd_flag:
             # Ahead of a trailing prompt flag and its prompt, like the flags above.
             at = len(argv) - 2 if spec.pass_prompt_via == "arg" else len(argv)
@@ -1817,7 +1856,7 @@ async def _run_cli(
                 ),
                 stdout=stdout_target,
                 stderr=asyncio.subprocess.PIPE,
-                env=_child_env(spec),
+                env=child_env,
                 cwd=call_dir,
                 limit=_CLI_STREAM_LIMIT,
             )
@@ -1828,33 +1867,40 @@ async def _run_cli(
                 f"before using this provider."
             ) from e
 
-        if spec.output_via == "stream_json":
-            # Streaming path: only used by claude_cli today. Reads
-            # stdout line-by-line, parses ``--output-format stream-
-            # json`` events, resets the inactivity watchdog on each
-            # event, surfaces text_deltas as the aggregated answer.
-            # Required for Sonnet 4.6 extended-thinking spans.
-            return await _collect_via_streaming(
-                proc, argv, spec, stdin_bytes,
-                timeout_s=timeout_s,
-                inactivity_timeout_s=inactivity_timeout_s,
-                post_eof_reap_timeout_s=post_eof_reap_timeout_s,
-                heartbeat_cb=heartbeat_cb,
-                node=node,
-                usage_out=usage_out,
+        try:
+            if spec.output_via == "stream_json":
+                # Streaming path: only used by claude_cli today. Reads
+                # stdout line-by-line, parses ``--output-format stream-
+                # json`` events, resets the inactivity watchdog on each
+                # event, surfaces text_deltas as the aggregated answer.
+                # Required for Sonnet 4.6 extended-thinking spans.
+                return await _collect_via_streaming(
+                    proc, argv, spec, stdin_bytes,
+                    timeout_s=timeout_s,
+                    inactivity_timeout_s=inactivity_timeout_s,
+                    post_eof_reap_timeout_s=post_eof_reap_timeout_s,
+                    heartbeat_cb=heartbeat_cb,
+                    node=node,
+                    usage_out=usage_out,
+                )
+            # Legacy ``communicate()`` path for everything else
+            # (codex_cli's ``last_message_file``, plus gemini_cli /
+            # copilot_cli plain ``stdout`` mode). Only the total
+            # wall-clock budget applies — these CLIs don't emit
+            # stream-style progress, so an inactivity timer would either
+            # fire false-positives (silent agent log) or do nothing useful
+            # (single stdout flush at end). Preserved here so existing
+            # tests that mock ``proc.communicate()`` keep working.
+            return await _collect_via_communicate(
+                proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
+                heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
             )
-        # Legacy ``communicate()`` path for everything else
-        # (codex_cli's ``last_message_file``, plus gemini_cli /
-        # copilot_cli plain ``stdout`` mode). Only the total
-        # wall-clock budget applies — these CLIs don't emit
-        # stream-style progress, so an inactivity timer would either
-        # fire false-positives (silent agent log) or do nothing useful
-        # (single stdout flush at end). Preserved here so existing
-        # tests that mock ``proc.communicate()`` keep working.
-        return await _collect_via_communicate(
-            proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
-            heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
-        )
+        except (RuntimeError, asyncio.TimeoutError) as exc:
+            # The CLI's own log is in the call's home and goes with it: its errors go into the message first.
+            note = _cli_home_errors(home_dir) if home_dir is not None else ""
+            if note and exc.args and isinstance(exc.args[0], str):
+                exc.args = (f"{exc.args[0]}\n{spec.argv[0]}'s own log said: {note}", *exc.args[1:])
+            raise
     finally:
         if tmp_out_path is not None:
             tmp_out_path.unlink(missing_ok=True)
@@ -1862,8 +1908,58 @@ async def _run_cli(
             image_path.unlink(missing_ok=True)
         if image_folder is not None:
             shutil.rmtree(image_folder, ignore_errors=True)
+        if home_dir is not None:
+            _remove_call_dir(home_dir)
         if call_dir is not None:
             _remove_call_dir(call_dir)
+
+
+def _write_cli_home(home: Path, settings: dict[str, Any]) -> None:
+    """Lay out a CLI call's own home (agy's): FI's settings, with the model the user chose in their own agy settings
+    kept (FI never picks a model for them), and an update check marked as just done, so a call does not start agy's
+    background updater (a fresh home otherwise starts one on every call)."""
+    folder = home / ".gemini" / "antigravity-cli"
+    folder.mkdir(parents=True)
+    chosen = dict(settings)
+    try:
+        own = json.loads((Path.home() / ".gemini" / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        own = {}
+    if isinstance(own, dict) and isinstance(own.get("model"), str) and own["model"].strip():
+        chosen["model"] = own["model"]
+    (folder / "settings.json").write_text(json.dumps(chosen), encoding="utf-8")
+    (folder / "last_check.timestamp").write_bytes(b"")
+
+
+#: The lines agy writes when a print-mode run fails (its own messages). Only these are shown: agy writes other error
+#: lines on every call, successful ones included (a sign-in check before its silent sign-in, a file watcher, a missing
+#: conversations folder in a fresh home, ...), and one of those shown with a failure would read as its cause.
+_AGY_FAILURE_LINES = (
+    "Print mode: run ended with error",
+    "Print mode: turn ended with error after partial response",
+    "Print mode: stream failed before the cascade started",
+    "Print mode: timed out waiting for cascade to start running",
+    "Print mode: print timeout after",
+    "Print mode: SendUserMessage failed",
+    "Print mode: WaitForConversationFullyIdle failed",
+    "Print mode: conversation update stream failed",
+    "Print mode: not logged in and no controlling terminal",
+    "Print mode: silent auth failed",
+    "Print mode: auth error",
+    "Print mode: auth timed out",
+    "Print mode: auth cancelled or interrupted",
+    "Print mode: eligibility check failed",
+)
+
+
+def _cli_home_errors(home: str) -> str:
+    """The line where agy's own log in a call's home (``cli.log``) says its run failed, or ''."""
+    try:
+        text = (Path(home) / ".gemini" / "antigravity-cli" / "cli.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    failed = [line.strip() for line in text.splitlines() if any(mark in line for mark in _AGY_FAILURE_LINES)]
+    return failed[-1][:600] if failed else ""
 
 
 def _remove_call_dir(path: str) -> None:

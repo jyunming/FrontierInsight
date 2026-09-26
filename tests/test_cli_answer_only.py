@@ -19,6 +19,7 @@ import dataclasses
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -173,9 +174,9 @@ async def test_claude_images_and_effort_keep_the_answer_only_flags() -> None:
 
 
 def test_unverified_clis_keep_their_argv() -> None:
-    """copilot_cli, gemini_cli and antigravity_cli could not be checked against
-    the real CLI (quota, account tier, no flag to turn tools off), so their
-    argv is unchanged; only the empty working directory applies to them."""
+    """copilot_cli and gemini_cli could not be checked against the real CLI (quota, account tier), so their argv is
+    unchanged; only the empty working directory applies to them. antigravity_cli has no flag that turns its tools off:
+    its answer-only settings go through a home of the call's own (see the agy tests below)."""
     assert _CLI_SPECS["copilot_cli"].argv == ("copilot", "-s", "--allow-all-tools", "-p")
     assert _CLI_SPECS["gemini_cli"].argv == ("gemini", "--yolo", "-o", "json", "-p", "")
     assert _CLI_SPECS["antigravity_cli"].argv == (
@@ -524,3 +525,142 @@ def test_stdout_errors_reads_only_top_level_failure_events() -> None:
     assert _cli_stdout_errors(None) == []
     assert _cli_stdout_errors(b"not json\n{broken\n[1, 2]\n") == []
     assert _cli_stdout_errors(b'{"type":"turn.failed","error":"plain string"}\n') == ["plain string"]
+
+
+
+# ---------------------------------------------------------------------------
+# antigravity_cli: answer-only through settings in a home of the call's own
+# ---------------------------------------------------------------------------
+
+
+def _agy_patches(spawn):  # noqa: ANN001, ANN202
+    return (
+        patch("core.provider.shutil.which", return_value="/bin/agy"),
+        patch("core.provider.asyncio.create_subprocess_exec", new=spawn),
+        patch("core.provider._collect_via_communicate", new=AsyncMock(return_value="ok")),
+        patch("core.provider._collect_via_streaming", new=AsyncMock(return_value="ok")),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agy_runs_with_a_home_of_its_own_whose_settings_refuse_its_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """agy follows ~/.gemini/antigravity-cli/settings.json, often "always-proceed": in real quests it ran shell
+    commands, fetched papers and read FI's source mid-answer. Every call gets a fresh home holding FI's settings, with
+    the model the user chose kept, and an update check marked done so no updater starts."""
+    own = tmp_path / "user_home" / ".gemini" / "antigravity-cli"
+    own.mkdir(parents=True)
+    (own / "settings.json").write_text(json.dumps({"model": "Gemini 3.1 Pro (High)",
+                                                   "toolPermission": "always-proceed"}), encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user_home"))
+    monkeypatch.setenv("ANTIGRAVITY_PERM_GRANTS", "command(*)")
+    seen: dict = {}
+
+    async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
+        env = kwargs["env"]
+        seen["env"] = env
+        folder = Path(env["HOME"]) / ".gemini" / "antigravity-cli"
+        seen["settings"] = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
+        seen["checked"] = (folder / "last_check.timestamp").is_file()
+        return MagicMock()
+
+    which, spawner, communicate, streaming = _agy_patches(spawn)
+    with which, spawner, communicate, streaming:
+        assert await _run_cli(_CLI_SPECS["antigravity_cli"], "the prompt") == "ok"
+    env, settings = seen["env"], seen["settings"]
+    assert env["HOME"] == env["USERPROFILE"] and Path(env["HOME"]).name.startswith("fi_cli_home_")
+    assert settings["toolPermission"] == "request-review" and settings["allowNonWorkspaceAccess"] is False
+    assert set(settings["permissions"]["deny"]) == {"command(*)", "write_file(*)", "read_url(*)", "mcp(*)"}
+    assert settings["model"] == "Gemini 3.1 Pro (High)", "the user's model is kept, never their permissions"
+    assert seen["checked"], "a fresh home would start agy's background updater on every call"
+    assert "ANTIGRAVITY_PERM_GRANTS" not in env and env.get("PATH") == os.environ.get("PATH")
+    assert not os.path.exists(env["HOME"]), "the home goes with the call"
+
+
+@pytest.mark.asyncio
+async def test_agy_home_is_removed_when_the_spawn_fails() -> None:
+    seen: dict = {}
+
+    async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
+        seen["home"] = kwargs["env"]["HOME"]
+        raise FileNotFoundError("gone")
+
+    with patch("core.provider.shutil.which", return_value="/bin/agy"), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=spawn):
+        with pytest.raises(RuntimeError, match="not found on PATH"):
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "hi")
+    assert seen["home"] and not os.path.exists(seen["home"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_agy_call_says_what_its_own_log_said() -> None:
+    """agy's log is in the call's home, removed with it: its error lines go into the message first (a quota error,
+    or a timeout whose stderr is empty)."""
+
+    async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
+        log = Path(kwargs["env"]["HOME"]) / ".gemini" / "antigravity-cli" / "cli.log"
+        log.write_text(
+            "I0926 fine\nE0926 session.go:259] Print mode: run ended with error: RESOURCE_EXHAUSTED (code 429)\n",
+            encoding="utf-8",
+        )
+        return MagicMock()
+
+    with patch("core.provider.shutil.which", return_value="/bin/agy"), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=spawn), \
+         patch("core.provider._collect_via_communicate", new=AsyncMock(side_effect=RuntimeError("agy exited rc=3"))):
+        with pytest.raises(RuntimeError) as err:
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "hi")
+    assert "agy exited rc=3" in str(err.value) and "RESOURCE_EXHAUSTED (code 429)" in str(err.value)
+
+
+@pytest.mark.asyncio
+async def test_other_clis_get_no_home_of_their_own() -> None:
+    assert all(spec.home_settings is None for name, spec in _CLI_SPECS.items() if name != "antigravity_cli")
+    _, kwargs, _ = await _spawn_record("claude_cli")
+    env = kwargs.get("env")
+    assert env is None or not str(env.get("HOME", "")).startswith(tempfile.gettempdir())
+
+
+def test_agy_is_told_its_tools_are_off() -> None:
+    from core.provider import _encode_antigravity_stdin
+
+    content = json.loads(_encode_antigravity_stdin("What is 2+2?"))["message"]["content"]
+    assert content.startswith("Answer this request directly") and content.endswith("What is 2+2?")
+    assert "search the web" in content and "image files the request names" in content
+
+
+def test_agys_log_note_is_only_a_line_saying_its_run_failed(tmp_path: Path) -> None:
+    """Every kind of error line a successful agy call writes (seen in real logs, a fresh home included) gives no note:
+    shown with a timeout kill, any of them would read as its cause."""
+    from core.provider import _cli_home_errors
+
+    log = tmp_path / ".gemini" / "antigravity-cli" / "cli.log"
+    log.parent.mkdir(parents=True)
+    noise = [
+        "E0926 errorreport.go:224] error getting token source: You are not logged into Antigravity.",
+        "E0926 x.go:1] failed to get load code assist response: error getting token source: not logged in",
+        "E0926 x.go:2] Failed to poll ListExperiments: error getting token source: not logged in",
+        "E0926 credits_manager.go:42] failed to refresh G1 credits: error getting token source",
+        "E0926 file_watcher.go:194] skipping empty or temp file:",
+        'E0926 launchsteps.go:84] Failed to resolve GeminiDir ".gemini": .gemini must be an absolute path',
+        "E0926 server.go:3030] Failed to read conversations directory C:/h/.gemini/antigravity/conversations",
+        "W0926 session.go:1] warning: run ended with no output and no recorded error",
+    ]
+    log.write_text("\n".join(["I0926 silent auth succeeded", *noise]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == ""
+    ended = "E0926 session.go:259] Print mode: run ended with error and no response: RESOURCE_EXHAUSTED (code 429)"
+    log.write_text("\n".join([noise[0], ended, noise[4]]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == ended
+    auth = "E0926 session.go:120] Print mode: silent auth failed: token expired"
+    log.write_text("\n".join([noise[0], auth]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == auth
+    # Every failure message agy has (its own wording) is chosen; with two, the last is.
+    from core.provider import _AGY_FAILURE_LINES
+
+    for mark in _AGY_FAILURE_LINES:
+        line = f"E0926 session.go:1] {mark}: some cause"
+        log.write_text("\n".join([noise[0], line, noise[4]]) + "\n", encoding="utf-8")
+        assert _cli_home_errors(str(tmp_path)) == line, mark
+    log.write_text("\n".join([ended, auth]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == auth

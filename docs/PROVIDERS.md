@@ -94,6 +94,8 @@ working directory (often a repository checkout) and cannot read what is there.
 FI's own files for the call, such as codex's answer file and the visual check's
 screenshots, are passed by absolute path from outside that directory.
 
+**`antigravity_cli` (agy)** has no command-line switch that turns its tools off (`--mode plan` and `--sandbox` do not), and it follows your own `~/.gemini/antigravity-cli/settings.json`, which is often `"toolPermission": "always-proceed"`: in real quests one agy answer ran dozens of shell commands, downloaded a paper, read FI's own source and cost over a million tokens. FI therefore gives every agy call a temporary home folder of its own (removed when the call ends) holding FI's settings: tools that need approval are refused (a non-interactive call cannot ask), and shell commands, file writes, web-page fetches and MCP tools are refused outright; agy cannot read files outside the workspace it has for that call, except the images FI hands it. Your own agy settings are neither used nor changed, except the model you chose there, which is kept (`provider.model` still overrides it); the sign-in still is (checked on Windows, where agy keeps it in the system keyring). If an agy call fails, the error lines of agy's own log for that call are added to FI's message, since that log is removed with the call. Each request also tells agy its tools are off. **Web search cannot be turned off this way**: no setting reaches it, so an agy answer may still draw on a web search. Measured on the same questions: a figure reading went from over 600,000 tokens to about 27,000, with no command run.
+
 **`codex_cli` does not read `~/.codex/config.toml`.** Custom model providers,
 profiles, MCP servers and every other setting in that file are not used by
 FI's calls; the `codex login` sign-in still is. Choose the model with
@@ -121,9 +123,6 @@ with no tools there is no way to start an agent.
 
 Not restricted yet — these run in the empty directory, but their tools are on:
 
-- **`antigravity_cli`** has no option that turns its tools off, and it works
-  in its own fixed workspace (`~/.gemini/antigravity-cli/scratch`) wherever it
-  is started.
 - **`copilot_cli`** keeps `--allow-all-tools`. Restricting it needs a check
   against the real CLI, which could not be made while the account's Copilot
   premium-request quota was used up.
@@ -244,8 +243,9 @@ it has to be a model that provider accepts. Providers named in
 
 `provider.reasoning_effort` sets how hard the model reasons before it
 answers. Leave it unset (the default) and FI sends nothing, so each
-provider keeps its own default: `claude_cli` and `antigravity_cli` use
-their own setting, `codex_cli` uses codex's built-in default (FI's calls do
+provider keeps its own default: `claude_cli` uses its own setting,
+`antigravity_cli` uses the level in the name of the model you chose for agy
+(e.g. `Gemini 3.1 Pro (High)`; see [Answer-only CLI calls](#answer-only-cli-calls)), `codex_cli` uses codex's built-in default (FI's calls do
 not read `~/.codex/config.toml`, so a `model_reasoning_effort` there does
 not apply; see [Answer-only CLI calls](#answer-only-cli-calls)), and a local
 Ollama model does not think at all. Set it in the YAML, or from the interview's
