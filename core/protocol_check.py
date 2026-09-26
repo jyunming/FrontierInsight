@@ -47,6 +47,9 @@ _LIST_WORDS = {
     "list", "values", "value", "vals", "grid", "range", "levels", "level", "set", "array", "arr", "points", "sweep",
     "options", "settings", "candidates", "choices", "space", "axis", "all", "full", "main", "default",
 }
+# Words that make a list a set of positions, not values of any axis: REPRESENTATIVE_RUN_INDICES = [0, 1, 2] shares its
+# numbers with an axis of 1 and 2 initial infectives, and was read as that axis (two forced repairs in a real run).
+_INDEX_WORDS = {"indices", "index", "idx", "ids", "id", "seeds", "seed", "positions", "position", "rows", "cols", "columns"}
 _PILOT = "FI_PILOT"
 _NUMERIC_CALLS = ("linspace", "logspace", "geomspace", "arange", "range")
 
@@ -329,6 +332,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         candidates = named or [
             f for f in lists
             if len(f.values) >= 2 and sum(_has(f.values, v) for v in want) >= max(1, len(want) // 2)
+            and not set(_tokens(f.name)) & _INDEX_WORDS
         ]
         if candidates:
             if not any(_same_set(f.values, want) for f in candidates):

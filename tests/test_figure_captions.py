@@ -84,3 +84,36 @@ def test_a_figure_that_is_already_a_paragraph_and_a_code_block_are_left_alone() 
     inline = "See ![icon](i.png) here.\nNext line.\n"
     assert blank_lines_around_figures(inline) == inline
     assert blank_lines_around_figures("") == "" and blank_lines_around_figures("![A.](x.png)") == "![A.](x.png)"
+
+
+def test_figures_out_of_number_order_have_their_references_renumbered_to_where_they_stand() -> None:
+    """A paper placed Figure 1, 3, 2; the renderer numbers by place, so the PDF printed the text's "Figure 3" over the
+    plot captioned Figure 2. Every reference is renumbered to its figure's place; code is left alone."""
+    from generation._figure_captions import numbers_off_figure_captions
+
+    md = ("See Figure 3 and Figures 2 and 3.\n\n![**Figure 1.** A](a.png)\n\n![**Figure 3.** C, beside Figure 2](c.png)"
+          "\n\n![**Figure 2.** B](b.png)\n\n```\nFigure 3 in code\n```")
+    out = numbers_off_figure_captions(md)
+    assert out.startswith("See Figure 2 and Figures 3 and 2.")
+    assert "![C, beside Figure 3](c.png)" in out and "Figure 3 in code" in out
+    in_order = "See Figure 2.\n\n![**Figure 1.** A](a.png)\n\n![**Figure 2.** B](b.png)"
+    assert numbers_off_figure_captions(in_order).startswith("See Figure 2."), "figures in order: references untouched"
+
+
+def test_renumbering_leaves_file_names_alone_and_keeps_a_range_in_order() -> None:
+    from generation._figure_captions import numbers_off_figure_captions
+    md = (
+        "![**Figure 1.** a](figures/a.png)\n\n![**Figure 3.** c](figures/figure3.png)\n\n![**Figure 2.** b](figures/b.png)\n\n"
+        "See Figure 3 and Figs. 2-3; inline ![x](figures/figure3.png) and figure3.png stay.\n"
+    )
+    out = numbers_off_figure_captions(md)
+    assert "See Figure 2 and Figs. 2-3;" in out
+    assert out.count("figures/figure3.png") == 2 and "and figure3.png stay" in out
+
+
+def test_a_range_whose_figures_are_no_longer_consecutive_is_listed() -> None:
+    from generation._figure_captions import _renumbered
+    assert _renumbered("Figs. 2-3 show it.", {1: 2, 2: 1, 3: 3}) == "Figs. 1 and 3 show it."
+    assert _renumbered("Figs. 2-3 show it.", {2: 3, 3: 2}) == "Figs. 2-3 show it."
+    assert _renumbered("Figs. 2-3 show it.", {2: 4, 3: 1, 4: 2, 1: 3}) == "Figs. 1 and 4 show it."
+    assert _renumbered("Figures 2 to 3.", {2: 3, 3: 2}) == "Figures 2 to 3."

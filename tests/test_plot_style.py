@@ -525,7 +525,8 @@ def test_a_vertical_reference_line_is_recorded_as_one_not_as_a_flat_series(tmp_p
     (axes,) = json.loads((records / "hist.json").read_text(encoding="utf-8"))["axes"]
     series = {s["label"]: s for s in axes["series"]}
     assert series["Deterministic"] == {"label": "Deterministic", "x": pytest.approx(0.583), "shows": "vertical line"}
-    assert series["level"]["shows"] == "flat" and series["level"]["min"] == pytest.approx(40)
+    # An axhline is a reference drawn flat on purpose, not a series lying flat.
+    assert series["level"] == {"label": "level", "y": pytest.approx(40), "shows": "reference line"}
     assert "in axes coordinates" not in series
 
 
@@ -539,3 +540,35 @@ def test_the_engine_does_not_call_a_vertical_line_hidden_or_flat() -> None:
     assert "Deterministic a vertical line at x = 0.583" in note and "FLAT" not in note
     paper = "![Final sizes with the Deterministic reference](figures/hist.png)\n"
     assert _figure_caption_findings(paper, {"hist.png": record}) == []
+
+
+def test_a_reference_line_and_a_family_of_runs_are_not_called_flat(tmp_path) -> None:
+    """A dashed threshold line lies flat by design; a family of runs drawn in a loop with the label on the first run is
+    recorded as the family (a real figure's first run sat flat at 1.0 while the others rose and fell)."""
+    pytest.importorskip("matplotlib")
+    boot_dir = write_boot(tmp_path, "latex")
+    records = tmp_path / "records"
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(p for p in (str(boot_dir), os.environ.get("PYTHONPATH", "")) if p),
+        "FI_FIGURE_RECORDS": str(records),
+    }
+    script = tmp_path / "plot.py"
+    script.write_text(
+        "import matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
+        "fig, ax = plt.subplots()\n"
+        "ax.plot([0, 1, 2], [1.0, 1.0, 1.0], color='C0', label='R0=1.5 runs')\n"
+        "ax.plot([0, 1, 2], [0.1, 0.6, 0.9], color='C0')\n"
+        "ax.plot([0, 1, 2], [0.0, 0.3, 0.2], color='C0')\n"
+        "ax.axhline(0.5, color='k', linestyle='--', label='threshold')\n"
+        "ax.plot([0, 2], [0.8, 0.8], color='r', linestyle=':', label='known value')\n"
+        "ax.legend()\nfig.savefig('fig.png')\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run([sys.executable, str(script)], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    record = json.loads((records / "fig.json").read_text(encoding="utf-8"))
+    series = {s["label"]: s for ax in record["axes"] for s in ax["series"]}
+    assert series["R0=1.5 runs"]["shows"] == "yes" and series["R0=1.5 runs"]["min"] == 0.0, series
+    assert series["threshold"]["shows"] == "reference line"
+    assert series["known value"]["shows"] == "reference line"

@@ -522,12 +522,24 @@ async function runResume(
     // pick just the first whitespace-separated token so the lookup is
     // deterministic instead of silently failing with a confusing
     // "no quest with id '"178…-x" extra'" message.
-    const rawArg = promptArgs.trim();
+    // /resume <quest_id> --from <step> (or --from=<step>): the step is taken out first, so a quest id is never read
+    // from it and `/resume --from code` still offers the picker.
+    const fromMatch = !plan && !watch ? /(?:^|\s)--from(?:\s+|=)(\S+)/.exec(promptArgs) : null;
+    const fromStep = fromMatch ? fromMatch[1].replace(/^["']+|["']+$/g, "").toLowerCase() : undefined;
+    const rawArg = (fromMatch ? promptArgs.replace(fromMatch[0], " ") : promptArgs).trim();
     const firstToken = rawArg.split(/\s+/)[0] || "";
     // Also strip surrounding quotes a user might paste from a log line.
     const sanitized = firstToken.replace(/^["']+|["']+$/g, "");
     // /plan <quest_id> <what to change>: the words after the id are the request.
     const planRequest = plan ? rawArg.slice(firstToken.length).trim() : "";
+    if (fromStep && !RERUN_STEPS.includes(fromStep)) {
+        stream.markdown(
+            `❌ \`${fromStep}\` is not a step a quest can be run again from. Choose one of: ` +
+            RERUN_STEPS.map((step) => `\`${step}\``).join(", ") +
+            ". To change the plan, use `@fi /plan <quest_id> <what to change>`.\n",
+        );
+        return;
+    }
     let chosenId = sanitized;
     if (!chosenId) {
         const picks = candidates.map((c) => ({
@@ -639,6 +651,9 @@ async function runResume(
         watch
             ? `👁 Watching quest \`${chosenId}\`: its experiment script is re-run on a timer and the quest resumes when the job is done.\n\n` +
               `📝 Using config: \`${relYaml}\`\n\n`
+            : fromStep
+            ? `🔁 Running quest \`${chosenId}\` again from the ${fromStep} step: what that step and the later ones made is first moved to \`.fi/previous/\`.\n\n` +
+              `📝 Using config: \`${relYaml}\`\n\n`
             : `🔁 Resuming quest \`${chosenId}\`\n\n` +
               `📝 Using config: \`${relYaml}\`\n\n` +
               `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
@@ -652,8 +667,13 @@ async function runResume(
         userPickedModel,
         /*resumeQuestId*/ chosenId,
         /*watch*/ watch,
+        /*revisePlan*/ undefined,
+        /*fromStep*/ fromStep,
     );
 }
+
+// The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
+const RERUN_STEPS = ["code", "run", "analysis", "writing", "review"];
 
 function parsePathsFromPrompt(prompt: string): string[] {
     // Split on whitespace OUTSIDE of double-quoted spans so users
@@ -1004,6 +1024,7 @@ async function runQuest(
     resumeQuestId?: string,
     watch = false,
     revisePlan?: string,
+    fromStep?: string,
 ): Promise<void> {
     const paths = promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
@@ -1064,6 +1085,7 @@ async function runQuest(
             argv.push(watch ? "--watch" : "--resume", resumeQuestId);
             // --revise-plan rewrites plan.md and runs nothing else; the words are one argument.
             if (revisePlan) argv.push("--revise-plan", revisePlan);
+            if (fromStep) argv.push("--from", fromStep);
         }
     }
 
