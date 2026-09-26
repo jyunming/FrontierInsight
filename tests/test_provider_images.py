@@ -175,3 +175,69 @@ async def test_a_vscode_bridge_that_cannot_send_images_reports_it_as_unsupported
     client._bridge.chat = AsyncMock(side_effect=BridgeError("no language model is available in this VSCode window"))
     with pytest.raises(BridgeError):
         await client.chat([{"role": "user", "content": "text only"}])
+
+
+@pytest.mark.asyncio
+async def test_agy_opens_the_images_from_files_its_prompt_names_and_the_folder_is_removed_afterwards() -> None:
+    """agy's stream-json input takes text only; FI saves the images, adds their folder to agy's workspace and names each
+    file in the prompt, in order. (Checked against the real CLI: it named the shapes and colours in a test image.)"""
+    spec = _CLI_SPECS["antigravity_cli"]
+    assert (spec.image_input, spec.add_dir_flag) == ("file_ref", "--add-dir")
+    seen: dict = {}
+
+    def encode(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return prompt
+
+    async def spawn(*argv, **kwargs):  # type: ignore[no-untyped-def]
+        folder = Path(argv[list(argv).index("--add-dir") + 1])
+        seen["folder"] = folder
+        seen["files"] = {p.name: p.read_bytes() for p in sorted(folder.iterdir())}
+        raise RuntimeError("stop after the launch")
+
+    with patch("core.provider.shutil.which", return_value="/usr/bin/agy"), \
+         patch("core.provider._encode_antigravity_stdin", new=encode), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=spawn):
+        with pytest.raises(RuntimeError, match="stop after the launch"):
+            await _run_cli(spec, "Name the shapes.", images=[("image/png", PNG), ("image/png", PNG + b"2")])
+    assert seen["files"] == {"image_1.png": PNG, "image_2.png": PNG + b"2"}
+    prompt = seen["prompt"]
+    first, second = str(seen["folder"] / "image_1.png"), str(seen["folder"] / "image_2.png")
+    assert prompt.index(first) < prompt.index(second) < prompt.index("Name the shapes.")
+    assert not seen["folder"].exists(), "the images and their folder are removed after the call"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_that_cannot_be_encoded_leaves_no_agy_image_folder(tmp_path: Path) -> None:
+    import tempfile
+
+    before = set(Path(tempfile.gettempdir()).glob("fi_cli_images_*"))
+    with patch("core.provider.shutil.which", return_value="/usr/bin/agy"), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+        with pytest.raises(UnicodeEncodeError):
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "a lone surrogate \ud800", images=[("image/png", PNG)])
+    spawn.assert_not_awaited()
+    assert set(Path(tempfile.gettempdir()).glob("fi_cli_images_*")) == before
+
+
+@pytest.mark.asyncio
+async def test_a_full_disk_while_writing_the_images_leaves_nothing_behind() -> None:
+    import tempfile
+
+    before = set(Path(tempfile.gettempdir()).glob("fi_cli_images_*"))
+    real_write = Path.write_bytes
+    calls = {"n": 0}
+
+    def write_bytes(self, data):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(28, "No space left on device")
+        return real_write(self, data)
+
+    with patch("core.provider.shutil.which", return_value="/usr/bin/agy"), \
+         patch.object(Path, "write_bytes", write_bytes), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+        with pytest.raises(OSError, match="No space left"):
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "Name the shapes.", images=[("image/png", PNG)] * 2)
+    spawn.assert_not_awaited()
+    assert set(Path(tempfile.gettempdir()).glob("fi_cli_images_*")) == before

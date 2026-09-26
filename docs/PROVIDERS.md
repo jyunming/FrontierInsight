@@ -60,13 +60,14 @@ config YAML, and runs the quest. Every LLM call streams through the
 
 ### Which providers can see images
 
-The visual check's AI step (`output.visual_check_ai: true`; off by default) sends page screenshots of the paper, slides and poster (and of `slides.pptx`, when LibreOffice is installed) to the configured provider. Where a provider cannot take images, the check runs on its measurements alone and its report says so.
+The same applies to the figures FI reads from the papers (`knowledge.read_figures`, on by default), which are sent to the model set for the step `figures`. The visual check's AI step (`output.visual_check_ai: true`; off by default) sends page screenshots of the paper, slides and poster (and of `slides.pptx`, when LibreOffice is installed) to the configured provider. Where a provider cannot take images, the check runs on its measurements alone and its report says so.
 
 - **HTTP providers** (`ollama`, `vllm`, `openai`, `gemini`, …) send the screenshots as image parts. The model itself must accept images; checked with `gemma4:31b-cloud` on Ollama.
 - **`claude_cli`** sends them inline in a stream-json turn. Checked with `haiku`.
-- **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input.
+- **`vscode_extension`** hands them to `vscode.lm` as image data. This needs a VS Code build that has `LanguageModelDataPart.image` and a chat model with image input. VS Code does not say in advance whether a model takes images: `@fi /probe image` sends the selected model one small test image the same way and says whether it read it, and, if the request fails, whether FI would recognise the error as *cannot read images*.
 - **`codex_cli`** passes each screenshot as a temporary file with `codex exec -i`. Checked with `gpt-5.6-luna` under the answer-only flags below: it named the colour of a test image.
-- **`copilot_cli`, `gemini_cli`, `antigravity_cli`:** measurements only for now.
+- **`antigravity_cli`** (agy) takes only text in its input, so each image is saved to a temporary folder that agy is given access to (`--add-dir`) and the prompt names each file, in order; agy opens them with its own file viewer. Checked with `gemini-3.8-flash-high`: it named the shapes and colours of a test image.
+- **`copilot_cli`, `gemini_cli`:** measurements only for now; a quest that must read figures with one of them stops and asks for a model that can.
 
 ## Answer-only CLI calls
 
