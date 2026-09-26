@@ -2667,15 +2667,67 @@ def estimate_cost_usd(
     return None
 
 
+IO_DIRNAME = "io"
+IO_ON_MARKER = "ON"
+
+
+def set_model_call_archive(fi_dir: Path, on: bool) -> None:
+    """Turn ``output.save_model_calls`` on or off for a quest: the marker in ``.fi/io/`` is what every writer below
+    checks, so the engine's calls and the output generators' calls are kept alike. Files already kept stay."""
+    marker = Path(fi_dir) / IO_DIRNAME / IO_ON_MARKER
+    try:
+        if on:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("output.save_model_calls: true\n", encoding="utf-8")
+        else:
+            marker.unlink(missing_ok=True)
+    except OSError as e:
+        _log.debug("[io] could not set the model-call archive: %r", e)
+
+
+def _archive_model_call(fi_dir: Path, record: dict[str, Any], messages: Any, response: Any) -> None:
+    """One call's whole prompt and answer, when the quest keeps them (``output.save_model_calls``)."""
+    folder = Path(fi_dir) / IO_DIRNAME
+    if messages is None or not (folder / IO_ON_MARKER).is_file():
+        return
+    from .audit_log import redact  # an API key pasted into a topic is not kept in the clear
+
+    def _no_images(value: Any) -> Any:
+        # A page image sent to the visual check is megabytes of base64: kept as its size, not its bytes.
+        if isinstance(value, str) and value.startswith("data:image") and len(value) > 200:
+            return f"[image, {len(value):,} characters]"
+        if isinstance(value, list):
+            return [_no_images(v) for v in value]
+        if isinstance(value, dict):
+            return {k: _no_images(v) for k, v in value.items()}
+        return value
+
+    messages = _no_images(messages)
+    import uuid
+
+    # A random part too: calls made at once (an ensemble) can share a clock tick.
+    name = f"{time.time_ns()}-{uuid.uuid4().hex[:6]}-{re.sub(r'[^A-Za-z0-9_.-]+', '_', record['node'] or 'call')[:60]}.json"
+    try:
+        (folder / name).write_text(json.dumps({
+            **record, "messages": redact(messages, whole=True), "response": redact(response, whole=True),
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+    except OSError as e:
+        _log.debug("[io] failed to keep a model call: %r", e)
+
+
 def append_cost_row(
     fi_dir: Path, *, node: str, model: str | None, usage: dict[str, Any] | None,
+    messages: Any = None, response: Any = None,
 ) -> None:
     """Append one model call to ``<fi_dir>/cost.jsonl`` as ``{ts, node,
     model, usage, cost_usd}``. The engine's nodes and the output generators
     (slides, poster, talk script, visual check) all write through here, so a
     quest's log counts every call it made. A call without ``usage`` still gets
     its row and is counted. Best-effort: a failed write is logged and never
-    stops the caller."""
+    stops the caller.
+
+    With ``messages`` and ``response``, a quest that keeps its model calls (``output.save_model_calls``) also gets the
+    call's whole prompt and answer in ``.fi/io/``."""
     model = model or ""
     cost = None
     if usage:
@@ -2691,6 +2743,7 @@ def append_cost_row(
             f.write(json.dumps(record) + "\n")
     except OSError as e:
         _log.debug("[cost] failed to write cost.jsonl: %r", e)
+    _archive_model_call(fi_dir, record, messages, response)
 
 
 class LLMClient:

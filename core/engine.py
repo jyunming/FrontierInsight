@@ -99,6 +99,7 @@ from .provider import (
     append_cost_row,
     model_for_node,
     resolve_endpoint_async,
+    set_model_call_archive as _set_model_call_archive,
 )
 
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "agents"
@@ -653,6 +654,7 @@ class Engine:
             (self.quest_root / "code").mkdir(parents=True, exist_ok=True)
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
+            _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
             # How strictly this quest is checked was approved on the interview's confirm screen; a hand edit since then
             # (a check turned down, a reviewer dropped, another model) stops here, before anything runs.
@@ -1301,6 +1303,7 @@ class Engine:
         Returns an artifacts bundle built from whatever the checkpoint holds;
         raises ``FileNotFoundError`` if there is no checkpoint to read.
         """
+        _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
         checkpoint_path = self.fi_dir / "state.sqlite"
         if not checkpoint_path.is_file():
             raise FileNotFoundError(
@@ -10619,7 +10622,7 @@ class Engine:
             messages, temperature=temp, model=self._model_for_node(node),
             node=node or "",
         )
-        self._log_chat_cost(node=node or "")
+        self._log_chat_cost(node=node or "", messages=messages, response=response)
         if node:
             # ``last_provider``/``last_model`` come from the client AFTER the call so a fallback that actually served
             # the request (core/provider.py::FallbackLLMClient) is recorded truthfully, not the one merely requested.
@@ -10844,7 +10847,7 @@ class Engine:
             messages, temperature=temperature, model=self._model_for_node(node),
             node=node or "",
         )
-        self._log_chat_cost(node=node or "")
+        self._log_chat_cost(node=node or "", messages=messages, response=response)
         return response
 
     def _clear_clarify_snapshot(self) -> None:
@@ -11185,6 +11188,8 @@ class Engine:
         self, *, node: str,
         model: str | None = None,
         usage: dict[str, int] | None = None,
+        messages: Any = None,
+        response: Any = None,
     ) -> None:
         """Append one row to ``<quest_root>/.fi/cost.jsonl`` per chat
         call. Pulled out of ``_chat`` / ``_chat_messages`` so both
@@ -11217,7 +11222,7 @@ class Engine:
             usage = getattr(self._client, "last_usage", None)
         if model is None:
             model = getattr(self._client, "last_model", None) or ""
-        append_cost_row(self.fi_dir, node=node, model=model, usage=usage)
+        append_cost_row(self.fi_dir, node=node, model=model, usage=usage, messages=messages, response=response)
 
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node via the shared
