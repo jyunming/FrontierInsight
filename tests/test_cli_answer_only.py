@@ -630,19 +630,28 @@ def test_agy_is_told_its_tools_are_off() -> None:
     assert "search the web" in content and "image files the request names" in content
 
 
-def test_agys_log_note_skips_the_noise_it_writes_on_every_call(tmp_path: Path) -> None:
+def test_agys_log_note_is_only_a_line_saying_its_run_failed(tmp_path: Path) -> None:
+    """Every kind of error line a successful agy call writes (seen in real logs, a fresh home included) gives no note:
+    shown with a timeout kill, any of them would read as its cause."""
     from core.provider import _cli_home_errors
 
     log = tmp_path / ".gemini" / "antigravity-cli" / "cli.log"
     log.parent.mkdir(parents=True)
     noise = [
         "E0926 errorreport.go:224] error getting token source: You are not logged into Antigravity.",
+        "E0926 x.go:1] failed to get load code assist response: error getting token source: not logged in",
+        "E0926 x.go:2] Failed to poll ListExperiments: error getting token source: not logged in",
+        "E0926 credits_manager.go:42] failed to refresh G1 credits: error getting token source",
         "E0926 file_watcher.go:194] skipping empty or temp file:",
+        'E0926 launchsteps.go:84] Failed to resolve GeminiDir ".gemini": .gemini must be an absolute path',
+        "E0926 server.go:3030] Failed to read conversations directory C:/h/.gemini/antigravity/conversations",
+        "W0926 session.go:1] warning: run ended with no output and no recorded error",
     ]
     log.write_text("\n".join(["I0926 silent auth succeeded", *noise]) + "\n", encoding="utf-8")
-    assert _cli_home_errors(str(tmp_path)) == "", "a killed call must not read as 'not logged in'"
+    assert _cli_home_errors(str(tmp_path)) == ""
     ended = "E0926 session.go:259] Print mode: run ended with error and no response: RESOURCE_EXHAUSTED (code 429)"
-    log.write_text("\n".join([noise[0], ended, noise[1], "E0926 other.go:1] something else"]) + "\n", encoding="utf-8")
+    log.write_text("\n".join([noise[0], ended, noise[4]]) + "\n", encoding="utf-8")
     assert _cli_home_errors(str(tmp_path)) == ended
-    log.write_text("\n".join([noise[0], "E0926 other.go:1] something else"]) + "\n", encoding="utf-8")
-    assert _cli_home_errors(str(tmp_path)) == "E0926 other.go:1] something else"
+    auth = "E0926 session.go:120] Print mode: silent auth failed: token expired"
+    log.write_text("\n".join([noise[0], auth]) + "\n", encoding="utf-8")
+    assert _cli_home_errors(str(tmp_path)) == auth

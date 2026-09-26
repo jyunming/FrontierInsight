@@ -1931,25 +1931,24 @@ def _write_cli_home(home: Path, settings: dict[str, Any]) -> None:
     (folder / "last_check.timestamp").write_bytes(b"")
 
 
-#: Error lines agy writes on every call, successful ones included: the sign-in check before its silent sign-in, and
-#: its file watcher. Shown with a failure they would read as its cause.
-_AGY_LOG_NOISE = ("error getting token source", "not logged into antigravity", "file_watcher.go")
+#: The lines agy writes when a print-mode run fails (its own messages). Only these are shown: agy writes other error
+#: lines on every call, successful ones included (a sign-in check before its silent sign-in, a file watcher, a missing
+#: conversations folder in a fresh home, ...), and one of those shown with a failure would read as its cause.
+_AGY_FAILURE_LINES = (
+    "Print mode: run ended with error",
+    "Print mode: silent auth failed",
+    "Print mode: conversation update stream failed",
+)
 
 
-def _cli_home_errors(home: str, lines: int = 3) -> str:
-    """What the CLI's own log in a call's home (agy writes ``cli.log`` there) says went wrong, or '': the line where
-    its run ended with an error when there is one, else its last error lines that are not noise it writes on every
-    call."""
+def _cli_home_errors(home: str) -> str:
+    """The line where agy's own log in a call's home (``cli.log``) says its run failed, or ''."""
     try:
         text = (Path(home) / ".gemini" / "antigravity-cli" / "cli.log").read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
-    errors = [line.strip() for line in text.splitlines() if line.startswith("E")]
-    ended = [line for line in errors if "run ended with error" in line]
-    if ended:
-        return ended[-1][:600]
-    real = [line for line in errors if not any(noise in line.lower() for noise in _AGY_LOG_NOISE)]
-    return " | ".join(real[-lines:])[:600]
+    failed = [line.strip() for line in text.splitlines() if any(mark in line for mark in _AGY_FAILURE_LINES)]
+    return failed[-1][:600] if failed else ""
 
 
 def _remove_call_dir(path: str) -> None:
