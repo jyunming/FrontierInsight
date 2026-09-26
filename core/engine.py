@@ -1536,10 +1536,16 @@ class Engine:
     async def rerun_steps(self) -> list[str]:
         """The steps this quest reached, which ``--from`` can run it again from (read from its checkpoint history; no
         model call, nothing written)."""
+        import aiosqlite
+
         path = self.fi_dir / "state.sqlite"
         if not path.is_file():
             return []
-        async with AsyncSqliteSaver.from_conn_string(str(path)) as saver:
+        # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
+        # own setup would write to its database.
+        async with aiosqlite.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
+            saver = AsyncSqliteSaver(conn)
+            saver.is_setup = True
             graph = self._build_graph().compile(checkpointer=saver)
             return await _rerun_from.reached(graph, {"configurable": {"thread_id": self.quest_id}})
 

@@ -1538,6 +1538,8 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     if (!res.ok) { alert('Resume failed: ' + await res.text()); return; }
     // Sent once: the next Resume goes on from where the quest then stands, unless a step is chosen again.
     document.getElementById('rerun-from').value = '';
+    // It may reach more steps, even between two refreshes: the list is asked for again once it stops.
+    rerunStepsLoaded = false;
     if (!pollHandle) pollHandle = setInterval(refresh, 3000);
     refresh();
   }

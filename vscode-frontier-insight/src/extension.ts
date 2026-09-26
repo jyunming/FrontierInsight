@@ -524,9 +524,11 @@ async function runResume(
     // "no quest with id '"178…-x" extra'" message.
     // /resume <quest_id> --from with no step: the steps that quest reached, which are the ones it can be run again from
     // (the newest quest when no id is given; the list names the quest it is for).
-    if (!plan && !watch && /(?:^|\s)--from\s*$/.test(promptArgs)) {
-        const named = promptArgs.replace(/(?:^|\s)--from\s*$/, " ").trim().split(/\s+/)[0] || "";
-        await runRerunSteps(named.replace(/^["']+|["']+$/g, "") || candidates[0].questId, stream, token);
+    // A `--from` followed by nothing or by another flag is a bare one.
+    const bareFrom = /(?:^|\s)--from(?=\s*$|\s+-)/;
+    if (!plan && !watch && bareFrom.test(promptArgs)) {
+        const named = (promptArgs.replace(bareFrom, " ").trim().split(/\s+/)[0] || "").replace(/^["']+|["']+$/g, "");
+        await runRerunSteps(named && !named.startsWith("-") ? named : candidates[0].questId, stream, token);
         return;
     }
     // /resume <quest_id> --from <step> (or --from=<step>): the step is taken out first, so a quest id is never read

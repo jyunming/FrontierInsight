@@ -1116,11 +1116,15 @@ def make_app(
             return JSONResponse({"quest_id": quest_id, "steps": []})
         from core import rerun_from as _rerun_from
         from core.config import Config
-        from core.engine import Engine
+        from core.engine import Engine, _close_quest_logger
 
         cfg = Config.from_yaml(yaml_path)
         cfg.output.output_dir = quest_root.parent
-        steps = await Engine(cfg, resume_quest_id=quest_id).rerun_steps()
+        try:
+            steps = await Engine(cfg, resume_quest_id=quest_id).rerun_steps()
+        finally:
+            # The Engine opened the quest's log files for this process; nothing is logged, so they are closed now.
+            _close_quest_logger(quest_id)
         return JSONResponse({
             "quest_id": quest_id,
             "steps": [{"step": step, "redoes": _rerun_from.REDOES[step]} for step in steps],
