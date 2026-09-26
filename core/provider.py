@@ -1710,107 +1710,98 @@ async def _run_cli(
     # image flag gets one temp file per image, removed in the finally below
     # with the answer file. The flags go before a trailing prompt flag.
     image_paths: list[Path] = []
-    if images:
-        if spec.image_input == "stream_json":
-            argv.extend(["--input-format", "stream-json"])
-        elif spec.image_input == "file_flag" and spec.image_flag:
-            flags: list[str] = []
-            for mime, data in images:
-                tmp_image = tempfile.NamedTemporaryFile(
-                    prefix="fi_cli_image_", suffix=_IMAGE_SUFFIXES.get(mime, ".png"), delete=False,
-                )
-                image_paths.append(Path(tmp_image.name))
-                with tmp_image:
-                    tmp_image.write(data)
-                flags.extend([spec.image_flag, str(image_paths[-1])])
-            if spec.pass_prompt_via == "arg":
-                argv[-1:-1] = flags
-            else:
-                argv.extend(flags)
-        elif spec.image_input == "file_ref" and spec.add_dir_flag:
-            image_dir = Path(tempfile.mkdtemp(prefix="fi_cli_images_"))
-            try:
+    image_folder: Path | None = None  # agy's images: a folder of their own, removed with them
+    # The call's one try/finally starts here, before the images are written, so a failure anywhere after it (a full
+    # disk while writing them, the prompt's encoding) still removes them.
+    call_dir: str | None = None
+    try:
+        if images:
+            if spec.image_input == "stream_json":
+                argv.extend(["--input-format", "stream-json"])
+            elif spec.image_input == "file_flag" and spec.image_flag:
+                flags: list[str] = []
+                for mime, data in images:
+                    tmp_image = tempfile.NamedTemporaryFile(
+                        prefix="fi_cli_image_", suffix=_IMAGE_SUFFIXES.get(mime, ".png"), delete=False,
+                    )
+                    image_paths.append(Path(tmp_image.name))
+                    with tmp_image:
+                        tmp_image.write(data)
+                    flags.extend([spec.image_flag, str(image_paths[-1])])
+                if spec.pass_prompt_via == "arg":
+                    argv[-1:-1] = flags
+                else:
+                    argv.extend(flags)
+            elif spec.image_input == "file_ref" and spec.add_dir_flag:
+                image_dir = Path(tempfile.mkdtemp(prefix="fi_cli_images_"))
+                image_folder = image_dir
                 for n, (mime, data) in enumerate(images, 1):
                     image_paths.append(image_dir / f"image_{n}{_IMAGE_SUFFIXES.get(mime, '.png')}")
                     image_paths[-1].write_bytes(data)
-            except BaseException:
-                # Before the call's own try/finally: a failed write (a full disk) leaves no folder behind.
-                shutil.rmtree(image_dir, ignore_errors=True)
-                raise
-            argv.extend([spec.add_dir_flag, str(image_dir)])
-            # The images, in the order the request refers to them: the first file is the first image it mentions.
-            prompt = (
-                f"This request comes with {len(image_paths)} image(s), saved as files. Open each one with your file "
-                "viewer and look at it before answering; they are, in the order the request refers to them:\n"
-                + "\n".join(f"{n}. {path}" for n, path in enumerate(image_paths, 1))
-                + "\n\n" + prompt
+                argv.extend([spec.add_dir_flag, str(image_dir)])
+                # The images, in the order the request refers to them: the first file is the first image it mentions.
+                prompt = (
+                    f"This request comes with {len(image_paths)} image(s), saved as files. Open each one with your file "
+                    "viewer and look at it before answering; they are, in the order the request refers to them:\n"
+                    + "\n".join(f"{n}. {path}" for n, path in enumerate(image_paths, 1))
+                    + "\n\n" + prompt
+                )
+            else:
+                if tmp_out_path is not None:
+                    tmp_out_path.unlink(missing_ok=True)
+                raise ImageInputUnsupported(f"{spec.argv[0]} cannot send images to its model")
+
+        # Cap the prompt for CLIs with a hard per-turn input limit (codex_cli),
+        # trimming the middle context so the call goes through instead of the
+        # CLI rejecting it with ``input_too_large`` and failing the node.
+        if spec.max_input_chars is not None and len(prompt) > spec.max_input_chars:
+            orig_len = len(prompt)
+            prompt = _truncate_prompt_to_fit(prompt, spec.max_input_chars)
+            _log.warning(
+                "[provider] %s%s prompt was %d chars, over the %d-char input cap; "
+                "trimmed middle context to fit. The model may miss some "
+                "literature/result detail — consider a leaner knowledge footprint "
+                "(top_k / literature_excerpt_chars) or evidence_gate_max_broaden: 0.",
+                spec.argv[0], f" [{node}]" if node else "", orig_len,
+                spec.max_input_chars,
             )
-        else:
-            if tmp_out_path is not None:
-                tmp_out_path.unlink(missing_ok=True)
-            raise ImageInputUnsupported(f"{spec.argv[0]} cannot send images to its model")
 
-    # Cap the prompt for CLIs with a hard per-turn input limit (codex_cli),
-    # trimming the middle context so the call goes through instead of the
-    # CLI rejecting it with ``input_too_large`` and failing the node.
-    if spec.max_input_chars is not None and len(prompt) > spec.max_input_chars:
-        orig_len = len(prompt)
-        prompt = _truncate_prompt_to_fit(prompt, spec.max_input_chars)
-        _log.warning(
-            "[provider] %s%s prompt was %d chars, over the %d-char input cap; "
-            "trimmed middle context to fit. The model may miss some "
-            "literature/result detail — consider a leaner knowledge footprint "
-            "(top_k / literature_excerpt_chars) or evidence_gate_max_broaden: 0.",
-            spec.argv[0], f" [{node}]" if node else "", orig_len,
-            spec.max_input_chars,
-        )
-
-    if spec.pass_prompt_via == "arg":
-        argv.append(prompt)
-        stdin_bytes: bytes | None = None
-    else:  # stdin
-        try:
+        if spec.pass_prompt_via == "arg":
+            argv.append(prompt)
+            stdin_bytes: bytes | None = None
+        else:  # stdin
             if images and spec.image_input == "stream_json":
                 payload = _encode_claude_stream_json(prompt, images)
             else:
                 payload = spec.stdin_encoder(prompt) if spec.stdin_encoder else prompt
             stdin_bytes = payload.encode("utf-8")
-        except BaseException:
-            # Still before the call's own try/finally: the image files written above go with the failure.
-            for image_path in image_paths:
-                image_path.unlink(missing_ok=True)
-            if image_paths and image_paths[0].parent.name.startswith("fi_cli_images_"):
-                shutil.rmtree(image_paths[0].parent, ignore_errors=True)
-            raise
 
-    # When the real answer lands in `tmp_out_path`, the CLI's stdout is just
-    # an agent log; capturing it into a PIPE for a long prompt wastes memory,
-    # so it is dropped. stderr stays piped so we can include its tail in
-    # error messages.
-    #
-    # Unless the spec reads usage out of that log. codex reports what it
-    # actually consumed in a `turn.completed` event on stdout, and that is
-    # the only place the real number exists: the char-count estimator sees
-    # only the prompt FI sent, not the system prompt and tool schema codex
-    # wraps around it, which is most of the input. Measured on a one-word
-    # prompt — estimator 7 tokens, codex 20,953.
-    stdout_target = (
-        asyncio.subprocess.DEVNULL
-        if spec.output_via == "last_message_file" and spec.usage_extractor is None
-        else asyncio.subprocess.PIPE
-    )
+        # When the real answer lands in `tmp_out_path`, the CLI's stdout is just
+        # an agent log; capturing it into a PIPE for a long prompt wastes memory,
+        # so it is dropped. stderr stays piped so we can include its tail in
+        # error messages.
+        #
+        # Unless the spec reads usage out of that log. codex reports what it
+        # actually consumed in a `turn.completed` event on stdout, and that is
+        # the only place the real number exists: the char-count estimator sees
+        # only the prompt FI sent, not the system prompt and tool schema codex
+        # wraps around it, which is most of the input. Measured on a one-word
+        # prompt — estimator 7 tokens, codex 20,953.
+        stdout_target = (
+            asyncio.subprocess.DEVNULL
+            if spec.output_via == "last_message_file" and spec.usage_extractor is None
+            else asyncio.subprocess.PIPE
+        )
 
-    # Single try/finally so the tmpfile is unlinked on every exit path —
-    # spawn failure, transient error, exception during communicate(), or
-    # success. Previously a `FileNotFoundError` from spawn leaked the file.
-    #
-    # The CLI runs in a new, empty directory of its own, removed in the same
-    # finally. Without one it inherited FI's working directory (a repository
-    # checkout in trend runs) and codex read the files there. FI's own files
-    # for the call (the answer file, images) live elsewhere, by absolute path,
-    # so the directory is still empty when the CLI starts.
-    call_dir: str | None = None
-    try:
+        # Single try/finally so the tmpfile is unlinked on every exit path —
+        # spawn failure, transient error, exception during communicate(), or
+        # success. Previously a `FileNotFoundError` from spawn leaked the file.
+        #
+        # The CLI runs in a new, empty directory of its own, removed in the same
+        # finally. Without one it inherited FI's working directory (a repository
+        # checkout in trend runs) and codex read the files there. FI's own files
+        # for the call (the answer file, images) live elsewhere, by absolute path,
+        # so the directory is still empty when the CLI starts.
         call_dir = tempfile.mkdtemp(prefix="fi_cli_call_")
         if spec.cwd_flag:
             # Ahead of a trailing prompt flag and its prompt, like the flags above.
@@ -1869,8 +1860,8 @@ async def _run_cli(
             tmp_out_path.unlink(missing_ok=True)
         for image_path in image_paths:
             image_path.unlink(missing_ok=True)
-        if image_paths and image_paths[0].parent.name.startswith("fi_cli_images_"):
-            shutil.rmtree(image_paths[0].parent, ignore_errors=True)
+        if image_folder is not None:
+            shutil.rmtree(image_folder, ignore_errors=True)
         if call_dir is not None:
             _remove_call_dir(call_dir)
 

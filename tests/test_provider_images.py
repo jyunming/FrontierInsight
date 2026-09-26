@@ -218,3 +218,26 @@ async def test_a_prompt_that_cannot_be_encoded_leaves_no_agy_image_folder(tmp_pa
             await _run_cli(_CLI_SPECS["antigravity_cli"], "a lone surrogate \ud800", images=[("image/png", PNG)])
     spawn.assert_not_awaited()
     assert set(Path(tempfile.gettempdir()).glob("fi_cli_images_*")) == before
+
+
+@pytest.mark.asyncio
+async def test_a_full_disk_while_writing_the_images_leaves_nothing_behind() -> None:
+    import tempfile
+
+    before = set(Path(tempfile.gettempdir()).glob("fi_cli_images_*"))
+    real_write = Path.write_bytes
+    calls = {"n": 0}
+
+    def write_bytes(self, data):  # type: ignore[no-untyped-def]
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise OSError(28, "No space left on device")
+        return real_write(self, data)
+
+    with patch("core.provider.shutil.which", return_value="/usr/bin/agy"), \
+         patch.object(Path, "write_bytes", write_bytes), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=AsyncMock()) as spawn:
+        with pytest.raises(OSError, match="No space left"):
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "Name the shapes.", images=[("image/png", PNG)] * 2)
+    spawn.assert_not_awaited()
+    assert set(Path(tempfile.gettempdir()).glob("fi_cli_images_*")) == before
