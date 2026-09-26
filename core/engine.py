@@ -2492,9 +2492,17 @@ class Engine:
         # Pull a few related items from the knowledge base to ground ideation.
         # No chosen_idea yet — pass chat_fn so the source-router (if
         # enabled) can still pick sources from the catalog using the
-        # topic alone.
+        # topic alone. The search engines behind it match keywords, not the
+        # topic's sentences: the same one-call keyword derivation the
+        # literature step uses turns the topic into the field's terms first
+        # (the topic as written when it gives none, as before).
+        seed_queries = await self._derive_literature_queries(
+            state["topic"], work_scope=self._work_scope(state),
+        ) if self.knowledge.enabled else []
+        if seed_queries:
+            self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
         seeded = await self.knowledge.asearch(
-            state["topic"], top_k=3,
+            seed_queries[0] if seed_queries else state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
             work_scope=self._work_scope(state),
         )
@@ -4075,7 +4083,10 @@ class Engine:
         hypothesis = ""
         if isinstance(design, dict):
             hypothesis = str(design.get("hypothesis", "")).strip()
-        query = f"{topic} {hypothesis}".strip() or topic
+        # The keyword query the literature step derived from the topic (search engines and the dataset adapters
+        # match terms, not the topic's sentences); the topic and hypothesis as written when there is none.
+        derived = str(state.get("literature_query") or "").strip()
+        query = derived or f"{topic} {hypothesis}".strip() or topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
         # ---- Reuse already-downloaded literature -------------------
@@ -5656,8 +5667,8 @@ class Engine:
         """The per-stratum intervals and effect sizes over the batches (:func:`_result_comparison_stats`), and, when the protocol
         declares metric specs, the engine's own estimates and contrasts with their p-values (``spec_statistics``,
         :mod:`core.metric_spec`). The audits that compare the paper with the numbers read the same dictionary."""
-        out = _result_comparison_stats(replicates, **kw)
         protocol = self._protocol_block(state)
+        out = _result_comparison_stats(replicates, factor_levels=_factor_levels(protocol), **kw)
         if protocol is not None and len(replicates) >= 1 and _metric_spec.declared(protocol):
             try:
                 spec = _metric_spec.statistics(replicates, protocol)
@@ -14634,9 +14645,31 @@ def _replicate_line_figure(
     }
 
 
+def _factor_levels(protocol: Any) -> set[str] | None:
+    """Every value a factor of the protocol's grid takes, as the names a result can group by (``"0.5"``, ``"rk4"``,
+    ``"r0=0.9"``; lower case, compared without case), or ``None`` when the protocol has no grid."""
+    grid = protocol.get("grid") if isinstance(protocol, dict) else None
+    if not isinstance(grid, dict) or not grid:
+        return None
+    levels: set[str] = set()
+    for factor, values in grid.items():
+        for v in values if isinstance(values, list) else [values]:
+            text = f"{v:g}" if isinstance(v, float) else str(v)
+            levels |= {str(v).lower(), text.lower(), f"{factor}={v}".lower(), f"{factor}={text}".lower()}
+    return levels
+
+
+def _numeric_key(key: str) -> bool:
+    try:
+        float(key)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _result_comparison_stats(
     replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
-    max_depth: int = 6, assertions: list[Any] | None = None,
+    max_depth: int = 6, assertions: list[Any] | None = None, factor_levels: set[str] | None = None,
 ) -> dict[str, Any]:
     """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the strata
     the experiment broke results down by, plus a multiple-comparison guard.
@@ -14652,7 +14685,11 @@ def _result_comparison_stats(
     (``RK4.err`` at the step-size level, ``err`` at the method level). A
     nested level counts only when its children share one key structure:
     ``{"errors": {...}, "timing": {...}}`` groups unlike things, and pairing
-    them would be noise. The ``by_*`` level itself is always a factor.
+    them would be noise. With the protocol's grid (``factor_levels``), a nested
+    level counts only when its children are also named for values of the
+    grid's factors (or are numbers): unlike groups can share a key structure
+    too (``errors`` and ``timing`` each with ``mean`` and ``max``). The
+    ``by_*`` level itself is always a factor.
 
     Returns ``{"strata": {factor: {stratum: {metric: {mean, ci_lower,
     ci_upper, n}}}}, "effect_sizes": [{factor, metric, a, b, cohens_d,
@@ -14695,7 +14732,10 @@ def _result_comparison_stats(
         )
         label = ".".join(path)
         comparable = len(strata) >= 2 and (
-            depth == 0 or len({_shape(nodes[0][s]) for s in strata}) == 1
+            depth == 0 or (
+                len({_shape(nodes[0][s]) for s in strata}) == 1
+                and (factor_levels is None or all(s.lower() in factor_levels or _numeric_key(s) for s in strata))
+            )
         )
         if comparable:
             metrics = sorted({

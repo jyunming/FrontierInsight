@@ -242,10 +242,14 @@ class Violation:
                 f"saying why, never left out)"
             )
         if self.kind == "clamped":
+            on_bound = any(b is not None and math.isclose(self.value, b, rel_tol=1e-9)
+                           for b in (self.assertion.min, self.assertion.max))
             return (
-                f"{self.path} = {self.value:g} sits exactly on a bound "
-                f"({self.assertion.describe()}){why}, and the script caps "
-                f"values at {self.value:g}: a clamped number, not a measurement"
+                (f"{self.path} = {self.value:g} sits exactly on a bound ({self.assertion.describe()}){why}, and the "
+                 f"script caps values at {self.value:g}" if on_bound else
+                 f"{self.path} = {self.value:g} sits exactly on {self.value:g}, a value the script caps this "
+                 f"quantity at")
+                + ": a clamped number, not a measurement"
             )
         return (
             f"{self.path} = {self.value:g} violates "
@@ -322,6 +326,97 @@ def clamp_constants(code: str) -> set[float]:
                     if v is not None:
                         out.add(v)
     return out
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+
+def clamp_targets(code: str) -> list[tuple[float, frozenset[str]]]:
+    """Each cap in the script with the variables it acts on: ``(constant, names)``.
+
+    The names are the variable a capped value is assigned to and the variables
+    inside the cap (``rmse = min(rmse, 10.0)`` gives ``{"rmse"}``;
+    ``if rmse > 1e6: rmse = 10.0`` gives ``{"rmse"}``). What
+    :func:`clamp_constants` finds, tied to what it caps, so a cap on one
+    quantity (a softmax clipped to 1.0) is not read as a cap on another (an
+    accuracy that is 1.0). Unparseable code yields nothing.
+    """
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return []
+    names: dict[str, float] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            v = _literal(node.value)
+            if v is not None:
+                names[node.targets[0].id] = v
+
+    def value(node: ast.AST) -> float | None:
+        v = _literal(node)
+        if v is None and isinstance(node, ast.Name):
+            v = names.get(node.id)
+        return v
+
+    def targets(stmt: ast.AST) -> set[str]:
+        if isinstance(stmt, ast.Assign):
+            return {n for t in stmt.targets for n in _names_in(t)}
+        if isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+            return _names_in(stmt.target)
+        return set()
+
+    out: list[tuple[float, frozenset[str]]] = []
+    for stmt in ast.walk(tree):
+        assigned = targets(stmt)
+        rhs = getattr(stmt, "value", None) if assigned else None
+        if isinstance(stmt, ast.If):
+            for inner in (*stmt.body, *stmt.orelse):
+                if isinstance(inner, (ast.Assign, ast.AnnAssign)) and inner.value is not None:
+                    v = value(inner.value)
+                    if v is not None:
+                        out.append((v, frozenset(targets(inner))))
+        for node in ast.walk(rhs) if rhs is not None else ():
+            if isinstance(node, ast.Call):
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else (fn.attr if isinstance(fn, ast.Attribute) else "")
+                if name in _CLAMP_CALLS:
+                    args = (*node.args, *(k.value for k in node.keywords))
+                    inside = set().union(*(_names_in(a) for a in args)) if args else set()
+                    for arg in args:
+                        v = value(arg)
+                        if v is not None:
+                            out.append((v, frozenset(assigned | (inside - set(names)))))
+            elif isinstance(node, ast.IfExp):
+                inside = _names_in(node) - set(names)
+                for branch in (node.body, node.orelse):
+                    v = value(branch)
+                    if v is not None:
+                        out.append((v, frozenset(assigned | inside)))
+    return out
+
+
+def metric_variables(code: str, key: str) -> set[str] | None:
+    """The variables a reported quantity named ``key`` is read from, or ``None`` when the script does not say.
+
+    Read from the dict literals that report it (``{"rmse": rmse_mean}`` gives ``{"rmse_mean"}``) and from a variable
+    of the same name. ``None`` means the tie cannot be made, and every cap in the script then counts, as before."""
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return None
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if isinstance(k, ast.Constant) and k.value == key and v is not None:
+                    found |= _names_in(v)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            tgts = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == key for t in tgts):
+                found.add(key)
+    return found or None
 
 
 # A value this close to a bound is ON that bound. The at-bound and clamped
@@ -682,9 +777,15 @@ def violations(
         return []
 
     clamps = clamp_constants(code) if code else set()
+    tied = clamp_targets(code) if code else []
     literals = numeric_literals(code) if code else set()
     out: list[Violation] = []
     for a in assertions:
+        # The caps that act on this quantity, when the script says which variables it is read from; else every cap.
+        key = a.path.split(".")[-1].strip("*[]")
+        variables = metric_variables(code, key) if code and key else None
+        own = {c for c, acted_on in tied if acted_on & variables} if variables is not None else None
+        caps = own if own is not None else clamps
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for tokens, path, value in leaves:
@@ -697,7 +798,10 @@ def violations(
                     a.max is not None and value > a.max
                 ):
                     out.append(Violation(path, value, a))
-            elif clamps and _pinned(value, a, clamps):
+                elif own and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in own):
+                    # Inside the range, but exactly on a constant the script caps this very quantity at.
+                    out.append(Violation(path, value, a, kind="clamped"))
+            elif caps and _pinned(value, a, caps):
                 out.append(Violation(path, value, a, kind="clamped"))
             elif bound != 0 or value == 0:
                 # On a bound of 0 only an exact 0 is the trivial answer; see "Why a tiny value is not on 0".
