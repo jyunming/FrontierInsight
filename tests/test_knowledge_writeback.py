@@ -137,6 +137,9 @@ async def test_quest_writeback_invokes_axon_when_enabled(
     assert meta["verdict"] == "accept"
     assert meta["key_findings"] == ["linear"]
     assert meta["provider"] == "openai"
+    # How the idea was chosen travels with the summary, under the same name the branch ledger uses.
+    assert meta["idea_selection"] in ("ensemble", "tournament", "reflection", "model", "none")
+    assert "chosen_idea" in meta and isinstance(meta["alternative_ideas"], list)
     assert "result_json" in meta
     # Path stored relative to quest_root, NOT absolute. Storing
     # `/home/<user>/.../paper.md` in Axon would leak the user's

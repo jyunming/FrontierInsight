@@ -237,6 +237,8 @@ class QuestState(TypedDict, total=False):
     # counts, and outcome label ("confirmed" / "swapped" /
     # "inconclusive_fallback") for visibility + future Axon write-back.
     ideate_tournament: dict[str, Any]
+    # How chosen_idea was picked: "ensemble", "tournament", "reflection" or "model" (the ideate node's own pick).
+    idea_selection: str
     literature: list[dict[str, Any]]
     # Iterative-literature counter. Incremented on every entry into
     # ``_node_literature``. First entry sets it to 1; ``broaden_lit``
@@ -1177,18 +1179,29 @@ class Engine:
                 # would mislead ("paused for data, but also failed?").
                 self._clear_stale_quest_failed_diagnostic()
                 self._write_evidence(final_state)
+                self._record_stop(final_state, await self._attempt_context(final_state))
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
             evidence_record = self._write_evidence(final_state)
-            self._record(_attempts.ATTEMPTS, {
-                "kind": "quest",
-                "outcome": _attempts.quest_outcome(dict(final_state), evidence_record),
-                "evidence": (evidence_record or {}).get("status"),
-                "review": (final_state.get("review") or {}).get("verdict"),
-                "skills": list(final_state.get("selected_skills") or []),
-                "context": await self._attempt_context(final_state),
-            })
+            end_context = await self._attempt_context(final_state)
+
+            def _quest_record() -> dict[str, Any]:
+                review = final_state.get("review") if isinstance(final_state.get("review"), dict) else {}
+                human = final_state.get("human_feedback") if isinstance(final_state.get("human_feedback"), dict) else {}
+                return {
+                    "kind": "quest",
+                    "outcome": _attempts.quest_outcome(
+                        dict(final_state), evidence_record,
+                        reviewer_accepted=review.get("verdict") == "accept" and _review_was_real(review),
+                    ),
+                    "evidence": (evidence_record or {}).get("status"),
+                    "review": review.get("verdict"),
+                    "person": human.get("action"),
+                    "answered_by": self._answering_model(),
+                    "context": end_context,
+                }
+            self._record(_attempts.ATTEMPTS, _quest_record)
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
@@ -1293,6 +1306,10 @@ class Engine:
                 _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
             except Exception:  # noqa: BLE001
                 pass
+            self._record(_attempts.ATTEMPTS, lambda: {
+                "kind": "quest", "outcome": "process_error", "error": type(exc).__name__,
+                "answered_by": self._answering_model(),
+            })
             raise
         finally:
             # Outer cleanup: releases the per-quest run.log FileHandler
@@ -2606,20 +2623,21 @@ class Engine:
             except Exception as e:
                 self._log.warning("[ideate] reflection skipped: %s", e)
 
-        out: QuestState = {"ideas": ideas, "chosen_idea": chosen}
+        selection = ("ensemble" if ideate_skip_post_processing else "tournament" if tournament_ran
+                     else "reflection" if critique else "model")
+        out: QuestState = {"ideas": ideas, "chosen_idea": chosen, "idea_selection": selection}
         if critique:
             out["ideate_critique"] = critique
         if tournament_result:
             out["ideate_tournament"] = tournament_result
-        self._record(_attempts.LEDGER, {
+        self._record(_attempts.LEDGER, lambda: {
             "kind": "ideas",
             "candidates": [{"title": i.get("title"), "hypothesis": i.get("hypothesis")}
-                           for i in ideas if isinstance(i, dict)],
+                           for i in (ideas if isinstance(ideas, list) else []) if isinstance(i, dict)],
             "chosen": chosen.get("title") if isinstance(chosen, dict) else None,
-            "rule": ("tournament: most wins" if tournament_ran
-                     else "reflection" if critique else "the model's own pick"),
+            "rule": selection,
             "why": (chosen.get("rationale") if isinstance(chosen, dict) else "") or "",
-            "reflection": {"swap_to": critique.get("swap_to")} if critique else None,
+            "reflection": {"swap_to": critique.get("swap_to")} if isinstance(critique, dict) and critique else None,
             "tournament": tournament_result or None,
         })
         return out
@@ -3627,14 +3645,17 @@ class Engine:
         out["design_history"] = _append_design_revision(
             state, design, self.quest_root, self._log, plan_sha,
         )
-        latest = (out["design_history"] or [{}])[-1]
-        self._record(_attempts.LEDGER, {
-            "kind": "design",
-            "revision": len(out["design_history"]),
-            "parent": len(out["design_history"]) - 1 or None,
-            "reason": latest.get("reason") or latest.get("trigger") or "",
-            "design_sha256": _attempts._json_sha(design),
-        })
+        def _design_record() -> dict[str, Any]:
+            latest = (out["design_history"] or [{}])[-1]
+            revision = latest.get("revision")
+            return {
+                "kind": "design",
+                "revision": revision,  # as in DESIGN_HISTORY.json: 0 for the first design
+                "parent": (revision - 1) if isinstance(revision, int) and revision > 0 else None,
+                "reason": latest.get("reason") or "",
+                "design_sha256": _attempts._json_sha(design),
+            }
+        self._record(_attempts.LEDGER, _design_record)
         # Range assertions contributed by the trusted skills this quest may
         # call. Stashed in state because ``_assertion_violations`` is a
         # module-level function with no access to the engine, and the
@@ -7156,20 +7177,26 @@ class Engine:
         }
         patch["numeric_warnings_accepted"] = False
         patch["run_manifest_failures"] = manifest_attempts_next
-        try:
-            oracle_status = str((json.loads((self.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
-                                 or {}).get("status") or "")
-        except (OSError, ValueError, AttributeError):
-            oracle_status = ""
-        self._record(_attempts.ATTEMPTS, {
-            "kind": "run",
-            "outcome": _attempts.run_outcome(
-                returncode=result.returncode, has_result=bool(result_json), manifest_status=manifest_status,
+        run_context = await self._attempt_context({**state, **patch})
+
+        def _run_record() -> dict[str, Any] | None:
+            try:
+                oracle = json.loads((self.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+                oracle_status = str((oracle or {}).get("status") or "") if isinstance(oracle, dict) else ""
+            except (OSError, ValueError):
+                oracle_status = ""
+            outcome = _attempts.run_outcome(
+                returncode=result.returncode, has_result=bool(result_json), manifest_status=str(manifest_status or ""),
                 oracle_status=oracle_status,
-            ),
-            "returncode": result.returncode,
-            "context": await self._attempt_context({**state, **patch}),
-        })
+            )
+            if outcome is None:
+                return None
+            return {
+                "kind": "run", "outcome": outcome, "returncode": result.returncode,
+                "oracle_status": oracle_status or None, "manifest_status": manifest_status or None,
+                "answered_by": self._answering_model(), "context": run_context,
+            }
+        self._record(_attempts.ATTEMPTS, _run_record)
         patch["manifest_failed_trials"] = getattr(self, "_manifest_failed_trials", None)
         if result_json:
             patch["bounded_seen"] = _bounded_seen_after(state, result_json)
@@ -7573,7 +7600,7 @@ class Engine:
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
         code_path.write_text(new_code, encoding="utf-8")
-        self._record(_attempts.LEDGER, {
+        self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": iters + 1,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
             "summary": patch_summary[:300],
@@ -11403,11 +11430,37 @@ class Engine:
             self._log.debug("[attempts] context not read: %r", e)
             return {}
 
-    def _record(self, name: str, record: dict[str, Any]) -> None:
-        """Append to one of the quest's attempt records (core/attempt_records.py). Records only: read by nothing
-        that decides a route."""
-        if not _attempts.append(self.fi_dir, name, record):
-            self._log.debug("[attempts] %s not written", name)
+    def _record(self, name: str, build: Any) -> None:
+        """Append to one of the quest's attempt records (core/attempt_records.py). ``build`` returns the record (or is
+        it); building it and writing it are both best-effort, so a record never touches the quest. Records only: read
+        by nothing that decides a route."""
+        try:
+            record = build() if callable(build) else build
+            if record and not _attempts.append(self.fi_dir, name, record):
+                self._log.debug("[attempts] %s not written", name)
+        except Exception as e:  # noqa: BLE001 -- a record never touches the quest
+            self._log.debug("[attempts] %s not built: %r", name, e)
+
+    def _answering_model(self) -> dict[str, Any]:
+        """The provider and model that answered the last call (after a fallback, the fallback's)."""
+        client = self._client
+        return {"provider": getattr(client, "last_provider", None) or None,
+                "model": getattr(client, "last_model", None) or None}
+
+    def _record_stop(self, state: QuestState | dict[str, Any], context: dict[str, Any]) -> None:
+        """A quest that stopped for a check it failed (:data:`core.attempt_records.STOP_OUTCOMES`) is an attempt with
+        that outcome; a stop that is not a failed check (the plan waiting for you, papers asked for) is not recorded."""
+        def build() -> dict[str, Any] | None:
+            pause = json.loads((self.fi_dir / "pause.json").read_text(encoding="utf-8"))
+            kind = str((pause or {}).get("kind") or "")
+            outcome = _attempts.STOP_OUTCOMES.get(kind)
+            if outcome is None and kind.endswith("_unknown"):
+                outcome = "inconclusive"
+            if outcome is None:
+                return None
+            return {"kind": "stop", "pause": kind, "outcome": outcome, "answered_by": self._answering_model(),
+                    "context": context}
+        self._record(_attempts.ATTEMPTS, build)
 
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node via the shared
@@ -11869,6 +11922,9 @@ class Engine:
             keywords = paper_keywords(artifacts.paper_md.read_text(encoding="utf-8"))
         except OSError:
             keywords = []
+        chosen = state.get("chosen_idea")
+        chosen_title = str(chosen.get("title") or "") if isinstance(chosen, dict) else ""
+        ideas_list = state.get("ideas") if isinstance(state.get("ideas"), list) else []
         meta: dict[str, Any] = {
             "title": state.get("title", ""),
             "topic": state.get("topic", "")[:1000],
@@ -11881,12 +11937,10 @@ class Engine:
             "key_findings": list(analysis.get("key_findings", []) or [])[:20],
             # The idea this study pursued and the ones it chose it over, with how: what a later quest reads to know
             # the direction was one of several (the full record, pairwise verdicts included, is .fi/branch_ledger.jsonl).
-            "chosen_idea": ((state.get("chosen_idea") or {}).get("title") or "") if isinstance(state.get("chosen_idea"), dict) else "",
-            "alternative_ideas": [str(i.get("title") or "") for i in (state.get("ideas") or [])
-                                  if isinstance(i, dict) and i.get("title")
-                                  and i.get("title") != (state.get("chosen_idea") or {}).get("title")][:10],
-            "idea_selection": ("tournament" if state.get("ideate_tournament")
-                               else "reflection" if state.get("ideate_critique") else "model pick"),
+            "chosen_idea": chosen_title,
+            "alternative_ideas": [str(i.get("title") or "") for i in ideas_list
+                                  if isinstance(i, dict) and i.get("title") and i.get("title") != chosen_title][:10],
+            "idea_selection": (str(state.get("idea_selection") or "") or ("model" if chosen_title else "none")),
             "result_json": state.get("result_json") or {},
             "figures": list(state.get("figures", []) or []),
             "provider": self.config.provider.name,
