@@ -648,6 +648,8 @@ class Engine:
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
         import time as _time
+        # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
+        self._quest_recorded = False
 
         from . import source_failures as _source_failures
 
@@ -1202,6 +1204,7 @@ class Engine:
                     "context": end_context,
                 }
             self._record(_attempts.ATTEMPTS, _quest_record)
+            self._quest_recorded = True
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
@@ -1306,10 +1309,14 @@ class Engine:
                 _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
             except Exception:  # noqa: BLE001
                 pass
-            self._record(_attempts.ATTEMPTS, lambda: {
-                "kind": "quest", "outcome": "process_error", "error": type(exc).__name__,
-                "answered_by": self._answering_model(),
-            })
+            # A quest already recorded as finished that fails in its clean-up keeps that record.
+            if not getattr(self, "_quest_recorded", False):
+                self._record(_attempts.ATTEMPTS, lambda: {
+                    "kind": "quest", "outcome": "process_error", "error": type(exc).__name__,
+                    "answered_by": self._answering_model(),
+                    # The conditions as last worked out (no files are read while the quest is failing).
+                    "context": getattr(self, "_last_attempt_context", None),
+                })
             raise
         finally:
             # Outer cleanup: releases the per-quest run.log FileHandler
@@ -11421,11 +11428,13 @@ class Engine:
         """The conditions an attempt ran under (core/attempt_records.py); an empty dict if they cannot be read. Hashing
         the quest's files and asking git for FI's commit run in a worker thread, off the event loop."""
         try:
-            return await asyncio.to_thread(
+            context = await asyncio.to_thread(
                 _attempts.context_fingerprint,
                 self.config, self.quest_root, dict(state), prompts=self._prompts,
                 fi_repo=Path(__file__).resolve().parent.parent,
             )
+            self._last_attempt_context = context
+            return context
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
             self._log.debug("[attempts] context not read: %r", e)
             return {}
@@ -11442,7 +11451,8 @@ class Engine:
             self._log.debug("[attempts] %s not built: %r", name, e)
 
     def _answering_model(self) -> dict[str, Any]:
-        """The provider and model that answered the last call (after a fallback, the fallback's)."""
+        """The provider and model that answered the quest's last model call (after a fallback, the fallback's): the
+        last call's, not necessarily the one that did the work the record is about."""
         client = self._client
         return {"provider": getattr(client, "last_provider", None) or None,
                 "model": getattr(client, "last_model", None) or None}
@@ -11454,8 +11464,6 @@ class Engine:
             pause = json.loads((self.fi_dir / "pause.json").read_text(encoding="utf-8"))
             kind = str((pause or {}).get("kind") or "")
             outcome = _attempts.STOP_OUTCOMES.get(kind)
-            if outcome is None and kind.endswith("_unknown"):
-                outcome = "inconclusive"
             if outcome is None:
                 return None
             return {"kind": "stop", "pause": kind, "outcome": outcome, "answered_by": self._answering_model(),

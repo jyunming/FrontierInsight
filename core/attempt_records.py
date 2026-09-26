@@ -35,13 +35,13 @@ OUTCOMES = ("process_error", "protocol_mismatch", "oracle_failure", "inconclusiv
 ATTEMPTS = "attempts.jsonl"
 LEDGER = "branch_ledger.jsonl"
 
-#: A stop for one of these checks is an attempt that failed it; any other stop (the plan waiting for you, papers asked
-#: for) is not an outcome.
+#: A stop for one of these checks is an attempt that failed it. Any other stop is not an outcome: the plan waiting for
+#: you, papers asked for, a protocol change waiting for approval, or a check that could not be asked (an outage is not
+#: a fact about the attempt).
 STOP_OUTCOMES = {
     "oracle": "oracle_failure",
-    "manifest": "protocol_mismatch", "protocol": "protocol_mismatch", "split": "protocol_mismatch",
-    "amendment": "protocol_mismatch",
-    "replicate_seed_unrepairable": "process_error",
+    "manifest": "protocol_mismatch", "protocol": "protocol_mismatch",
+    "split": "process_error", "numeric": "process_error", "replicate_seed_unrepairable": "process_error",
 }
 
 #: Above this size a file is identified by its size and its first and last MiB, not read whole.

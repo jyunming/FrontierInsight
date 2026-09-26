@@ -144,3 +144,39 @@ def test_a_stop_for_a_failed_check_is_recorded_and_other_stops_are_not(tmp_path:
     engine._record_stop({}, {})
     (stop,) = ar.read(engine.fi_dir, ar.ATTEMPTS)
     assert stop["kind"] == "stop" and stop["outcome"] == "oracle_failure"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_quest_is_recorded_once_and_a_finished_one_is_not_recorded_again(
+        smoke_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    # A failure after the quest's line was written (in the clean-up) does not add a second one.
+    def boom(self, *a, **k):  # noqa: ANN001
+        raise RuntimeError("clean-up failed")
+
+    monkeypatch.setattr(Engine, "_write_cost_summary", boom)
+    engine = Engine(smoke_config)
+    with pytest.raises(RuntimeError):
+        await engine.run()
+    ends = [r for r in ar.read(engine.fi_dir, ar.ATTEMPTS) if r["kind"] == "quest"]
+    assert len(ends) == 1 and ends[0]["outcome"] != "process_error"
+
+
+@pytest.mark.asyncio
+async def test_a_quest_that_fails_is_recorded_as_a_process_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        raise RuntimeError("the provider is gone")
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(Config.model_validate({
+        "topic": "t", "provider": {"name": "openai", "model": "m"}, "knowledge": {"enabled": False},
+        "engine": {"clarify_mode": "off"}, "output": {"output_dir": str(tmp_path / "out")},
+    }))
+    with pytest.raises(Exception):
+        await engine.run()
+    ends = [r for r in ar.read(engine.fi_dir, ar.ATTEMPTS) if r["kind"] == "quest"]
+    assert len(ends) == 1 and ends[0]["outcome"] == "process_error" and ends[0]["error"]
