@@ -380,6 +380,11 @@ export function answersToYaml(answers: InterviewAnswers): string {
         lines.push('rigor_profile: "research"');
         lines.push("");
     }
+    // What the result is for: kept, since an exploration's result is never publication-ready (core/evidence.py).
+    if (answers.result_use) {
+        lines.push(`result_use: "${answers.result_use}"`);
+        lines.push("");
+    }
 
     lines.push("provider:");
     lines.push(`${indent}name: "vscode_extension"`);
