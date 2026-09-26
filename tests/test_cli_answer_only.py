@@ -19,6 +19,7 @@ import dataclasses
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -532,35 +533,93 @@ def test_stdout_errors_reads_only_top_level_failure_events() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _agy_patches(spawn):  # noqa: ANN001, ANN202
+    return (
+        patch("core.provider.shutil.which", return_value="/bin/agy"),
+        patch("core.provider.asyncio.create_subprocess_exec", new=spawn),
+        patch("core.provider._collect_via_communicate", new=AsyncMock(return_value="ok")),
+        patch("core.provider._collect_via_streaming", new=AsyncMock(return_value="ok")),
+    )
+
+
 @pytest.mark.asyncio
-async def test_agy_runs_with_a_home_of_its_own_whose_settings_refuse_its_tools() -> None:
+async def test_agy_runs_with_a_home_of_its_own_whose_settings_refuse_its_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """agy follows ~/.gemini/antigravity-cli/settings.json, often "always-proceed": in real quests it ran shell
-    commands, fetched papers and read FI's source mid-answer. Every call gets a fresh home holding FI's settings."""
+    commands, fetched papers and read FI's source mid-answer. Every call gets a fresh home holding FI's settings, with
+    the model the user chose kept, and an update check marked done so no updater starts."""
+    own = tmp_path / "user_home" / ".gemini" / "antigravity-cli"
+    own.mkdir(parents=True)
+    (own / "settings.json").write_text(json.dumps({"model": "Gemini 3.1 Pro (High)",
+                                                   "toolPermission": "always-proceed"}), encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "user_home"))
+    monkeypatch.setenv("ANTIGRAVITY_PERM_GRANTS", "command(*)")
     seen: dict = {}
 
     async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
         env = kwargs["env"]
-        seen["home"], seen["profile"] = env["HOME"], env["USERPROFILE"]
-        settings = Path(env["HOME"]) / ".gemini" / "antigravity-cli" / "settings.json"
-        seen["settings"] = json.loads(settings.read_text(encoding="utf-8"))
-        seen["path"] = env.get("PATH")
+        seen["env"] = env
+        folder = Path(env["HOME"]) / ".gemini" / "antigravity-cli"
+        seen["settings"] = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
+        seen["checked"] = (folder / "last_check.timestamp").is_file()
         return MagicMock()
 
-    with patch("core.provider.shutil.which", return_value="/bin/agy"),          patch("core.provider.asyncio.create_subprocess_exec", new=spawn),          patch("core.provider._collect_via_communicate", new=AsyncMock(return_value="ok")),          patch("core.provider._collect_via_streaming", new=AsyncMock(return_value="ok")):
+    which, spawner, communicate, streaming = _agy_patches(spawn)
+    with which, spawner, communicate, streaming:
         assert await _run_cli(_CLI_SPECS["antigravity_cli"], "the prompt") == "ok"
-    assert seen["home"] == seen["profile"] and Path(seen["home"]).name.startswith("fi_cli_home_")
-    assert os.path.normcase(seen["home"]) != os.path.normcase(os.path.expanduser("~"))
-    settings = seen["settings"]
+    env, settings = seen["env"], seen["settings"]
+    assert env["HOME"] == env["USERPROFILE"] and Path(env["HOME"]).name.startswith("fi_cli_home_")
     assert settings["toolPermission"] == "request-review" and settings["allowNonWorkspaceAccess"] is False
     assert set(settings["permissions"]["deny"]) == {"command(*)", "write_file(*)", "read_url(*)", "mcp(*)"}
-    assert seen["path"] == os.environ.get("PATH"), "the rest of the environment is kept (the CLI must still start)"
-    assert not os.path.exists(seen["home"]), "the home goes with the call"
+    assert settings["model"] == "Gemini 3.1 Pro (High)", "the user's model is kept, never their permissions"
+    assert seen["checked"], "a fresh home would start agy's background updater on every call"
+    assert "ANTIGRAVITY_PERM_GRANTS" not in env and env.get("PATH") == os.environ.get("PATH")
+    assert not os.path.exists(env["HOME"]), "the home goes with the call"
+
+
+@pytest.mark.asyncio
+async def test_agy_home_is_removed_when_the_spawn_fails() -> None:
+    seen: dict = {}
+
+    async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
+        seen["home"] = kwargs["env"]["HOME"]
+        raise FileNotFoundError("gone")
+
+    with patch("core.provider.shutil.which", return_value="/bin/agy"), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=spawn):
+        with pytest.raises(RuntimeError, match="not found on PATH"):
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "hi")
+    assert seen["home"] and not os.path.exists(seen["home"])
+
+
+@pytest.mark.asyncio
+async def test_a_failed_agy_call_says_what_its_own_log_said() -> None:
+    """agy's log is in the call's home, removed with it: its error lines go into the message first (a quota error,
+    or a timeout whose stderr is empty)."""
+
+    async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
+        log = Path(kwargs["env"]["HOME"]) / ".gemini" / "antigravity-cli" / "cli.log"
+        log.write_text(
+            "I0926 fine\nE0926 session.go:259] Print mode: run ended with error: RESOURCE_EXHAUSTED (code 429)\n",
+            encoding="utf-8",
+        )
+        return MagicMock()
+
+    with patch("core.provider.shutil.which", return_value="/bin/agy"), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=spawn), \
+         patch("core.provider._collect_via_communicate", new=AsyncMock(side_effect=RuntimeError("agy exited rc=3"))):
+        with pytest.raises(RuntimeError) as err:
+            await _run_cli(_CLI_SPECS["antigravity_cli"], "hi")
+    assert "agy exited rc=3" in str(err.value) and "RESOURCE_EXHAUSTED (code 429)" in str(err.value)
 
 
 @pytest.mark.asyncio
 async def test_other_clis_get_no_home_of_their_own() -> None:
+    assert all(spec.home_settings is None for name, spec in _CLI_SPECS.items() if name != "antigravity_cli")
     _, kwargs, _ = await _spawn_record("claude_cli")
-    assert kwargs.get("env") is None or kwargs["env"].get("HOME") == os.environ.get("HOME")
+    env = kwargs.get("env")
+    assert env is None or not str(env.get("HOME", "")).startswith(tempfile.gettempdir())
 
 
 def test_agy_is_told_its_tools_are_off() -> None:

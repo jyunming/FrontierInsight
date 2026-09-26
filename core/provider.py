@@ -1837,11 +1837,11 @@ async def _run_cli(
         child_env = _child_env(spec)
         if spec.home_settings is not None:
             home_dir = tempfile.mkdtemp(prefix="fi_cli_home_")
-            settings_dir = Path(home_dir) / ".gemini" / "antigravity-cli"
-            settings_dir.mkdir(parents=True)
-            (settings_dir / "settings.json").write_text(json.dumps(spec.home_settings), encoding="utf-8")
+            _write_cli_home(Path(home_dir), spec.home_settings)
             child_env = {**(child_env if child_env is not None else os.environ), "HOME": home_dir,
                          "USERPROFILE": home_dir}
+            # A grant inherited from an agy or Antigravity terminal FI was started from would reach the call.
+            child_env.pop("ANTIGRAVITY_PERM_GRANTS", None)
         if spec.cwd_flag:
             # Ahead of a trailing prompt flag and its prompt, like the flags above.
             at = len(argv) - 2 if spec.pass_prompt_via == "arg" else len(argv)
@@ -1867,33 +1867,40 @@ async def _run_cli(
                 f"before using this provider."
             ) from e
 
-        if spec.output_via == "stream_json":
-            # Streaming path: only used by claude_cli today. Reads
-            # stdout line-by-line, parses ``--output-format stream-
-            # json`` events, resets the inactivity watchdog on each
-            # event, surfaces text_deltas as the aggregated answer.
-            # Required for Sonnet 4.6 extended-thinking spans.
-            return await _collect_via_streaming(
-                proc, argv, spec, stdin_bytes,
-                timeout_s=timeout_s,
-                inactivity_timeout_s=inactivity_timeout_s,
-                post_eof_reap_timeout_s=post_eof_reap_timeout_s,
-                heartbeat_cb=heartbeat_cb,
-                node=node,
-                usage_out=usage_out,
+        try:
+            if spec.output_via == "stream_json":
+                # Streaming path: only used by claude_cli today. Reads
+                # stdout line-by-line, parses ``--output-format stream-
+                # json`` events, resets the inactivity watchdog on each
+                # event, surfaces text_deltas as the aggregated answer.
+                # Required for Sonnet 4.6 extended-thinking spans.
+                return await _collect_via_streaming(
+                    proc, argv, spec, stdin_bytes,
+                    timeout_s=timeout_s,
+                    inactivity_timeout_s=inactivity_timeout_s,
+                    post_eof_reap_timeout_s=post_eof_reap_timeout_s,
+                    heartbeat_cb=heartbeat_cb,
+                    node=node,
+                    usage_out=usage_out,
+                )
+            # Legacy ``communicate()`` path for everything else
+            # (codex_cli's ``last_message_file``, plus gemini_cli /
+            # copilot_cli plain ``stdout`` mode). Only the total
+            # wall-clock budget applies — these CLIs don't emit
+            # stream-style progress, so an inactivity timer would either
+            # fire false-positives (silent agent log) or do nothing useful
+            # (single stdout flush at end). Preserved here so existing
+            # tests that mock ``proc.communicate()`` keep working.
+            return await _collect_via_communicate(
+                proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
+                heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
             )
-        # Legacy ``communicate()`` path for everything else
-        # (codex_cli's ``last_message_file``, plus gemini_cli /
-        # copilot_cli plain ``stdout`` mode). Only the total
-        # wall-clock budget applies — these CLIs don't emit
-        # stream-style progress, so an inactivity timer would either
-        # fire false-positives (silent agent log) or do nothing useful
-        # (single stdout flush at end). Preserved here so existing
-        # tests that mock ``proc.communicate()`` keep working.
-        return await _collect_via_communicate(
-            proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
-            heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
-        )
+        except (RuntimeError, asyncio.TimeoutError) as exc:
+            # The CLI's own log is in the call's home and goes with it: its errors go into the message first.
+            note = _cli_home_errors(home_dir) if home_dir is not None else ""
+            if note and exc.args and isinstance(exc.args[0], str):
+                exc.args = (f"{exc.args[0]}\n{spec.argv[0]}'s own log said: {note}", *exc.args[1:])
+            raise
     finally:
         if tmp_out_path is not None:
             tmp_out_path.unlink(missing_ok=True)
@@ -1902,9 +1909,36 @@ async def _run_cli(
         if image_folder is not None:
             shutil.rmtree(image_folder, ignore_errors=True)
         if home_dir is not None:
-            shutil.rmtree(home_dir, ignore_errors=True)
+            _remove_call_dir(home_dir)
         if call_dir is not None:
             _remove_call_dir(call_dir)
+
+
+def _write_cli_home(home: Path, settings: dict[str, Any]) -> None:
+    """Lay out a CLI call's own home (agy's): FI's settings, with the model the user chose in their own agy settings
+    kept (FI never picks a model for them), and an update check marked as just done, so a call does not start agy's
+    background updater (a fresh home otherwise starts one on every call)."""
+    folder = home / ".gemini" / "antigravity-cli"
+    folder.mkdir(parents=True)
+    chosen = dict(settings)
+    try:
+        own = json.loads((Path.home() / ".gemini" / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        own = {}
+    if isinstance(own, dict) and isinstance(own.get("model"), str) and own["model"].strip():
+        chosen["model"] = own["model"]
+    (folder / "settings.json").write_text(json.dumps(chosen), encoding="utf-8")
+    (folder / "last_check.timestamp").write_bytes(b"")
+
+
+def _cli_home_errors(home: str, lines: int = 3) -> str:
+    """The last error lines of the CLI's own log in a call's home (agy writes ``cli.log`` there), or ''."""
+    try:
+        text = (Path(home) / ".gemini" / "antigravity-cli" / "cli.log").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    errors = [line.strip() for line in text.splitlines() if line.startswith("E")]
+    return " | ".join(errors[-lines:])[:600]
 
 
 def _remove_call_dir(path: str) -> None:
