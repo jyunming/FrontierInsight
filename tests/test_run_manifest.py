@@ -634,6 +634,21 @@ async def test_when_the_repair_gives_up_the_rejected_runs_numbers_and_figures_do
 
 
 @pytest.mark.asyncio
+async def test_with_no_repair_left_a_manifest_difference_still_stops_and_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Earlier crashes can spend every repair (here: none are allowed). The difference must still stop the quest with
+    its reason, not go on to a paper written from no results."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_reply(SIM_SHORT)))
+    engine = Engine(_cfg(tmp_path, engine={"exec_reflect_max_iterations": 0}))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is None and "Writing" not in calls
+    assert _record(engine)["status"] == "stopped"
+    assert "the simulation does not do what the protocol fixed" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_a_deterministic_study_that_runs_as_one_script_needs_no_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     protocol = {"grid": {"dt": [0.1, 0.01]}}
     script = "DT_LIST = [0.1, 0.01]\n" + ANALYSIS.replace('raw = pathlib.Path(os.environ["FI_RAW_DIR"])\ndone = json.loads((raw / "outcomes.json").read_text())', "done = {}")

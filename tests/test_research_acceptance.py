@@ -163,7 +163,7 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
         status, record, problem = receipts.read(root, check)
         assert status == "pass", (check, status, problem)
     assert audit_log.verify(root / ".fi" / "audit.jsonl").ok
-    assert not (root / ".fi" / "human_review.json").exists()
+    assert not any("waiting for your decision" in g for g in _all_gaps(_evidence(root))), "the review was accepted"
     # The settings the interview approved are recorded, and their hash is in the trace.
     assert (root / ".fi" / plan_settings.NAME).is_file()
     assert any(e.get("kind") == "plan_settings_recorded" for e in audit_log.read(root / ".fi" / "audit.jsonl"))
@@ -172,6 +172,13 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
 
 
 # --- faults put into a copy of the finished quest ---------------------------------------------------------------------
+
+
+def test_an_undamaged_copy_is_still_publication_ready(baseline: dict[str, Any], tmp_path: Path) -> None:
+    """The control for every fault below: the copy and the reassessment alone change nothing."""
+    config, root = _copy(baseline, tmp_path)
+    record = _reassess(baseline, config, root.name)
+    assert record["status"] == "publication_ready", record.get("gaps")
 
 
 @pytest.mark.parametrize("check", ["evidence_gate", "claim_check", "design_audit"])
@@ -297,6 +304,7 @@ SIM_SOME_FAIL = SIM_TRIAL.replace(
 def test_trials_that_fail_with_no_failure_policy_are_a_gap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(RESEARCH_PROTOCOL, SIM_SOME_FAIL, ANALYSIS_TRIAL, []))
     engine, artifacts, pauses = _run_through_pauses(_config(tmp_path))
+    assert artifacts.paper_md is not None and pauses == ["# Action needed — read and edit the plan"], pauses
     root = engine.quest_root
     trials = [json.loads(line) for line in (root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     failed = [t for t in trials if t.get("event") == "trial" and t.get("status") != "ok"]

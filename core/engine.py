@@ -7245,24 +7245,29 @@ class Engine:
             )
         return replotted
 
-    def _manifest_repair_gave_up(self, state: QuestState) -> QuestState | None:
-        """When the repair gives up on a run the run-manifest check sent back (``engine.run_manifest_check: block``):
-        the difference it found still stands, so the quest must stop and name it, as when the repairs run out, and
-        not go on as a run that merely produced no results (which went back to design, then wrote a paper from
-        none, the named difference lost). The repairs count as spent and the same scripts run once more (FI's trials
-        are reused when the simulation is unchanged): the check finds the difference again and the run stops there,
-        with the reason. ``None`` when the failure was not a run-manifest difference."""
+    def _manifest_repair_gave_up(self, state: QuestState, history: list[dict[str, Any]] | None = None) -> QuestState | None:
+        """When the repair gives up, or none is left, on a run the run-manifest check sent back
+        (``engine.run_manifest_check: block``): the difference it found still stands, so the quest must stop and name
+        it, as when the repairs run out, and not go on as a run that merely produced no results (which went back to
+        design, then wrote a paper from none, the named difference lost). The repairs count as spent and the same
+        scripts run once more, so the stop happens in the run step and a resume after fixing them runs them again: the
+        check finds the difference and the run stops there, with the reason. On the trial contract FI's trials are
+        reused (the simulation is unchanged); the older contract, or a record changed on disk, runs them again.
+        ``None`` when the failure was not a run-manifest difference."""
         if self.config.engine.run_manifest_check != "block" or not int(state.get("run_manifest_failures") or 0):
             return None
         self._log.warning(
             "[execute_reflect] the repair gave up on the run-manifest difference; the run is checked once more and "
             "stops with it"
         )
-        return {
+        patch: QuestState = {
             "run_manifest_failures": int(self.config.engine.run_manifest_repair_attempts),
             "exec_patch_pending": True,
             "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,
         }
+        if history is not None:
+            patch["exec_reflect_history"] = history  # the repair's own reason for giving up, kept
+        return patch
 
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
         """Post-execute repair node.
@@ -7322,6 +7327,11 @@ class Engine:
 
         iters = state.get("exec_reflect_iter", 0)
         if iters >= self.config.engine.exec_reflect_max_iterations:
+            # A run the run-manifest check sent back, with no repair left (earlier crashes spent them, or none are
+            # allowed): the difference stands, and the quest stops and names it, never going on with no results.
+            stop = self._manifest_repair_gave_up(state)
+            if stop is not None:
+                return stop
             # Proceed regardless; analyze owns the authoritative degenerate
             # flag against the final result (covers max_iterations=0 too).
             if rc == 0 and has_result_json and findings and not degenerate and not implausible:
@@ -7504,7 +7514,7 @@ class Engine:
                 "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": f"(gave up: {give_up[:120]})",
             })
-            return self._manifest_repair_gave_up(state) or {
+            return self._manifest_repair_gave_up(state, history) or {
                 "exec_give_up_reason": give_up,
                 "exec_reflect_iter": iters + 1,
                 "exec_reflect_history": history,
