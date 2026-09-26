@@ -61,19 +61,21 @@ def test_a_command_that_runs_too_long_is_stopped_with_the_helper_it_started(isk,
     """``git-remote-https`` is a child of ``git`` and holds its output handle: with a pipe, the wait for
     the output never ends after git is killed. Here the helper writes a marker if it is left alive."""
     marker = tmp_path / "helper-alive"
+    # The timeout leaves the parent time to have started its helper before it is stopped: a stop that lands while
+    # the helper is still being created cannot see it (a slow Windows runner took over 2 s to get there, twice).
     parent = textwrap.dedent(
         """
         import subprocess, sys, time
         subprocess.Popen([sys.executable, "-c",
-            "import sys, time, pathlib; time.sleep(4); pathlib.Path(sys.argv[1]).write_text('alive')", sys.argv[1]])
+            "import sys, time, pathlib; time.sleep(10); pathlib.Path(sys.argv[1]).write_text('alive')", sys.argv[1]])
         time.sleep(60)
         """
     )
     started = time.time()
-    done = isk._git([sys.executable, "-c", parent, str(marker)], timeout=2)
+    done = isk._git([sys.executable, "-c", parent, str(marker)], timeout=6)
     assert done.timed_out and not done.ok and done.reason() == "timed out"
-    assert time.time() - started < 15
-    time.sleep(6)  # long enough for a helper that was not stopped to have written its marker
+    assert time.time() - started < 20
+    time.sleep(12)  # long enough for a helper that was not stopped to have written its marker
     assert not marker.exists()
 
 

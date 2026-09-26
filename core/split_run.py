@@ -188,7 +188,9 @@ def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | 
             named["simulate"] = body
         elif name == ANALYSIS_NAME:
             named["analysis"] = body
-    if len(named) == 2:
+        elif name == "submit.py":
+            named["submit"] = body  # a cluster quest's third script (core/trial_runner.py)
+    if "simulate" in named and "analysis" in named:
         return named
     if len(blocks) == 2 and not named:
         return {"simulate": blocks[0], "analysis": blocks[1]}

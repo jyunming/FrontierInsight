@@ -103,13 +103,17 @@ def test_the_switch_is_auto_by_default_and_needs_no_folder() -> None:
     "kwargs,message",
     [
         ({"raw_dir": "somewhere", "split_analysis": False}, "only means something with execution.split_analysis"),
-        ({"split_analysis": True, "background_jobs": True}, "cannot be combined with execution.background_jobs"),
         ({"split_analysis": True, "sandbox": "docker", "raw_dir": str(Path.cwd())}, "must be relative"),
     ],
 )
 def test_combinations_that_cannot_work_are_refused_at_load(kwargs: dict, message: str) -> None:
     with pytest.raises(ValidationError, match=message):
         ExecutionConfig(**kwargs)
+
+
+def test_two_scripts_and_a_background_job_go_together_now() -> None:
+    """FI runs the trials as a job array on the cluster (core/trial_runner.py prepare_cluster / collect_cluster)."""
+    assert ExecutionConfig(split_analysis=True, background_jobs=True).background_jobs
 
 
 def test_a_relative_folder_is_fine_with_docker_and_an_absolute_one_with_venv(tmp_path: Path) -> None:
@@ -156,9 +160,11 @@ def test_auto_splits_a_stochastic_design_and_not_a_deterministic_one(tmp_path: P
     assert eng._split_block({}) == ""
 
 
-def test_auto_never_splits_a_background_job_a_study_with_no_experiment_or_a_data_only_run(tmp_path: Path) -> None:
+def test_auto_never_splits_a_study_with_no_experiment_or_a_data_only_run(tmp_path: Path) -> None:
     stochastic = {"design": {"hypothesis": "h", "protocol": {"runs_per_setting": 300}}}
-    assert _engine_with(tmp_path / "a", background_jobs=True)._split_on(stochastic) is False
+    # A stochastic background job now runs FI's trials as a job array; a deterministic one stays one script.
+    jobs = _engine_with(tmp_path / "a", background_jobs=True)
+    assert jobs._split_on(stochastic) is True and jobs._split_on({"design": {"hypothesis": "h"}}) is False
     eng = _engine_with(tmp_path / "b")
     assert eng._split_on({**stochastic, "no_simulation_resolved": True}) is False
     assert eng._split_on({**stochastic, "survey_mode_resolved": True}) is False

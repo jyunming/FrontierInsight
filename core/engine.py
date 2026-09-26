@@ -4962,7 +4962,7 @@ class Engine:
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
-                job_block=self._job_block(),
+                job_block=self._job_block(state),
                 split_block=self._split_block(state),
             )
         else:
@@ -4987,7 +4987,7 @@ class Engine:
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=self._skills_block(state) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
-                job_block=self._job_block(),
+                job_block=self._job_block(state),
                 split_block=self._split_block(state),
             )
         # A review that named something this run computed sent the experiment
@@ -5008,6 +5008,7 @@ class Engine:
         # that does not hold both is asked for once more; if it still does not, the quest
         # runs as one script and says so, rather than stopping.
         simulate_code = ""
+        submit_code = ""
         if self._split_on(state):
             scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
             if scripts is None:
@@ -5017,8 +5018,13 @@ class Engine:
                 )
                 text = await self._chat(prompt + _SPLIT_REPLY_REMINDER, node="implement")
                 scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
+            if scripts is not None and self.config.execution.background_jobs and "submit" not in scripts:
+                self._log.warning("[implement] a cluster quest's reply did not hold submit.py; asking once more")
+                text = await self._chat(prompt + _SPLIT_REPLY_REMINDER + _CLUSTER_REPLY_REMINDER, node="implement")
+                scripts = _split_run.parse_split_response(text, _PY_FENCE_RE) or scripts
             if scripts is not None:
                 simulate_code, code = scripts["simulate"], scripts["analysis"]
+                submit_code = scripts.get("submit", "")
                 deps = _parse_split_deps(text)
                 broken = _run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code})
                 if broken:
@@ -5069,6 +5075,10 @@ class Engine:
                 self._log.info("[implement] %s is unchanged; its raw files stay in use", simulate_path.name)
         elif simulate_path.is_file():
             simulate_path.unlink()  # no leftover simulation from an earlier pass beside a one-script quest
+        submit_path = self.quest_root / "code" / _trial_runner.SUBMIT_NAME
+        if submit_code.strip():
+            submit_path.write_text(submit_code, encoding="utf-8")
+            self._log.info("[implement] wrote %s (%d bytes)", submit_path, len(submit_code))
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
         if extracted:  # nothing to seed in the stub written above
@@ -5888,7 +5898,10 @@ class Engine:
         or fails asks for a repair of the script; each is up to ``engine.oracle_repair_attempts`` attempts. If the
         oracles still do not pass, ``block`` stops the quest before its main sweep and ``warn`` records it and goes on.
         Every attempt is in ``needs/ORACLE_CHECK.json``."""
-        if self.config.engine.oracle_check == "off" or self.config.execution.background_jobs:
+        # A background job's one script cannot be run here for a check; a job array's oracle() can (it is a function).
+        if self.config.engine.oracle_check == "off" or (
+            self.config.execution.background_jobs and not self._split_on(state)
+        ):
             self._oracle_record_clear()
             return None
         protocol = self._protocol_block(state)
@@ -6469,6 +6482,8 @@ class Engine:
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
                 log=self._log,
+                submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
+                        if self.config.execution.background_jobs else None),
             )
         elif split:
             runner = _split_run.SplitRunner(
@@ -6707,7 +6722,14 @@ class Engine:
             manifest_attempts = 0
         else:
             manifest_attempts = int(state.get("run_manifest_failures", 0) or 0)
-        manifest_status, manifest_found = self._run_manifest_problems(state, split, result)
+        from core import job_watch as _job_watch
+
+        _job = _job_watch.job_of(_extract_result_json(result.stdout or ""))
+        if _job is not None and _job["status"] == _job_watch.PENDING and result.returncode == 0:
+            # A job still running has recorded nothing yet: its record is checked when it is done.
+            manifest_status, manifest_found = "pending", []
+        else:
+            manifest_status, manifest_found = self._run_manifest_problems(state, split, result)
         manifest_attempts_next = 0
         if manifest_found:
             mode = self.config.engine.run_manifest_check
@@ -7317,9 +7339,17 @@ class Engine:
         simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
         split = self._split_on(state) and simulate_path.is_file()
         repair_simulation = split and exec_result.get("failed_script") == _split_run.SIMULATE_NAME
+        repair_submit = split and exec_result.get("failed_script") == _trial_runner.SUBMIT_NAME
         script_code = state.get("code") or ""
         if split:
-            if repair_simulation:
+            if repair_submit:
+                script_code = (self.quest_root / "code" / _trial_runner.SUBMIT_NAME).read_text(encoding="utf-8")
+                split_note = (
+                    "[FI NOTE] The script below is code/submit.py, the driver that submits FI's job array to the cluster "
+                    "and reports it pending or done (the cluster section of the design above). It failed: fix it, and "
+                    "return submit.py only.\n"
+                )
+            elif repair_simulation:
                 script_code = simulate_path.read_text(encoding="utf-8")
                 split_note = _SPLIT_REFLECT_SIMULATE
             else:
@@ -7416,7 +7446,8 @@ class Engine:
         # Write the patched code to disk so the next `execute` picks it
         # up. We mirror the implement node's behavior.
         code_path = self.quest_root / "code" / (
-            _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"
+            _trial_runner.SUBMIT_NAME if repair_submit
+            else _split_run.SIMULATE_NAME if repair_simulation else "experiment.py"
         )
         code_path.parent.mkdir(parents=True, exist_ok=True)
         code_path.write_text(new_code, encoding="utf-8")
@@ -7427,7 +7458,7 @@ class Engine:
             "exec_reflect_history": history,
             "exec_patch_pending": True,
         }
-        if not repair_simulation:
+        if not repair_simulation and not repair_submit:
             # ``code`` is the script that prints RESULT_JSON, which is the analysis when
             # there are two.
             patch["code"] = new_code
@@ -11320,10 +11351,13 @@ class Engine:
         except OSError:
             pass
 
-    def _job_block(self) -> str:
+    def _job_block(self, state: QuestState | None = None) -> str:
         """The background-job contract for the design and code-writing prompts,
-        or nothing when ``execution.background_jobs`` is off."""
-        return _JOB_PROTOCOL if self.config.execution.background_jobs else ""
+        or nothing when ``execution.background_jobs`` is off. A quest whose trials FI runs as a job array gets that
+        contract with the two-script one instead (:meth:`_split_block`)."""
+        if not self.config.execution.background_jobs:
+            return ""
+        return "" if state is not None and self._split_on(state) else _JOB_PROTOCOL
 
     def _split_on(self, state: QuestState) -> bool:
         """Whether this quest keeps its simulation and its analysis in two scripts (``execution.split_analysis``).
@@ -11335,18 +11369,21 @@ class Engine:
         if mode != "auto":
             return bool(mode)
         if (
-            self.config.execution.background_jobs
-            or state.get("no_simulation_resolved")
+            state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
             or self.config.engine.analyze_local_first
         ):
             return False
+        # A background job (a cluster) with a stochastic design runs FI's trials as a job array (core/trial_runner.py):
+        # two scripts and submit.py. A deterministic one stays the one-script job it was.
         return _split_run.design_is_stochastic(state.get("design") or {})
 
     def _split_block(self, state: QuestState) -> str:
         """The two-script contract for the code-writing prompts, or nothing when
         ``execution.split_analysis`` is off."""
-        return _SPLIT_PROTOCOL if self._split_on(state) else ""
+        if not self._split_on(state):
+            return ""
+        return _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
         """The experiment reported its job as pending. Record what is being
@@ -11404,6 +11441,13 @@ class Engine:
             {**os.environ, ENV_VAR: str(examples_dir(self.quest_root))}
             if list_inputs(self.quest_root) else None
         )
+        tasks = self.quest_root / _trial_runner.CLUSTER_DIR / _trial_runner.TASKS_NAME
+        submit = self.quest_root / "code" / _trial_runner.SUBMIT_NAME
+        if tasks.is_file() and submit.is_file():
+            # FI's trials run as a job array: submit.py says whether it is done; the resume then collects the results.
+            code_path = submit
+            env = {**(env or os.environ),
+                   _trial_runner.TASKS_ENV: (_trial_runner.CLUSTER_DIR / _trial_runner.TASKS_NAME).as_posix()}
         result = await self.executor.execute(
             [str(py), str(code_path)], cwd=self.quest_root,
             timeout_s=self.config.execution.timeout_s, env=env,
@@ -11414,7 +11458,7 @@ class Engine:
             return job_watch.PENDING, job_watch.write_pending(
                 self.fi_dir, job, code_path.relative_to(self.quest_root).as_posix(),
             )
-        if result.returncode == 0 and result_json is not None:
+        if result.returncode == 0 and result_json is not None and (job is None or job["status"] == job_watch.DONE):
             return job_watch.DONE, {"note": "the results are ready"}
         return job_watch.FAILED, {
             "note": f"the script exited {result.returncode}: {(result.stderr or '')[-200:].strip()}",
@@ -12699,6 +12743,36 @@ The real simulation runs on a cluster or takes longer than the wall-time limit, 
 5. Job failed: print the reason on stderr and exit non-zero.
 Never sleep-wait for the job. Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate run is made for a background job.
 """
+
+_CLUSTER_PROTOCOL = """\
+
+## The trials run on a cluster (execution.background_jobs is on)
+
+The simulation is too long to run here, so FI runs the trials as a job array on the cluster: one task per setting of
+the protocol's grid, each running every trial of that setting through FI's own harness. FI writes the tasks; you write
+how to submit them. Reply with a THIRD fenced block, starting with the line `# file: submit.py`, after the other two.
+
+**submit.py** is an idempotent driver FI runs again and again from the quest folder. Follow the selected skill and the
+user's example files for how to submit an array job on this cluster, how to tell that it finished, failed or is still
+running, and which Python the tasks use.
+- The environment variable `FI_TASKS` names a JSON file: `{"count": N, "tasks": [{"index": i, "setting": "...",
+  "argv": [harness, spec, out]}]}`. Task i must run `<cluster python> <argv...>` from the quest folder; nothing else.
+  Submit ONE array job of N tasks (task i = the array index i). Do not change, merge or skip tasks.
+- Keep the job's state in `job/state.json`. First run: submit, save the job id there, print exactly one line
+  `RESULT_JSON: {"fi_job": {"status": "pending", "id": "<job id>", "note": "<short state>", "poll_s": <seconds>}}` and
+  exit 0. Every later run: check the job; still running: print the pending line again; never submit a second job.
+- All tasks finished (whatever each one's own result): print `RESULT_JSON: {"fi_job": {"status": "done", "id": "<job id>"}}`
+  and exit 0. FI then reads every task's results itself, writes the record and runs experiment.py. FI may run
+  submit.py again after that: it must print the same done line again, so never delete `job/state.json`.
+- The job could not be submitted or was cancelled: print the reason on stderr and exit non-zero.
+submit.py never reads or writes the tasks' results, and experiment.py does not submit anything: it reads FI_TRIALS as
+above.
+"""
+
+_CLUSTER_REPLY_REMINDER = (
+    "\n\nThis quest runs its trials on a cluster: reply with THREE fenced Python blocks, `# file: simulate.py`, "
+    "`# file: experiment.py` and `# file: submit.py`, as the section on the cluster above says."
+)
 
 _SPLIT_PROTOCOL = """\
 ## The experiment is two scripts, and FI runs the trials (execution.split_analysis is on)

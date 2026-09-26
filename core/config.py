@@ -1061,12 +1061,7 @@ class ExecutionConfig(BaseModel):
             raise ValueError(
                 "execution.raw_dir only means something with execution.split_analysis: true (or auto)"
             )
-        if self.split_analysis is True and self.background_jobs:
-            raise ValueError(
-                "execution.split_analysis cannot be combined with execution.background_jobs yet: "
-                "a background job's script already submits, waits for and collects the run, "
-                "and the analysis of what it collects is not split from it"
-            )
+        # split_analysis with background_jobs: FI runs the trials as a job array on the cluster (core/trial_runner.py).
         if (
             self.split_analysis is not False and self.sandbox == "docker"
             and self.raw_dir.strip() and Path(self.raw_dir).expanduser().is_absolute()

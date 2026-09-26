@@ -21,6 +21,12 @@ FI owns everything around them:
 A trial the child never reported (the cell's process crashed or ran out of time) is recorded as failed, with why. The
 ledger rows use the run-manifest schema (``cell``, ``trial``, ``status``, ``reason``), so the existing checker
 (:mod:`core.run_manifest`) reads them; the counts it checks are now FI's own.
+
+On a cluster (``execution.background_jobs``), the settings run as one job-array task each instead of one local process
+each: FI writes the harness, one spec per setting and the task list into ``job/fi/`` (:func:`prepare_cluster`), the
+experiment's ``code/submit.py`` submits the array the way the cluster's skill says and reports it pending or done
+(:mod:`core.job_watch`), and when it is done FI reads each task's results and writes the ledger and the summary itself
+(:func:`collect_cluster`), with the same checks as a local run.
 """
 
 from __future__ import annotations
@@ -42,6 +48,12 @@ SUMMARY_NAME = "trials.json"
 HARNESS_PATH = Path(".fi") / "trial_harness.py"
 #: The environment variable that tells the analysis script where FI's per-cell summary is.
 RESULTS_ENV = "FI_TRIALS"
+#: On a cluster: the folder FI writes the job array's tasks into, the task list, and the variable naming it.
+CLUSTER_DIR = Path("job") / "fi"
+TASKS_NAME = "tasks.json"
+TASKS_ENV = "FI_TASKS"
+CLUSTER_RECORD = Path(".fi") / "trials" / "cluster.json"
+SUBMIT_NAME = "submit.py"
 
 # The harness runs in the quest's own Python (venv, shared interpreter or container), which may not have FI installed:
 # it is self-contained, standard library only. It loads the simulation from its file, calls the entry function for
@@ -62,11 +74,14 @@ def main():
     nonce = spec.pop("nonce")
     # What names the results file and the nonce goes before the simulation is loaded: the spec file is deleted and argv
     # cleared, so code that looks for them has to dig through this process's memory rather than read a path.
-    try:
-        os.remove(spec_path)
-    except OSError:
-        pass
+    if not spec.pop("keep_spec", False):  # a cluster's scheduler may run a task again: its spec stays there
+        try:
+            os.remove(spec_path)
+        except OSError:
+            pass
     del sys.argv[1:]
+    # The simulation's own folder is where its imports are (a helper module beside simulate.py).
+    sys.path.insert(0, os.path.dirname(os.path.abspath(spec["module"])))
     real_stdout = sys.stdout
     sys.stdout = sys.stderr
     try:
@@ -221,51 +236,55 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
     return {"schema": "fi.trials/v1", "thresholds": dict(thresholds or {}), "cells": out}
 
 
-async def run_trials(
-    executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
-    runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
-    run_id: str = "", thresholds: dict[str, Any] | None = None,
-) -> TrialRun:
-    """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
-    the simulation file relative to ``quest_root``; ``timeout_s`` bounds each cell's process."""
+def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
+          deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False) -> list[dict[str, Any]]:
+    """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
+    ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
+    ``quest_root``."""
     quest_root = Path(quest_root)
-    raw = quest_root / RAW_DIRNAME
-    raw.mkdir(parents=True, exist_ok=True)
-    work = quest_root / ".fi" / "trials"
-    work.mkdir(parents=True, exist_ok=True)
-    harness = quest_root / HARNESS_PATH
-    harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
-    (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
-    ledger = raw / LEDGER_NAME
-    ledger.write_text("", encoding="utf-8")
     entry = "run_cell" if deterministic else "run_trial"
     per_cell = 1 if deterministic else max(1, int(runs_per_setting))
-    runs: list[CellRun] = []
-    started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
+    plan = []
     for index, cell in enumerate(cells(grid)):
         key = cell_key(cell)
         trials = [{"trial": t, "seed": None if deterministic else trial_seed(base_seed, key, t)} for t in range(per_cell)]
-        spec_path = work / f"cell{index}.json"
-        out_path = work / f"cell{index}.out.jsonl"
+        spec_path = folder / f"cell{index}.json"
+        out_path = folder / out_name.format(index=index)
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry, "cell": cell,
-                                         "trials": trials, "nonce": nonce}, default=str), encoding="utf-8")
-        _append(ledger, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell, "entry": entry,
-                         "at": time.time()})
-        left = int(timeout_s - (time.monotonic() - started))
-        if left <= 0:
-            result = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
-        else:
-            result = await executor.execute(
-                [str(python), HARNESS_PATH.as_posix(), spec_path.relative_to(quest_root).as_posix(),
-                 out_path.relative_to(quest_root).as_posix()],
-                cwd=quest_root, timeout_s=max(1, left), env=env,
-            )
-        run = CellRun(key=key, cell=cell, planned=per_cell, returncode=result.returncode,
-                      timed_out=bool(getattr(result, "timed_out", False)), stderr=result.stderr or "")
+                                         "trials": trials, "nonce": nonce, "keep_spec": keep_spec}, default=str),
+                             encoding="utf-8")
+        plan.append({"index": index, "key": key, "cell": cell, "trials": trials, "nonce": nonce, "entry": entry,
+                     "spec": spec_path.relative_to(quest_root).as_posix(),
+                     "out": out_path.relative_to(quest_root).as_posix()})
+    return plan
+
+
+def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, Any], *, run_id: str,
+             thresholds: dict[str, Any] | None, not_reported: str) -> TrialRun:
+    """Read each cell's results file, keep the rows the harness FI started wrote (the cell's nonce, a trial it was
+    given, reported once, with the seed it was given), and write the ledger and the summary. ``results`` holds each
+    cell's process result by index (a cluster task has none: ``not_reported`` says why a trial is missing then)."""
+    quest_root = Path(quest_root)
+    raw = quest_root / RAW_DIRNAME
+    raw.mkdir(parents=True, exist_ok=True)
+    ledger = raw / LEDGER_NAME
+    ledger.write_text("", encoding="utf-8")
+    runs: list[CellRun] = []
+    for task in plan:
+        key, trials, nonce = task["key"], task["trials"], task["nonce"]
+        per_cell = len(trials)
+        _append(ledger, {"event": "planned", "run_id": run_id, "cell": key, "trials": per_cell,
+                         "entry": task["entry"], "at": time.time()})
+        result = results.get(task["index"])
+        run = CellRun(key=key, cell=task["cell"], planned=per_cell,
+                      returncode=getattr(result, "returncode", None) if result is not None else None,
+                      timed_out=bool(getattr(result, "timed_out", False)),
+                      stderr=(getattr(result, "stderr", "") or "") if result is not None else "")
         reported: dict[int, dict[str, Any]] = {}
         twice: set[int] = set()
+        out_path = quest_root / task["out"]
         try:
             lines = out_path.read_text(encoding="utf-8").splitlines() if out_path.is_file() else []
         except OSError:
@@ -283,11 +302,16 @@ async def run_trials(
                 if row["trial"] in reported:
                     twice.add(row["trial"])
                 reported.setdefault(row["trial"], row)
-        why_missing = (
-            f"the simulation could not be loaded ({run.load_error})" if run.load_error
-            else "the study's time (execution.timeout_s) ran out before this setting's trial" if run.timed_out
-            else f"the cell's process stopped (exit code {result.returncode}) before this trial"
-        )
+        if run.load_error:
+            why_missing = f"the simulation could not be loaded ({run.load_error})"
+        elif result is None:
+            why_missing = not_reported
+        elif run.timed_out:
+            why_missing = "the study's time (execution.timeout_s) ran out before this setting's trial"
+        elif result.returncode == 0:
+            why_missing = "the cell's process ended normally but never reported this trial"
+        else:
+            why_missing = f"the cell's process stopped (exit code {result.returncode}) before this trial"
         for t in trials:
             row = reported.get(t["trial"]) or {"trial": t["trial"], "seed": t["seed"], "status": "failed",
                                               "reason": why_missing}
@@ -312,6 +336,84 @@ async def run_trials(
     return TrialRun(cells=runs, ledger_path=ledger, summary_path=summary)
 
 
+async def run_trials(
+    executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
+    runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
+    run_id: str = "", thresholds: dict[str, Any] | None = None,
+) -> TrialRun:
+    """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
+    the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study."""
+    quest_root = Path(quest_root)
+    work = quest_root / ".fi" / "trials"
+    work.mkdir(parents=True, exist_ok=True)
+    harness = quest_root / HARNESS_PATH
+    harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
+    (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
+    plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
+                 deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl")
+    results: dict[int, Any] = {}
+    started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
+    for task in plan:
+        left = int(timeout_s - (time.monotonic() - started))
+        if left <= 0:
+            results[task["index"]] = type("NotRun", (), {"returncode": -1, "timed_out": True, "stderr": ""})()
+            continue
+        results[task["index"]] = await executor.execute(
+            [str(python), HARNESS_PATH.as_posix(), task["spec"], task["out"]],
+            cwd=quest_root, timeout_s=max(1, left), env=env,
+        )
+    return _collect(quest_root, plan, results, run_id=run_id, thresholds=thresholds, not_reported="")
+
+
+def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int,
+                    base_seed: int, deterministic: bool, key: str) -> dict[str, Any]:
+    """The job array for a cluster: FI's harness, one spec per setting and the task list in ``job/fi/``, and FI's own
+    record of the plan (``.fi/trials/cluster.json``). Kept as it is while ``key`` (the simulation and the protocol) is
+    the same, so every check of a submitted job sees the tasks that were submitted. Returns the record."""
+    quest_root = Path(quest_root)
+    record_path = quest_root / CLUSTER_RECORD
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    if isinstance(record, dict) and record.get("key") == key:
+        return record
+    folder = quest_root / CLUSTER_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    for old in folder.glob("*"):
+        if old.is_file():
+            old.unlink()
+    # A job submitted for an earlier plan is not this plan's: submit.py submits again (its state goes), and the new
+    # tasks write to files named for this plan, so a task of the old job still running cannot write into them.
+    state = quest_root / "job" / "state.json"
+    if state.is_file():
+        state.replace(state.with_name("state.previous.json"))  # kept, not deleted: it may name a job still running
+    (folder / "harness.py").write_text(HARNESS_SOURCE, encoding="utf-8")
+    plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
+                 deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True)
+    harness = (CLUSTER_DIR / "harness.py").as_posix()
+    tasks = {
+        "count": len(plan),
+        "how": "Run task i as: <the cluster's python> " + harness + " <spec> <out>, from the quest folder; one task per "
+               "setting, all of them independent. Each writes its results to <out>; FI reads them.",
+        "tasks": [{"index": t["index"], "setting": t["key"], "trials": len(t["trials"]),
+                   "argv": [harness, t["spec"], t["out"]]} for t in plan],
+    }
+    (folder / TASKS_NAME).write_text(json.dumps(tasks, indent=1), encoding="utf-8")
+    record = {"key": key, "plan": plan}
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(record, default=str), encoding="utf-8")
+    return record
+
+
+def collect_cluster(quest_root: Path, record: dict[str, Any], *, run_id: str = "",
+                    thresholds: dict[str, Any] | None = None) -> TrialRun:
+    """The ledger and the summary from the job array's results, checked as a local run's are."""
+    return _collect(Path(quest_root), record.get("plan") or [], {}, run_id=run_id, thresholds=thresholds,
+                    not_reported="the cluster task for this setting reported no result for this trial (its own log "
+                                 "on the cluster says why)")
+
+
 _ENTRY_RE = re.compile(r"^def\s+(run_trial|run_cell|oracle)\s*\(", re.MULTILINE)
 
 
@@ -331,7 +433,7 @@ class TrialsRunner:
     check). ``failed_script`` says which script to repair; ``last`` keeps the trial run for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
-                 simulate: Path, analysis: Path, log: Any = None) -> None:
+                 simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None) -> None:
         self.executor = executor
         self.quest_root = Path(quest_root)
         self._protocol = protocol
@@ -341,6 +443,8 @@ class TrialsRunner:
         self.log = log
         self.failed_script: str | None = None
         self.last: TrialRun | None = None
+        # On a cluster: the experiment's script that submits the job array FI prepared and reports it pending or done.
+        self.submit = Path(submit) if submit is not None else None
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
@@ -357,6 +461,39 @@ class TrialsRunner:
         if run is not None:
             if self.log is not None:
                 self.log.info("[execute] simulate.py and the protocol are unchanged: the trials FI already ran are used")
+        elif self.submit is not None:
+            # A cluster: the tasks are FI's, the submission is the experiment's; a pending job returns as it is and
+            # the quest waits for it (core/job_watch.py).
+            from core import job_watch
+
+            record = prepare_cluster(
+                self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
+                runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, key=key,
+            )
+            submitted = await self.executor.execute(
+                [cmd[0], str(self.submit)], cwd=cwd, timeout_s=timeout_s,
+                env={**(env or {}), TASKS_ENV: (CLUSTER_DIR / TASKS_NAME).as_posix()},
+            )
+            job = job_watch.job_of(_last_result_json(submitted.stdout or ""))
+            if submitted.returncode != 0 or job is None or job.get("status") == job_watch.FAILED:
+                self.failed_script = self.submit.name
+                why = ("" if submitted.returncode != 0 else
+                       "\nsubmit.py must end with a RESULT_JSON line holding fi_job (pending or done)" if job is None
+                       else f"\nthe job failed: {job.get('note') or ''}")
+                return ExecutionResult(returncode=submitted.returncode or 1, stdout=submitted.stdout or "",
+                                       duration_s=time.monotonic() - started,
+                                       stderr=((submitted.stderr or "") + why).strip(), timed_out=submitted.timed_out)
+            if job.get("status") == job_watch.PENDING:
+                self.failed_script = None
+                _note_job(self.quest_root, record, job)
+                return submitted
+            run = collect_cluster(
+                self.quest_root, record,
+                thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+            )
+            _save_run(self.quest_root, key, run)
+            if self.log is not None:
+                self.log.info("[execute] the cluster job is done: FI read every setting's results and wrote the ledger")
         else:
             run = await run_trials(
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
@@ -376,14 +513,44 @@ class TrialsRunner:
                 (r.get("reason") for c in run.cells for r in c.rows if r.get("reason")), "every trial failed")
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI ran no trial successfully: {reason}".strip())
-        analysis_env = {**(env or {}), RESULTS_ENV: str(run.summary_path),
-                        "FI_RAW_DIR": str(run.summary_path.parent)}
+        # Relative to the quest folder the analysis runs in: the same path inside a container (/work) as on the host.
+        analysis_env = {**(env or {}), RESULTS_ENV: run.summary_path.relative_to(self.quest_root).as_posix(),
+                        "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
         return ExecutionResult(
             returncode=result.returncode, stdout=result.stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr() + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+
+def _note_job(quest_root: Path, record: dict[str, Any], job: dict[str, Any]) -> None:
+    """A job id FI has not seen for this plan is a new submission (the last one failed or was cancelled): the results
+    an earlier job left are removed, so only this job's are read when it is done."""
+    job_id = str(job.get("id") or "")
+    if not job_id or record.get("job_id") == job_id:
+        return
+    if record.get("job_id"):
+        # Another job than the one FI saw for this plan. The first id FI sees is this plan's first job: its tasks may
+        # already be writing, and there is nothing earlier to clear.
+        for task in record.get("plan") or []:
+            (Path(quest_root) / task["out"]).unlink(missing_ok=True)
+    record["job_id"] = job_id
+    try:
+        (Path(quest_root) / CLUSTER_RECORD).write_text(json.dumps(record, default=str), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _last_result_json(stdout: str) -> dict[str, Any] | None:
+    for line in reversed(stdout.splitlines()):
+        if line.startswith("RESULT_JSON:"):
+            try:
+                value = json.loads(line[len("RESULT_JSON:"):].strip())
+            except ValueError:
+                return None
+            return value if isinstance(value, dict) else None
+    return None
 
 
 RUN_RECORD = Path(".fi") / "trials" / "run.json"
