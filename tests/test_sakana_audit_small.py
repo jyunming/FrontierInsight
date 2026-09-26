@@ -80,7 +80,7 @@ def test_research_with_every_reviewer_on_one_model_stops_before_anything_runs(tm
     assert artifacts is not None
     text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
     assert "one reviewer on a different model" in text and "review_panel.statistician" in text and "m-main" in text
-    assert "under the `provider:` section" in text, "no approved record yet: the config is edited by hand"
+    assert "under its `provider:` section" in text, "no approved record yet: the config is edited by hand"
     assert json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review_models"
     assert any(e.get("kind") == "pause_requested" and e.get("pause") == "review_models"
                for e in audit_log.read(engine.audit.path))

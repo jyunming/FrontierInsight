@@ -17,6 +17,9 @@ topic: >
   R0 in {1.5, 3.0} for a population of N = 200, from 100 stochastic runs per setting, and compare it with the deterministic
   final-size prediction.
 title: kimi-sir-check
+# A cheap check of the provider, not a study: its paper is marked preliminary.
+result_use: explore
+
 provider:
   name: openai
   base_url: https://api.moonshot.ai/v1
