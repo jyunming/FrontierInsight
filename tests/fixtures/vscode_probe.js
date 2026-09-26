@@ -124,6 +124,16 @@ const vscodeMock = new Proxy(
       User: (content) => ({ role: "user", content }),
       Assistant: (content) => ({ role: "assistant", content }),
     },
+    LanguageModelTextPart: class {
+      constructor(value) {
+        this.kind = "text";
+        this.value = value;
+      }
+    },
+    // Images for `@fi /probe image`; `noDataPart` plays a VS Code too old to send them.
+    LanguageModelDataPart: arg.noDataPart ? undefined : {
+      image: (data, mime) => ({ kind: "image", mime, bytes: data.length }),
+    },
     lm: {
       selectChatModels: async (selector) => {
         log.push({ kind: "select", selector: selector === undefined ? null : selector });

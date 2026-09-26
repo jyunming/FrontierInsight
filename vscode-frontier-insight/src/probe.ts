@@ -25,6 +25,7 @@
  * Python.
  */
 import * as vscode from "vscode";
+import { ChatMessageApi, toChatMessages } from "./lm-messages";
 
 export const CANARY_PROMPT = "Reply with exactly the single word PONG and nothing else.";
 
@@ -335,10 +336,15 @@ export async function runProbe(
     token: vscode.CancellationToken,
 ): Promise<void> {
     const arg = prompt.trim().toLowerCase();
+    if (arg === "image") {
+        await probeImage(picked, stream, token);
+        return;
+    }
     if (arg !== "" && arg !== "all") {
         stream.markdown(
             `Unknown argument \`${cell(prompt, 40)}\`. Use \`@fi /probe\` for the model selected in the ` +
-            "Chat picker, or `@fi /probe all` for every model VS Code lists. Nothing was sent.\n",
+            "Chat picker, `@fi /probe all` for every model VS Code lists, or `@fi /probe image` to check that the " +
+            "selected model can read an image. Nothing was sent.\n",
         );
         return;
     }
@@ -423,4 +429,83 @@ export async function runProbe(
     if (details) stream.markdown(details);
     stream.markdown(renderSent());
     stream.markdown(renderLimits());
+}
+
+
+// ---------------------------------------------------------------------------
+// `@fi /probe image`: can the selected model read an image sent the way FI's bridge sends one?
+// ---------------------------------------------------------------------------
+
+/** A 96x48 PNG: a red square on the left, a blue circle on the right. */
+export const PROBE_IMAGE_PNG_BASE64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAGAAAAAwCAIAAABhdOiYAAAA6UlEQVR42u2aSxKFIAwEDcVNvP+RPAtv8XZ+EDBZJOksVcaia6ZiYaS1tlHPVUAAIAABCEAAAlDUqk83DhHrd+8Gn2Aix/Via7s+IF91y+V6d4FUjY3m9uEpTCUPnbVVNRWaBSuVhHSmdGjz4QBp2WdQrWSmM6JJxAJFzMI+r8o4iC6WBJBdvvr6OIiIAQhAAAIQgMzry7nyF30cRMTyALJLWUcZB8WKmIWJ+pr+HKTL6FWNiEXsYlomGtHx+uPwv7flQ6JxxL4jtmalqVXuhxemrJRxuuO0c/X5IGGQnDYPIAABCEAAilo/gbBLZyZJoZQAAAAASUVORK5CYII=";
+
+export const IMAGE_PROMPT =
+    "Name each shape in the image and its colour, left to right, in one short line.";
+
+/** Whether a reply names what the test image shows (a red square, a blue circle). */
+export function sawTheImage(reply: string): boolean {
+    const r = reply.toLowerCase();
+    return r.includes("red") && /square|rectangle/.test(r) && r.includes("blue") && r.includes("circle");
+}
+
+/**
+ * One request carrying the test image, built by the same conversion FI's bridge uses for the figure reading and the
+ * visual check (`toChatMessages`), to the model selected in the Chat picker. It reports whether the model named what
+ * the image shows, and, when the request fails, whether FI would take the error for "this model cannot read images"
+ * (the error names images: the quest stops and asks) or not (it is retried as a network problem, then reported).
+ */
+async function probeImage(
+    picked: vscode.LanguageModelChat | undefined,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    if (!picked) {
+        stream.markdown(
+            "No model is selected in the Chat picker, so there is nothing to probe. Pick one and try again. " +
+            "Nothing was sent.\n",
+        );
+        return;
+    }
+    stream.markdown(
+        `### @fi /probe image: can \`${cell(String(picked.id))}\` read an image?\n\n` +
+        "One request: a small test image (a red square and a blue circle) and the question " +
+        `\`${IMAGE_PROMPT}\`, sent the way FI sends the figures it reads and the screenshots it checks.\n\n`,
+    );
+    const started = Date.now();
+    let reply = "";
+    try {
+        const messages = toChatMessages<vscode.LanguageModelChatMessage>(
+            [{
+                role: "user",
+                content: [
+                    { type: "text", text: IMAGE_PROMPT },
+                    { type: "image_url", image_url: { url: `data:image/png;base64,${PROBE_IMAGE_PNG_BASE64}` } },
+                ],
+            }],
+            vscode as unknown as ChatMessageApi,
+        );
+        const res = await picked.sendRequest(messages, {}, token);
+        for await (const chunk of res.text) reply += chunk;
+    } catch (e) {
+        const text = describe(e);
+        // The same test as the Python side's (core/provider.py): an error that names images is "cannot read images".
+        const recognised = text.toLowerCase().includes("image");
+        stream.markdown(
+            `**The request failed** after ${Date.now() - started} ms:\n\n${fence(firstChars(text))}\n` +
+            (recognised
+                ? "FI would take this for *this model cannot read images*: a quest that needs to read figures stops " +
+                  "and asks for a model that can.\n"
+                : "FI would **not** recognise this as *cannot read images*: it would retry the request as a network " +
+                  "problem and then report the model as unavailable. Please send this result along.\n"),
+        );
+        return;
+    }
+    stream.markdown(
+        `**Reply** (${Date.now() - started} ms):\n\n${fence(firstChars(reply))}\n` +
+        (sawTheImage(reply)
+            ? "It named the red square and the blue circle: this model reads the images FI sends it.\n"
+            : "It did not name the red square and the blue circle: the image may not have reached the model, or it " +
+              "cannot read images. A quest that reads figures with this model would get answers not based on them.\n"),
+    );
 }

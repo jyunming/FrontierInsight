@@ -175,3 +175,33 @@ async def test_a_vscode_bridge_that_cannot_send_images_reports_it_as_unsupported
     client._bridge.chat = AsyncMock(side_effect=BridgeError("no language model is available in this VSCode window"))
     with pytest.raises(BridgeError):
         await client.chat([{"role": "user", "content": "text only"}])
+
+
+@pytest.mark.asyncio
+async def test_agy_opens_the_images_from_files_its_prompt_names_and_the_folder_is_removed_afterwards() -> None:
+    """agy's stream-json input takes text only; FI saves the images, adds their folder to agy's workspace and names each
+    file in the prompt, in order. (Checked against the real CLI: it named the shapes and colours in a test image.)"""
+    spec = _CLI_SPECS["antigravity_cli"]
+    assert (spec.image_input, spec.add_dir_flag) == ("file_ref", "--add-dir")
+    seen: dict = {}
+
+    def encode(prompt: str) -> str:
+        seen["prompt"] = prompt
+        return prompt
+
+    async def spawn(*argv, **kwargs):  # type: ignore[no-untyped-def]
+        folder = Path(argv[list(argv).index("--add-dir") + 1])
+        seen["folder"] = folder
+        seen["files"] = {p.name: p.read_bytes() for p in sorted(folder.iterdir())}
+        raise RuntimeError("stop after the launch")
+
+    with patch("core.provider.shutil.which", return_value="/usr/bin/agy"), \
+         patch("core.provider._encode_antigravity_stdin", new=encode), \
+         patch("core.provider.asyncio.create_subprocess_exec", new=spawn):
+        with pytest.raises(RuntimeError, match="stop after the launch"):
+            await _run_cli(spec, "Name the shapes.", images=[("image/png", PNG), ("image/png", PNG + b"2")])
+    assert seen["files"] == {"image_1.png": PNG, "image_2.png": PNG + b"2"}
+    prompt = seen["prompt"]
+    first, second = str(seen["folder"] / "image_1.png"), str(seen["folder"] / "image_2.png")
+    assert prompt.index(first) < prompt.index(second) < prompt.index("Name the shapes.")
+    assert not seen["folder"].exists(), "the images and their folder are removed after the call"

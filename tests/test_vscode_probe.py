@@ -366,3 +366,25 @@ def test_the_output_says_what_it_can_and_cannot_show_and_claims_no_proof(tmp_pat
     lowered = reply.lower()
     for word in ("proves", "confirmed", "verified", "detected a system prompt", "no system prompt was"):
         assert word not in lowered, word
+
+
+def test_probe_image_sends_one_image_the_way_the_bridge_does_and_says_whether_it_was_read(tmp_path: Path) -> None:
+    got = _run(tmp_path, prompt="image", picked=_model("gpt-x", replies=("A red square and a blue circle.",)))
+    (send,) = _sends(got)
+    (content,) = send["texts"]
+    assert [part["kind"] for part in content] == ["text", "image"] and content[1]["mime"] == "image/png"
+    assert "It named the red square and the blue circle" in got["reply"]
+    missed = _run(tmp_path, prompt="image", picked=_model("gpt-x", replies=("I cannot see any image.",)))
+    assert "It did not name the red square and the blue circle" in missed["reply"]
+
+
+def test_probe_image_says_whether_fi_would_recognise_the_error() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        named = _run(Path(d), prompt="image", picked=_model("gpt-x", replies=({"error": "image input not supported"},)))
+        other = _run(Path(d), prompt="image", picked=_model("gpt-x", replies=({"error": "Bad request: 400"},)))
+        old = _run(Path(d), prompt="image", picked=_model("gpt-x"), noDataPart=True)
+    assert "FI would take this for *this model cannot read images*" in named["reply"]
+    assert "FI would **not** recognise this" in other["reply"]
+    assert "cannot send images" in old["reply"] and old["sends"] == 0

@@ -197,10 +197,14 @@ class _CliSpec:
     # How this CLI takes images when a message carries image parts:
     # ``"stream_json"`` sends them inline in a ``--input-format stream-json``
     # user turn (claude); ``"file_flag"`` writes each to a temp file passed
-    # with ``image_flag``. ``None`` means the CLI cannot take images, and a
-    # call that carries them raises ``ImageInputUnsupported``.
+    # with ``image_flag``; ``"file_ref"`` writes them to a temp folder the CLI
+    # is given access to (``add_dir_flag``) and names each file in the prompt,
+    # for an agent CLI that opens images with its own file viewer but takes
+    # only text in its input (agy). ``None`` means the CLI cannot take images,
+    # and a call that carries them raises ``ImageInputUnsupported``.
     image_input: str | None = None
     image_flag: str | None = None
+    add_dir_flag: str | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -714,6 +718,12 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # session (low|medium|high)".
         effort_args=lambda level: ["--effort", level],
         effort_levels=frozenset({"low", "medium", "high"}),
+        # agy's stream-json input takes text only ("content block type
+        # \"image\" is not supported"), but it opens an image file with its
+        # own viewer when the file's folder is added to its workspace: checked
+        # against the real CLI, it named the shapes and colours in a test image.
+        image_input="file_ref",
+        add_dir_flag="--add-dir",
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -1717,6 +1727,19 @@ async def _run_cli(
                 argv[-1:-1] = flags
             else:
                 argv.extend(flags)
+        elif spec.image_input == "file_ref" and spec.add_dir_flag:
+            image_dir = Path(tempfile.mkdtemp(prefix="fi_cli_images_"))
+            for n, (mime, data) in enumerate(images, 1):
+                image_paths.append(image_dir / f"image_{n}{_IMAGE_SUFFIXES.get(mime, '.png')}")
+                image_paths[-1].write_bytes(data)
+            argv.extend([spec.add_dir_flag, str(image_dir)])
+            # The images, in the order the request refers to them: the first file is the first image it mentions.
+            prompt = (
+                f"This request comes with {len(image_paths)} image(s), saved as files. Open each one with your file "
+                "viewer and look at it before answering; they are, in the order the request refers to them:\n"
+                + "\n".join(f"{n}. {path}" for n, path in enumerate(image_paths, 1))
+                + "\n\n" + prompt
+            )
         else:
             if tmp_out_path is not None:
                 tmp_out_path.unlink(missing_ok=True)
@@ -1833,6 +1856,8 @@ async def _run_cli(
             tmp_out_path.unlink(missing_ok=True)
         for image_path in image_paths:
             image_path.unlink(missing_ok=True)
+        if image_paths and image_paths[0].parent.name.startswith("fi_cli_images_"):
+            shutil.rmtree(image_paths[0].parent, ignore_errors=True)
         if call_dir is not None:
             _remove_call_dir(call_dir)
 
