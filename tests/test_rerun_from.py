@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -127,3 +128,33 @@ async def test_a_step_of_several_nodes_is_done_again_from_its_first_node_of_the_
     # A crashed script repaired and run again is still the one run step: it restarts at the first execute.
     graph = _Graph([("implement",), ("execute",), ("execute_reflect",), ("execute",), ("analyze",)])
     assert (await rerun_from.checkpoint_before(graph, {}, "run"))["configurable"]["checkpoint_id"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_a_quest_waiting_at_the_review_is_written_again_from_the_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The web offers Redo at an answer pause: the review's pending question is left behind, the paper is written
+    again, and the quest comes back to the review."""
+    from core.config import PausesConfig
+
+    calls: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        calls.append(_classify(prompt))
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    cfg = _cfg(tmp_path)
+    cfg.pauses = PausesConfig(review="ask")
+    cfg.engine.auto_accept_on_pass = False
+    first = Engine(cfg)
+    await first.run()
+    assert json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review"
+    writes = calls.count("Writing")
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    await second.run(from_step="writing")
+    assert calls.count("Writing") > writes, "the paper was written again"
+    assert json.loads((second.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review", "back at the review"
+    assert list((second.fi_dir / "previous").iterdir()), "the first paper is kept"
