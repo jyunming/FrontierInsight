@@ -16,6 +16,27 @@ python launch.py --trace <quest> --trace-detail summary        # just the shape:
 
 On the web, open a quest and expand **Trace** (same detail and step filters). The list reads the same as the command. In VSCode, `@fi /trace <quest_id> [--node <name>] [--detail summary|checks|debug]` prints the same lines in chat.
 
+## Watch it live
+
+```bash
+python launch.py --trace <quest> --follow                      # each new event as it happens, until the quest stops for you, finishes or fails
+```
+
+In VSCode, `@fi /follow <quest_id>` shows each step in chat as it happens (`--detail checks` for more); stopping the chat stops following, and the quest goes on. A quest whose process is killed outright (out of memory, the machine off) leaves no record to end on: stop following with Ctrl+C (or by stopping the chat). The web quest page already shows the live log.
+
+## Ask why
+
+```bash
+python launch.py --why <quest>                                 # why it stopped, why the review asked for a revision, why the evidence is at its level
+python launch.py --why <quest> execute                         # why one step decided what it did
+```
+
+The answer is put together from what the quest recorded (the stop, the review's route and the facts it read, each check's verdict, the evidence record); no model is asked. The model's own reasons are shown under their own heading, since they are what it said, not something FI checked. On the web, **Why?** in the Trace section answers for the step chosen there (or overall); in VSCode, `@fi /why <quest_id> [stop|review|evidence|<step>]`.
+
+## Keep every prompt and answer
+
+The trace records every decision but not the whole text a model was sent. To keep that too, set `output.save_model_calls: true`: each call's whole prompt and answer (the output generators' calls included) goes to `<quest folder>/.fi/io/`, one file per call, with anything that looks like a key redacted and a page image kept as its size. It is off by default, because a quest makes 30–90 calls and the files can reach tens of megabytes.
+
 ## How to read a line
 
 | You see | It means |

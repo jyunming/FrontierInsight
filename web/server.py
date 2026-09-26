@@ -49,6 +49,7 @@ from core import audit_log as fi_audit
 from core import evidence as fi_evidence
 from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
+from core import todo as fi_todo
 from core.engine import PROGRESS_LOG_NAME, Engine, _aggregate_cost_rows
 from core.provider import ProxySupervisor
 from generation._visual_check import report_summary
@@ -1276,6 +1277,18 @@ def make_app(
             "events": [{**e, "description": fi_audit.describe(e, tagged=False)} for e in chosen[-limit:]],
         })
 
+    @app.get("/api/quests/{quest_id}/why")
+    async def get_why(quest_id: str, about: str = "") -> JSONResponse:
+        """Why the quest did what it did (core/why.py, the same answer as ``launch.py --why``): why it stopped, why the
+        review asked for a revision, why the evidence is at its level, or, with ``about=<step>``, why that step decided
+        what it did."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        from core import why as fi_why
+
+        return JSONResponse({"quest_id": quest_id, "about": about,
+                             "text": fi_why.explain(_resolve_quest_root(app.state.output_root, quest_id), about)})
+
     @app.get("/api/quests/{quest_id}/amendment")
     async def get_amendment(quest_id: str) -> JSONResponse:
         """The protocol amendment the quest stopped to ask about (what changes, why, whether results were seen), the
@@ -1522,6 +1535,9 @@ def make_app(
             "kind": descriptor.get("kind") or "",
             "upload_targets": descriptor.get("upload_targets") or [],
             "markdown": markdown,
+            # The to-do card's items (core/todo.py): at a pause the first is the pause itself; a finished quest can
+            # still have things worth a look (a check that warned, papers that could not be fetched).
+            "items": fi_todo.read(quest_root / ".fi"),
         })
 
     async def _save_uploads(

@@ -43,7 +43,7 @@ import {
 import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
-import { runTrace } from "./trace";
+import { runFollow, runTrace, runWhy } from "./trace";
 
 
 /**
@@ -357,6 +357,17 @@ async function handleRequest(
     if (cmd === "trace") {
         // The quest's audit trace (core/audit_log.py), shown exactly as `launch.py --trace` prints it.
         await runTrace(prompt, stream, token);
+        return;
+    }
+    if (cmd === "why") {
+        // Why it stopped / why the review asked for a revision / why the evidence is at its level / why a step decided
+        // what it did (core/why.py), exactly as `launch.py --why` prints it.
+        await runWhy(prompt, stream, token);
+        return;
+    }
+    if (cmd === "follow") {
+        // Each step of a running quest as it happens (`launch.py --trace <id> --follow`).
+        await runFollow(prompt, stream, token);
         return;
     }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
@@ -1082,6 +1093,7 @@ async function runQuest(
     // `frontierInsight.pythonPath` surfaces as this file's own diagnostic (which names that setting) rather
     // than launch.py's CLI-only self-bootstrap silently creating and switching to a different `.venv/` the
     // user never configured here.
+    const startedAt = Date.now();
     const child = spawn(pythonPath, argv, {
         cwd: workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
@@ -1116,11 +1128,16 @@ async function runQuest(
     // raw `[FI]` prefix.
     child.stdout.setEncoding("utf-8");
     let stdoutBuf = "";
+    // The quest this run is: launch.py prints `[FI] <quest_id> -> <quest folder>` when it stops or ends, so the card
+    // shown after it is that quest's, never another's written about the same time.
+    let questIdSeen: string | undefined;
     child.stdout.on("data", (chunk: string) => {
         stdoutBuf += chunk;
         const lines = stdoutBuf.split(/\r?\n/);
         stdoutBuf = lines.pop() || "";
         for (const line of lines) {
+            const ran = line.match(/^\[FI\] (\d+-[\w-]+) -> /);
+            if (ran && !fleet) questIdSeen = ran[1];
             const wrote = line.match(/^\[FI\] wrote (\w+) -> (.+)$/);
             if (wrote) {
                 stream.markdown(`  ✅ wrote ${wrote[1]} → \`${path.basename(wrote[2])}\`\n\n`);
@@ -1177,12 +1194,19 @@ async function runQuest(
             await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
         } catch { /* the message above names the command that opens it */ }
     } else if (exitCode === 0) {
-        stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
         const outputsDir = path.isAbsolute(outDirSetting)
             ? outDirSetting
             : path.join(workDir, outDirSetting);
-        await surfaceNextStep(outputsDir, stream, resumeQuestId);
+        // A quest that stopped for you also exits 0: say it is waiting, not that it finished.
+        const card = await readNextStep(outputsDir, resumeQuestId ?? questIdSeen, startedAt);
+        if (card) {
+            stream.markdown(`\n\n---\n\n⏸ **The quest is waiting for you.**\n\n${card.markdown}\n`);
+        } else {
+            stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
+            const finishedId = resumeQuestId ?? questIdSeen;
+            if (finishedId) await surfaceWorthALook(outputsDir, stream, finishedId);
+        }
         await surfaceWantedPapers(outputsDir, stream, resumeQuestId);
     } else {
         const tail = stderrTail.join("\n");
@@ -1198,43 +1222,65 @@ async function runQuest(
 
 
 /**
- * Best-effort: when a quest pauses for ANY reason (clarify / papers / supply /
- * data / review), the engine writes one `NEXT_STEP.md` at the quest root and
- * deletes it on completion. So its presence means "waiting for you" — surface
- * it as the unified *Action needed* message. Mirrors the Web quest page's
- * single Action-needed banner.
+ * Best-effort: when a quest stops for you, the engine writes the to-do card
+ * `NEXT_STEP.md` at the quest root (why it stopped, what to decide, the
+ * recommendation, the alternatives, everything else waiting; core/todo.py) and
+ * deletes it on completion. So its presence means "waiting for you". Returns
+ * the card, or null. Mirrors the Web quest page's Action-needed banner.
  */
-async function surfaceNextStep(
+// A file written by this run can carry a time a few seconds before the run started, by the extension's clock, when the
+// quest runs on another machine (Remote SSH, WSL, a container).
+const CLOCK_SLACK_MS = 10_000;
+
+async function readNextStep(
     outputsDir: string,
-    stream: vscode.ChatResponseStream,
-    knownQuestId?: string,
-): Promise<void> {
+    knownQuestId: string | undefined,
+    since: number,
+): Promise<{ questId: string; markdown: string } | null> {
     try {
         let questId: string | null = null;
         if (knownQuestId) {
             try {
                 await fsPromises.stat(path.join(outputsDir, knownQuestId, "NEXT_STEP.md"));
                 questId = knownQuestId;
-            } catch { return; }
+            } catch { return null; }
         } else {
-            // /new: pick the quest whose NEXT_STEP.md was written most recently.
+            // /new: the quest whose NEXT_STEP.md this run wrote (never an older quest's card).
             const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
             let best: { id: string; mtime: number } | null = null;
             for (const e of entries) {
                 if (!e.isDirectory() || e.name.startsWith("_")) { continue; }
                 try {
                     const st = await fsPromises.stat(path.join(outputsDir, e.name, "NEXT_STEP.md"));
-                    if (!best || st.mtimeMs > best.mtime) { best = { id: e.name, mtime: st.mtimeMs }; }
+                    if (st.mtimeMs >= since - CLOCK_SLACK_MS && (!best || st.mtimeMs > best.mtime)) { best = { id: e.name, mtime: st.mtimeMs }; }
                 } catch { /* no NEXT_STEP in this quest */ }
             }
-            if (!best) { return; }
+            if (!best) { return null; }
             questId = best.id;
         }
-        const md = await fsPromises.readFile(
-            path.join(outputsDir, questId, "NEXT_STEP.md"), "utf-8",
+        const markdown = await fsPromises.readFile(path.join(outputsDir, questId, "NEXT_STEP.md"), "utf-8");
+        return { questId, markdown };
+    } catch { return null; }
+}
+
+/**
+ * A finished quest's to-do card (`.fi/todo.json`, core/todo.py): what did not stop it but is worth a look.
+ */
+async function surfaceWorthALook(
+    outputsDir: string,
+    stream: vscode.ChatResponseStream,
+    questId: string,
+): Promise<void> {
+    try {
+        const raw = await fsPromises.readFile(path.join(outputsDir, questId, ".fi", "todo.json"), "utf-8");
+        const items = (JSON.parse(raw).items || []) as Array<{ why?: string; recommended?: string; blocking?: boolean }>;
+        const rest = items.filter((i) => !i.blocking);
+        if (!rest.length) { return; }
+        stream.markdown(
+            "\n\n**Worth a look:**\n\n" +
+            rest.map((i) => `- **${i.why || ""}** ${i.recommended || ""}`).join("\n") + "\n",
         );
-        stream.markdown(`\n\n---\n\n⏸ **Action needed**\n\n${md}\n`);
-    } catch { /* best-effort */ }
+    } catch { /* no card: nothing waiting */ }
 }
 
 

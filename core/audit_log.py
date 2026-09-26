@@ -78,9 +78,9 @@ def _home_variants() -> list[str]:
     return sorted({home, home.replace("\\", "/")}, key=len, reverse=True) if home else []
 
 
-def redact_text(text: str, *, secrets: list[str] | None = None) -> str:
+def redact_text(text: str, *, secrets: list[str] | None = None, whole: bool = False) -> str:
     """``text`` without credentials (env values, key-shaped tokens) and with the home directory as ``~``; cut at
-    :data:`_MAX_TEXT` characters, saying how many were dropped."""
+    :data:`_MAX_TEXT` characters, saying how many were dropped, unless ``whole`` (a kept model call is kept whole)."""
     for value in secrets if secrets is not None else _secret_values():
         text = text.replace(value, _REDACTED)
     for pattern in _SECRET_PATTERNS[:-1]:
@@ -88,27 +88,29 @@ def redact_text(text: str, *, secrets: list[str] | None = None) -> str:
     text = _SECRET_PATTERNS[-1].sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{_REDACTED}", text)
     for home in _home_variants():
         text = text.replace(home, "~")
-    if len(text) > _MAX_TEXT:
+    if not whole and len(text) > _MAX_TEXT:
         text = text[:_MAX_TEXT] + f"... [{len(text) - _MAX_TEXT} more characters not kept]"
     return text
 
 
-def redact(value: Any, *, secrets: list[str] | None = None) -> Any:
-    """``value`` (JSON-shaped) with every string passed through :func:`redact_text`; lists are cut at :data:`_MAX_LIST`."""
+def redact(value: Any, *, secrets: list[str] | None = None, whole: bool = False) -> Any:
+    """``value`` (JSON-shaped) with every string passed through :func:`redact_text`; lists are cut at :data:`_MAX_LIST`.
+    ``whole`` removes credentials only, and cuts nothing."""
     secrets = _secret_values() if secrets is None else secrets
     if isinstance(value, str):
-        return redact_text(value, secrets=secrets)
+        return redact_text(value, secrets=secrets, whole=whole)
     if isinstance(value, dict):
-        return {str(k): redact(v, secrets=secrets) for k, v in value.items()}
+        return {str(k): redact(v, secrets=secrets, whole=whole) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
         items = list(value)
-        kept = [redact(v, secrets=secrets) for v in items[:_MAX_LIST]]
-        if len(items) > _MAX_LIST:
-            kept.append(f"... [{len(items) - _MAX_LIST} more not kept]")
+        limit = len(items) if whole else _MAX_LIST
+        kept = [redact(v, secrets=secrets, whole=whole) for v in items[:limit]]
+        if len(items) > limit:
+            kept.append(f"... [{len(items) - limit} more not kept]")
         return kept
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return redact_text(str(value), secrets=secrets)
+    return redact_text(str(value), secrets=secrets, whole=whole)
 
 
 def canonical(record: dict[str, Any]) -> str:

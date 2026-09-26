@@ -202,6 +202,8 @@ The active Copilot model is captured automatically into `provider.model` so the 
 - `@fi /drafts` — list proposal-draft YAMLs in `outputs/_drafts/` with a one-click `/start` hint for each. Mirrors `python launch.py --list-drafts` and the web `/interview` drafts picker.
 - `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable, and report which endpoint answered. CLI / `--serve` launches auto-start the sidecar so embeddings + indexes stay warm across quests; VSCode users keep their own (the extension probes on activate and offers a one-click "Start in terminal" if it's down — that prompt is non-blocking). Quests started from this chat use that same service for the knowledge base (`knowledge.axon_mode: http`, the default): they switch it to FI's `frontier-insight` project for one operation and back, and if it cannot be reached the quest runs without the knowledge base and says why in its log.
 - `@fi /probe [all]` — ask the model selected in the Chat picker whether text FI did not send (a hidden system prompt, tool definitions, a persona) appears to be in its context. `@fi /probe all` does the same for every model VS Code lists, after a confirmation that says how many requests will be sent. Behavioural evidence only; see [Does a model carry a hidden system prompt?](#does-a-model-carry-a-hidden-system-prompt).
+- `@fi /follow <quest_id>` — each step of a running quest as it happens, until it stops for you, finishes or fails.
+- `@fi /why <quest_id> [stop|review|evidence|<step>]` — why it stopped, why the review asked for a revision, why the evidence is at its level, or why one step decided what it did; read from what the quest recorded, no model asked.
 - `@fi /trace <quest_id> [--node <name>] [--detail summary|checks|debug]` — the quest's audit trace: what ran, why it went that way, and a check that the record was not edited. Prints exactly what `python launch.py --trace` prints (same file, same descriptions, same hash-chain check) and mirrors the web quest page's **Trace** panel; `--node` shows one step only, `--detail` narrows or widens what is shown (`checks` is the default). See [The trace: what a quest did, and why](../docs/trace.md).
 
 ### Skills
@@ -272,7 +274,7 @@ The methodologist persona's must-flag rules (circular evaluation, single-point e
 
 To skip the gate entirely, set `pauses.review: off` in the YAML.
 
-Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat shows a single **Action needed** message with exactly what to do and the `@fi /resume <id>` command.
+Whenever a quest pauses for you — to confirm setup (`pauses.clarify: ask`), to let you download a paywalled paper it found (`pauses.papers`, on by default), to drop in your own papers/data (`pauses.supply`), or to review the result — it writes one `NEXT_STEP.md` and the chat says the quest is waiting for you and shows that card: why it stopped, what to decide, what FI recommends, the alternatives, what to do and the `@fi /resume <id>` command, with everything else waiting listed under it. When a quest finishes, the chat lists anything still worth a look (a check that warned, papers that could not be downloaded).
 
 ### Fleet (multiple quests in parallel)
 

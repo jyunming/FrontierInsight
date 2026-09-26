@@ -30,7 +30,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Rigor profile**: `rigor_profile: research` turns on together what a study needs before its result can be trusted, and makes those checks stop the quest instead of only reporting. The setup questions recommend it for a simulation study. [rigor.md](rigor.md)
 
-**Trace**: the quest's ordered, tamper-evident diary (`.fi/audit.jsonl`): each step, each check, each route, and what the model said about why. Read it with `fi --trace <quest id>`. [trace.md](trace.md)
+**Trace**: the quest's ordered, tamper-evident diary (`.fi/audit.jsonl`): each step, each check, each route, and what the model said about why. Read it with `fi --trace <quest id>` (`--follow` to watch it live); `fi --why <quest id>` answers why it stopped, why it was sent back, why the evidence is at its level. [trace.md](trace.md)
 
 **Model claim**: the model's own account of its reasoning, kept in the trace so you can argue with it. It is never a check result. [trace.md](trace.md)
 
