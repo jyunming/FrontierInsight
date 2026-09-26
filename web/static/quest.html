@@ -455,6 +455,9 @@
     questAnswerPaused = !data.alive && data.has_config && answerPause;
     const menu = document.getElementById('rerun-from');
     menu.classList.toggle('hidden', !(resumable || questAnswerPaused));
+    // The menu offers only the steps this quest reached; asked again whenever it is shown after running.
+    if (data.alive) rerunStepsLoaded = false;
+    else if ((resumable || questAnswerPaused) && !rerunStepsLoaded) loadRerunSteps();
     // At an answer pause going on is that pause's own form: the empty choice only invites picking a step.
     const firstChoice = questAnswerPaused ? 'Redo from a step…' : 'Go on from where it stopped';
     // Written only when it changes: rewriting an option on every refresh closes an open menu.
@@ -1487,6 +1490,26 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
 
   // Set in refresh(): a finished quest re-runs via ?rerun=true (re-opens it),
   // a paused/crashed quest plain-resumes.
+  let rerunStepsLoaded = false;
+  async function loadRerunSteps() {
+    rerunStepsLoaded = true;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/rerun-steps`);
+      if (!res.ok) { rerunStepsLoaded = false; return; }
+      const steps = (await res.json()).steps || [];
+      const menu = document.getElementById('rerun-from');
+      for (const opt of menu.options) {
+        if (!opt.value) continue;
+        const step = steps.find((s) => s.step === opt.value);
+        // A step the quest never reached has nothing to be redone from.
+        opt.hidden = !step;
+        if (step) opt.title = 'Redo from here: ' + step.redoes + '.';
+      }
+      if (menu.selectedOptions[0] && menu.selectedOptions[0].hidden) menu.value = '';
+    } catch (e) {
+      rerunStepsLoaded = false;
+    }
+  }
   let questFinishedForRerun = false;
   let questAnswerPaused = false;
   let questResumable = false;

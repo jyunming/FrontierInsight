@@ -150,6 +150,26 @@ export async function runWhy(
 }
 
 /**
+ * `@fi /resume <quest_id> --from` with no step — the steps this quest reached, which are the ones it can be run again
+ * from, each with what that redoes. The same list as `python launch.py --resume <id> --from` and the web Redo menu.
+ */
+export async function runRerunSteps(
+    questId: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const ctx = launchContext(stream);
+    if (!ctx || token.isCancellationRequested) return;
+    stream.progress(`Reading which steps ${questId} reached…`);
+    const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, ["--resume", questId, "--from", "--output-root", ctx.outputRoot]);
+    const text = (res.code === 0 ? res.stdout : [res.stdout, res.stderr].filter((t) => t.trim()).join("\n")).trim();
+    stream.markdown(text ? "```\n" + text.slice(0, OUTPUT_CHARS) + "\n```\n" : `No output (exit ${res.code}).\n`);
+    if (res.code === 0 && text) {
+        stream.markdown(`Then: \`@fi /resume ${questId} --from <step>\`.\n`);
+    }
+}
+
+/**
  * `@fi /follow <quest_id>` — each step of a running quest as it happens (`python launch.py --trace <id> --follow`),
  * until it stops for you, finishes or fails. Stopping the chat stops following; the quest goes on.
  */

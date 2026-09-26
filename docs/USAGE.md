@@ -16,7 +16,7 @@ commands:
 | `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~23–28 × N quests |
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
-| `@fi /resume <quest_id> --from <step>` | Does the quest again from `code`, `run`, `analysis`, `writing` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. | the calls of that step and the ones after it |
+| `@fi /resume <quest_id> --from <step>` | Does the quest again from `code`, `run`, `analysis`, `writing` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. With no step, lists the steps that quest reached. | the calls of that step and the ones after it |
 | `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the design) beside the chat to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
@@ -131,6 +131,20 @@ fi --config quest.yaml --resume <quest_id> --from writing   # write the paper ag
 fi --serve                                               # the web UI watches ./outputs and starts quests from this folder
 ```
 
+### Doing a step again
+
+`--resume <quest_id> --from <step>` does a quest again from one of its steps and keeps everything decided before it. What that step and the later ones made is moved to `.fi/previous/<time>/` first, so the old and the new outputs can be compared. `--from` with no step lists the steps that quest reached, which are the only ones it can be done again from; the web quest page's menu beside **Resume** shows the same list, and so does `@fi /resume <quest_id> --from` in VSCode.
+
+| Step | What doing it again does |
+|---|---|
+| `code` | writes the experiment's code again, then runs it and does everything after |
+| `run` | runs the same code again for new results, then analyses, writes and reviews them |
+| `analysis` | analyses the same results again, then writes and reviews |
+| `writing` | writes the paper again from the same analysis, then reviews it |
+| `review` | reviews the same paper again (and makes the slides and poster from it again) |
+
+The steps before the code are the plan. To change it, use `--revise-plan "<what to change>"` (or the web **Plan** panel, or `@fi /plan <quest_id> <what to change>`), then `--resume`.
+
 `--resume` looks under the folder's `output.output_dir`; if it does not find the quest it says exactly where it looked. In VSCode, open your project folder and set `frontierInsight.repoPath` to the FrontierInsight folder; quests then run in the project (`frontierInsight.workingDir` overrides that). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
 
 ### All `fi` flags
@@ -157,7 +171,7 @@ fi --serve                                               # the web UI watches ./
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
 | `--interactive` | quest | with `engine.clarify_mode: interactive`, read clarify answers from stdin |
 | `--resume <quest_id>` | quest | re-enter a checkpoint, requires `--config` |
-| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `code`, `run`, `analysis`, `writing` or `review`. What that step and the later ones made is moved to `.fi/previous/<time>/` first. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
+| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `code`, `run`, `analysis`, `writing` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
 | `--days N` | digest | digest window in days, default 7 |

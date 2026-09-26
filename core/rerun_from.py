@@ -27,6 +27,14 @@ STEPS: dict[str, tuple[str, ...]] = {
 }
 # Nodes a step loops through without leaving it: the run's repair of a crashed script goes back to execute.
 _WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect",)}
+# What running the quest again from each step does, in one sentence a person reads before choosing.
+REDOES: dict[str, str] = {
+    "code": "writes the experiment's code again, then runs it and does everything after",
+    "run": "runs the same code again for new results, then analyses, writes and reviews them",
+    "analysis": "analyses the same results again, then writes and reviews",
+    "writing": "writes the paper again from the same analysis, then reviews it",
+    "review": "reviews the same paper again (and makes the slides and poster from it again)",
+}
 _ALIASES = {
     "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run", "auto_collect_data": "run", "analyze": "analysis",
     "write": "writing", "paper": "writing",
@@ -76,6 +84,28 @@ async def checkpoint_before(graph: Any, run_config: dict[str, Any], step: str) -
         elif best is not None and not about_to & inside:
             break
     return best.config if best is not None else None
+
+
+async def reached(graph: Any, run_config: dict[str, Any]) -> list[str]:
+    """The steps the quest reached, in their order: the ones ``--from`` can run it again from (a step it never reached
+    has no checkpoint before it)."""
+    seen: set[str] = set()
+    async for snapshot in graph.aget_state_history(run_config):
+        seen.update(snapshot.next or ())
+    return [step for step, nodes in STEPS.items() if seen & set(nodes)]
+
+
+def listing(quest_id: str, steps: list[str]) -> str:
+    """The reached steps as a person reads them, with how to use one."""
+    if not steps:
+        return (f"Quest {quest_id} has not reached the code step yet, so there is no step to run it again from. "
+                f"`--resume {quest_id}` goes on from where it stopped; to change the plan, use --revise-plan.")
+    width = max(len(step) for step in steps)
+    lines = [f"Quest {quest_id} can be run again from:"]
+    lines += [f"  {step.ljust(width)}  {REDOES[step]}" for step in steps]
+    lines.append(f"Run: --resume {quest_id} --from <step>. What that step and the later ones made is first moved to "
+                 ".fi/previous/<time>/. To change the plan, use --revise-plan.")
+    return "\n".join(lines)
 
 
 def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:

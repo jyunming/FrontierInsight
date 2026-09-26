@@ -43,7 +43,7 @@ import {
 import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
-import { runFollow, runTrace, runWhy } from "./trace";
+import { runFollow, runRerunSteps, runTrace, runWhy } from "./trace";
 
 
 /**
@@ -522,6 +522,13 @@ async function runResume(
     // pick just the first whitespace-separated token so the lookup is
     // deterministic instead of silently failing with a confusing
     // "no quest with id '"178…-x" extra'" message.
+    // /resume <quest_id> --from with no step: the steps that quest reached, which are the ones it can be run again from
+    // (the newest quest when no id is given; the list names the quest it is for).
+    if (!plan && !watch && /(?:^|\s)--from\s*$/.test(promptArgs)) {
+        const named = promptArgs.replace(/(?:^|\s)--from\s*$/, " ").trim().split(/\s+/)[0] || "";
+        await runRerunSteps(named.replace(/^["']+|["']+$/g, "") || candidates[0].questId, stream, token);
+        return;
+    }
     // /resume <quest_id> --from <step> (or --from=<step>): the step is taken out first, so a quest id is never read
     // from it and `/resume --from code` still offers the picker.
     const fromMatch = !plan && !watch ? /(?:^|\s)--from(?:\s+|=)(\S+)/.exec(promptArgs) : null;
@@ -536,7 +543,8 @@ async function runResume(
         stream.markdown(
             `❌ \`${fromStep}\` is not a step a quest can be run again from. Choose one of: ` +
             RERUN_STEPS.map((step) => `\`${step}\``).join(", ") +
-            ". To change the plan, use `@fi /plan <quest_id> <what to change>`.\n",
+            "; `@fi /resume <quest_id> --from` with no step lists the ones that quest reached. " +
+            "To change the plan, use `@fi /plan <quest_id> <what to change>`.\n",
         );
         return;
     }
