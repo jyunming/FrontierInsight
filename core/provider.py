@@ -205,6 +205,9 @@ class _CliSpec:
     image_input: str | None = None
     image_flag: str | None = None
     add_dir_flag: str | None = None
+    # Settings a CLI reads only from a file in the user's home (agy): written to a fresh home folder of the call's
+    # own, which the CLI is pointed at through HOME / USERPROFILE, so the user's own settings are never used or changed.
+    home_settings: dict[str, Any] | None = None
     # Pull real token usage out of the CLI's own output. Several CLIs report
     # what they actually consumed — including the system prompt and tool
     # schema they wrap around ours, which the char-count estimator cannot
@@ -268,6 +271,21 @@ def _child_env(spec: _CliSpec) -> dict[str, str] | None:
     return env
 
 
+#: agy answer-only. It has no flag that turns its tools off (``--mode plan`` and ``--sandbox`` do not; checked), and
+#: in print mode it follows the user's ``~/.gemini/antigravity-cli/settings.json``, which is often
+#: ``"toolPermission": "always-proceed"``: one figure reading ran 66 shell commands, fetched a paper from arXiv and read
+#: FI's own source. These settings, given to every call in a home of its own: a tool that needs approval is refused
+#: (print mode cannot ask), and the deny rules refuse shell commands, file writes, URL fetches and MCP tools outright;
+#: files outside the call's folder and the image folder FI adds cannot be read. Web search cannot be turned off this
+#: way (no setting or rule reaches it; checked), so an agy call can still search the web.
+_ANTIGRAVITY_SETTINGS: dict[str, Any] = {
+    "toolPermission": "request-review",
+    "allowNonWorkspaceAccess": False,
+    "artifactReviewPolicy": "asks-for-review",
+    "permissions": {"deny": ["command(*)", "write_file(*)", "read_url(*)", "mcp(*)"]},
+}
+
+
 def _encode_antigravity_stdin(prompt: str) -> str:
     """Wrap a prompt as one antigravity stream-json turn.
 
@@ -285,8 +303,17 @@ def _encode_antigravity_stdin(prompt: str) -> str:
     """
     return json.dumps({
         "event": "user",
-        "message": {"role": "user", "content": prompt},
+        "message": {"role": "user", "content": _ANTIGRAVITY_PREFACE + prompt},
     }, ensure_ascii=False) + "\n"
+
+
+#: Said to agy before every request: its shell, file writes and URL fetches are refused (``_ANTIGRAVITY_SETTINGS``), and
+#: a model that tries one and is refused may end its turn with no answer, which FI would take for a failed call.
+_ANTIGRAVITY_PREFACE = (
+    "Answer this request directly in your reply, from what it contains. Do not run commands, write files, fetch web "
+    "pages or search the web: those tools are turned off for this request. The only files you may open are image "
+    "files the request names.\n\n"
+)
 
 
 def _encode_claude_stream_json(prompt: str, images: list[tuple[str, bytes]]) -> str:
@@ -724,6 +751,7 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # against the real CLI, it named the shapes and colours in a test image.
         image_input="file_ref",
         add_dir_flag="--add-dir",
+        home_settings=_ANTIGRAVITY_SETTINGS,
     ),
 }
 CLI_PROVIDERS: frozenset[str] = frozenset(_CLI_SPECS)
@@ -1711,6 +1739,7 @@ async def _run_cli(
     # with the answer file. The flags go before a trailing prompt flag.
     image_paths: list[Path] = []
     image_folder: Path | None = None  # agy's images: a folder of their own, removed with them
+    home_dir: str | None = None  # agy's settings home (``home_settings``), removed with the call folder
     # The call's one try/finally starts here, before the images are written, so a failure anywhere after it (a full
     # disk while writing them, the prompt's encoding) still removes them.
     call_dir: str | None = None
@@ -1803,6 +1832,14 @@ async def _run_cli(
         # for the call (the answer file, images) live elsewhere, by absolute path,
         # so the directory is still empty when the CLI starts.
         call_dir = tempfile.mkdtemp(prefix="fi_cli_call_")
+        child_env = _child_env(spec)
+        if spec.home_settings is not None:
+            home_dir = tempfile.mkdtemp(prefix="fi_cli_home_")
+            settings_dir = Path(home_dir) / ".gemini" / "antigravity-cli"
+            settings_dir.mkdir(parents=True)
+            (settings_dir / "settings.json").write_text(json.dumps(spec.home_settings), encoding="utf-8")
+            child_env = {**(child_env if child_env is not None else os.environ), "HOME": home_dir,
+                         "USERPROFILE": home_dir}
         if spec.cwd_flag:
             # Ahead of a trailing prompt flag and its prompt, like the flags above.
             at = len(argv) - 2 if spec.pass_prompt_via == "arg" else len(argv)
@@ -1817,7 +1854,7 @@ async def _run_cli(
                 ),
                 stdout=stdout_target,
                 stderr=asyncio.subprocess.PIPE,
-                env=_child_env(spec),
+                env=child_env,
                 cwd=call_dir,
                 limit=_CLI_STREAM_LIMIT,
             )
@@ -1862,6 +1899,8 @@ async def _run_cli(
             image_path.unlink(missing_ok=True)
         if image_folder is not None:
             shutil.rmtree(image_folder, ignore_errors=True)
+        if home_dir is not None:
+            shutil.rmtree(home_dir, ignore_errors=True)
         if call_dir is not None:
             _remove_call_dir(call_dir)
 

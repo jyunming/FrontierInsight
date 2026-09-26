@@ -173,9 +173,9 @@ async def test_claude_images_and_effort_keep_the_answer_only_flags() -> None:
 
 
 def test_unverified_clis_keep_their_argv() -> None:
-    """copilot_cli, gemini_cli and antigravity_cli could not be checked against
-    the real CLI (quota, account tier, no flag to turn tools off), so their
-    argv is unchanged; only the empty working directory applies to them."""
+    """copilot_cli and gemini_cli could not be checked against the real CLI (quota, account tier), so their argv is
+    unchanged; only the empty working directory applies to them. antigravity_cli has no flag that turns its tools off:
+    its answer-only settings go through a home of the call's own (see the agy tests below)."""
     assert _CLI_SPECS["copilot_cli"].argv == ("copilot", "-s", "--allow-all-tools", "-p")
     assert _CLI_SPECS["gemini_cli"].argv == ("gemini", "--yolo", "-o", "json", "-p", "")
     assert _CLI_SPECS["antigravity_cli"].argv == (
@@ -524,3 +524,48 @@ def test_stdout_errors_reads_only_top_level_failure_events() -> None:
     assert _cli_stdout_errors(None) == []
     assert _cli_stdout_errors(b"not json\n{broken\n[1, 2]\n") == []
     assert _cli_stdout_errors(b'{"type":"turn.failed","error":"plain string"}\n') == ["plain string"]
+
+
+
+# ---------------------------------------------------------------------------
+# antigravity_cli: answer-only through settings in a home of the call's own
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agy_runs_with_a_home_of_its_own_whose_settings_refuse_its_tools() -> None:
+    """agy follows ~/.gemini/antigravity-cli/settings.json, often "always-proceed": in real quests it ran shell
+    commands, fetched papers and read FI's source mid-answer. Every call gets a fresh home holding FI's settings."""
+    seen: dict = {}
+
+    async def spawn(*argv, **kwargs):  # noqa: ANN002, ANN003
+        env = kwargs["env"]
+        seen["home"], seen["profile"] = env["HOME"], env["USERPROFILE"]
+        settings = Path(env["HOME"]) / ".gemini" / "antigravity-cli" / "settings.json"
+        seen["settings"] = json.loads(settings.read_text(encoding="utf-8"))
+        seen["path"] = env.get("PATH")
+        return MagicMock()
+
+    with patch("core.provider.shutil.which", return_value="/bin/agy"),          patch("core.provider.asyncio.create_subprocess_exec", new=spawn),          patch("core.provider._collect_via_communicate", new=AsyncMock(return_value="ok")),          patch("core.provider._collect_via_streaming", new=AsyncMock(return_value="ok")):
+        assert await _run_cli(_CLI_SPECS["antigravity_cli"], "the prompt") == "ok"
+    assert seen["home"] == seen["profile"] and Path(seen["home"]).name.startswith("fi_cli_home_")
+    assert os.path.normcase(seen["home"]) != os.path.normcase(os.path.expanduser("~"))
+    settings = seen["settings"]
+    assert settings["toolPermission"] == "request-review" and settings["allowNonWorkspaceAccess"] is False
+    assert set(settings["permissions"]["deny"]) == {"command(*)", "write_file(*)", "read_url(*)", "mcp(*)"}
+    assert seen["path"] == os.environ.get("PATH"), "the rest of the environment is kept (the CLI must still start)"
+    assert not os.path.exists(seen["home"]), "the home goes with the call"
+
+
+@pytest.mark.asyncio
+async def test_other_clis_get_no_home_of_their_own() -> None:
+    _, kwargs, _ = await _spawn_record("claude_cli")
+    assert kwargs.get("env") is None or kwargs["env"].get("HOME") == os.environ.get("HOME")
+
+
+def test_agy_is_told_its_tools_are_off() -> None:
+    from core.provider import _encode_antigravity_stdin
+
+    content = json.loads(_encode_antigravity_stdin("What is 2+2?"))["message"]["content"]
+    assert content.startswith("Answer this request directly") and content.endswith("What is 2+2?")
+    assert "search the web" in content and "image files the request names" in content

@@ -94,6 +94,8 @@ working directory (often a repository checkout) and cannot read what is there.
 FI's own files for the call, such as codex's answer file and the visual check's
 screenshots, are passed by absolute path from outside that directory.
 
+**`antigravity_cli` (agy)** has no command-line switch that turns its tools off (`--mode plan` and `--sandbox` do not), and it follows your own `~/.gemini/antigravity-cli/settings.json`, which is often `"toolPermission": "always-proceed"`: in real quests one agy answer ran dozens of shell commands, downloaded a paper, read FI's own source and cost over a million tokens. FI therefore gives every agy call a temporary home folder of its own (removed when the call ends) holding FI's settings: tools that need approval are refused (a non-interactive call cannot ask), and shell commands, file writes, web-page fetches and MCP tools are refused outright; files outside the call's folder cannot be read, except the images FI hands it. Your own agy settings are neither used nor changed; the sign-in still is. Each request also tells agy its tools are off. **Web search cannot be turned off this way**: no setting reaches it, so an agy answer may still draw on a web search. Measured on the same questions: a figure reading went from over 600,000 tokens to about 27,000, with no command run.
+
 **`codex_cli` does not read `~/.codex/config.toml`.** Custom model providers,
 profiles, MCP servers and every other setting in that file are not used by
 FI's calls; the `codex login` sign-in still is. Choose the model with

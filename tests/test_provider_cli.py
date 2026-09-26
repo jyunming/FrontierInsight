@@ -78,7 +78,7 @@ def test_antigravity_stdin_envelope_shape() -> None:
     encoded = _S["antigravity_cli"].stdin_encoder("hello")
     msg = _json.loads(encoded)
     assert msg["event"] == "user"
-    assert msg["message"] == {"role": "user", "content": "hello"}
+    assert msg["message"]["role"] == "user" and msg["message"]["content"].endswith("\n\nhello")
 
 
 def test_antigravity_usage_is_measured_not_estimated() -> None:
