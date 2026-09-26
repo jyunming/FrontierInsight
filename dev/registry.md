@@ -49,6 +49,9 @@ same PR that adds, splits or renames one.
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client, sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
+- `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
+  one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
+  `run_oracle` in `_oracle_gate`); the older self-looping contract stays in `core/split_run.py` as `self_reported`.
 - `core/profile.py` — the person's author line, asked on the first interview and kept in
   `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
   submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).
@@ -109,6 +112,7 @@ same PR that adds, splits or renames one.
 - `generation/_marp.py` — Marp CLI discovery for `slides.html` / `slides.pdf`.
 - `generation/_keywords.py`, `_figure_captions.py`, `_tables.py`, `_cjk.py`, `_skip_md.py` — small shared renderers.
 - `core/replot_figures.py` — redrawing a line figure as the mean-over-seeds version.
+- `core/rerun_from.py` — `--resume <id> --from <step>`: the step names, the checkpoint just before a step (`checkpoint_before`, used by `Engine.run`), and moving that step's and later outputs to `.fi/previous/<time>/`.
 - `core/paper_patch.py`, `core/paper_trim.py` — a targeted revise (only the flagged passages) and a page-limit trim.
 
 ## Command-line tools and the web/VS Code surfaces

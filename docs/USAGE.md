@@ -16,6 +16,7 @@ commands:
 | `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~23–28 × N quests |
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
+| `@fi /resume <quest_id> --from <step>` | Does the quest again from `code`, `run`, `analysis`, `writing` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. | the calls of that step and the ones after it |
 | `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the design) beside the chat to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
@@ -126,6 +127,7 @@ cd ~/my_project
 fi --config quest.yaml                                   # pip install: the `fi` command
 python /path/to/FrontierInsight/launch.py --config quest.yaml   # a checkout: the same thing
 fi --config quest.yaml --resume <quest_id>               # resume from the same folder (or add --output <dir>)
+fi --config quest.yaml --resume <quest_id> --from writing   # write the paper again, keeping the run
 fi --serve                                               # the web UI watches ./outputs and starts quests from this folder
 ```
 
@@ -155,6 +157,7 @@ fi --serve                                               # the web UI watches ./
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
 | `--interactive` | quest | with `engine.clarify_mode: interactive`, read clarify answers from stdin |
 | `--resume <quest_id>` | quest | re-enter a checkpoint, requires `--config` |
+| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `code`, `run`, `analysis`, `writing` or `review`. What that step and the later ones made is moved to `.fi/previous/<time>/` first. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
 | `--days N` | digest | digest window in days, default 7 |
@@ -255,7 +258,7 @@ execution:
   timeout_s: 600
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
-  split_analysis: auto              # auto (default: on for a stochastic design) | true | false. Keep the simulation (code/simulate.py, raw files in raw/seed<K>/) apart from its analysis (code/experiment.py); not with background_jobs
+  split_analysis: auto              # auto (default: on for a stochastic design) | true | false. Keep the simulation (code/simulate.py: run_trial, run by FI, record in raw/) apart from its analysis (code/experiment.py); not with background_jobs
   raw_dir: ""                       # only with split_analysis: where the raw files go (relative to the quest, or absolute; relative with docker); empty = raw/
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)
