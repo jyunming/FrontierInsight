@@ -6868,8 +6868,8 @@ class Engine:
                 kind="manifest",
                 headline=headline,
                 steps=[
-                    "The run's own manifest (`run_manifest.json` in its raw-data folder) differs from the frozen protocol, and the "
-                    "repairs did not remove it: " + "; ".join(manifest_found) + ".",
+                    "The run's own manifest (`run_manifest.json` in its raw-data folder) differs from the frozen protocol, and "
+                    "no repair removed it (the repairs failed, gave up, or none was left): " + "; ".join(manifest_found) + ".",
                     fix,
                 ],
                 problems=manifest_found,
@@ -7257,8 +7257,8 @@ class Engine:
         if self.config.engine.run_manifest_check != "block" or not int(state.get("run_manifest_failures") or 0):
             return None
         self._log.warning(
-            "[execute_reflect] the repair gave up on the run-manifest difference; the run is checked once more and "
-            "stops with it"
+            "[execute_reflect] no repair of the run-manifest difference (it gave up, or none is left); the run is "
+            "checked once more and stops with it"
         )
         patch: QuestState = {
             "run_manifest_failures": int(self.config.engine.run_manifest_repair_attempts),
