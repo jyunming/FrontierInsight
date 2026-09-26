@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import (
     FileResponse, HTMLResponse, JSONResponse, StreamingResponse,
 )
@@ -1104,7 +1104,7 @@ def make_app(
         return HTMLResponse(injected)
 
     @app.post("/api/quests/{quest_id}/resume")
-    async def resume_quest(quest_id: str, rerun: bool = False) -> JSONResponse:
+    async def resume_quest(quest_id: str, rerun: bool = False, from_step: str = Query("", alias="from")) -> JSONResponse:
         """Spawn ``python launch.py --config <quest_root>/config.yaml
         --resume <id>`` as a subprocess via the launcher. Different
         from ``--update``: no interview; just continue from the last
@@ -1113,7 +1113,10 @@ def make_app(
         ``rerun=true`` uses ``--rerun`` instead: for a FINISHED quest it
         re-opens it (re-enters at design, applies saved refine feedback) and
         runs back to the human-review gate, so a done quest can be pushed
-        further."""
+        further.
+
+        ``from=<step>`` (code, run, analysis, writing, review) runs the quest again from that step: ``--from <step>``,
+        which first moves what that step and the later ones made to ``.fi/previous/<time>/``."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
@@ -1132,10 +1135,15 @@ def make_app(
                 "prior run before --resume can pick it up.",
             )
         from web.quest_launcher import QuestLauncherFull
+        from core import rerun_from as _rerun_from
+        step = _rerun_from.resolve(from_step) if from_step else None
+        if from_step and step is None:
+            raise HTTPException(400, f"{from_step!r} is not a step a quest can be rerun from; choose one of: "
+                                     f"{_rerun_from.choices()}")
         resume_flag = "--rerun" if rerun else "--resume"
         try:
             launched = app.state.launcher.launch_command(
-                argv_tail=["--config", str(yaml_path), resume_flag, quest_id],
+                argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else [])],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
             )
         except QuestLauncherFull as e:

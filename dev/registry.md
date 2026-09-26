@@ -111,6 +111,7 @@ same PR that adds, splits or renames one.
 - `generation/_marp.py` — Marp CLI discovery for `slides.html` / `slides.pdf`.
 - `generation/_keywords.py`, `_figure_captions.py`, `_tables.py`, `_cjk.py`, `_skip_md.py` — small shared renderers.
 - `core/replot_figures.py` — redrawing a line figure as the mean-over-seeds version.
+- `core/rerun_from.py` — `--resume <id> --from <step>`: the step names, the checkpoint just before a step (`checkpoint_before`, used by `Engine.run`), and moving that step's and later outputs to `.fi/previous/<time>/`.
 - `core/paper_patch.py`, `core/paper_trim.py` — a targeted revise (only the flagged passages) and a page-limit trim.
 
 ## Command-line tools and the web/VS Code surfaces

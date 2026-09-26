@@ -97,6 +97,15 @@ def test_resume_happy_path_spawns_subprocess(
     assert "--rerun" in argv2 and "--resume" not in argv2
     assert "q3" in argv2
 
+    # from=<step> reruns from that step; a name that is no step is refused before anything starts.
+    res3 = client.post("/api/quests/q3/resume?from=write")
+    assert res3.status_code == 200, res3.text
+    argv3 = mock_subprocess[2]
+    assert argv3[argv3.index("--from") + 1] == "writing" and "q3" in argv3
+    res4 = client.post("/api/quests/q3/resume?from=design")
+    assert res4.status_code == 400 and "code, run, analysis, writing, review" in res4.text
+    assert len(mock_subprocess) == 3
+
 
 def test_watch_needs_a_quest_that_is_waiting_on_a_job(tmp_path: Path) -> None:
     client = _client(tmp_path)
