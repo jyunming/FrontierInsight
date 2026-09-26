@@ -6847,6 +6847,8 @@ class Engine:
                 manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")
             except OSError:
                 pass
+            # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
+            self._clear_stale_figures()
             if set(manifest_found) <= set(self._manifest_analysis_problems):
                 headline = "the analysis does not report the values the protocol's metrics need"
                 fix = (
@@ -7243,6 +7245,25 @@ class Engine:
             )
         return replotted
 
+    def _manifest_repair_gave_up(self, state: QuestState) -> QuestState | None:
+        """When the repair gives up on a run the run-manifest check sent back (``engine.run_manifest_check: block``):
+        the difference it found still stands, so the quest must stop and name it, as when the repairs run out, and
+        not go on as a run that merely produced no results (which went back to design, then wrote a paper from
+        none, the named difference lost). The repairs count as spent and the same scripts run once more (FI's trials
+        are reused when the simulation is unchanged): the check finds the difference again and the run stops there,
+        with the reason. ``None`` when the failure was not a run-manifest difference."""
+        if self.config.engine.run_manifest_check != "block" or not int(state.get("run_manifest_failures") or 0):
+            return None
+        self._log.warning(
+            "[execute_reflect] the repair gave up on the run-manifest difference; the run is checked once more and "
+            "stops with it"
+        )
+        return {
+            "run_manifest_failures": int(self.config.engine.run_manifest_repair_attempts),
+            "exec_patch_pending": True,
+            "exec_reflect_iter": int(state.get("exec_reflect_iter") or 0) + 1,
+        }
+
     async def _node_execute_reflect(self, state: QuestState) -> QuestState:
         """Post-execute repair node.
 
@@ -7483,7 +7504,7 @@ class Engine:
                 "stderr_tail": exec_result.get("stderr_tail", "")[-400:],
                 "patch_summary": f"(gave up: {give_up[:120]})",
             })
-            return {
+            return self._manifest_repair_gave_up(state) or {
                 "exec_give_up_reason": give_up,
                 "exec_reflect_iter": iters + 1,
                 "exec_reflect_history": history,
@@ -7496,7 +7517,7 @@ class Engine:
             )
             if overlaps:
                 return spent
-            return {
+            return self._manifest_repair_gave_up(state) or {
                 "exec_give_up_reason": "(LLM produced no patched code)",
                 "exec_reflect_iter": iters + 1,
             }
@@ -10665,6 +10686,13 @@ class Engine:
             payload={"human_review": snapshot},
         )
         # Resume: ``payload`` is what the callback / web POST returned.
+        # The node wrote the snapshot again on this pass (a resumed node runs from its start), but the review is
+        # answered now: the snapshot goes, or the evidence assessed before the quest ends reads "the review is waiting
+        # for your decision" for a review already accepted (automatically, by ``auto_accept_on_pass``, included).
+        try:
+            (self.fi_dir / "human_review.json").unlink(missing_ok=True)
+        except OSError:
+            pass
         # Validate + normalise so a malformed answer doesn't propagate
         # into the routing layer.
         action = "accept"
