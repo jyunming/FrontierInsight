@@ -130,7 +130,7 @@ def test_the_trace_command_is_wired_into_the_chat_dispatcher() -> None:
     extension = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
     assert 'cmd === "trace"' in extension
     assert "runTrace(prompt, stream, token)" in extension
-    assert 'import { runFollow, runTrace, runWhy } from "./trace";' in extension
+    assert 'import { runFollow, runRerunSteps, runTrace, runWhy } from "./trace";' in extension
     # /why and /follow go through the same module, and each reaches launch.py's own flags.
     assert 'cmd === "why"' in extension and "runWhy(prompt, stream, token)" in extension
     assert 'cmd === "follow"' in extension and "runFollow(prompt, stream, token)" in extension

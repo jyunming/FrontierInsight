@@ -93,6 +93,17 @@ async def test_a_step_the_quest_never_reached_changes_nothing(tmp_path: Path, mo
     # first, so use a step whose nodes this quest never ran by removing them from the table for this test.
     monkeypatch.setitem(rerun_from.STEPS, "run", ("data_load",))
     second = Engine(cfg, resume_quest_id=first.quest_id)
+    # The list of steps to run again from, in the CLI and the web, is the quest's own history: no data_load in it.
+    reached = await second.rerun_steps()
+    assert "run" not in reached and {"code", "analysis", "writing"} <= set(reached)
+    import yaml
+    from fastapi.testclient import TestClient
+
+    from web.server import make_app
+
+    (second.quest_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")), encoding="utf-8")
+    body = TestClient(make_app(cfg.output.output_dir)).get(f"/api/quests/{first.quest_id}/rerun-steps").json()
+    assert [s["step"] for s in body["steps"]] == reached and all(s["redoes"] for s in body["steps"])
     await second.run(from_step="run")
     assert "never reached the run step" in capsys.readouterr().out
     assert not (second.fi_dir / "previous").exists()
@@ -158,3 +169,33 @@ async def test_a_quest_waiting_at_the_review_is_written_again_from_the_writing(
     assert calls.count("Writing") > writes, "the paper was written again"
     assert json.loads((second.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "review", "back at the review"
     assert list((second.fi_dir / "previous").iterdir()), "the first paper is kept"
+
+
+@pytest.mark.asyncio
+async def test_the_steps_offered_are_the_ones_the_quest_reached() -> None:
+    graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("execute_reflect",),
+                    ("execute",), ("analyze",)])
+    steps = await rerun_from.reached(graph, {})
+    assert steps == ["code", "run", "analysis"]
+    text = rerun_from.listing("q-1", steps)
+    assert "q-1 can be run again from:" in text and "--resume q-1 --from <step>" in text
+    assert all(rerun_from.REDOES[step] in text for step in steps) and "writing" not in text
+    assert "has not reached the code step" in rerun_from.listing("q-1", [])
+
+
+def test_from_with_no_step_asks_for_the_list() -> None:
+    import launch
+
+    cfg = ["--config", "examples/integrator_bakeoff/config.yaml", "--resume", "q-1"]
+    assert launch.parse_args([*cfg, "--from"]).teach_from == launch._LIST_STEPS
+    assert launch.parse_args([*cfg, "--from", "writing"]).teach_from == "writing"
+
+
+def test_help_is_not_preceded_by_a_dependency_warning() -> None:
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parent.parent
+    done = subprocess.run([sys.executable, "-B", "launch.py", "--help"], cwd=root, capture_output=True, text=True,
+                          timeout=120)
+    assert done.returncode == 0 and "allowed_objects" not in done.stderr, done.stderr[:500]

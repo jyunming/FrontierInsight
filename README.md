@@ -78,7 +78,7 @@ python launch.py --config outputs/<id>/config.yaml --resume <id> --revise-plan "
 python launch.py --config outputs/<id>/config.yaml --resume <id>       # run the plan as it now reads
 ```
 
-On the web the quest page has a **Plan** panel; in VSCode use `@fi /plan <quest_id>`. You can also stop after the literature search (`pauses.supply: after_literature`) to read the sources and add your own papers before any compute is spent.
+On the web the quest page has a **Plan** panel; in VSCode use `@fi /plan <quest_id>`. You can also stop after the literature search (`pauses.supply: after_literature`) to read the sources and add your own papers before any compute is spent. To do a later step again (the code, the run, the analysis, the writing or the review), `--resume <id> --from` with no step lists the ones the quest reached, and `--from <step>` redoes from there: [docs/USAGE.md](docs/USAGE.md#doing-a-step-again).
 
 ## How much can you trust the result?
 
