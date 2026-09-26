@@ -316,7 +316,13 @@ def test_human_review_snapshot_carries_the_warnings(tmp_path: Path) -> None:
     import asyncio
 
     eng = _review_engine(tmp_path, gate="after_review")
-    eng._pause_for_human = lambda **_kw: {"action": "accept"}  # type: ignore[method-assign]
+    seen: dict = {}
+
+    def pause(**_kw):  # noqa: ANN003, ANN202 -- what a UI reads while the gate waits
+        seen["snap"] = json.loads((tmp_path / ".fi" / "human_review.json").read_text("utf-8"))
+        return {"action": "accept"}
+
+    eng._pause_for_human = pause  # type: ignore[method-assign]
     state = {
         "iteration": 0,
         "review": {"verdict": "accept", "must_flag_hits": [],
@@ -324,7 +330,7 @@ def test_human_review_snapshot_carries_the_warnings(tmp_path: Path) -> None:
     }
     asyncio.run(eng._node_human_feedback(state))  # type: ignore[arg-type]
 
-    snap = json.loads((tmp_path / ".fi" / "human_review.json").read_text("utf-8"))
+    snap = seen["snap"]
     assert snap["numeric_oracle_warnings"] == ["transposed: 2.41 vs nils=2.14"]
     assert snap["must_flag_hits"] == [], "kept apart so the UIs can label them"
 
