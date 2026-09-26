@@ -38,7 +38,7 @@
       <a href="/" id="back-link" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-mid transition-colors flex items-center gap-2">
         <span class="material-symbols-outlined text-[16px]">arrow_back</span> Dashboard
       </a>
-      <select id="rerun-from" class="hidden bg-surface-mid cyber-border text-on-surface px-4 py-2 rounded-full font-label-sm text-label-sm" title="Where to go on from. Redoing a step first moves what that step and the later ones made to .fi/previous/.">
+      <select id="rerun-from" onchange="showResumeButton(questResumable)" class="hidden w-auto bg-surface-mid cyber-border text-on-surface px-4 py-2 rounded-full font-label-sm text-label-sm" title="Where to go on from. Redoing a step first moves what that step and the later ones made to .fi/previous/.">
         <option value="">Go on from where it stopped</option>
         <option value="code">Redo from the code</option>
         <option value="run">Redo from the run</option>
@@ -450,16 +450,19 @@
     const answerPause = data.pending_clarify || !!data.pending_human_review;
     const resumable = !data.alive && data.has_config && !answerPause;
     const resumeBtn = document.getElementById('resume-btn');
-    resumeBtn.classList.toggle('hidden', !resumable);
-    document.getElementById('rerun-from').classList.toggle('hidden', !resumable);
-    // Label it "Re-run" for a finished quest (re-open for another pass / apply
-    // updated settings), else "Resume" (continue a pause / crash).
-    const finished = data.summary && !data.pending_action && !data.pending_human_review;
-    questFinishedForRerun = finished;
-    resumeBtn.textContent = finished ? 'Re-run' : 'Resume';
-    resumeBtn.title = finished
-      ? 'Re-open this finished quest for another revision pass — it re-runs to the review gate (applying any saved refine feedback or updated settings).'
-      : 'Resume this quest from where it paused.';
+    // Redoing a step is open at an ANSWER pause too (a paper waiting for review can be written again): the menu shows,
+    // and the button appears once a step is chosen. Going on from where it stopped is still that pause's own form.
+    questAnswerPaused = !data.alive && data.has_config && answerPause;
+    const menu = document.getElementById('rerun-from');
+    menu.classList.toggle('hidden', !(resumable || questAnswerPaused));
+    // At an answer pause going on is that pause's own form: the empty choice only invites picking a step.
+    const firstChoice = questAnswerPaused ? 'Redo from a step…' : 'Go on from where it stopped';
+    // Written only when it changes: rewriting an option on every refresh closes an open menu.
+    if (menu.options[0].textContent !== firstChoice) { menu.options[0].textContent = firstChoice; menu.options[0].value = ''; }
+    // "Re-run" for a finished quest (re-open for another pass / apply updated settings), else "Resume"; "Redo" once a
+    // step is chosen at an answer pause (showResumeButton).
+    questFinishedForRerun = data.summary && !data.pending_action && !data.pending_human_review;
+    showResumeButton(resumable);
     // Config-less quests can't Update or Resume — disable + explain.
     const updateLink = document.getElementById('update-link');
     if (!data.has_config) {
@@ -1485,6 +1488,23 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   // Set in refresh(): a finished quest re-runs via ?rerun=true (re-opens it),
   // a paused/crashed quest plain-resumes.
   let questFinishedForRerun = false;
+  let questAnswerPaused = false;
+  let questResumable = false;
+  function showResumeButton(resumable) {
+    questResumable = resumable;
+    const step = document.getElementById('rerun-from').value;
+    const btn = document.getElementById('resume-btn');
+    btn.classList.toggle('hidden', !(resumable || (questAnswerPaused && step)));
+    if (step) {
+      btn.textContent = 'Redo';
+      btn.title = 'Run this quest again from the chosen step; what it made before is kept in .fi/previous/.';
+    } else {
+      btn.textContent = questFinishedForRerun ? 'Re-run' : 'Resume';
+      btn.title = questFinishedForRerun
+        ? 'Re-open this finished quest for another revision pass — it re-runs to the review gate (applying any saved refine feedback or updated settings).'
+        : 'Resume this quest from where it paused.';
+    }
+  }
   async function resumeQuest() {
     const fromStep = document.getElementById('rerun-from').value;
     const params = new URLSearchParams();
@@ -1493,6 +1513,8 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     const url = `/api/quests/${encodeURIComponent(questId)}/resume` + (params.toString() ? `?${params}` : '');
     const res = await fetch(url, { method: 'POST' });
     if (!res.ok) { alert('Resume failed: ' + await res.text()); return; }
+    // Sent once: the next Resume goes on from where the quest then stands, unless a step is chosen again.
+    document.getElementById('rerun-from').value = '';
     if (!pollHandle) pollHandle = setInterval(refresh, 3000);
     refresh();
   }
