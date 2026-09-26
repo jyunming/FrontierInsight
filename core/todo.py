@@ -103,6 +103,11 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "Let FI watch the job and go on when it is done: `--watch`.",
         ["Go on yourself once the job is done: `--resume`."],
     ),
+    "review_models": (
+        "Which model should one reviewer use? A research result needs a reviewer on a model other than the rest.",
+        "Choose a model for one reviewer (the steps say where), then go on.",
+        ["Run it without rigor_profile: research: the panel may then share one model."],
+    ),
     "plan_changed": (
         "Settings that decide how strictly the quest is checked changed after you approved it. Keep the change?",
         "If you meant the change, approve it: `--update` (it shows the settings and records them).",

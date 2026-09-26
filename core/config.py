@@ -1556,11 +1556,13 @@ class Config(BaseModel):
     # "publication-ready" on settings nobody chose for that.
     result_use: Literal["", "explore", "research", "decision"] = ""
 
-    @model_validator(mode="after")
-    def _result_use_when_unsaid(self) -> "Config":
-        if not self.result_use:
-            self.result_use = "research" if self.rigor_profile == "research" else "explore"
-        return self
+    @property
+    def effective_result_use(self) -> str:
+        """What the result is for, the unsaid case settled: ``result_use`` as written, else ``research`` under
+        ``rigor_profile: research`` and ``explore`` otherwise. Worked out when read (not written into the field), so a
+        copy of the config with another profile gets its own answer and a record of the approved settings keeps what
+        the file said."""
+        return self.result_use or ("research" if self.rigor_profile == "research" else "explore")
 
     @model_validator(mode="before")
     @classmethod

@@ -68,6 +68,10 @@ topic: |
 
 title: bv-depolarizing-noise
 
+# What the result is for (explore, research or decision). Left out, a quest is an exploration and its paper
+# is marked preliminary.
+result_use: research
+
 provider:
   name: claude_cli
   # No api_key_env needed — claude_cli reuses `claude login` OAuth.

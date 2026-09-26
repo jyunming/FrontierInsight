@@ -58,6 +58,10 @@ topic: |
 
 title: euv-mor-photon-shot-noise-ler
 
+# What the result is for (explore, research or decision). Left out, a quest is an exploration and its paper
+# is marked preliminary.
+result_use: research
+
 provider:
   name: ollama
   model: gpt-oss:120b-cloud
