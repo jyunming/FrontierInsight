@@ -30,7 +30,7 @@ def test_a_cap_on_train_is_not_a_cap_on_test() -> None:
 
 def test_a_cap_whose_place_cannot_be_shown_is_a_warning() -> None:
     for code in (
-        'inner = {"rmse": min(rmse, 10.0)}\nout = {"test": inner}\n' + P,   # alias under another key
+        'out = to_native({"test": {"rmse": min(r, 10.0)}})\n' + P,   # wrapped in a call the check cannot follow
         'rows.append({"rmse": min(e, 10.0)})\nout = {"runs": rows}\n' + P,  # a list of records built by append
         'unused = {"test": {"rmse": min(x, 10.0)}}\nout = {"test": {"rmse": r}}\n' + P,  # a literal never printed
     ):
@@ -68,7 +68,29 @@ def test_the_engine_sends_back_only_a_proven_cap() -> None:
 
     design = {"result_assertions": [{"path": "rmse", "min": 0, "max": 100}]}
     unproven = {"result_json": {"test": {"rmse": 10.0}}, "design": design,
-                "code": 'inner = {"rmse": min(r, 10.0)}\nout = {"test": inner}\nprint(json.dumps(out))\n'}
+                "code": 'out = to_native({"test": {"rmse": min(r, 10.0)}})\nprint(json.dumps(out))\n'}
     assert _assertion_violations(unproven) == [] and len(_assertion_warnings(unproven)) == 1
     proven = {**unproven, "code": 'out = {"test": {"rmse": min(r, 10.0)}}\nprint(json.dumps(out))\n'}
     assert len(_assertion_violations(proven)) == 1 and _assertion_warnings(proven) == []
+
+
+def test_a_name_or_a_function_s_return_inside_the_printed_result_is_followed() -> None:
+    # The inline alias: test_metrics is placed under "test" by the printed literal, so its cap is proven there.
+    code = 'test_metrics = {"rmse": min(e, 10.0)}\nprint("RESULT_JSON:", json.dumps({"test": test_metrics}))\n'
+    (found,) = violations({"test": {"rmse": 10.0}}, RMSE, code=code)
+    assert found.kind == "clamped"
+    # ... and a train literal placed under "train" is not a top-level rmse cap.
+    code = 'train = {"rmse": min(t, 10.0)}\nprint(json.dumps({"train": train, "rmse": test_rmse}))\n'
+    assert violations({"train": {"rmse": 3.0}, "rmse": 10.0}, RMSE, code=code) == []
+    # A result returned by a function the script prints.
+    code = 'def run():\n    return {"test": {"rmse": min(r, 10.0)}}\nprint("RESULT_JSON:", json.dumps(run()))\n'
+    (found,) = violations({"test": {"rmse": 10.0}}, RMSE, code=code)
+    assert found.kind == "clamped"
+    # A name bound inside a function is looked up there, not in another function.
+    code = ('def fit():\n    out = {"rmse": min(e, 10.0)}\n    return out\n'
+            'def main():\n    out = {"rmse": final}\n    print(json.dumps(out))\n')
+    assert violations({"rmse": 10.0}, RMSE, code=code) == [] or \
+        _kinds(violations({"rmse": 10.0}, RMSE, code=code)) == ["clamped_unproven"]
+    # An annotated binding and a conditional at the root.
+    code = 'out: dict = {"rmse": min(r, 10.0)}\nprint(json.dumps(out))\n'
+    assert _kinds(violations({"rmse": 10.0}, RMSE, code=code)) == ["clamped"]

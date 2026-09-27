@@ -7213,8 +7213,8 @@ class Engine:
         patch["numeric_warnings_accepted"] = False
         for w in _assertion_warnings({**state, **patch}):
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
-            self._audit("check_result", check="plausibility_unproven_cap", verdict="warn",
-                        path=getattr(w, "path", ""), value=getattr(w, "value", None))
+            self._audit("check_result", check="plausibility_unproven_cap", status="warn",
+                        summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         patch["run_manifest_failures"] = manifest_attempts_next
         run_context = await self._attempt_context({**state, **patch})
 

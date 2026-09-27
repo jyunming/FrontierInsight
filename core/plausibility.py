@@ -391,8 +391,14 @@ def _chain_matches(chain: tuple[str, ...], target: list[str]) -> bool:
 def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]:
     """Every upper cap (:func:`_upper_caps`) written as the value of a dict key in ``code``, once per script: the key
     chain from the literal it sits in (a computed key is ``*``, a list or comprehension position is ``[]``), whether
-    that literal is the one the script prints (the argument of ``print``/``json.dumps``, or a name bound to a literal
-    and then printed), and the capped constants. Empty for code that caps nothing or does not parse."""
+    that literal is part of what the script prints, and the capped constants. Empty for code that caps nothing or does
+    not parse.
+
+    What the script prints is followed from each argument of ``print(...)`` / ``*.dumps(...)`` / ``*.dump(...)``: a
+    literal written there, a name bound to one in the same function (or at module level), or the literals a function
+    of the script called there returns. A name or such a call used as a value inside a printed literal is followed the
+    same way, with that value's key as the prefix, so ``{"test": test_metrics}`` places ``test_metrics``'s keys under
+    ``test``. A literal reached this way is not also read on its own."""
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
@@ -400,13 +406,11 @@ def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]
     if not any(isinstance(n, ast.Call) and _upper_caps(n) for n in ast.walk(tree)):
         return ()
     names: dict[str, float] = {}
-    bound_literal: dict[str, list[ast.AST]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             v = _literal(node.value)
             if v is not None:
                 names[node.targets[0].id] = v
-            bound_literal.setdefault(node.targets[0].id, []).append(node.value)
 
     def value(node: ast.AST) -> float | None:
         v = _literal(node)
@@ -414,25 +418,67 @@ def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]
             v = names.get(node.id)
         return v
 
-    # The literals the script prints: an argument of print(...) or *.dumps(...) / *.dump(...), directly or by name.
-    printed: set[int] = set()
+    # Scopes: which function (or the module) each node is written in; the names bound there; each function's returns.
+    scope_of: dict[int, ast.AST] = {}
+    bindings: dict[tuple[int, str], list[ast.AST]] = {}
+    functions: dict[str, list[ast.AST]] = {}
+    returns: dict[int, list[ast.AST]] = {}
+
+    def index_scope(scope: ast.AST, body: list[ast.AST]) -> None:
+        stack = list(body)
+        while stack:
+            node = stack.pop()
+            scope_of[id(node)] = scope
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.setdefault(node.name, []).append(node)
+                index_scope(node, node.body)
+                continue
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                bindings.setdefault((id(scope), node.targets[0].id), []).append(node.value)
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+                bindings.setdefault((id(scope), node.target.id), []).append(node.value)
+            elif isinstance(node, ast.Return) and node.value is not None:
+                returns.setdefault(id(scope), []).append(node.value)
+            stack.extend(ast.iter_child_nodes(node))
+
+    index_scope(tree, tree.body)
+    containers = (ast.Dict, ast.DictComp, ast.List, ast.Tuple, ast.ListComp, ast.SetComp, ast.GeneratorExp)
+
+    def resolve(expr: ast.AST, scope: ast.AST, depth: int = 0) -> list[tuple[ast.AST, ast.AST]]:
+        """The literals ``expr`` evaluates to, each with the scope it is written in; ``[]`` when that is unknown."""
+        if depth > 6:
+            return []
+        if isinstance(expr, containers):
+            return [(expr, scope)]
+        if isinstance(expr, ast.IfExp):
+            return resolve(expr.body, scope, depth + 1) + resolve(expr.orelse, scope, depth + 1)
+        if isinstance(expr, ast.BoolOp):
+            return [r for v in expr.values for r in resolve(v, scope, depth + 1)]
+        if isinstance(expr, ast.Name):
+            bound = bindings.get((id(scope), expr.id)) or bindings.get((id(tree), expr.id)) or []
+            return [r for b in bound for r in resolve(b, scope if (id(scope), expr.id) in bindings else tree, depth + 1)]
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and expr.func.id in functions:
+            out: list[tuple[ast.AST, ast.AST]] = []
+            for fn in functions[expr.func.id]:
+                for ret in returns.get(id(fn), []):
+                    out += resolve(ret, fn, depth + 1)
+            return out
+        return []
+
+    # The literals the script prints (the roots of its output), and every literal reached from another one by name or
+    # call (read only from there).
+    printed: list[tuple[ast.AST, ast.AST]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         fn = node.func
         fname = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
-        if fname not in ("print", "dumps", "dump"):
-            continue
-        for arg in node.args:
-            for sub in ast.walk(arg):
-                if isinstance(sub, (ast.Dict, ast.DictComp)):
-                    printed.add(id(sub))
-                elif isinstance(sub, ast.Name):
-                    for lit in bound_literal.get(sub.id, []):
-                        printed.add(id(lit))
+        if fname in ("print", "dumps", "dump"):
+            for arg in node.args:
+                printed += resolve(arg, scope_of.get(id(node), tree))
 
-    containers = (ast.Dict, ast.DictComp, ast.List, ast.Tuple, ast.ListComp, ast.SetComp, ast.GeneratorExp)
     nested: set[int] = set()
+    reached: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
             children = [v for v in node.values if v is not None]
@@ -454,6 +500,8 @@ def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]
                     stack += [c.body, c.orelse]
                 elif isinstance(c, ast.BoolOp):
                     stack += list(c.values)
+                elif isinstance(c, (ast.Name, ast.Call)):
+                    reached.update(id(lit) for lit, _ in resolve(c, scope_of.get(id(node), tree)))
 
     entries: list[tuple[tuple[str, ...], bool, frozenset]] = []
 
@@ -478,13 +526,18 @@ def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]
             return json.dumps(k.value)
         return _ANY_KEY
 
-    def visit(node: ast.AST, chain: tuple[str, ...], printed_root: bool) -> None:
+    def visit(node: ast.AST, chain: tuple[str, ...], printed_root: bool, scope: ast.AST, depth: int = 0) -> None:
+        if depth > 12:
+            return
         if isinstance(node, ast.IfExp):
-            visit(node.body, chain, printed_root)
-            visit(node.orelse, chain, printed_root)
+            visit(node.body, chain, printed_root, scope, depth + 1)
+            visit(node.orelse, chain, printed_root, scope, depth + 1)
         elif isinstance(node, ast.BoolOp):
             for v in node.values:
-                visit(v, chain, printed_root)
+                visit(v, chain, printed_root, scope, depth + 1)
+        elif isinstance(node, (ast.Name, ast.Call)):
+            for lit, lit_scope in resolve(node, scope):
+                visit(lit, chain, printed_root, lit_scope, depth + 1)
         elif isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values):
                 key = key_of(k)
@@ -494,22 +547,26 @@ def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]
                 caps = caps_in(v)
                 if caps:
                     entries.append((here, printed_root, caps))
-                visit(v, here, printed_root)
+                visit(v, here, printed_root, scope, depth + 1)
         elif isinstance(node, ast.DictComp):
             here = (*chain, _ANY_KEY)
             caps = caps_in(node.value)
             if caps:
                 entries.append((here, printed_root, caps))
-            visit(node.value, here, printed_root)
+            visit(node.value, here, printed_root, scope, depth + 1)
         elif isinstance(node, (ast.List, ast.Tuple)):
             for e in node.elts:
-                visit(e, (*chain, "[]"), printed_root)
+                visit(e, (*chain, "[]"), printed_root, scope, depth + 1)
         elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
-            visit(node.elt, (*chain, "[]"), printed_root)
+            visit(node.elt, (*chain, "[]"), printed_root, scope, depth + 1)
 
+    printed_ids = {id(lit) for lit, _ in printed}
+    for lit, lit_scope in printed:
+        visit(lit, (), True, lit_scope)
     for node in ast.walk(tree):
-        if isinstance(node, containers) and id(node) not in nested:
-            visit(node, (), id(node) in printed)
+        if (isinstance(node, containers) and id(node) not in nested and id(node) not in reached
+                and id(node) not in printed_ids):
+            visit(node, (), False, scope_of.get(id(node), tree))
     return tuple(entries)
 
 
