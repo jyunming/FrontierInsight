@@ -409,10 +409,49 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
                    "argv": [harness, t["spec"], t["out"]]} for t in plan],
     }
     (folder / TASKS_NAME).write_text(json.dumps(tasks, indent=1), encoding="utf-8")
-    record = {"key": key, "plan": plan}
+    from core.attempt_records import script_hashes
+
+    # The code the tasks will import, as it was when they were submitted: compared when their results are collected.
+    record = {"key": key, "plan": plan, "code_at_submit": script_hashes(quest_root)}
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_text(json.dumps(record, default=str), encoding="utf-8")
     return record
+
+
+def code_changed_while_queued(quest_root: Path, record: dict[str, Any], *, local: tuple[str, ...] = ()) -> list[str]:
+    """The files in ``code/`` (paths relative to it) that differ from when the job was submitted, but for ``local``
+    ones (the analysis and the submit script, which run here, not in the tasks); records them in
+    ``.fi/trials/cluster.json`` so the attempt's context says its code is not known. A record from before the
+    submission was hashed has nothing to compare: it is named as unknown."""
+    from core.attempt_records import script_hashes
+
+    quest_root = Path(quest_root)
+    before = record.get("code_at_submit")
+    if not isinstance(before, dict):
+        changed = ["(the code at submission was not recorded)"]
+    else:
+        now = script_hashes(quest_root)
+        # A file the submit script or a task wrote next to the code after submission is not code that changed.
+        changed = sorted(f for f in before if f not in local and before.get(f) != now.get(f))
+    record["code_changed_while_queued"] = changed
+    try:
+        (quest_root / CLUSTER_RECORD).write_text(json.dumps(record, default=str), encoding="utf-8")
+    except OSError:
+        pass
+    return changed
+
+
+def _forget_queued_changes(quest_root: Path) -> None:
+    path = Path(quest_root) / CLUSTER_RECORD
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(record, dict) and record.pop("code_changed_while_queued", None) is not None:
+        try:
+            path.write_text(json.dumps(record, default=str), encoding="utf-8")
+        except OSError:
+            pass
 
 
 def collect_cluster(quest_root: Path, record: dict[str, Any], *, run_id: str = "",
@@ -498,6 +537,13 @@ class TrialsRunner:
                 self.failed_script = None
                 _note_job(self.quest_root, record, job)
                 return submitted
+            code_dir = self.quest_root / "code"
+            local = tuple(p.resolve().relative_to(code_dir.resolve()).as_posix()
+                          for p in (self.analysis, self.submit) if p.resolve().is_relative_to(code_dir.resolve()))
+            changed = code_changed_while_queued(self.quest_root, record, local=local)
+            if changed and self.log is not None:
+                self.log.warning("[execute] the code changed while the cluster job was queued (%s): the tasks may have "
+                                 "run other code than FI has now; the attempt's record says so", ", ".join(changed[:10]))
             run = collect_cluster(
                 self.quest_root, record,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
@@ -506,6 +552,8 @@ class TrialsRunner:
             if self.log is not None:
                 self.log.info("[execute] the cluster job is done: FI read every setting's results and wrote the ledger")
         else:
+            # Run here, not on a cluster: what an earlier cluster job's code did while queued is not this run's.
+            _forget_queued_changes(self.quest_root)
             run = await run_trials(
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,

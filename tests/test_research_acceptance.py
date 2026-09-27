@@ -17,9 +17,10 @@ from typing import Any
 
 import pytest
 
-from core import audit_log, plan_settings, receipts
+from core import audit_log, evidence, plan_settings, receipts
 from core.config import Config
 from core.engine import Engine
+from core.provider import LAST_CALL
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, SIM_TRIAL, _reply
 
@@ -55,6 +56,8 @@ def _config(root: Path, **over: Any) -> Config:
 
 def _fake(protocol: dict[str, Any], simulate: str, analysis: str, calls: list[str]):
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        # An HTTP provider names the model that answered; without that the review's independence is unproven.
+        LAST_CALL.set({"provider": "openai", "model": kw.get("model") or "m-default", "reported": True})
         prompt = messages[-1]["content"]
         kind = _classify(prompt)
         calls.append(kind)
@@ -102,7 +105,10 @@ def _run_through_pauses(config: Config, *, quest_id: str | None = None, from_ste
 
 
 def _evidence(root: Path) -> dict[str, Any]:
-    return json.loads((root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
+    """The evidence as every surface reads it: with the quest's seal checked."""
+    record = evidence.read(root)
+    assert record is not None
+    return record
 
 
 def _all_gaps(record: dict[str, Any]) -> list[str]:
@@ -170,6 +176,27 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert any(e.get("kind") == "plan_settings_recorded" for e in audit_log.read(root / ".fi" / "audit.jsonl"))
     record = _evidence(root)
     assert record["status"] == "publication_ready", record.get("gaps")
+    # The seal is the trace's last event and names the evidence and attempt records as they are.
+    assert audit_log.read(root / ".fi" / "audit.jsonl")[-1]["kind"] == "quest_finalized"
+    assert record["trace_seal"] == "verified"
+
+
+def test_anything_written_after_the_seal_takes_publication_ready_away(baseline: dict[str, Any], tmp_path: Path) -> None:
+    _config_copy, root = _copy(baseline, tmp_path)
+    audit_log.AuditLog(root / ".fi" / "audit.jsonl", root.name).append("check_result", check="late", status="ok")
+    record = _evidence(root)
+    assert record["status"] != "publication_ready"
+    assert any("after the decision trace's final seal" in g for g in record["gaps"]), record["gaps"]
+
+
+def test_an_attempt_record_changed_after_the_seal_takes_publication_ready_away(
+        baseline: dict[str, Any], tmp_path: Path) -> None:
+    _config_copy, root = _copy(baseline, tmp_path)
+    with (root / ".fi" / "attempts.jsonl").open("a", encoding="utf-8") as fh:
+        fh.write('{"kind": "run", "outcome": "accepted"}\n')
+    record = _evidence(root)
+    assert record["status"] != "publication_ready"
+    assert any("attempts.jsonl changed after the quest was sealed" in g for g in record["gaps"]), record["gaps"]
 
 
 # --- faults put into a copy of the finished quest ---------------------------------------------------------------------
@@ -313,3 +340,14 @@ def test_trials_that_fail_with_no_failure_policy_are_a_gap(tmp_path: Path, monke
     record = _evidence(root)
     assert record["status"] != "publication_ready"
     assert any("failure_policy" in g for g in _all_gaps(record)), _all_gaps(record)
+
+
+def test_a_reviewer_whose_model_was_not_reported_takes_publication_ready_away(
+        baseline: dict[str, Any], tmp_path: Path) -> None:
+    config, root = _copy(baseline, tmp_path)
+    panel = [dict(r) for r in baseline["artifacts"].raw_state.get("review_panel") or []]
+    assert panel and all(r.get("actual_model_reported") for r in panel), "the baseline's reviewers all reported"
+    panel[0]["actual_model_reported"] = False
+    record = _reassess(baseline, config, root.name, review_panel=panel)
+    assert record["status"] != "publication_ready"
+    assert any("independence is unverified" in g for g in _all_gaps(record)), _all_gaps(record)

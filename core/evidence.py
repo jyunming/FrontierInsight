@@ -25,6 +25,7 @@ the final state; it needs no model.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -148,15 +149,41 @@ def _audit_gaps(paper_dir: Path) -> tuple[bool, list[str]]:
 _SEALED_STEPS = ("write", "review")
 
 
-def _trace_completeness_gaps(trace: Path, audit_log: Any) -> list[str]:
-    """What keeps a trace whose hash chain checks out from being the quest's complete record: no seal at its end
-    (``quest_finalized``, written as a finished quest's last event), events this run could not write, a seal that does
-    not count the events before it, steps written after the seal, or a seal without the paper's steps. A valid prefix
-    alone (one ``quest_started`` line) proves only that what is there was not changed."""
+#: Files a finished quest's seal names by hash (quest-relative): what the evidence, the attempt records and the paper
+#: were when the quest sealed its trace. The paper is named by ``paper_sha256``.
+SEALED_FILES = ("needs/EVIDENCE.json", ".fi/attempts.jsonl", ".fi/branch_ledger.jsonl")
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = False) -> list[str]:
+    """What keeps a trace whose hash chain checks out from being the quest's complete record: no seal as its very last
+    event (``quest_finalized``), events that could not be written, a seal that does not count the events before it,
+    anything written after the seal, a seal without the paper's steps, or a file the seal names that changed since. A
+    valid prefix alone (one ``quest_started`` line) proves only that what is there was not changed.
+
+    ``sealing``: the finishing quest is assessing itself just before it writes the seal (which names this assessment's
+    hash, so it cannot come first); only what can already be known counts: lost events so far and the paper's steps.
+    The rest is checked when the record is read (:func:`verify_seal`)."""
     try:
         events = audit_log.read(trace)
     except Exception:  # noqa: BLE001
         return ["the quest's decision trace (.fi/audit.jsonl) could not be read"]
+    if sealing:
+        gaps = []
+        lost = audit_log.lost_writes(trace)
+        if lost:
+            gaps.append(f"{lost} event(s) of the quest's decision trace could not be written")
+        done = {e.get("node") for e in events if e.get("kind") == "node_completed"}
+        missing = [s for s in _SEALED_STEPS if s not in done]
+        if missing:
+            gaps.append(f"the decision trace names no completed {', '.join(missing)} step")
+        return gaps
     seals = [i for i, e in enumerate(events) if e.get("kind") == "quest_finalized"]
     if not seals:
         if (trace.parent / "pause.json").is_file():
@@ -167,13 +194,37 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any) -> list[str]:
     gaps: list[str] = []
     if int(seal.get("write_errors") or 0) > 0:
         gaps.append(f"{seal['write_errors']} event(s) of the quest's decision trace could not be written")
+    lost_now = audit_log.lost_writes(trace)
+    if lost_now > int(seal.get("write_errors") or 0):
+        gaps.append(f"{lost_now - int(seal.get('write_errors') or 0)} event(s) of the decision trace could not be "
+                    "written after the quest was sealed")
+    if int(seal.get("records_not_written") or 0) > 0:
+        gaps.append(f"{seal['records_not_written']} of the quest's attempt record(s) could not be written")
     if seal.get("events_before") != at:
         gaps.append("the decision trace's final seal does not count the events before it (events are missing or were added)")
     if any(e.get("kind") in ("node_started", "node_completed") for e in events[at + 1:]):
         gaps.append("steps ran after the decision trace's final seal (the quest was re-run and did not finish again)")
+    elif at != len(events) - 1:
+        gaps.append(f"{len(events) - 1 - at} event(s) were written after the decision trace's final seal, which "
+                    "therefore does not cover them")
     missing = [s for s in _SEALED_STEPS if s not in (seal.get("nodes_completed") or [])]
     if missing:
         gaps.append(f"the decision trace's final seal names no completed {', '.join(missing)} step")
+    quest_root = trace.parent.parent
+    files = seal.get("files") if isinstance(seal.get("files"), dict) else None
+    if files is None:
+        gaps.append("the decision trace's final seal names no hash of the evidence and attempt records")
+    else:
+        for rel in SEALED_FILES:
+            if rel in files and files[rel] != _file_sha256(quest_root / rel):
+                gaps.append(f"{rel} changed after the quest was sealed")
+        if "needs/EVIDENCE.json" not in files:
+            gaps.append("the decision trace's final seal names no hash of the evidence record")
+    paper = seal.get("paper_path")
+    if not paper or not seal.get("paper_sha256"):
+        gaps.append("the decision trace's final seal names no hash of the paper")
+    elif seal.get("paper_sha256") != _file_sha256(quest_root / str(paper)):
+        gaps.append(f"the paper ({paper}) changed after the quest was sealed")
     return gaps
 
 def assess(
@@ -338,6 +389,12 @@ def assess(
             "every reviewer used one model (engine.one_model_review: only one was available), so the review is one "
             "model's view"
         )
+    # Reviewers set up on different models, but the connection did not say which model answered: unproven, not assumed.
+    if settings.get("rigor_profile") == "research" and settings.get("review_identity_unverified"):
+        ready_gaps.append(
+            "the review's independence is unverified: the connection did not report which model answered the "
+            f"{', '.join(map(str, settings['review_identity_unverified']))} reviewer(s), so they may all have been one model"
+        )
     # A quest set up to explore: its result is preliminary whatever it passed (the person said so at the start).
     if settings.get("result_use") == "explore":
         ready_gaps.append(
@@ -360,7 +417,7 @@ def assess(
             if not intact:
                 ready_gaps.append("the quest's decision trace (.fi/audit.jsonl) no longer checks out (its hash chain is broken)")
             else:
-                ready_gaps.extend(_trace_completeness_gaps(trace, _audit_log))
+                ready_gaps.extend(_trace_completeness_gaps(trace, _audit_log, sealing=bool(settings.get("sealing"))))
     # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
@@ -442,7 +499,7 @@ def assess(
         }
         for level, ok in zip(LEVELS, reached)
     ]
-    return {
+    record = {
         "status": status,
         "levels": dict(zip(LEVELS, reached)),
         "next_level": next_level,
@@ -451,6 +508,66 @@ def assess(
         "ladder": ladder,
         "rigor_profile": settings.get("rigor_profile") or "default",
     }
+    if settings.get("sealing") and settings.get("rigor_profile") == "research":
+        # Written before the seal that names it: whoever reads it checks the seal (verify_seal).
+        record["trace_seal"] = "pending"
+    return record
+
+
+def verify_seal(quest_root: Path, record: Any) -> Any:
+    """The evidence record as it stands once the quest's seal is checked. Under ``rigor_profile: research`` a record is
+    publication-ready only if the seal is the trace's last event, nothing was lost, and the evidence, the attempt
+    records and the paper are what the seal names; otherwise it is read one level down, with the reasons. Whatever the
+    record says about its own seal (``trace_seal``) is not believed: it is in the file the seal protects. A research
+    record from before the seal named these files is read one level down too. Pure: it reads, never writes (not even
+    to the trace it checks)."""
+    if not isinstance(record, dict):
+        return record
+    from . import audit_log as _audit_log
+
+    trace = quest_root / ".fi" / "audit.jsonl"
+    if record.get("rigor_profile") != "research":
+        # The record's own profile is in the file the seal protects: a seal that says research is believed over it.
+        try:
+            seals = [e for e in _audit_log.read(trace) if e.get("kind") == "quest_finalized"]
+        except Exception:  # noqa: BLE001
+            seals = []
+        if not (seals and seals[-1].get("rigor_profile") == "research"):
+            return record
+    try:
+        intact = trace.is_file() and _audit_log.verify(trace).ok
+    except Exception:  # noqa: BLE001
+        intact = False
+    problems = (_trace_completeness_gaps(trace, _audit_log) if intact
+                else ["the quest's decision trace (.fi/audit.jsonl) is missing or no longer checks out"])
+    if not problems:
+        return {**record, "trace_seal": "verified"}
+    out = {**record, "trace_seal": "not_verified"}
+    last = LEVELS[-1]
+    all_gaps = {k: list(v) for k, v in (record.get("all_gaps") or {}).items()}
+    all_gaps[last] = list(dict.fromkeys([*all_gaps.get(last, []), *problems]))
+    out["all_gaps"] = all_gaps
+    levels = dict(record.get("levels") or {})
+    if levels.get(last):
+        levels[last] = False
+        out["levels"] = levels
+        out["status"] = LEVELS[-2]
+        out["next_level"] = last
+    if out.get("next_level") == last:
+        out["gaps"] = all_gaps[last]
+    out["ladder"] = [
+        {**step, "reached": bool(levels.get(step.get("level"), step.get("reached"))),
+         **({"gaps": all_gaps[last]} if step.get("level") == last else {})}
+        for step in record.get("ladder") or [] if isinstance(step, dict)
+    ]
+    return out
+
+
+def read(quest_root: Path) -> dict[str, Any] | None:
+    """``needs/EVIDENCE.json`` as every surface should show it: in the current names (:func:`upgrade`) and with its
+    quest's seal checked (:func:`verify_seal`). ``None`` when there is none or it cannot be read."""
+    record = _json(quest_root / "needs" / "EVIDENCE.json")
+    return verify_seal(quest_root, upgrade(record)) if isinstance(record, dict) else None
 
 
 def upgrade(record: Any) -> Any:

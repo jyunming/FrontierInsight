@@ -144,8 +144,12 @@ RESEARCH = {**ON, "rigor_profile": "research"}
 
 def _seal(log: audit_log.AuditLog, trace: Path, **over) -> None:
     events = audit_log.read(trace)
+    files = {rel: evidence._file_sha256(trace.parent.parent / rel) for rel in evidence.SEALED_FILES}
     log.append("quest_finalized", **{"events_before": len(events), "write_errors": 0,
-                                    "nodes_completed": ["write", "review"], **over})
+                                    "nodes_completed": ["write", "review"], "files": files,
+                                    "paper_path": "paper/paper.md",
+                                    "paper_sha256": evidence._file_sha256(trace.parent.parent / "paper" / "paper.md"),
+                                    **over})
 
 
 def _gaps(root: Path) -> list[str]:

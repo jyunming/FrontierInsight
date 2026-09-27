@@ -1190,13 +1190,15 @@ class Engine:
                 # would mislead ("paused for data, but also failed?").
                 self._clear_stale_quest_failed_diagnostic()
                 self._write_evidence(final_state)
-                self._record_stop(final_state, await self._attempt_context(final_state))
+                self._record_stop(final_state, await self._attempt_context(final_state, kind="in_progress"))
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
-            self._seal_trace(final_state)
-            evidence_record = self._write_evidence(final_state)
-            end_context = await self._attempt_context(final_state)
+            # Finishing is two steps: everything the quest keeps is written first (the evidence, the attempt records),
+            # then the seal naming their hashes is the trace's last event. The evidence is assessed before the seal it
+            # cannot yet see; readers check that seal (core/evidence.py::verify_seal).
+            evidence_record = self._write_evidence(final_state, sealing=True)
+            end_context = await self._attempt_context(final_state, kind="quest_end")
 
             def _quest_record() -> dict[str, Any]:
                 review = final_state.get("review") if isinstance(final_state.get("review"), dict) else {}
@@ -1220,8 +1222,6 @@ class Engine:
                 }
             self._record(_attempts.ATTEMPTS, _quest_record)
             self._quest_recorded = True
-            # Anchor both record files in the trace now that the last line is written.
-            self._audit("attempts_sealed", files=_attempts.file_digests(self.fi_dir))
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
@@ -1242,6 +1242,15 @@ class Engine:
                     p.unlink(missing_ok=True)
                 except OSError:
                     pass
+            # Nothing may be written to the trace after this.
+            self._seal_trace(final_state)
+            if evidence_record is not None:
+                sealed = _evidence.verify_seal(self.quest_root, evidence_record)
+                if sealed.get("status") != evidence_record.get("status"):
+                    self._log.warning("[evidence] after sealing: %s (the seal did not check out: %s)",
+                                      _evidence.summary_line(sealed, technical=True),
+                                      "; ".join((sealed.get("all_gaps") or {}).get("publication_ready", [])[-3:]))
+                evidence_record = sealed
             # Nothing is paused now; what did not stop the quest but is worth a look stays on the card (.fi/todo.json).
             _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
             self._write_back_knowledge(artifacts, final_state, (evidence_record or {}).get("status"))
@@ -1334,7 +1343,7 @@ class Engine:
                 if not fail_context:
                     try:
                         fail_context = await asyncio.wait_for(
-                            self._attempt_context({"topic": self.config.topic}, partial=True), timeout=30)
+                            self._attempt_context({"topic": self.config.topic}, kind="in_progress", partial=True), timeout=30)
                     except Exception:  # noqa: BLE001 -- never in the way of the error
                         fail_context = None
                 self._record(_attempts.ATTEMPTS, lambda: {
@@ -1441,25 +1450,38 @@ class Engine:
             self._log.debug("[audit] could not record %s: %r", kind, e)
 
     def _seal_trace(self, state: QuestState) -> None:
-        """The last event of a finished quest (``quest_finalized``): how many events the trace holds before it, how
-        many this run could not write, which steps completed and a hash of the paper. A trace that checks out but has
-        no seal (the quest never finished, or its end was lost) or lost events is a gap under ``rigor_profile:
-        research`` (core/evidence.py): a valid prefix is not a complete record."""
+        """The last event of a finished quest (``quest_finalized``), written after everything else the quest keeps:
+        how many events the trace holds before it, how many events and attempt records could not be written, which
+        steps completed, and the hashes of the evidence record, the attempt records and the paper. Under
+        ``rigor_profile: research`` a trace without it as its last event, or whose named files changed since, is a gap
+        (core/evidence.py::verify_seal): a valid prefix is not a complete record."""
         try:
             events = _audit_log.read(self.audit.path)
         except Exception:  # noqa: BLE001 -- a trace that cannot be read gets no seal, which is itself the gap
             return
-        paper = state.get("paper_md")
+        # The quest's own paper (where _collect_artifacts finds it), not a path the state kept from before a move.
+        paper_rel = "paper/paper.md"
         try:
-            paper_sha = hashlib.sha256(Path(str(paper)).read_bytes()).hexdigest() if paper else None
+            paper_sha = hashlib.sha256((self.quest_root / paper_rel).read_bytes()).hexdigest()
         except OSError:
             paper_sha = None
+        files = {}
+        for rel in _evidence.SEALED_FILES:
+            try:
+                files[rel] = hashlib.sha256((self.quest_root / rel).read_bytes()).hexdigest()
+            except OSError:
+                files[rel] = None
         self._audit(
             "quest_finalized",
             events_before=len(events),
             write_errors=max(int(getattr(self.audit, "write_errors", 0) or 0), _audit_log.lost_writes(self.audit.path)),
+            records_not_written=_attempts.lost(self.fi_dir),
+            # Kept here, not only in the evidence record the seal protects: whether the seal must be checked.
+            rigor_profile=self.config.rigor_profile,
             nodes_completed=sorted({str(e.get("node")) for e in events if e.get("kind") == "node_completed" and e.get("node")}),
+            paper_path=paper_rel,
             paper_sha256=paper_sha,
+            files=files,
         )
 
     def _audit_artifacts(self, node: str) -> None:
@@ -5875,9 +5897,10 @@ class Engine:
             payload={"check": check, "failure": failure},
         )
 
-    def _write_evidence(self, state: QuestState) -> dict[str, Any] | None:
+    def _write_evidence(self, state: QuestState, *, sealing: bool = False) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
-        (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest."""
+        (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest.
+        ``sealing``: the quest is finishing and seals its trace right after (the seal names this record)."""
         try:
             missed: list[str] = []
             replicates = state.get("result_json_replicates") or []
@@ -5911,6 +5934,8 @@ class Engine:
                     # The panel really runs on one model and the person said that is all they have: a gap. The flag
                     # alone (set, then a second model added) is not.
                     "one_model_review": self._one_model_panel(),
+                    "review_identity_unverified": self._review_identity_unverified(state),
+                    "sealing": sealing,
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -7267,7 +7292,7 @@ class Engine:
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         patch["run_manifest_failures"] = manifest_attempts_next
-        run_context = await self._attempt_context({**state, **patch}, after_run=True)
+        run_context = await self._attempt_context({**state, **patch}, kind="after_run")
 
         def _run_record() -> dict[str, Any] | None:
             try:
@@ -11611,9 +11636,9 @@ class Engine:
             model = getattr(self._client, "last_model", None) or ""
         append_cost_row(self.fi_dir, node=node, model=model, usage=usage, messages=messages, response=response)
 
-    async def _attempt_context(self, state: QuestState, *, after_run: bool = False,
-                               partial: bool = False) -> dict[str, Any]:
-        """The conditions an attempt ran under (core/attempt_records.py); an empty dict if they cannot be read. Hashing
+    async def _attempt_context(self, state: QuestState, *, kind: str, partial: bool = False) -> dict[str, Any]:
+        """The conditions an attempt ran under (core/attempt_records.py; ``kind`` is one of its ``CONTEXT_KINDS``); an
+        empty dict if they cannot be read. Hashing
         the quest's files and asking git for FI's commit run in a worker thread, off the event loop."""
         try:
             models_used = {node: dict(v) for node, v in dict(getattr(self, "_last_chat", {}) or {}).items()}
@@ -11622,7 +11647,7 @@ class Engine:
                 _attempts.context_fingerprint,
                 self.config, self.quest_root, dict(state), prompts=self._prompts,
                 fi_repo=Path(__file__).resolve().parent.parent, models_used=models_used,
-                after_run=after_run, cache=cache, partial=partial,
+                kind=kind, cache=cache, partial=partial,
             )
             if not partial:
                 self._last_attempt_context = context
@@ -11689,6 +11714,18 @@ class Engine:
             return False
         panel = list(self.config.engine.review_panel or [])
         return len({self._reviewer_model(p) for p in panel}) <= 1
+
+    def _review_identity_unverified(self, state: QuestState) -> list[str]:
+        """Under ``rigor_profile: research``, the reviewers set up on different models whose connection did not say
+        which model actually answered (one that reports none): that they were different models is unproven, so the
+        evidence level lists it. Empty when the panel knowingly runs on one model (its own gap) or every answer came
+        with the model that gave it."""
+        if self.config.rigor_profile != "research" or self._one_model_panel():
+            return []
+        ok = [r for r in (state.get("review_panel") or []) if isinstance(r, dict) and r.get("status", "ok") == "ok"]
+        if len({str(r.get("requested_model")) for r in ok}) < 2:
+            return []
+        return sorted(str(r.get("persona") or "?") for r in ok if not r.get("actual_model_reported"))
 
     def _reviewer_model(self, persona: str) -> str:
         """The model a review-panel persona is asked on: its own ``provider.node_models`` entry, else the quest's."""

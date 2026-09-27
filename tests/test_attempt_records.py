@@ -56,7 +56,7 @@ def test_the_context_names_what_a_failure_depends_on(tmp_path: Path) -> None:
     (tmp_path / "needs").mkdir()
     (tmp_path / "needs" / "ENVIRONMENT.json").write_text('{"packages": ["a==1"]}', encoding="utf-8")
     state = {"design": {"protocol": {"runs_per_setting": 30, "metrics": [{"id": "x"}]}}, "iteration": 1}
-    ctx = ar.context_fingerprint(cfg, tmp_path, state, prompts={"design": "prompt text"})
+    ctx = ar.context_fingerprint(cfg, tmp_path, state, kind="in_progress", prompts={"design": "prompt text"})
     assert ctx["model"] == "m1" and ctx["provider"] == "openai"
     assert ctx["skills"] == [] and ctx["fi"] is None, "no fi_repo given: unknown, not an empty string"
     assert ctx["environment_sha256"] and ctx["metric_specs_sha256"] and ctx["budget"]["runs_per_setting"] == 30
@@ -64,9 +64,9 @@ def test_the_context_names_what_a_failure_depends_on(tmp_path: Path) -> None:
     assert ctx["policy"]["result_use"] == "explore" and ctx["question"]["topic_sha256"]
     assert ctx["complete"] is False, "no FI version known: never treated as the same conditions"
     other = ar.context_fingerprint(cfg.model_copy(update={"provider": cfg.provider.model_copy(update={"model": "m2"})}),
-                                   tmp_path, state, prompts={"design": "prompt text"})
+                                   tmp_path, state, kind="in_progress", prompts={"design": "prompt text"})
     assert other["model"] != ctx["model"], "a different model is a different context"
-    assert ar.context_fingerprint(cfg, tmp_path, state, prompts={"design": "changed"})["prompts_sha256"] != ctx["prompts_sha256"]
+    assert ar.context_fingerprint(cfg, tmp_path, state, kind="in_progress", prompts={"design": "changed"})["prompts_sha256"] != ctx["prompts_sha256"]
 
 
 def test_two_quests_with_the_same_packages_and_protocol_match(tmp_path: Path) -> None:
@@ -81,11 +81,11 @@ def test_two_quests_with_the_same_packages_and_protocol_match(tmp_path: Path) ->
             {"python": "3.11", "executable": venv, "recorded": name, "packages": ["a==1"]}), encoding="utf-8")
         (root / "needs" / "FROZEN_PROTOCOL.json").write_text(json.dumps(
             {"protocol": protocol, "approved_at": name, "run_id": name}), encoding="utf-8")
-        ctxs.append(ar.context_fingerprint(cfg, root, {}, prompts={}))
+        ctxs.append(ar.context_fingerprint(cfg, root, {}, kind="in_progress", prompts={}))
     assert ctxs[0]["environment_sha256"] == ctxs[1]["environment_sha256"]
     assert ctxs[0]["protocol_sha256"] == ctxs[1]["protocol_sha256"]
     # Before the freeze the same protocol gives the same hash.
-    before = ar.context_fingerprint(cfg, tmp_path / "none", {"design": {"protocol": protocol}}, prompts={})
+    before = ar.context_fingerprint(cfg, tmp_path / "none", {"design": {"protocol": protocol}}, kind="in_progress", prompts={})
     assert before["protocol_sha256"] == ctxs[0]["protocol_sha256"]
 
 
@@ -99,18 +99,18 @@ def test_a_changed_program_or_a_late_input_file_changes_the_context(tmp_path: Pa
     inputs.mkdir()
     for i in range(201):
         (inputs / f"f{i:03d}.txt").write_text(str(i), encoding="utf-8")
-    before = ar.context_fingerprint(cfg, tmp_path, {}, prompts={})
+    before = ar.context_fingerprint(cfg, tmp_path, {}, kind="in_progress", prompts={})
     (tmp_path / "code" / "experiment.py").write_text("print(2)", encoding="utf-8")
-    after_code = ar.context_fingerprint(cfg, tmp_path, {}, prompts={})
+    after_code = ar.context_fingerprint(cfg, tmp_path, {}, kind="in_progress", prompts={})
     assert after_code["code"] != before["code"]
     (inputs / "f200.txt").write_text("changed", encoding="utf-8")
-    after_input = ar.context_fingerprint(cfg, tmp_path, {}, prompts={})
+    after_input = ar.context_fingerprint(cfg, tmp_path, {}, kind="in_progress", prompts={})
     assert after_input["inputs"]["sha256"] != after_code["inputs"]["sha256"]
     assert after_input["inputs"]["files"] == 201 and after_input["inputs"]["complete"] is True
     # A different question or policy is a different context.
-    assert ar.context_fingerprint(cfg.model_copy(update={"topic": "other"}), tmp_path, {}, prompts={})["question"] != \
+    assert ar.context_fingerprint(cfg.model_copy(update={"topic": "other"}), tmp_path, {}, kind="in_progress", prompts={})["question"] != \
         before["question"]
-    assert ar.context_fingerprint(cfg.model_copy(update={"result_use": "research"}), tmp_path, {}, prompts={})[
+    assert ar.context_fingerprint(cfg.model_copy(update={"result_use": "research"}), tmp_path, {}, kind="in_progress", prompts={})[
         "policy"] != before["policy"]
 
 
@@ -172,7 +172,10 @@ async def test_a_quest_records_its_ideas_design_runs_and_end(smoke_config: Confi
     design_ids = {r["record_id"] for r in ledger if r["kind"] in ("design", "repair")}
     assert runs[0]["parent_id"] in design_ids, "the run names the design revision it ran"
     from core import audit_log
-    assert any(e.get("kind") == "attempts_sealed" for e in audit_log.read(engine.audit.path)), "anchored at the end"
+    last = audit_log.read(engine.audit.path)[-1]
+    assert last["kind"] == "quest_finalized", "the seal is the trace's last event"
+    assert last["files"][".fi/attempts.jsonl"] == ar._sha((engine.fi_dir / ar.ATTEMPTS).read_bytes()), "anchored"
+    assert end["context"]["context_kind"] == "quest_end"
     assert "answered_by" in end and "person" in end
 
 
@@ -262,11 +265,11 @@ def test_what_keeps_a_context_from_being_complete_is_named(tmp_path: Path) -> No
     cfg = Config.model_validate({"topic": "t", "provider": {"name": "openai", "model": "m1"},
                                  "knowledge": {"enabled": False}})
     repo = Path(__file__).resolve().parent.parent
-    ctx = ar.context_fingerprint(cfg, tmp_path, {}, prompts={}, fi_repo=repo, after_run=True)
+    ctx = ar.context_fingerprint(cfg, tmp_path, {}, prompts={}, fi_repo=repo, kind="after_run")
     assert not ctx["complete"]
     assert "no model call recorded yet" in ctx["missing"] and "no script in code/" in ctx["missing"]
     assert ctx["policy"]["config_sha256"]
-    part = ar.context_fingerprint(cfg, tmp_path, {}, prompts={}, fi_repo=repo, partial=True,
+    part = ar.context_fingerprint(cfg, tmp_path, {}, kind="in_progress", prompts={}, fi_repo=repo, partial=True,
                                   models_used={"design": {"provider": "p", "model": "m"}})
     assert any("without the quest's state" in m for m in part["missing"])
 

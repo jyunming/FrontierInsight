@@ -43,8 +43,10 @@ OUTCOMES = ("process_error", "protocol_mismatch", "oracle_failure", "inconclusiv
 ATTEMPTS = "attempts.jsonl"
 LEDGER = "branch_ledger.jsonl"
 #: Version 2 added record ids, the scripts' hashes, the question, the policy, the models each step was answered by, the
-#: inputs' completeness and the quest line's four fields. Version 1 lines carry no ``schema``.
-SCHEMA = 2
+#: inputs' completeness and the quest line's four fields. Version 3: code is hashed whole, a context names its
+#: ``context_kind``, and a finished quest's context needs its code, environment and protocol. Version 1 lines carry no
+#: ``schema``.
+SCHEMA = 3
 
 #: The quest line's fields (:func:`quest_status`). ``execution_status``: how far it ran. ``review_status``: what the
 #: review said. ``evidence_status``: the evidence level (core/evidence.py). ``claim_outcome``: whether the result
@@ -74,14 +76,15 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _file_sha(path: Path) -> str | None:
+def _file_sha(path: Path, *, whole: bool = False) -> str | None:
     """A hash of the file, read in chunks; a file over :data:`_WHOLE_FILE_LIMIT` is hashed by its size and its first
-    and last MiB. ``None`` when it cannot be read."""
+    and last MiB unless ``whole`` (code is always read whole: two programs must never share a hash). ``None`` when it
+    cannot be read."""
     try:
         h = hashlib.sha256()
         size = path.stat().st_size
         with path.open("rb") as fh:
-            if size > _WHOLE_FILE_LIMIT:
+            if size > _WHOLE_FILE_LIMIT and not whole:
                 h.update(f"size:{size}".encode("ascii"))
                 h.update(fh.read(_CHUNK))
                 fh.seek(-_CHUNK, 2)
@@ -157,17 +160,17 @@ def _git_version(repo: Path) -> dict[str, Any] | None:
     return {"commit": commit, "dirty": bool(status)} if commit else None
 
 
-def _digest(path: Path, cache: dict | None) -> tuple[str | None, int | None]:
+def _digest(path: Path, cache: dict | None, *, whole: bool = False) -> tuple[str | None, int | None]:
     """``path``'s hash and size; with ``cache`` (the engine's own, keyed by path, size and modification time) a file
     unchanged since it was last hashed is not read again."""
     try:
         st = path.stat()
     except OSError:
         return None, None
-    key = (str(path), st.st_size, st.st_mtime_ns)
+    key = (str(path), st.st_size, st.st_mtime_ns, whole)
     if cache is not None and key in cache:
         return cache[key], st.st_size
-    digest = _file_sha(path)
+    digest = _file_sha(path, whole=whole)
     if cache is not None and digest is not None:
         cache[key] = digest
     return digest, st.st_size
@@ -207,13 +210,15 @@ def _folder_manifest(folder: Path, limit: int = _INPUT_FILES_LIMIT, cache: dict 
 
 def script_hashes(quest_root: Path, cache: dict | None = None) -> dict[str, str]:
     """The hash of every file in the quest's ``code/`` folder, subfolders included (the experiment, the simulation, a
-    cluster submit script, whatever they import or read from there), by relative path: the code an attempt ran. A
-    cluster job's scripts are hashed when its result is collected, not when it was submitted."""
+    cluster submit script, whatever they import or read from there), by relative path, each read whole: the code an
+    attempt ran. A cluster job's code is also hashed when it is submitted and compared when its results are collected
+    (core/trial_runner.py); a change in between is named in ``.fi/trials/cluster.json`` and leaves the context
+    incomplete."""
     code = quest_root / "code"
     out: dict[str, str] = {}
     if code.is_dir():
         for path in sorted(p for p in code.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
-            digest, _ = _digest(path, cache)
+            digest, _ = _digest(path, cache, whole=True)
             if digest:
                 out[path.relative_to(code).as_posix()] = digest
     return out
@@ -239,13 +244,35 @@ def _environment_sha(needs: Path) -> str | None:
     return _json_sha({k: record.get(k) for k in keep})
 
 
-def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *, prompts: dict[str, Any] | None = None,
-                        fi_repo: Path | None = None, models_used: dict[str, Any] | None = None,
-                        after_run: bool = False, cache: dict | None = None, partial: bool = False) -> dict[str, Any]:
+#: When a context is worked out. ``in_progress``: the quest stopped part-way (a check failed, it paused). ``after_run``:
+#: an experiment has just run. ``quest_end``: the quest finished; an experiment it was meant to run must have left its
+#: code, environment and protocol, unless it runs none by design (a survey, an analysis of data that already exists).
+CONTEXT_KINDS = ("in_progress", "after_run", "quest_end")
+
+
+def _experiment_expected(config: Any, state: dict[str, Any]) -> bool:
+    engine = getattr(config, "engine", None)
+    return not (state.get("survey_mode_resolved") or state.get("no_simulation_resolved")
+                or getattr(engine, "survey_mode", False))
+
+
+def _cluster_code_changes(quest_root: Path) -> list[str]:
+    record = _read_json(quest_root / ".fi" / "trials" / "cluster.json")
+    changed = record.get("code_changed_while_queued") if isinstance(record, dict) else None
+    return [str(c) for c in changed] if isinstance(changed, list) else []
+
+
+def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *, kind: str,
+                        prompts: dict[str, Any] | None = None, fi_repo: Path | None = None,
+                        models_used: dict[str, Any] | None = None, cache: dict | None = None,
+                        partial: bool = False) -> dict[str, Any]:
     """The conditions an attempt ran under, as far as the quest knows them. Two attempts share a context only when
     these match: the model and the settings that change its answers, the prompts it was given, FI's own version, the
     selected skills, the environment and its packages, the inputs, the protocol and its metric definitions, the budget,
-    and where in the quest's lineage the attempt sits. A field FI could not work out is ``None``."""
+    and where in the quest's lineage the attempt sits. A field FI could not work out is ``None``. ``kind`` is one of
+    :data:`CONTEXT_KINDS`: what must be there for the context to be complete depends on it."""
+    if kind not in CONTEXT_KINDS:
+        raise ValueError(f"kind must be one of {CONTEXT_KINDS}; got {kind!r}")
     provider = getattr(config, "provider", None)
     engine = getattr(config, "engine", None)
     execution = getattr(config, "execution", None)
@@ -292,14 +319,18 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         missing.append("the configuration could not be hashed")
     if not models_used:
         missing.append("no model call recorded yet")
-    if after_run:
+    if kind == "after_run" or (kind == "quest_end" and _experiment_expected(config, state)):
         if not code:
             missing.append("no script in code/")
         if environment_sha is None:
             missing.append("no environment record")
         if protocol_sha is None:
             missing.append("no protocol")
+    changed_while_queued = _cluster_code_changes(quest_root)
+    if changed_while_queued:
+        missing.append("the code changed while the cluster job was queued: " + ", ".join(changed_while_queued[:10]))
     return {
+        "context_kind": kind,
         "provider": getattr(provider, "name", "") or None,
         "model": getattr(provider, "model", "") or None,
         "settings": {
