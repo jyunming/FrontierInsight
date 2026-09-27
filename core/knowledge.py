@@ -20,7 +20,11 @@ Two responsibilities:
 2. **Ingest** (`Knowledge.add_quest_artifacts`) for the post-quest
    write-back, gated on `verdict == "accept"` by default. Finished
    research lands as a *structured bundle*, NOT a flat blob, so the
-   chunked-RAG corpus stays title-searchable and topic-linkable:
+   chunked-RAG corpus stays title-searchable and topic-linkable. A
+   result that is not accepted evidence (an exploration, evidence
+   gaps) goes under `fi_preliminary_spine` / `fi_preliminary_paper` /
+   `fi_preliminary_summary` instead of the first three kinds below,
+   with no ref spines, and is read back as a reminder, never a source:
      - `fi_paper_spine`        — single-chunk card-catalog entry per
                                  paper (title + authors + DOI + topic
                                  + abstract + key claims).
