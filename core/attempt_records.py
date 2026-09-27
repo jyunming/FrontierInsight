@@ -3,15 +3,22 @@
 Two append-only JSONL files in the quest's ``.fi/`` folder, written as the quest runs and read by nothing that decides a
 route (this is the "records only" first phase; a later phase reads them in shadow mode, then for real):
 
-- ``attempts.jsonl``: one line per run of the experiment, one when the quest stops for a check it failed, and one when
-  the quest ends or fails, each with an ``outcome`` from :data:`OUTCOMES` and the ``context`` it happened under
-  (:func:`context_fingerprint`). A failure is a fact about an attempt under a context, not about a method in general: a
-  different model, protocol or environment is a different context.
+- ``attempts.jsonl``: one line per run of the experiment (an ``outcome`` from :data:`OUTCOMES` and the hashes of the
+  scripts it ran), one when the quest stops for a check it failed, and one when the quest ends or fails (four separate
+  fields: :func:`quest_status`), each with the ``context`` it happened under (:func:`context_fingerprint`). A failure is
+  a fact about an attempt under a context, not about a method in general: a different model, protocol, program or
+  environment is a different context.
 - ``branch_ledger.jsonl``: the choices along the way, with what was chosen from what: the candidate ideas and how one was
   picked, each revision of the design and why, each repair of a script.
 
+Every line carries ``schema`` (:data:`SCHEMA`), its own ``record_id`` and the ``quest_id``. A context says whether it
+is ``complete`` (every part of it could be worked out, the inputs hashed whole); only a complete context of the current
+schema may ever be treated as the same conditions as another -- an older record or an incomplete one is information
+only.
+
 Kept apart from the accepted evidence (nothing here is written to the knowledge base, and nothing here supports a
-claim). Every write is best-effort: a record that cannot be built or written never touches the quest.
+claim). Every write is best-effort: a record that cannot be built or written never touches the quest, and the quest's
+last line counts the ones that could not be written.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import hashlib
 import json
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +42,19 @@ from . import frozen_protocol as _frozen
 OUTCOMES = ("process_error", "protocol_mismatch", "oracle_failure", "inconclusive", "accepted")
 ATTEMPTS = "attempts.jsonl"
 LEDGER = "branch_ledger.jsonl"
+#: Version 2 added record ids, the scripts' hashes, the question, the policy, the models each step was answered by, the
+#: inputs' completeness and the quest line's four fields. Version 1 lines carry no ``schema``.
+SCHEMA = 2
+
+#: The quest line's fields (:func:`quest_status`). ``execution_status``: how far it ran. ``review_status``: what the
+#: review said. ``evidence_status``: the evidence level (core/evidence.py). ``claim_outcome``: whether the result
+#: supports the hypothesis -- not derived yet (the analysis does not state it), so ``None``.
+EXECUTION = ("completed", "no_result", "stopped", "crashed", "no_experiment_by_design", "data_analysis")
+#: ``rejected`` is the person's (``person``), never a reviewer's: a reviewer answers accept or revise.
+REVIEW = ("accepted", "revise", "rejected", "unavailable", "none")
+
+#: Inputs beyond this many files are not all hashed, and the context says it is incomplete.
+_INPUT_FILES_LIMIT = 2000
 
 #: A stop for one of these checks is an attempt that failed it. Any other stop is not an outcome: the plan waiting for
 #: you, papers asked for, a protocol change waiting for approval, or a check that could not be asked (an outage is not
@@ -88,8 +109,37 @@ def _read_json(path: Path) -> Any:
 
 
 @functools.lru_cache(maxsize=4)
+def _fi_source_sha(repo: Path) -> str | None:
+    """A hash over FI's own source (``core/**/*.py``, ``generation/**/*.py``, ``agents/*.md``) under ``repo``: what this
+    process loaded, the same for an installed copy and a checkout, and different for any edit, committed or not."""
+    h = hashlib.sha256()
+    found = False
+    for pattern in ("core/**/*.py", "generation/**/*.py", "agents/*.md"):
+        for path in sorted(repo.glob(pattern)):
+            if "__pycache__" in path.parts:
+                continue
+            digest = _file_sha(path)
+            if digest is None:
+                return None
+            h.update(path.relative_to(repo).as_posix().encode("utf-8"))
+            h.update(digest.encode("ascii"))
+            found = True
+    return h.hexdigest() if found else None
+
+
 def _fi_version(repo: Path) -> dict[str, Any] | None:
-    """FI's own commit, and whether the checkout had changes, when ``repo`` is the top of a git checkout; ``None``
+    """FI's identity: a hash of its loaded source (:func:`_fi_source_sha`), plus the git commit and whether the checkout
+    had changes when ``repo`` is the top of a git checkout. ``None`` when not even the source can be read."""
+    source = _fi_source_sha(repo)
+    if source is None:
+        return None
+    info = _git_version(repo)
+    return {"source_sha256": source, **(info or {"commit": None, "dirty": None})}
+
+
+@functools.lru_cache(maxsize=4)
+def _git_version(repo: Path) -> dict[str, Any] | None:
+    """The git commit, and whether the checkout had changes, when ``repo`` is the top of a git checkout; ``None``
     otherwise (an installed copy, or a folder inside someone else's repository). Asked once per process: it is the
     code this process loaded."""
     def git(*args: str) -> str | None:
@@ -107,18 +157,76 @@ def _fi_version(repo: Path) -> dict[str, Any] | None:
     return {"commit": commit, "dirty": bool(status)} if commit else None
 
 
-def _folder_sha(folder: Path, limit: int = 200) -> str | None:
-    """A hash over the names and contents of up to ``limit`` files (the inputs a quest was given)."""
+def _digest(path: Path, cache: dict | None) -> tuple[str | None, int | None]:
+    """``path``'s hash and size; with ``cache`` (the engine's own, keyed by path, size and modification time) a file
+    unchanged since it was last hashed is not read again."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, None
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    if cache is not None and key in cache:
+        return cache[key], st.st_size
+    digest = _file_sha(path)
+    if cache is not None and digest is not None:
+        cache[key] = digest
+    return digest, st.st_size
+
+
+def _folder_manifest(folder: Path, limit: int = _INPUT_FILES_LIMIT, cache: dict | None = None,
+                     ) -> dict[str, Any] | None:
+    """A hash over the names and contents of the files in ``folder`` (the inputs or the data a quest was given), with
+    how many files and bytes there are and whether the hash covers them all: ``complete`` is false when there are more
+    than ``limit`` files, a file is too large to read whole (:data:`_WHOLE_FILE_LIMIT`) or one could not be read. One
+    aggregate hash, not a per-file list: it says whether the inputs differ, not which one."""
     if not folder.is_dir():
         return None
+    files = sorted(p for p in folder.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
     h = hashlib.sha256()
-    for n, path in enumerate(sorted(p for p in folder.rglob("*") if p.is_file())):
+    total, complete = 0, len(files) <= limit
+    for n, path in enumerate(files):
         if n >= limit:
-            h.update(b"...")
-            break
+            try:
+                total += path.stat().st_size
+            except OSError:
+                pass
+            continue
+        digest, size = _digest(path, cache)
+        if size is None:
+            complete = False
+            continue
+        total += size
+        if size > _WHOLE_FILE_LIMIT:
+            complete = False
+        if digest is None:
+            complete = False
         h.update(path.relative_to(folder).as_posix().encode("utf-8"))
-        h.update((_file_sha(path) or "").encode("ascii"))
-    return h.hexdigest()
+        h.update((digest or "").encode("ascii"))
+    return {"sha256": h.hexdigest(), "files": len(files), "bytes": total, "complete": complete}
+
+
+def script_hashes(quest_root: Path, cache: dict | None = None) -> dict[str, str]:
+    """The hash of every file in the quest's ``code/`` folder, subfolders included (the experiment, the simulation, a
+    cluster submit script, whatever they import or read from there), by relative path: the code an attempt ran. A
+    cluster job's scripts are hashed when its result is collected, not when it was submitted."""
+    code = quest_root / "code"
+    out: dict[str, str] = {}
+    if code.is_dir():
+        for path in sorted(p for p in code.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
+            digest, _ = _digest(path, cache)
+            if digest:
+                out[path.relative_to(code).as_posix()] = digest
+    return out
+
+
+def _config_sha(config: Any) -> str | None:
+    """A hash of the whole effective configuration, without where the outputs go and the transport wiring: every check
+    mode, the sandbox, the split rules -- also for a config that has no approved-settings record."""
+    try:
+        data = config.model_dump(mode="json", exclude={"output": {"output_dir"}, "provider": {"extra"}})
+    except Exception:  # noqa: BLE001 -- not a pydantic config (a test's stand-in)
+        return None
+    return _json_sha(data)
 
 
 def _environment_sha(needs: Path) -> str | None:
@@ -132,7 +240,8 @@ def _environment_sha(needs: Path) -> str | None:
 
 
 def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *, prompts: dict[str, Any] | None = None,
-                        fi_repo: Path | None = None) -> dict[str, Any]:
+                        fi_repo: Path | None = None, models_used: dict[str, Any] | None = None,
+                        after_run: bool = False, cache: dict | None = None, partial: bool = False) -> dict[str, Any]:
     """The conditions an attempt ran under, as far as the quest knows them. Two attempts share a context only when
     these match: the model and the settings that change its answers, the prompts it was given, FI's own version, the
     selected skills, the environment and its packages, the inputs, the protocol and its metric definitions, the budget,
@@ -151,6 +260,45 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         protocol_sha = _frozen.sha256(protocol) if protocol else None
     except (TypeError, ValueError):
         protocol_sha = None
+    inputs = _folder_manifest(quest_root / "inputs", cache=cache)
+    data = _folder_manifest(quest_root / "data", cache=cache)
+    code = script_hashes(quest_root, cache)
+    engine_cfg = engine
+    question = {
+        "topic_sha256": _json_sha(str(state.get("topic") or getattr(config, "topic", "") or "")),
+        "hypothesis_sha256": _json_sha(str(design.get("hypothesis") or "")) if design else None,
+        "design_sha256": _json_sha(design) if design else None,
+    }
+    policy = {
+        "result_use": getattr(config, "effective_result_use", None) or getattr(config, "result_use", None) or None,
+        "rigor_profile": getattr(config, "rigor_profile", None),
+        "review_panel": list(getattr(engine_cfg, "review_panel", []) or []),
+        "approved_plan_sha256": _file_sha(quest_root / ".fi" / "approved_plan.json"),
+        "config_sha256": _config_sha(config),
+    }
+    fi = _fi_version(fi_repo) if fi_repo is not None else None
+    environment_sha = _environment_sha(needs)
+    # What keeps this context from ever counting as the same conditions as another: it is information only.
+    missing: list[str] = []
+    if partial:
+        missing.append("worked out without the quest's state (it failed before any attempt was recorded)")
+    if inputs is not None and not inputs.get("complete"):
+        missing.append("inputs not all hashed")
+    if data is not None and not data.get("complete"):
+        missing.append("data not all hashed")
+    if fi is None:
+        missing.append("FI's source could not be read")
+    if policy["config_sha256"] is None:
+        missing.append("the configuration could not be hashed")
+    if not models_used:
+        missing.append("no model call recorded yet")
+    if after_run:
+        if not code:
+            missing.append("no script in code/")
+        if environment_sha is None:
+            missing.append("no environment record")
+        if protocol_sha is None:
+            missing.append("no protocol")
     return {
         "provider": getattr(provider, "name", "") or None,
         "model": getattr(provider, "model", "") or None,
@@ -163,11 +311,21 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
             "node_ensemble": sorted((getattr(provider, "node_ensemble", None) or {}).keys()),
         },
         "prompts_sha256": _json_sha({k: getattr(v, "template", str(v)) for k, v in (prompts or {}).items()}),
-        "fi": _fi_version(fi_repo) if fi_repo is not None else None,
+        "fi": fi,
         "skills": sorted(str(s) for s in (state.get("selected_skills") or [])),
-        "environment_sha256": _environment_sha(needs),
+        "environment_sha256": environment_sha,
         "dependency_lock_sha256": _file_sha(quest_root / ".fi" / "requirements.lock.txt"),
-        "inputs_sha256": _folder_sha(quest_root / "inputs"),
+        "inputs": inputs,
+        "data": data,
+        "code": code,
+        "question": question,
+        "policy": policy,
+        # For each step asked through the engine's one-call path, who answered its last call (provider, model, the prompt's
+        # and reply's hashes). The source router, ensembles and the output generators
+        # call the model another way and are not in it.
+        "models_used": dict(models_used or {}),
+        "missing": missing,
+        "complete": not missing,
         "protocol_sha256": protocol_sha,
         "metric_specs_sha256": _json_sha(protocol.get("metrics")) if protocol.get("metrics") else None,
         "budget": {
@@ -186,16 +344,61 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
     }
 
 
-def append(fi_dir: Path, name: str, record: dict[str, Any]) -> bool:
-    """Append one record (with the time) to ``fi_dir/name``; False when it could not be written."""
+def append(fi_dir: Path, name: str, record: dict[str, Any]) -> str | None:
+    """Append one record (with the time, :data:`SCHEMA` and a new ``record_id``) to ``fi_dir/name``; its id, or
+    ``None`` when it could not be written."""
     try:
         fi_dir.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"at": time.time(), **record}, sort_keys=True, default=str, ensure_ascii=False)
+        record_id = str(record.get("record_id") or uuid.uuid4().hex)
+        line = json.dumps({"at": time.time(), "schema": SCHEMA, **record, "record_id": record_id},
+                          sort_keys=True, default=str, ensure_ascii=False)
         with (fi_dir / name).open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
-        return True
+        return record_id
     except (OSError, TypeError, ValueError):
-        return False
+        return None
+
+
+LOST = "attempts.lost"
+
+
+def count_lost(fi_dir: Path) -> None:
+    """Add one to the count of records that could not be built or written, kept in ``fi_dir`` so a later run of the
+    quest (after a pause) still sees it. Best-effort."""
+    try:
+        (fi_dir / LOST).write_text(str(lost(fi_dir) + 1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def lost(fi_dir: Path) -> int:
+    """How many records of this quest could not be built or written, over every run of it."""
+    try:
+        return int((fi_dir / LOST).read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def file_digests(fi_dir: Path) -> dict[str, Any]:
+    """The hash and line count of both record files, for the audit trace to anchor them at the quest's end."""
+    out: dict[str, Any] = {}
+    for name in (ATTEMPTS, LEDGER):
+        path = fi_dir / name
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        out[name] = {"sha256": _sha(data), "lines": data.count(b"\n")}
+    return out
+
+
+def last_id(fi_dir: Path, name: str, kinds: tuple[str, ...] = ()) -> str | None:
+    """The ``record_id`` of the last record in ``fi_dir/name`` (of one of ``kinds`` when given): where a resumed quest
+    picks up the lineage an earlier run of it recorded."""
+    for record in reversed(read(fi_dir, name)):
+        if not kinds or record.get("kind") in kinds:
+            return record.get("record_id")
+    return None
 
 
 def read(fi_dir: Path, name: str) -> list[dict[str, Any]]:
@@ -230,11 +433,38 @@ def run_outcome(*, returncode: int | None, has_result: bool, manifest_status: st
     return "inconclusive"
 
 
-def quest_outcome(state: dict[str, Any], evidence: dict[str, Any] | None, *, reviewer_accepted: bool) -> str:
-    """What the quest came to: ``process_error`` when nothing ran, ``accepted`` when a reviewer accepted the result
-    (``reviewer_accepted`` is the engine's own test of that, the one the automatic accept and the write-back use), and
-    ``inconclusive`` otherwise."""
-    status = str((evidence or {}).get("status") or "")
-    if status == "not_executed" or not state.get("result_json"):
-        return "process_error"
-    return "accepted" if reviewer_accepted else "inconclusive"
+def quest_status(state: dict[str, Any], evidence: dict[str, Any] | None, *, reviewer_accepted: bool,
+                 no_experiment: bool, data_analysis: bool = False) -> dict[str, Any]:
+    """What a finished quest came to, as four separate fields rather than one label: a literature survey that runs no
+    experiment by design is not a process error, and an accepted result with evidence gaps is not accepted evidence.
+
+    - ``execution_status``: ``no_experiment_by_design`` (``no_experiment``: a survey), ``data_analysis`` (a quest that
+      analyses given data instead of simulating), ``completed`` when the experiment gave a result, ``no_result`` when
+      the quest finished without one. ``crashed`` is written only by a quest that failed.
+    - ``review_status``: ``accepted`` only when ``reviewer_accepted`` (the engine's own test of a real reviewer accept,
+      the one the automatic accept and the write-back use); ``unavailable`` for a review that did not really run;
+      else the verdict (``revise`` / ``rejected``) or ``none``.
+    - ``evidence_status``: the evidence level's status, or ``unknown``.
+    - ``claim_outcome``: ``None`` (not derived: the analysis does not state it)."""
+    review = state.get("review") if isinstance(state.get("review"), dict) else {}
+    verdict = str(review.get("verdict") or "").lower()
+    if no_experiment:
+        execution = "no_experiment_by_design"
+    elif data_analysis:
+        execution = "data_analysis"
+    else:
+        execution = "completed" if state.get("result_json") else "no_result"
+    if reviewer_accepted:
+        review_status = "accepted"
+    elif review and str(review.get("status") or "ok") != "ok":
+        review_status = "unavailable"
+    elif verdict in ("revise", "reject", "rejected"):
+        review_status = "revise" if verdict == "revise" else "rejected"
+    else:
+        review_status = "none"
+    return {
+        "execution_status": execution,
+        "review_status": review_status,
+        "evidence_status": str((evidence or {}).get("status") or "unknown"),
+        "claim_outcome": None,
+    }

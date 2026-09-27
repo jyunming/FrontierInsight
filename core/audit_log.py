@@ -49,6 +49,7 @@ KINDS = (
     "audit_repair",       # a torn last line was dropped when the file was reopened
     "quest_finalized",    # the seal a finished quest writes last: how many events came before it, how many could not
                           # be written in this run, and which steps completed (core/evidence.py reads it)
+    "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
 )
 
 # Keys the chain owns: an event's own fields never replace them.
