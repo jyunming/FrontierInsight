@@ -28,7 +28,7 @@ same PR that adds, splits or renames one.
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits
   (`needs/{numeric,statistics,provenance}_audit.json`) that `internally_reconciled` requires all three of.
 - `core/numeric_warnings.py` — solver/runtime warnings from a run's own stderr that a paper must not be written over.
-- `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code, including caps the script puts on a result (`clamp_constants`; `direct_caps`: a cap written where a quantity is reported).
+- `core/plausibility.py` — the design's declared `result_assertions` (legal ranges for a result) checked in code, including caps the script puts on a result (`clamp_constants`; `direct_caps`: a cap written where a value is reported, matched on its whole path).
 - `core/goal_coverage.py` — does the experiment use the numbers the topic itself asked for?
 
 ## Config, interview, providers

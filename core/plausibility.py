@@ -163,6 +163,7 @@ run's own manifest does not contradict, is exempt (the engine passes it as
 from __future__ import annotations
 
 import ast
+import functools
 import math
 import re
 from dataclasses import dataclass
@@ -356,18 +357,43 @@ def _upper_caps(call: ast.Call) -> list[ast.AST]:
     return []
 
 
-def direct_caps(code: str, key: str) -> set[float]:
-    """Constants a quantity named ``key`` is capped at from above right where it is reported: an upper cap
-    (:func:`_upper_caps`) in the value of a dict literal that reports it (``{"rmse": min(rmse, 10.0)}``), not inside a
-    denominator (``x / min(n, 1)`` guards a division). A key many quantities share (``mean``, ``max``) gives nothing,
-    and so does unparseable code. Every other cap, a floor or one set inside an ``if`` included, is left to
+def _segments(where: Any) -> list[str]:
+    """A reported value's path as segments: dict keys by name, list positions as ``[]``. ``where`` is the tokens
+    :func:`_walk_leaves` yields, or a dotted string (``test.rmse``, ``runs[3].rmse``)."""
+    if isinstance(where, str):
+        out: list[str] = []
+        for part in where.split("."):
+            name = part.split("[", 1)[0]
+            if name:
+                out.append(name)
+            out.extend("[]" for _ in range(part.count("[")))
+        return out
+    return [str(v) if kind == "k" else "[]" for kind, v in where]
+
+
+def direct_caps(code: str, where: Any) -> set[float]:
+    """Constants the value reported at ``where`` is capped at from above right where it is reported: an upper cap
+    (:func:`_upper_caps`) in the value of a dict literal whose own path is exactly that value's path
+    (``{"test": {"rmse": min(rmse, 10.0)}}`` for ``test.rmse``), not inside a denominator (``x / min(n, 1)`` guards a
+    division). The whole path has to match: a cap on ``train.rmse`` is not one on ``test.rmse``, and a literal that
+    holds only part of the path (``{"rmse": ...}`` assigned somewhere under ``test``) cannot show which value it caps,
+    so it gives nothing. A one-segment path on a key many quantities share (``mean``, ``max``) gives nothing, and so
+    does unparseable code. Every other cap, a floor or one set inside an ``if`` included, is left to
     :func:`clamp_constants`, which counts them all for a value on a bound."""
-    if not key or key.lower() in _GENERIC_KEYS:
+    target = _segments(where)
+    if not target or (len(target) == 1 and target[0].lower() in _GENERIC_KEYS):
         return set()
+    return set(_direct_caps(code or "", tuple(target)))
+
+
+@functools.lru_cache(maxsize=512)
+def _direct_caps(code: str, target_t: tuple[str, ...]) -> frozenset[float]:
+    """:func:`direct_caps` for one script and one path, remembered: a check asks it for every reported value."""
+    target = list(target_t)
     try:
-        tree = ast.parse(code or "")
+        tree = ast.parse(code)
     except (SyntaxError, ValueError):
-        return set()
+        return frozenset()
     names: dict[str, float] = {}
     for node in ast.walk(tree):
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
@@ -382,22 +408,48 @@ def direct_caps(code: str, key: str) -> set[float]:
             v = names.get(node.id)
         return v
 
-    found: set[float] = set()
+    # Literals nested in another literal are reached from their outermost one, so their path is known.
+    nested: set[int] = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Dict):
-            continue
-        for k, v in zip(node.keys, node.values):
-            if not (isinstance(k, ast.Constant) and k.value == key and v is not None):
-                continue
-            guarded = {id(n) for b in ast.walk(v) if isinstance(b, ast.BinOp)
-                       and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
-            for n in ast.walk(v):
-                if isinstance(n, ast.Call) and id(n) not in guarded:
-                    for bound in _upper_caps(n):
-                        c = value(bound)
-                        if c is not None:
-                            found.add(c)
-    return found
+        if isinstance(node, ast.Dict):
+            nested.update(id(v) for v in node.values if v is not None)
+        elif isinstance(node, (ast.List, ast.Tuple)):
+            nested.update(id(e) for e in node.elts)
+        elif isinstance(node, ast.ListComp):
+            nested.add(id(node.elt))
+
+    found: set[float] = set()
+
+    def caps_in(v: ast.AST) -> None:
+        guarded = {id(n) for b in ast.walk(v) if isinstance(b, ast.BinOp)
+                   and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
+        for n in ast.walk(v):
+            if isinstance(n, ast.Call) and id(n) not in guarded:
+                for bound in _upper_caps(n):
+                    c = value(bound)
+                    if c is not None:
+                        found.add(c)
+
+    def visit(node: ast.AST, path: list[str]) -> None:
+        if isinstance(node, ast.Dict):
+            for k, v in zip(node.keys, node.values):
+                if v is None or not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                    continue
+                here = [*path, k.value]
+                if here == target:
+                    caps_in(v)
+                elif len(here) < len(target) and target[:len(here)] == here:
+                    visit(v, here)
+        elif isinstance(node, (ast.List, ast.Tuple, ast.ListComp)):
+            here = [*path, "[]"]
+            if len(here) < len(target) and target[:len(here)] == here:
+                for e in (node.elts if not isinstance(node, ast.ListComp) else [node.elt]):
+                    visit(e, here)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Dict, ast.List, ast.Tuple, ast.ListComp)) and id(node) not in nested:
+            visit(node, [])
+    return frozenset(found)
 
 
 # A value this close to a bound is ON that bound. The at-bound and clamped
@@ -763,7 +815,6 @@ def violations(
     for a in assertions:
         # Every cap in the script counts for a value on a bound, as before. A value exactly on a cap written right where
         # this quantity is reported is rejected even inside the range (an RMSE capped at 10 and reported as 10).
-        own = direct_caps(code, a.path.split(".")[-1].strip("*[]")) if code else set()
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for tokens, path, value in leaves:
@@ -776,7 +827,7 @@ def violations(
                     a.max is not None and value > a.max
                 ):
                     out.append(Violation(path, value, a))
-                elif own and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in own):
+                elif code and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in direct_caps(code, tokens)):
                     # Inside the range, but exactly on a constant the script caps this very quantity at.
                     out.append(Violation(path, value, a, kind="clamped"))
             elif clamps and _pinned(value, a, clamps):
