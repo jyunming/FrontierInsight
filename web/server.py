@@ -1048,10 +1048,12 @@ def make_app(
                 continue
             try:
                 text = paper_md.read_text(encoding="utf-8")
+                # A re-ingest has no review record it can trust, so the paper is kept as preliminary: a later quest
+                # reads it as a reminder, never as a source (core/engine.py::_is_preliminary_memory).
                 ok = kn.add_text(
-                    kind="fi_quest_paper",
+                    kind="fi_preliminary_paper",
                     text=text,
-                    metadata={"quest_id": d.name, "source": "web-reingest"},
+                    metadata={"quest_id": d.name, "source": "web-reingest", "standing": "preliminary"},
                 )
                 results.append({"quest_id": d.name, "ok": ok})
             except Exception as e:

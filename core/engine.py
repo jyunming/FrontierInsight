@@ -1237,7 +1237,7 @@ class Engine:
                     pass
             # Nothing is paused now; what did not stop the quest but is worth a look stays on the card (.fi/todo.json).
             _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
-            self._write_back_knowledge(artifacts, final_state)
+            self._write_back_knowledge(artifacts, final_state, (evidence_record or {}).get("status"))
             self._record_skill_usage(final_state)
             self._write_cost_summary()
             # Clean up any stale ``quest_failed.md`` from a PRIOR
@@ -1436,7 +1436,7 @@ class Engine:
         self._audit(
             "quest_finalized",
             events_before=len(events),
-            write_errors=int(getattr(self.audit, "write_errors", 0) or 0),
+            write_errors=max(int(getattr(self.audit, "write_errors", 0) or 0), _audit_log.lost_writes(self.audit.path)),
             nodes_completed=sorted({str(e.get("node")) for e in events if e.get("kind") == "node_completed" and e.get("node")}),
             paper_sha256=paper_sha,
         )
@@ -4203,6 +4203,7 @@ class Engine:
             and ((d.get("metadata") or {}).get("title")
                  or (d.get("metadata") or {}).get("url"))
             and (d.get("metadata") or {}).get("kind") not in _FI_INTERNAL_KINDS
+            and not _is_preliminary_memory(d.get("metadata") or {})
         ]
         if lit_docs and self.config.knowledge.relevance_guard:
             relevant = await self._filter_relevant_docs(relevance_topic, lit_docs)
@@ -4276,7 +4277,7 @@ class Engine:
             meta = item.get("metadata") or {}
             if not (meta.get("title") or meta.get("url")):
                 continue
-            if meta.get("kind") in _FI_INTERNAL_KINDS:
+            if meta.get("kind") in _FI_INTERNAL_KINDS or _is_preliminary_memory(meta):
                 continue
             n += 1
         if n:
@@ -4307,7 +4308,7 @@ class Engine:
             content = _item_content(item)  # the whole text, not only the state's first part
             if not (meta.get("title") or meta.get("url")):
                 continue
-            if meta.get("kind") in _FI_INTERNAL_KINDS:
+            if meta.get("kind") in _FI_INTERNAL_KINDS or _is_preliminary_memory(meta):
                 continue
             slug = _slugify(
                 str(meta.get("title") or meta.get("source") or f"lit{idx}")
@@ -4383,7 +4384,9 @@ class Engine:
         # off-topic ones so we don't write a paper on garbage; if NOTHING
         # is on-topic, return 0 so wait_for_data pauses for real user data
         # instead of proceeding.
-        docs = await self._filter_relevant_docs(relevance_topic or query, docs)
+        # An earlier FI result kept as preliminary is a reminder, never data (core/engine.py::_is_preliminary_memory).
+        docs = [d for d in docs if not _is_preliminary_memory(getattr(d, "metadata", None) or {})]
+        docs = await self._filter_relevant_docs(relevance_topic or query, docs) if docs else []
         if not docs:
             self._log.info(
                 "[auto_collect] relevance guard dropped every auto-collected "
@@ -5884,6 +5887,7 @@ class Engine:
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
                     "result_use": getattr(self.config, "effective_result_use", "") or getattr(self.config, "result_use", ""),
+                    "one_model_review": bool(getattr(self.config.engine, "one_model_review", False)),
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -8531,7 +8535,8 @@ class Engine:
         n_sources = n_supporting = n_findings = 0
         try:
             lit = state.get("literature")
-            lit = lit if isinstance(lit, list) else []
+            lit = [d for d in (lit if isinstance(lit, list) else [])
+                   if not (isinstance(d, dict) and _is_preliminary_memory(d.get("metadata") or {}))]
             n_sources = sum(
                 1 for d in lit
                 # the source's own text: a model's reading of its figures is not a source with text
@@ -10360,10 +10365,14 @@ class Engine:
     def _review_models_collapsed(self, panel_results: list[dict[str, Any]]) -> str | None:
         """Under ``rigor_profile: research``: the one provider/model that actually answered every reviewer who reviewed,
         when the panel was set up on more than one model (a fallback or an alias made them one); ``None`` otherwise."""
-        if self.config.rigor_profile != "research":
+        if self.config.rigor_profile != "research" or getattr(self.config.engine, "one_model_review", False):
             return None
         ok = [r for r in panel_results if r.get("status") == "ok"]
         if len(ok) < 2 or len({str(r.get("requested_model")) for r in ok}) < 2:
+            return None
+        # Only a model the provider reported can show a collapse; a transport that reports none (a CLI, the VS Code
+        # bridge) leaves it unknown, which is not taken for one model.
+        if not all(r.get("actual_model_reported") for r in ok):
             return None
         actual = {f"{r.get('actual_provider') or '?'}/{r.get('actual_model') or '?'}" for r in ok}
         return next(iter(actual)) if len(actual) == 1 else None
@@ -10372,7 +10381,7 @@ class Engine:
                                            actual: str) -> None:
         """Stop because reviewers set up on different models were all answered by one (a fallback took over, or two
         model names reach the same model): the panel is one model's view in several roles. Resuming asks again; with
-        ``--accept`` the review goes on and the evidence level lists the gap."""
+        ``engine.one_model_review: true`` the review goes on and the evidence level lists the gap."""
         asked = ", ".join(sorted({str(r.get("requested_model")) for r in panel_results if r.get("status") == "ok"}))
         self._pause_for_human(
             kind="review_models_collapsed",
@@ -10381,9 +10390,11 @@ class Engine:
             steps=[
                 f"Asked for: {asked}. Answered by: {actual} (after a fallback took over, or because two model names reach "
                 "the same model).",
-                f"The paper is at `{paper_path}`. Resume once the other model can be reached again: the review runs "
-                f"from the start. To go on with this review anyway, `python launch.py --resume {self.quest_id} "
-                "--accept`; the result is then not publication-ready, and says why.",
+                f"The paper is at `{paper_path}`. Resume once the other model can be reached again "
+                f"(`python launch.py --resume {self.quest_id}`): the review runs from the start.",
+                "To go on with one model's review instead, add `one_model_review: true` under the `engine:` section of "
+                "the quest's config.yaml and resume: the review then runs on the models you have, and the result is not "
+                "publication-ready, and says why.",
             ],
             payload={"review_models_collapsed": True, "quest_id": self.quest_id, "actual": actual},
         )
@@ -10644,6 +10655,9 @@ class Engine:
                 "actual_provider": self._chat_provenance(f"review_panel.{name}").get("provider"),
                 "actual_model": self._chat_provenance(f"review_panel.{name}").get("model"),
                 "fallback": bool(self._chat_provenance(f"review_panel.{name}").get("fallback")),
+                # False when the transport does not say which model served the call (a CLI, the VS Code bridge):
+                # ``actual_model`` is then only the model asked for.
+                "actual_model_reported": bool(self._chat_provenance(f"review_panel.{name}").get("reported")),
             }
 
         # return_exceptions=True is defense in depth: a panelist must never be
@@ -10677,11 +10691,7 @@ class Engine:
         collapsed = self._review_models_collapsed(panel_results)
         if collapsed is not None:
             self._pause_for_review_models_collapsed(paper_path, panel_results, collapsed)
-            # Reached only when a resume answered the pause with a value (`--resume --accept`): the review goes on and
-            # records that one model answered every reviewer, which the evidence level lists as a gap.
         agg = _aggregate_panel_reviews(list(panel_results))
-        if collapsed is not None:
-            agg["same_actual_model"] = collapsed
 
         # Moderator call — best effort for the rationale + suggestion
         # attribution prose. Numeric fields are taken from `agg`.
@@ -10969,6 +10979,7 @@ class Engine:
                 "model": (served.get("model") or getattr(self._client, "last_model", None) or self._model_for_node(node)
                           or self.config.provider.model),
                 "fallback": bool(served.get("fallback")),
+                "reported": bool(served.get("reported")),
                 "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
@@ -11630,6 +11641,8 @@ class Engine:
         runs and says how to give one persona another model (the person chooses which). ``None`` when there is one."""
         if self.config.rigor_profile != "research" or not self.config.engine.review_panel:
             return None
+        if getattr(self.config.engine, "one_model_review", False):
+            return None
         models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
         if len(set(models.values())) > 1:
             return None
@@ -12047,7 +12060,8 @@ class Engine:
         if written:
             self._log.info("[skills] recorded use in: %s", ", ".join(written))
 
-    def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState) -> None:
+    def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState,
+                              evidence_status: str | None = None) -> None:
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
             return
         if artifacts.paper_md is None:
@@ -12075,12 +12089,8 @@ class Engine:
         # (research or decision), a reviewer accepted it and its evidence level is publication_ready. Anything else
         # (an exploration, a result with evidence gaps, a written-back result nobody accepted) is kept as a preliminary
         # observation: a later quest sees it as a reminder of what was tried, never as evidence to cite.
-        evidence_status = ""
-        try:
-            evidence_status = str((json.loads((self.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-                                   or {}).get("status") or "")
-        except (OSError, ValueError, AttributeError):
-            pass
+        # ``evidence_status`` is this run's evidence record (Engine.run); no record means unknown, which is preliminary.
+        evidence_status = str(evidence_status or "")
         result_use = getattr(self.config, "effective_result_use", "") or "explore"
         accepted = verdict == "accept" and _review_was_real(review)
         standing = ("accepted" if accepted and result_use in ("research", "decision")
@@ -12102,6 +12112,9 @@ class Engine:
         for d in (state.get("literature") or []):
             m = d.get("metadata") or {}
             if not (m.get("title") or m.get("doi") or m.get("arxiv_id") or m.get("pmid")):
+                continue
+            # FI's own memory (a preliminary result, an earlier quest's records) is not an external paper.
+            if _is_preliminary_memory(m) or str(m.get("kind") or "").startswith("fi_"):
                 continue
             external_refs.append({
                 "title": m.get("title", ""),
@@ -12576,6 +12589,9 @@ def _is_citable(meta: dict[str, Any]) -> bool:
 # how the user feeds real (paywalled or local) papers into Axon; whether
 # such an entry survives depends on its own metadata (real DOI/URL).
 _FI_INTERNAL_KINDS = frozenset({
+    "fi_preliminary_spine",
+    "fi_preliminary_paper",
+    "fi_preliminary_summary",
     "fi_critique",
     "fi_digest",
     "fi_portfolio",

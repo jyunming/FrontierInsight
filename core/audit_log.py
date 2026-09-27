@@ -199,6 +199,7 @@ class AuditLog:
                 return self._write(kind, node, provenance, fields)
             except OSError as e:
                 self.write_errors += 1
+                _count_lost(self.path)
                 if not self._warned:
                     self._warned = True
                     import logging
@@ -246,6 +247,30 @@ class AuditLog:
 
 # ---- reading --------------------------------------------------------------
 
+
+def _lost_path(path: Path) -> Path:
+    return path.with_name(path.name + ".lost")
+
+
+def _count_lost(path: Path) -> None:
+    """Add one to the count of events that could not be written, kept beside the trace so a later run of the same
+    quest (after a pause) still sees it. Best-effort: when even this cannot be written, the loss is only in this run's
+    ``write_errors``."""
+    try:
+        target = _lost_path(path)
+        n = lost_writes(path)
+        target.write_text(str(n + 1), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def lost_writes(path: Path) -> int:
+    """How many events of the trace at ``path`` could not be written, over every run of the quest (see
+    :func:`_count_lost`)."""
+    try:
+        return int(_lost_path(path).read_text(encoding="utf-8").strip() or 0)
+    except (OSError, ValueError):
+        return 0
 
 def read(path: Path) -> list[dict[str, Any]]:
     """Every parseable event of a trace, in file order (lines that do not parse are skipped; :func:`verify` reports them)."""

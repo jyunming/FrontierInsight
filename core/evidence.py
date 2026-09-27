@@ -159,6 +159,8 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any) -> list[str]:
         return ["the quest's decision trace (.fi/audit.jsonl) could not be read"]
     seals = [i for i, e in enumerate(events) if e.get("kind") == "quest_finalized"]
     if not seals:
+        if (trace.parent / "pause.json").is_file():
+            return ["the quest has not finished yet (it is paused): its decision trace is sealed when it finishes"]
         return ["the quest's decision trace has no final seal: the quest did not finish, or the end of its record was lost"]
     at = seals[-1]
     seal = events[at]
@@ -330,11 +332,10 @@ def assess(
             ready_gaps.append(f"the review verdict is {review.get('verdict') or 'not accept'}")
         if review.get("must_flag_hits"):
             ready_gaps.append(f"the review left {len(review['must_flag_hits'])} must-fix finding(s)")
-    # One model answered every reviewer of a research panel set up on more than one, and the person chose to go on.
-    if isinstance(review, dict) and review.get("same_actual_model"):
+    # Under rigor_profile: research the panel knowingly ran on one model (engine.one_model_review).
+    if settings.get("rigor_profile") == "research" and settings.get("one_model_review"):
         ready_gaps.append(
-            f"every reviewer was answered by one model ({review['same_actual_model']}), although the panel was set up "
-            "on more than one: the review is one model's view"
+            "every reviewer used one model (the quest was set up with only one), so the review is one model's view"
         )
     # A quest set up to explore: its result is preliminary whatever it passed (the person said so at the start).
     if settings.get("result_use") == "explore":

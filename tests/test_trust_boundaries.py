@@ -33,12 +33,9 @@ from tests.test_knowledge import _BrainAddText, _calls_by_kind, _enabled_knowled
 
 # --- F2 -------------------------------------------------------------------------------------------------------------
 
-def _writeback_engine(tmp_path: Path, captured: list, *, result_use: str, evidence_status: str | None) -> tuple:
+def _writeback_engine(tmp_path: Path, captured: list, *, result_use: str) -> tuple:
     paper = tmp_path / "paper.md"
     paper.write_text("# Probe\n", encoding="utf-8")
-    if evidence_status is not None:
-        (tmp_path / "needs").mkdir(exist_ok=True)
-        (tmp_path / "needs" / "EVIDENCE.json").write_text(json.dumps({"status": evidence_status}), encoding="utf-8")
 
     class _Knowledge:
         enabled = True
@@ -73,8 +70,11 @@ ACCEPT = {"review": {"verdict": "accept", "status": "ok", "must_flag_hits": []},
 ])
 def test_what_a_result_is_kept_as(tmp_path: Path, result_use: str, status: str | None, standing: str) -> None:
     captured: list = []
-    eng, artifacts = _writeback_engine(tmp_path, captured, result_use=result_use, evidence_status=status)
-    eng._write_back_knowledge(artifacts, ACCEPT)
+    eng, artifacts = _writeback_engine(tmp_path, captured, result_use=result_use)
+    # A stale file from an earlier run is not read: only this run's evidence record counts.
+    (tmp_path / "needs").mkdir(exist_ok=True)
+    (tmp_path / "needs" / "EVIDENCE.json").write_text(json.dumps({"status": "publication_ready"}), encoding="utf-8")
+    eng._write_back_knowledge(artifacts, ACCEPT, status)
     (call,) = captured
     meta = call["metadata"]
     assert meta["standing"] == standing
@@ -98,6 +98,24 @@ def test_a_preliminary_result_is_written_under_its_own_kinds_without_ref_spines(
     assert _enabled_knowledge_with(brain2).add_quest_artifacts(
         quest_id="q2", paper_md_path=paper, summary="found", metadata={"standing": "accepted", "external_refs": refs})
     assert "fi_quest_summary" in _calls_by_kind(brain2) and "fi_external_ref_spine" in _calls_by_kind(brain2)
+
+
+def test_fi_memory_is_not_written_back_as_an_external_paper(tmp_path: Path) -> None:
+    captured: list = []
+    eng, artifacts = _writeback_engine(tmp_path, captured, result_use="research")
+    state = {**ACCEPT, "literature": [
+        {"metadata": {"kind": "fi_preliminary_spine", "title": "An earlier exploration"}, "content": "x"},
+        {"metadata": {"kind": "fi_paper_spine", "title": "An earlier quest"}, "content": "x"},
+        {"metadata": {"title": "A real paper", "doi": "10.1/x"}, "content": "abstract"},
+    ]}
+    eng._write_back_knowledge(artifacts, state, "publication_ready")
+    refs = captured[0]["metadata"]["external_refs"]
+    assert [r["title"] for r in refs] == ["A real paper"]
+
+
+def test_a_preliminary_result_is_not_counted_as_a_source_or_written_as_data(tmp_path: Path) -> None:
+    from core.engine import _FI_INTERNAL_KINDS, PRELIMINARY_KINDS
+    assert PRELIMINARY_KINDS <= _FI_INTERNAL_KINDS
 
 
 def test_a_later_quest_reads_a_preliminary_result_as_a_reminder_never_a_source() -> None:
@@ -176,6 +194,23 @@ def test_steps_after_the_seal_are_a_gap(tmp_path: Path) -> None:
     assert not any("seal" in g for g in evidence.assess(root, _state(), settings=ON)["gaps"])
 
 
+def test_a_paused_quest_is_not_called_damaged(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    trace = root / ".fi" / "audit.jsonl"
+    trace.unlink(missing_ok=True)
+    audit_log.AuditLog(trace, root.name).append("quest_started")
+    (root / ".fi" / "pause.json").write_text("{}", encoding="utf-8")
+    assert any("has not finished yet" in g for g in _gaps(root))
+
+
+def test_events_lost_before_a_pause_are_still_counted_by_the_seal(tmp_path: Path) -> None:
+    trace = tmp_path / ".fi" / "audit.jsonl"
+    trace.parent.mkdir(parents=True)
+    audit_log._count_lost(trace)
+    audit_log._count_lost(trace)
+    assert audit_log.lost_writes(trace) == 2, "a later run of the quest reads the count left beside the trace"
+
+
 def test_the_seal_describes_itself() -> None:
     line = audit_log.describe({"kind": "quest_finalized", "events_before": 42, "write_errors": 1})
     assert "42 events" in line and "1 could not be written" in line
@@ -208,7 +243,7 @@ def _research_engine(tmp_path: Path) -> Engine:
 
 def test_reviewers_answered_by_one_model_are_found(tmp_path: Path) -> None:
     eng = _research_engine(tmp_path)
-    ok = {"status": "ok", "actual_provider": "openai"}
+    ok = {"status": "ok", "actual_provider": "openai", "actual_model_reported": True}
     collapsed = [{**ok, "requested_model": "m-main", "actual_model": "same"},
                  {**ok, "requested_model": "m-other", "actual_model": "same"}]
     assert eng._review_models_collapsed(collapsed) == "openai/same"
@@ -218,10 +253,23 @@ def test_reviewers_answered_by_one_model_are_found(tmp_path: Path) -> None:
     # A panel set up on one model is the pre-run check's business, not this one's.
     one = [{**ok, "requested_model": "m", "actual_model": "m"}, {**ok, "requested_model": "m", "actual_model": "m"}]
     assert eng._review_models_collapsed(one) is None
+    # A transport that does not say which model served the call is unknown, not one model.
+    unreported = [{**r, "actual_model_reported": False} for r in collapsed]
+    assert eng._review_models_collapsed(unreported) is None
 
 
-def test_going_on_with_one_model_s_review_is_a_gap(tmp_path: Path) -> None:
+def test_one_model_review_goes_on_and_is_a_gap(tmp_path: Path) -> None:
+    from core.config import Config
+    eng = Engine(Config.model_validate({
+        "topic": "t", "rigor_profile": "research", "provider": {"name": "openai", "model": "m"},
+        "engine": {"one_model_review": True}, "knowledge": {"enabled": False},
+        "output": {"output_dir": str(tmp_path / "out")},
+    }))
+    assert eng._review_models_stop() is None
+    ok = {"status": "ok", "actual_provider": "openai", "actual_model_reported": True, "actual_model": "same"}
+    assert eng._review_models_collapsed([{**ok, "requested_model": "a"}, {**ok, "requested_model": "b"}]) is None
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
-    state = _state()
-    state["review"] = {**state["review"], "same_actual_model": "openai/same"}
-    assert any("one model's view" in g for g in evidence.assess(root, state, settings=ON)["gaps"])
+    gaps = evidence.assess(root, _state(), settings={**RESEARCH, "one_model_review": True})["gaps"]
+    assert any("one model's view" in g for g in gaps)
+
+

@@ -106,7 +106,8 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
     "review_models_collapsed": (
         "The reviewers were set up on different models, but one model answered them all. Wait for the other model, or go on?",
         "Resume once the other model can be reached again: the review runs from the start.",
-        ["Go on with this review (--accept): the result is then not publication-ready, and says why."],
+        ["Go on with one model's review: add `one_model_review: true` under `engine:` in the quest's config.yaml and "
+         "resume. The result is then not publication-ready, and says why."],
     ),
     "review_models": (
         "Which model should one reviewer use? A research result needs a reviewer on a model other than the rest.",
