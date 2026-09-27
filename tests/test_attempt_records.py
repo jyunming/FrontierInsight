@@ -27,16 +27,26 @@ def test_a_run_s_outcome() -> None:
     assert ar.run_outcome(returncode=0, has_result=True, manifest_status="pending") is None, "a job still running"
 
 
-def test_a_quest_s_outcome_is_accepted_only_when_a_reviewer_accepted_it() -> None:
-    ran = {"result_json": {"x": 1}}
-    executed = {"status": "executed"}
-    assert ar.quest_outcome({}, {"status": "not_executed"}, reviewer_accepted=True) == "process_error"
-    assert ar.quest_outcome(ran, executed, reviewer_accepted=True) == "accepted"
-    assert ar.quest_outcome(ran, executed, reviewer_accepted=False) == "inconclusive"
+def test_a_quest_s_status_keeps_execution_review_evidence_and_claim_apart() -> None:
+    ran = {"result_json": {"x": 1}, "review": {"verdict": "accept", "status": "ok"}}
+    ready = {"status": "publication_ready"}
+    s = ar.quest_status(ran, ready, reviewer_accepted=True, no_experiment=False)
+    assert s == {"execution_status": "completed", "review_status": "accepted", "evidence_status": "publication_ready",
+                 "claim_outcome": None}
+    # A survey runs no experiment by design: accepted, not a process error.
+    survey = ar.quest_status({"review": {"verdict": "accept"}}, {"status": "executed"}, reviewer_accepted=True,
+                             no_experiment=True)
+    assert survey["execution_status"] == "no_experiment_by_design" and survey["review_status"] == "accepted"
+    # An accept with evidence gaps is an accepted review of a result that is not publication-ready.
+    gaps = ar.quest_status(ran, {"status": "protocol_runtime_matched"}, reviewer_accepted=True, no_experiment=False)
+    assert gaps["review_status"] == "accepted" and gaps["evidence_status"] == "protocol_runtime_matched"
+    assert ar.quest_status({}, None, reviewer_accepted=False, no_experiment=False)["execution_status"] == "crashed"
+    unreal = ar.quest_status({**ran, "review": {"verdict": "accept", "status": "error"}}, ready,
+                             reviewer_accepted=False, no_experiment=False)
+    assert unreal["review_status"] == "unavailable"
+    assert ar.quest_status({**ran, "review": {"verdict": "revise"}}, ready, reviewer_accepted=False,
+                           no_experiment=False)["review_status"] == "revise"
     # No direction is guessed from the analysis's prose: the real analysis has no field that states it.
-    real_analysis = {"summary": "The hypothesis is not supported; no significant difference.", "key_findings": [],
-                     "claims_supported": [], "claims_unsupported": ["h"], "next_step": "write"}
-    assert ar.quest_outcome({**ran, "analysis": real_analysis}, executed, reviewer_accepted=True) == "accepted"
     assert set(ar.STOP_OUTCOMES.values()) <= set(ar.OUTCOMES)
 
 
@@ -51,6 +61,8 @@ def test_the_context_names_what_a_failure_depends_on(tmp_path: Path) -> None:
     assert ctx["skills"] == [] and ctx["fi"] is None, "no fi_repo given: unknown, not an empty string"
     assert ctx["environment_sha256"] and ctx["metric_specs_sha256"] and ctx["budget"]["runs_per_setting"] == 30
     assert ctx["lineage"]["iteration"] == 1
+    assert ctx["policy"]["result_use"] == "explore" and ctx["question"]["topic_sha256"]
+    assert ctx["complete"] is False, "no FI version known: never treated as the same conditions"
     other = ar.context_fingerprint(cfg.model_copy(update={"provider": cfg.provider.model_copy(update={"model": "m2"})}),
                                    tmp_path, state, prompts={"design": "prompt text"})
     assert other["model"] != ctx["model"], "a different model is a different context"
@@ -77,6 +89,39 @@ def test_two_quests_with_the_same_packages_and_protocol_match(tmp_path: Path) ->
     assert before["protocol_sha256"] == ctxs[0]["protocol_sha256"]
 
 
+def test_a_changed_program_or_a_late_input_file_changes_the_context(tmp_path: Path) -> None:
+    """The delta re-audit's counterexamples: an edited experiment.py kept the context, and so did input file 201."""
+    cfg = Config.model_validate({"topic": "t", "provider": {"name": "openai", "model": "m1"},
+                                 "knowledge": {"enabled": False}})
+    (tmp_path / "code").mkdir()
+    (tmp_path / "code" / "experiment.py").write_text("print(1)", encoding="utf-8")
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    for i in range(201):
+        (inputs / f"f{i:03d}.txt").write_text(str(i), encoding="utf-8")
+    before = ar.context_fingerprint(cfg, tmp_path, {}, prompts={})
+    (tmp_path / "code" / "experiment.py").write_text("print(2)", encoding="utf-8")
+    after_code = ar.context_fingerprint(cfg, tmp_path, {}, prompts={})
+    assert after_code["code"] != before["code"]
+    (inputs / "f200.txt").write_text("changed", encoding="utf-8")
+    after_input = ar.context_fingerprint(cfg, tmp_path, {}, prompts={})
+    assert after_input["inputs"]["sha256"] != after_code["inputs"]["sha256"]
+    assert after_input["inputs"]["files"] == 201 and after_input["inputs"]["complete"] is True
+    # A different question or policy is a different context.
+    assert ar.context_fingerprint(cfg.model_copy(update={"topic": "other"}), tmp_path, {}, prompts={})["question"] != \
+        before["question"]
+    assert ar.context_fingerprint(cfg.model_copy(update={"result_use": "research"}), tmp_path, {}, prompts={})[
+        "policy"] != before["policy"]
+
+
+def test_too_many_inputs_are_marked_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ar, "_INPUT_FILES_LIMIT", 3)
+    for i in range(5):
+        (tmp_path / f"{i}.txt").write_text(str(i), encoding="utf-8")
+    m = ar._folder_manifest(tmp_path, limit=3)
+    assert m["files"] == 5 and m["complete"] is False
+
+
 def test_a_large_input_is_not_read_whole(tmp_path: Path) -> None:
     big = tmp_path / "big.bin"
     with big.open("wb") as fh:
@@ -91,7 +136,9 @@ def test_a_large_input_is_not_read_whole(tmp_path: Path) -> None:
 
 
 def test_records_append_and_a_torn_line_is_skipped(tmp_path: Path) -> None:
-    assert ar.append(tmp_path, ar.ATTEMPTS, {"kind": "run", "outcome": "inconclusive"})
+    rid = ar.append(tmp_path, ar.ATTEMPTS, {"kind": "run", "outcome": "inconclusive"})
+    assert rid and ar.read(tmp_path, ar.ATTEMPTS)[0]["record_id"] == rid
+    assert ar.read(tmp_path, ar.ATTEMPTS)[0]["schema"] == ar.SCHEMA
     with (tmp_path / ar.ATTEMPTS).open("a", encoding="utf-8") as fh:
         fh.write('{"torn": ')
     assert [r["kind"] for r in ar.read(tmp_path, ar.ATTEMPTS)] == ["run"]
@@ -117,7 +164,10 @@ async def test_a_quest_records_its_ideas_design_runs_and_end(smoke_config: Confi
     runs = [r for r in attempts if r["kind"] == "run"]
     (end,) = [r for r in attempts if r["kind"] == "quest"]
     assert runs and all(r["outcome"] in ar.OUTCOMES for r in runs)
-    assert end["outcome"] in ar.OUTCOMES and end["context"]["provider"] == "openai"
+    assert end["execution_status"] in ar.EXECUTION and end["review_status"] in ar.REVIEW
+    assert end["context"]["provider"] == "openai" and end["quest_id"] == engine.quest_id
+    assert end["records_not_written"] == 0 and end["context"]["models_used"], "which model answered each step"
+    assert all(r["scripts"] for r in runs), "each run names the scripts it ran by hash"
     assert "answered_by" in end and "person" in end
 
 
@@ -163,7 +213,7 @@ async def test_a_failed_quest_is_recorded_once_and_a_finished_one_is_not_recorde
     with pytest.raises(RuntimeError):
         await engine.run()
     ends = [r for r in ar.read(engine.fi_dir, ar.ATTEMPTS) if r["kind"] == "quest"]
-    assert len(ends) == 1 and ends[0]["outcome"] != "process_error"
+    assert len(ends) == 1 and ends[0]["execution_status"] != "crashed"
 
 
 @pytest.mark.asyncio
@@ -179,4 +229,5 @@ async def test_a_quest_that_fails_is_recorded_as_a_process_error(tmp_path: Path,
     with pytest.raises(Exception):
         await engine.run()
     ends = [r for r in ar.read(engine.fi_dir, ar.ATTEMPTS) if r["kind"] == "quest"]
-    assert len(ends) == 1 and ends[0]["outcome"] == "process_error" and ends[0]["error"]
+    assert len(ends) == 1 and ends[0]["execution_status"] == "crashed" and ends[0]["error"]
+    assert ends[0]["context"] and ends[0]["context"]["question"]["topic_sha256"], "a context even for an early failure"
