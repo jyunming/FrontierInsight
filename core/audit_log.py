@@ -47,6 +47,8 @@ KINDS = (
     "check_result",       # one check's verdict (protocol, oracle, run manifest, numeric warnings, evidence, design audit)
     "model_claim",        # the model's own rationale (provenance model_claim)
     "audit_repair",       # a torn last line was dropped when the file was reopened
+    "quest_finalized",    # the seal a finished quest writes last: how many events came before it, how many could not
+                          # be written in this run, and which steps completed (core/evidence.py reads it)
 )
 
 # Keys the chain owns: an event's own fields never replace them.
@@ -314,7 +316,8 @@ DETAILS = ("summary", "checks", "debug")
 
 # What each detail level shows. ``summary``: the shape of the run and every decision. ``checks``: plus each check's verdict,
 # the artifacts and the model's stated reasons. ``debug``: everything, including each node's start.
-_SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair"}
+_SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair",
+                  "quest_finalized"}
 _CHECK_KINDS = _SUMMARY_KINDS | {"check_result", "artifact_created", "model_claim"}
 
 
@@ -371,6 +374,10 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         return f"a torn last line ({e.get('dropped_bytes')} bytes) was dropped"
     if kind == "quest_started":
         return f"quest {'resumed' if e.get('resumed') else 'started'}"
+    if kind == "quest_finalized":
+        lost = e.get("write_errors") or 0
+        return (f"quest finished: {e.get('events_before')} events recorded"
+                + (f", {lost} could not be written" if lost else ""))
     return f"{where}{kind}"
 
 

@@ -103,6 +103,11 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "Let FI watch the job and go on when it is done: `--watch`.",
         ["Go on yourself once the job is done: `--resume`."],
     ),
+    "review_models_collapsed": (
+        "The reviewers were set up on different models, but one model answered them all. Wait for the other model, or go on?",
+        "Resume once the other model can be reached again: the review runs from the start.",
+        ["Go on with this review (--accept): the result is then not publication-ready, and says why."],
+    ),
     "review_models": (
         "Which model should one reviewer use? A research result needs a reviewer on a model other than the rest.",
         "Choose a model for one reviewer (the steps say where), then go on.",

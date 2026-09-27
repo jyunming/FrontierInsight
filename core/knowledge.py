@@ -4318,6 +4318,12 @@ class Knowledge:
            an accepted quest land here, keeping Axon curated rather than
            a raw web cache.
 
+        A result whose ``metadata['standing']`` is ``"preliminary"`` (an exploration, a result with evidence gaps: see
+        ``Engine._write_back_knowledge``) is written under its own kinds -- ``fi_preliminary_spine``,
+        ``fi_preliminary_paper``, ``fi_preliminary_summary`` -- and its topic event says so; no external-ref spines are
+        written for it, since those are kept for papers that contributed to an accepted result. A later quest reads a
+        preliminary result as a reminder, never as a source (``core/engine.py::_is_preliminary_memory``).
+
         Returns True iff every doc above wrote successfully.
         """
         if not self.enabled or self._brain is None:
@@ -4327,6 +4333,14 @@ class Knowledge:
 
         external_refs = list((metadata or {}).get("external_refs") or [])
         meta_no_refs = {k: v for k, v in (metadata or {}).items() if k != "external_refs"}
+        preliminary = str(meta_no_refs.get("standing") or "accepted") == "preliminary"
+        kind_of = ({"spine": "fi_preliminary_spine", "paper": "fi_preliminary_paper", "summary": "fi_preliminary_summary"}
+                   if preliminary else
+                   {"spine": "fi_paper_spine", "paper": "fi_quest_paper", "summary": "fi_quest_summary"})
+        if preliminary:
+            external_refs_for_spines: list[dict[str, Any]] = []
+        else:
+            external_refs_for_spines = external_refs
 
         topic = str(meta_no_refs.get("topic", "")).strip()
         topic_id = _slugify_topic(topic)
@@ -4379,11 +4393,11 @@ class Knowledge:
                 key_claims=list(meta_no_refs.get("key_findings") or []),
                 keywords=list(meta_no_refs.get("keywords") or []),
             )
-            _enq("fi_paper_spine", spine_text, {**base_meta, "origin": "quest_paper"})
+            _enq(kind_of["spine"], spine_text, {**base_meta, "origin": "quest_paper"})
 
             # (2) Body — full paper with 1-line citation header prepended.
             body_text = _prepend_paper_header(paper_md, quest_paper_meta_for_helpers)
-            _enq("fi_quest_paper", body_text, base_meta)
+            _enq(kind_of["paper"], body_text, base_meta)
 
             # (3) Summary — backwards-compat kind; gains paper_refs in metadata.
             summary_payload = {
@@ -4396,7 +4410,7 @@ class Knowledge:
                 f"---structured-findings---\n"
                 f"{json.dumps(summary_payload, indent=2, default=str)}"
             )
-            _enq("fi_quest_summary", summary_text, {
+            _enq(kind_of["summary"], summary_text, {
                 **base_meta,
                 "paper_refs": [_paper_short_id(r) for r in external_refs],
             })
@@ -4411,7 +4425,11 @@ class Knowledge:
                 score=meta_no_refs.get("score"),
                 paper_refs=external_refs,
             )
+            if preliminary:
+                topic_text = ("PRELIMINARY result (an exploration, or evidence gaps): a reminder of what was tried, "
+                              "not evidence.\n" + topic_text)
             _enq("fi_topic_event", topic_text, {
+                "standing": "preliminary" if preliminary else "accepted",
                 "tag": f"fi-topic:{topic_id}",
                 "topic_id": topic_id,
                 "topic": topic,
@@ -4424,7 +4442,7 @@ class Knowledge:
 
             # (5) External-ref spines — curated card-catalog entries for
             # papers that actually contributed to an accepted quest.
-            for ref in external_refs:
+            for ref in external_refs_for_spines:
                 ref_paper_id = _paper_short_id(ref)
                 ref_spine_text = _render_paper_spine(
                     {**ref, "topic": topic},
