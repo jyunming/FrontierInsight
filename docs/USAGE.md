@@ -206,7 +206,10 @@ title: integrator-bakeoff
 # default and writes the draft's three cheaper engine settings (ideate_reflect: false, cross_check_per_finding_k: 0,
 # enable_analyze_reroute: false), the same on every interface. research also keeps the decision trace on and needs the
 # reviewers not all on one model (provider.node_models["review_panel.<role>"]); a panel all on one model stops
-# the quest before it runs, saying how to set one. See docs/rigor.md.
+# the quest before it runs, saying how to set one. For research or a decision the interview asks for that model
+# right away ("Second reviewer's model", written as review_panel.statistician); its "I only have one model" writes
+# engine.one_model_review: true instead, so the quest runs and its result says the review was one model's view and
+# is never publication-ready. See docs/rigor.md.
 rigor_profile: default
 # What the result is for: explore, research or decision (the interview writes it). Left out, the quest is an
 # exploration: it runs, its paper opens with a note that the result is preliminary, and it never reaches
@@ -254,6 +257,7 @@ engine:
   max_iterations: 2                 # design-revise loop budget
   review_loop: true                 # enable review-driven revise
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
+  one_model_review: false           # rigor_profile research only: true when you have only one model, so the quest runs with every reviewer on it instead of stopping; the result then says the review was one model's view and is never publication-ready
   clarify_mode: auto                # off | auto | interactive
   ideate_reflect: true              # extra self-critique pass (1 LLM call)
   ideate_tournament: false          # pairwise tournament across brainstormed ideas; replaces ideate_reflect; C(N,2) calls in parallel

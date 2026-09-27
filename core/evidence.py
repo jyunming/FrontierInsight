@@ -321,6 +321,10 @@ def assess(
                 intact = False
             if not intact:
                 ready_gaps.append("the quest's decision trace (.fi/audit.jsonl) no longer checks out (its hash chain is broken)")
+        if settings.get("one_model_review"):
+            ready_gaps.append(
+                "every reviewer used one model (the quest was set up with only one), so the review is one model's view"
+            )
     # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),

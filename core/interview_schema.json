@@ -16,7 +16,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     },
     {
       "id": "result_use",
@@ -49,7 +50,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     },
     {
       "id": "paper_format",
@@ -112,7 +114,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "output_kinds",
@@ -168,7 +171,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "paper_style",
@@ -196,7 +200,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "poster_size",
@@ -229,7 +234,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "study_depth",
@@ -262,7 +268,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "provider",
@@ -314,7 +321,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     },
     {
       "id": "provider_model",
@@ -330,7 +338,38 @@
         "serve"
       ],
       "allow_other": true,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
+    },
+    {
+      "id": "second_reviewer_model",
+      "label": "Second reviewer's model",
+      "prompt": "A study needs one reviewer on a different model from the others, so they do not all make the same mistakes. Which model should the statistician reviewer use? If you have no other model, pick 'I only have one model': the quest still runs, but its result says the review was one model's view and it will not be marked publication-ready.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": "__one_model__",
+          "label": "I only have one model",
+          "description": "The quest runs; its result says the review was one model's view and is never publication-ready."
+        }
+      ],
+      "placeholder": "",
+      "default": null,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": true,
+      "tier": 1,
+      "ask_if": {
+        "question": "result_use",
+        "one_of": [
+          "research",
+          "decision"
+        ]
+      }
     },
     {
       "id": "title",
@@ -347,7 +386,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "no_simulation",
@@ -375,7 +415,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "survey_mode",
@@ -403,7 +444,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "clarify_mode",
@@ -436,7 +478,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "review_panel",
@@ -482,7 +525,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "pause_for_user_input",
@@ -525,7 +569,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "knowledge_enabled",
@@ -553,7 +598,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "web_research",
@@ -581,7 +627,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "audience",
@@ -609,7 +656,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "supply_papers",
@@ -637,7 +685,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "pause_for_plan",
@@ -665,7 +714,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "comparative_baseline",
@@ -682,7 +732,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "success_metric",
@@ -699,7 +750,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "budget",
@@ -716,7 +768,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "knowledge_top_k",
@@ -733,7 +786,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 2
+      "tier": 2,
+      "ask_if": null
     },
     {
       "id": "knowledge_external_top_k",
@@ -750,7 +804,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "ensemble_profile",
@@ -788,7 +843,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "ensemble_models",
@@ -805,7 +861,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "max_iterations",
@@ -822,7 +879,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "node_models",
@@ -839,7 +897,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "reasoning_effort",
@@ -892,7 +951,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "provider_base_url",
@@ -908,7 +968,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "provider_api_key_env",
@@ -924,7 +985,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "provider_fixed_temperature",
@@ -940,7 +1002,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "page_limit",
@@ -957,7 +1020,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 3
+      "tier": 3,
+      "ask_if": null
     },
     {
       "id": "author",
@@ -974,7 +1038,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     },
     {
       "id": "affiliation",
@@ -991,7 +1056,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     },
     {
       "id": "contact_email",
@@ -1008,7 +1074,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     },
     {
       "id": "url",
@@ -1025,7 +1092,8 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1
+      "tier": 1,
+      "ask_if": null
     }
   ],
   "paper_formats": [

@@ -18,6 +18,7 @@ import {
     ENSEMBLE_MIN_MODELS,
     InterviewAnswers,
     LIGHT_NODES,
+    ONE_MODEL_ANSWER,
     OTHER_NODES,
     PaperFormat,
     answersToYaml,
@@ -92,6 +93,53 @@ async function pickOneModel(title: string, removeLabel?: string): Promise<string
         ignoreFocusOut: true,
     });
     return picked ? picked.id : undefined;
+}
+
+/**
+ * "Second reviewer's model" (core/interview.py, same wording): asked for research or a decision. The list is the chat
+ * models this VSCode offers except the one the quest runs on (`primary`, the Chat-picker model), then "I only have one
+ * model", which is offered even when the list is empty. Returns a model id, ONE_MODEL_ANSWER, or undefined on Esc.
+ */
+export async function pickSecondReviewerModel(primary?: vscode.LanguageModelChat): Promise<string | undefined> {
+    let models: readonly vscode.LanguageModelChat[] = [];
+    try {
+        models = await vscode.lm.selectChatModels();
+    } catch {
+        models = [];
+    }
+    // provider.model is written as the primary's family and the bridge resolves a name by id, then by family: a model
+    // matching the primary on either is the same model, so it is not offered.
+    const same = (m: vscode.LanguageModelChat) =>
+        !!primary && (m.id === primary.id || m.family === primary.family || m.id === primary.family);
+    const items: { label: string; description?: string; detail?: string; id: string }[] = models
+        .filter((m) => !same(m))
+        .map((m) => ({ label: m.name || m.id, description: `${m.vendor} · ${m.family}`, detail: m.id, id: m.id }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+    items.push({
+        label: "$(person) I only have one model",
+        description: "The quest runs; its result says the review was one model's view and is never publication-ready.",
+        id: ONE_MODEL_ANSWER,
+    });
+    items.push({ label: "$(edit) Other (type a model name)", id: "__OTHER__" });
+    for (;;) {
+        const picked = await vscode.window.showQuickPick(items, {
+            title: "Frontier Insight — second reviewer's model",
+            placeHolder:
+                "A study needs one reviewer on a different model from the others, so they do not all make the same " +
+                "mistakes. Which model should the statistician reviewer use?",
+            matchOnDescription: true,
+            matchOnDetail: true,
+            ignoreFocusOut: true,
+        });
+        if (!picked) { return undefined; }
+        if (picked.id !== "__OTHER__") { return picked.id; }
+        const typed = await vscode.window.showInputBox({
+            title: "Second reviewer's model",
+            prompt: "A model name your VSCode offers, other than the one this quest runs on.",
+            ignoreFocusOut: true,
+        });
+        if (typed && typed.trim()) { return typed.trim(); }
+    }
 }
 
 /**
@@ -228,6 +276,7 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
     "supply_papers",
     "pause_for_plan",
     "result_use",
+    "second_reviewer_model",
     "audience",
     "knowledge_top_k",
     "knowledge_external_top_k",
@@ -266,9 +315,12 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
  */
 export async function runInterview(
     stream: vscode.ChatResponseStream,
+    // The Chat-picker model the quest will run on (written as provider.model by the caller): left out of the second
+    // reviewer's list.
+    primaryModel?: vscode.LanguageModelChat,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** Two questions (and your author line the first time), then I'll show you the defaults worked out from your topic — edit anything before launch.\n\n",
+        "🧪 **Let's set up a new research quest.** A few questions (and your author line the first time), then I'll show you the defaults worked out from your topic — edit anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
@@ -327,6 +379,15 @@ export async function runInterview(
     stream.markdown(`  **Result for:** \`${resultUse}\`
 
 `);
+    // Research or a decision: the review panel needs one reviewer on another model, asked here so the quest does not
+    // stop on its first run to ask for it (core/interview.py: second_reviewer_model).
+    let secondReviewer = "";
+    if (resultUse !== "explore") {
+        const picked = await pickSecondReviewerModel(primaryModel);
+        if (picked === undefined) return undefined;
+        secondReviewer = picked;
+        stream.markdown(`  **Second reviewer:** ${secondReviewerText(secondReviewer)}\n\n`);
+    }
 
     const paperFormat: PaperFormat = paperFormatFor(topic);
     const outputKinds = outputKindsFor(topic);
@@ -401,6 +462,7 @@ export async function runInterview(
         // The plan is always written; stopping for it is opt-in (unattended runs).
         pause_for_plan: false,
         result_use: resultUse,
+        second_reviewer_model: secondReviewer,
         rigor_profile: rigorProfileFor(resultUse),
         ...authorLine,
         poster_size: "a1_portrait",
@@ -436,7 +498,7 @@ export async function runInterview(
         }
         if (action.value === "edit_default") {
             const before = JSON.stringify(answers);
-            await editTier2Field(answers, edited);
+            await editTier2Field(answers, edited, primaryModel);
             markChanged(before, answers, edited);
             continue;
         }
@@ -479,6 +541,13 @@ async function probeAxonReachable(): Promise<boolean> {
     return true;
 }
 
+/** The second reviewer's answer in words, for the chat and the review block. */
+function secondReviewerText(answer: string): string {
+    return answer === ONE_MODEL_ANSWER
+        ? "none: every reviewer on the one model (the result says so; not publication-ready)"
+        : `statistician on \`${answer}\``;
+}
+
 function reviewBlockMarkdown(a: InterviewAnswers): string {
     const lines: string[] = [];
     lines.push("\n### Review before launch\n");
@@ -496,6 +565,9 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
     lines.push(`| Stop to read and edit the plan | ${a.pause_for_plan === true ? "yes (plan.md)" : "no"} |`);
     lines.push(`| Result for | ${a.result_use === "explore" ? "exploring: a cheaper preliminary draft (no idea self-critique, no per-finding cross-check, no redesign after the analysis)" : `${a.result_use ?? "research"}: every check stops the quest, the plan waits for you, a clean environment per quest`} |`);
+    if (a.result_use !== "explore") {
+        lines.push(`| Second reviewer | ${a.second_reviewer_model ? secondReviewerText(a.second_reviewer_model).replace(/\|/g, "\\|") : "not chosen: the quest stops before it runs to ask for one"} |`);
+    }
     lines.push(`| Pause for my papers / datasets | \`${a.pause_for_user_input ?? "never"}\` |`);
     lines.push(`| Multi-model ensemble | \`${a.ensemble_profile ?? "off"}\` |`);
     if ((a.ensemble_profile ?? "off") !== "off") {
@@ -941,9 +1013,13 @@ function saveProfile(line: AuthorLine): void {
 }
 
 /** Inline editor for the tier-2 defaults. */
-async function editTier2Field(a: InterviewAnswers, edited: Set<string> = new Set()): Promise<void> {
+async function editTier2Field(
+    a: InterviewAnswers, edited: Set<string> = new Set(), primaryModel?: vscode.LanguageModelChat,
+): Promise<void> {
     const which = await vscode.window.showQuickPick(
         [
+            // Asked for research or a decision only (core/interview.py: ask_if), so offered here only then.
+            ...(a.result_use !== "explore" ? [{ label: "Second reviewer's model", value: "second_reviewer_model" }] : []),
             { label: "Paper format / venue", value: "paper_format" },
             { label: "Deliverables", value: "output_kinds" },
             { label: "Study depth", value: "study_depth" },
@@ -964,6 +1040,11 @@ async function editTier2Field(a: InterviewAnswers, edited: Set<string> = new Set
         { title: "Edit which default?", ignoreFocusOut: true },
     );
     if (!which) return;
+    if (which.value === "second_reviewer_model") {
+        const v = await pickSecondReviewerModel(primaryModel);
+        if (v !== undefined) a.second_reviewer_model = v;
+        return;
+    }
     if (which.value === "author_line") {
         const v = await askAuthorLine(a);
         if (v) Object.assign(a, v);
@@ -1132,6 +1213,12 @@ async function editTier2Field(a: InterviewAnswers, edited: Set<string> = new Set
                 a.result_use = v.value;
                 a.rigor_profile = rigorProfileFor(v.value);
                 a.review_panel = resolveReviewPanel(a.review_panel, v.value);
+                // Research or a decision needs the second reviewer's model: asked now if it was not before (the
+                // first answer was exploring), so the quest does not stop on its first run to ask for it.
+                if (v.value !== "explore" && !a.second_reviewer_model) {
+                    const second = await pickSecondReviewerModel(primaryModel);
+                    if (second !== undefined) a.second_reviewer_model = second;
+                }
             }
             return;
         }

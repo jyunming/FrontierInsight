@@ -296,6 +296,8 @@
         }
       }
 
+      if (!isUpdate) refreshConditionalQuestions();  // a draft's "what is the result for" shows or hides the second reviewer
+
       // Render the proposal MD preview if present.
       const preview = document.getElementById('proposal-preview-card');
       if (proposal_md) {
@@ -346,6 +348,78 @@
       && !(savedProfile && PROFILE_FIELDS.includes(q.id)));
   }
 
+  // Mirrors core/interview.py:question_applies: a question with ``ask_if`` is asked only when that earlier answer is
+  // one of the listed values (an earlier question not answered yet counts as its default).
+  function questionApplies(q, answers) {
+    if (!q.ask_if) return true;
+    let value = (answers || {})[q.ask_if.question];
+    if (value === undefined || value === null || value === '') {
+      const earlier = schema.questions.find((x) => x.id === q.ask_if.question);
+      value = earlier ? earlier.default : undefined;
+    }
+    return q.ask_if.one_of.includes(value);
+  }
+
+  // The first-screen answers as they stand in the form, for questionApplies.
+  function formAnswers() {
+    const out = {};
+    for (const q of schema.questions) {
+      const el = document.getElementById(`q-${q.id}`);
+      if (el) out[q.id] = el.value;
+    }
+    return out;
+  }
+
+  // Shows a question only when it applies (the second reviewer's model: research or a decision), and numbers the
+  // shown ones in order.
+  function refreshConditionalQuestions() {
+    const answers = formAnswers();
+    let n = 0;
+    let shown = 0;
+    for (const q of firstScreenQuestions()) {
+      const fs = document.getElementById(`fs-${q.id}`);
+      if (!fs) continue;
+      const applies = questionApplies(q, answers);
+      fs.classList.toggle('hidden', !applies);
+      if (applies) {
+        n += 1; shown += 1;
+        const num = fs.querySelector('.q-num');
+        if (num) num.textContent = String(n);
+      }
+    }
+    if (!isUpdate) document.getElementById('progress-total').textContent = shown;
+  }
+
+  // The models listed for the provider (static, then live), kept so the second reviewer's list can leave out the one
+  // picked as the quest's model whenever that changes.
+  let providerModelList = [];
+
+  function renderSecondReviewerOptions() {
+    const sel = document.getElementById('q-second_reviewer_model');
+    if (!sel || sel.tagName !== 'SELECT') return;
+    const q = schema.questions.find((x) => x.id === 'second_reviewer_model');
+    const primary = (document.getElementById('q-provider_model') || {}).value || '';
+    const before = sel.value;
+    sel.innerHTML = '';
+    const blank = document.createElement('option');
+    blank.value = '';
+    blank.textContent = '(pick one)';
+    sel.appendChild(blank);
+    const choices = [...providerModelList.filter((m) => String(m.value) !== primary), ...((q && q.choices) || [])];
+    for (const c of choices) {
+      const opt = document.createElement('option');
+      opt.value = String(c.value);
+      opt.textContent = c.label;
+      if (c.description) opt.title = c.description;
+      sel.appendChild(opt);
+    }
+    const other = document.createElement('option');
+    other.value = '__OTHER__';
+    other.textContent = 'Other (type your own)';
+    sel.appendChild(other);
+    if ([...sel.options].some((o) => o.value === before)) sel.value = before;
+  }
+
   function renderForm() {
     const form = document.getElementById('interview-form');
     form.innerHTML = '';
@@ -354,8 +428,10 @@
     // "Continue to Review". Update flow keeps the existing "all editable
     // fields" rendering because the user is patching an existing quest,
     // not building a fresh one from scratch.
+    // A question asked only for some answers (the second reviewer's model) is fixed once the quest exists: not shown on
+    // an update.
     const visibleQs = isUpdate
-      ? schema.questions.filter((q) => q.frontends.includes('serve'))
+      ? schema.questions.filter((q) => q.frontends.includes('serve') && !q.ask_if)
       : firstScreenQuestions();
     document.getElementById('progress-total').textContent = visibleQs.length;
     document.getElementById('progress-pill').classList.remove('hidden');
@@ -364,12 +440,13 @@
       idx += 1;
       const editable = !isUpdate || schema.editable_fields.includes(q.id);
       const fs = document.createElement('fieldset');
+      fs.id = `fs-${q.id}`;
       fs.className = editable
         ? 'relative bg-surface-mid/80 border border-primary/30 p-8 rounded-lg group transition-all duration-300 shadow-[0_0_40px_rgba(195,192,255,0.04)]'
         : 'relative bg-surface-mid border border-white/10 p-8 rounded-lg opacity-60 group transition-all duration-300';
       const legend = document.createElement('legend');
       legend.className = 'absolute -top-3 left-6 px-2 bg-surface-mid font-label-sm text-label-sm uppercase tracking-wider flex items-center gap-2 ' + (editable ? 'text-primary' : 'text-on-surface-variant');
-      legend.innerHTML = `${idx}. ${escapeHtml(q.label)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
+      legend.innerHTML = `<span class="q-num">${idx}</span>. ${escapeHtml(q.label)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
       fs.appendChild(legend);
       const inner = document.createElement('div');
       inner.className = 'space-y-4 relative z-10' + (editable ? '' : ' pointer-events-none');
@@ -395,6 +472,10 @@
       </button>
     `;
     form.appendChild(submitRow);
+    if (!isUpdate) {
+      renderSecondReviewerOptions();
+      refreshConditionalQuestions();
+    }
   }
 
   // Compute the value to seed an input with for question ``q``.
@@ -437,7 +518,8 @@
       sel.className = base + ' appearance-none cursor-pointer pr-10';
       if (!editable) sel.disabled = true;
       let choices = q.choices;
-      if (q.id === 'provider_model') choices = [];
+      // Filled from the provider's models once one is picked (renderProviderModelOptions / renderSecondReviewerOptions).
+      if (q.id === 'provider_model' || q.id === 'second_reviewer_model') choices = [];
       // Prefer the top-level `schema.providers` list for the
       // `provider` question — the server augments that list with
       // `vscode_extension` when the dashboard was launched from a
@@ -462,6 +544,8 @@
         sel.appendChild(opt);
       }
       if (q.id === 'provider') sel.addEventListener('change', () => populateProviderModel(sel.value));
+      if (q.id === 'provider_model') sel.addEventListener('change', () => renderSecondReviewerOptions());
+      if (q.id === 'result_use' && !isUpdate) sel.addEventListener('change', () => refreshConditionalQuestions());
       sel.addEventListener('change', () => handleOtherSelection(sel, q));
       wrap.appendChild(sel);
       const arrow = document.createElement('span');
@@ -552,6 +636,8 @@
       other.textContent = 'Other (type your own)';
       sel.appendChild(other);
     }
+    providerModelList = models;
+    renderSecondReviewerOptions();
   }
 
   // Tier-1 + tier-2 + tier-3 answers, accumulated as the user moves
@@ -712,6 +798,7 @@
     for (const q of visibleQs) {
       const el = document.getElementById(`q-${q.id}`);
       if (!el) continue;
+      if (!questionApplies(q, out)) continue;  // not asked for this answer (an earlier question decides; see ask_if)
       let value = el.value;
       if (value === '__OTHER__') {
         const other = document.getElementById(`q-${q.id}-other`);
@@ -741,6 +828,12 @@
     // New-quest flow: validate tier-1, derive tier-2/3, render review.
     if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
     if (!out.provider || !String(out.provider).trim()) { alert('Pick the LLM provider.'); return false; }
+    // Asked for research or a decision only (skipped above otherwise): then it needs an answer.
+    const secondQ = visibleQs.find((q) => q.id === 'second_reviewer_model');
+    if (secondQ && questionApplies(secondQ, out) && !String(out.second_reviewer_model || '').trim()) {
+      alert(`Pick the second reviewer's model, or "I only have one model".`);
+      return false;
+    }
     pendingAnswers = { ...(savedProfile || {}), ...out, profile_seen: savedProfile };
     editedFields.clear();
     const derived = await deriveTier2(out);
@@ -762,7 +855,7 @@
     sec.innerHTML = '';
 
     // Tier-1 summary card (read-only, click "Edit" to go back to form).
-    const tier1 = firstScreenQuestions();
+    const tier1 = firstScreenQuestions().filter((q) => questionApplies(q, pendingAnswers));
     const t1Card = document.createElement('div');
     t1Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
     t1Card.innerHTML = `

@@ -5860,6 +5860,7 @@ class Engine:
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
                     "result_use": getattr(self.config, "effective_result_use", "") or getattr(self.config, "result_use", ""),
+                    "one_model_review": self.config.engine.one_model_review,
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -11558,6 +11559,8 @@ class Engine:
         on one model are one model's view in several roles; its errors are shared, not caught. Stops before anything
         runs and says how to give one persona another model (the person chooses which). ``None`` when there is one."""
         if self.config.rigor_profile != "research" or not self.config.engine.review_panel:
+            return None
+        if self.config.engine.one_model_review:  # set up with only one model: runs, and the result says so
             return None
         models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
         if len(set(models.values())) > 1:
