@@ -78,6 +78,7 @@ def test_route_after_human_feedback_refine_goes_to_the_writer_first(tmp_path: Pa
     eng = _engine_with_gate(tmp_path, "after_review")
     state = {
         "human_feedback": {"action": "refine", "feedback": "be more rigorous"},
+        "feedback_history": [{"iteration": 0, "text": "be more rigorous"}],  # the gate node records every refine
         "iteration": 1,
     }
     assert eng._route_after_human_feedback(state) == "rewrite"  # type: ignore[arg-type]
@@ -90,6 +91,7 @@ def test_route_after_human_feedback_refine_honored_past_max_iterations(tmp_path:
     eng = _engine_with_gate(tmp_path, "after_review")
     state = {
         "human_feedback": {"action": "refine", "feedback": "x"},
+        "feedback_history": [{"iteration": 0, "text": "x"}],  # the gate node records every refine
         "iteration": 5,  # well past max_iterations
     }
     assert eng._route_after_human_feedback(state) == "rewrite"  # type: ignore[arg-type]

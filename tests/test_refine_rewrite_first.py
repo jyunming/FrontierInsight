@@ -146,3 +146,13 @@ def test_a_refine_the_text_cannot_answer_goes_to_the_design(tmp_path: Path) -> N
     assert eng._route_after_write({**_refined(), **out}) == "redesign"  # type: ignore[arg-type]
     facts = eng._route_facts("write", {**_refined(), **out})  # type: ignore[arg-type]
     assert facts == {"refine_scope": "experiment", "needs_experiment": ["run a permutation test to get the p-value"]}
+
+
+def test_notes_the_history_does_not_hold_go_to_the_design_rather_than_being_dropped() -> None:
+    from core.engine import Engine
+
+    eng = object.__new__(Engine)
+    legacy = {"human_feedback": {"action": "refine", "feedback": "cite the 2019 study"}, "feedback_history": []}
+    assert eng._route_after_human_feedback(legacy) == "revise"
+    current = {**legacy, "feedback_history": [{"iteration": 1, "text": "cite the 2019 study"}]}
+    assert eng._route_after_human_feedback(current) == "rewrite"

@@ -2180,7 +2180,12 @@ class Engine:
         if action == "refine":
             # A refine with no notes is FI re-opening a finished quest (``--reopen``, ``--update``): the steps its
             # changed settings affect run again, from the design, as before.
-            return "rewrite" if str(hf.get("feedback") or "").strip() else "revise"
+            notes = str(hf.get("feedback") or "").strip()
+            history = [str(h.get("text") or "").strip() for h in (state.get("feedback_history") or [])
+                       if isinstance(h, dict)]
+            # Notes the history does not hold (a state saved before refines were recorded there) reach only the
+            # design, which reads them from ``human_feedback``: send them there rather than drop them.
+            return "rewrite" if notes and history and history[-1] == notes else "revise"
         return "done"
 
     def _route_after_write(self, state: QuestState) -> str:
