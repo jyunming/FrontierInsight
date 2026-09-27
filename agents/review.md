@@ -39,7 +39,7 @@ Respond with a single JSON object, no prose, no markdown fence:
   "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'unsupported_claim' when the Claim grounding block lists unsupported claims, 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
 }
 
-The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and forces another revision pass (or escalates to human review). Personas without their own MUST-FLAG rules return ``[]``.
+The ``must_flag_hits`` field is non-negotiable: any item in this list overrides ``engine.review_loop = false`` and forces another revision pass (or escalates to human review). Personas without their own MUST-FLAG rules return ``[]``, except for the shared ones above (`unsupported_claim`, `figure_caption`) and `user_feedback_unaddressed` when the person's refine notes are shown below and the paper does not answer one.
 
 ---
 

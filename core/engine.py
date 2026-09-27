@@ -390,8 +390,13 @@ class QuestState(TypedDict, total=False):
     # A person's refine goes to the writing step first (``_route_after_human_feedback``). ``refine_written_for``: how
     # many refines the writer has answered (so each is answered once). ``refine_needs_experiment``: the points
     # of it the writer said need a new or different experiment (then the quest goes back to the design).
-    # ``refine_scope``: what the refine came to, ``paper`` or ``experiment``.
+    # ``refine_scope``: what the refine came to, ``paper`` or ``experiment`` (empty on a write that answered none).
+    # ``feedback_rounds_from``: the first round of ``feedback_history`` the review is shown (the rounds since the last
+    # gate answer). ``feedback_rewrite_for``: the refine count when a rewrite was made for an unanswered note; the
+    # same note flagged again after it sends the quest to the design.
     refine_written_for: int
+    feedback_rounds_from: int
+    feedback_rewrite_for: int
     refine_needs_experiment: list[str]
     refine_scope: str
     # Names of pause-points the engine has already paused at on this
@@ -821,11 +826,16 @@ class Engine:
                         # iteration==0).
                         if reopen and not prior_snapshot.next:
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
+                            # The notes of earlier refines were answered by earlier passes: this pass redoes the
+                            # design, and neither the writer nor the review treats them as new.
+                            _answered = _refine_count(prior_snapshot.values or {})  # type: ignore[arg-type]
                             await graph.aupdate_state(
                                 run_config,
                                 {
                                     "human_feedback": {"action": "refine"},
                                     "iteration": _it + 1,
+                                    "refine_written_for": _answered,
+                                    "feedback_rounds_from": len((prior_snapshot.values or {}).get("feedback_history") or []),
                                 },
                                 as_node="human_feedback",
                             )
@@ -2123,6 +2133,13 @@ class Engine:
                     "already re-run its experiment — writing the paper again instead",
                     must_flag, rerun_for,
                 )
+            if (any(_hit_name(h) == _UNANSWERED_NOTE_HIT for h in must_flag)
+                    and state.get("feedback_rewrite_for") == _refine_count(state) and _refine_count(state)):
+                self._log.info(
+                    "[route] the review still finds the person's note unanswered after a rewrite for it — "
+                    "going back to the design",
+                )
+                return "revise"
             if _hits_need_only_a_rewrite(must_flag):
                 self._log.info(
                     "[route] must_flag_hits=%s are all about the text — rewriting the paper",
@@ -8984,6 +9001,11 @@ class Engine:
         if refine_round:
             out["refine_written_for"] = _refine_count(state)
             out["refine_scope"] = "experiment" if needs_experiment else "paper"
+        else:
+            out["refine_scope"] = ""
+            if any(_hit_name(h) == _UNANSWERED_NOTE_HIT for h in (state.get("review") or {}).get("must_flag_hits") or []):
+                # A rewrite for a note the review said the paper leaves unanswered: flagged again, it goes to the design.
+                out["feedback_rewrite_for"] = _refine_count(state)
         return out
 
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
@@ -11036,6 +11058,8 @@ class Engine:
         if action == "refine":
             update["iteration"] = state.get("iteration", 0) + 1
             history = list(state.get("feedback_history") or [])
+            # The review is shown the notes of this gate answer, not the ones an earlier gate answered.
+            update["feedback_rounds_from"] = len(history)
             history.append({
                 "iteration": state.get("iteration", 0),
                 "text": feedback,
@@ -15703,6 +15727,7 @@ _TEXT_ONLY_HITS = frozenset({
     # does goes to the design from the writing step), so the paper is written again.
     "user_feedback_unaddressed",
 })
+_UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be
@@ -15971,13 +15996,17 @@ def _paper_basis(state: QuestState) -> str:
     return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
-_NEEDS_EXPERIMENT_RE = re.compile(r"^[ \t>*_-]*NEEDS_EXPERIMENT:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+# A line of the writer's reply naming a point that needs an experiment: bare, quoted, bulleted, numbered (``1.`` /
+# ``1)``), bold or in backticks.
+_NEEDS_EXPERIMENT_RE = re.compile(
+    r"^[ \t>*_`-]*(?:\d+[.)][ \t]*)?[*_`]*NEEDS_EXPERIMENT[*_`]*:[*_`]*[ \t]*(.+?)[ \t*_`]*$", re.MULTILINE)
 
 
 def _refine_round(state: QuestState) -> bool:
-    """This write answers a person's refine it has not answered yet."""
+    """This write answers a person's refine it has not answered yet: a round of ``feedback_history`` the writer has
+    not answered (a refine whose notes are only in ``human_feedback``, an older state's shape, is not one)."""
     return ((state.get("human_feedback") or {}).get("action") == "refine"
-            and state.get("refine_written_for") != _refine_count(state))
+            and _refine_count(state) > int(state.get("refine_written_for") or 0))
 
 
 def _refine_count(state: QuestState) -> int:
@@ -15991,13 +16020,20 @@ def _take_needs_experiment(markdown: str) -> tuple[str, list[str]]:
     if not points:
         return markdown, []
     cleaned = _NEEDS_EXPERIMENT_RE.sub("", markdown)
-    return re.sub(r"\n{3,}", "\n\n", cleaned).rstrip() + "\n", points
+    # A fenced reply followed by the points: with the points gone, the fence is the outer one again.
+    cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", cleaned).strip())
+    return cleaned.rstrip() + "\n", points
 
 
 def _user_feedback_review_block(state: QuestState) -> str:
-    """The review prompt's ``$user_feedback_block``: what the person asked for when they refined, so a point the
-    paper leaves unanswered is a must-fix finding. Empty when they have not refined."""
-    rounds = [str(h.get("text") or "").strip() for h in state.get("feedback_history") or [] if isinstance(h, dict)]
+    """The review prompt's ``$user_feedback_block``: what the person asked for at the last gate (the rounds since
+    ``feedback_rounds_from``; only the latest one for an older state), so a point the paper leaves unanswered is a
+    must-fix finding. Earlier rounds were answered at an earlier gate and are not raised again. Empty when there is
+    none."""
+    history = [h for h in state.get("feedback_history") or [] if isinstance(h, dict)]
+    start = state.get("feedback_rounds_from")
+    history = history[int(start):] if isinstance(start, int) else history[-1:]
+    rounds = [str(h.get("text") or "").strip() for h in history]
     rounds = [r for r in rounds if r]
     if not rounds:
         return ""
@@ -16060,8 +16096,8 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
         lines += [
             "Answer the user's feedback in the text wherever the text can answer it. If a point can only be answered "
             "by running a new or different experiment, do not write numbers for it: end your reply with one line per "
-            "such point, `NEEDS_EXPERIMENT: <the point, in one sentence>` (FI removes these lines and goes back to the "
-            "design). Write no such line when the text can answer every point.",
+            "such point, starting the line with NEEDS_EXPERIMENT: followed by the point in one sentence (FI removes "
+            "these lines and goes back to the design). Write no such line when the text can answer every point.",
         ]
     return "\n".join(lines) or "(none — first draft)"
 

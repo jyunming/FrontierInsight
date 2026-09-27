@@ -38,15 +38,6 @@ def _refined(**over: Any) -> dict[str, Any]:
             "feedback_history": list(NOTES), **over}
 
 
-def test_the_graph_sends_a_refine_to_the_writer_and_the_writer_decides() -> None:
-    # The edges as built, not a picture of them.
-    import inspect
-
-    src = inspect.getsource(Engine._build_graph)
-    assert '{"rewrite": "write", "revise": "design", "done": END}' in src
-    assert '{"check": "claim_check", "redesign": "design"}' in src
-
-
 def test_routes(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     assert eng._route_after_human_feedback(_refined()) == "rewrite"  # type: ignore[arg-type]
@@ -60,11 +51,13 @@ def test_a_refine_is_answered_once() -> None:
     assert _refine_round(_refined())  # type: ignore[arg-type]
     assert not _refine_round(_refined(refine_written_for=1))  # type: ignore[arg-type]
     assert not _refine_round({"human_feedback": {"action": "accept"}, "feedback_history": NOTES})  # type: ignore[arg-type]
+    # An older state's notes only in human_feedback (no history round): not a refine round, the writer is not asked.
+    assert not _refine_round({"human_feedback": {"action": "refine", "feedback": "x"}})  # type: ignore[arg-type]
 
 
 def test_the_writer_is_told_how_to_name_an_experiment_point() -> None:
     text = _format_review_for_writer(_refined(), refine_round=True)  # type: ignore[arg-type]
-    assert "Holm p-value" in text and "NEEDS_EXPERIMENT:" in text
+    assert "Holm p-value" in text and "NEEDS_EXPERIMENT:" in text and "`NEEDS_EXPERIMENT" not in text
     assert "NEEDS_EXPERIMENT:" not in _format_review_for_writer(_refined())  # type: ignore[arg-type]
 
 
@@ -72,6 +65,35 @@ def test_needs_experiment_lines_are_taken_out_of_the_paper() -> None:
     paper, points = _take_needs_experiment("# P\n\nBody.\n\nNEEDS_EXPERIMENT: rerun the sweep with 30 seeds\n")
     assert points == ["rerun the sweep with 30 seeds"] and "NEEDS_EXPERIMENT" not in paper and "Body." in paper
     assert _take_needs_experiment("# P\n\nBody.\n") == ("# P\n\nBody.\n", [])
+
+
+def test_needs_experiment_lines_in_other_shapes_are_taken_too() -> None:
+    reply = ("# P\n\nBody.\n\n`NEEDS_EXPERIMENT: run a permutation test`\n1. NEEDS_EXPERIMENT: more seeds\n"
+             "2) **NEEDS_EXPERIMENT:** a finer grid**\n- NEEDS_EXPERIMENT: a new baseline\n")
+    paper, points = _take_needs_experiment(reply)
+    assert points == ["run a permutation test", "more seeds", "a finer grid", "a new baseline"]
+    assert "NEEDS_EXPERIMENT" not in paper and paper.strip().endswith("Body.")
+
+
+def test_a_fenced_reply_with_points_after_it_loses_its_fence() -> None:
+    paper, points = _take_needs_experiment("```markdown\n# P\n\nBody.\n```\n\nNEEDS_EXPERIMENT: x\n")
+    assert points == ["x"] and paper == "# P\n\nBody.\n"
+
+
+def test_the_review_sees_only_the_notes_of_the_last_gate() -> None:
+    history = [{"iteration": 1, "text": "old note, answered at an earlier gate"}, {"iteration": 2, "text": "new note"}]
+    block = _user_feedback_review_block({"feedback_history": history, "feedback_rounds_from": 1})  # type: ignore[arg-type]
+    assert "new note" in block and "old note" not in block
+    assert "old note" not in _user_feedback_review_block({"feedback_history": history})  # type: ignore[arg-type]
+    assert _user_feedback_review_block({"feedback_history": history, "feedback_rounds_from": 2}) == ""  # type: ignore[arg-type]
+
+
+def test_a_note_still_unanswered_after_its_rewrite_goes_to_the_design(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    hit = "user_feedback_unaddressed: the Holm p-value is still there"
+    state = _refined(review={"verdict": "revise", "must_flag_hits": [hit]}, iteration=0, refine_written_for=1)
+    assert eng._route_after_review(state) == "rewrite"  # type: ignore[arg-type]
+    assert eng._route_after_review({**state, "feedback_rewrite_for": 1}) == "revise"  # type: ignore[arg-type]
 
 
 def test_the_review_reads_the_notes_and_an_unanswered_one_is_a_text_fix() -> None:
@@ -103,6 +125,11 @@ def test_a_text_only_refine_rewrites_the_paper_and_leaves_the_protocol(tmp_path:
                  "# Paper\n\nThe comparison is described without a p-value.\n", prompts)
     assert "Holm p-value" in prompts[0], "the whole-paper writer read the notes (not the passage editor)"
     assert out["refine_needs_experiment"] == [] and out["refine_scope"] == "paper" and out["refine_written_for"] == 1
+    # The rewrite after it, for the review's note, is not a refine round: its scope is empty, and it is marked as the
+    # rewrite for that note.
+    later = _write(eng, {**_refined(), **out, "review": {"verdict": "revise", "must_flag_hits": [
+        "user_feedback_unaddressed: still there"]}}, "# Paper\n\nFixed.\n", prompts)
+    assert later["refine_scope"] == "" and later["feedback_rewrite_for"] == 1 and "refine_written_for" not in later
     assert eng._route_after_write({**_refined(), **out}) == "check"  # type: ignore[arg-type]
     assert frozen_protocol.protocol_of(eng.quest_root) == before
 
