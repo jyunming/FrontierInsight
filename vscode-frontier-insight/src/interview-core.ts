@@ -183,6 +183,15 @@ export function secondReviewerNodeModel(answers: InterviewAnswers, rigorProfile:
     return model;
 }
 
+/** Mirrors core/interview.py:other_reviewer_models: the models ``review_panel.*`` per-node entries name that are not the
+ * quest's own (an entry on the quest's own model leaves every reviewer on it, so it does not count). */
+export function otherReviewerModels(nodeModels: Record<string, string>, primaryModel: string | undefined): string[] {
+    const primary = (primaryModel ?? "").trim();
+    return Object.entries(nodeModels)
+        .filter(([node, model]) => node.startsWith("review_panel.") && model.trim() !== "" && model.trim() !== primary)
+        .map(([, model]) => model.trim());
+}
+
 /** Mirrors core/interview.py:rigor_profile_for. */
 export function rigorProfileFor(resultUse: string): "default" | "research" {
     return resultUse === "explore" ? "default" : "research";
@@ -440,8 +449,9 @@ export function answersToYaml(answers: InterviewAnswers): string {
     // Per-node model overrides. Only emit when the user typed something.
     const nodeModels = parseNodeModelsAnswer(answers.node_models);
     const secondReviewer = secondReviewerNodeModel(answers, rigorProfile);
-    if (secondReviewer && !Object.keys(nodeModels).some((node) => node.startsWith("review_panel."))) {
-        // A reviewer model named in the per-node overrides wins over this answer. Mirrors core/interview.py.
+    if (secondReviewer && otherReviewerModels(nodeModels, answers.provider_model).length === 0) {
+        // A reviewer named in the per-node overrides on another model wins over this answer; one on the quest's own
+        // model would leave every reviewer on it, so the answer is merged in then too. Mirrors core/interview.py.
         nodeModels["review_panel.statistician"] = secondReviewer;
     }
     if (Object.keys(nodeModels).length > 0) {
@@ -470,8 +480,10 @@ export function answersToYaml(answers: InterviewAnswers): string {
     if (surveyMode) {
         lines.push(`${indent}survey_mode: true`);
     }
-    if (rigorProfile === "research" && (answers.second_reviewer_model ?? "").trim() === ONE_MODEL_ANSWER) {
-        // Only one model: the quest runs, and its result says the review was one model's view.
+    if (rigorProfile === "research" && (answers.second_reviewer_model ?? "").trim() === ONE_MODEL_ANSWER
+        && otherReviewerModels(nodeModels, answers.provider_model).length === 0) {
+        // Only one model: the quest runs, and its result says the review was one model's view. Not written when a
+        // per-node override puts a reviewer on another model after all. Mirrors core/interview.py.
         lines.push(`${indent}one_model_review: true`);
     }
     // A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface (this

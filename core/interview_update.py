@@ -432,6 +432,15 @@ def rewrite_yaml_with_new_answers(
                 dst[k] = v
 
     deep_merge(base_data, raw)
+    # "I only have one model" (engine.one_model_review) no longer holds once a reviewer is put on another model (the
+    # way the review-models stop points to): dropped, so the result is not held back for a panel that has two models.
+    from core.interview import other_reviewer_models
+
+    provider_block = base_data.get("provider") or {}
+    engine_block = base_data.get("engine")
+    if (isinstance(engine_block, dict) and engine_block.get("one_model_review")
+            and other_reviewer_models(provider_block.get("node_models"), provider_block.get("model"))):
+        del engine_block["one_model_review"]
     return yaml.safe_dump(base_data, sort_keys=False, indent=2, allow_unicode=True)
 
 

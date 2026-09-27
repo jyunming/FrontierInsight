@@ -49,7 +49,9 @@ def test_the_question_is_asked_on_every_interface_right_after_the_model() -> Non
     assert QUESTION.tier == 1 and set(QUESTION.frontends) == {"cli", "serve", "vscode"}
     assert QUESTION.kind == "single" and QUESTION.allow_other and QUESTION.default is None
     assert not QUESTION.mid_quest_editable
-    assert "different model" in QUESTION.prompt and "I only have one model" in QUESTION.prompt
+    assert QUESTION.label == "A different model for one reviewer"
+    assert "Four AI reviewers" in QUESTION.prompt and "I only have one model" in QUESTION.prompt
+    assert "statistician" not in QUESTION.prompt, "plain words: the statistics reviewer"
     assert [c.value for c in QUESTION.choices] == [ONE_MODEL_ANSWER]
     assert QUESTION.choices[0].label == "I only have one model"
     ids = [q.id for q in questions_for_tier(1, "cli")]
@@ -87,12 +89,14 @@ async def test_the_cli_asks_it_and_writes_it(
 
     cfg = await _new(tmp_path, monkeypatch, ["Second reviewer probe", use, "1", "1", *typed, "", "", "", "", ""])
     shown = capsys.readouterr().out
-    assert ("Second reviewer's model" in shown) is bool(typed)
+    assert ("A different model for one reviewer" in shown) is bool(typed)
     assert cfg.provider.model == "gpt-5"
     assert (cfg.provider.node_models or {}).get("review_panel.statistician") == statistician
     assert cfg.engine.one_model_review is one
     if typed:
-        assert "2nd reviewer" in shown.split("The plan", 1)[1], "the confirm screen shows the answer"
+        plan = shown.split("The plan", 1)[1]
+        assert "Reviewers    :" in plan, "the confirm screen shows the answer"
+        assert ("the statistics reviewer uses gpt-5-mini" in plan) is (statistician is not None)
 
 
 @pytest.mark.asyncio
@@ -137,6 +141,27 @@ def test_the_answer_merges_into_the_per_node_models_and_a_named_reviewer_model_w
     _text, cfg = _cfg(tmp_path / "b", _answers(second_reviewer_model="m-two",
                                                node_models="review_panel.methodologist:m-own"))
     assert cfg.provider.node_models == {"review_panel.methodologist": "m-own"}
+    # A named reviewer on the quest's own model (gpt-5 here) leaves every reviewer on it: the answer is merged in too.
+    (tmp_path / "c").mkdir()
+    _text, cfg = _cfg(tmp_path / "c", _answers(second_reviewer_model="m-two",
+                                               node_models="review_panel.methodologist:gpt-5"))
+    assert cfg.provider.node_models == {"review_panel.methodologist": "gpt-5", "review_panel.statistician": "m-two"}
+
+
+def test_one_model_is_not_written_when_a_reviewer_is_on_another_model_after_all(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    text, cfg = _cfg(tmp_path / "a", _answers(second_reviewer_model=ONE_MODEL_ANSWER,
+                                              node_models="review_panel.methodologist:m2"))
+    assert "one_model_review" not in text and cfg.engine.one_model_review is False
+    # ... but a named reviewer on the quest's own model does not count as another model.
+    (tmp_path / "b").mkdir()
+    text, cfg = _cfg(tmp_path / "b", _answers(second_reviewer_model=ONE_MODEL_ANSWER,
+                                              node_models="review_panel.methodologist:gpt-5"))
+    assert cfg.engine.one_model_review is True
+    for node_models, one in (("review_panel.methodologist:m2", False), ("review_panel.methodologist:m-main", True)):
+        ts_text, ts_cfg = _emit(tmp_path, result_use="research", review_panel=list(PANEL), provider_model="m-main",
+                                node_models=node_models, second_reviewer_model=ONE_MODEL_ANSWER)
+        assert ts_cfg.engine.one_model_review is one, ts_text
 
 
 def test_exploring_or_not_asked_writes_neither(tmp_path: Path) -> None:
@@ -194,6 +219,25 @@ def test_vscode_asks_it_after_what_the_result_is_for_and_leaves_the_chat_model_o
     assert f'export const ONE_MODEL_ANSWER = "{ONE_MODEL_ANSWER}";' in core_ts
 
 
+def test_vscode_uses_the_same_words_checks_typed_names_and_will_not_launch_without_an_answer() -> None:
+    import re
+
+    ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
+    m = re.search(r"export const SECOND_REVIEWER_PROMPT =\s*((?:\"[^\"]*\"\s*\+?\s*)+);", ts)
+    assert m, "SECOND_REVIEWER_PROMPT not found"
+    assert "".join(re.findall(r'"([^"]*)"', m.group(1))) == QUESTION.prompt
+    assert f'export const SECOND_REVIEWER_LABEL = "{QUESTION.label}";' in ts
+    assert "placeHolder: SECOND_REVIEWER_PROMPT" in ts
+    # A typed name must be one VS Code offers (by id or family), or the bridge would use the chat model instead.
+    assert "selectChatModels({ id: name })" in ts and "selectChatModels({ family: name })" in ts
+    assert "await vscodeOffersModel(typed)" in ts
+    # Launch with research or a decision and no answer asks it, and does not launch without one.
+    launch = ts[ts.index('if (action.value === "launch") {'):]
+    launch = launch[:launch.index("return answers;")]
+    assert 'answers.result_use !== "explore" && !answers.second_reviewer_model' in launch
+    assert "pickSecondReviewerModel(primaryModel)" in launch and "continue;" in launch
+
+
 # ---- the web form ----
 
 
@@ -215,6 +259,18 @@ def test_the_web_form_carries_the_answer(tmp_path: Path) -> None:
     assert "function questionApplies" in page and "renderSecondReviewerOptions" in page
     assert "String(m.value) !== primary" in page, "the quest's own model is left out of the list"
     assert "out.second_reviewer_model === out.provider_model" in page, "nor can it be typed in"
+    # Research or a decision needs the quest's model named, so "the same model" can always be checked.
+    for use in ("research", "decision"):
+        blank = client.post("/api/interview/submit", json={**_ok_answers_payload(), "result_use": use,
+                                                           "provider_model": "", "second_reviewer_model": "gpt-5"})
+        assert blank.status_code == 400 and "provider_model" in blank.text
+    assert client.post("/api/interview/submit", json={**_ok_answers_payload(), "result_use": "explore",
+                                                      "provider_model": ""}).status_code == 200
+    assert "!String(out.provider_model || '').trim()" in page
+    # The update form hides a question by the schema's own editability, not by having a condition.
+    assert "!(q.ask_if && !schema.editable_fields.includes(q.id))" in page
+    # A draft's model that only the live list has is kept until it arrives.
+    assert "pendingModelValues[qid] = target" in page and "applyPendingModel('provider_model')" in page
 
 
 # ---- a later --update keeps it ----
@@ -233,6 +289,48 @@ def test_an_update_keeps_the_answer(tmp_path: Path, answer: str) -> None:
     cfg = Config.from_yaml(quest / "config.yaml")
     assert cfg.engine.one_model_review is (answer == ONE_MODEL_ANSWER)
     assert (cfg.provider.node_models or {}).get("review_panel.statistician") == (None if answer == ONE_MODEL_ANSWER else "m-two")
+
+
+@pytest.mark.parametrize("node_models, kept", [
+    ({"review_panel.statistician": "m-two"}, False),   # a reviewer on another model: the flag no longer holds
+    ({"review_panel.statistician": "gpt-5"}, True),    # on the quest's own model: still one model
+    ({"poster": "m-cheap"}, True),                     # not a reviewer
+])
+def test_an_update_that_names_a_reviewer_model_drops_one_model_review(
+    tmp_path: Path, node_models: dict[str, str], kept: bool,
+) -> None:
+    import yaml
+
+    from core.interview_update import load_current_answers, rewrite_yaml_with_new_answers
+
+    quest = tmp_path / "quest"
+    quest.mkdir()
+    (quest / "config.yaml").write_text(answers_to_yaml(_answers(second_reviewer_model=ONE_MODEL_ANSWER)),
+                                       encoding="utf-8")
+    current, _path, raw = load_current_answers(quest)
+    node_models_answer = ", ".join(f"{k}:{v}" for k, v in node_models.items())
+    (quest / "config.yaml").write_text(
+        rewrite_yaml_with_new_answers(raw, replace(current, node_models=node_models_answer)), encoding="utf-8")
+    cfg = Config.from_yaml(quest / "config.yaml")
+    assert cfg.engine.one_model_review is kept
+    assert (cfg.provider.node_models or {}) == node_models
+    # A hand-edited config (the per-node models added straight to the YAML) is handled the same way.
+    raw2 = yaml.safe_load(answers_to_yaml(_answers(second_reviewer_model=ONE_MODEL_ANSWER)))
+    raw2["provider"]["node_models"] = dict(node_models)
+    current2 = replace(current, node_models="")
+    assert ("one_model_review" in (yaml.safe_load(rewrite_yaml_with_new_answers(raw2, current2))["engine"])) is kept
+
+
+@pytest.mark.asyncio
+async def test_the_cli_asks_again_when_other_is_left_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from tests.test_interview_e2e_cli import _new
+
+    other = str(len(second_reviewer_choices("openai", "gpt-5")) + 1)
+    cfg = await _new(tmp_path, monkeypatch, ["Empty other probe", "", "1", "1", other, "", "1", "", "", "", "", ""])
+    assert "nothing typed" in capsys.readouterr().out
+    assert (cfg.provider.node_models or {}).get("review_panel.statistician") == "gpt-5-mini"
 
 
 # ---- the result ----

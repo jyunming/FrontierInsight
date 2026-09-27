@@ -318,7 +318,7 @@ DRAFT_ENGINE_SETTINGS: tuple[tuple[str, str], ...] = (
 )
 
 
-# The "Second reviewer's model" answer that says there is no other model: the quest runs with
+# The "A different model for one reviewer" answer (second_reviewer_model) that says there is no other model: the quest runs with
 # ``engine.one_model_review: true`` (every reviewer on the one model, said in the result) instead of stopping.
 # Mirrored in vscode-frontier-insight/src/interview-core.ts (ONE_MODEL_ANSWER).
 ONE_MODEL_ANSWER = "__one_model__"
@@ -591,12 +591,13 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         id="second_reviewer_model",
-        label="Second reviewer's model",
+        label="A different model for one reviewer",
+        # Mirrored word for word in vscode-frontier-insight/src/interview.ts (SECOND_REVIEWER_PROMPT).
         prompt=(
-            "A study needs one reviewer on a different model from the others, so they do not all make the same "
-            "mistakes. Which model should the statistician reviewer use? If you have no other model, pick 'I only "
-            "have one model': the quest still runs, but its result says the review was one model's view and it "
-            "will not be marked publication-ready."
+            "Four AI reviewers read the result. If they all use the same model they tend to make the same mistakes, "
+            "so one of them (the statistics reviewer) should use another model. Which one? If you have no other "
+            "model, pick 'I only have one model': the quest still runs, but its result says the review was one "
+            "model's view and it will not be marked publication-ready."
         ),
         kind="single",
         # The models are added in front of this at render time: the ones the frontend can offer for the same
@@ -1213,7 +1214,7 @@ def question_applies(q: Question, answers: dict[str, Any]) -> bool:
 
 
 def second_reviewer_choices(provider: str, primary_model: str | None) -> tuple[Choice, ...]:
-    """The choices for "Second reviewer's model" on the CLI and the web: the provider's models except the one the quest
+    """The choices for "A different model for one reviewer" on the CLI and the web: the provider's models except the one the quest
     runs on, then "I only have one model". (VS Code lists the chat models ``vscode.lm`` offers instead.)"""
     (q,) = [x for x in QUESTIONS if x.id == "second_reviewer_model"]
     others = tuple(c for c in model_choices_for(provider) if c.value != primary_model)
@@ -1521,7 +1522,7 @@ class InterviewAnswers:
     rigor_profile: str = "default"
     # The "What is the result for?" answer: "research" | "decision" | "explore", or "" when not asked.
     result_use: str = ""
-    # "Second reviewer's model" (asked for research or a decision only): a model id, written as
+    # "A different model for one reviewer" (asked for research or a decision only): a model id, written as
     # ``provider.node_models["review_panel.statistician"]``; ``ONE_MODEL_ANSWER``, written as
     # ``engine.one_model_review: true``; or "" when not asked (nothing written). Must stay in sync with
     # vscode-frontier-insight/src/interview-core.ts.
@@ -1644,12 +1645,22 @@ def parse_node_models_answer(raw: str) -> dict[str, str]:
 
 
 def second_reviewer_node_model(answers: InterviewAnswers, rigor_profile: str) -> str:
-    """The model the "Second reviewer's model" answer puts on the statistician reviewer, or "" when it puts none (not
+    """The model the "A different model for one reviewer" answer puts on the statistics reviewer, or "" when it puts none (not
     asked, "I only have one model", or not a research-profile quest, where there is no such requirement)."""
     model = answers.second_reviewer_model.strip()
     if rigor_profile != "research" or not model or model == ONE_MODEL_ANSWER:
         return ""
     return model
+
+
+def other_reviewer_models(node_models: dict[str, Any] | None, primary_model: str | None) -> list[str]:
+    """The reviewer models a ``review_panel.*`` per-node entry names that are not the quest's own model: an entry on the
+    quest's own model leaves every reviewer on it, so it does not count as naming another."""
+    primary = (primary_model or "").strip()
+    return [
+        str(model).strip() for node, model in (node_models or {}).items()
+        if str(node).startswith("review_panel.") and str(model or "").strip() and str(model).strip() != primary
+    ]
 
 
 def expand_ensemble_profile(
@@ -1781,8 +1792,9 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     # today's behavior for a quest that doesn't set this.
     node_models = parse_node_models_answer(answers.node_models)
     second_reviewer = second_reviewer_node_model(answers, rigor_profile)
-    if second_reviewer and not any(node.startswith("review_panel.") for node in node_models):
-        # A reviewer model named in the per-node overrides wins over this answer.
+    if second_reviewer and not other_reviewer_models(node_models, answers.provider_model):
+        # A reviewer named in the per-node overrides on another model wins over this answer; one on the quest's own
+        # model would leave every reviewer on it, so the answer is merged in then too.
         node_models["review_panel.statistician"] = second_reviewer
     if node_models:
         lines.append(f"{indent}node_models:")
@@ -1807,8 +1819,10 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     lines.append(f"{indent}no_simulation: {'true' if no_simulation else 'false'}")
     if survey_mode:
         lines.append(f"{indent}survey_mode: true")
-    if rigor_profile == "research" and answers.second_reviewer_model.strip() == ONE_MODEL_ANSWER:
-        # Only one model: the quest runs, and its result says the review was one model's view.
+    if (rigor_profile == "research" and answers.second_reviewer_model.strip() == ONE_MODEL_ANSWER
+            and not other_reviewer_models(node_models, answers.provider_model)):
+        # Only one model: the quest runs, and its result says the review was one model's view. Not written when a
+        # per-node override puts a reviewer on another model after all.
         lines.append(f"{indent}one_model_review: true")
 
     # A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface.

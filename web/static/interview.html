@@ -267,6 +267,10 @@
       const { parsed, proposal_md, proposal_md_filename } = await res.json();
 
       const flat = flattenDraft(parsed);
+      // What a draft wrote for the second reviewer, read back into the question (core/interview.py:answers_to_yaml).
+      const draftStat = ((parsed && parsed.provider && parsed.provider.node_models) || {})['review_panel.statistician'];
+      if (draftStat) flat.second_reviewer_model = draftStat;
+      else if (parsed && parsed.engine && parsed.engine.one_model_review) flat.second_reviewer_model = '__one_model__';
       // Track how many fields we actually pre-filled so the banner can
       // tell the user exactly what landed.
       const filled = [];
@@ -292,6 +296,11 @@
           if (matched) {
             filled.push(qid);
             if (qid === 'provider') populateProviderModel(el.value);
+          } else if (qid === 'provider_model' || qid === 'second_reviewer_model') {
+            // A model that is only in the live list (it arrives after this): kept and selected once it is there.
+            pendingModelValues[qid] = target;
+            if (qid === 'second_reviewer_model') renderSecondReviewerOptions(); else applyPendingModel(qid);
+            filled.push(qid);
           }
         }
       }
@@ -393,6 +402,27 @@
   // The models listed for the provider (static, then live), kept so the second reviewer's list can leave out the one
   // picked as the quest's model whenever that changes.
   let providerModelList = [];
+  // Model values a loaded draft named that the list did not have yet (the live list arrives later): selected once they
+  // are listed, typed into "Other" until then.
+  const pendingModelValues = {};
+
+  function applyPendingModel(qid) {
+    const v = pendingModelValues[qid];
+    const sel = document.getElementById(`q-${qid}`);
+    if (!v || !sel || sel.tagName !== 'SELECT') return;
+    const q = schema.questions.find((x) => x.id === qid);
+    if ([...sel.options].some((o) => o.value === v)) {
+      sel.value = v;
+      delete pendingModelValues[qid];
+    } else if ([...sel.options].some((o) => o.value === '__OTHER__')) {
+      sel.value = '__OTHER__';
+    } else {
+      return;
+    }
+    handleOtherSelection(sel, q);
+    const other = document.getElementById(`q-${qid}-other`);
+    if (other && sel.value === '__OTHER__') other.value = v;
+  }
 
   function renderSecondReviewerOptions() {
     const sel = document.getElementById('q-second_reviewer_model');
@@ -418,6 +448,7 @@
     other.textContent = 'Other (type your own)';
     sel.appendChild(other);
     if ([...sel.options].some((o) => o.value === before)) sel.value = before;
+    applyPendingModel('second_reviewer_model');
   }
 
   function renderForm() {
@@ -428,10 +459,11 @@
     // "Continue to Review". Update flow keeps the existing "all editable
     // fields" rendering because the user is patching an existing quest,
     // not building a fresh one from scratch.
-    // A question asked only for some answers (the second reviewer's model) is fixed once the quest exists: not shown on
-    // an update.
+    // A conditional question that cannot be changed mid-quest (the second reviewer's model) is not shown on an update:
+    // pinned with no value it would only confuse. Editability is the schema's own (editable_fields).
     const visibleQs = isUpdate
-      ? schema.questions.filter((q) => q.frontends.includes('serve') && !q.ask_if)
+      ? schema.questions.filter((q) => q.frontends.includes('serve')
+          && !(q.ask_if && !schema.editable_fields.includes(q.id)))
       : firstScreenQuestions();
     document.getElementById('progress-total').textContent = visibleQs.length;
     document.getElementById('progress-pill').classList.remove('hidden');
@@ -621,7 +653,7 @@
     blank.value = '';
     blank.textContent = models.length
       ? (dynamicSource ? '(pick a model — live)' : '(pick a model)')
-      : '(pick a provider first)';
+      : ((document.getElementById('q-provider') || {}).value ? '(the Chat-picker model; or type one under Other)' : '(pick a provider first)');
     sel.appendChild(blank);
     for (const m of models) {
       const opt = document.createElement('option');
@@ -630,13 +662,16 @@
       if (m.description) opt.title = m.description;
       sel.appendChild(opt);
     }
-    if (models.length) {
+    // "Other" whenever a provider is picked, also one with no list (vscode_extension): research needs the model named.
+    const providerPicked = !!((document.getElementById('q-provider') || {}).value);
+    if (models.length || providerPicked) {
       const other = document.createElement('option');
       other.value = '__OTHER__';
       other.textContent = 'Other (type your own)';
       sel.appendChild(other);
     }
     providerModelList = models;
+    applyPendingModel('provider_model');
     renderSecondReviewerOptions();
   }
 
@@ -828,15 +863,21 @@
     // New-quest flow: validate tier-1, derive tier-2/3, render review.
     if (!out.topic || !String(out.topic).trim()) { alert('Topic is required.'); return false; }
     if (!out.provider || !String(out.provider).trim()) { alert('Pick the LLM provider.'); return false; }
-    // Asked for research or a decision only (skipped above otherwise): then it needs an answer.
+    // Asked for research or a decision only (skipped above otherwise): then it needs an answer, and the quest's own
+    // model must be named so the two can be told apart (left blank, the provider's default runs, which a reviewer
+    // "on another model" could turn out to be).
     const secondQ = visibleQs.find((q) => q.id === 'second_reviewer_model');
+    if (secondQ && questionApplies(secondQ, out) && !String(out.provider_model || '').trim()) {
+      alert('Research or a decision needs the quest\'s model named (pick one, or type it under "Other"), so one reviewer can use a different one.');
+      return false;
+    }
     if (secondQ && questionApplies(secondQ, out) && !String(out.second_reviewer_model || '').trim()) {
-      alert(`Pick the second reviewer's model, or "I only have one model".`);
+      alert(`Pick a different model for one reviewer, or "I only have one model".`);
       return false;
     }
     if (secondQ && out.second_reviewer_model && out.second_reviewer_model === out.provider_model) {
       // The same model again would leave every reviewer on it, and the quest would stop to ask for another.
-      alert(`That is the model the quest runs on. Pick another for the second reviewer, or "I only have one model".`);
+      alert(`That is the model the quest runs on. Pick a different one for that reviewer, or "I only have one model".`);
       return false;
     }
     pendingAnswers = { ...(savedProfile || {}), ...out, profile_seen: savedProfile };

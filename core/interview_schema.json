@@ -343,8 +343,8 @@
     },
     {
       "id": "second_reviewer_model",
-      "label": "Second reviewer's model",
-      "prompt": "A study needs one reviewer on a different model from the others, so they do not all make the same mistakes. Which model should the statistician reviewer use? If you have no other model, pick 'I only have one model': the quest still runs, but its result says the review was one model's view and it will not be marked publication-ready.",
+      "label": "A different model for one reviewer",
+      "prompt": "Four AI reviewers read the result. If they all use the same model they tend to make the same mistakes, so one of them (the statistics reviewer) should use another model. Which one? If you have no other model, pick 'I only have one model': the quest still runs, but its result says the review was one model's view and it will not be marked publication-ready.",
       "kind": "single",
       "choices": [
         {
