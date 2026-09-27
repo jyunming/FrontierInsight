@@ -272,6 +272,14 @@ def test_one_model_review_goes_on_and_is_a_gap(tmp_path: Path) -> None:
     assert eng._review_models_collapsed([{**ok, "requested_model": "a"}, {**ok, "requested_model": "b"}]) is None
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     gaps = evidence.assess(root, _state(), settings={**RESEARCH, "one_model_review": True})["gaps"]
-    assert any("allowed to run on one model" in g for g in gaps)
+    assert any("every reviewer used one model" in g for g in gaps)
+    assert eng._one_model_panel() is True
+    two = Engine(Config.model_validate({
+        "topic": "t", "rigor_profile": "research",
+        "provider": {"name": "openai", "model": "m", "node_models": {"review_panel.statistician": "m2"}},
+        "engine": {"one_model_review": True}, "knowledge": {"enabled": False},
+        "output": {"output_dir": str(tmp_path / "out2")},
+    }))
+    assert two._one_model_panel() is False, "the flag with a second model added is not a one-model review"
 
 

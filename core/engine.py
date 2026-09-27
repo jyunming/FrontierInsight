@@ -5887,7 +5887,9 @@ class Engine:
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
                     "result_use": getattr(self.config, "effective_result_use", "") or getattr(self.config, "result_use", ""),
-                    "one_model_review": bool(getattr(self.config.engine, "one_model_review", False)),
+                    # The panel really runs on one model and the person said that is all they have: a gap. The flag
+                    # alone (set, then a second model added) is not.
+                    "one_model_review": self._one_model_panel(),
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -11631,6 +11633,13 @@ class Engine:
             return None
         return model_for_node(self.config.provider.node_models, node)
 
+    def _one_model_panel(self) -> bool:
+        """``engine.one_model_review`` is set and every reviewer on the panel is asked on the same model."""
+        if not getattr(self.config.engine, "one_model_review", False):
+            return False
+        panel = list(self.config.engine.review_panel or [])
+        return len({self._reviewer_model(p) for p in panel}) <= 1
+
     def _reviewer_model(self, persona: str) -> str:
         """The model a review-panel persona is asked on: its own ``provider.node_models`` entry, else the quest's."""
         return self._model_for_node(f"review_panel.{persona}") or self.config.provider.model or "(the provider's default)"
@@ -11675,6 +11684,9 @@ class Engine:
                 how,
                 f"Then `python launch.py --resume {self.quest_id}`. (Without rigor_profile: research there is no such "
                 "requirement.)",
+                "If you have only one model: add `one_model_review: true` under the `engine:` section of the quest's "
+                "config.yaml and resume. The quest then runs on it, and its result says the review was one model's view "
+                "and is not marked publication-ready.",
             ],
         )
         try:
