@@ -22,7 +22,7 @@ same PR that adds, splits or renames one.
   `analyze` (`analysis_note`).
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
-- `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records).
+- `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written by `Engine._seal_trace`).
 - `core/audit_log.py` — the hash-chained, redacted per-quest trace (`STAGE_PROGRESS`/`_ProgressOnly` for the curated
   console/web view live in `core/engine.py`, next to `_quest_logger`).
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits
@@ -40,13 +40,13 @@ same PR that adds, splits or renames one.
   (`Engine._stop_for_changed_settings`); `interview_update.approve_settings` records a change `--update` approves.
 - `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; `core/interview_update.py`
   is mid-quest re-entry.
-- `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing.
+- `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call).
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
 - `core/ensemble.py` — the multi-model fan-out-and-merge primitive a node opts into.
 
 ## Knowledge / literature
 
-- `core/knowledge.py` — `Knowledge`, the three-layer retrieval (pinned papers → Axon → external router).
+- `core/knowledge.py` — `Knowledge`, the three-layer retrieval (pinned papers → Axon → external router); `add_quest_artifacts` writes accepted or preliminary kinds by `metadata['standing']` (decided in `Engine._write_back_knowledge`; read back by `engine._is_preliminary_memory` / `_preliminary_reminders`).
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client, sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
