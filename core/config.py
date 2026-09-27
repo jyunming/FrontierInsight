@@ -560,6 +560,10 @@ class EngineConfig(BaseModel):
     # Write ``<quest>/.fi/audit.jsonl``: every node, check verdict, route and the model's stated reasons, in order, with a hash
     # chain (core/audit_log.py). A record only: a failure to write it never stops a quest. Off writes nothing.
     audit_trace: bool = True
+    # The review panel knowingly runs on one model (only one is available). Under ``rigor_profile: research`` the quest
+    # then does not stop for its reviewers' models, and its result is not publication-ready (the evidence level says
+    # the review was one model's view).
+    one_model_review: bool = False
     # Human-feedback gate. ``"after_review"`` (the default) pauses
     # the quest AFTER the review node fires and waits for the user
     # to accept / reject / refine the result before finalising. The

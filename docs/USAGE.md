@@ -254,6 +254,7 @@ engine:
   max_iterations: 2                 # design-revise loop budget
   review_loop: true                 # enable review-driven revise
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
+  one_model_review: false           # only one model available: under rigor_profile: research the review panel may run on it (no stop for the reviewers' models); the result is then not publication-ready. Not part of the approved settings: the evidence level already shows it
   clarify_mode: auto                # off | auto | interactive
   ideate_reflect: true              # extra self-critique pass (1 LLM call)
   ideate_tournament: false          # pairwise tournament across brainstormed ideas; replaces ideate_reflect; C(N,2) calls in parallel
@@ -312,7 +313,7 @@ knowledge:
   literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened.
   foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
-  write_back_only_on_accept: true
+  write_back_only_on_accept: true  # accepted evidence only when a study (research/decision) was accepted AND reached publication_ready; anything else written back is kept as preliminary (a reminder later quests never cite)
 
   external_fallback: [openalex, arxiv, crossref]   # arxiv is searched through OpenAlex's arXiv source (arXiv's own query API is throttled for everyone). Also: semantic_scholar, pubmed, core, openaire, doaj (the last three keyless; good for humanities / social science), google_scholar. Crossref / OpenAlex / OpenAIRE keep papers only, plus books and chapters when the quest has no experiment.
   openalex_api_key: ""              # or env OPENALEX_API_KEY. Without a key OpenAlex allows ~100 searches/day; a quest uses dozens. Env wins over YAML.

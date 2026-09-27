@@ -105,6 +105,7 @@ from .knowledge import (
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
+    LAST_CALL as _LAST_CALL,
     FallbackLLMClient,
     LLMClient,
     PROXY_PROVIDERS,
@@ -1193,6 +1194,7 @@ class Engine:
                 return self._collect_artifacts(final_state)
 
             artifacts = self._collect_artifacts(final_state)
+            self._seal_trace(final_state)
             evidence_record = self._write_evidence(final_state)
             end_context = await self._attempt_context(final_state)
 
@@ -1235,7 +1237,7 @@ class Engine:
                     pass
             # Nothing is paused now; what did not stop the quest but is worth a look stays on the card (.fi/todo.json).
             _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
-            self._write_back_knowledge(artifacts, final_state)
+            self._write_back_knowledge(artifacts, final_state, (evidence_record or {}).get("status"))
             self._record_skill_usage(final_state)
             self._write_cost_summary()
             # Clean up any stale ``quest_failed.md`` from a PRIOR
@@ -1416,6 +1418,28 @@ class Engine:
             self.audit.append(kind, node=node or self._audit_node, provenance=provenance, **fields)
         except Exception as e:  # noqa: BLE001 -- the trace is a record; it must never stop a quest
             self._log.debug("[audit] could not record %s: %r", kind, e)
+
+    def _seal_trace(self, state: QuestState) -> None:
+        """The last event of a finished quest (``quest_finalized``): how many events the trace holds before it, how
+        many this run could not write, which steps completed and a hash of the paper. A trace that checks out but has
+        no seal (the quest never finished, or its end was lost) or lost events is a gap under ``rigor_profile:
+        research`` (core/evidence.py): a valid prefix is not a complete record."""
+        try:
+            events = _audit_log.read(self.audit.path)
+        except Exception:  # noqa: BLE001 -- a trace that cannot be read gets no seal, which is itself the gap
+            return
+        paper = state.get("paper_md")
+        try:
+            paper_sha = hashlib.sha256(Path(str(paper)).read_bytes()).hexdigest() if paper else None
+        except OSError:
+            paper_sha = None
+        self._audit(
+            "quest_finalized",
+            events_before=len(events),
+            write_errors=max(int(getattr(self.audit, "write_errors", 0) or 0), _audit_log.lost_writes(self.audit.path)),
+            nodes_completed=sorted({str(e.get("node")) for e in events if e.get("kind") == "node_completed" and e.get("node")}),
+            paper_sha256=paper_sha,
+        )
 
     def _audit_artifacts(self, node: str) -> None:
         # A large file (the trial ledger) whose size and modification time are those it had when last hashed is not
@@ -4179,6 +4203,7 @@ class Engine:
             and ((d.get("metadata") or {}).get("title")
                  or (d.get("metadata") or {}).get("url"))
             and (d.get("metadata") or {}).get("kind") not in _FI_INTERNAL_KINDS
+            and not _is_preliminary_memory(d.get("metadata") or {})
         ]
         if lit_docs and self.config.knowledge.relevance_guard:
             relevant = await self._filter_relevant_docs(relevance_topic, lit_docs)
@@ -4252,7 +4277,7 @@ class Engine:
             meta = item.get("metadata") or {}
             if not (meta.get("title") or meta.get("url")):
                 continue
-            if meta.get("kind") in _FI_INTERNAL_KINDS:
+            if meta.get("kind") in _FI_INTERNAL_KINDS or _is_preliminary_memory(meta):
                 continue
             n += 1
         if n:
@@ -4283,7 +4308,7 @@ class Engine:
             content = _item_content(item)  # the whole text, not only the state's first part
             if not (meta.get("title") or meta.get("url")):
                 continue
-            if meta.get("kind") in _FI_INTERNAL_KINDS:
+            if meta.get("kind") in _FI_INTERNAL_KINDS or _is_preliminary_memory(meta):
                 continue
             slug = _slugify(
                 str(meta.get("title") or meta.get("source") or f"lit{idx}")
@@ -4359,7 +4384,9 @@ class Engine:
         # off-topic ones so we don't write a paper on garbage; if NOTHING
         # is on-topic, return 0 so wait_for_data pauses for real user data
         # instead of proceeding.
-        docs = await self._filter_relevant_docs(relevance_topic or query, docs)
+        # An earlier FI result kept as preliminary is a reminder, never data (core/engine.py::_is_preliminary_memory).
+        docs = [d for d in docs if not _is_preliminary_memory(getattr(d, "metadata", None) or {})]
+        docs = await self._filter_relevant_docs(relevance_topic or query, docs) if docs else []
         if not docs:
             self._log.info(
                 "[auto_collect] relevance guard dropped every auto-collected "
@@ -5860,6 +5887,9 @@ class Engine:
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
                     "result_use": getattr(self.config, "effective_result_use", "") or getattr(self.config, "result_use", ""),
+                    # The panel really runs on one model and the person said that is all they have: a gap. The flag
+                    # alone (set, then a second model added) is not.
+                    "one_model_review": self._one_model_panel(),
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -8507,7 +8537,8 @@ class Engine:
         n_sources = n_supporting = n_findings = 0
         try:
             lit = state.get("literature")
-            lit = lit if isinstance(lit, list) else []
+            lit = [d for d in (lit if isinstance(lit, list) else [])
+                   if not (isinstance(d, dict) and _is_preliminary_memory(d.get("metadata") or {}))]
             n_sources = sum(
                 1 for d in lit
                 # the source's own text: a model's reading of its figures is not a source with text
@@ -10333,6 +10364,43 @@ class Engine:
         self._log.warning("[page_limit] %s (shortening %d of %d)", hit, done + 1, _PAGE_LIMIT_REWRITES)
         return [hit], record
 
+    def _review_models_collapsed(self, panel_results: list[dict[str, Any]]) -> str | None:
+        """Under ``rigor_profile: research``: the one provider/model that actually answered every reviewer who reviewed,
+        when the panel was set up on more than one model (a fallback or an alias made them one); ``None`` otherwise."""
+        if self.config.rigor_profile != "research" or getattr(self.config.engine, "one_model_review", False):
+            return None
+        ok = [r for r in panel_results if r.get("status") == "ok"]
+        if len(ok) < 2 or len({str(r.get("requested_model")) for r in ok}) < 2:
+            return None
+        # Only a model the provider reported can show a collapse; a transport that reports none (a CLI, the VS Code
+        # bridge) leaves it unknown, which is not taken for one model.
+        if not all(r.get("actual_model_reported") for r in ok):
+            return None
+        actual = {f"{r.get('actual_provider') or '?'}/{r.get('actual_model') or '?'}" for r in ok}
+        return next(iter(actual)) if len(actual) == 1 else None
+
+    def _pause_for_review_models_collapsed(self, paper_path: Any, panel_results: list[dict[str, Any]],
+                                           actual: str) -> None:
+        """Stop because reviewers set up on different models were all answered by one (a fallback took over, or two
+        model names reach the same model): the panel is one model's view in several roles. Resuming asks again; with
+        ``engine.one_model_review: true`` the review goes on and the evidence level lists the gap."""
+        asked = ", ".join(sorted({str(r.get("requested_model")) for r in panel_results if r.get("status") == "ok"}))
+        self._pause_for_human(
+            kind="review_models_collapsed",
+            interaction="supply",
+            headline="the reviewers were set up on different models, but one model answered them all",
+            steps=[
+                f"Asked for: {asked}. Answered by: {actual} (after a fallback took over, or because two model names reach "
+                "the same model).",
+                f"The paper is at `{paper_path}`. Resume once the other model can be reached again "
+                f"(`python launch.py --resume {self.quest_id}`): the review runs from the start.",
+                "To go on with one model's review instead, add `one_model_review: true` under the `engine:` section of "
+                "the quest's config.yaml and resume: the review then runs on the models you have, and the result is not "
+                "publication-ready, and says why.",
+            ],
+            payload={"review_models_collapsed": True, "quest_id": self.quest_id, "actual": actual},
+        )
+
     def _pause_for_review_unavailable(self, paper_path: Any, why: list[str]) -> None:
         """Stop because the review could not be asked for (a usage limit, a provider that is down), and ask again on
         resume. Never an accept: a failed call used to be recorded as ``accept, score 3``, which is what the person was
@@ -10426,8 +10494,8 @@ class Engine:
             # once more; a second reply without a verdict stops the quest like a
             # failed call. A stand-in "accept" used to be recorded instead, and
             # an automatic accept and the Axon write-back took it as a review.
-            # The pause normally ends the run here. If it returns instead (a resume that sent a value, such as
-            # `--resume --accept`, answers the pending pause), that is read as "ask again", never as a review.
+            # The pause normally ends the run here. If it ever returned a value instead (no resume sends one to this
+            # pause today), that is read as "ask again", never as a review.
             review: Any = None
             while review is None:
                 problem = "the reviewer answered twice without a verdict (accept or revise)"
@@ -10583,8 +10651,15 @@ class Engine:
                 "blocking": parsed.get("blocking") or "",
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
                 "status": "ok",
-                # Which model gave this review: panelists on one model are one reviewer's view in several roles.
+                # Which model was asked for, and which provider and model actually answered (after a fallback, the
+                # fallback's): panelists answered by one model are one reviewer's view in several roles.
                 "requested_model": self._reviewer_model(name),
+                "actual_provider": self._chat_provenance(f"review_panel.{name}").get("provider"),
+                "actual_model": self._chat_provenance(f"review_panel.{name}").get("model"),
+                "fallback": bool(self._chat_provenance(f"review_panel.{name}").get("fallback")),
+                # False when the transport does not say which model served the call (a CLI, the VS Code bridge):
+                # ``actual_model`` is then only the model asked for.
+                "actual_model_reported": bool(self._chat_provenance(f"review_panel.{name}").get("reported")),
             }
 
         # return_exceptions=True is defense in depth: a panelist must never be
@@ -10612,9 +10687,12 @@ class Engine:
                 + (r["error"] if r.get("no_verdict") else f"could not be asked ({r.get('error') or 'no reply'})")
                 for r in unasked
             ] or ["a reviewer could not be asked"])
-            # Reached only when a resume answered the pause with a value (`--resume --accept`, say): the panelists
-            # that did not review stay in panel_results with their status, cast no vote in the aggregator, and make
-            # the review's status "error", so nothing takes the result as a panel's accept.
+            # Reached only if a resume ever answered this pause with a value (none does today): the panelists that did
+            # not review stay in panel_results with their status, cast no vote in the aggregator, and make the
+            # review's status "error", so nothing takes the result as a panel's accept.
+        collapsed = self._review_models_collapsed(panel_results)
+        if collapsed is not None:
+            self._pause_for_review_models_collapsed(paper_path, panel_results, collapsed)
         agg = _aggregate_panel_reviews(list(panel_results))
 
         # Moderator call — best effort for the rationale + suggestion
@@ -10887,17 +10965,23 @@ class Engine:
             else _temperature_for_node(node)
         )
         messages = [{"role": "user", "content": prompt}]
+        _LAST_CALL.set(None)
         response = await self._client.chat(
             messages, temperature=temp, model=self._model_for_node(node),
             node=node or "",
         )
+        served = _LAST_CALL.get() or {}
         self._log_chat_cost(node=node or "", messages=messages, response=response)
         if node:
-            # ``last_provider``/``last_model`` come from the client AFTER the call so a fallback that actually served
-            # the request (core/provider.py::FallbackLLMClient) is recorded truthfully, not the one merely requested.
+            # Who answered THIS call (core/provider.py::LAST_CALL, the task's own), so a fallback that actually served
+            # it is recorded truthfully and calls made at the same time do not overwrite each other. The client's
+            # shared attributes are the fallback for a transport that sets nothing.
             self._last_chat[node] = {
-                "provider": getattr(self._client, "last_provider", None) or self.config.provider.name,
-                "model": getattr(self._client, "last_model", None) or self._model_for_node(node) or self.config.provider.model,
+                "provider": served.get("provider") or getattr(self._client, "last_provider", None) or self.config.provider.name,
+                "model": (served.get("model") or getattr(self._client, "last_model", None) or self._model_for_node(node)
+                          or self.config.provider.model),
+                "fallback": bool(served.get("fallback")),
+                "reported": bool(served.get("reported")),
                 "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
@@ -11549,6 +11633,13 @@ class Engine:
             return None
         return model_for_node(self.config.provider.node_models, node)
 
+    def _one_model_panel(self) -> bool:
+        """``engine.one_model_review`` is set and every reviewer on the panel is asked on the same model."""
+        if not getattr(self.config.engine, "one_model_review", False):
+            return False
+        panel = list(self.config.engine.review_panel or [])
+        return len({self._reviewer_model(p) for p in panel}) <= 1
+
     def _reviewer_model(self, persona: str) -> str:
         """The model a review-panel persona is asked on: its own ``provider.node_models`` entry, else the quest's."""
         return self._model_for_node(f"review_panel.{persona}") or self.config.provider.model or "(the provider's default)"
@@ -11558,6 +11649,8 @@ class Engine:
         on one model are one model's view in several roles; its errors are shared, not caught. Stops before anything
         runs and says how to give one persona another model (the person chooses which). ``None`` when there is one."""
         if self.config.rigor_profile != "research" or not self.config.engine.review_panel:
+            return None
+        if getattr(self.config.engine, "one_model_review", False):
             return None
         models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
         if len(set(models.values())) > 1:
@@ -11591,6 +11684,9 @@ class Engine:
                 how,
                 f"Then `python launch.py --resume {self.quest_id}`. (Without rigor_profile: research there is no such "
                 "requirement.)",
+                "If you have only one model: add `one_model_review: true` under the `engine:` section of the quest's "
+                "config.yaml and resume. The quest then runs on it, and its result says the review was one model's view "
+                "and is not marked publication-ready.",
             ],
         )
         try:
@@ -11976,7 +12072,8 @@ class Engine:
         if written:
             self._log.info("[skills] recorded use in: %s", ", ".join(written))
 
-    def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState) -> None:
+    def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState,
+                              evidence_status: str | None = None) -> None:
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
             return
         if artifacts.paper_md is None:
@@ -12000,6 +12097,17 @@ class Engine:
             self._log.info("[write-back] skipped: the accept was not a reviewer's (review status %s)", review.get("status"))
             return
 
+        # What the result may stand for in the long-term store: accepted evidence only when the quest was a study
+        # (research or decision), a reviewer accepted it and its evidence level is publication_ready. Anything else
+        # (an exploration, a result with evidence gaps, a written-back result nobody accepted) is kept as a preliminary
+        # observation: a later quest sees it as a reminder of what was tried, never as evidence to cite.
+        # ``evidence_status`` is this run's evidence record (Engine.run); no record means unknown, which is preliminary.
+        evidence_status = str(evidence_status or "")
+        result_use = getattr(self.config, "effective_result_use", "") or "explore"
+        accepted = verdict == "accept" and _review_was_real(review)
+        standing = ("accepted" if accepted and result_use in ("research", "decision")
+                    and evidence_status == "publication_ready" else "preliminary")
+
         analysis = state.get("analysis") or {}
         design = state.get("design") or {}
         summary_parts: list[str] = []
@@ -12016,6 +12124,10 @@ class Engine:
         for d in (state.get("literature") or []):
             m = d.get("metadata") or {}
             if not (m.get("title") or m.get("doi") or m.get("arxiv_id") or m.get("pmid")):
+                continue
+            # FI's own memory (a preliminary result, an earlier quest's records) is not an external paper; a paper the
+            # person supplied (fi_local_paper) or one an earlier quest recorded (fi_external_ref_spine) is.
+            if _is_preliminary_memory(m) or m.get("kind") in _FI_MEMORY_KINDS:
                 continue
             external_refs.append({
                 "title": m.get("title", ""),
@@ -12078,6 +12190,10 @@ class Engine:
             "model": self.config.provider.model or "(cli-default)",
             "paper_md_relpath": paper_md_relpath,
             "external_refs": external_refs,
+            "standing": standing,
+            "result_use": result_use,
+            "evidence_status": evidence_status or "unknown",
+            "review_status": str(review.get("status") or "ok"),
         }
         ok = self.knowledge.add_quest_artifacts(
             quest_id=self.quest_id,
@@ -12086,8 +12202,8 @@ class Engine:
             metadata=meta,
         )
         self._log.info(
-            "[write-back] axon ingest=%s (verdict=%s, score=%s)",
-            ok, verdict, review.get("score"),
+            "[write-back] axon ingest=%s (verdict=%s, score=%s, kept as %s: result for %s, evidence %s)",
+            ok, verdict, review.get("score"), standing, result_use, evidence_status or "unknown",
         )
 
 
@@ -12406,15 +12522,58 @@ def _format_lit_excerpt(
     return excerpt
 
 
+#: What a preliminary FI result is written to Axon as (core/knowledge.py::add_quest_artifacts).
+PRELIMINARY_KINDS = frozenset({"fi_preliminary_spine", "fi_preliminary_paper", "fi_preliminary_summary"})
+
+
+def _is_preliminary_memory(meta: dict[str, Any]) -> bool:
+    """An earlier FI quest's result kept as a preliminary observation (an exploration, a result with evidence gaps):
+    a reminder of what was tried, never a source to cite."""
+    return str(meta.get("kind") or "") in PRELIMINARY_KINDS or str(meta.get("standing") or "") == "preliminary"
+
+
+def _preliminary_reminders(items: list[Any], limit: int = 3, chars: int = 300) -> str:
+    """The earlier preliminary FI results among ``items``, as a short block set apart from the citable sources, or
+    ``""`` when there are none."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        meta = (item.get("metadata") if isinstance(item, dict) else getattr(item, "metadata", None)) or {}
+        if not _is_preliminary_memory(meta):
+            continue
+        key = str(meta.get("quest_id") or meta.get("title") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+        text = " ".join(str(content or "").split())[:chars]
+        lines.append(f"- {meta.get('title') or 'an earlier quest'} (quest {meta.get('quest_id') or '?'}, "
+                     f"result for {meta.get('result_use') or '?'}, evidence {meta.get('evidence_status') or '?'}): {text}")
+        if len(lines) >= limit:
+            break
+    if not lines:
+        return ""
+    return ("Earlier FI results kept as PRELIMINARY (an exploration, or a result with evidence gaps). They say what was "
+            "tried; they are not evidence. Never cite them or state their findings as established:\n" + "\n".join(lines))
+
+
+def _with_reminders(block: str, items: list[Any]) -> str:
+    reminders = _preliminary_reminders(items)
+    return f"{block}\n\n{reminders}" if reminders else block
+
+
 def _is_citable(meta: dict[str, Any]) -> bool:
     """An entry is citable if it has at least a real title AND
     one identifying field (authors, year, venue, doi/url/arxiv).
+    An earlier FI result kept as preliminary is never citable (see :func:`_preliminary_reminders`).
 
     Filters out partial loader output where only a path/slug exists
     — those entries would render as ``[i] item-i`` or ``[i] (no title)``
     and the LLM tends to fabricate author names / URLs to complete
     the slot. Honesty > completeness on a thin retrieval pull.
     """
+    if _is_preliminary_memory(meta):
+        return False
     title = (meta.get("title") or "").strip()
     if not title:
         return False
@@ -12443,6 +12602,9 @@ def _is_citable(meta: dict[str, Any]) -> bool:
 # how the user feeds real (paywalled or local) papers into Axon; whether
 # such an entry survives depends on its own metadata (real DOI/URL).
 _FI_INTERNAL_KINDS = frozenset({
+    "fi_preliminary_spine",
+    "fi_preliminary_paper",
+    "fi_preliminary_summary",
     "fi_critique",
     "fi_digest",
     "fi_portfolio",
@@ -12452,6 +12614,10 @@ _FI_INTERNAL_KINDS = frozenset({
     "fi_source_catalog",
     "fi_paper_spine",
 })
+
+
+#: FI's own cross-quest memory: never recorded as an external paper a quest built on.
+_FI_MEMORY_KINDS = _FI_INTERNAL_KINDS | {"fi_quest_paper", "fi_quest_summary", "fi_topic_event"}
 
 
 def _is_audience_appropriate(meta: dict[str, Any], audience: str) -> bool:
@@ -12551,8 +12717,8 @@ def _format_lit(
         )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
-        return "(no prior work surfaced from the knowledge base)"
-    return "\n\n".join(lines)
+        return _with_reminders("(no prior work surfaced from the knowledge base)", docs)
+    return _with_reminders("\n\n".join(lines), docs)
 
 
 def _format_lit_from_state(
@@ -12584,8 +12750,8 @@ def _format_lit_from_state(
         )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
-        return "(no prior work surfaced from the knowledge base)"
-    return "\n\n".join(lines)
+        return _with_reminders("(no prior work surfaced from the knowledge base)", items)
+    return _with_reminders("\n\n".join(lines), items)
 
 
 def _is_web_page(meta: dict[str, Any]) -> bool:

@@ -47,6 +47,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -2871,6 +2872,12 @@ def append_cost_row(
     _archive_model_call(fi_dir, record, messages, response)
 
 
+#: The provider and model that answered the most recent chat call made in the current asyncio task. A client's
+#: ``last_provider``/``last_model`` attributes are shared by every call on it, so calls made at the same time (a review
+#: panel's reviewers) overwrite each other's; a context variable is the task's own. The engine clears it before a call
+#: and reads it after (``Engine._chat``).
+LAST_CALL: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_last_call", default=None)
+
 class LLMClient:
     """Thin async wrapper that speaks OpenAI Chat Completions.
 
@@ -3167,6 +3174,7 @@ class LLMClient:
         # of empty bars for CLI / bridge transports.
         self.last_usage = None
         self.last_model = (model or self.endpoint.model)
+        LAST_CALL.set({"provider": self.last_provider, "model": self.last_model, "reported": False})
         # Last-resort prompt-size guard (all transports) — a runaway prompt
         # otherwise blows the context window into a hard 400 / stall.
         messages = self._trim_messages(messages, node=node)
@@ -3302,6 +3310,7 @@ class LLMClient:
         # not the one we asked for.
         if isinstance(data.get("model"), str):
             self.last_model = data["model"]
+            LAST_CALL.set({"provider": self.last_provider, "model": data["model"], "reported": True})
         text = data["choices"][0]["message"]["content"]
         # Older Ollama versions omit ``usage`` from the response. Fall
         # through to char-based estimation so the cost.jsonl row still
@@ -3763,8 +3772,10 @@ class FallbackLLMClient:
                 self._log.info("[fallback] provider %s recovered — circuit closed", slot.label)
             slot.record_success()
             self.last_usage = getattr(client, "last_usage", None)
-            self.last_model = getattr(client, "last_model", None)
+            served = LAST_CALL.get() or {}
+            self.last_model = served.get("model") or getattr(client, "last_model", None)
             self.last_provider = slot.label
+            LAST_CALL.set({**served, "provider": slot.label, "model": self.last_model, "fallback": idx > 0})
             if idx > 0:
                 self._log.info(
                     "[fallback] request served by %s (primary unavailable)",

@@ -144,6 +144,38 @@ def _audit_gaps(paper_dir: Path) -> tuple[bool, list[str]]:
     return ran > 0 and not gaps and not missing, gaps
 
 
+#: Steps a finished quest that wrote a paper has completed; a seal without them sealed an incomplete run.
+_SEALED_STEPS = ("write", "review")
+
+
+def _trace_completeness_gaps(trace: Path, audit_log: Any) -> list[str]:
+    """What keeps a trace whose hash chain checks out from being the quest's complete record: no seal at its end
+    (``quest_finalized``, written as a finished quest's last event), events this run could not write, a seal that does
+    not count the events before it, steps written after the seal, or a seal without the paper's steps. A valid prefix
+    alone (one ``quest_started`` line) proves only that what is there was not changed."""
+    try:
+        events = audit_log.read(trace)
+    except Exception:  # noqa: BLE001
+        return ["the quest's decision trace (.fi/audit.jsonl) could not be read"]
+    seals = [i for i, e in enumerate(events) if e.get("kind") == "quest_finalized"]
+    if not seals:
+        if (trace.parent / "pause.json").is_file():
+            return ["the quest has not finished yet (it is paused): its decision trace is sealed when it finishes"]
+        return ["the quest's decision trace has no final seal: the quest did not finish, or the end of its record was lost"]
+    at = seals[-1]
+    seal = events[at]
+    gaps: list[str] = []
+    if int(seal.get("write_errors") or 0) > 0:
+        gaps.append(f"{seal['write_errors']} event(s) of the quest's decision trace could not be written")
+    if seal.get("events_before") != at:
+        gaps.append("the decision trace's final seal does not count the events before it (events are missing or were added)")
+    if any(e.get("kind") in ("node_started", "node_completed") for e in events[at + 1:]):
+        gaps.append("steps ran after the decision trace's final seal (the quest was re-run and did not finish again)")
+    missing = [s for s in _SEALED_STEPS if s not in (seal.get("nodes_completed") or [])]
+    if missing:
+        gaps.append(f"the decision trace's final seal names no completed {', '.join(missing)} step")
+    return gaps
+
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
@@ -300,6 +332,12 @@ def assess(
             ready_gaps.append(f"the review verdict is {review.get('verdict') or 'not accept'}")
         if review.get("must_flag_hits"):
             ready_gaps.append(f"the review left {len(review['must_flag_hits'])} must-fix finding(s)")
+    # Under rigor_profile: research the panel knowingly ran on one model (engine.one_model_review).
+    if settings.get("rigor_profile") == "research" and settings.get("one_model_review"):
+        ready_gaps.append(
+            "every reviewer used one model (engine.one_model_review: only one was available), so the review is one "
+            "model's view"
+        )
     # A quest set up to explore: its result is preliminary whatever it passed (the person said so at the start).
     if settings.get("result_use") == "explore":
         ready_gaps.append(
@@ -321,6 +359,8 @@ def assess(
                 intact = False
             if not intact:
                 ready_gaps.append("the quest's decision trace (.fi/audit.jsonl) no longer checks out (its hash chain is broken)")
+            else:
+                ready_gaps.extend(_trace_completeness_gaps(trace, _audit_log))
     # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
