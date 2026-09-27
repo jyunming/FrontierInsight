@@ -242,10 +242,14 @@ class Violation:
                 f"saying why, never left out)"
             )
         if self.kind == "clamped":
+            on_bound = any(b is not None and math.isclose(self.value, b, rel_tol=1e-9)
+                           for b in (self.assertion.min, self.assertion.max))
             return (
-                f"{self.path} = {self.value:g} sits exactly on a bound "
-                f"({self.assertion.describe()}){why}, and the script caps "
-                f"values at {self.value:g}: a clamped number, not a measurement"
+                (f"{self.path} = {self.value:g} sits exactly on a bound ({self.assertion.describe()}){why}, and the "
+                 f"script caps values at {self.value:g}" if on_bound else
+                 f"{self.path} = {self.value:g} is exactly the constant the script caps (or floors) this quantity at, "
+                 f"inside its range ({self.assertion.describe()}){why}")
+                + ": a clamped number, not a measurement"
             )
         return (
             f"{self.path} = {self.value:g} violates "
@@ -322,6 +326,78 @@ def clamp_constants(code: str) -> set[float]:
                     if v is not None:
                         out.add(v)
     return out
+
+
+# Keys many quantities share: a result path ending in one says nothing about which quantity it is.
+_GENERIC_KEYS = frozenset({
+    "mean", "avg", "average", "median", "max", "min", "std", "sd", "sem", "var", "value", "values", "val",
+    "result", "results", "total", "count", "n", "ci", "lower", "upper", "lo", "hi", "estimate",
+})
+def _upper_caps(call: ast.Call) -> list[ast.AST]:
+    """The arguments a call caps its value at from above: either argument of a two-argument ``min`` /
+    ``np.minimum`` / ``fmin`` (the one that is a constant is the cap, written first or second); the upper bound of a
+    clip or clamp, by keyword (``a_max=``, ``max=``, ``upper=``, ``clip_value_max=``) or as the third positional
+    argument of the function form (``np.clip(x, lo, HI)``, whatever the module is called). Two positional arguments are
+    read as none: ``x.clip(lo, HI)`` and ``torch.clamp(x, lo)`` look alike and the second is a cap in one and a floor
+    in the other (a value on the cap still meets :func:`clamp_constants` on its bound). A floor (``max(1, n)``), a
+    reduction (``x.max(1)``, ``np.min(x, 1)``) and a keyword like ``axis=`` are none."""
+    fn = call.func
+    name = fn.attr if isinstance(fn, ast.Attribute) else (fn.id if isinstance(fn, ast.Name) else "")
+    if name == "min" and isinstance(fn, ast.Name):
+        return list(call.args) if len(call.args) == 2 and not call.keywords else []  # min(a, b, key=...) is no cap
+    if name in ("minimum", "fmin"):
+        return list(call.args) if len(call.args) == 2 else []  # np.minimum(r, 10.0, out=r) is one
+    if name in ("clip", "clamp", "clip_by_value"):
+        for k in call.keywords:
+            if k.arg in ("a_max", "max", "upper", "clip_value_max"):
+                return [k.value]
+        if len(call.args) >= 3:
+            return [call.args[2]]
+    return []
+
+
+def direct_caps(code: str, key: str) -> set[float]:
+    """Constants a quantity named ``key`` is capped at from above right where it is reported: an upper cap
+    (:func:`_upper_caps`) in the value of a dict literal that reports it (``{"rmse": min(rmse, 10.0)}``), not inside a
+    denominator (``x / min(n, 1)`` guards a division). A key many quantities share (``mean``, ``max``) gives nothing,
+    and so does unparseable code. Every other cap, a floor or one set inside an ``if`` included, is left to
+    :func:`clamp_constants`, which counts them all for a value on a bound."""
+    if not key or key.lower() in _GENERIC_KEYS:
+        return set()
+    try:
+        tree = ast.parse(code or "")
+    except (SyntaxError, ValueError):
+        return set()
+    names: dict[str, float] = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)):
+            v = _literal(node.value)
+            if v is not None:
+                names[node.targets[0].id] = v
+
+    def value(node: ast.AST) -> float | None:
+        v = _literal(node)
+        if v is None and isinstance(node, ast.Name):
+            v = names.get(node.id)
+        return v
+
+    found: set[float] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for k, v in zip(node.keys, node.values):
+            if not (isinstance(k, ast.Constant) and k.value == key and v is not None):
+                continue
+            guarded = {id(n) for b in ast.walk(v) if isinstance(b, ast.BinOp)
+                       and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
+            for n in ast.walk(v):
+                if isinstance(n, ast.Call) and id(n) not in guarded:
+                    for bound in _upper_caps(n):
+                        c = value(bound)
+                        if c is not None:
+                            found.add(c)
+    return found
 
 
 # A value this close to a bound is ON that bound. The at-bound and clamped
@@ -685,6 +761,9 @@ def violations(
     literals = numeric_literals(code) if code else set()
     out: list[Violation] = []
     for a in assertions:
+        # Every cap in the script counts for a value on a bound, as before. A value exactly on a cap written right where
+        # this quantity is reported is rejected even inside the range (an RMSE capped at 10 and reported as 10).
+        own = direct_caps(code, a.path.split(".")[-1].strip("*[]")) if code else set()
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for tokens, path, value in leaves:
@@ -697,6 +776,9 @@ def violations(
                     a.max is not None and value > a.max
                 ):
                     out.append(Violation(path, value, a))
+                elif own and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in own):
+                    # Inside the range, but exactly on a constant the script caps this very quantity at.
+                    out.append(Violation(path, value, a, kind="clamped"))
             elif clamps and _pinned(value, a, clamps):
                 out.append(Violation(path, value, a, kind="clamped"))
             elif bound != 0 or value == 0:
