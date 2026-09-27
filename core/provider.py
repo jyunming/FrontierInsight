@@ -3653,7 +3653,8 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
 
 
 _SECRETISH_RE = re.compile(
-    r"(?i)(bearer\s+|api[_-]?key[=:]\s*|sk-|[?&](?:key|api_key|apikey|token|access_token)=)[A-Za-z0-9._\-%]{6,}")
+    r"(?i)(bearer\s+|api[_-]?key[=:]\s*|\btoken[=:]\s*|sk-|[?&](?:key|api_key|apikey|token|access_token)=)"
+    r"[A-Za-z0-9._\-%]{6,}")
 
 
 class _AppendToFile(logging.Handler):

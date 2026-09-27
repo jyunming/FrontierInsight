@@ -791,7 +791,7 @@ class Engine:
                             return self._collect_artifacts({})
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
-                        forget_papers_asked(self.fi_dir)
+                        forget_papers_asked(self.fi_dir, declined=False)
                         where, moved = _rerun_from.back_up(self.quest_root, from_step)
                         self._audit("rerun_from", step=from_step, moved=moved)
                         self._log.info("[run] rerunning from the %s step; the earlier outputs are in %s (%s)",
@@ -826,7 +826,7 @@ class Engine:
                         # JSON is embedded (the design node skips it at
                         # iteration==0).
                         if reopen and not prior_snapshot.next:
-                            forget_papers_asked(self.fi_dir)
+                            forget_papers_asked(self.fi_dir, declined=False)
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             # The notes of earlier refines were answered by earlier passes: this pass redoes the
                             # design, and neither the writer nor the review treats them as new.
@@ -3206,7 +3206,8 @@ class Engine:
                 )
             # Resuming from the papers pause without adding files is the answer "go on without them": those papers
             # are not asked for again. Only the papers not yet declined are asked for.
-            declined_now = _take_papers_declined(self.fi_dir, self.quest_root)
+            declined_now = _take_papers_declined(self.fi_dir, self.quest_root,
+                                                 getattr(self, "_resumed_from_pause", None))
             if declined_now:
                 self._audit("papers_declined", count=len(declined_now), papers=sorted(declined_now)[:40])
                 self._log.info("[literature] going on without %d paper(s) you were asked for (none was added to "
@@ -11486,6 +11487,12 @@ class Engine:
         markers alone, since those are state ("already paused here"), not
         display. Any node that genuinely re-pauses re-writes its own marker, so
         a real pending pause re-appears within the same run."""
+        # Which pause this run goes on from, read before its marker goes: a node that needs to know what the person
+        # answered by resuming (the papers pause) asks the engine, not the file.
+        try:
+            self._resumed_from_pause = json.loads((self.fi_dir / "pause.json").read_text(encoding="utf-8")).get("kind")
+        except (OSError, ValueError, AttributeError):
+            self._resumed_from_pause = None
         for p in (
             self.quest_root / "NEXT_STEP.md",
             self.fi_dir / "pause.json",
@@ -18207,19 +18214,13 @@ def _papers_to_ask(needed: list["RetrievedDoc"], fi_dir: Path) -> tuple[list["Re
     return new, len(needed) - len(new)
 
 
-def _take_papers_declined(fi_dir: Path, quest_root: Path) -> set[str]:
-    """When the quest is going on from the papers pause (``.fi/pause.json`` says so) and no paper was added to
-    ``inputs/papers/``, the papers it asked for were declined: they are moved to ``.fi/papers_declined.json`` and
-    returned. Anything else (another pause, an ``--update``, a run from a step: :func:`forget_papers_asked`) declines
-    nothing."""
+def _take_papers_declined(fi_dir: Path, quest_root: Path, resumed_from: str | None) -> set[str]:
+    """When this run goes on from the papers pause (``resumed_from``, the pause kind the engine read before clearing
+    the markers) and no paper was added to ``inputs/papers/``, the papers it asked for were declined: they are moved
+    to ``.fi/papers_declined.json`` and returned. Anything else (another pause, an ``--update``, a run from a step:
+    :func:`forget_papers_asked`) declines nothing."""
     asked = _read_key_set(fi_dir / _PAPERS_ASKED)
-    if not asked or _papers_dir_has_files(quest_root):
-        return set()
-    try:
-        kind = json.loads((fi_dir / "pause.json").read_text(encoding="utf-8")).get("kind")
-    except (OSError, ValueError, AttributeError):
-        kind = None
-    if kind != "papers":
+    if not asked or _papers_dir_has_files(quest_root) or resumed_from != "papers":
         return set()
     _write_key_set(fi_dir / _PAPERS_DECLINED, _read_key_set(fi_dir / _PAPERS_DECLINED) | asked)
     try:
@@ -18229,10 +18230,11 @@ def _take_papers_declined(fi_dir: Path, quest_root: Path) -> set[str]:
     return asked
 
 
-def forget_papers_asked(fi_dir: Path) -> None:
-    """The quest is changed (``--update``) or run again from a step: an unanswered papers pause is not answered by it,
-    and papers declined for the earlier research question are asked for again if they come back."""
-    for name in (_PAPERS_ASKED, _PAPERS_DECLINED):
+def forget_papers_asked(fi_dir: Path, *, declined: bool = True) -> None:
+    """An unanswered papers pause is not answered by changing the quest (``--update``) or running it again from a step
+    or re-opening it. ``declined``: also forget the papers the person went on without (a changed quest may ask for them
+    again); a run from a step or a re-opened quest does not search the literature again, so it keeps them."""
+    for name in ((_PAPERS_ASKED, _PAPERS_DECLINED) if declined else (_PAPERS_ASKED,)):
         try:
             (Path(fi_dir) / name).unlink()
         except OSError:

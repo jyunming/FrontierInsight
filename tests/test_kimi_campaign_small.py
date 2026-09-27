@@ -74,7 +74,9 @@ async def test_the_literature_step_pauses_then_goes_on_without_the_papers(tmp_pa
     with pytest.raises(_Paused):
         await eng._node_literature(dict(state))
     assert len(asked) == 1 and asked[0]["kind"] == "papers"
-    # Resumed without adding any file: the quest goes on, and says so in its trace and on the to-do card.
+    # Resumed without adding any file. run() clears the pause markers before any node runs, as a real resume does.
+    eng._clear_stale_pause_markers()
+    assert not (eng.fi_dir / "pause.json").exists()
     patch = await eng._node_literature(dict(state))
     assert patch.get("literature"), "the literature step finished"
     assert len(asked) == 1, "not asked again"
@@ -83,6 +85,7 @@ async def test_the_literature_step_pauses_then_goes_on_without_the_papers(tmp_pa
     assert any(i.kind == "papers_declined" and "2 paper(s)" in i.why for i in todo.waiting(eng.quest_root))
     # A new paper later: only it is asked for, and the card says how many were already declined.
     eng.knowledge.asearch = lambda q, **kw: _async([*docs, _paywalled("10.1/c")])  # type: ignore[method-assign]
+    eng._resumed_from_pause = None  # a later literature pass in a run that did not resume from the papers pause
     with pytest.raises(_Paused):
         await eng._node_literature(dict(state))
     assert asked[-1]["headline"] == "download 1 paywalled paper(s)"
@@ -99,15 +102,25 @@ def test_an_update_or_another_pause_does_not_count_as_going_on_without_them(tmp_
     fi = tmp_path / ".fi"
     new, already = _papers_to_ask([_paywalled("10.1/a")], fi)
     assert len(new) == 1 and already == 0
-    (fi / "pause.json").write_text(json.dumps({"kind": "plan"}), encoding="utf-8")
-    assert _take_papers_declined(fi, tmp_path) == set(), "the quest is going on from another pause"
-    (fi / "pause.json").write_text(json.dumps({"kind": "papers"}), encoding="utf-8")
-    forget_papers_asked(fi)  # --update / --from / re-open
-    assert _take_papers_declined(fi, tmp_path) == set()
+    assert _take_papers_declined(fi, tmp_path, "plan") == set(), "the quest is going on from another pause"
+    assert _take_papers_declined(fi, tmp_path, None) == set(), "a fresh run is not an answer"
+    forget_papers_asked(fi)  # --update
+    assert _take_papers_declined(fi, tmp_path, "papers") == set()
     assert _papers_to_ask([_paywalled("10.1/a")], fi)[0], "asked again after the quest was changed"
     (tmp_path / "inputs" / "papers").mkdir(parents=True)
     (tmp_path / "inputs" / "papers" / "a.pdf").write_bytes(b"%PDF-1.4")
-    assert _take_papers_declined(fi, tmp_path) == set(), "a paper was added: nothing was declined"
+    assert _take_papers_declined(fi, tmp_path, "papers") == set(), "a paper was added: nothing was declined"
+
+
+def test_a_run_from_a_step_keeps_the_papers_already_declined(tmp_path: Path) -> None:
+    from core.engine import _papers_to_ask, _take_papers_declined, forget_papers_asked, papers_declined_count
+
+    fi = tmp_path / ".fi"
+    _papers_to_ask([_paywalled("10.1/a")], fi)
+    assert _take_papers_declined(fi, tmp_path, "papers") == {"doi:10.1/a"}
+    _papers_to_ask([_paywalled("10.1/b")], fi)  # asked again later, not answered
+    forget_papers_asked(fi, declined=False)  # --from write / re-open: the literature is not searched again
+    assert papers_declined_count(fi) == 1 and not (fi / "papers_asked.json").exists()
 
 
 # --- timeouts over the defaults ---------------------------------------------------------------------------------------
@@ -228,15 +241,22 @@ async def test_a_failed_http_call_and_its_retry_are_in_the_quest_log(monkeypatch
     assert "trying again" in line and "sk-abcdefghijkl" not in line and "[redacted]" in line
 
 
+def test_research_cards_offer_only_what_the_engine_allows() -> None:
+    card = todo.pause_item("numeric", "stopped", [], profile="research", frozen=True)
+    assert any("Go on unchanged" in a and "does not count the run as holding to its protocol" in a
+               for a in card.alternatives), "research lets the warnings be accepted, and the card says what it costs"
+
+
 def test_a_key_in_a_url_is_not_written_to_the_log() -> None:
     from types import SimpleNamespace
 
     from core.provider import _retry_line
 
     rs = SimpleNamespace(attempt_number=1, next_action=None, outcome=SimpleNamespace(
-        exception=lambda: httpx.ConnectError("GET https://api.x/v1?key=AIzaSyABCDEFG123&token=tok_123456789")))
+        exception=lambda: httpx.ConnectError(
+            "GET https://api.x/v1?key=AIzaSyABCDEFG123&token=tok_123456789 (header token: hdr_abcdefgh99)")))
     line = _retry_line("write", "gemini over HTTP", rs, 4)
-    assert "AIzaSyABCDEFG123" not in line and "tok_123456789" not in line
+    assert "AIzaSyABCDEFG123" not in line and "tok_123456789" not in line and "hdr_abcdefgh99" not in line
 
 
 def test_a_call_outside_the_engine_reaches_the_quest_run_log(tmp_path: Path) -> None:

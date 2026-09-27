@@ -72,7 +72,8 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
     "numeric": (
         "The run printed numerical warnings. Fix the script, or accept them?",
         "Fix experiment.py (a changed script is run again), then go on.",
-        ["Go on unchanged: the warnings are accepted and recorded."],
+        ["Go on unchanged: the warnings are accepted and recorded, and the evidence then does not count the run as "
+         "holding to its protocol."],
     ),
     "oracle": (
         "The script has not passed its oracle checks (a result with a known answer). Fix the script, or the check?",
