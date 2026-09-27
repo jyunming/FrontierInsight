@@ -834,6 +834,11 @@
       alert(`Pick the second reviewer's model, or "I only have one model".`);
       return false;
     }
+    if (secondQ && out.second_reviewer_model && out.second_reviewer_model === out.provider_model) {
+      // The same model again would leave every reviewer on it, and the quest would stop to ask for another.
+      alert(`That is the model the quest runs on. Pick another for the second reviewer, or "I only have one model".`);
+      return false;
+    }
     pendingAnswers = { ...(savedProfile || {}), ...out, profile_seen: savedProfile };
     editedFields.clear();
     const derived = await deriveTier2(out);

@@ -95,6 +95,19 @@ async def test_the_cli_asks_it_and_writes_it(
         assert "2nd reviewer" in shown.split("The plan", 1)[1], "the confirm screen shows the answer"
 
 
+@pytest.mark.asyncio
+async def test_the_cli_does_not_take_the_quests_own_model_typed_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Typed in through "Other", the quest's own model would leave every reviewer on it: asked again."""
+    from tests.test_interview_e2e_cli import _new
+
+    other = str(len(second_reviewer_choices("openai", "gpt-5")) + 1)
+    cfg = await _new(tmp_path, monkeypatch, ["Same model probe", "", "1", "1", other, "gpt-5", "2", "", "", "", "", ""])
+    assert "the model the quest runs on" in capsys.readouterr().out
+    assert (cfg.provider.node_models or {}).get("review_panel.statistician") == "gpt-4o"
+
+
 # ---- what it writes (CLI / web: answers_to_yaml; VS Code: its TypeScript mirror) ----
 
 
@@ -171,6 +184,7 @@ def test_vscode_asks_it_after_what_the_result_is_for_and_leaves_the_chat_model_o
     assert run.index("what is the result for?") < run.index("pickSecondReviewerModel(primaryModel)")
     assert 'resultUse !== "explore"' in run
     assert "I only have one model" in ts and "m.family === primary.family" in ts
+    assert "[primary.id, primary.family].includes(s.trim())" in ts, "a typed name equal to the chat model is refused"
     # Changing the answer to research on the review screen asks it then.
     case = ts[ts.index('case "result_use"'):]
     assert "pickSecondReviewerModel(primaryModel)" in case[:case.index("return;\n        }")]
@@ -194,9 +208,13 @@ def test_the_web_form_carries_the_answer(tmp_path: Path) -> None:
         assert cfg.engine.one_model_review is one
     bad = client.post("/api/interview/submit", json={**_ok_answers_payload(), "second_reviewer_model": ["a"]})
     assert bad.status_code == 400
+    same = client.post("/api/interview/submit", json={**_ok_answers_payload(), "provider_model": "m-main",
+                                                      "second_reviewer_model": "m-main"})
+    assert same.status_code == 400 and "the model the quest runs on" in same.text
     page = (Path(__file__).resolve().parent.parent / "web" / "static" / "interview.html").read_text(encoding="utf-8")
     assert "function questionApplies" in page and "renderSecondReviewerOptions" in page
     assert "String(m.value) !== primary" in page, "the quest's own model is left out of the list"
+    assert "out.second_reviewer_model === out.provider_model" in page, "nor can it be typed in"
 
 
 # ---- a later --update keeps it ----
@@ -227,6 +245,9 @@ def test_one_model_review_is_a_publication_ready_gap_under_research(tmp_path: Pa
     assert one["status"] != "publication_ready"
     assert any("every reviewer used one model" in g and "one model's view" in g for g in one["gaps"])
     assert not any("every reviewer used one model" in g for g in evidence.assess(root, _state(), settings=research)["gaps"])
+    # Outside research there is no requirement, so no such gap either.
+    default = evidence.assess(root, _state(), settings={**ON, "one_model_review": True})
+    assert not any("every reviewer used one model" in g for g in default["gaps"])
 
 
 def test_one_model_review_is_allowed_beside_the_research_profile() -> None:

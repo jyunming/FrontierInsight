@@ -137,6 +137,10 @@ export async function pickSecondReviewerModel(primary?: vscode.LanguageModelChat
             title: "Second reviewer's model",
             prompt: "A model name your VSCode offers, other than the one this quest runs on.",
             ignoreFocusOut: true,
+            // The same model again would leave every reviewer on it, and the quest would stop to ask for another.
+            validateInput: (s) => (primary && [primary.id, primary.family].includes(s.trim())
+                ? "That is the model this quest runs on. Type another, or press Esc and pick \"I only have one model\"."
+                : null),
         });
         if (typed && typed.trim()) { return typed.trim(); }
     }

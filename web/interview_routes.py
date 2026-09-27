@@ -536,6 +536,10 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
     second_reviewer_model = second_reviewer_model.strip()
     if len(second_reviewer_model) > 300 or "\n" in second_reviewer_model:
         raise ValueError("second_reviewer_model must be one model name")
+    if second_reviewer_model and second_reviewer_model == (body.get("provider_model") or ""):
+        raise ValueError(
+            "second_reviewer_model is the model the quest runs on; pick another, or 'I only have one model'"
+        )
     # survey_mode: optional bool (default off). A literature/history synthesis
     # with no experiment and no dataset — implies no_simulation at runtime.
     survey_mode = body.get("survey_mode", False)

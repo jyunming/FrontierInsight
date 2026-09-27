@@ -3429,6 +3429,10 @@ async def _run_new(
             if not question_applies(q, partial):  # the second reviewer's model: research or a decision only
                 continue
             answer = _cli_prompt_for(q, partial, {})
+            while q.id == "second_reviewer_model" and answer is not None and answer == partial.get("provider_model"):
+                # The same model again would leave every reviewer on it, and the quest would stop to ask for another.
+                print("    (that is the model the quest runs on; pick another, or 'I only have one model')")
+                answer = _cli_prompt_for(q, partial, {})
             if answer is None:
                 print()
                 print("— interview cancelled.")
