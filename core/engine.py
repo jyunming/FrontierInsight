@@ -7262,6 +7262,10 @@ class Engine:
             "exec_patch_pending": False,
         }
         patch["numeric_warnings_accepted"] = False
+        for w in _assertion_warnings({**state, **patch}):
+            self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
+            self._audit("check_result", check="plausibility_unproven_cap", status="warn",
+                        summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         patch["run_manifest_failures"] = manifest_attempts_next
         run_context = await self._attempt_context({**state, **patch}, after_run=True)
 
@@ -17190,11 +17194,29 @@ def _assertion_violations(state: "QuestState") -> list:
         # The script rides along so a value capped exactly at a non-zero
         # bound is caught too; ``seen`` so a bounded quantity an earlier run
         # reported cannot quietly disappear. See core/plausibility.py for both.
-        return plausibility.check_design(
+        found = plausibility.check_design(
             state.get("result_json") or {}, _asserting_design(state), code=state.get("code") or "",
             seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
         )
+        # A cap whose place in the result cannot be shown is a warning (_assertion_warnings), not a violation.
+        return [v for v in found if getattr(v, "kind", "") != "clamped_unproven"]
     except Exception:  # noqa: BLE001 - a checker bug must not block a quest
+        return []
+
+
+def _assertion_warnings(state: "QuestState") -> list:
+    """The findings of the same check that are warnings, not violations: a value exactly on a constant the script
+    caps a quantity of that name at, where that cap's place in the result cannot be shown
+    (``plausibility.direct_caps(..., proven=False)``). Logged and recorded in the trace; they never send a run back."""
+    try:
+        from core import plausibility
+
+        found = plausibility.check_design(
+            state.get("result_json") or {}, _asserting_design(state), code=state.get("code") or "",
+            seen=state.get("bounded_seen") or (), zero_expected=_zero_expected_paths(state),
+        )
+        return [v for v in found if getattr(v, "kind", "") == "clamped_unproven"]
+    except Exception:  # noqa: BLE001
         return []
 
 
