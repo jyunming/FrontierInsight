@@ -47,6 +47,7 @@ KINDS = (
     "check_result",       # one check's verdict (protocol, oracle, run manifest, numeric warnings, evidence, design audit)
     "model_claim",        # the model's own rationale (provenance model_claim)
     "audit_repair",       # a torn last line was dropped when the file was reopened
+    "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
 )
 
 # Keys the chain owns: an event's own fields never replace them.

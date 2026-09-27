@@ -40,7 +40,7 @@ def test_a_quest_s_status_keeps_execution_review_evidence_and_claim_apart() -> N
     # An accept with evidence gaps is an accepted review of a result that is not publication-ready.
     gaps = ar.quest_status(ran, {"status": "protocol_runtime_matched"}, reviewer_accepted=True, no_experiment=False)
     assert gaps["review_status"] == "accepted" and gaps["evidence_status"] == "protocol_runtime_matched"
-    assert ar.quest_status({}, None, reviewer_accepted=False, no_experiment=False)["execution_status"] == "crashed"
+    assert ar.quest_status({}, None, reviewer_accepted=False, no_experiment=False)["execution_status"] == "no_result"
     unreal = ar.quest_status({**ran, "review": {"verdict": "accept", "status": "error"}}, ready,
                              reviewer_accepted=False, no_experiment=False)
     assert unreal["review_status"] == "unavailable"
@@ -168,6 +168,9 @@ async def test_a_quest_records_its_ideas_design_runs_and_end(smoke_config: Confi
     assert end["context"]["provider"] == "openai" and end["quest_id"] == engine.quest_id
     assert end["records_not_written"] == 0 and end["context"]["models_used"], "which model answered each step"
     assert all(r["scripts"] for r in runs), "each run names the scripts it ran by hash"
+    assert all("parent_id" in r and "run_id" in r for r in runs)
+    from core import audit_log
+    assert any(e.get("kind") == "attempts_sealed" for e in audit_log.read(engine.audit.path)), "anchored at the end"
     assert "answered_by" in end and "person" in end
 
 
@@ -231,3 +234,39 @@ async def test_a_quest_that_fails_is_recorded_as_a_process_error(tmp_path: Path,
     ends = [r for r in ar.read(engine.fi_dir, ar.ATTEMPTS) if r["kind"] == "quest"]
     assert len(ends) == 1 and ends[0]["execution_status"] == "crashed" and ends[0]["error"]
     assert ends[0]["context"] and ends[0]["context"]["question"]["topic_sha256"], "a context even for an early failure"
+
+
+def test_a_finished_quest_without_a_result_is_not_called_crashed() -> None:
+    s = ar.quest_status({"review": {}}, None, reviewer_accepted=False, no_experiment=False)
+    assert s["execution_status"] == "no_result"
+    assert ar.quest_status({}, None, reviewer_accepted=False, no_experiment=False,
+                           data_analysis=True)["execution_status"] == "data_analysis"
+
+
+def test_the_code_folder_is_hashed_whole_and_fi_is_known_by_its_source(tmp_path: Path) -> None:
+    (tmp_path / "code" / "pkg").mkdir(parents=True)
+    (tmp_path / "code" / "run.sh").write_text("python experiment.py", encoding="utf-8")
+    (tmp_path / "code" / "pkg" / "helper.py").write_text("X = 1", encoding="utf-8")
+    assert set(ar.script_hashes(tmp_path)) == {"run.sh", "pkg/helper.py"}
+    repo = Path(__file__).resolve().parent.parent
+    fi = ar._fi_version(repo)
+    assert fi and fi["source_sha256"], "an installed copy is known by its source too"
+
+
+def test_what_keeps_a_context_from_being_complete_is_named(tmp_path: Path) -> None:
+    cfg = Config.model_validate({"topic": "t", "provider": {"name": "openai", "model": "m1"},
+                                 "knowledge": {"enabled": False}})
+    repo = Path(__file__).resolve().parent.parent
+    ctx = ar.context_fingerprint(cfg, tmp_path, {}, prompts={}, fi_repo=repo, after_run=True)
+    assert not ctx["complete"]
+    assert "no model call recorded yet" in ctx["missing"] and "no script in code/" in ctx["missing"]
+    assert ctx["policy"]["config_sha256"]
+    part = ar.context_fingerprint(cfg, tmp_path, {}, prompts={}, fi_repo=repo, partial=True,
+                                  models_used={"design": {"provider": "p", "model": "m"}})
+    assert any("without the quest's state" in m for m in part["missing"])
+
+
+def test_lost_records_are_counted_across_runs(tmp_path: Path) -> None:
+    ar.count_lost(tmp_path)
+    ar.count_lost(tmp_path)
+    assert ar.lost(tmp_path) == 2
