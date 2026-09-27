@@ -801,12 +801,14 @@ class EngineConfig(BaseModel):
     # Pairwise tournament across the brainstormed ideas.
     # When True, REPLACES the single ``ideate_reflect`` critique call
     # with ``C(N, 2)`` parallel pairwise comparisons (3 calls for the
-    # default 3 ideas) and picks the highest-win-count idea. Borrowed
-    # from Google Co-Scientist's pairwise+Elo ranking pattern. Costs
-    # 2 extra LLM calls vs. the single critique but produces a
-    # measurably better-ranked ``chosen_idea``
-    # on topics where the brainstormed alternatives are close in
-    # quality. Off by default to keep the cost floor at 7-18 calls.
+    # default 3 ideas) and picks the idea with the most wins (ties: more
+    # decisive wins, then the original order). The idea comes from
+    # Google Co-Scientist's pairwise ranking, but this is win counting,
+    # not Elo, and the comparisons come from one model family, so they
+    # are not independent judgements. Whether it picks better ideas than
+    # the single critique has not been measured. Costs 2 extra LLM calls
+    # vs. the single critique. Off by default to keep the cost floor at
+    # 7-18 calls.
     # When True, ``ideate_reflect`` is ignored (tournament wins).
     ideate_tournament: bool = False
     # Multi-persona reviewer panel on the `review` node.
@@ -1525,6 +1527,8 @@ _RESEARCH_PROFILE: dict[str, dict[str, Any]] = {
         "protocol_check": "block", "oracle_check": "block", "numeric_warnings": "block", "run_manifest_check": "block",
         "cross_check_verify": True,
         "review_panel": ["methodologist", "statistician", "reproducibility", "devil_advocate"],
+        # The hash-chained trace is what a research result's decisions are audited from: it cannot be turned off.
+        "audit_trace": True,
     },
 }
 
@@ -1546,9 +1550,19 @@ class Config(BaseModel):
     # profile does not name are left as they are. A config that sets one of these to the opposite is refused, naming the key:
     # the profile is a guarantee, and a later line of YAML must not take it apart quietly. ``default``: nothing changes.
     rigor_profile: Literal["default", "research"] = "default"
-    # What the result is for, as the interview asked it (explore / research / decision; empty for a config written by
-    # hand). Kept because it bounds the evidence: an exploration's result is preliminary, never publication-ready.
+    # What the result is for, as the interview asked it (explore / research / decision). Kept because it bounds the
+    # evidence: an exploration's result is preliminary, never publication-ready. A config that does not say (one
+    # written by hand) is an exploration, unless it asks for ``rigor_profile: research``: a quest never reaches
+    # "publication-ready" on settings nobody chose for that.
     result_use: Literal["", "explore", "research", "decision"] = ""
+
+    @property
+    def effective_result_use(self) -> str:
+        """What the result is for, the unsaid case settled: ``result_use`` as written, else ``research`` under
+        ``rigor_profile: research`` and ``explore`` otherwise. Worked out when read (not written into the field), so a
+        copy of the config with another profile gets its own answer and a record of the approved settings keeps what
+        the file said."""
+        return self.result_use or ("research" if self.rigor_profile == "research" else "explore")
 
     @model_validator(mode="before")
     @classmethod

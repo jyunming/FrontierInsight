@@ -15,7 +15,7 @@ FI runs a topic through: ideate, literature search, a written plan, experiment d
 - The simulation writes what it actually ran, and FI compares it with the protocol.
 - Suspicious numbers, impossible values and paper numbers that do not match the results are caught by code, not by a model.
 - Each headline number names what it estimates, so the matching interval and test are used.
-- Each quest ends with an **evidence level** that says what was and was not shown; `rigor_profile: research` makes the checks stop the quest instead of only reporting.
+- Each quest ends with an **evidence level** that says what was and was not shown; `rigor_profile: research` makes the checks stop the quest instead of only reporting, keeps the step-by-step trace and needs the reviewers not all on one model. A config that does not say what its result is for (`result_use`) is an exploration: its paper is marked preliminary.
 
 [How it works](rigor.md) · [the words](glossary.md)
 

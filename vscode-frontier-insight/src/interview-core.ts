@@ -255,7 +255,7 @@ export const LIGHT_NODES: readonly string[] = [
  * light nodes first, then the rest, which are untested.
  */
 export const OTHER_NODES: readonly string[] = [
-    "clarify", "ideate", "ideate_reflect", "literature_query", "literature_foundational",
+    "clarify", "ideate", "ideate_reflect", "ideate_query", "literature_query", "literature_foundational",
     "plan", "plan_revise", "design", "design_self_critique", "implement_outline", "implement", "execute_reflect",
     "analyze", "write", "claim_check", "review", "speech",
 ];

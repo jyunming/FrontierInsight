@@ -253,6 +253,9 @@ class QuestState(TypedDict, total=False):
     # ``literature_queries``.
     literature_query: str
     literature_queries: list[str]
+    # True when ``literature_query`` is a keyword query (derived from the topic, or the requery that found sources),
+    # False when it is the fallback ``title + topic`` concatenation.
+    literature_query_derived: bool
     design: dict[str, Any]
     # Every version of the design, in order. Entry 0 is the pre-registration
     # (stated before any result existed); later entries are flagged
@@ -673,6 +676,11 @@ class Engine:
             self._log.info("starting quest %s", self.quest_id)
             _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
+            # Research needs a reviewer on another model: checked before the settings are recorded as approved, so the
+            # model the person adds is part of what is approved, not a change to it.
+            stopped = self._review_models_stop()
+            if stopped is not None:
+                return stopped
             # How strictly this quest is checked was approved on the interview's confirm screen; a hand edit since then
             # (a check turned down, a reviewer dropped, another model) stops here, before anything runs.
             record = self.fi_dir / _plan_settings.NAME
@@ -2525,9 +2533,17 @@ class Engine:
         # Pull a few related items from the knowledge base to ground ideation.
         # No chosen_idea yet — pass chat_fn so the source-router (if
         # enabled) can still pick sources from the catalog using the
-        # topic alone.
+        # topic alone. The search engines behind it match keywords, not the
+        # topic's sentences: the same one-call keyword derivation the
+        # literature step uses turns the topic into the field's terms first
+        # (the topic as written when it gives none, as before).
+        seed_queries = await self._derive_literature_queries(
+            state["topic"], work_scope=self._work_scope(state), node="ideate_query",
+        ) if self.knowledge.enabled else []
+        if seed_queries:
+            self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
         seeded = await self.knowledge.asearch(
-            state["topic"], top_k=3,
+            seed_queries[0] if seed_queries else state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
             work_scope=self._work_scope(state),
         )
@@ -2841,6 +2857,7 @@ class Engine:
         queries = await self._derive_literature_queries(
             state["topic"], chosen.get("title") or "", hypothesis, work_scope=scope,
         )
+        derived = bool(queries)
         if queries:
             self._log.info("[literature] search queries derived from the topic: %r", queries)
             query = queries[0]
@@ -2953,6 +2970,8 @@ class Engine:
                     "%d doc(s) now clear the floor",
                     attempt, stats.get("above_floor", 0),
                 )
+                # The query that found sources is the one later searches reuse, not the one that found none.
+                query, derived = tried_queries[-1], True
         docs = filtered
         # The original papers and textbooks a keyword search does not reach
         # join the candidates, and the screen judges them like the rest.
@@ -3120,6 +3139,7 @@ class Engine:
             "literature_iter": this_iter,
             "literature_query": query.strip(),
             "literature_queries": queries,
+            "literature_query_derived": derived,
         }
 
     def _design_prompt(self, state: QuestState) -> str:
@@ -4131,7 +4151,12 @@ class Engine:
         hypothesis = ""
         if isinstance(design, dict):
             hypothesis = str(design.get("hypothesis", "")).strip()
-        query = f"{topic} {hypothesis}".strip() or topic
+        # The keyword query the literature step derived from the topic (search engines and the dataset adapters
+        # match terms, not the topic's sentences); the topic and hypothesis as written when there is none.
+        derived = str(state.get("literature_query") or "").strip() if state.get("literature_query_derived") else ""
+        # What a source must be about is judged against the question as written, not the few keywords.
+        relevance_topic = f"{topic} {hypothesis}".strip() or topic
+        query = derived or relevance_topic
         auto_dir = self.quest_root / "data" / "auto_collected"
 
         # ---- Reuse already-downloaded literature -------------------
@@ -4156,7 +4181,7 @@ class Engine:
             and (d.get("metadata") or {}).get("kind") not in _FI_INTERNAL_KINDS
         ]
         if lit_docs and self.config.knowledge.relevance_guard:
-            relevant = await self._filter_relevant_docs(query, lit_docs)
+            relevant = await self._filter_relevant_docs(relevance_topic, lit_docs)
             lit_written = len(relevant)
             if lit_written < len(lit_docs):
                 self._log.info(
@@ -4179,7 +4204,7 @@ class Engine:
         axon_written = 0
         if lit_written == 0:
             axon_written = await self._axon_collect_step(
-                query, auto_dir, work_scope=self._work_scope(state),
+                query, auto_dir, work_scope=self._work_scope(state), relevance_topic=relevance_topic,
             )
 
         # ---- Dataset adapters --------------------------------------
@@ -4280,7 +4305,7 @@ class Engine:
         return written
 
     async def _axon_collect_step(
-        self, query: str, auto_dir: Path, *, work_scope: str = WORK_SCOPE_PAPERS,
+        self, query: str, auto_dir: Path, *, work_scope: str = WORK_SCOPE_PAPERS, relevance_topic: str = "",
     ) -> int:
         """Axon-backed retrieval. Returns the
         count of files written under ``auto_dir`` (not in a
@@ -4334,7 +4359,7 @@ class Engine:
         # off-topic ones so we don't write a paper on garbage; if NOTHING
         # is on-topic, return 0 so wait_for_data pauses for real user data
         # instead of proceeding.
-        docs = await self._filter_relevant_docs(query, docs)
+        docs = await self._filter_relevant_docs(relevance_topic or query, docs)
         if not docs:
             self._log.info(
                 "[auto_collect] relevance guard dropped every auto-collected "
@@ -4593,7 +4618,7 @@ class Engine:
 
     async def _derive_literature_queries(
         self, topic: str, idea_title: str = "", hypothesis: str = "",
-        *, work_scope: str = WORK_SCOPE_PAPERS,
+        *, work_scope: str = WORK_SCOPE_PAPERS, node: str = "literature_query",
     ) -> list[str]:
         """Turn a topic statement into up to three keyword search queries,
         one per facet of the topic.
@@ -4654,8 +4679,8 @@ class Engine:
             'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
         )
         try:
-            raw = await self._chat(prompt, node="literature_query")
-            parsed = _parse_json_lenient(raw, node="literature_query")
+            raw = await self._chat(prompt, node=node)
+            parsed = _parse_json_lenient(raw, node=node)
         except Exception as e:  # noqa: BLE001 — best-effort; caller degrades
             self._log.info("[literature] query derivation failed: %r", e)
             return []
@@ -5712,8 +5737,9 @@ class Engine:
         """The per-stratum intervals and effect sizes over the batches (:func:`_result_comparison_stats`), and, when the protocol
         declares metric specs, the engine's own estimates and contrasts with their p-values (``spec_statistics``,
         :mod:`core.metric_spec`). The audits that compare the paper with the numbers read the same dictionary."""
-        out = _result_comparison_stats(replicates, **kw)
         protocol = self._protocol_block(state)
+        metric_ids = {str(m.get("id")).lower() for m in _metric_spec.declared(protocol) if m.get("id")} or None
+        out = _result_comparison_stats(replicates, metric_ids=metric_ids, **kw)
         if protocol is not None and len(replicates) >= 1 and _metric_spec.declared(protocol):
             try:
                 spec = _metric_spec.statistics(replicates, protocol)
@@ -5833,7 +5859,7 @@ class Engine:
                     "numeric_warnings": self.config.engine.numeric_warnings,
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
-                    "result_use": getattr(self.config, "result_use", ""),
+                    "result_use": getattr(self.config, "effective_result_use", "") or getattr(self.config, "result_use", ""),
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -7462,15 +7488,16 @@ class Engine:
             at_bound = any(getattr(v, "kind", "") == "at_bound" for v in implausible)
             self._log.warning(
                 "[execute_reflect] rc=0 but %d value(s) break the design's "
-                "declared bounds%s — attempting repair (iter %d)",
+                "declared bounds or are capped by the script%s — attempting repair (iter %d)",
                 len(implausible),
-                " (at least one is capped at its bound)" if clamped else "",
+                " (at least one is a capped number)" if clamped else "",
                 iters + 1,
             )
             rj_preview = json.dumps(state.get("result_json") or {}, indent=2)[:1500]
             stdout_for_prompt = (
                 "IMPLAUSIBLE RESULT: the script exited 0 and printed RESULT_JSON, "
-                "but these values break the bounds the DESIGN declared for them:\n"
+                "but these values break the bounds the DESIGN declared for them, or are a number the script "
+                "capped rather than computed:\n"
                 + "\n".join(f"- {v.describe()}" for v in implausible[:10])
                 + "\n\nFind the cause before changing anything. If it is a bug "
                 "(wrong units, a factor of two, a sign error, a mis-set "
@@ -7481,8 +7508,8 @@ class Engine:
                 "NEVER clamp, cap or clip a result to the bound or replace it "
                 "with any constant: a capped value is detected and rejected, and "
                 "it would state something false."
-                + ("\n\nA value above is already capped at its bound by the "
-                   "script itself; remove that cap." if clamped else "")
+                + ("\n\nA value above is capped by the script itself (at its bound, or at a constant the "
+                   "script caps that very quantity at, inside the range); remove that cap." if clamped else "")
                 + ("\n\nA quantity above sits exactly on a bound in several "
                    "settings. That is what a computation returning a trivial "
                    "answer looks like: a root finder settling on the solution at "
@@ -8800,6 +8827,8 @@ class Engine:
                 "drew; placed %s in the paper before the review",
                 len(placed), ", ".join(placed),
             )
+        markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
+                    else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -10554,6 +10583,8 @@ class Engine:
                 "blocking": parsed.get("blocking") or "",
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
                 "status": "ok",
+                # Which model gave this review: panelists on one model are one reviewer's view in several roles.
+                "requested_model": self._reviewer_model(name),
             }
 
         # return_exceptions=True is defense in depth: a panelist must never be
@@ -11517,6 +11548,60 @@ class Engine:
         if not node:
             return None
         return model_for_node(self.config.provider.node_models, node)
+
+    def _reviewer_model(self, persona: str) -> str:
+        """The model a review-panel persona is asked on: its own ``provider.node_models`` entry, else the quest's."""
+        return self._model_for_node(f"review_panel.{persona}") or self.config.provider.model or "(the provider's default)"
+
+    def _review_models_stop(self) -> QuestArtifacts | None:
+        """``rigor_profile: research``: the review panel needs at least one reviewer on a different model. Personas all
+        on one model are one model's view in several roles; its errors are shared, not caught. Stops before anything
+        runs and says how to give one persona another model (the person chooses which). ``None`` when there is one."""
+        if self.config.rigor_profile != "research" or not self.config.engine.review_panel:
+            return None
+        models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
+        if len(set(models.values())) > 1:
+            return None
+        # A panel that has already reviewed (a quest resumed at the human-review gate, say) is not asked again.
+        if any(e.get("kind") == "node_completed" and e.get("node") == "review" for e in _audit_log.read(self.audit.path)):
+            return None
+        only = next(iter(models.values()))
+        persona = "statistician" if "statistician" in models else next(iter(models))
+        self._log.warning("[review] stopped: every review-panel persona is on %s; research needs one on another model", only)
+        self._audit("pause_requested", pause="review_models", model=only, panel=list(models))
+        headline = "the review panel needs one reviewer on a different model"
+        approved = (self.fi_dir / _plan_settings.NAME).is_file()
+        how = (
+            f"Choose another model for one of them, then approve it with `python launch.py --update {self.quest_id}` "
+            f"(web: the quest page's Update, VS Code: `@fi /update {self.quest_id}`): in \"Per-node model overrides\" "
+            f"enter `review_panel.{persona}:<another model your provider offers>` (in VS Code choose \"Type node:model "
+            f"pairs\" there)."
+            if approved else
+            f"Choose another model for one of them and add it to the quest's config.yaml, under its `provider:` section "
+            f"(add one if there is none; never a second one), inside `node_models:` if that is already there:\n"
+            f"  node_models:\n    review_panel.{persona}: <another model your provider offers>"
+        )
+        self._write_next_step(
+            kind="review_models",
+            interaction="answer",
+            headline=headline,
+            steps=[
+                f"Nothing was run. Every reviewer on this research quest's panel ({', '.join(models)}) would be asked on "
+                f"the same model ({only}): one model's view in several roles, whose mistakes the others share.",
+                how,
+                f"Then `python launch.py --resume {self.quest_id}`. (Without rigor_profile: research there is no such "
+                "requirement.)",
+            ],
+        )
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "pause.json").write_text(json.dumps({
+                "kind": "review_models", "interaction": "answer", "quest_id": self.quest_id, "headline": headline,
+                "next_step_file": "NEXT_STEP.md", "upload_targets": [],
+            }, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return self._collect_artifacts({})
 
     async def _preflight_required_skills(self) -> None:
         """A skill named in ``engine.skills_required`` that cannot be used stops
@@ -14809,9 +14894,39 @@ def _replicate_line_figure(
     }
 
 
+#: The line an exploration's paper carries under its title (what the result is for: explore, or not said).
+PRELIMINARY_NOTE = (
+    "> **Preliminary result.** This quest was set up to explore, or did not say what its result is for, so what it "
+    "found is a first look, not a publication-ready result. Run it again for research (`result_use: research`) to "
+    "check it."
+)
+
+
+def _mark_preliminary(markdown: str) -> str:
+    """``markdown`` with :data:`PRELIMINARY_NOTE` under its title, once. With no title it goes at the top, after any
+    YAML front matter; a ``# comment`` inside a fenced code block is not a title."""
+    if PRELIMINARY_NOTE in markdown:
+        return markdown
+    lines = markdown.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
+        if end is not None:
+            start = end + 1
+    at, fenced = None, False
+    for i in range(start, len(lines)):
+        if lines[i].lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and lines[i].startswith("# "):
+            at = i + 1
+            break
+    at = start if at is None else at
+    return "\n".join([*lines[:at], "", PRELIMINARY_NOTE, "", *lines[at:]])
+
+
 def _result_comparison_stats(
     replicates: list[dict[str, Any]], *, max_effect_sizes: int = 24,
-    max_depth: int = 6, assertions: list[Any] | None = None,
+    max_depth: int = 6, assertions: list[Any] | None = None, metric_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     """Per-stratum CIs + pairwise effect sizes (Cohen's d) between the strata
     the experiment broke results down by, plus a multiple-comparison guard.
@@ -14827,7 +14942,11 @@ def _result_comparison_stats(
     (``RK4.err`` at the step-size level, ``err`` at the method level). A
     nested level counts only when its children share one key structure:
     ``{"errors": {...}, "timing": {...}}`` groups unlike things, and pairing
-    them would be noise. The ``by_*`` level itself is always a factor.
+    them would be noise. Unlike groups can share a key structure too
+    (``errors`` and ``timing`` each with ``mean`` and ``max``): a nested level
+    whose children are named for the protocol's declared metrics
+    (``metric_ids``) groups measures, not settings, and is not compared. The
+    ``by_*`` level itself is always a factor.
 
     Returns ``{"strata": {factor: {stratum: {metric: {mean, ci_lower,
     ci_upper, n}}}}, "effect_sizes": [{factor, metric, a, b, cohens_d,
@@ -14870,7 +14989,10 @@ def _result_comparison_stats(
         )
         label = ".".join(path)
         comparable = len(strata) >= 2 and (
-            depth == 0 or len({_shape(nodes[0][s]) for s in strata}) == 1
+            depth == 0 or (
+                len({_shape(nodes[0][s]) for s in strata}) == 1
+                and not (metric_ids and any(s.lower() in metric_ids for s in strata))
+            )
         )
         if comparable:
             metrics = sorted({

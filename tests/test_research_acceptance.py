@@ -41,7 +41,8 @@ def _config(root: Path, **over: Any) -> Config:
     data: dict[str, Any] = {
         "topic": "smoke topic for the research acceptance run", "title": "research-acceptance",
         "rigor_profile": "research",
-        "provider": {"name": "openai"},
+        # Research needs one reviewer on another model; the fake model answers the same whatever it is called.
+        "provider": {"name": "openai", "node_models": {"review_panel.statistician": "m-other"}},
         "engine": {"max_iterations": 1, "review_loop": False, "auto_accept_on_pass": True, "execute_replicates": 3,
                    "pilot_run": False},
         "execution": {"sandbox": "venv", "timeout_s": 300},
