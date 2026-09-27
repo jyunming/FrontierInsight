@@ -261,6 +261,8 @@
   // fields AND render its companion proposal markdown in the preview
   // panel so the user can read the full plan while filling fields.
   window.loadDraftIntoForm = async function (filename) {
+    // A new draft: nothing an earlier one was waiting for applies any more.
+    for (const k of Object.keys(pendingModelValues)) delete pendingModelValues[k];
     try {
       const res = await fetch(`/api/drafts/${encodeURIComponent(filename)}`);
       if (!res.ok) { alert(`Could not load draft: HTTP ${res.status}`); return; }
@@ -575,7 +577,16 @@
         if (ve === String(seedEncoded)) opt.selected = true;
         sel.appendChild(opt);
       }
-      if (q.id === 'provider') sel.addEventListener('change', () => populateProviderModel(sel.value));
+      // A pick the person makes replaces a draft value still waiting for the live list (and a provider change makes the
+      // draft's model name for the old provider moot).
+      if (q.id === 'provider') sel.addEventListener('change', () => {
+        delete pendingModelValues.provider_model;
+        delete pendingModelValues.second_reviewer_model;
+        populateProviderModel(sel.value);
+      });
+      if (q.id === 'provider_model' || q.id === 'second_reviewer_model') {
+        sel.addEventListener('change', () => { delete pendingModelValues[q.id]; });
+      }
       if (q.id === 'provider_model') sel.addEventListener('change', () => renderSecondReviewerOptions());
       if (q.id === 'result_use' && !isUpdate) sel.addEventListener('change', () => refreshConditionalQuestions());
       sel.addEventListener('change', () => handleOtherSelection(sel, q));
