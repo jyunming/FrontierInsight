@@ -97,6 +97,10 @@ export interface InterviewAnswers {
     // (rigorProfileFor) and, for "explore", writes the draft's three cost-saving engine settings. Must stay in sync
     // with core/interview.py:InterviewAnswers.result_use.
     result_use?: "research" | "decision" | "explore";
+    // "Second reviewer's model", asked for research or a decision only: a model id (written as
+    // provider.node_models["review_panel.statistician"]), ONE_MODEL_ANSWER (written as engine.one_model_review: true),
+    // or empty when not asked. Must stay in sync with core/interview.py:InterviewAnswers.second_reviewer_model.
+    second_reviewer_model?: string;
     // Mid-quest stop so you can drop reference PDFs into inputs/papers/
     // and datasets into inputs/data/ before the engine continues, then
     // resume. Maps to pauses.supply via SUPPLY_TO_PAUSE; "never" (the
@@ -166,6 +170,27 @@ export const DRAFT_ENGINE_SETTINGS: readonly (readonly [string, string])[] = [
     ["cross_check_per_finding_k", "0"],
     ["enable_analyze_reroute", "false"],
 ];
+
+/** The "Second reviewer's model" answer that says there is no other model — must match ``ONE_MODEL_ANSWER`` in
+ * core/interview.py. The quest then runs with every reviewer on the one model, and its result says so. */
+export const ONE_MODEL_ANSWER = "__one_model__";
+
+/** Mirrors core/interview.py:second_reviewer_node_model: the model the answer puts on the statistician reviewer, or ""
+ * (not asked, "I only have one model", or not a research-profile quest). */
+export function secondReviewerNodeModel(answers: InterviewAnswers, rigorProfile: string | undefined): string {
+    const model = (answers.second_reviewer_model ?? "").trim();
+    if (rigorProfile !== "research" || !model || model === ONE_MODEL_ANSWER) { return ""; }
+    return model;
+}
+
+/** Mirrors core/interview.py:other_reviewer_models: the models ``review_panel.*`` per-node entries name that are not the
+ * quest's own (an entry on the quest's own model leaves every reviewer on it, so it does not count). */
+export function otherReviewerModels(nodeModels: Record<string, string>, primaryModel: string | undefined): string[] {
+    const primary = (primaryModel ?? "").trim();
+    return Object.entries(nodeModels)
+        .filter(([node, model]) => node.startsWith("review_panel.") && model.trim() !== "" && model.trim() !== primary)
+        .map(([, model]) => model.trim());
+}
 
 /** Mirrors core/interview.py:rigor_profile_for. */
 export function rigorProfileFor(resultUse: string): "default" | "research" {
@@ -423,6 +448,12 @@ export function answersToYaml(answers: InterviewAnswers): string {
     }
     // Per-node model overrides. Only emit when the user typed something.
     const nodeModels = parseNodeModelsAnswer(answers.node_models);
+    const secondReviewer = secondReviewerNodeModel(answers, rigorProfile);
+    if (secondReviewer && otherReviewerModels(nodeModels, answers.provider_model).length === 0) {
+        // A reviewer named in the per-node overrides on another model wins over this answer; one on the quest's own
+        // model would leave every reviewer on it, so the answer is merged in then too. Mirrors core/interview.py.
+        nodeModels["review_panel.statistician"] = secondReviewer;
+    }
     if (Object.keys(nodeModels).length > 0) {
         lines.push(`${indent}node_models:`);
         for (const [node, model] of Object.entries(nodeModels)) {
@@ -448,6 +479,12 @@ export function answersToYaml(answers: InterviewAnswers): string {
     lines.push(`${indent}no_simulation: ${noSimulation ? "true" : "false"}`);
     if (surveyMode) {
         lines.push(`${indent}survey_mode: true`);
+    }
+    if (rigorProfile === "research" && (answers.second_reviewer_model ?? "").trim() === ONE_MODEL_ANSWER
+        && otherReviewerModels(nodeModels, answers.provider_model).length === 0) {
+        // Only one model: the quest runs, and its result says the review was one model's view. Not written when a
+        // per-node override puts a reviewer on another model after all. Mirrors core/interview.py.
+        lines.push(`${indent}one_model_review: true`);
     }
     // A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface (this
     // interview once wrote them for every quest). Mirrors core/interview.py:answers_to_yaml.

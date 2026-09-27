@@ -38,8 +38,9 @@ same PR that adds, splits or renames one.
 - `core/attempt_records.py` — what a quest tried and under which conditions: `.fi/attempts.jsonl` (each run's outcome from `OUTCOMES` and `script_hashes`, each failed-check stop, the quest's four fields from `quest_status`; every line with `context_fingerprint`, schema `SCHEMA`, a `record_id`) and `.fi/branch_ledger.jsonl` (ideas, design revisions, repairs); written by `Engine._record` / `_record_stop` / `_attempt_context`, read by nothing that routes yet.
 - `core/plan_settings.py` — the settings a quest was approved with (`.fi/approved_plan.json`), checked at every start
   (`Engine._stop_for_changed_settings`); `interview_update.approve_settings` records a change `--update` approves.
-- `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; `core/interview_update.py`
-  is mid-quest re-entry.
+- `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; a question asked only for
+  some earlier answer carries `ask_if`, checked by `question_applies` (the web page and VS Code mirror it; today only
+  `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry.
 - `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call).
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
 - `core/ensemble.py` — the multi-model fan-out-and-merge primitive a node opts into.

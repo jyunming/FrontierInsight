@@ -35,13 +35,15 @@ def test_tier1_cli_asks_the_topic_what_it_is_for_and_the_model() -> None:
     """The first screen asks what only the person can say: the topic, what the result is for (it sets how strictly the
     quest is checked, so it is asked, never hidden) and the provider and model. The paper format, the deliverables and
     the study depth are worked out from the topic and shown on the review screen; the multi-model ensemble is in
-    Advanced. The author line comes last and is asked only while no profile is saved (core/profile.py)."""
+    Advanced. For research or a decision the second reviewer's model follows (research needs one reviewer on another
+    model; see ``question_applies``). The author line comes last and is asked only while no profile is saved (core/profile.py)."""
     ids = [q.id for q in questions_for_tier(1, "cli")]
     assert ids == [
         "topic",
         "result_use",
         "provider",
         "provider_model",
+        "second_reviewer_model",
         "author",
         "affiliation",
         "contact_email",
@@ -65,6 +67,7 @@ def test_tier1_vscode_asks_the_topic_and_what_it_is_for() -> None:
     assert ids == [
         "topic",
         "result_use",
+        "second_reviewer_model",
         "author",
         "affiliation",
         "contact_email",

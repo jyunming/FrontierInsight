@@ -3383,7 +3383,7 @@ async def _run_new(
     from core.interview import (
         QUESTIONS, InterviewAnswers, answers_to_yaml,
         derive_tier2, derive_tier3, parse_fixed_temperature_answer, parse_page_limit_answer,
-        preflight_clarify, questions_for_tier, resolve_review_panel, slugify,
+        preflight_clarify, question_applies, questions_for_tier, resolve_review_panel, slugify,
     )
 
     # Choice labels include em-dashes / arrows / Unicode math. Windows
@@ -3426,7 +3426,18 @@ async def _run_new(
         for q in tier1:
             if saved_profile is not None and q.id in _profile.FIELDS:
                 continue
+            if not question_applies(q, partial):  # the second reviewer's model: research or a decision only
+                continue
             answer = _cli_prompt_for(q, partial, {})
+            while (q.id == "provider_model" and answer is not None and not str(answer).strip()
+                   and str(partial.get("result_use") or "research") != "explore"):
+                # Research or a decision: the quest's model is named, so another one can be picked for a reviewer.
+                print("    (research needs the quest's model named, so one reviewer can use a different one)")
+                answer = _cli_prompt_for(q, partial, {})
+            while q.id == "second_reviewer_model" and answer is not None and answer == partial.get("provider_model"):
+                # The same model again would leave every reviewer on it, and the quest would stop to ask for another.
+                print("    (that is the model the quest runs on; pick another, or 'I only have one model')")
+                answer = _cli_prompt_for(q, partial, {})
             if answer is None:
                 print()
                 print("— interview cancelled.")
@@ -3591,6 +3602,7 @@ async def _run_new(
         supply_papers=bool(advanced.get("supply_papers", True)),
         pause_for_plan=bool(advanced.get("pause_for_plan", False)),
         result_use=str(partial.get("result_use") or "research"),
+        second_reviewer_model=str(partial.get("second_reviewer_model") or ""),
         # Advanced (tier 3): off unless the person opened Advanced and named the models.
         ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
         ensemble_models=str(advanced.get("ensemble_models") or ""),
@@ -3673,6 +3685,11 @@ def _print_plan_summary(partial: dict[str, object]) -> None:
         print("  Checks       : every check stops the quest; the plan waits for you; clean environment per quest")
     model = partial.get("provider_model") or "(provider default)"
     print(f"  Model        : {partial.get('provider') or 'openai'} / {model}")
+    second = str(partial.get("second_reviewer_model") or "")
+    if use != "explore" and second:
+        from core.interview import ONE_MODEL_ANSWER
+        print("  Reviewers    : " + ("all on the one model (the result says so, and is not marked publication-ready)"
+                                     if second == ONE_MODEL_ANSWER else f"the statistics reviewer uses {second}"))
     ensemble = str(partial.get("ensemble_profile") or "off")
     if ensemble != "off":
         print(f"  Ensemble     : {ensemble} ({partial.get('ensemble_models') or 'no models named'})")
@@ -3756,7 +3773,7 @@ def _cli_prompt_for(
     (paper_format flowing into no_simulation, etc).
     """
     from core.interview import (
-        Choice, build_smart_defaults, model_choices_for,
+        Choice, build_smart_defaults, model_choices_for, second_reviewer_choices,
     )
 
     # Recompute smart defaults given everything answered so far.
@@ -3787,6 +3804,9 @@ def _cli_prompt_for(
     if q.id == "provider_model":
         provider = partial.get("provider")
         choices = model_choices_for(str(provider)) if provider else ()
+    elif q.id == "second_reviewer_model":
+        # The same provider's models except the one the quest runs on, then "I only have one model".
+        choices = second_reviewer_choices(str(partial.get("provider") or ""), partial.get("provider_model"))  # type: ignore[arg-type]
     else:
         choices = q.choices
 
@@ -3843,7 +3863,11 @@ def _cli_prompt_for(
                     custom = input("    type the value: ").strip()
                 except (EOFError, KeyboardInterrupt):
                     return None
-                return custom or None
+                if not custom:
+                    # An empty value is not an answer: asked again rather than cancelling the whole interview.
+                    print("    (nothing typed; pick a number, or choose Other again and type a name)")
+                    continue
+                return custom
             print(f"    (not a valid choice — pick 1 to {len(choices) + (1 if q.allow_other else 0)})")
             continue
         # Match by unique label prefix (case-insensitive).

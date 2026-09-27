@@ -111,6 +111,14 @@ def test_research_with_one_reviewer_on_another_model_goes_on(tmp_path: Path) -> 
     assert engine._reviewer_model("statistician") == "m-other" and engine._reviewer_model("methodologist") == "m-main"
 
 
+def test_set_up_with_only_one_model_the_quest_runs(tmp_path: Path) -> None:
+    """The interview's "I only have one model": no stop; the result says so instead (core/evidence.py)."""
+    cfg = _research(tmp_path)
+    engine = Engine(cfg.model_copy(update={"engine": cfg.engine.model_copy(update={"one_model_review": True})}))
+    assert engine._review_models_stop() is None
+    assert not (engine.fi_dir / "pause.json").exists()
+
+
 def test_the_default_profile_has_no_such_requirement(tmp_path: Path) -> None:
     engine = Engine(Config.model_validate({
         "topic": "t", "provider": {"name": "openai", "model": "m"}, "engine": {"review_panel": ["methodologist"]},

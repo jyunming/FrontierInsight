@@ -310,7 +310,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             raise HTTPException(400, str(e))
 
         try:
-            new_answers = _parse_answers(body)
+            new_answers = _parse_answers(body, new_quest=False)
         except (KeyError, TypeError, ValueError) as e:
             raise HTTPException(400, f"invalid answers payload: {e}")
 
@@ -392,7 +392,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         return JSONResponse(result)
 
 
-def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
+def _parse_answers(body: dict[str, Any], *, new_quest: bool = True) -> InterviewAnswers:
     """Validate-and-coerce a JSON answers payload into
     :class:`InterviewAnswers`. Strict per-field type checks: the
     naïve ``bool(...)`` / ``list(...)`` coercion lets ``"false"`` get
@@ -528,6 +528,27 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
     result_use = body.get("result_use") or ""
     if result_use not in ("", "research", "decision", "explore"):
         raise ValueError(f"result_use must be 'research', 'decision' or 'explore'; got {result_use!r}")
+    # The second reviewer's model (research or a decision only): a model id, or "I only have one model". Missing (an
+    # older client, or exploring) writes nothing.
+    second_reviewer_model = body.get("second_reviewer_model") or ""
+    if not isinstance(second_reviewer_model, str):
+        raise TypeError(f"second_reviewer_model must be str, got {type(second_reviewer_model).__name__}")
+    second_reviewer_model = second_reviewer_model.strip()
+    if len(second_reviewer_model) > 300 or "\n" in second_reviewer_model:
+        raise ValueError("second_reviewer_model must be one model name")
+    # Research or a decision: the quest's model is named, so the second reviewer's can be checked against it (left blank,
+    # the provider's default would run, and a reviewer "on another model" could be that same default).
+    if new_quest and result_use in ("research", "decision") and not str(pm or "").strip():
+        raise ValueError(
+            "provider_model: research or a decision needs the quest's model named, so one reviewer can use a "
+            "different one"
+        )
+    # An older caller that sends no second_reviewer_model gets what it always got: a research quest whose reviewers
+    # are all on one model stops on its first run and says how to name another (docs/rigor.md).
+    if second_reviewer_model and second_reviewer_model == (body.get("provider_model") or ""):
+        raise ValueError(
+            "second_reviewer_model is the model the quest runs on; pick another, or 'I only have one model'"
+        )
     # survey_mode: optional bool (default off). A literature/history synthesis
     # with no experiment and no dataset — implies no_simulation at runtime.
     survey_mode = body.get("survey_mode", False)
@@ -604,6 +625,7 @@ def _parse_answers(body: dict[str, Any]) -> InterviewAnswers:
         pause_for_plan=pause_for_plan,
         rigor_profile=rigor_profile,
         result_use=result_use,
+        second_reviewer_model=second_reviewer_model,
         ensemble_profile=ensemble_profile,
         ensemble_models=", ".join(named_models),
         max_iterations=max_iterations,

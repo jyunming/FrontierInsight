@@ -74,6 +74,7 @@ async def test_run_new_draft_only_produces_valid_config_yaml(
         "",                                       # knowledge_enabled (default = disabled)
         "1",                                      # provider (no default — first choice)
         "1",                                      # provider_model (no default — first choice)
+        "1",                                      # second_reviewer_model (research: the first other model)
     ]
     feed = io.StringIO("\n".join(answers) + "\n")
     monkeypatch.setattr("sys.stdin", feed)
@@ -158,6 +159,7 @@ async def test_run_new_asks_the_author_line_once_and_keeps_it_for_the_next_quest
         "Author line probe topic",   # topic
         "",                          # result_use (default research)
         "1", "1",                    # provider, provider_model
+        "1",                         # second reviewer's model (research)
         "  Jane   Chen ",            # author
         "R&D Lab",                   # affiliation
         "",                          # contact_email (skipped)
@@ -169,12 +171,12 @@ async def test_run_new_asks_the_author_line_once_and_keeps_it_for_the_next_quest
     assert profile.load() == {"author": "Jane Chen", "affiliation": "R&D Lab", "contact_email": "",
                               "url": "https://example.org/p"}
 
-    again = await _new(tmp_path, monkeypatch, ["A second topic", "", "1", "1", ""])
+    again = await _new(tmp_path, monkeypatch, ["A second topic", "", "1", "1", "1", ""])
     assert (again.output.author, again.output.affiliation, again.output.url) == (
         "Jane Chen", "R&D Lab", "https://example.org/p")
 
     # Changed on the review screen: this quest and the next ones.
-    changed = await _new(tmp_path, monkeypatch, ["A third topic", "", "1", "1", _review_row("affiliation"), "New Lab", ""])
+    changed = await _new(tmp_path, monkeypatch, ["A third topic", "", "1", "1", "1", _review_row("affiliation"), "New Lab", ""])
     assert changed.output.affiliation == "New Lab" and profile.load()["affiliation"] == "New Lab"
 
 
@@ -185,7 +187,7 @@ async def test_run_new_writes_the_ensemble_named_in_advanced(
     """The ensemble is in Advanced now. Picked there with the models the person named, it is written as they named it;
     FI adds none."""
     cfg = await _new(tmp_path, monkeypatch, [
-        "Ensemble probe topic", "", "1", "1", "", "", "", "",   # topic, result_use, provider, model, author line
+        "Ensemble probe topic", "", "1", "1", "1", "", "", "", "",  # topic, result_use, provider, model, 2nd reviewer, author
         "a", _review_row("ensemble_profile"), "4",              # Advanced: the full profile
         _review_row("ensemble_models"), "model-a, model-b, model-c",
         "",                                                     # launch
@@ -201,7 +203,7 @@ async def test_run_new_configures_no_ensemble_when_the_user_names_no_models(
     """Picking a fan-out profile but naming no models must not fall back to models FI likes: the quest runs
     single-model."""
     cfg = await _new(tmp_path, monkeypatch, [
-        "Ensemble without models probe", "", "1", "1", "", "", "", "",
+        "Ensemble without models probe", "", "1", "1", "1", "", "", "", "",
         "a", _review_row("ensemble_profile"), "4", "",
     ])
     assert not cfg.provider.node_ensemble
@@ -216,7 +218,7 @@ async def test_run_new_takes_a_paper_format_changed_on_the_review_screen_and_wha
 
     essay = str([c.value for c in PAPER_FORMATS].index("essay") + 1)
     cfg = await _new(tmp_path, monkeypatch, [
-        "A history of the printing press", "", "1", "1", "", "", "", "",
+        "A history of the printing press", "", "1", "1", "1", "", "", "", "",
         _review_row("paper_format"), essay, "",
     ])
     assert cfg.output.paper_format == "essay"
@@ -244,6 +246,7 @@ async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
         "Page limit probe topic",    # topic
         "",                          # result_use (default research)
         "1", "1",                    # provider, provider_model
+        "1",                         # second reviewer's model (research)
         "", "", "", "",              # author line
         "a", row, "four",            # review screen: show advanced, a typo (refused)
         row, "4",                    # the page limit
@@ -284,8 +287,10 @@ async def test_run_new_writes_what_the_result_is_for(
         return {}
 
     monkeypatch.setattr("core.interview.preflight_clarify", fake_preflight)
-    # topic, result_use, paper_format, output_kinds, study_depth, provider, provider_model; then Enter to launch.
-    answers = iter(["Result use probe topic", pick, "", "", "", "1", "1", "", "", "", "", "", ""])
+    # topic, result_use, (three blanks the provider question re-asks), provider, provider_model, and for research or a
+    # decision the second reviewer's model (not asked when exploring); then Enter to launch.
+    second = [] if pick == "3" else ["1"]
+    answers = iter(["Result use probe topic", pick, "", "", "", "1", "1", *second, "", "", "", "", "", ""])
     reads = {"n": 0}
 
     def fake_input(prompt: str = "") -> str:

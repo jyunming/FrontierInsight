@@ -969,7 +969,8 @@ async function runInterviewAndQuest(
 ): Promise<void> {
     if (token.isCancellationRequested) return;
 
-    const answers = await runInterview(stream);
+    // The picked model is left out of the second reviewer's list (research needs a reviewer on another model).
+    const answers = await runInterview(stream, userPickedModel);
     if (!answers) return;  // user hit Esc somewhere
 
     // Snapshot the active Copilot model into provider.model so the
