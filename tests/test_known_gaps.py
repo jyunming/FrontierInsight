@@ -199,29 +199,29 @@ def test_only_an_upper_cap_where_the_quantity_is_reported_counts_inside_the_rang
 
 def test_a_clip_is_read_by_its_arguments_not_its_module_name() -> None:
     probs = [Assertion(path="p_hat", min=0.0, max=1.0)]
-    for code in ('out = {"p_hat": float(cp.clip(p, 0.05, 0.95))}\n', 'out = {"p_hat": float(jax.numpy.clip(p, 0.05, 0.95))}\n'):
+    for code in ('out = {"p_hat": float(cp.clip(p, 0.05, 0.95))}\nprint(json.dumps(out))\n', 'out = {"p_hat": float(jax.numpy.clip(p, 0.05, 0.95))}\nprint(json.dumps(out))\n'):
         assert violations({"p_hat": 0.05}, probs, code=code) == [], "0.05 is the floor"
         (found,) = violations({"p_hat": 0.95}, probs, code=code)
         assert found.kind == "clamped", code
     # Two positional arguments read as no cap: the method's cap (t.clamp(lo, HI)) and the function's floor
     # (torch.clamp(x, lo)) look alike.
-    assert violations({"p_hat": 0.05}, probs, code='out = {"p_hat": float(torch.clamp(p, 0.05))}\n') == []
-    assert violations({"p_hat": 0.95}, probs, code='out = {"p_hat": float(t.clamp(0.05, 0.95))}\n') == []
+    assert violations({"p_hat": 0.05}, probs, code='out = {"p_hat": float(torch.clamp(p, 0.05))}\nprint(json.dumps(out))\n') == []
+    assert violations({"p_hat": 0.95}, probs, code='out = {"p_hat": float(t.clamp(0.05, 0.95))}\nprint(json.dumps(out))\n') == []
 
 
 def test_a_cap_written_first_counts_too() -> None:
-    for code in ('out = {"rmse": min(10.0, rmse)}\n', 'out = {"rmse": float(np.minimum(10.0, r))}\n'):
+    for code in ('out = {"rmse": min(10.0, rmse)}\nprint(json.dumps(out))\n', 'out = {"rmse": float(np.minimum(10.0, r))}\nprint(json.dumps(out))\n'):
         (found,) = violations({"rmse": 10.0}, RMSE, code=code)
         assert found.kind == "clamped", code
 
 
 def test_a_cap_in_a_denominator_is_a_guard_not_a_cap() -> None:
     ratio = [Assertion(path="rate", min=0.0, max=10.0)]
-    assert violations({"rate": 1.0}, ratio, code='out = {"rate": total / min(max(n, 1), 1.0)}\n') == []
+    assert violations({"rate": 1.0}, ratio, code='out = {"rate": total / min(max(n, 1), 1.0)}\nprint(json.dumps(out))\n') == []
 
 
 def test_a_min_of_two_computed_values_is_no_cap_and_minimum_with_out_still_is() -> None:
-    assert violations({"rmse": 4.0}, RMSE, code='out = {"rmse": min(a, b)}\n') == []
-    (found,) = violations({"rmse": 10.0}, RMSE, code='out = {"rmse": float(np.minimum(r, 10.0, out=r))}\n')
+    assert violations({"rmse": 4.0}, RMSE, code='out = {"rmse": min(a, b)}\nprint(json.dumps(out))\n') == []
+    (found,) = violations({"rmse": 10.0}, RMSE, code='out = {"rmse": float(np.minimum(r, 10.0, out=r))}\nprint(json.dumps(out))\n')
     assert found.kind == "clamped"
 
