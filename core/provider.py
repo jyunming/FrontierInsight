@@ -363,9 +363,18 @@ def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
             continue
         if evt.get("type") != "result":
             continue
+        # Which model actually answered, as the CLI reports it: the one that wrote the most (a helper model the CLI
+        # used on the side writes little). Read even when the token counts are missing.
+        served = None
+        by_model = evt.get("modelUsage")
+        if isinstance(by_model, dict) and by_model:
+            best = max(by_model, key=lambda m: int((by_model[m] or {}).get("outputTokens") or 0)
+                       if isinstance(by_model[m], dict) else 0)
+            if isinstance(best, str) and best.strip():
+                served = best.strip()
         u = evt.get("usage") or {}
         if not u:
-            return None
+            return {"served_model": served} if served else None
         fresh = int(u.get("input_tokens") or 0)
         cache_write = int(u.get("cache_creation_input_tokens") or 0)
         cache_read = int(u.get("cache_read_input_tokens") or 0)
@@ -385,6 +394,8 @@ def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
         cost = evt.get("total_cost_usd")
         if isinstance(cost, (int, float)):
             measured["cost_usd_reported"] = float(cost)
+        if served:
+            measured["served_model"] = served
         return measured
     return None
 
@@ -3603,6 +3614,12 @@ class LLMClient:
                 # and by a wide margin: these CLIs wrap our prompt in their
                 # own system prompt and tool schema, which is most of the
                 # input and which the estimator cannot see at all.
+                served = measured.pop("served_model", None)
+                if isinstance(served, str) and served:
+                    # The CLI said which model answered this very call (claude_cli does). Set from this call's own
+                    # reading, in this task's own record: calls running at the same time never see each other's.
+                    self.last_model = served
+                    LAST_CALL.set({"provider": self.last_provider, "model": served, "reported": True})
                 if measured:
                     self.last_usage = measured
                 return text

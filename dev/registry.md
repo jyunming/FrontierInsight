@@ -22,7 +22,7 @@ same PR that adds, splits or renames one.
   `analyze` (`analysis_note`).
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
-- `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written by `Engine._seal_trace`).
+- `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).
 - `core/audit_log.py` — the hash-chained, redacted per-quest trace (`STAGE_PROGRESS`/`_ProgressOnly` for the curated
   console/web view live in `core/engine.py`, next to `_quest_logger`).
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits
@@ -35,7 +35,7 @@ same PR that adds, splits or renames one.
 
 - `core/config.py` — the typed `Config` tree, `rigor_profile: research` (`_RESEARCH_PROFILE`,
   `REQUIRED_REVIEW_ROLES`, `_apply_rigor_profile`), unknown-key auditing.
-- `core/attempt_records.py` — what a quest tried and under which conditions: `.fi/attempts.jsonl` (each run's outcome from `OUTCOMES` and `script_hashes`, each failed-check stop, the quest's four fields from `quest_status`; every line with `context_fingerprint`, schema `SCHEMA`, a `record_id`) and `.fi/branch_ledger.jsonl` (ideas, design revisions, repairs); written by `Engine._record` / `_record_stop` / `_attempt_context`, read by nothing that routes yet.
+- `core/attempt_records.py` — what a quest tried and under which conditions: `.fi/attempts.jsonl` (each run's outcome from `OUTCOMES` and `script_hashes`, each failed-check stop, the quest's four fields from `quest_status`; every line with `context_fingerprint` of a `CONTEXT_KINDS` kind, schema `SCHEMA`, a `record_id`) and `.fi/branch_ledger.jsonl` (ideas, design revisions, repairs); written by `Engine._record` / `_record_stop` / `_attempt_context`, read by nothing that routes yet.
 - `core/plan_settings.py` — the settings a quest was approved with (`.fi/approved_plan.json`), checked at every start
   (`Engine._stop_for_changed_settings`); `interview_update.approve_settings` records a change `--update` approves.
 - `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; a question asked only for
@@ -53,7 +53,7 @@ same PR that adds, splits or renames one.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
   one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
-  `run_oracle` in `_oracle_gate`); the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`).
+  `run_oracle` in `_oracle_gate`); the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`); `code_changed_while_queued` compares the code at submission with the code at collection.
 - `core/profile.py` — the person's author line, asked on the first interview and kept in
   `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
   submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).

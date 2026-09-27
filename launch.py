@@ -2033,17 +2033,12 @@ async def _finish_outputs(
             if failures.get("total"):
                 print(f"[FI] source failures: {failures.get('summary')}")
     # How much of the result has been checked against something other than itself (core/evidence.py).
-    evidence_path = art.quest_root / "needs" / "EVIDENCE.json"
-    if evidence_path.is_file():
-        try:
-            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            evidence = None
-        if isinstance(evidence, dict):
-            from core.evidence import summary_line as _evidence_line
+    from core.evidence import read as _read_evidence, summary_line as _evidence_line
 
-            summary["evidence"] = evidence
-            print(f"[FI] evidence: {_evidence_line(evidence)}")
+    evidence = _read_evidence(art.quest_root)  # with its seal checked
+    if evidence is not None:
+        summary["evidence"] = evidence
+        print(f"[FI] evidence: {_evidence_line(evidence)}")
     # The visual check's per-output result, for the web quest page.
     visual_check = report_summary(art.quest_root)
     if visual_check is not None:

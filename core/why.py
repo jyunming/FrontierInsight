@@ -102,7 +102,9 @@ def _step(events: list[dict[str, Any]], node: str, heading: str) -> list[str]:
 
 
 def _evidence(root: Path) -> list[str]:
-    record = _json(root / "needs" / "EVIDENCE.json")
+    from .evidence import read as _read_evidence  # with its seal checked, as every surface shows it
+
+    record = _read_evidence(root)
     if not isinstance(record, dict):
         return ["Why the evidence is at this level: the quest has not assessed its evidence yet."]
     from .evidence import summary_line  # the level in words, never its identifier

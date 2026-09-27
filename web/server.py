@@ -2288,7 +2288,7 @@ def make_app(
             ),
             "summary": summary,
             # How much of the result has been checked against something other than itself (needs/EVIDENCE.json).
-            "evidence": fi_evidence.upgrade(_read_json_or_none(quest_root / "needs" / "EVIDENCE.json")),
+            "evidence": fi_evidence.read(quest_root),
             # The frozen protocol and any amendment waiting for a person (core/frozen_protocol.py).
             "amendment": _amendment_view(quest_root),
             "source_failures": source_failures,

@@ -205,7 +205,9 @@ def waiting(quest_root: Path) -> list[Item]:
         out.append(Item("sources", "Some literature sources could not be reached (.fi/source_failures.json).",
                         recommended="Nothing to do unless the literature looks thin: go on later, or add papers to "
                                     "inputs/papers/."))
-    evidence = _read_json(needs / "EVIDENCE.json")
+    from .evidence import read as _read_evidence  # with its seal checked, as every surface shows it
+
+    evidence = _read_evidence(root)
     if isinstance(evidence, dict) and evidence.get("gaps") and evidence.get("next_level"):
         from .evidence import summary_line  # the level's own plain sentence, never its identifier
 

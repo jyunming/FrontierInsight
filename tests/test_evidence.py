@@ -359,7 +359,7 @@ def test_the_quest_page_the_cli_summary_and_the_chat_carry_it() -> None:
     page = (root / "web" / "static" / "quest.html").read_text(encoding="utf-8")
     for needle in ('id="evidence-banner"', "renderEvidence(data.evidence)", "independently_validated", "statistically_adequate", "publication_ready"):
         assert needle in page, needle
-    assert '"evidence": fi_evidence.upgrade(_read_json_or_none' in (root / "web" / "server.py").read_text(encoding="utf-8")
+    assert '"evidence": fi_evidence.read(quest_root)' in (root / "web" / "server.py").read_text(encoding="utf-8")
     assert 'summary["evidence"] = evidence' in (root / "launch.py").read_text(encoding="utf-8")
     assert "evidence: (.+)" in (root / "vscode-frontier-insight" / "src" / "extension.ts").read_text(encoding="utf-8")
 
