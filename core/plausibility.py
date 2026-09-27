@@ -164,6 +164,7 @@ from __future__ import annotations
 
 import ast
 import functools
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -241,6 +242,12 @@ class Violation:
                 f"nothing to check: report it again under the name `{self.path}`, with the value the run computes "
                 f"(a value outside the range is reported as it is; one the method cannot give is `null` with a flag "
                 f"saying why, never left out)"
+            )
+        if self.kind == "clamped_unproven":
+            return (
+                f"{self.path} = {self.value:g} is exactly a constant the script caps a quantity of that name at "
+                f"({self.assertion.describe()}){why}, but where that cap's value goes in the result cannot be shown "
+                f"(it is built in a loop, appended or put under another key): check that it is not this one"
             )
         if self.kind == "clamped":
             on_bound = any(b is not None and math.isclose(self.value, b, rel_tol=1e-9)
@@ -359,7 +366,8 @@ def _upper_caps(call: ast.Call) -> list[ast.AST]:
 
 def _segments(where: Any) -> list[str]:
     """A reported value's path as segments: dict keys by name, list positions as ``[]``. ``where`` is the tokens
-    :func:`_walk_leaves` yields, or a dotted string (``test.rmse``, ``runs[3].rmse``)."""
+    :func:`_walk_leaves` yields (what the check uses), or, for convenience, a dotted string for keys without ``.`` or
+    ``[`` in them (``test.rmse``, ``runs[3].rmse``)."""
     if isinstance(where, str):
         out: list[str] = []
         for part in where.split("."):
@@ -371,36 +379,34 @@ def _segments(where: Any) -> list[str]:
     return [str(v) if kind == "k" else "[]" for kind, v in where]
 
 
-def direct_caps(code: str, where: Any) -> set[float]:
-    """Constants the value reported at ``where`` is capped at from above right where it is reported: an upper cap
-    (:func:`_upper_caps`) in the value of a dict literal whose own path is exactly that value's path
-    (``{"test": {"rmse": min(rmse, 10.0)}}`` for ``test.rmse``), not inside a denominator (``x / min(n, 1)`` guards a
-    division). The whole path has to match: a cap on ``train.rmse`` is not one on ``test.rmse``, and a literal that
-    holds only part of the path (``{"rmse": ...}`` assigned somewhere under ``test``) cannot show which value it caps,
-    so it gives nothing. A one-segment path on a key many quantities share (``mean``, ``max``) gives nothing, and so
-    does unparseable code. Every other cap, a floor or one set inside an ``if`` included, is left to
-    :func:`clamp_constants`, which counts them all for a value on a bound."""
-    target = _segments(where)
-    if not target or (len(target) == 1 and target[0].lower() in _GENERIC_KEYS):
-        return set()
-    return set(_direct_caps(code or "", tuple(target)))
+_ANY_KEY = "*"   # a key the script computes (an f-string, a variable, a comprehension's key): any one key
 
 
-@functools.lru_cache(maxsize=512)
-def _direct_caps(code: str, target_t: tuple[str, ...]) -> frozenset[float]:
-    """:func:`direct_caps` for one script and one path, remembered: a check asks it for every reported value."""
-    target = list(target_t)
+def _chain_matches(chain: tuple[str, ...], target: list[str]) -> bool:
+    return len(chain) == len(target) and all(
+        c == t or (c == _ANY_KEY and t != "[]") for c, t in zip(chain, target))
+
+
+@functools.lru_cache(maxsize=64)
+def _cap_index(code: str) -> tuple[tuple[tuple[str, ...], bool, frozenset], ...]:
+    """Every upper cap (:func:`_upper_caps`) written as the value of a dict key in ``code``, once per script: the key
+    chain from the literal it sits in (a computed key is ``*``, a list or comprehension position is ``[]``), whether
+    that literal is the one the script prints (the argument of ``print``/``json.dumps``, or a name bound to a literal
+    and then printed), and the capped constants. Empty for code that caps nothing or does not parse."""
     try:
         tree = ast.parse(code)
     except (SyntaxError, ValueError):
-        return frozenset()
+        return ()
+    if not any(isinstance(n, ast.Call) and _upper_caps(n) for n in ast.walk(tree)):
+        return ()
     names: dict[str, float] = {}
+    bound_literal: dict[str, list[ast.AST]] = {}
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
             v = _literal(node.value)
             if v is not None:
                 names[node.targets[0].id] = v
+            bound_literal.setdefault(node.targets[0].id, []).append(node.value)
 
     def value(node: ast.AST) -> float | None:
         v = _literal(node)
@@ -408,48 +414,131 @@ def _direct_caps(code: str, target_t: tuple[str, ...]) -> frozenset[float]:
             v = names.get(node.id)
         return v
 
-    # Literals nested in another literal are reached from their outermost one, so their path is known.
+    # The literals the script prints: an argument of print(...) or *.dumps(...) / *.dump(...), directly or by name.
+    printed: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        fname = fn.attr if isinstance(fn, ast.Attribute) else fn.id if isinstance(fn, ast.Name) else ""
+        if fname not in ("print", "dumps", "dump"):
+            continue
+        for arg in node.args:
+            for sub in ast.walk(arg):
+                if isinstance(sub, (ast.Dict, ast.DictComp)):
+                    printed.add(id(sub))
+                elif isinstance(sub, ast.Name):
+                    for lit in bound_literal.get(sub.id, []):
+                        printed.add(id(lit))
+
+    containers = (ast.Dict, ast.DictComp, ast.List, ast.Tuple, ast.ListComp, ast.SetComp, ast.GeneratorExp)
     nested: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Dict):
-            nested.update(id(v) for v in node.values if v is not None)
+            children = [v for v in node.values if v is not None]
+        elif isinstance(node, ast.DictComp):
+            children = [node.value]
         elif isinstance(node, (ast.List, ast.Tuple)):
-            nested.update(id(e) for e in node.elts)
-        elif isinstance(node, ast.ListComp):
-            nested.add(id(node.elt))
+            children = list(node.elts)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            children = [node.elt]
+        else:
+            continue
+        for child in children:
+            # A branch (``x if ok else y``, ``a or b``) sits where its parent put it.
+            stack = [child]
+            while stack:
+                c = stack.pop()
+                nested.add(id(c))
+                if isinstance(c, ast.IfExp):
+                    stack += [c.body, c.orelse]
+                elif isinstance(c, ast.BoolOp):
+                    stack += list(c.values)
 
-    found: set[float] = set()
+    entries: list[tuple[tuple[str, ...], bool, frozenset]] = []
 
-    def caps_in(v: ast.AST) -> None:
+    def caps_in(v: ast.AST) -> frozenset:
         guarded = {id(n) for b in ast.walk(v) if isinstance(b, ast.BinOp)
                    and isinstance(b.op, (ast.Div, ast.FloorDiv, ast.Mod)) for n in ast.walk(b.right)}
+        found = set()
         for n in ast.walk(v):
             if isinstance(n, ast.Call) and id(n) not in guarded:
                 for bound in _upper_caps(n):
                     c = value(bound)
                     if c is not None:
                         found.add(c)
+        return frozenset(found)
 
-    def visit(node: ast.AST, path: list[str]) -> None:
-        if isinstance(node, ast.Dict):
+    def key_of(k: ast.AST | None) -> str | None:
+        if k is None:
+            return None  # a ``**spread``
+        if isinstance(k, ast.Constant) and isinstance(k.value, str):
+            return k.value
+        if isinstance(k, ast.Constant) and isinstance(k.value, (int, float)) and not isinstance(k.value, bool):
+            return json.dumps(k.value)
+        return _ANY_KEY
+
+    def visit(node: ast.AST, chain: tuple[str, ...], printed_root: bool) -> None:
+        if isinstance(node, ast.IfExp):
+            visit(node.body, chain, printed_root)
+            visit(node.orelse, chain, printed_root)
+        elif isinstance(node, ast.BoolOp):
+            for v in node.values:
+                visit(v, chain, printed_root)
+        elif isinstance(node, ast.Dict):
             for k, v in zip(node.keys, node.values):
-                if v is None or not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                key = key_of(k)
+                if key is None or v is None:
                     continue
-                here = [*path, k.value]
-                if here == target:
-                    caps_in(v)
-                elif len(here) < len(target) and target[:len(here)] == here:
-                    visit(v, here)
-        elif isinstance(node, (ast.List, ast.Tuple, ast.ListComp)):
-            here = [*path, "[]"]
-            if len(here) < len(target) and target[:len(here)] == here:
-                for e in (node.elts if not isinstance(node, ast.ListComp) else [node.elt]):
-                    visit(e, here)
+                here = (*chain, key)
+                caps = caps_in(v)
+                if caps:
+                    entries.append((here, printed_root, caps))
+                visit(v, here, printed_root)
+        elif isinstance(node, ast.DictComp):
+            here = (*chain, _ANY_KEY)
+            caps = caps_in(node.value)
+            if caps:
+                entries.append((here, printed_root, caps))
+            visit(node.value, here, printed_root)
+        elif isinstance(node, (ast.List, ast.Tuple)):
+            for e in node.elts:
+                visit(e, (*chain, "[]"), printed_root)
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            visit(node.elt, (*chain, "[]"), printed_root)
 
     for node in ast.walk(tree):
-        if isinstance(node, (ast.Dict, ast.List, ast.Tuple, ast.ListComp)) and id(node) not in nested:
-            visit(node, [])
-    return frozenset(found)
+        if isinstance(node, containers) and id(node) not in nested:
+            visit(node, (), id(node) in printed)
+    return tuple(entries)
+
+
+def direct_caps(code: str, where: Any, *, proven: bool = True) -> set[float]:
+    """Constants the value reported at ``where`` is capped at from above right where it is reported: an upper cap
+    (:func:`_upper_caps`) as the value of a dict key, not inside a denominator (``x / min(n, 1)`` guards a division).
+
+    ``proven`` (the default): only a cap whose place in the printed result is known -- a literal the script prints
+    (directly, or bound to a name it prints) whose key chain is exactly the value's whole path (a computed key matches
+    any one key, a list position any position). A cap on ``train.rmse`` is not one on ``test.rmse``.
+
+    ``proven=False``: the caps that may be this value's but cannot be shown to be -- a literal the script does not print
+    as such (built in a loop, appended, assigned under another key) whose key chain matches the END of the value's
+    path. The check reports these as a warning, never a block.
+
+    A one-segment path on a key many quantities share (``mean``, ``max``) gives nothing; so does unparseable code. Every
+    other cap, a floor or one set inside an ``if`` included, is left to :func:`clamp_constants`, which counts them all
+    for a value on a bound."""
+    target = _segments(where)
+    if not target or (len(target) == 1 and target[0].lower() in _GENERIC_KEYS):
+        return set()
+    found: set[float] = set()
+    for chain, printed, caps in _cap_index(code or ""):
+        if proven:
+            if printed and _chain_matches(chain, target):
+                found |= caps
+        elif not printed and len(chain) <= len(target) and _chain_matches(chain, target[len(target) - len(chain):]):
+            found |= caps
+    return found
 
 
 # A value this close to a bound is ON that bound. The at-bound and clamped
@@ -813,8 +902,8 @@ def violations(
     literals = numeric_literals(code) if code else set()
     out: list[Violation] = []
     for a in assertions:
-        # Every cap in the script counts for a value on a bound, as before. A value exactly on a cap written right where
-        # this quantity is reported is rejected even inside the range (an RMSE capped at 10 and reported as 10).
+        # Every cap in the script counts for a value on a bound, as before. A value exactly on a cap proven to be at
+        # this value's whole path is rejected even inside the range (an RMSE capped at 10 and reported as 10).
         matched: list[tuple[tuple, str, float]] = []
         on_bound: dict[float, list[tuple[tuple, str]]] = {}
         for tokens, path, value in leaves:
@@ -828,8 +917,14 @@ def violations(
                 ):
                     out.append(Violation(path, value, a))
                 elif code and any(c != 0 and math.isclose(value, c, rel_tol=1e-9) for c in direct_caps(code, tokens)):
-                    # Inside the range, but exactly on a constant the script caps this very quantity at.
+                    # Inside the range, but exactly on a constant the script caps this very value at: a cap written
+                    # at its whole path in the result the script prints.
                     out.append(Violation(path, value, a, kind="clamped"))
+                elif code and any(c != 0 and math.isclose(value, c, rel_tol=1e-9)
+                                  for c in direct_caps(code, tokens, proven=False)):
+                    # A cap that may be this value's, written where its place in the result cannot be shown (a loop,
+                    # an append, another key): a warning, never a block (core/engine.py::_assertion_warnings).
+                    out.append(Violation(path, value, a, kind="clamped_unproven"))
             elif clamps and _pinned(value, a, clamps):
                 out.append(Violation(path, value, a, kind="clamped"))
             elif bound != 0 or value == 0:

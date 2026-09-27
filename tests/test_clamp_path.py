@@ -1,7 +1,9 @@
-"""A cap counts inside the range only for the value whose whole path it is written at (the 2026-09-27 delta re-audit, F6).
+"""A cap counts inside the range only for the value it is proven to cap (the 2026-09-27 delta re-audit, F6).
 
 The check used to match the last segment of the path: ``{"train": {"rmse": min(train_rmse, 10.0)}}`` made a test RMSE
-of exactly 10 look capped, though nothing capped it.
+of exactly 10 look capped, though nothing capped it. Now a cap blocks only when it sits at the value's whole path in
+the result the script prints; a cap that may be the value's but whose place cannot be shown (built in a loop, appended,
+assigned under another key) is a warning (``clamped_unproven``), never a block.
 """
 
 from __future__ import annotations
@@ -10,37 +12,63 @@ from core.plausibility import Assertion, direct_caps, violations
 
 RMSE = [Assertion(path="rmse", min=0.0, max=100.0)]
 TEST_RMSE = [Assertion(path="test.rmse", min=0.0, max=100.0)]
+P = "print(json.dumps(out))\n"
+
+
+def _kinds(found: list) -> list[str]:
+    return [v.kind for v in found]
 
 
 def test_a_cap_on_train_is_not_a_cap_on_test() -> None:
-    code = 'out = {"train": {"rmse": min(train_rmse, 10.0)}, "test": {"rmse": test_rmse}}\n'
+    code = 'out = {"train": {"rmse": min(train_rmse, 10.0)}, "test": {"rmse": test_rmse}}\n' + P
     result = {"train": {"rmse": 3.0}, "test": {"rmse": 10.0}}
     assert violations(result, TEST_RMSE, code=code) == [], "the re-audit's counterexample"
     assert violations(result, RMSE, code=code) == [], "the assertion names only the leaf: still test's own path counts"
-    # The train value on its own cap is caught.
     (found,) = violations({"train": {"rmse": 10.0}, "test": {"rmse": 2.0}}, RMSE, code=code)
     assert found.kind == "clamped" and found.path == "train.rmse"
 
 
-def test_a_literal_that_holds_only_part_of_the_path_cannot_say_which_value_it_caps() -> None:
-    code = 'inner = {"rmse": min(rmse, 10.0)}\nout = {"test": inner}\n'
-    assert violations({"test": {"rmse": 10.0}}, TEST_RMSE, code=code) == []
-    # At the top level the literal is the whole path: caught as before.
-    (found,) = violations({"rmse": 10.0}, RMSE, code='out = {"rmse": min(rmse, 10.0)}\n')
+def test_a_cap_whose_place_cannot_be_shown_is_a_warning() -> None:
+    for code in (
+        'inner = {"rmse": min(rmse, 10.0)}\nout = {"test": inner}\n' + P,   # alias under another key
+        'rows.append({"rmse": min(e, 10.0)})\nout = {"runs": rows}\n' + P,  # a list of records built by append
+        'unused = {"test": {"rmse": min(x, 10.0)}}\nout = {"test": {"rmse": r}}\n' + P,  # a literal never printed
+    ):
+        result = {"runs": [{"rmse": 10.0}]} if "rows" in code else {"test": {"rmse": 10.0}}
+        assert _kinds(violations(result, RMSE, code=code)) == ["clamped_unproven"], code
+    # A train cap written in a loop is still not a test cap (its chain ends in train.rmse).
+    code = 'for k in ks:\n    res[k] = {"train": {"rmse": min(t, 10.0)}}\nout = {"by": res}\n' + P
+    assert violations({"by": {"a": {"test": {"rmse": 10.0}}}}, RMSE, code=code) == []
+
+
+def test_sweep_shapes_are_proven_when_printed_whole() -> None:
+    # A computed key matches any one key, a comprehension position any position.
+    code = 'out = {"by_R0": {f"R0={r}": {"rmse": min(e, 10.0)} for r, e in zip(R0S, E)}}\n' + P
+    (found,) = violations({"by_R0": {"R0=0.9": {"rmse": 10.0}}}, RMSE, code=code)
+    assert found.kind == "clamped"
+    code = 'out = {"runs": [{"rmse": min(r, 10.0)} for r in rs]}\n' + P
+    (found,) = violations({"runs": [{"rmse": 10.0}]}, RMSE, code=code)
+    assert found.kind == "clamped"
+    code = 'out = {"test": {"rmse": min(r, 10.0)} if ok else None}\n' + P
+    (found,) = violations({"test": {"rmse": 10.0}}, RMSE, code=code)
     assert found.kind == "clamped"
 
 
-def test_a_list_of_records_is_matched_position_by_position() -> None:
-    code = 'out = {"runs": [{"rmse": min(r, 10.0)} for r in rs]}\n'
-    (found,) = violations({"runs": [{"rmse": 10.0}]}, RMSE, code=code)
-    assert found.kind == "clamped" and found.path.startswith("runs")
-    assert direct_caps(code, "runs[0].rmse") == {10.0}
-    assert direct_caps(code, "other[0].rmse") == set()
-
-
 def test_the_path_can_be_given_as_tokens_or_a_string() -> None:
-    code = 'out = {"test": {"rmse": min(x, 7.5)}}\n'
+    code = 'out = {"test": {"rmse": min(x, 7.5)}}\n' + P
     assert direct_caps(code, "test.rmse") == {7.5}
     assert direct_caps(code, (("k", "test"), ("k", "rmse"))) == {7.5}
     assert direct_caps(code, "train.rmse") == set()
     assert direct_caps("not python (", "rmse") == set()
+    assert direct_caps('out = {"rmse": r}\n', "rmse") == set(), "no cap at all"
+
+
+def test_the_engine_sends_back_only_a_proven_cap() -> None:
+    from core.engine import _assertion_violations, _assertion_warnings
+
+    design = {"result_assertions": [{"path": "rmse", "min": 0, "max": 100}]}
+    unproven = {"result_json": {"test": {"rmse": 10.0}}, "design": design,
+                "code": 'inner = {"rmse": min(r, 10.0)}\nout = {"test": inner}\nprint(json.dumps(out))\n'}
+    assert _assertion_violations(unproven) == [] and len(_assertion_warnings(unproven)) == 1
+    proven = {**unproven, "code": 'out = {"test": {"rmse": min(r, 10.0)}}\nprint(json.dumps(out))\n'}
+    assert len(_assertion_violations(proven)) == 1 and _assertion_warnings(proven) == []
