@@ -7253,7 +7253,8 @@ class Engine:
                 "scripts": dict(run_context.get("code") or {}),
                 # What it came from: the frozen protocol's run, and the design revision or repair recorded last.
                 "run_id": frozen.get("run_id") if isinstance(frozen, dict) else None,
-                "parent_id": getattr(self, "_last_ledger_id", None),
+                "parent_id": (getattr(self, "_last_ledger_id", None)
+                              or _attempts.last_id(self.fi_dir, _attempts.LEDGER, ("design", "repair"))),
                 "oracle_status": oracle_status or None, "manifest_status": manifest_status or None,
                 "answered_by": self._answering_model(), "context": run_context,
             }
@@ -11579,7 +11580,8 @@ class Engine:
             if outcome is None:
                 return None
             return {"kind": "stop", "pause": kind, "outcome": outcome, "execution_status": "stopped",
-                    "run_record_id": getattr(self, "_last_run_record_id", None),
+                    "run_record_id": (getattr(self, "_last_run_record_id", None)
+                                      or _attempts.last_id(self.fi_dir, _attempts.ATTEMPTS, ("run",))),
                     "answered_by": self._answering_model(), "context": context}
         self._record(_attempts.ATTEMPTS, build)
 

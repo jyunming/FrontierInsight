@@ -288,8 +288,6 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         missing.append("data not all hashed")
     if fi is None:
         missing.append("FI's source could not be read")
-    if not question["topic_sha256"]:
-        missing.append("no topic")
     if policy["config_sha256"] is None:
         missing.append("the configuration could not be hashed")
     if not models_used:
@@ -323,7 +321,7 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         "question": question,
         "policy": policy,
         # For each step asked through the engine's one-call path, who answered its last call (provider, model, the prompt's
-        # and reply's hashes, whether a fallback served it). The source router, ensembles and the output generators
+        # and reply's hashes). The source router, ensembles and the output generators
         # call the model another way and are not in it.
         "models_used": dict(models_used or {}),
         "missing": missing,
@@ -392,6 +390,15 @@ def file_digests(fi_dir: Path) -> dict[str, Any]:
             continue
         out[name] = {"sha256": _sha(data), "lines": data.count(b"\n")}
     return out
+
+
+def last_id(fi_dir: Path, name: str, kinds: tuple[str, ...] = ()) -> str | None:
+    """The ``record_id`` of the last record in ``fi_dir/name`` (of one of ``kinds`` when given): where a resumed quest
+    picks up the lineage an earlier run of it recorded."""
+    for record in reversed(read(fi_dir, name)):
+        if not kinds or record.get("kind") in kinds:
+            return record.get("record_id")
+    return None
 
 
 def read(fi_dir: Path, name: str) -> list[dict[str, Any]]:

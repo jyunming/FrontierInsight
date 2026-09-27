@@ -169,6 +169,8 @@ async def test_a_quest_records_its_ideas_design_runs_and_end(smoke_config: Confi
     assert end["records_not_written"] == 0 and end["context"]["models_used"], "which model answered each step"
     assert all(r["scripts"] for r in runs), "each run names the scripts it ran by hash"
     assert all("parent_id" in r and "run_id" in r for r in runs)
+    design_ids = {r["record_id"] for r in ledger if r["kind"] in ("design", "repair")}
+    assert runs[0]["parent_id"] in design_ids, "the run names the design revision it ran"
     from core import audit_log
     assert any(e.get("kind") == "attempts_sealed" for e in audit_log.read(engine.audit.path)), "anchored at the end"
     assert "answered_by" in end and "person" in end
@@ -248,9 +250,12 @@ def test_the_code_folder_is_hashed_whole_and_fi_is_known_by_its_source(tmp_path:
     (tmp_path / "code" / "run.sh").write_text("python experiment.py", encoding="utf-8")
     (tmp_path / "code" / "pkg" / "helper.py").write_text("X = 1", encoding="utf-8")
     assert set(ar.script_hashes(tmp_path)) == {"run.sh", "pkg/helper.py"}
+    import shutil
     repo = Path(__file__).resolve().parent.parent
-    fi = ar._fi_version(repo)
-    assert fi and fi["source_sha256"], "an installed copy is known by its source too"
+    copy = tmp_path / "installed"
+    shutil.copytree(repo / "core", copy / "core", ignore=shutil.ignore_patterns("__pycache__"))
+    fi = ar._fi_version(copy)
+    assert fi and fi["source_sha256"] and fi["commit"] is None, "an installed copy (no git) is known by its source"
 
 
 def test_what_keeps_a_context_from_being_complete_is_named(tmp_path: Path) -> None:
@@ -270,3 +275,22 @@ def test_lost_records_are_counted_across_runs(tmp_path: Path) -> None:
     ar.count_lost(tmp_path)
     ar.count_lost(tmp_path)
     assert ar.lost(tmp_path) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_late_crash_keeps_the_context_last_worked_out(
+        smoke_config: Config, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: F811
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if "Writing" in prompt or "write the paper" in prompt.lower():
+            raise RuntimeError("the provider went away while writing")
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    engine = Engine(smoke_config)
+    with pytest.raises(Exception):
+        await engine.run()
+    (end,) = [r for r in ar.read(engine.fi_dir, ar.ATTEMPTS) if r["kind"] == "quest"]
+    assert end["execution_status"] == "crashed"
+    assert not any("without the quest's state" in m for m in end["context"]["missing"]), "not a fresh, empty context"
+    assert end["context"]["lineage"]["iteration"] >= 0 and end["context"]["question"]["design_sha256"]
