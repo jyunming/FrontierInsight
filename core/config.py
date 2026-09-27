@@ -572,8 +572,8 @@ class EngineConfig(BaseModel):
     #
     #   {"action": "accept"}                     # finalise the quest as-is
     #   {"action": "reject"}                     # finalise with verdict=rejected
-    #   {"action": "refine", "feedback": "..."}  # bump iteration; back to design
-    #                                            #   with feedback injected
+    #   {"action": "refine", "feedback": "..."}  # bump iteration; to the writing step with the
+    #                                            #   notes (design only if a point needs a new experiment)
     #
     # ``"off"`` skips the gate and lets the engine's review-loop
     # verdict drive revise/done routing without a pause. Useful for

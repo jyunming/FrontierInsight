@@ -2,7 +2,7 @@
 
 When ``engine.human_feedback_gate == "after_review"`` the engine fires
 a ``human_feedback`` node that pauses on ``interrupt()`` and routes
-to either END (accept / reject) or design (refine). These tests pin:
+to either END (accept / reject) or the writing step (refine). These tests pin:
 
 - Router behaviour: gate "off" → existing revise/done routing.
 - Router behaviour: gate "after_review" → human_feedback always picked.
@@ -73,14 +73,14 @@ def test_route_after_review_gate_on_always_human_feedback(tmp_path: Path) -> Non
         assert eng._route_after_review(state) == "human_feedback"  # type: ignore[arg-type]
 
 
-def test_route_after_human_feedback_refine_loops_to_design(tmp_path: Path) -> None:
-    """``refine`` → ``revise`` (back to design) when iteration cap not exhausted."""
+def test_route_after_human_feedback_refine_goes_to_the_writer_first(tmp_path: Path) -> None:
+    """``refine`` → ``rewrite`` (the writing step answers the notes; one that needs an experiment goes on to design)."""
     eng = _engine_with_gate(tmp_path, "after_review")
     state = {
         "human_feedback": {"action": "refine", "feedback": "be more rigorous"},
         "iteration": 1,
     }
-    assert eng._route_after_human_feedback(state) == "revise"  # type: ignore[arg-type]
+    assert eng._route_after_human_feedback(state) == "rewrite"  # type: ignore[arg-type]
 
 
 def test_route_after_human_feedback_refine_honored_past_max_iterations(tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ def test_route_after_human_feedback_refine_honored_past_max_iterations(tmp_path:
         "human_feedback": {"action": "refine", "feedback": "x"},
         "iteration": 5,  # well past max_iterations
     }
-    assert eng._route_after_human_feedback(state) == "revise"  # type: ignore[arg-type]
+    assert eng._route_after_human_feedback(state) == "rewrite"  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("action", ["accept", "reject"])

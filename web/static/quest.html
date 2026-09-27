@@ -283,7 +283,7 @@
       <div id="human-review-history" class="hidden flex flex-col gap-2"></div>
       <form id="human-review-form" class="fi-form flex flex-col gap-3" onsubmit="event.preventDefault(); return false;">
         <label class="font-label-sm text-label-sm text-outline uppercase" for="hr-feedback">Feedback (required for refine)</label>
-        <textarea id="hr-feedback" rows="4" class="w-full bg-surface-low border border-white/10 rounded p-3 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none" placeholder="What should the next iteration change?"></textarea>
+        <textarea id="hr-feedback" rows="4" class="w-full bg-surface-low border border-white/10 rounded p-3 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none" placeholder="What should change? Refine sends your notes back to the writing step first; if a point needs a new experiment, FI goes back to the design."></textarea>
         <div class="flex flex-wrap gap-3">
           <button type="button" data-action="accept" class="bg-secondary text-on-secondary px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Accept</button>
           <button type="button" data-action="reject" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Reject</button>

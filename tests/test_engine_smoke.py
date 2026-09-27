@@ -472,10 +472,19 @@ async def test_human_refine_loops_past_max_iterations(
     artifacts = await asyncio.wait_for(
         engine.run(human_feedback_callback=cb), timeout=300,
     )
-    # The refine looped back to design and returned to the gate → 2 calls.
+    # The refine ran another pass and returned to the gate → 2 calls.
     # (Pre-fix it routed straight to done after the first refine → 1 call.)
     assert len(calls) == 2
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    # A note the text can answer goes to the writer, not the design: the design ran once, before the first review.
+    from core import audit_log
+
+    events = audit_log.read(engine.audit.path)
+    assert sum(1 for e in events if e.get("kind") == "node_completed" and e.get("node") == "design") == 1
+    hf = [e for e in events if e.get("kind") == "route_decision" and e.get("node") == "human_feedback"]
+    assert [e.get("chosen") for e in hf][:1] == ["rewrite"]
+    wrote = [e for e in events if e.get("kind") == "route_decision" and e.get("node") == "write"]
+    assert wrote and wrote[-1]["facts"]["refine_scope"] == "paper" and wrote[-1]["chosen"] == "check"
 
 
 @pytest.mark.asyncio
