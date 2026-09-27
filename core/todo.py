@@ -13,6 +13,7 @@ pauses can pass better ones (the oracle stop names the change it proposes).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -146,12 +147,63 @@ def advice(kind: str) -> tuple[str, str, list[str]]:
     return decide, rec, list(alts)
 
 
+_SETTING_RE = re.compile(r"`(?:(?P<section>engine|execution|pauses)\.)?(?P<key>\w+):\s*(?P<value>[^`]+?)\s*`")
+
+#: What a person under ``rigor_profile: research`` can do instead of relaxing a check the profile holds fixed.
+RESEARCH_INSTEAD = (
+    "This quest is set up for research, so that check cannot be relaxed: fix what it found (resume, and FI repairs "
+    "the script), change the plan (`--revise-plan`), or start a new quest set up to explore."
+)
+
+
+def refused_settings(text: str, profile: str) -> list[str]:
+    """The settings ``text`` suggests (``engine.run_manifest_check: warn``, ...) that ``profile`` refuses."""
+    if profile != "research":
+        return []
+    from .config import _RESEARCH_PROFILE  # the one table of what research holds fixed
+
+    out = []
+    for m in _SETTING_RE.finditer(text or ""):
+        sections = [m["section"]] if m["section"] else list(_RESEARCH_PROFILE)
+        for section in sections:
+            forced = (_RESEARCH_PROFILE.get(section) or {}).get(m["key"])
+            if forced is None or isinstance(forced, list):
+                continue
+            if str(m["value"]).strip().lower() != str(forced).strip().lower():
+                out.append(m.group(0))
+    return out
+
+
+def _without_refused(lines: list[str], profile: str) -> tuple[list[str], bool]:
+    """``lines`` with every sentence that suggests a refused setting dropped (a line left empty goes); and whether any
+    was dropped."""
+    kept, dropped = [], False
+    for line in lines:
+        if not refused_settings(line, profile):
+            kept.append(line)
+            continue
+        dropped = True
+        sentences = re.split(r"(?<=[.;:])\s+(?=[A-Z(`])", line)
+        rest = " ".join(s for s in sentences if not refused_settings(s, profile)).strip()
+        if rest:
+            kept.append(rest)
+    return kept, dropped
+
+
 def pause_item(kind: str, headline: str, steps: list[str], *, recommended: str | None = None,
-               alternatives: list[str] | None = None) -> Item:
-    """The item for the pause that stopped the quest."""
+               alternatives: list[str] | None = None, profile: str = "default") -> Item:
+    """The item for the pause that stopped the quest. Under ``profile`` ``research`` no line suggests a setting the
+    profile refuses (it would be refused when the quest is resumed); what the person can do instead is said."""
     decide, rec, alts = advice(kind)
-    return Item(kind=kind, why=headline, decide=decide, recommended=recommended or rec,
-                alternatives=list(alternatives) if alternatives is not None else alts, steps=list(steps), blocking=True)
+    rec = recommended or rec
+    alts = list(alternatives) if alternatives is not None else alts
+    steps, dropped_steps = _without_refused(list(steps), profile)
+    alts, dropped_alts = _without_refused(alts, profile)
+    if refused_settings(rec, profile):
+        rec, dropped_alts = RESEARCH_INSTEAD, True
+    elif dropped_steps or dropped_alts:
+        alts.append(RESEARCH_INSTEAD)
+    return Item(kind=kind, why=headline, decide=decide, recommended=rec, alternatives=alts, steps=steps, blocking=True)
 
 
 def _read_json(path: Path) -> Any:

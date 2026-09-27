@@ -2918,8 +2918,11 @@ class LLMClient:
         node_model_fallbacks: dict[str, str] | None = None,
         max_prompt_chars: int = 0,
         heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
+        run_log: "logging.Logger | None" = None,
     ) -> None:
         self.endpoint = endpoint
+        # The quest's own log (run.log): a failed call and the retry after it are written there too.
+        self._run_log = run_log
         self._owns_http = http is None
         self._http = http or httpx.AsyncClient(timeout=timeout_s)
         # Base HTTP read-timeout (seconds) and per-node overrides for the
@@ -3099,6 +3102,19 @@ class LLMClient:
             f"that provider's own default — see docs/PROVIDERS.md) for a revoked, wrong-account, "
             f"or model-unauthorized key."
         )
+
+    def _retry_note(self, node: str | None, where: str, total: int,
+                    model: Callable[[Any], str | None] | str | None = None) -> Callable[[Any], None]:
+        """tenacity ``before_sleep``: the failed call and the coming retry, in FI's log and the quest's run.log."""
+        def note(rs: Any) -> None:
+            try:
+                line = _retry_line(node, where, rs, total, model=model(rs) if callable(model) else model)
+                _log.warning("%s", line)
+                if self._run_log is not None:
+                    self._run_log.warning("%s", line)
+            except Exception:  # noqa: BLE001 -- a log line never stops a retry
+                pass
+        return note
 
     def _trim_messages(
         self, messages: list[dict[str, str]], *, node: str = "",
@@ -3281,6 +3297,8 @@ class LLMClient:
             # a window so the upstream sees a gentler ramp.
             wait=wait_random_exponential(multiplier=1, max=20),
             retry=retry_if_exception(_retry_http_error),
+            before_sleep=self._retry_note(
+                node, f"{self.endpoint.provider_name or 'provider'} over HTTP", 4, model or self.endpoint.model),
             reraise=True,
         ):
             with attempt:
@@ -3443,6 +3461,7 @@ class LLMClient:
                 # blip. Random spreads them over the window.
                 wait=wait_random_exponential(multiplier=2, max=60),
                 retry=retry_if_exception(_retry_transient_bridge),
+                before_sleep=self._retry_note(node, "the VS Code connection", 6, hint or None),
                 reraise=True,
             ):
                 with attempt:
@@ -3538,23 +3557,12 @@ class LLMClient:
         # model the next attempt will use, so silent retries become
         # debuggable. The actual log_warning is closed over in the
         # ``_log`` reference below.
-        def _retry_log(rs: Any) -> None:
-            try:
-                exc = rs.outcome.exception() if rs.outcome else None
-                next_attempt = rs.attempt_number + 1
-                next_model = (
-                    fallback_model if (fallback_model and next_attempt >= 2)
-                    else primary_model
-                )
-                _log.warning(
-                    "[%s] CLI call attempt %d failed (%s); retrying "
-                    "(attempt %d of 4, model=%s)",
-                    node or spec.argv[0], rs.attempt_number,
-                    repr(exc)[:300] if exc else "no exception captured",
-                    next_attempt, next_model or "<cli default>",
-                )
-            except Exception:
-                pass  # never block retries on logging errors
+        # The model the NEXT try is asked on (a node's fallback model from the second try on).
+        _retry_log = self._retry_note(
+            node or spec.argv[0], f"{spec.argv[0]} CLI", 4,
+            lambda rs: ((fallback_model if (fallback_model and rs.attempt_number + 1 >= 2) else primary_model)
+                        or "the CLI's default"),
+        )
 
         async for attempt in AsyncRetrying(
             # Normal transients get 4 attempts; a repeated WEDGE bails after 2
@@ -3642,6 +3650,21 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
         sc = getattr(getattr(exc, "response", None), "status_code", None)
         return isinstance(sc, int) and sc in (401, 403, 402)
     return False
+
+
+_SECRETISH_RE = re.compile(r"(?i)(bearer\s+|api[_-]?key[=:]\s*|sk-)[A-Za-z0-9._\-]{6,}")
+
+
+def _retry_line(node: str | None, where: str, rs: Any, total: int, *, model: str | None = None) -> str:
+    """One line for a failed model call that is about to be tried again: which step, which provider and model, which
+    attempt of how many, what went wrong and how long until the next try. Nothing that looks like a key."""
+    exc = rs.outcome.exception() if getattr(rs, "outcome", None) else None
+    wait = getattr(getattr(rs, "next_action", None), "sleep", None)
+    what = f"{type(exc).__name__}: {str(exc)[:200]}" if exc else "no error captured"
+    what = _SECRETISH_RE.sub(lambda m: m.group(1) + "[redacted]", what).replace("\n", " ")
+    return (f"[{node or 'model'}] the model call failed ({where}{', model ' + model if model else ''}), "
+            f"attempt {rs.attempt_number} of {total}: {what}; trying again"
+            + (f" in {wait:.0f}s" if isinstance(wait, (int, float)) else ""))
 
 
 @dataclass

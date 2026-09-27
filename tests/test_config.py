@@ -67,7 +67,11 @@ def test_a_user_written_per_node_map_is_honoured_verbatim() -> None:
         cli_timeout_s=900.0,
         node_cli_timeout_s={"implement_outline": 120.0},
     )
-    assert cfg.node_cli_timeout_s == {"implement_outline": 120.0}
+    assert cfg.node_cli_timeout_s["implement_outline"] == 120.0
+    # The steps the map does not name keep their built-in budgets (raised to the floor), not the 900 s base alone.
+    built_in = ProviderConfig(name="codex_cli").node_cli_timeout_s
+    assert {k: v for k, v in cfg.node_cli_timeout_s.items() if k != "implement_outline"} == \
+        {k: max(v, 900.0) for k, v in built_in.items() if k != "implement_outline"}
 
 
 def test_default_cli_timeout_leaves_the_per_node_budgets_alone() -> None:

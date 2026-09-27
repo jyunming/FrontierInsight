@@ -3207,6 +3207,9 @@ class Engine:
                     self.quest_root, needed, self._log,
                     query=_lit_query(state), oa_unfetched=oa_unfetched,
                 )
+            # Asked once, answered by going on: the same papers are not asked for again (the pause offers going on
+            # without them; resuming without adding any files is that answer).
+            needed = _papers_to_ask(needed, self.fi_dir, self._log)
             if needed:
                 self._pause_for_human(
                     kind="papers",
@@ -3218,6 +3221,8 @@ class Engine:
                         "`needs/WANTED_PAPERS.md` with a download link each.",
                         "Download the few that matter and drop the PDFs into "
                         "`inputs/papers/` — they're ingested as full text.",
+                        "Or go on without them: resume without adding files, and those papers are used from "
+                        "their abstracts only (FI will not ask for them again).",
                     ],
                     payload={
                         "papers_required": True,
@@ -3678,6 +3683,7 @@ class Engine:
             ),
             max_prompt_chars=self.config.provider.max_prompt_chars,
             heartbeat_cb=self._llm_heartbeat,
+            run_log=self._log,
         )
         # Wrap in a fallback chain so a single provider's outage doesn't
         # forfeit the quest. No-op (unwrapped) when no fallback configured.
@@ -3894,7 +3900,8 @@ class Engine:
         the person: why it stopped, what there is to decide, the recommendation, the alternatives, what to do, and
         everything else waiting, then how to go on. ``interaction`` (answer / supply) is kept in ``pause.json``.
         Best-effort; a write failure never stops a quest."""
-        item = _todo.pause_item(kind, headline, steps, recommended=recommended, alternatives=alternatives)
+        item = _todo.pause_item(kind, headline, steps, recommended=recommended, alternatives=alternatives,
+                                profile=getattr(self.config, "rigor_profile", "default"))
         _todo.write(self.quest_root, self.fi_dir, self.quest_id, item)
         return item
 
@@ -3939,7 +3946,7 @@ class Engine:
             "decide": item.decide,
             "recommended": item.recommended,
             "alternatives": item.alternatives,
-            "steps": list(steps),
+            "steps": list(item.steps),
             "quest_id": self.quest_id,
             "next_step_file": "NEXT_STEP.md",
             # For a SUPPLY pause: which upload target(s) the web banner should
@@ -11174,6 +11181,7 @@ class Engine:
                 node_model_fallbacks={},
                 max_prompt_chars=self.config.provider.max_prompt_chars,
                 heartbeat_cb=self._llm_heartbeat,
+                run_log=self._log,
             )
         return _factory
 
@@ -18145,6 +18153,51 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     # Elsevier / Wiley / …) is also a real paywalled paper the user can fetch.
     from core.knowledge import _is_academic_source
     return _is_academic_source(str(md.get("url") or ""))
+
+
+_PAPERS_ASKED = "papers_asked.json"
+
+
+def _paper_key(doc: "RetrievedDoc") -> str:
+    """A paper's identity across retrievals: its DOI, else its link, else its title."""
+    md = doc.metadata or {}
+    for k in ("doi", "url", "source_url", "title"):
+        v = str(md.get(k) or "").strip().lower()
+        if v:
+            return f"{k}:{v}"
+    return "text:" + hashlib.sha256((doc.content or "")[:500].encode("utf-8")).hexdigest()
+
+
+def _papers_asked(fi_dir: Path) -> set[str]:
+    """The papers this quest has already asked the person for (``.fi/papers_asked.json``)."""
+    try:
+        data = json.loads((fi_dir / _PAPERS_ASKED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(k) for k in data} if isinstance(data, list) else set()
+
+
+def _record_papers_asked(fi_dir: Path, keys: set[str]) -> None:
+    try:
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        (fi_dir / _PAPERS_ASKED).write_text(json.dumps(sorted(keys), indent=1) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _papers_to_ask(needed: list["RetrievedDoc"], fi_dir: Path, log: Any) -> list["RetrievedDoc"]:
+    """The paywalled papers to stop and ask the person for: none when every one was asked for already and the person
+    went on without adding files (the pause offers that; resuming is the answer), all of them (recorded as asked)
+    when any is new."""
+    if not needed:
+        return []
+    asked = _papers_asked(fi_dir)
+    if all(_paper_key(d) in asked for d in needed):
+        log.info("[literature] going on without the %d paper(s) asked for earlier (none was added to "
+                 "inputs/papers/): they are used from their abstracts only", len(needed))
+        return []
+    _record_papers_asked(fi_dir, asked | {_paper_key(d) for d in needed})
+    return needed
 
 
 def _papers_dir_has_files(quest_root: Path) -> bool:

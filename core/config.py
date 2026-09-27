@@ -327,6 +327,37 @@ class ProviderConfig(BaseModel):
     # — no regression for quests without ensemble configured).
     node_ensemble: dict[str, "NodeEnsembleConfig"] | None = None
 
+    @field_validator("node_http_timeout_s", mode="before")
+    @classmethod
+    def _http_timeouts_over_the_defaults(cls, v: object) -> object:
+        """A YAML map names only the steps it changes: its keys go over the default table, which keeps every other
+        step's budget. (A one-key map used to replace the whole table, so every other step silently fell back to the
+        base timeout.) ``null`` keeps the defaults."""
+        default = cls.model_fields["node_http_timeout_s"].default_factory()
+        if v is None:
+            return default
+        return {**default, **v} if isinstance(v, dict) else v
+
+    @model_validator(mode="before")
+    @classmethod
+    def _cli_timeouts_over_the_defaults(cls, data: Any) -> Any:
+        """``node_cli_timeout_s`` from the config names only the steps it changes, as ``node_http_timeout_s`` does:
+        its keys are kept exactly as written, and every other step keeps its built-in budget (raised to an explicit
+        ``cli_timeout_s``, the floor ``_cli_timeout_is_a_floor`` applies when no map is given)."""
+        if not isinstance(data, dict) or "node_cli_timeout_s" not in data:
+            return data
+        given = data.get("node_cli_timeout_s")
+        if given is not None and not isinstance(given, dict):
+            return data
+        built_in = cls.model_fields["node_cli_timeout_s"].default_factory()
+        try:
+            floor = float(data["cli_timeout_s"]) if data.get("cli_timeout_s") is not None else None
+        except (TypeError, ValueError):
+            floor = None
+        if floor is not None:
+            built_in = {node: max(seconds, floor) for node, seconds in built_in.items()}
+        return {**data, "node_cli_timeout_s": {**built_in, **(given or {})}}
+
     @field_validator("reasoning_effort", mode="before")
     @classmethod
     def _normalise_reasoning_effort(cls, v: object) -> object:

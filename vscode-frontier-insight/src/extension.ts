@@ -1344,7 +1344,8 @@ async function surfaceWantedPapers(
         stream.markdown(
             "\n\n---\n\n📄 **Some relevant papers were paywalled** — only the abstract " +
             `was reachable. Download the ones that matter, drop the PDFs into ` +
-            `\`${papersDir}\`, then \`@fi /resume ${best.id}\`.\n\n${md}\n`,
+            `\`${papersDir}\`, then \`@fi /resume ${best.id}\` — or resume without adding any: those papers ` +
+            `are used from their abstracts, and FI does not ask for them again.\n\n${md}\n`,
         );
     } catch { /* best-effort */ }
 }
