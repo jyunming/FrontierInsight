@@ -107,10 +107,12 @@ def test_fi_memory_is_not_written_back_as_an_external_paper(tmp_path: Path) -> N
         {"metadata": {"kind": "fi_preliminary_spine", "title": "An earlier exploration"}, "content": "x"},
         {"metadata": {"kind": "fi_paper_spine", "title": "An earlier quest"}, "content": "x"},
         {"metadata": {"title": "A real paper", "doi": "10.1/x"}, "content": "abstract"},
+        {"metadata": {"kind": "fi_local_paper", "title": "The person's own paper"}, "content": "x"},
+        {"metadata": {"kind": "fi_external_ref_spine", "title": "A paper an earlier quest recorded"}, "content": "x"},
     ]}
     eng._write_back_knowledge(artifacts, state, "publication_ready")
     refs = captured[0]["metadata"]["external_refs"]
-    assert [r["title"] for r in refs] == ["A real paper"]
+    assert [r["title"] for r in refs] == ["A real paper", "The person's own paper", "A paper an earlier quest recorded"]
 
 
 def test_a_preliminary_result_is_not_counted_as_a_source_or_written_as_data(tmp_path: Path) -> None:
@@ -270,6 +272,6 @@ def test_one_model_review_goes_on_and_is_a_gap(tmp_path: Path) -> None:
     assert eng._review_models_collapsed([{**ok, "requested_model": "a"}, {**ok, "requested_model": "b"}]) is None
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     gaps = evidence.assess(root, _state(), settings={**RESEARCH, "one_model_review": True})["gaps"]
-    assert any("one model's view" in g for g in gaps)
+    assert any("allowed to run on one model" in g for g in gaps)
 
 

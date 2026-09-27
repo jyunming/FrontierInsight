@@ -10492,8 +10492,8 @@ class Engine:
             # once more; a second reply without a verdict stops the quest like a
             # failed call. A stand-in "accept" used to be recorded instead, and
             # an automatic accept and the Axon write-back took it as a review.
-            # The pause normally ends the run here. If it returns instead (a resume that sent a value, such as
-            # `--resume --accept`, answers the pending pause), that is read as "ask again", never as a review.
+            # The pause normally ends the run here. If it ever returned a value instead (no resume sends one to this
+            # pause today), that is read as "ask again", never as a review.
             review: Any = None
             while review is None:
                 problem = "the reviewer answered twice without a verdict (accept or revise)"
@@ -10685,9 +10685,9 @@ class Engine:
                 + (r["error"] if r.get("no_verdict") else f"could not be asked ({r.get('error') or 'no reply'})")
                 for r in unasked
             ] or ["a reviewer could not be asked"])
-            # Reached only when a resume answered the pause with a value (`--resume --accept`, say): the panelists
-            # that did not review stay in panel_results with their status, cast no vote in the aggregator, and make
-            # the review's status "error", so nothing takes the result as a panel's accept.
+            # Reached only if a resume ever answered this pause with a value (none does today): the panelists that did
+            # not review stay in panel_results with their status, cast no vote in the aggregator, and make the
+            # review's status "error", so nothing takes the result as a panel's accept.
         collapsed = self._review_models_collapsed(panel_results)
         if collapsed is not None:
             self._pause_for_review_models_collapsed(paper_path, panel_results, collapsed)
@@ -12113,8 +12113,9 @@ class Engine:
             m = d.get("metadata") or {}
             if not (m.get("title") or m.get("doi") or m.get("arxiv_id") or m.get("pmid")):
                 continue
-            # FI's own memory (a preliminary result, an earlier quest's records) is not an external paper.
-            if _is_preliminary_memory(m) or str(m.get("kind") or "").startswith("fi_"):
+            # FI's own memory (a preliminary result, an earlier quest's records) is not an external paper; a paper the
+            # person supplied (fi_local_paper) or one an earlier quest recorded (fi_external_ref_spine) is.
+            if _is_preliminary_memory(m) or m.get("kind") in _FI_MEMORY_KINDS:
                 continue
             external_refs.append({
                 "title": m.get("title", ""),
@@ -12601,6 +12602,10 @@ _FI_INTERNAL_KINDS = frozenset({
     "fi_source_catalog",
     "fi_paper_spine",
 })
+
+
+#: FI's own cross-quest memory: never recorded as an external paper a quest built on.
+_FI_MEMORY_KINDS = _FI_INTERNAL_KINDS | {"fi_quest_paper", "fi_quest_summary", "fi_topic_event"}
 
 
 def _is_audience_appropriate(meta: dict[str, Any], audience: str) -> bool:

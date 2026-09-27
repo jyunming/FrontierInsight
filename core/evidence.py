@@ -335,7 +335,8 @@ def assess(
     # Under rigor_profile: research the panel knowingly ran on one model (engine.one_model_review).
     if settings.get("rigor_profile") == "research" and settings.get("one_model_review"):
         ready_gaps.append(
-            "every reviewer used one model (the quest was set up with only one), so the review is one model's view"
+            "the review panel was allowed to run on one model (engine.one_model_review), so the review may be one "
+            "model's view"
         )
     # A quest set up to explore: its result is preliminary whatever it passed (the person said so at the start).
     if settings.get("result_use") == "explore":
