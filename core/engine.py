@@ -671,6 +671,11 @@ class Engine:
             self._log.info("starting quest %s", self.quest_id)
             _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
+            # Research needs a reviewer on another model: checked before the settings are recorded as approved, so the
+            # model the person adds is part of what is approved, not a change to it.
+            stopped = self._review_models_stop()
+            if stopped is not None:
+                return stopped
             # How strictly this quest is checked was approved on the interview's confirm screen; a hand edit since then
             # (a check turned down, a reviewer dropped, another model) stops here, before anything runs.
             record = self.fi_dir / _plan_settings.NAME
@@ -5798,7 +5803,7 @@ class Engine:
                     "numeric_warnings": self.config.engine.numeric_warnings,
                     "run_manifest_check": self.config.engine.run_manifest_check,
                     "rigor_profile": self.config.rigor_profile,
-                    "result_use": getattr(self.config, "result_use", ""),
+                    "result_use": getattr(self.config, "effective_result_use", "") or getattr(self.config, "result_use", ""),
                     "evidence_gate": "on" if self.config.engine.evidence_gate else "off",
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
@@ -8740,6 +8745,8 @@ class Engine:
                 "drew; placed %s in the paper before the review",
                 len(placed), ", ".join(placed),
             )
+        markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
+                    else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -10494,6 +10501,8 @@ class Engine:
                 "blocking": parsed.get("blocking") or "",
                 "must_flag_hits": [str(h).strip() for h in mfh if str(h).strip()],
                 "status": "ok",
+                # Which model gave this review: panelists on one model are one reviewer's view in several roles.
+                "requested_model": self._reviewer_model(name),
             }
 
         # return_exceptions=True is defense in depth: a panelist must never be
@@ -11411,6 +11420,60 @@ class Engine:
         if not node:
             return None
         return model_for_node(self.config.provider.node_models, node)
+
+    def _reviewer_model(self, persona: str) -> str:
+        """The model a review-panel persona is asked on: its own ``provider.node_models`` entry, else the quest's."""
+        return self._model_for_node(f"review_panel.{persona}") or self.config.provider.model or "(the provider's default)"
+
+    def _review_models_stop(self) -> QuestArtifacts | None:
+        """``rigor_profile: research``: the review panel needs at least one reviewer on a different model. Personas all
+        on one model are one model's view in several roles; its errors are shared, not caught. Stops before anything
+        runs and says how to give one persona another model (the person chooses which). ``None`` when there is one."""
+        if self.config.rigor_profile != "research" or not self.config.engine.review_panel:
+            return None
+        models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
+        if len(set(models.values())) > 1:
+            return None
+        # A panel that has already reviewed (a quest resumed at the human-review gate, say) is not asked again.
+        if any(e.get("kind") == "node_completed" and e.get("node") == "review" for e in _audit_log.read(self.audit.path)):
+            return None
+        only = next(iter(models.values()))
+        persona = "statistician" if "statistician" in models else next(iter(models))
+        self._log.warning("[review] stopped: every review-panel persona is on %s; research needs one on another model", only)
+        self._audit("pause_requested", pause="review_models", model=only, panel=list(models))
+        headline = "the review panel needs one reviewer on a different model"
+        approved = (self.fi_dir / _plan_settings.NAME).is_file()
+        how = (
+            f"Choose another model for one of them, then approve it with `python launch.py --update {self.quest_id}` "
+            f"(web: the quest page's Update, VS Code: `@fi /update {self.quest_id}`): in \"Per-node model overrides\" "
+            f"enter `review_panel.{persona}:<another model your provider offers>` (in VS Code choose \"Type node:model "
+            f"pairs\" there)."
+            if approved else
+            f"Choose another model for one of them and add it to the quest's config.yaml, under its `provider:` section "
+            f"(add one if there is none; never a second one), inside `node_models:` if that is already there:\n"
+            f"  node_models:\n    review_panel.{persona}: <another model your provider offers>"
+        )
+        self._write_next_step(
+            kind="review_models",
+            interaction="answer",
+            headline=headline,
+            steps=[
+                f"Nothing was run. Every reviewer on this research quest's panel ({', '.join(models)}) would be asked on "
+                f"the same model ({only}): one model's view in several roles, whose mistakes the others share.",
+                how,
+                f"Then `python launch.py --resume {self.quest_id}`. (Without rigor_profile: research there is no such "
+                "requirement.)",
+            ],
+        )
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "pause.json").write_text(json.dumps({
+                "kind": "review_models", "interaction": "answer", "quest_id": self.quest_id, "headline": headline,
+                "next_step_file": "NEXT_STEP.md", "upload_targets": [],
+            }, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        return self._collect_artifacts({})
 
     async def _preflight_required_skills(self) -> None:
         """A skill named in ``engine.skills_required`` that cannot be used stops
@@ -14692,6 +14755,36 @@ def _replicate_line_figure(
         "file": name, "size": runs[0].get("size"), "suptitle": _redrawn_band_text(runs[0].get("suptitle") or "", len(runs)),
         "n": len(runs), "axes": panels,
     }
+
+
+#: The line an exploration's paper carries under its title (what the result is for: explore, or not said).
+PRELIMINARY_NOTE = (
+    "> **Preliminary result.** This quest was set up to explore, or did not say what its result is for, so what it "
+    "found is a first look, not a publication-ready result. Run it again for research (`result_use: research`) to "
+    "check it."
+)
+
+
+def _mark_preliminary(markdown: str) -> str:
+    """``markdown`` with :data:`PRELIMINARY_NOTE` under its title, once. With no title it goes at the top, after any
+    YAML front matter; a ``# comment`` inside a fenced code block is not a title."""
+    if PRELIMINARY_NOTE in markdown:
+        return markdown
+    lines = markdown.split("\n")
+    start = 0
+    if lines and lines[0].strip() == "---":
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() in ("---", "...")), None)
+        if end is not None:
+            start = end + 1
+    at, fenced = None, False
+    for i in range(start, len(lines)):
+        if lines[i].lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and lines[i].startswith("# "):
+            at = i + 1
+            break
+    at = start if at is None else at
+    return "\n".join([*lines[:at], "", PRELIMINARY_NOTE, "", *lines[at:]])
 
 
 def _result_comparison_stats(

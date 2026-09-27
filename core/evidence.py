@@ -303,9 +303,24 @@ def assess(
     # A quest set up to explore: its result is preliminary whatever it passed (the person said so at the start).
     if settings.get("result_use") == "explore":
         ready_gaps.append(
-            "this quest was set up to explore (what the result is for: explore), so its result is preliminary: run it "
-            "again for research to make it publication-ready"
+            "this quest was set up to explore (what the result is for: explore, or not said), so its result is "
+            "preliminary: run it again for research (`result_use: research`) to make it publication-ready"
         )
+    # Under rigor_profile: research the hash-chained trace is what the quest's decisions are audited from: missing, or
+    # no longer checking out, the result cannot be shown to have come about as its records say.
+    if settings.get("rigor_profile") == "research":
+        from . import audit_log as _audit_log
+
+        trace = quest_root / ".fi" / "audit.jsonl"
+        if not trace.is_file():
+            ready_gaps.append("the quest's decision trace (.fi/audit.jsonl) is missing")
+        else:
+            try:
+                intact = _audit_log.verify(trace).ok
+            except Exception:  # noqa: BLE001 -- a trace that cannot be read does not check out either
+                intact = False
+            if not intact:
+                ready_gaps.append("the quest's decision trace (.fi/audit.jsonl) no longer checks out (its hash chain is broken)")
     # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
