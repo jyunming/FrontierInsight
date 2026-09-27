@@ -3515,6 +3515,81 @@ def _axon_config_from(spec: Any) -> Any:
 
 
 
+#: The kinds a quest's result is written under, by its standing (Knowledge.add_quest_artifacts): spine, paper, summary.
+STANDING_KINDS: dict[str, tuple[str, ...]] = {
+    "accepted": ("fi_paper_spine", "fi_quest_paper", "fi_quest_summary"),
+    "preliminary": ("fi_preliminary_spine", "fi_preliminary_paper", "fi_preliminary_summary"),
+}
+
+
+def _bm25_of(brain: Any) -> Any:
+    return getattr(brain, "_own_bm25", None) or getattr(brain, "bm25", None)
+
+
+def _quest_docs(brain: Any) -> list[tuple[str, dict[str, Any]]]:
+    """(document id, metadata) of every quest-result document in FI's project. Over HTTP the ids come from the
+    service's list of documents (``<kind>:<quest id>:...``) and the time each was written from a filtered search; in
+    process, from the chunks themselves."""
+    kinds = {k for ks in STANDING_KINDS.values() for k in ks}
+    if callable(getattr(brain, "list_sources", None)):
+        out = []
+        for source in brain.list_sources():
+            kind, _, rest = source.partition(":")
+            if kind in kinds and rest:
+                qid = rest.split(":", 1)[0]
+                at = ""
+                try:
+                    rows, _diag, _ = brain.search_raw(qid, filters={"quest_id": qid, "kind": kind},
+                                                      overrides={"top_k": 5})
+                    at = max((str((r.get("metadata") or {}).get("ingested_at") or "") for r in rows), default="")
+                except Exception:  # noqa: BLE001 -- without the time, the other standing's time decides
+                    pass
+                out.append((source, {"kind": kind, "quest_id": qid, "ingested_at": at}))
+        return out
+    bm25 = _bm25_of(brain)
+    out = []
+    for chunk in list(getattr(bm25, "corpus", None) or []):
+        meta = chunk.get("metadata") or {}
+        if meta.get("kind") in kinds and meta.get("quest_id"):
+            out.append((str(meta.get("source_id") or chunk.get("id")), meta))
+    return out
+
+
+def _delete_in_process(brain: Any, *, quest_id: str, kinds: tuple[str, ...]) -> bool:
+    """Remove from an in-process AxonBrain every chunk of a quest's documents of ``kinds`` (found by metadata: the
+    chunk ids Axon makes are its own), any summary node built over them, and their duplicate-check records. The same
+    calls Axon's own ``/delete`` route and its CLI make; AxonBrain has no public method for it."""
+    bm25 = _bm25_of(brain)
+    corpus = list(getattr(bm25, "corpus", None) or [])
+    if bm25 is None:
+        raise RuntimeError("this Axon build keeps no chunk index FI can read")
+    assert_ok = getattr(brain, "_assert_write_allowed", None)
+    if callable(assert_ok):
+        assert_ok("delete")
+    hit = {c["id"]: c for c in corpus
+           if (c.get("metadata") or {}).get("quest_id") == quest_id and (c.get("metadata") or {}).get("kind") in kinds}
+    if not hit:
+        return True
+    summaries = [c["id"] for c in corpus if set((c.get("metadata") or {}).get("children_ids") or []) & set(hit)]
+    ids = [*hit, *summaries]
+    store = getattr(brain, "_own_vector_store", None) or getattr(brain, "vector_store", None)
+    if store is not None:
+        store.delete_by_ids(ids)
+    bm25.delete_documents(ids)
+    graph = getattr(brain, "_graph_backend", None)
+    if graph is not None:
+        graph.delete_documents(ids)
+    hashes = getattr(brain, "_ingested_hashes", None)
+    doc_hash = getattr(brain, "_doc_hash", None)
+    if isinstance(hashes, set) and callable(doc_hash):
+        for chunk in hit.values():
+            hashes.discard(doc_hash(chunk))
+        save = getattr(brain, "_save_hash_store", None)
+        if callable(save):
+            save()
+    return True
+
+
 def _build_http_brain(cfg: KnowledgeConfig) -> Any:
     """FI's brain over the running Axon service: find it, start it when it is down, wait for it to be ready."""
     from . import axon_sidecar
@@ -4290,6 +4365,59 @@ class Knowledge:
             except Exception as e:
                 _log.warning("axon finalize_ingest failed: %s", e)
 
+    def _retire(self, doc_ids: list[str], *, quest_id: str, kinds: tuple[str, ...]) -> bool:
+        """Remove a quest's documents of ``kinds`` (ids ``doc_ids``) from Axon, every chunk of them. Over HTTP the
+        service's ``/delete``; in process, the chunks found by their ``quest_id`` and ``kind``, with their duplicate-check
+        records, so the same text can be written again. True when they are gone or were never there."""
+        brain = self._brain
+        if brain is None:
+            return False
+        try:
+            delete = getattr(brain, "delete_documents", None)
+            if callable(delete):
+                delete(list(doc_ids))
+                return True
+            return _delete_in_process(brain, quest_id=quest_id, kinds=kinds)
+        except Exception as e:  # noqa: BLE001 -- a knowledge-base write never stops a quest
+            _log.warning("axon: could not remove %s of quest %s: %s", ", ".join(kinds), quest_id, e)
+            return False
+
+    def retire_stale_standing(self, *, dry_run: bool = False) -> list[dict[str, Any]]:
+        """Quests that have documents under both standings (accepted and preliminary), which a quest whose standing
+        changed before FI removed the other copy left behind: the copy written earlier is removed (``dry_run``: only
+        listed). Returns one entry per quest: its id, the standing kept and the one removed."""
+        if not self.enabled or self._brain is None:
+            return []
+        found: dict[str, dict[str, dict[str, Any]]] = {}
+        try:
+            docs = _quest_docs(self._brain)
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"the knowledge layer's documents could not be listed: {e}") from None
+        for doc_id, meta in docs:
+            standing = next((s for s, kinds in STANDING_KINDS.items() if meta.get("kind") in kinds), None)
+            qid = str(meta.get("quest_id") or "")
+            if standing and qid:
+                slot = found.setdefault(qid, {}).setdefault(standing, {"ids": set(), "at": ""})
+                slot["ids"].add(doc_id)
+                slot["at"] = max(slot["at"], str(meta.get("ingested_at") or ""))
+        out = []
+        for qid, by in sorted(found.items()):
+            if len(by) < 2:
+                continue
+            times = {s: by[s]["at"] for s in by}
+            if not all(times.values()) or len(set(times.values())) < 2:
+                # Which copy is newer cannot be told: nothing is removed, and the person is told.
+                out.append({"quest_id": qid, "kept": None, "removed": None, "undetermined": True,
+                            "documents": sorted(i for s in by for i in by[s]["ids"])})
+                continue
+            keep = max(by, key=lambda s: times[s])
+            drop = next(s for s in by if s != keep)
+            entry = {"quest_id": qid, "kept": keep, "removed": drop, "documents": sorted(by[drop]["ids"])}
+            if not dry_run:
+                entry["ok"] = self._retire(sorted(by[drop]["ids"]), quest_id=qid, kinds=STANDING_KINDS[drop])
+            out.append(entry)
+        return out
+
     def add_quest_artifacts(
         self,
         *,
@@ -4338,9 +4466,7 @@ class Knowledge:
         external_refs = list((metadata or {}).get("external_refs") or [])
         meta_no_refs = {k: v for k, v in (metadata or {}).items() if k != "external_refs"}
         preliminary = str(meta_no_refs.get("standing") or "accepted") == "preliminary"
-        kind_of = ({"spine": "fi_preliminary_spine", "paper": "fi_preliminary_paper", "summary": "fi_preliminary_summary"}
-                   if preliminary else
-                   {"spine": "fi_paper_spine", "paper": "fi_quest_paper", "summary": "fi_quest_summary"})
+        kind_of = dict(zip(("spine", "paper", "summary"), STANDING_KINDS["preliminary" if preliminary else "accepted"]))
         if preliminary:
             external_refs_for_spines: list[dict[str, Any]] = []
         else:
@@ -4380,6 +4506,23 @@ class Knowledge:
             # previous shape sent five separate ``add_text`` calls
             # which (a) didn't exist on the Axon API at all and (b)
             # would have over-flushed if they had.
+            # The quest's copy under the other standing goes first: a result that is preliminary now must not stay
+            # citable from an earlier accepted copy (and the other way round, a stale reminder). First, too, because
+            # Axon skips a text it has already stored, so the same paper under the new standing would not be written.
+            other = "accepted" if preliminary else "preliminary"
+            other_ids = [self._mint_doc_id(k, {**base_meta, "kind": k}) for k in STANDING_KINDS[other]]
+            had_other = False
+            if callable(getattr(self._brain, "list_sources", None)):
+                try:  # the ids really stored, whatever metadata minted them
+                    stored = {s for s in self._brain.list_sources()
+                              if any(s.startswith(f"{k}:{quest_id}:") or s == f"{k}:{quest_id}"
+                                     for k in STANDING_KINDS[other])}
+                    had_other = bool(stored)
+                    other_ids = sorted(set(other_ids) | stored)
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("axon: could not list documents for quest %s: %s", quest_id, e)
+            retired = self._retire(other_ids, quest_id=quest_id, kinds=STANDING_KINDS[other]) and had_other
+
             docs: list[dict[str, Any]] = []
 
             def _enq(kind: str, text: str, extra_meta: dict[str, Any]) -> None:
@@ -4463,6 +4606,22 @@ class Knowledge:
 
             self._brain.ingest(docs)
             self._finalize_ingest_if_supported()
+            # The Axon service's /delete leaves the per-chunk duplicate records behind (jyunming/Axon#168), so the
+            # same paper written again under the new standing can be skipped chunk by chunk. Check what landed.
+            # Only this quest's own result documents: a cited paper's card may already be there under another quest,
+            # and the service files it under the paper's own source.
+            own = [d["id"] for d in docs if d["metadata"].get("kind") in kind_of.values()]
+            missing: list[str] = []
+            if own and callable(getattr(self._brain, "list_sources", None)):
+                try:
+                    present = set(self._brain.list_sources())
+                    missing = [i for i in own if i not in present]
+                except Exception as e:  # noqa: BLE001
+                    _log.debug("axon: could not list what was written for quest %s: %s", quest_id, e)
+            if missing:
+                _log.warning("axon write-back for quest %s: %d document(s) did not land in the knowledge base (%s): "
+                             "the Axon service skipped text it had stored before; later quests may not find all of "
+                             "this result", quest_id, len(missing), ", ".join(missing[:5]))
             _log.info(
                 "axon writeback: %d docs ingested for quest %s "
                 "(kinds: %s)",
@@ -4471,5 +4630,7 @@ class Knowledge:
             )
             return True
         except Exception as e:
-            _log.warning("axon write-back failed for quest %s: %s", quest_id, e)
+            _log.warning("axon write-back failed for quest %s: %s%s", quest_id, e,
+                         " (its earlier copy was already removed, so the knowledge base has no copy of it now)"
+                         if locals().get("retired") else "")
             return False

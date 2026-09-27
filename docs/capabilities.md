@@ -49,7 +49,7 @@ Experiments can run in the same Python, in a per-quest virtual environment, or i
 
 ## Other command-line tools
 
-`fi tools --help` lists them: summarise a folder, write a weekly digest, synthesise across quests, get an adversarial second review of a finished quest, plan a quest without running it (`fi tools proposal`), analyse data you already have (`fi tools analyze`), and load documents into the knowledge layer (`fi tools ingest`). [Details](capabilities-reference.md#cli-tools)
+`fi tools --help` lists them: summarise a folder, write a weekly digest, synthesise across quests, get an adversarial second review of a finished quest, plan a quest without running it (`fi tools proposal`), analyse data you already have (`fi tools analyze`), load documents into the knowledge layer (`fi tools ingest`), and remove out-of-date copies of quest results from it (`fi tools tidy-knowledge`). [Details](capabilities-reference.md#cli-tools)
 
 ## Example quests
 
