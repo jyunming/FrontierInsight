@@ -89,8 +89,7 @@ def test_a_name_or_a_function_s_return_inside_the_printed_result_is_followed() -
     # A name bound inside a function is looked up there, not in another function.
     code = ('def fit():\n    out = {"rmse": min(e, 10.0)}\n    return out\n'
             'def main():\n    out = {"rmse": final}\n    print(json.dumps(out))\n')
-    assert violations({"rmse": 10.0}, RMSE, code=code) == [] or \
-        _kinds(violations({"rmse": 10.0}, RMSE, code=code)) == ["clamped_unproven"]
+    assert _kinds(violations({"rmse": 10.0}, RMSE, code=code)) == ["clamped_unproven"], "fit's out is never printed"
     # An annotated binding and a conditional at the root.
     code = 'out: dict = {"rmse": min(r, 10.0)}\nprint(json.dumps(out))\n'
     assert _kinds(violations({"rmse": 10.0}, RMSE, code=code)) == ["clamped"]
