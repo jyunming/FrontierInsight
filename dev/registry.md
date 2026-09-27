@@ -41,7 +41,7 @@ same PR that adds, splits or renames one.
 - `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; a question asked only for
   some earlier answer carries `ask_if`, checked by `question_applies` (the web page and VS Code mirror it; today only
   `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry.
-- `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call).
+- `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call); `quest_run_log` (a failed call made outside the engine still reaches the quest's run.log).
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
 - `core/ensemble.py` — the multi-model fan-out-and-merge primitive a node opts into.
 
@@ -58,7 +58,7 @@ same PR that adds, splits or renames one.
   `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
   submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).
 - `core/why.py` — `--why` / web Why? / `@fi /why`: why a quest stopped, why the review asked for a revision, why the evidence is at its level, why a step decided what it did, from the audit trace and records (no model call). `launch._follow_trace` is `--trace --follow`; `provider.set_model_call_archive` / `append_cost_row(messages=, response=)` keep every model call in `.fi/io/` when `output.save_model_calls` is on.
-- `core/todo.py` — the to-do card every stop writes (`NEXT_STEP.md` + `.fi/todo.json`): per-kind decision, recommendation and alternatives (`advice`; under a rigor profile, never a setting it refuses: `refused_settings`), the other things waiting (`waiting`), printed by `launch.py`, read by the web `/next-step` endpoint and VS Code.
+- `core/todo.py` — the to-do card every stop writes (`NEXT_STEP.md` + `.fi/todo.json`): per-kind decision, recommendation and alternatives (`advice`; under a rigor profile, never a setting it refuses: `refused_settings`, and what to do instead by pause kind and freeze: `research_instead`), the other things waiting (`waiting`), printed by `launch.py`, read by the web `/next-step` endpoint and VS Code.
 - `core/receipts.py` — the receipt each required check (evidence gate, design audit, claim check) writes under
   `needs/receipts/`; `core/evidence.py` reads them for `publication_ready`; `engine._stop_once_for_check` is the
   research profile's one stop and retry.

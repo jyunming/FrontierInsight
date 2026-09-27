@@ -3652,7 +3652,39 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
     return False
 
 
-_SECRETISH_RE = re.compile(r"(?i)(bearer\s+|api[_-]?key[=:]\s*|sk-)[A-Za-z0-9._\-]{6,}")
+_SECRETISH_RE = re.compile(
+    r"(?i)(bearer\s+|api[_-]?key[=:]\s*|sk-|[?&](?:key|api_key|apikey|token|access_token)=)[A-Za-z0-9._\-%]{6,}")
+
+
+class _AppendToFile(logging.Handler):
+    """Appends each record to a file and closes it again: nothing stays open (a Windows lock) and nothing is shared."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(logging.WARNING)
+        self.path = Path(path)
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(self.format(record) + "\n")
+        except Exception:  # noqa: BLE001 -- a log line never stops a call
+            pass
+
+
+def quest_run_log(quest_root: Path | str | None) -> "logging.Logger | None":
+    """A logger that adds warnings to ``<quest_root>/.fi/run.log`` (for a model call made outside the engine, after it
+    closed the quest's own log: the output generators, the critique). Not registered anywhere; ``None`` without a
+    quest folder."""
+    if not quest_root:
+        return None
+    fi_dir = Path(quest_root) / ".fi"
+    if not fi_dir.is_dir():
+        return None
+    logger = logging.Logger(f"frontier_insight.run_log.{Path(quest_root).name}", logging.WARNING)
+    logger.addHandler(_AppendToFile(fi_dir / "run.log"))
+    logger.propagate = False
+    return logger
 
 
 def _retry_line(node: str | None, where: str, rs: Any, total: int, *, model: str | None = None) -> str:

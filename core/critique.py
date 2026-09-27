@@ -45,6 +45,7 @@ from .digest import _parse_quest_id_timestamp
 from .knowledge import Knowledge
 from .provider import (
     LLMClient,
+    quest_run_log,
     PROXY_PROVIDERS,
     ProxySupervisor,
     resolve_endpoint_async,
@@ -319,7 +320,7 @@ async def generate_critique(
     own_supervisor = supervisor is None
     sup = supervisor or ProxySupervisor()
     endpoint = await resolve_endpoint_async(provider, sup)
-    client = LLMClient(endpoint)
+    client = LLMClient(endpoint, run_log=quest_run_log(quest_dir))
     try:
         if ensemble is not None:
             # Multi-model critique: N independent critics + the
