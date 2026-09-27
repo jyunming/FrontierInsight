@@ -1203,18 +1203,25 @@ class Engine:
                 human = final_state.get("human_feedback") if isinstance(final_state.get("human_feedback"), dict) else {}
                 return {
                     "kind": "quest",
-                    "outcome": _attempts.quest_outcome(
+                    **_attempts.quest_status(
                         dict(final_state), evidence_record,
                         reviewer_accepted=review.get("verdict") == "accept" and _review_was_real(review),
+                        no_experiment=bool(getattr(self.config.engine, "survey_mode", False)
+                                           or final_state.get("survey_mode_resolved")),
+                        data_analysis=bool(final_state.get("no_simulation_resolved")),
                     ),
-                    "evidence": (evidence_record or {}).get("status"),
                     "review": review.get("verdict"),
                     "person": human.get("action"),
+                    # This run's run records (a resumed quest's earlier ones are in the file before it).
+                    "run_record_ids": list(getattr(self, "_run_record_ids", [])),
+                    "records_not_written": _attempts.lost(self.fi_dir),
                     "answered_by": self._answering_model(),
                     "context": end_context,
                 }
             self._record(_attempts.ATTEMPTS, _quest_record)
             self._quest_recorded = True
+            # Anchor both record files in the trace now that the last line is written.
+            self._audit("attempts_sealed", files=_attempts.file_digests(self.fi_dir))
             # Completion path only (NOT the pause-exit above): the quest reached
             # its terminal node, so every pause it raised has been resolved —
             # clear the unified NEXT_STEP.md + pause.json + any ANSWER-pause
@@ -1321,12 +1328,24 @@ class Engine:
                 pass
             # A quest already recorded as finished that fails in its clean-up keeps that record.
             if not getattr(self, "_quest_recorded", False):
+                # The conditions as last worked out while the quest ran; only when none were, a context without the
+                # quest's state (marked incomplete), and never one that holds up the error for long.
+                fail_context = getattr(self, "_last_attempt_context", None)
+                if not fail_context:
+                    try:
+                        fail_context = await asyncio.wait_for(
+                            self._attempt_context({"topic": self.config.topic}, partial=True), timeout=30)
+                    except Exception:  # noqa: BLE001 -- never in the way of the error
+                        fail_context = None
                 self._record(_attempts.ATTEMPTS, lambda: {
-                    "kind": "quest", "outcome": "process_error", "error": type(exc).__name__,
+                    "kind": "quest", "execution_status": "crashed", "review_status": "none",
+                    "evidence_status": "unknown", "claim_outcome": None, "error": type(exc).__name__,
+                    "run_record_ids": list(getattr(self, "_run_record_ids", [])),
+                    "records_not_written": _attempts.lost(self.fi_dir),
                     "answered_by": self._answering_model(),
-                    # The conditions as last worked out (no files are read while the quest is failing).
-                    "context": getattr(self, "_last_attempt_context", None),
+                    "context": fail_context,
                 })
+                self._audit("attempts_sealed", files=_attempts.file_digests(self.fi_dir))
             raise
         finally:
             # Outer cleanup: releases the per-quest run.log FileHandler
@@ -1411,6 +1430,8 @@ class Engine:
         "needs/receipts/claim_check.json", "needs/ENVIRONMENT.json", "needs/RUN_MANIFEST_CHECK.json",
         "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json", "raw/ledger.jsonl", "raw/trials.json",
         ".fi/trials/run.json", "paper/claims.json",
+        # What the quest tried (core/attempt_records.py): anchored in the trace, so an edit after the fact shows.
+        ".fi/attempts.jsonl", ".fi/branch_ledger.jsonl",
     )
 
     def _audit(self, kind: str, *, node: str | None = None, provenance: str = _audit_log.DETERMINISTIC, **fields: Any) -> None:
@@ -3706,7 +3727,7 @@ class Engine:
                 "reason": latest.get("reason") or "",
                 "design_sha256": _attempts._json_sha(design),
             }
-        self._record(_attempts.LEDGER, _design_record)
+        self._last_ledger_id = self._record(_attempts.LEDGER, _design_record) or getattr(self, "_last_ledger_id", None)
         # Range assertions contributed by the trusted skills this quest may
         # call. Stashed in state because ``_assertion_violations`` is a
         # module-level function with no access to the engine, and the
@@ -7246,7 +7267,7 @@ class Engine:
             self._audit("check_result", check="plausibility_unproven_cap", status="warn",
                         summary=w.describe()[:300], path=getattr(w, "path", ""), value=getattr(w, "value", None))
         patch["run_manifest_failures"] = manifest_attempts_next
-        run_context = await self._attempt_context({**state, **patch})
+        run_context = await self._attempt_context({**state, **patch}, after_run=True)
 
         def _run_record() -> dict[str, Any] | None:
             try:
@@ -7260,12 +7281,21 @@ class Engine:
             )
             if outcome is None:
                 return None
+            frozen = _attempts._read_json(self.quest_root / "needs" / "FROZEN_PROTOCOL.json")
             return {
                 "kind": "run", "outcome": outcome, "returncode": result.returncode,
+                "scripts": dict(run_context.get("code") or {}),
+                # What it came from: the frozen protocol's run, and the design revision or repair recorded last.
+                "run_id": frozen.get("run_id") if isinstance(frozen, dict) else None,
+                "parent_id": (getattr(self, "_last_ledger_id", None)
+                              or _attempts.last_id(self.fi_dir, _attempts.LEDGER, ("design", "repair"))),
                 "oracle_status": oracle_status or None, "manifest_status": manifest_status or None,
                 "answered_by": self._answering_model(), "context": run_context,
             }
-        self._record(_attempts.ATTEMPTS, _run_record)
+        run_record_id = self._record(_attempts.ATTEMPTS, _run_record)
+        if run_record_id:
+            self._last_run_record_id = run_record_id
+            self.__dict__.setdefault("_run_record_ids", []).append(run_record_id)
         patch["manifest_failed_trials"] = getattr(self, "_manifest_failed_trials", None)
         if result_json:
             patch["bounded_seen"] = _bounded_seen_after(state, result_json)
@@ -7699,11 +7729,11 @@ class Engine:
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
         code_path.write_text(new_code, encoding="utf-8")
-        self._record(_attempts.LEDGER, lambda: {
+        self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": iters + 1,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
             "summary": patch_summary[:300],
-        })
+        }) or getattr(self, "_last_ledger_id", None)
 
         patch: QuestState = {
             **spent,
@@ -11581,31 +11611,43 @@ class Engine:
             model = getattr(self._client, "last_model", None) or ""
         append_cost_row(self.fi_dir, node=node, model=model, usage=usage, messages=messages, response=response)
 
-    async def _attempt_context(self, state: QuestState) -> dict[str, Any]:
+    async def _attempt_context(self, state: QuestState, *, after_run: bool = False,
+                               partial: bool = False) -> dict[str, Any]:
         """The conditions an attempt ran under (core/attempt_records.py); an empty dict if they cannot be read. Hashing
         the quest's files and asking git for FI's commit run in a worker thread, off the event loop."""
         try:
+            models_used = {node: dict(v) for node, v in dict(getattr(self, "_last_chat", {}) or {}).items()}
+            cache = self.__dict__.setdefault("_attempt_digests", {})
             context = await asyncio.to_thread(
                 _attempts.context_fingerprint,
                 self.config, self.quest_root, dict(state), prompts=self._prompts,
-                fi_repo=Path(__file__).resolve().parent.parent,
+                fi_repo=Path(__file__).resolve().parent.parent, models_used=models_used,
+                after_run=after_run, cache=cache, partial=partial,
             )
-            self._last_attempt_context = context
+            if not partial:
+                self._last_attempt_context = context
             return context
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
             self._log.debug("[attempts] context not read: %r", e)
             return {}
 
-    def _record(self, name: str, build: Any) -> None:
+    def _record(self, name: str, build: Any) -> str | None:
         """Append to one of the quest's attempt records (core/attempt_records.py). ``build`` returns the record (or is
         it); building it and writing it are both best-effort, so a record never touches the quest. Records only: read
         by nothing that decides a route."""
         try:
             record = build() if callable(build) else build
-            if record and not _attempts.append(self.fi_dir, name, record):
+            if not record:
+                return None
+            record_id = _attempts.append(self.fi_dir, name, {"quest_id": self.quest_id, **record})
+            if not record_id:
+                _attempts.count_lost(self.fi_dir)
                 self._log.debug("[attempts] %s not written", name)
+            return record_id
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
+            _attempts.count_lost(self.fi_dir)
             self._log.debug("[attempts] %s not built: %r", name, e)
+            return None
 
     def _answering_model(self) -> dict[str, Any]:
         """The provider and model that answered the quest's last model call (after a fallback, the fallback's): the
@@ -11618,13 +11660,17 @@ class Engine:
         """A quest that stopped for a check it failed (:data:`core.attempt_records.STOP_OUTCOMES`) is an attempt with
         that outcome; a stop that is not a failed check (the plan waiting for you, papers asked for) is not recorded."""
         def build() -> dict[str, Any] | None:
+            if not (self.fi_dir / "pause.json").is_file():
+                return None
             pause = json.loads((self.fi_dir / "pause.json").read_text(encoding="utf-8"))
             kind = str((pause or {}).get("kind") or "")
             outcome = _attempts.STOP_OUTCOMES.get(kind)
             if outcome is None:
                 return None
-            return {"kind": "stop", "pause": kind, "outcome": outcome, "answered_by": self._answering_model(),
-                    "context": context}
+            return {"kind": "stop", "pause": kind, "outcome": outcome, "execution_status": "stopped",
+                    "run_record_id": (getattr(self, "_last_run_record_id", None)
+                                      or _attempts.last_id(self.fi_dir, _attempts.ATTEMPTS, ("run",))),
+                    "answered_by": self._answering_model(), "context": context}
         self._record(_attempts.ATTEMPTS, build)
 
     def _model_for_node(self, node: str | None) -> str | None:
