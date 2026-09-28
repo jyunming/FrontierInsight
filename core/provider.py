@@ -840,26 +840,44 @@ def _http_streams(endpoint: "ResolvedEndpoint") -> bool:
     return host in _STREAMED_HOSTS
 
 
-#: Words in an error sent inside a stream that mean trying again cannot help (the same request would fail the same way:
-#: a content filter, a key or permission problem, no quota or balance left, a malformed request). Anything else is
-#: taken as transient, as a 5xx is.
-_STREAM_FATAL_ERROR_WORDS = (
-    "content_filter", "content filter", "moderation", "sensitive", "auth", "permission", "forbidden",
-    "invalid_request", "invalid request", "invalid_api_key", "not_found", "quota", "insufficient", "balance",
-    "billing", "payment",
+#: An error sent inside a stream that will clear by itself (read from its type, code and message): tried again, like a
+#: 429 or a 5xx. Checked first, so "rate limit ... quota exceeded, retry in 20s" is a rate limit, not an empty account.
+_STREAM_TRANSIENT = re.compile(
+    r"\b(rate[ _-]?limit\w*|overload\w*|capacity|try again|retry (in|after)|temporar\w*|timed? ?out|"
+    r"unavailable|busy|server[ _]error|internal[ _]error|bad gateway)\b"
+)
+#: Classes that trying again cannot fix (the same request fails the same way): read from the error's ``type`` and
+#: ``code`` only, never its free-text message, as whole words. Moonshot's ``content_filter`` and
+#: ``exceeded_current_quota_error`` are among them.
+_STREAM_PERMANENT = re.compile(
+    r"\b(content filter|moderation|invalid request|invalid api key|invalid authentication|authentication error|"
+    r"unauthori[sz]ed|permission denied|permission error|forbidden|not found|quota|insufficient balance|"
+    r"insufficient quota|billing|payment required|account suspended)\b"
 )
 
 
 def _stream_error(error: Any, request: Any) -> BaseException:
-    """The exception an error sent inside a stream becomes: a 4xx-equivalent ``httpx.HTTPStatusError`` (not tried again)
-    when it names a cause retrying cannot fix, a transient ``httpx.RemoteProtocolError`` otherwise."""
+    """The exception an error sent inside a stream becomes: transient (``httpx.RemoteProtocolError``, tried again) when
+    it says it will clear -- a rate limit, an overload, a 429 or 5xx code (:data:`_STREAM_TRANSIENT`) -- or when nothing
+    names a permanent class; a 4xx-equivalent ``httpx.HTTPStatusError`` (not tried again) only when its ``type`` or
+    ``code`` names one (:data:`_STREAM_PERMANENT`)."""
     if isinstance(error, dict):
-        words = " ".join(str(error.get(k) or "") for k in ("type", "code", "message")).lower()
+        kind = " ".join(str(error.get(k) or "") for k in ("type", "code"))
         message = str(error.get("message") or error.get("type") or error.get("code") or error)
+        status = next((error.get(k) for k in ("code", "status", "status_code")
+                       if isinstance(error.get(k), int) or str(error.get(k) or "").isdigit()), None)
     else:
-        words = message = str(error)
+        kind, message, status = "", str(error), None
     text = f"the model's stream reported an error: {message[:300]}"
-    if any(w in words for w in _STREAM_FATAL_ERROR_WORDS):
+
+    def norm(s: str) -> str:
+        return re.sub(r"[_\-]+", " ", s.lower())
+
+    if status is not None and (int(status) == 429 or int(status) >= 500):
+        return httpx.RemoteProtocolError(text)
+    if _STREAM_TRANSIENT.search(norm(f"{kind} {message}")):
+        return httpx.RemoteProtocolError(text)
+    if _STREAM_PERMANENT.search(norm(kind)) or (status is not None and 400 <= int(status) < 500):
         return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
     return httpx.RemoteProtocolError(text)
 

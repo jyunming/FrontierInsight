@@ -314,3 +314,62 @@ def test_no_content_at_all_is_none_as_a_plain_call_returns() -> None:
 
     text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
     assert text is None
+
+
+# --- second review pass: which in-stream errors are tried again ---------------------------------------------------------
+
+TRANSIENT = [
+    {"message": "Rate limit reached: per-minute token quota exceeded, retry in 20s"},
+    {"message": "request reached max TPM quota, please try again after 1 seconds"},
+    {"message": "insufficient capacity, try again"},
+    {"message": "Insufficient system resources"},
+    {"message": "upstream connect error: load balancer reset"},
+    {"message": "bad gateway from authentication proxy"},
+    {"type": "engine_overloaded_error", "message": "The engine is currently overloaded"},
+    {"type": "rate_limit_reached_error", "message": "Your account reached max RPM"},
+    {"type": "server_error", "message": "x"},
+    {"code": 500, "message": "x"},
+    {"code": "503", "message": "x"},
+    {"code": 429, "type": "exceeded_current_quota_error", "message": "slow down"},
+]
+PERMANENT = [
+    {"type": "content_filter", "message": "The request was rejected because it was considered high risk"},
+    {"type": "exceeded_current_quota_error", "message": "Your account is suspended, please check your plan"},
+    {"type": "invalid_request_error", "message": "bad"},
+    {"type": "invalid_authentication_error", "message": "Invalid Authentication"},
+    {"code": 401, "message": "x"},
+]
+
+
+@pytest.mark.parametrize("error", TRANSIENT, ids=[str(e)[:40] for e in TRANSIENT])
+def test_an_error_that_will_clear_is_tried_again(error: dict) -> None:
+    from core.provider import _retry_http_error, _stream_error
+
+    assert _retry_http_error(_stream_error(error, httpx.Request("POST", "http://x"))), error
+
+
+@pytest.mark.parametrize("error", PERMANENT, ids=[str(e)[:40] for e in PERMANENT])
+def test_an_error_retrying_cannot_fix_stops_at_once(error: dict) -> None:
+    from core.provider import _retry_http_error, _stream_error
+
+    assert not _retry_http_error(_stream_error(error, httpx.Request("POST", "http://x"))), error
+
+
+def test_the_permanent_class_is_read_from_type_and_code_not_the_message() -> None:
+    from core.provider import _retry_http_error, _stream_error
+
+    err = _stream_error({"type": "unknown_error", "message": "content filter quota billing"}, httpx.Request("POST", "u"))
+    assert _retry_http_error(err)
+
+
+def test_stream_in_extra_body_is_refused_when_the_config_loads_and_in_a_per_call_extra() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="stream"):
+        ProviderConfig(**KIMI, extra_body={"stream": True})
+
+    async def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover -- never reached
+        return httpx.Response(200, content=_sse(_chunk("ok", finish="stop")))
+
+    with pytest.raises(ValueError, match="stream"):
+        asyncio.run(_chat(resolve_endpoint(ProviderConfig(name="openai")), handler, extra={"stream": True}))
