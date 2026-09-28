@@ -89,8 +89,10 @@ def test_a_mean_over_a_declared_subset_is_backed_by_that_subset_not_by_every_tri
 
 def test_a_declared_subset_still_catches_fabricated_values_and_missing_counts() -> None:
     majors = {0.9: 3, 1.5: 100, 3.0: 200}
+    # Each stratum's values are held to its own count exactly: a mean over the successes averages exactly them.
     short = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, values_per_major=0.1))
-    assert len(short) == 1 and "a mean over the trials `prob_major` counts (303)" in short[0]
+    assert len(short) == 3 and all("value(s) but `prob_major_count` says" in s for s in short), short
+    assert "lists 20 value(s) but `prob_major_count` says 200" in " ".join(short)
     # The proportion's own total must still account for the trials the manifest claims.
     thin = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, total=10))
     assert len(thin) == 1 and "counts only 30 trial(s) in its `prob_major_total`" in thin[0]

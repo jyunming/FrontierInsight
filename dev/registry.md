@@ -15,7 +15,8 @@ same PR that adds, splits or renames one.
   (also used, unmodified, for the tamper-recovery restore — see `propose_tamper_recovery`).
 - `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol?
 - `core/run_manifest.py` — runtime check: does what the simulation says it ran (`run_manifest.json`) match the
-  protocol's exact Cartesian product? Also the two-script split-analysis lint.
+  protocol's exact Cartesian product? Also the two-script split-analysis lint, and the strata of a `given` mean
+  (`NESTING`, `_given_findings`, `strata_coverage`, read by `metric_spec.coverage_gaps`).
 - `core/oracle_check.py` — an oracle the script must pass before its main run, judged by the engine against the
   protocol's own expected value and tolerance, not by the script's self-report. Also owns what a repair may propose
   about a check (`proposals`, never applied without a person) and the note that carries the engine's verdicts to

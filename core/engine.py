@@ -5503,7 +5503,9 @@ class Engine:
             # FI holds every trial's value: a list the analysis reports for one of the trials' own outcomes is checked
             # value by value, not only counted.
             recorded, altered = _trial_runner.recorded_values(self.quest_root)
-            not_run = _trial_runner.reported_values_not_run(recorded, result_json)
+            not_run = _trial_runner.reported_values_not_run(recorded, result_json, given_means={
+                str(m["id"]) for m in protocol.get("metrics") or []
+                if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")})
             found = row_problems + altered + _run_manifest.problems(protocol, manifest, result_json=result_json) + not_run
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
@@ -13542,7 +13544,9 @@ thresholds: a threshold the analysis applies (what counts as an outbreak,
 a success, a pass) is read from there, never written into a script as a number of its own. It never imports or calls simulate.py. It computes the summary statistics from those values, draws the
 figures into `figures/` and prints the `RESULT_JSON: {...}` last line, exactly as the rules above ask: the figure
 rules, the stratification rule and the no-clamping rule are its rules, and every `<name>_values` / `_count` / `_total`
-it reports comes from those lists, never from a number of its own. For a PAIRED metric it also prints, beside each
+it reports comes from those lists, never from a number of its own. A result reported per setting or per group of
+settings puts each one in a mapping of its own keyed like `R0=1.5` (or `R0=1.5,N=500`), with the metric's own names
+inside it, never the setting inside the name (`p_outbreak_R0_1_5_count`). For a PAIRED metric it also prints, beside each
 `<name>_values`, `<name>_pair_id`: the `trials` of those values, so the settings' trials are joined by id. A setting with failed trials is reported with the
 trials that succeeded and says how many failed.
 
@@ -13578,7 +13582,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "ci_method": "<how uncertainty is estimated, matched to what is estimated: for a proportion over pooled runs, a binomial interval; for a mean over a subset of runs, a bootstrap; a spread across a few batches is not a sample size>",
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
-  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise>"}],
+  "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
   "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from>"}]
 }
 

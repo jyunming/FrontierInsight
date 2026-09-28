@@ -807,21 +807,32 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     return extra
 
 
-def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
+def reported_values_not_run(recorded: dict[str, Counter], result_json: Any,
+                            given_means: frozenset[str] | set[str] = frozenset()) -> list[str]:
     """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
     trials never produced (or more copies of one than they did): one sentence each.
 
     The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
     of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
     checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
-    FI's to check here."""
+    FI's to check here, except the values of a mean over a subset of the trials (``given_means``): they are that subset's
+    values of one quantity the trials returned, so they must all be values of one recorded quantity."""
     out: list[str] = []
 
     def walk(node: Any, path: str) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
                 here = f"{path}.{k}" if path else str(k)
-                if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
+                if (isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in given_means
+                        and k[:-7] not in recorded and recorded):
+                    if all(_not_among(v, counts) for counts in recorded.values()):
+                        out.append(
+                            f"the analysis reports `{here}`, the values `{k[:-7]}` averages over a subset of the trials, "
+                            "but they are not all values of any one quantity FI's trials returned: experiment.py must "
+                            "list the trials' own values of the quantity it averages (read from FI_TRIALS), or run_trial "
+                            "must return that quantity"
+                        )
+                elif isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
                     extra = _not_among(v, recorded[k[:-7]])
                     if extra:
                         out.append(
