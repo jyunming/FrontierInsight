@@ -57,8 +57,14 @@ def test_values_of_trials_outside_the_subset_do_not_pass() -> None:
 
 def test_the_subset_s_own_values_pass_in_any_order_and_as_fractions_of_n() -> None:
     honest = {"R0=1.5,N=100": _stratum([float(100 + t) for t in reversed(range(10))], 10),
-              "R0=3.0,N=100": _stratum([(100 + t) / 100 for t in range(40)], 40)}
+              "R0=3.0,N=100": _stratum([float(100 + t) for t in range(40)], 40)}
     assert _check(honest) == ([], [])
+    fractions = {"R0=1.5,N=100": _stratum([(100 + t) / 100 for t in range(10)], 10),
+                 "R0=3.0,N=100": _stratum([(100 + t) / 100 for t in range(40)], 40)}
+    assert _check(fractions) == ([], [])
+    mixed = {"R0=1.5,N=100": _stratum([float(100 + t) for t in range(10)], 10),
+             "R0=3.0,N=100": _stratum([(100 + t) / 100 for t in range(40)], 40)}
+    assert any("one mean averages one quantity" in a for a in _check(mixed)[0]), "sizes here, fractions there"
 
 
 def test_values_borrowed_from_another_setting_do_not_pass() -> None:
@@ -77,7 +83,7 @@ def test_a_record_without_the_membership_is_the_simulation_s_to_fix() -> None:
     no_p = _rows({"R0=1.5,N=100": 10}, membership=False)
     analysis, simulation = _check({"R0=1.5,N=100": _stratum([1.0] * 10, 10)}, no_p)
     assert analysis == [] and len(simulation) == 1
-    assert "run_trial must return `p` as 1" in simulation[0], "a doable repair, not a dead end"
+    assert "run_trial must return, under the proportion's own id `p`, 1" in simulation[0], "a doable repair"
     assert tr.RETURN_MEMBERSHIP.format(given="p") in simulation[0]
 
 
@@ -112,10 +118,80 @@ def test_rows_are_read_from_fi_s_record_and_an_edited_row_is_left_out(tmp_path: 
     assert [r["trial"] for r in got["R0=1.5,N=100"]] == [0, 1]
 
 
-def test_outside_research_the_engine_does_not_run_the_row_check() -> None:
-    import inspect
+def _engine(profile: str, quest_root: Path):
+    from types import SimpleNamespace
 
-    from core import engine
+    from core.engine import Engine
 
-    source = inspect.getsource(engine.Engine._run_manifest_problems)
-    assert 'if self.config.rigor_profile == "research":' in source and "given_rows_problems" in source
+    eng = object.__new__(Engine)
+    eng.config = SimpleNamespace(rigor_profile=profile)
+    eng.quest_root = quest_root
+    return eng
+
+
+def test_outside_research_the_row_check_does_not_run(tmp_path: Path) -> None:
+    forged = {"R0=1.5,N=100": _stratum([1.0] * 10, 10)}
+    ledger = [{"cell": "R0=1.5,N=100", "trial": 0, "status": "ok"}]
+    assert _engine("default", tmp_path)._given_row_findings(PROTOCOL, ledger, forged) == ([], [])
+    analysis, simulation = _engine("research", tmp_path)._given_row_findings(PROTOCOL, ledger, forged)
+    assert simulation and "run.json) is missing" in simulation[0], "research: no record while trials ran fails closed"
+
+
+def test_a_mean_under_a_wrapper_key_is_checked_against_the_whole_run() -> None:
+    whole = [float(100 + t) for t in range(10)] + [float(100 + t) for t in range(40)]
+    for forged in ({"summary": _stratum([1.0] * 50, 50)},
+                   {"results": [_stratum([1.0] * 50, 50)]},
+                   {"metrics": {"summary": _stratum([1.0] * 50, 50)}}):
+        analysis, _ = _check(forged)
+        assert any("not the values of the trials" in a for a in analysis), forged
+    assert _check({"summary": _stratum(whole, 50)}) == ([], []), "the honest whole-run mean under a wrapper passes"
+
+
+def test_a_flag_quantity_never_stands_in_for_the_averaged_one() -> None:
+    rows = {k: [{**r, "values": {**r["values"], "ok": 1.0}} for r in v] for k, v in ROWS.items()}
+    forged = {"R0=1.5,N=100": _stratum([1.0] * 10, 10)}
+    analysis, _ = _check(forged, rows)
+    assert any("not the values of the trials" in a for a in analysis)
+
+
+def test_one_quantity_in_every_stratum() -> None:
+    rows = {k: [{**r, "values": {**r["values"], "z": r["values"]["y"] * 3}} for r in v] for k, v in ROWS.items()}
+    mixed = {"R0=1.5,N=100": _stratum([float(100 + t) for t in range(10)], 10),
+             "R0=3.0,N=100": _stratum([float(100 + t) * 3 for t in range(40)], 40)}
+    analysis, _ = _check(mixed, rows)
+    assert any("one mean averages one quantity" in a for a in analysis)
+    same = {"R0=1.5,N=100": _stratum([float(100 + t) * 3 for t in range(10)], 10),
+            "R0=3.0,N=100": _stratum([float(100 + t) * 3 for t in range(40)], 40)}
+    assert _check(same, rows) == ([], [])
+
+
+def test_the_writer_and_the_reader_agree(tmp_path: Path) -> None:
+    """_collect writes the ledger, _save_run the record; recorded_rows_by_cell reads them back, hash-checked."""
+    folder = tmp_path / ".fi" / "trials"
+    folder.mkdir(parents=True)
+    plan = tr._plan(tmp_path, "code/simulate.py", {"R0": [1.5]}, runs_per_setting=3, base_seed=7,
+                    deterministic=False, folder=folder, out_name="cell{index}.out.jsonl",
+                    thresholds={"major": 0.1})
+    spec = json.loads((tmp_path / plan[0]["spec"]).read_text(encoding="utf-8"))
+    assert spec["thresholds"] == {"major": 0.1}, "the protocol's thresholds reach the harness"
+    lines = [json.dumps({"nonce": plan[0]["nonce"], "trial": t["trial"], "seed": t["seed"], "status": "ok",
+                         "values": {"p": float(t["trial"] < 2), "y": 10.0 + t["trial"]}}) for t in plan[0]["trials"]]
+    (tmp_path / plan[0]["out"]).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    ok = type("R", (), {"returncode": 0, "timed_out": False, "stderr": ""})()
+    run = tr._collect(tmp_path, plan, {0: ok}, run_id="r", thresholds={"major": 0.1}, not_reported="")
+    tr._save_run(tmp_path, "k", run)
+    rows = tr.recorded_rows_by_cell(tmp_path)
+    assert [r["trial"] for r in rows["R0=1.5"]] == [0, 1, 2]
+    result = {"R0=1.5": {"p_count": 2, "p_total": 3, "m_values": [10.0, 11.0]}}
+    protocol = {**PROTOCOL, "grid": {"R0": [1.5]}}
+    assert tr.given_rows_problems(protocol, rows, result) == ([], [])
+
+
+def test_the_harness_sets_the_thresholds_before_loading_the_simulation() -> None:
+    assert 'os.environ["FI_THRESHOLDS"]' in tr.HARNESS_SOURCE
+    assert tr.HARNESS_SOURCE.index("FI_THRESHOLDS") < tr.HARNESS_SOURCE.index("exec_module")
+
+
+def test_a_row_without_a_trial_id_is_never_read_as_trial_0() -> None:
+    assert tr._trial_id({"trial": None}) is None and tr._trial_id({}) is None and tr._trial_id({"trial": True}) is None
+    assert tr._trial_id({"trial": 0}) == 0

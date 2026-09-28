@@ -72,6 +72,9 @@ def main():
         spec = json.load(f)
     out = open(sys.argv[2], "w", encoding="utf-8")
     nonce = spec.pop("nonce")
+    # The frozen protocol's thresholds (what counts as an outbreak, a success): run_trial reads them from here, never
+    # from a number of its own.
+    os.environ["FI_THRESHOLDS"] = json.dumps(spec.pop("thresholds", None) or {})
     # What names the results file and the nonce goes before the simulation is loaded: the spec file is deleted and argv
     # cleared, so code that looks for them has to dig through this process's memory rather than read a path.
     if not spec.pop("keep_spec", False):  # a cluster's scheduler may run a task again: its spec stays there
@@ -244,7 +247,7 @@ def _summary(runs: list[CellRun], thresholds: dict[str, Any] | None = None) -> d
 
 def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int, base_seed: int,
           deterministic: bool, folder: Path, out_name: str, keep_spec: bool = False,
-          paired: bool = False) -> list[dict[str, Any]]:
+          paired: bool = False, thresholds: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Write one spec per cell (the simulation file, the entry, the cell, its trials with their seeds, a nonce) into
     ``folder`` and return the plan: per cell its key, cell, trials, nonce, and the spec and results paths relative to
     ``quest_root``."""
@@ -261,7 +264,8 @@ def _plan(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, r
         out_path.unlink(missing_ok=True)
         nonce = hashlib.sha256(f"{time.time_ns()}|{index}|{id(trials)}".encode()).hexdigest()[:24]
         spec_path.write_text(json.dumps({"module": str(module).replace("\\", "/"), "entry": entry, "cell": cell,
-                                         "trials": trials, "nonce": nonce, "keep_spec": keep_spec}, default=str),
+                                         "trials": trials, "nonce": nonce, "keep_spec": keep_spec,
+                                         "thresholds": dict(thresholds or {})}, default=str),
                              encoding="utf-8")
         plan.append({"index": index, "key": key, "cell": cell, "trials": trials, "nonce": nonce, "entry": entry,
                      "spec": spec_path.relative_to(quest_root).as_posix(),
@@ -358,7 +362,8 @@ async def run_trials(
     harness.write_text(HARNESS_SOURCE, encoding="utf-8")  # fresh every run: nothing the experiment wrote is run
     (quest_root / RUN_RECORD).unlink(missing_ok=True)  # an earlier run's record never stands beside this run's ledger
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
-                 deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired)
+                 deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
+                 thresholds=thresholds)
     results: dict[int, Any] = {}
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for task in plan:
@@ -374,7 +379,8 @@ async def run_trials(
 
 
 def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *, runs_per_setting: int,
-                    base_seed: int, deterministic: bool, key: str, paired: bool = False) -> dict[str, Any]:
+                    base_seed: int, deterministic: bool, key: str, paired: bool = False,
+                    thresholds: dict[str, Any] | None = None) -> dict[str, Any]:
     """The job array for a cluster: FI's harness, one spec per setting and the task list in ``job/fi/``, and FI's own
     record of the plan (``.fi/trials/cluster.json``). Kept as it is while ``key`` (the simulation and the protocol) is
     the same, so every check of a submitted job sees the tasks that were submitted. Returns the record."""
@@ -399,7 +405,7 @@ def prepare_cluster(quest_root: Path, module: Path | str, grid: dict[str, list[A
     (folder / "harness.py").write_text(HARNESS_SOURCE, encoding="utf-8")
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=folder, out_name="out{index}-" + key[:10] + ".jsonl", keep_spec=True,
-                 paired=paired)
+                 paired=paired, thresholds=thresholds)
     harness = (CLUSTER_DIR / "harness.py").as_posix()
     tasks = {
         "count": len(plan),
@@ -519,6 +525,7 @@ class TrialsRunner:
             record = prepare_cluster(
                 self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, key=key, paired=paired,
+                thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
             )
             submitted = await self.executor.execute(
                 [cmd[0], str(self.submit)], cwd=cwd, timeout_s=timeout_s,
@@ -737,6 +744,12 @@ def pooled(per_cell: dict[str, dict[str, Counter]]) -> dict[str, Counter]:
     return out
 
 
+def _trial_id(row: dict[str, Any]) -> int | None:
+    """A row's trial number, or ``None`` when it has none (never read as trial 0)."""
+    t = row.get("trial")
+    return t if isinstance(t, int) and not isinstance(t, bool) and t >= 0 else None
+
+
 def recorded_rows_by_cell(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
     """Each trial FI ran to the end, as a row: its setting (cell key), trial number, seed and the whole dict
     ``run_trial`` returned for it, checked against the hash FI's ledger holds for that trial (a row whose values no
@@ -754,8 +767,9 @@ def recorded_rows_by_cell(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
             row = json.loads(line)
         except ValueError:
             continue
-        if isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok":
-            hashes[(str(row.get("cell")), int(row.get("trial") or 0))] = str(row.get("values_sha256") or "")
+        if (isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok"
+                and _trial_id(row) is not None):
+            hashes[(str(row.get("cell")), _trial_id(row))] = str(row.get("values_sha256") or "")
     out: dict[str, list[dict[str, Any]]] = {}
     for cell in record.get("cells") or []:
         key = str(cell.get("key"))
@@ -764,7 +778,7 @@ def recorded_rows_by_cell(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
                 continue
             values = row.get("values") if isinstance(row.get("values"), dict) else {}
             digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
-            if hashes.get((key, int(row.get("trial") or 0))) != digest:
+            if _trial_id(row) is None or hashes.get((key, _trial_id(row))) != digest:
                 continue
             out.setdefault(key, []).append({"cell": key, "trial": row.get("trial"), "seed": row.get("seed"),
                                             "values": values})
@@ -775,27 +789,39 @@ def recorded_rows_by_cell(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
 #: the repair and the implement prompt.
 RETURN_MEMBERSHIP = (
     "Under research, a mean over the trials a proportion counts is recomputed by FI from its own trial record, trial "
-    "by trial: run_trial must return `{given}` as 1 (the trial is in the subset) or 0 (it is not) for every trial, "
-    "next to the value being averaged."
+    "by trial: run_trial must return, under the proportion's own id `{given}`, 1 (the trial is in the subset) or 0 "
+    "(it is not) for every trial, next to the value being averaged; a cut-off that decides it is read from "
+    "FI_THRESHOLDS, never written into the script."
 )
 
 
 def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str, list[dict[str, Any]]],
-                        result_json: Any) -> tuple[list[str], list[str]]:
+                        result_json: Any, *, ok_trials: int = 0) -> tuple[list[str], list[str]]:
     """Under research, a mean over the trials a proportion counts (a metric with ``given``), checked trial by trial:
     FI takes, from its own record, the trials of each reported stratum (or of the run) whose ``given`` is 1, and the
     analysis's count must be how many there are and its values must be those same trials' values of one quantity
     (or that value divided by the trial's own size setting), as a multiset. ``(analysis's to fix, simulation's to
     fix)``: values or a count that are not those trials' are the analysis's; a record with no 0/1 ``given`` is the
-    simulation's (:data:`RETURN_MEMBERSHIP`)."""
+    simulation's (:data:`RETURN_MEMBERSHIP`), and so is a record that cannot be read while the ledger says trials ran
+    (``ok_trials``): the trials are run again. Every mapping holding the mean's values is checked, under a stratum
+    key or not (a ``summary`` or ``results`` wrapper is the whole run); the values are one quantity the trials
+    returned, the same one in every stratum, never a quantity that is only 0 and 1."""
     from core import run_manifest as _rm
 
-    if not isinstance(protocol, dict) or not rows_by_cell or result_json is None:
+    if not isinstance(protocol, dict) or result_json is None:
         return [], []
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     given_of = {str(m["id"]): str(m["given"]) for m in protocol.get("metrics") or []
                 if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")}
     if not given_of:
+        return [], []
+    if not rows_by_cell:
+        if ok_trials > 0:
+            return [], [
+                f"FI's record of the trials' own values (.fi/trials/run.json) is missing or unreadable, though its ledger "
+                f"says {ok_trials} trial(s) ran to the end: a mean over a subset of the trials cannot be checked trial "
+                "by trial without it, so the trials are run again"
+            ]
         return [], []
     keyed: dict[frozenset, str] = {}
     for key in rows_by_cell:
@@ -823,10 +849,15 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
             )
             continue
 
+        # A quantity every trial returned only as 0 or 1 (an `ok`, a `converged`, the membership itself) is a flag,
+        # not what a mean over the subset averages: a list of 1s drawn from it is not the subset's values.
+        flags = {n for n in {n for r in rows for n in r["values"]}
+                 if all(r["values"].get(n) in (0, 1) and not isinstance(r["values"].get(n), bool) for r in rows)}
+
         def forms(subset: list[dict[str, Any]]) -> list[tuple[str, list[float | None]]]:
-            """Each quantity the subset's trials returned, and each such quantity divided by a size setting, as the
-            list of per-trial values (``None`` where a trial's value is not a finite number)."""
-            names = sorted({n for r in subset for n in r["values"] if n != given})
+            """Each quantity the subset's trials returned (not a 0/1 flag), and each such quantity divided by a size
+            setting, as the list of per-trial values (``None`` where a trial's value is not a finite number)."""
+            names = sorted({n for r in subset for n in r["values"] if n != given and n not in flags})
             out: list[tuple[str, list[float | None]]] = []
             for name in names:
                 plain: list[float | None] = []
@@ -857,11 +888,13 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
             numbers = [x for x in reported if x is not None]
             return _missing_exact(numbers, counts) == 0
 
+        chosen: str | None = None
         for under, mapping in _rm._mappings_with(result_json, f"{metric}_values"):
             where = f"`{under}`" if under is not None else "the top level"
-            cells, _why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
-            if under is not None and cells is None:
-                continue  # not a stratum of the grid: the manifest check reports it
+            cells, why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
+            if why:
+                continue  # shaped like a stratum the grid does not have: the manifest check reports it
+            # A key that is no setting at all (`summary`, `results`, a list of records) holds the whole run's mean.
             own = [keyed[c] for c in cells if c in keyed] if cells else all_cells
             subset = [r for key in own for r in rows_by_cell.get(key, []) if membership(r, given) == 1]
             reported = _rm._values_of(mapping, metric)
@@ -874,11 +907,19 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
                     f"`{given}` = 1 for {len(subset)} of them: the mean is over every trial in the subset, not a "
                     "selection"
                 )
-            if not any(same_multiset(reported, vals) for _name, vals in forms(subset)):
+            matched = [name for name, vals in forms(subset) if same_multiset(reported, vals)]
+            if not matched:
                 analysis.append(
                     f"at {where}, `{metric}_values` are not the values of the trials whose `{given}` is 1 (FI took those "
                     f"{len(subset)} trial(s) from its own record, trial by trial): a mean over a subset lists each of "
                     "its trials' own value once, and no trial outside it. " + _rm.DERIVED
+                )
+            elif chosen is None:
+                chosen = matched[0]
+            elif chosen not in matched:
+                analysis.append(
+                    f"at {where}, `{metric}_values` are the subset's values of `{matched[0]}`, but elsewhere they are of "
+                    f"`{chosen}`: one mean averages one quantity in every stratum"
                 )
     return analysis, simulation
 
@@ -902,8 +943,9 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok":
-                hashes[(str(row.get("cell")), int(row.get("trial") or 0))] = str(row.get("values_sha256") or "")
+            if (isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok"
+                    and _trial_id(row) is not None):
+                hashes[(str(row.get("cell")), _trial_id(row))] = str(row.get("values_sha256") or "")
     except OSError:
         return {}, []
     out: dict[str, dict[str, Counter]] = {}
@@ -914,7 +956,7 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
                 continue
             values = row.get("values") or {}
             digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
-            if hashes.get((str(cell.get("key")), int(row.get("trial") or 0))) != digest:
+            if _trial_id(row) is None or hashes.get((str(cell.get("key")), _trial_id(row))) != digest:
                 altered += 1
                 continue
             for name, value in values.items():
