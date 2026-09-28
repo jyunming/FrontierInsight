@@ -52,8 +52,8 @@ class _ProcessLock:
     The OS releases a file lock when its process dies, so a killed quest cannot leave the service locked for the next one.
     """
 
-    def __init__(self, path: Path, timeout: float = _LOCK_TIMEOUT_S) -> None:
-        self._path, self._timeout = path, timeout
+    def __init__(self, path: Path, timeout: float = _LOCK_TIMEOUT_S, *, what: str = "the Axon project") -> None:
+        self._path, self._timeout, self._what = path, timeout, what
         self._threads = threading.RLock()
         self._depth = 0
         self._fh: Any = None
@@ -74,11 +74,14 @@ class _ProcessLock:
                     self._release_file()
 
     def _acquire_file(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(self._path, "a+b")  # noqa: SIM115 -- closed in _release_file
         deadline = time.monotonic() + self._timeout
+        fh: Any = None
         while True:
             try:
+                if fh is None:
+                    # Opening can fail as the lock can (another user's file, a folder not there yet): tried again too.
+                    self._path.parent.mkdir(parents=True, exist_ok=True)
+                    fh = open(self._path, "a+b")  # noqa: SIM115 -- closed in _release_file
                 if sys.platform == "win32":
                     import msvcrt
 
@@ -89,13 +92,13 @@ class _ProcessLock:
 
                     fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except OSError:
+            except OSError as e:
                 if time.monotonic() >= deadline:
-                    fh.close()
-                    raise AxonUnavailable(
-                        f"another FI process has held the Axon project for more than {int(self._timeout)}s "
-                        f"(lock file {self._path})",
-                    ) from None
+                    if fh is not None:
+                        fh.close()
+                    reason = (f"another FI process has held {self._what} for more than {int(self._timeout)}s"
+                              if fh is not None else f"its lock file could not be opened ({e})")
+                    raise AxonUnavailable(f"{reason} (lock file {self._path})") from None
                 time.sleep(0.2)
         self._fh = fh
 

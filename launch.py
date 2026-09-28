@@ -2639,8 +2639,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
 
         if args.tidy_knowledge:
-            return _tidy_knowledge(check_only=args.tidy_knowledge == "check", axon_config_path=args.axon_config,
-                                   output_root=args.output_root)
+            return _tidy_knowledge(check_only=args.tidy_knowledge == "check", axon_config_path=args.axon_config)
 
         if args.doctor:
             return _doctor()
@@ -4760,20 +4759,7 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
     return 0
 
 
-def _note_tidied(output_root: Path | None) -> None:
-    """After a clean tidy: a quest's note that its earlier copy could not be removed says what is left to do."""
-    for note in sorted(Path(output_root or "outputs").glob("*/.fi/knowledge_problem.json")):
-        try:
-            note.write_text(json.dumps({
-                "quest_id": note.parent.parent.name,
-                "problem": "the earlier copy was removed by `fi tools tidy-knowledge`, but this quest's current result "
-                           "is not in the knowledge base yet: resume the quest to write it",
-            }, indent=2) + "\n", encoding="utf-8")
-        except OSError:
-            pass
-
-
-def _tidy_knowledge(*, check_only: bool, axon_config_path: Path | None, output_root: Path | None = None) -> int:
+def _tidy_knowledge(*, check_only: bool, axon_config_path: Path | None) -> int:
     """Remove (or with ``check_only`` list) the older copy of each quest result kept under both standings."""
     from core.config import KnowledgeConfig
     from core.knowledge import Knowledge
@@ -4820,8 +4806,10 @@ def _tidy_knowledge(*, check_only: bool, axon_config_path: Path | None, output_r
     if check_only:
         print("[FI] nothing was changed; run `fi tools tidy-knowledge` to remove them.")
     everything = [*found, *cards]
-    if not check_only and all(e.get("ok") for e in everything):
-        _note_tidied(output_root)
+    touched = sorted({str(e["quest_id"]) for e in found if e.get("ok")}
+                     | {str(e["removed_consumer"]) for e in cards if e.get("ok") and e.get("removed_consumer")})
+    if touched and not check_only:
+        print("[FI] resume each of these quests to write its current result and clear its note: " + ", ".join(touched))
     return 0 if all(e.get("ok") or (check_only and not e.get("undetermined")) for e in everything) else 1
 
 

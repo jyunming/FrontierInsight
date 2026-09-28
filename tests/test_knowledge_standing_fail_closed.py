@@ -234,14 +234,70 @@ def test_the_engine_puts_the_problem_on_the_card_and_in_run_log(tmp_path: Path) 
     assert not (eng.fi_dir / "knowledge_problem.json").exists()
 
 
-def test_a_clean_tidy_rewords_a_quest_s_note(tmp_path: Path) -> None:
-    import launch
+def test_a_failed_write_after_removing_a_copy_is_on_the_card(tmp_path: Path) -> None:
+    brain = _InProcess()
+    k = _enabled_knowledge_with(brain)
+    assert _write(k, tmp_path, "accepted")
 
-    note = tmp_path / "q1" / ".fi" / "knowledge_problem.json"
-    note.parent.mkdir(parents=True)
+    def broken(docs):  # noqa: ANN001
+        raise RuntimeError("the store went away")
+
+    brain.ingest = broken
+    assert _write(k, tmp_path, "preliminary") is False
+    assert "may hold no copy of this result now" in k.last_writeback_problem
+    assert "resume the quest" in k.last_writeback_problem
+
+
+def test_a_skipped_write_back_keeps_only_what_is_true(tmp_path: Path) -> None:
+    class _Knowledge:
+        enabled = True
+        last_writeback_problem = None
+        conflict: str | None = None
+
+        def standing_conflict(self, quest_id):  # noqa: ANN001
+            return self.conflict
+
+    paper = tmp_path / "paper.md"
+    paper.write_text("# Probe\n", encoding="utf-8")
+    eng = object.__new__(Engine)
+    eng.quest_id, eng.quest_root, eng.fi_dir = "probe", tmp_path, tmp_path / ".fi"
+    eng.fi_dir.mkdir()
+    eng.knowledge = _Knowledge()
+    eng.config = SimpleNamespace(knowledge=SimpleNamespace(write_back_quests=True, write_back_only_on_accept=True))
+    eng._log = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None)
+    artifacts = QuestArtifacts(quest_id="probe", quest_root=tmp_path, paper_md=paper, paper_pdf=None,
+                               figures_dir=None, bundle_manifest=None, raw_state={})
+    note = eng.fi_dir / "knowledge_problem.json"
+    rejected = {"review": {"verdict": "revise", "status": "ok"}}
     note.write_text('{"problem": "still holds the earlier copy"}', encoding="utf-8")
-    launch._note_tidied(tmp_path)
-    assert "resume the quest to write it" in json.loads(note.read_text(encoding="utf-8"))["problem"]
+    eng._write_back_knowledge(artifacts, rejected, None)
+    assert not note.exists(), "no longer true: the note goes"
+    eng.knowledge.conflict = "the knowledge base holds both an accepted and a preliminary copy"
+    eng._write_back_knowledge(artifacts, rejected, None)
+    assert "holds both" in json.loads(note.read_text(encoding="utf-8"))["problem"], "still true: it stays"
+
+
+def test_a_lock_it_cannot_open_is_waited_for_then_said_plainly(tmp_path: Path) -> None:
+    from core.axon_http import AxonUnavailable, _ProcessLock
+
+    blocked = tmp_path / "a-file" / "x.lock"
+    (tmp_path / "a-file").write_text("not a folder", encoding="utf-8")  # the lock's folder cannot be made
+    lock = _ProcessLock(blocked, timeout=0.5, what="the knowledge base's paper entries")
+    with pytest.raises(AxonUnavailable, match="could not be opened"):
+        with lock.held():
+            pass
+
+
+def test_the_lock_names_what_it_guards(tmp_path: Path) -> None:
+    from core.axon_http import AxonUnavailable, _ProcessLock
+
+    path = tmp_path / "busy.lock"
+    holder = _ProcessLock(path, what="the knowledge base's paper entries")
+    waiter = _ProcessLock(path, timeout=0.5, what="the knowledge base's paper entries")
+    with holder.held():
+        with pytest.raises(AxonUnavailable, match="held the knowledge base's paper entries"):
+            with waiter.held():
+                pass
 
 
 # --- F-08 -----------------------------------------------------------------------------------------------------------
@@ -292,6 +348,26 @@ def test_a_failed_write_restores_the_entries_it_removed(tmp_path: Path) -> None:
     assert entry["metadata"]["consumed_by_quests"] == ["q1"], "q1's entry is back as it was"
 
 
+def test_a_write_that_landed_before_its_answer_was_lost_is_not_restored_twice(tmp_path: Path) -> None:
+    brain = _Http()
+    k = _enabled_knowledge_with(brain)
+    assert _write(k, tmp_path, "accepted", quest="q1", refs=[REF])
+    real_ingest = brain.ingest
+    calls = {"n": 0}
+
+    def lands_then_fails(docs):  # noqa: ANN001
+        calls["n"] += 1
+        real_ingest(docs)
+        if calls["n"] == 1:
+            raise RuntimeError("the answer was lost")
+
+    brain.ingest = lands_then_fails
+    assert _write(k, tmp_path, "accepted", quest="q2", refs=[REF]) is False
+    (entry,) = _entries(brain).values()
+    assert entry["metadata"]["consumed_by_quests"] == ["q1", "q2"], "the entry that landed is kept, not replaced"
+    assert calls["n"] == 1, "nothing written back over it"
+
+
 def test_chroma_s_joined_list_is_read(tmp_path: Path) -> None:
     brain = _InProcess()
     k = _enabled_knowledge_with(brain)
@@ -335,12 +411,16 @@ def test_tidy_rewrites_an_entry_an_older_write_back_hid_from_the_list(tmp_path: 
         if d["metadata"].get("kind") == REF_SPINE:
             d["metadata"]["source"] = "arxiv"
             d["metadata"].pop("ref_source", None)
+            d["metadata"].pop("entry_layout", None)
     assert f"{REF_SPINE}:doi:10.1/x" not in brain.list_sources()
     done = k.retire_stale_ref_spines()
     assert [e for e in done if e.get("migrated")] and all(e.get("ok") for e in done)
     assert f"{REF_SPINE}:doi:10.1/x" in brain.list_sources()
     (entry,) = _entries(brain).values()
     assert entry["metadata"]["ref_source"] == "arxiv" and entry["metadata"]["consumed_by_quests"] == ["q1"]
+    before = dict(brain.docs)
+    assert not [e for e in k.retire_stale_ref_spines() if e.get("migrated")], "a migrated entry is not done again"
+    assert brain.docs == before
 
 
 def test_an_entry_that_cannot_be_read_is_left_alone(tmp_path: Path) -> None:

@@ -12306,10 +12306,10 @@ class Engine:
                               evidence_status: str | None = None) -> None:
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
             # This quest no longer writes to the knowledge base: a note from an earlier write-back is not its to act on.
-            if getattr(self, "fi_dir", None) is not None:
-                (self.fi_dir / "knowledge_problem.json").unlink(missing_ok=True)
+            self._settle_knowledge_note(None)
             return
         if artifacts.paper_md is None:
+            self._settle_knowledge_note(self._knowledge_conflict())
             return
 
         review = state.get("review") or {}
@@ -12324,10 +12324,12 @@ class Engine:
                 "[write-back] skipped: verdict=%s (write_back_only_on_accept=True)",
                 verdict,
             )
+            self._settle_knowledge_note(self._knowledge_conflict())
             return
         # An accept no reviewer gave is not research the review signed off on.
         if self.config.knowledge.write_back_only_on_accept and not _review_was_real(review):
             self._log.info("[write-back] skipped: the accept was not a reviewer's (review status %s)", review.get("status"))
+            self._settle_knowledge_note(self._knowledge_conflict())
             return
 
         # What the result may stand for in the long-term store: accepted evidence only when the quest was a study
@@ -12439,8 +12441,20 @@ class Engine:
             ok, verdict, review.get("score"), standing, result_use, evidence_status or "unknown",
         )
         # What kept the knowledge base from holding exactly one current copy of this result: in run.log and on the
-        # quest's card until a later write-back succeeds.
-        problem = getattr(self.knowledge, "last_writeback_problem", None)
+        # quest's card until a later write-back settles it.
+        self._settle_knowledge_note(getattr(self.knowledge, "last_writeback_problem", None))
+
+    def _knowledge_conflict(self) -> str | None:
+        """Without writing: only what is still true of the knowledge base (both standings of the quest held)."""
+        try:
+            check = getattr(self.knowledge, "standing_conflict", None)
+            return check(self.quest_id) if callable(check) else None
+        except Exception:  # noqa: BLE001 -- a note about the knowledge base never touches the quest
+            return None
+
+    def _settle_knowledge_note(self, problem: str | None) -> None:
+        """Keep ``.fi/knowledge_problem.json`` (and the card) to what is true now: ``problem`` written, or the note
+        removed when there is none. Each write-back, and each finished quest that skips one, settles it again."""
         if problem:
             self._log.warning("[write-back] %s", problem)
         if getattr(self, "fi_dir", None) is None:
@@ -12450,6 +12464,8 @@ class Engine:
             if problem:
                 record.write_text(json.dumps({"quest_id": self.quest_id, "problem": problem}, indent=2) + "\n",
                                   encoding="utf-8")
+            elif not record.is_file():
+                return
             else:
                 record.unlink(missing_ok=True)
             _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)

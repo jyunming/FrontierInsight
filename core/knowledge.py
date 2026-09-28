@@ -3571,6 +3571,8 @@ _AXON_CHUNK_KEYS = frozenset({
     "parent_id", "dedup_hash", "doc_hash", "children_ids", "raptor_level", "level", "window", "file_type", "filename",
     "project", "score", "vector_score", "bm25_score", "fused_score",
 })
+#: The layout a paper entry is written in: one without it, filed under a paper's own source, is written again by tidy.
+_ENTRY_LAYOUT = 2
 #: What a search used as proof asks for: every match, whatever its similarity.
 _PROOF_SEARCH = {"top_k": 50, "threshold": 0.0}
 
@@ -3689,7 +3691,9 @@ def _entry_meta(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _paper_entries_lock() -> Iterator[None]:
     """Held while a quest reads, removes and writes paper entries: two FI processes (a fleet, the web page and the
     CLI) updating the same paper's quests must not overwrite each other. A file every FI process names the same."""
-    lock = _axon_http._ProcessLock(Path(tempfile.gettempdir()) / "fi-paper-entries.lock")
+    # Per user (the FI folder in their home), not a shared temp name another user's file could block.
+    lock = _axon_http._ProcessLock(Path.home() / ".frontier-insight" / "locks" / "paper-entries.lock", timeout=300,
+                                   what="the knowledge base's paper entries")
     with lock.held():
         yield
 
@@ -4530,7 +4534,7 @@ class Knowledge:
 
     def _paper_entry_doc(self, pid: str, meta: dict[str, Any], text: str, consumers: set[str]) -> dict[str, Any]:
         merged = {**meta, "paper_id": pid, "tag": f"fi-paper:{pid}", "consumed_by_quests": sorted(consumers),
-                  "kind": REF_SPINE}
+                  "entry_layout": _ENTRY_LAYOUT, "kind": REF_SPINE}
         return {"id": self._mint_doc_id(REF_SPINE, merged), "text": _with_consumers(text, consumers), "metadata": merged}
 
     def _drop_consumer(self, pid: str, quest_id: str, *, ref: dict[str, Any] | None = None,
@@ -4566,7 +4570,11 @@ class Knowledge:
         return entry
 
     def _restore_entries(self, entries: list[tuple[str, dict[str, Any], str, set[str]]]) -> None:
-        """Write removed paper entries back as they were (a write that replaced them failed)."""
+        """Write removed paper entries back as they were (a write that replaced them failed). An entry that is there
+        again (the write reached the service before its answer was lost) is left as it is."""
+        entries = [e for e in entries if _paper_entry(self._brain, e[0]) == []]
+        if not entries:
+            return
         try:
             self._brain.ingest([self._paper_entry_doc(pid, meta, text, consumers)
                                 for pid, meta, text, consumers in entries])
@@ -4622,7 +4630,8 @@ class Knowledge:
                 if dry_run or corpus is not None:
                     continue
                 rows = _paper_entry(brain, pid)
-                if rows and any((r.get("metadata") or {}).get("source") and "ref_source" not in (r.get("metadata") or {})
+                if rows and any((r.get("metadata") or {}).get("entry_layout") != _ENTRY_LAYOUT
+                                and (r.get("metadata") or {}).get("source")
                                 and not str(r["metadata"]["source"]).startswith(f"{REF_SPINE}:") for r in rows):
                     meta, text, consumers = _entry_meta(rows), _entry_text(rows), _consumers(rows)
                     ok = self._remove_paper_entry(pid, rows)
@@ -4652,6 +4661,15 @@ class Knowledge:
         except Exception as e:  # noqa: BLE001 -- a knowledge-base write never stops a quest
             _log.warning("axon: could not remove %s of quest %s: %s", ", ".join(kinds), quest_id, e)
             return False
+
+    def standing_conflict(self, quest_id: str) -> str | None:
+        """A plain sentence when the knowledge base is shown to hold both an accepted and a preliminary copy of the
+        quest; ``None`` otherwise (one copy, none, or it cannot be told)."""
+        if not self.enabled or self._brain is None:
+            return None
+        both = all(_standing_present(self._brain, quest_id, kinds) for kinds in STANDING_KINDS.values())
+        return ("the knowledge base holds both an accepted and a preliminary copy of this quest's result; run "
+                "`fi tools tidy-knowledge` once the Axon service is reachable") if both else None
 
     def retire_stale_standing(self, *, dry_run: bool = False) -> list[dict[str, Any]]:
         """Quests that have documents under both standings (accepted and preliminary), which a quest whose standing
@@ -4884,7 +4902,7 @@ class Knowledge:
             # A quest written back again (resumed, refined) keeps the ids of its documents: the copy there now goes
             # first, or a store that refuses an id it already holds (the in-process vector stores do) fails the write.
             own_ids = [d["id"] for d in docs]
-            self._retire(own_ids, quest_id=quest_id, kinds=(*kind_of.values(), "fi_topic_event"))
+            own_removed = self._retire(own_ids, quest_id=quest_id, kinds=(*kind_of.values(), "fi_topic_event"))
             lock = _paper_entries_lock() if external_refs_for_spines else contextlib.nullcontext()
             with lock:
                 replaced: list[tuple[str, dict[str, Any], str, set[str]]] = []
@@ -4950,7 +4968,11 @@ class Knowledge:
             )
             return True
         except Exception as e:
-            _log.warning("axon write-back failed for quest %s: %s%s", quest_id, e,
-                         " (its earlier copy was already removed, so the knowledge base has no copy of it now)"
-                         if locals().get("retired") else "")
+            removed_first = bool(locals().get("retired") or locals().get("own_removed"))
+            self.last_writeback_problem = (
+                f"the write to the knowledge base failed ({type(e).__name__}: {str(e)[:200]})"
+                + ("; its earlier copy had already been removed, so the knowledge base may hold no copy of this "
+                   "result now" if removed_first else "")
+                + "; resume the quest to write it again")
+            _log.warning("axon write-back for quest %s: %s", quest_id, self.last_writeback_problem)
             return False
