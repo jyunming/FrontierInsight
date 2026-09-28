@@ -322,8 +322,15 @@ def _values_listed(result_json: Any, metric_id: str) -> bool:
 #: What the values of a mean over a subset of the trials may be, said the same way by the check and the repair.
 DERIVED = (
     "Each value in a `<metric>_values` list is one trial's own value as FI_TRIALS holds it for that stratum's settings, "
-    "or that value divided by the trial's own size setting (a final size divided by N is a fraction), exactly as "
-    "computed, not rounded."
+    "or that value divided by the trial's own size setting (an axis such as N: a final size divided by N is a "
+    "fraction), as computed, not rounded."
+)
+
+#: What fixes a mean over a subset of the trials reported for too few settings for FI to vouch for its count.
+PARTIAL = (
+    "Report every setting of the grid as its own stratum (keyed like `R0=1.5,N=500`, with `{given}_count`, "
+    "`{given}_total` and the values), or have run_trial return `{given}` as 1 or 0 for each trial so FI can count the "
+    "subset itself; a headline setting can still be named in the summary."
 )
 
 #: How a stratified result is laid out, said the same way to the plan, the analysis and every repair.
@@ -516,6 +523,19 @@ def _given_findings(
                 f"`{metric}_{suffix}_values` lists {len(values)} trial(s) but `{given}_{suffix}_count` says {count:g}: "
                 f"a mean over the trials `{given}` counts lists exactly those trials",
                 trial_mode,
+            ))
+    if placed and not trial_mode and not out:
+        # FI ran no trials here: nothing but the totals backs the strata. Main's floor still applies to them.
+        union: set[frozenset[tuple[str, Any]]] = set()
+        for _key, cells, _count in placed:
+            union |= cells
+        covered = sum(ok.get(c, 0.0) for c in union) if ok else 0.0
+        if ok and covered < expected_total * 0.5:
+            out.append((
+                f"`{metric}` is reported for settings holding {covered:g} of the {expected_total:g} successful trials: "
+                "the claimed trial count is not backed by the data the analysis actually used. "
+                + PARTIAL.format(given=given),
+                False,
             ))
     # A stratum that contains another cannot count fewer successes than it.
     for big_key, big_cells, big_count in placed:
@@ -710,7 +730,7 @@ def analysis_output_problems(
 
 def problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "",
-    result_json: dict[str, Any] | None = None,
+    result_json: dict[str, Any] | None = None, *, trial_mode: bool = False,
 ) -> list[str]:
     """How the run differs from the protocol, one sentence each; empty when the manifest matches it.
 
@@ -794,7 +814,8 @@ def problems(
             if short:
                 shown = ", ".join(f"{c}: {n}" for c, n in list(short.items())[:4])
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
-        out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json))
+        out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json,
+                                                                     trial_mode=trial_mode))
 
     listed = manifest.get("failed_trials")
     listed = listed if isinstance(listed, list) else []

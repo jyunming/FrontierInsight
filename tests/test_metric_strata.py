@@ -48,7 +48,9 @@ def test_the_stratum_written_into_the_name_is_the_analysis_to_fix_and_says_how()
 
 def test_headline_strata_are_allowed_and_said() -> None:
     headline = {"by_R0": {"R0=1.5,N=500": _stratum(31, 400), "R0=3.0,N=500": _stratum(300, 400)}}
-    assert rm.problems(PROTOCOL, _manifest(), result_json=headline) == [], "no dead end: the diag_sir headline shape"
+    assert rm.problems(PROTOCOL, _manifest(), result_json=headline, trial_mode=True) == [],         "with FI's trials the manifest check passes it (the per-value check decides; see below)"
+    (older,) = rm.problems(PROTOCOL, _manifest(), result_json=headline)
+    assert "holding 800 of the 4000" in older and "every setting of the grid" in older,         "under the self-reported contract the totals are all there is: as strict as before, with a doable repair"
     assert rm.strata_coverage(PROTOCOL, headline) == [
         "`mean_final_size_given_major` is reported for 2 of the protocol's 10 settings, so it describes those "
         "settings only, not the whole design"]
@@ -81,7 +83,13 @@ def test_a_flat_single_stratum_result_still_passes() -> None:
 
 
 def _no_problems(result: dict[str, Any]) -> list[str]:
-    return rm.problems(PROTOCOL, _manifest(), result_json=result)
+    """The manifest check as the engine runs it when FI ran the trials."""
+    return rm.problems(PROTOCOL, _manifest(), result_json=result, trial_mode=True)
+
+
+def _values_wrong(found: list[str]) -> list[str]:
+    """Only the per-value findings (a selection of few settings is a finding of its own, tested apart)."""
+    return [f for f in found if "never produced" in f]
 
 
 def test_a_stratum_of_the_grid_must_say_how_many_trials_it_covers() -> None:
@@ -138,19 +146,19 @@ def _per_cell() -> dict[str, dict[str, Counter]]:
 
 def test_a_stratum_s_values_are_its_own_settings_values_or_a_fraction_of_them() -> None:
     raw = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [150.0] * 10}}}
-    assert given_values_not_run(PROTOCOL, _per_cell(), raw) == []
+    assert _values_wrong(given_values_not_run(PROTOCOL, _per_cell(), raw)) == []
     fraction = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.3] * 10}}}
-    assert given_values_not_run(PROTOCOL, _per_cell(), fraction) == [], "final size divided by N is allowed"
+    assert _values_wrong(given_values_not_run(PROTOCOL, _per_cell(), fraction)) == [], "final size divided by N is allowed"
     over_r0 = {"by_R0": {"R0=1.5": {"mean_final_size_given_major_values": [0.3] * 50}}}
     assert given_values_not_run(PROTOCOL, _per_cell(), over_r0) == [], "a stratum over N pools its settings' fractions"
 
 
 def test_a_made_up_fraction_or_a_value_borrowed_from_another_setting_is_caught() -> None:
     made_up = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.31] * 10}}}
-    (found,) = given_values_not_run(PROTOCOL, _per_cell(), made_up)
+    (found,) = _values_wrong(given_values_not_run(PROTOCOL, _per_cell(), made_up))
     assert "never produced in those settings" in found and rm.DERIVED in found
     borrowed = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [450.0] * 10}}}  # R0=3.0's value
-    assert given_values_not_run(PROTOCOL, _per_cell(), borrowed), "another setting's values are not this one's"
+    assert _values_wrong(given_values_not_run(PROTOCOL, _per_cell(), borrowed)), "another setting's values are not this one's"
     suffixed = {"mean_final_size_given_major_R0_1_5_values": [0.31] * 10}
     assert given_values_not_run(PROTOCOL, _per_cell(), suffixed), "a list with the stratum in its name is checked too"
     assert rm.DERIVED in rm.analysis_directive(["x"]), "the repair says the same thing the finding does"
@@ -160,7 +168,8 @@ def test_only_a_size_axis_may_divide_a_value_and_nothing_multiplies_one() -> Non
     cell = "R0=1.5,N=500"
 
     def found(values: list[float]) -> list[str]:
-        return given_values_not_run(PROTOCOL, _per_cell(), {"by": {cell: {"mean_final_size_given_major_values": values}}})
+        return _values_wrong(given_values_not_run(
+            PROTOCOL, _per_cell(), {"by": {cell: {"mean_final_size_given_major_values": values}}}))
 
     assert found([150.0 / 500] * 10) == [], "divided by N (a size) is a fraction"
     assert found([150.0 * 500] * 10), "multiplied by N is not"
@@ -171,9 +180,9 @@ def test_only_a_size_axis_may_divide_a_value_and_nothing_multiplies_one() -> Non
 def test_a_value_rounded_by_the_script_is_not_the_trial_value() -> None:
     per = {"R0=1.5,N=500": {"final_size": Counter({"163": 10})}}
     exact = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [163 / 500] * 10}}}
-    assert given_values_not_run(PROTOCOL, per, exact) == []
+    assert _values_wrong(given_values_not_run(PROTOCOL, per, exact)) == []
     rounded = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.3] * 10}}}
-    assert given_values_not_run(PROTOCOL, per, rounded), "0.326 printed as 0.3 is a rounding the check does not accept"
+    assert _values_wrong(given_values_not_run(PROTOCOL, per, rounded)), "0.326 printed as 0.3 is a rounding the check does not accept"
 
 
 def test_when_the_trials_return_the_subset_the_count_is_fi_s_own() -> None:
@@ -192,3 +201,54 @@ def test_a_list_with_the_stratum_in_its_name_is_held_to_its_count_too() -> None:
     assert any("`mean_final_size_given_major_R0_1_5_values` lists 10 trial(s)" in f for f in _no_problems(result))
     missing = {**_stratum(1850, 4000), "mean_final_size_given_major_R0_1_5_values": [0.5] * 10}
     assert any("has no `p_outbreak_R0_1_5_count`" in f for f in _no_problems(missing))
+
+
+def _diag_cells() -> dict[str, dict[str, Counter]]:
+    """diag_sir's shape: the trials return a final size only, so whether a trial is a major outbreak is the analysis's."""
+    out = {}
+    for r in GRID["R0"]:
+        for n in GRID["N"]:
+            sizes = Counter({f"{0.3 * n + i:.12g}": 1 for i in range(127)})
+            sizes["1"] = 400 - 127
+            out[f"R0={r},N={n}"] = {"final_size": sizes}
+    return out
+
+
+def test_a_cherry_picked_subset_of_few_settings_is_blocked_with_a_doable_repair() -> None:
+    per = _diag_cells()
+    top10 = sorted((float(k) for k in per["R0=1.5,N=500"]["final_size"] if k != "1"), reverse=True)[:10]
+    picked = {"by": {"R0=1.5,N=500": {"p_outbreak_count": 10, "p_outbreak_total": 400,
+                                      "mean_final_size_given_major_values": top10}}}
+    found = given_values_not_run(PROTOCOL, per, picked)
+    assert any("holding 400 of the run's 4000 trials" in f and "every setting of the grid" in f
+               and "return `p_outbreak` as 1 or 0" in f for f in found), found
+    # The whole grid reported, each setting its own stratum: nothing to add (the per-stratum checks hold it).
+    whole = {"by": {k: {"p_outbreak_count": 127, "p_outbreak_total": 400,
+                        "mean_final_size_given_major_values": [float(x) for x in c["final_size"] if x != "1"]}
+                    for k, c in per.items()}}
+    assert given_values_not_run(PROTOCOL, per, whole) == []
+
+
+def test_the_size_axis_is_named_like_one() -> None:
+    from core.trial_runner import _count_axes
+
+    assert _count_axes({"N": [100, 500], "R0": [1.5, 3.0]}) == ["N"]
+    assert _count_axes({"seed": [42, 43], "R": [2, 3], "replicate": [2, 3], "population": [1000, 2000]}) == [
+        "population"]
+    protocol = {**PROTOCOL, "grid": {"seed": [42, 43], "N": [100, 200]}}
+    per = {"seed=42,N=100": {"final_size": Counter({"84": 10})}}
+    over_seed = {"by": {"seed=42,N=100": {"mean_final_size_given_major_values": [84 / 42] * 10}}}
+    assert given_values_not_run(protocol, per, over_seed), "divided by a seed is not a fraction"
+    over_n = {"by": {"seed=42,N=100": {"mean_final_size_given_major_values": [84 / 100] * 10}}}
+    assert not any("never produced" in f for f in given_values_not_run(protocol, per, over_n))
+
+
+def test_float32_printing_passes_and_rounding_does_not() -> None:
+    import struct
+
+    per = {"R0=1.5,N=500": {"final_size": Counter({"163": 10})}}
+    f32 = struct.unpack("f", struct.pack("f", 163 / 500))[0]
+    as_f32 = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [f32] * 10}}}
+    assert not any("never produced" in f for f in given_values_not_run(PROTOCOL, per, as_f32))
+    rounded = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.3] * 10}}}
+    assert any("never produced" in f for f in given_values_not_run(PROTOCOL, per, rounded))

@@ -5506,7 +5506,8 @@ class Engine:
             recorded = _trial_runner.pooled(per_cell)
             not_run = (_trial_runner.reported_values_not_run(recorded, result_json)
                        + _trial_runner.given_values_not_run(protocol, per_cell, result_json))
-            found = row_problems + altered + _run_manifest.problems(protocol, manifest, result_json=result_json) + not_run
+            found = (row_problems + altered
+                     + _run_manifest.problems(protocol, manifest, result_json=result_json, trial_mode=True) + not_run)
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
             # again).

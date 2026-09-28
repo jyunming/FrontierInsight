@@ -783,13 +783,23 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
     return out, problems
 
 
+#: Grid axis names that are a size (a population, a number of agents): the only axes a trial's value may be divided by.
+_SIZE_AXIS = re.compile(
+    r"^(n|n_\w+|\w+_n|size|\w+_size|size_\w+|population|pop\w*|agents|n_?agents|particles|n_?particles|"
+    r"individuals|nodes|n_?nodes|households)$",
+    re.IGNORECASE,
+)
+
+
 def _count_axes(grid: dict[str, list[Any]]) -> list[str]:
-    """The grid axes that are sizes (every value a whole number above 1: a population N, a sample size), the only
-    ones a trial's value may be divided by to make it a fraction."""
+    """The grid axes that are sizes: named like one (N, population, agents, ...: never a seed, a replicate or a rate
+    such as R0) and every value a whole number above 1. The only axes a trial's value may be divided by to make it a
+    fraction."""
     out = []
     for axis, values in grid.items():
         nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
-        if nums and len(nums) == len(values) and all(float(v).is_integer() and v > 1 for v in nums):
+        if (_SIZE_AXIS.match(str(axis).strip()) and nums and len(nums) == len(values)
+                and all(float(v).is_integer() and v > 1 for v in nums)):
             out.append(axis)
     return out
 
@@ -835,16 +845,25 @@ def _derived_counts(per_cell: dict[str, dict[str, Counter]], cells: list[str], n
     return list(forms.values())
 
 
+#: How close a printed value must be to a trial's: a float32 or a float printed in full passes, a rounding does not.
+_VALUE_REL_TOL = 1e-6
+
+
 def _missing_exact(values: list[Any], counts: Counter) -> int:
-    """How many of ``values`` are not among ``counts`` (each counted value used once), compared by :func:`_exact_key`."""
-    left = Counter(counts)
+    """How many of ``values`` are not among ``counts`` (each counted value used once): equal within a relative
+    :data:`_VALUE_REL_TOL` (the noise of storing a number in fewer bits), never within a rounding the script chose."""
+    import bisect
+
+    pool = sorted(float(k) for k, n in counts.items() for _ in range(max(int(n), 0)))
     missing = 0
     for x in values:
-        k = _exact_key(x)
-        if k is None:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(float(x)):
             continue
-        if left[k] > 0:
-            left[k] -= 1
+        v = float(x)
+        tol = max(abs(v) * _VALUE_REL_TOL, 1e-12)
+        i = bisect.bisect_left(pool, v - tol)
+        if i < len(pool) and pool[i] <= v + tol:
+            pool.pop(i)
         else:
             missing += 1
     return missing
@@ -905,7 +924,29 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                 seen = True
         return total if seen else None
 
+    ok_trials = {key: max((sum(c.values()) for c in by_name.values()), default=0) for key, by_name in per_cell.items()}
+    everything = sum(ok_trials.values())
     for metric in means:
+        # The strata the mean is reported for: when FI cannot count their subset itself and they hold under half
+        # the run's trials, a selection of the trials cannot be told from the whole (see run_manifest.PARTIAL).
+        given = given_of.get(metric, "")
+        covered: set[str] = set()
+        unverifiable = False
+        for under, _mapping in _rm._mappings_with(result_json, f"{metric}_values"):
+            cells, _why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
+            if cells is None:
+                continue
+            own = [keyed[c] for c in cells if c in keyed]
+            covered.update(own)
+            if members(given, own) is None:
+                unverifiable = True
+        reported = sum(ok_trials.get(k, 0) for k in covered)
+        if covered and unverifiable and everything and reported < 0.5 * everything:
+            out.append(
+                f"`{metric}` is reported for settings holding {reported:g} of the run's {everything:g} trials, and FI "
+                f"cannot count its subset (`{given}`) itself, so a selection of the trials cannot be told from all of "
+                "them. " + _rm.PARTIAL.format(given=given)
+            )
         stem = re.compile(rf"^{re.escape(metric)}_.+_values$")
 
         def walk(node: Any, under: Any, path: str) -> None:
