@@ -852,7 +852,7 @@ _STREAM_TRANSIENT = re.compile(
 _STREAM_PERMANENT = re.compile(
     r"\b(content filter|moderation|invalid request|invalid api key|invalid authentication|authentication error|"
     r"unauthori[sz]ed|permission denied|permission error|forbidden|not found|quota|insufficient balance|"
-    r"insufficient quota|billing|payment required|account suspended)\b"
+    r"insufficient quota|billing|payment required|account suspended|context length exceeded)\b"
 )
 
 
@@ -875,9 +875,13 @@ def _stream_error(error: Any, request: Any) -> BaseException:
 
     if status is not None and (int(status) == 429 or int(status) >= 500):
         return httpx.RemoteProtocolError(text)
+    # A permanent type or code wins over a hopeful message ("invalid request ... try again with a shorter prompt"),
+    # unless the type or code itself says it will clear.
+    if _STREAM_PERMANENT.search(norm(kind)) and not _STREAM_TRANSIENT.search(norm(kind)):
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
     if _STREAM_TRANSIENT.search(norm(f"{kind} {message}")):
         return httpx.RemoteProtocolError(text)
-    if _STREAM_PERMANENT.search(norm(kind)) or (status is not None and 400 <= int(status) < 500):
+    if status is not None and 400 <= int(status) < 500:
         return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
     return httpx.RemoteProtocolError(text)
 

@@ -373,3 +373,17 @@ def test_stream_in_extra_body_is_refused_when_the_config_loads_and_in_a_per_call
 
     with pytest.raises(ValueError, match="stream"):
         asyncio.run(_chat(resolve_endpoint(ProviderConfig(name="openai")), handler, extra={"stream": True}))
+
+
+@pytest.mark.parametrize("error", [
+    {"type": "invalid_request_error", "message": "please try again with a shorter prompt"},
+    {"type": "authentication_error", "message": "temporarily blocked"},
+    {"code": "context_length_exceeded", "message": "too long"},
+])
+def test_a_permanent_type_or_code_is_not_retried_whatever_the_message_hopes(error) -> None:
+    import httpx
+
+    from core.provider import _stream_error
+
+    req = httpx.Request("POST", "https://api.moonshot.ai/v1/chat/completions")
+    assert isinstance(_stream_error(error, req), httpx.HTTPStatusError)
