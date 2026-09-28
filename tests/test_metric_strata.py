@@ -50,7 +50,8 @@ def test_headline_strata_are_allowed_and_said() -> None:
     headline = {"by_R0": {"R0=1.5,N=500": _stratum(31, 400), "R0=3.0,N=500": _stratum(300, 400)}}
     assert rm.problems(PROTOCOL, _manifest(), result_json=headline) == [], "no dead end: the diag_sir headline shape"
     assert rm.strata_coverage(PROTOCOL, headline) == [
-        "`mean_final_size_given_major` is reported for 2 of the protocol's 10 settings"]
+        "`mean_final_size_given_major` is reported for 2 of the protocol's 10 settings, so it describes those "
+        "settings only, not the whole design"]
     assert "reported for 2 of the protocol's 10 settings" in " ".join(ms.coverage_gaps(PROTOCOL, [headline], {}))
 
 
@@ -153,3 +154,41 @@ def test_a_made_up_fraction_or_a_value_borrowed_from_another_setting_is_caught()
     suffixed = {"mean_final_size_given_major_R0_1_5_values": [0.31] * 10}
     assert given_values_not_run(PROTOCOL, _per_cell(), suffixed), "a list with the stratum in its name is checked too"
     assert rm.DERIVED in rm.analysis_directive(["x"]), "the repair says the same thing the finding does"
+
+
+def test_only_a_size_axis_may_divide_a_value_and_nothing_multiplies_one() -> None:
+    cell = "R0=1.5,N=500"
+
+    def found(values: list[float]) -> list[str]:
+        return given_values_not_run(PROTOCOL, _per_cell(), {"by": {cell: {"mean_final_size_given_major_values": values}}})
+
+    assert found([150.0 / 500] * 10) == [], "divided by N (a size) is a fraction"
+    assert found([150.0 * 500] * 10), "multiplied by N is not"
+    assert found([150.0 * 1.5] * 10), "multiplied by R0 is not"
+    assert found([150.0 / 1.5] * 10), "divided by R0 (not a size) is not"
+
+
+def test_a_value_rounded_by_the_script_is_not_the_trial_value() -> None:
+    per = {"R0=1.5,N=500": {"final_size": Counter({"163": 10})}}
+    exact = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [163 / 500] * 10}}}
+    assert given_values_not_run(PROTOCOL, per, exact) == []
+    rounded = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.3] * 10}}}
+    assert given_values_not_run(PROTOCOL, per, rounded), "0.326 printed as 0.3 is a rounding the check does not accept"
+
+
+def test_when_the_trials_return_the_subset_the_count_is_fi_s_own() -> None:
+    per = {"R0=1.5,N=500": {"final_size": Counter({"150": 10, "1": 390}),
+                            "p_outbreak": Counter({"1": 10, "0": 390})}}
+    honest = {"by": {"R0=1.5,N=500": {"p_outbreak_count": 10, "mean_final_size_given_major_values": [150.0] * 10}}}
+    assert given_values_not_run(PROTOCOL, per, honest) == []
+    picked = {"by": {"R0=1.5,N=500": {"p_outbreak_count": 4, "mean_final_size_given_major_values": [150.0] * 4}}}
+    (found,) = given_values_not_run(PROTOCOL, per, picked)
+    assert "returned `p_outbreak` = 1 for 10 of them" in found
+
+
+def test_a_list_with_the_stratum_in_its_name_is_held_to_its_count_too() -> None:
+    result = {**_stratum(1850, 4000), "p_outbreak_R0_1_5_count": 31,
+              "mean_final_size_given_major_R0_1_5_values": [0.5] * 10}
+    assert any("`mean_final_size_given_major_R0_1_5_values` lists 10 trial(s)" in f for f in _no_problems(result))
+    missing = {**_stratum(1850, 4000), "mean_final_size_given_major_R0_1_5_values": [0.5] * 10}
+    assert any("has no `p_outbreak_R0_1_5_count`" in f for f in _no_problems(missing))

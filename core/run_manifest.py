@@ -322,8 +322,8 @@ def _values_listed(result_json: Any, metric_id: str) -> bool:
 #: What the values of a mean over a subset of the trials may be, said the same way by the check and the repair.
 DERIVED = (
     "Each value in a `<metric>_values` list is one trial's own value as FI_TRIALS holds it for that stratum's settings, "
-    "or that value divided (or multiplied) by one of the trial's own grid values (a final size divided by N is a "
-    "fraction)."
+    "or that value divided by the trial's own size setting (a final size divided by N is a fraction), exactly as "
+    "computed, not rounded."
 )
 
 #: How a stratified result is laid out, said the same way to the plan, the analysis and every repair.
@@ -387,6 +387,27 @@ def _suffixed_keys(result_json: Any, stem: str, tail: str) -> list[str]:
 
     walk(result_json)
     return found
+
+
+def _suffixed_pairs(result_json: Any, metric: str) -> list[tuple[str, dict[str, Any]]]:
+    """``(suffix, the mapping)`` for each ``<metric>_<suffix>_values`` list in ``result_json``."""
+    pattern = re.compile(rf"^{re.escape(metric)}_(.+)_values$")
+    out: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                m = pattern.match(k) if isinstance(k, str) else None
+                if m and isinstance(v, list):
+                    out.append((m.group(1), node))
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(result_json)
+    return out
 
 
 def _ok_per_cell(manifest: dict[str, Any], grid: dict[str, list[Any]]) -> dict[frozenset[tuple[str, Any]], float]:
@@ -480,6 +501,22 @@ def _given_findings(
                 trial_mode,
             ))
         placed.append((under, cells, count))
+    # A stratum written into the name: its list is still held to the count written beside it the same way.
+    for suffix, holder in _suffixed_pairs(result_json, metric):
+        values = _values_of({f"{metric}_values": holder[f"{metric}_{suffix}_values"]}, metric)
+        count = _num(holder.get(f"{given}_{suffix}_count"))
+        if count is None:
+            out.append((
+                f"`{metric}_{suffix}_values` has no `{given}_{suffix}_count` beside it, so the subset it averages "
+                f"cannot be counted. {NESTING}",
+                True,
+            ))
+        elif len(values) != int(count):
+            out.append((
+                f"`{metric}_{suffix}_values` lists {len(values)} trial(s) but `{given}_{suffix}_count` says {count:g}: "
+                f"a mean over the trials `{given}` counts lists exactly those trials",
+                trial_mode,
+            ))
     # A stratum that contains another cannot count fewer successes than it.
     for big_key, big_cells, big_count in placed:
         for small_key, small_cells, small_count in placed:
@@ -527,7 +564,10 @@ def strata_coverage(protocol: dict[str, Any] | None, result_json: Any) -> list[s
                 named = True
                 covered |= cells
         if named and len(covered) < len(everything):
-            out.append(f"`{spec['id']}` is reported for {len(covered)} of the protocol's {len(everything)} settings")
+            out.append(
+                f"`{spec['id']}` is reported for {len(covered)} of the protocol's {len(everything)} settings, so it "
+                "describes those settings only, not the whole design"
+            )
     return out
 
 

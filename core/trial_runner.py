@@ -783,39 +783,71 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
     return out, problems
 
 
+def _count_axes(grid: dict[str, list[Any]]) -> list[str]:
+    """The grid axes that are sizes (every value a whole number above 1: a population N, a sample size), the only
+    ones a trial's value may be divided by to make it a fraction."""
+    out = []
+    for axis, values in grid.items():
+        nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if nums and len(nums) == len(values) and all(float(v).is_integer() and v > 1 for v in nums):
+            out.append(axis)
+    return out
+
+
+def _exact_key(v: Any) -> str | None:
+    """A number to ten significant digits: equal up to floating-point noise, never up to a rounding a script chose."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return f"{float(v):.10g}"
+
+
 def _derived_counts(per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
                     grid: dict[str, list[Any]]) -> list[Counter]:
-    """The values of ``name`` in ``cells`` as they are, and each divided and multiplied by one of the cell's own grid
-    values: every form a list of that quantity may take (a final size, or a final size divided by N)."""
+    """The values of ``name`` in ``cells`` as they are, and each divided by one of the cell's own size axes
+    (:func:`_count_axes`): every form a list of that quantity may take (a final size, or a final size divided by N).
+    Keyed by :func:`_exact_key`."""
     from core import run_manifest as _rm
 
-    forms: list[Counter] = [Counter()]
-    per_axis: dict[tuple[str, str], Counter] = {}
+    sizes = _count_axes(grid)
+    forms: dict[str | None, Counter] = {None: Counter()}
     for key in cells:
         counts = (per_cell.get(key) or {}).get(name)
         if not counts:
             continue
-        forms[0].update(counts)
         parsed = _rm._parse_cell(key) or {}
-        for axis, raw in parsed.items():
+        for value, n in counts.items():
             try:
-                a = float(raw)
-            except ValueError:
+                x = float(value)
+            except (TypeError, ValueError):
                 continue
-            if not a or not math.isfinite(a):
-                continue
-            for op in ("div", "mul"):
-                target = per_axis.setdefault((axis, op), Counter())
-                for value, n in counts.items():
-                    try:
-                        x = float(value)
-                    except (TypeError, ValueError):
-                        continue
-                    y = x / a if op == "div" else x * a
-                    k = _value_key(y)
+            k = _exact_key(x)
+            if k is not None:
+                forms[None][k] += n
+            for axis in sizes:
+                try:
+                    a = float(parsed.get(axis, "nan"))
+                except ValueError:
+                    continue
+                if a and math.isfinite(a):
+                    k = _exact_key(x / a)
                     if k is not None:
-                        target[k] += n
-    return forms + list(per_axis.values())
+                        forms.setdefault(axis, Counter())[k] += n
+    return list(forms.values())
+
+
+def _missing_exact(values: list[Any], counts: Counter) -> int:
+    """How many of ``values`` are not among ``counts`` (each counted value used once), compared by :func:`_exact_key`."""
+    left = Counter(counts)
+    missing = 0
+    for x in values:
+        k = _exact_key(x)
+        if k is None:
+            continue
+        if left[k] > 0:
+            left[k] -= 1
+        else:
+            missing += 1
+    return missing
 
 
 def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, dict[str, Counter]],
@@ -824,7 +856,7 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
     the settings they are reported for, one sentence each. Each list under a stratum key (``R0=1.5``) is held to the
     trials of exactly those settings; one that names no stratum, and one with the stratum in its name
     (``<metric>_R0_1_5_values``), to every setting. A value is a trial's own value of one quantity, or that value divided
-    (or multiplied) by one of the trial's own grid values (:data:`core.run_manifest.DERIVED`)."""
+    by the trial's own size setting (:data:`core.run_manifest.DERIVED`), compared exactly; where the trials return the proportion as 0/1, each stratum's count is held to FI's own count."""
     from core import run_manifest as _rm
 
     if not isinstance(protocol, dict) or not per_cell or result_json is None:
@@ -846,13 +878,32 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
         if not numbers:
             return
         for name in names:
-            if any(not _not_among(numbers, form) for form in _derived_counts(per_cell, cells, name, grid)):
+            if any(not _missing_exact(numbers, form) for form in _derived_counts(per_cell, cells, name, grid)):
                 return
         out.append(
             f"the analysis reports `{where}` for `{metric}`, a mean over a subset of the trials, with values FI's trials "
             f"never produced in {'those settings' if len(cells) < len(all_cells) else 'the run'}: "
             + _rm.DERIVED
         )
+
+    given_of = {str(m["id"]): str(m["given"]) for m in protocol.get("metrics") or []
+                if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")}
+
+    def members(proportion: str, cells: list[str]) -> float | None:
+        """How many trials of ``cells`` are in the proportion's subset, when the trials returned it as 0/1; ``None``
+        when FI cannot tell (the analysis decides membership itself, from a threshold)."""
+        total = 0.0
+        seen = False
+        for key in cells:
+            counts = (per_cell.get(key) or {}).get(proportion)
+            if not counts:
+                continue
+            for value, n in counts.items():
+                if float(value) not in (0.0, 1.0):
+                    return None
+                total += float(value) * n
+                seen = True
+        return total if seen else None
 
     for metric in means:
         stem = re.compile(rf"^{re.escape(metric)}_.+_values$")
@@ -865,6 +916,16 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                         cells, _why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
                         own = [keyed[c] for c in (cells or []) if c in keyed] if cells else all_cells
                         check(metric, here, v, own or all_cells)
+                        given = given_of.get(metric, "")
+                        count = node.get(f"{given}_count")
+                        exact = members(given, own or all_cells) if cells else None
+                        if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
+                                and float(count) != exact:
+                            out.append(
+                                f"at `{path or 'the top level'}`, `{given}_count` says {count:g}, but FI's trials of "
+                                f"those settings returned `{given}` = 1 for {exact:g} of them: the mean averages "
+                                "every trial in the subset, not a selection"
+                            )
                     elif isinstance(k, str) and stem.match(k) and isinstance(v, list):
                         check(metric, here, v, all_cells)
                     else:

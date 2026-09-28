@@ -8232,6 +8232,12 @@ class Engine:
             }
             if precision_note:
                 payload["precision_note"] = precision_note
+            coverage = _run_manifest.strata_coverage(self._protocol_block(state), state.get("result_json"))
+            if coverage:
+                payload["coverage_note"] = (
+                    "; ".join(coverage) + ". Say so in the limitations and in the summary: the result is for those "
+                    "settings, not the whole design."
+                )
             if constant:
                 payload["aggregate_note"] = (
                     f"{len(constant)} further metric(s) were identical across "
