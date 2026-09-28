@@ -2666,7 +2666,7 @@ class Engine:
             self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
             # Kept for a person to see; the literature step derives its own, from the topic AND the chosen direction.
             _record_query_set(self.fi_dir, {"stage": "ideate", "queries": seed_queries,
-                                            "reason": "the idea step's grounding search (topic only)"})
+                                            "reason": "the idea step's grounding search (topic only)"}, log=self._log)
         seeded = await self.knowledge.asearch(
             seed_queries[0] if seed_queries else state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
@@ -2984,16 +2984,19 @@ class Engine:
         # changed inputs, derives them again, and the record says why.
         title = chosen.get("title") or ""
         derive_prompt = _literature_query_prompt(state["topic"], title, hypothesis, work_scope=scope)
-        key = _query_set_key(derive_prompt, this_iter)
-        saved = [e for e in _read_query_sets(self.fi_dir) if e.get("stage") == "literature"]
-        same = next((e for e in reversed(saved) if e.get("key") == key and e.get("queries")), None)
+        # The model that derives them is part of what they answer: a different model derives them again.
+        deriving_model = self._model_for_node("literature_query") or self.config.provider.model or ""
+        key = _query_set_key(derive_prompt, this_iter, deriving_model)
+        saved = [e for e in _read_query_sets(self.fi_dir, log=self._log) if e.get("stage") == "literature"]
+        same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))), None)
         if same is not None and self.config.knowledge.enabled:
-            queries = [str(q) for q in same["queries"]][:3]
+            queries = [q.strip() for q in same["queries"]][:3]
             query_set = {**same, "reused": True}
-            self._log.info("[literature] reusing the search queries derived for this pass: %r", queries)
+            self._log.info("[literature] reusing the search queries derived for this pass (by %s): %r",
+                           same.get("model") or "the model then", queries)
         else:
             if any(e.get("iteration") == this_iter for e in saved):
-                reason = "the topic, the chosen direction or the hypothesis changed"
+                reason = "the topic, the chosen direction, the hypothesis or the model changed"
             elif saved:
                 reason = f"a new search pass ({this_iter})"
             else:
@@ -3004,14 +3007,16 @@ class Engine:
             query_set = {
                 "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
                 "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(),
-                "model": (self._chat_provenance("literature_query") or {}).get("model") if queries else None,
+                "model": ((self._chat_provenance("literature_query") or {}).get("model") or deriving_model or None)
+                if queries else None,
                 "reason": reason, "reused": False,
             }
             if queries:  # a failed derivation is not kept: the next run tries again
-                _record_query_set(self.fi_dir, {k: v for k, v in query_set.items() if k != "reused"})
+                _record_query_set(self.fi_dir, {k: v for k, v in query_set.items() if k != "reused"}, log=self._log)
         derived = bool(queries)
         if queries:
-            self._log.info("[literature] search queries derived from the topic: %r", queries)
+            if not query_set.get("reused"):
+                self._log.info("[literature] search queries derived from the topic: %r", queries)
             query = queries[0]
         else:
             queries = [query.strip()]
@@ -18253,25 +18258,47 @@ def _literature_query_prompt(topic: str, idea_title: str = "", hypothesis: str =
 _LITERATURE_QUERIES = "literature_queries.json"
 
 
-def _query_set_key(prompt: str, iteration: int) -> str:
+def _query_set_key(prompt: str, iteration: int, model: str = "") -> str:
     """What a saved query set answers: the exact derivation prompt (topic, chosen direction, hypothesis, kind of
-    quest) and the search pass. A new pass (a broaden-the-literature re-entry) is a new key, so it searches afresh."""
-    return hashlib.sha256(f"{iteration}\n{prompt}".encode("utf-8")).hexdigest()
+    quest), the search pass and the model that derives them. A new pass (a broaden-the-literature re-entry) or another
+    model is a new key, so it derives afresh."""
+    return hashlib.sha256(f"{iteration}\n{model}\n{prompt}".encode("utf-8")).hexdigest()
 
 
-def _read_query_sets(fi_dir: Path) -> list[dict[str, Any]]:
-    try:
-        data = json.loads((fi_dir / _LITERATURE_QUERIES).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+def _usable_queries(value: Any) -> bool:
+    """A saved query list that can be reused: a non-empty list of non-empty strings (not a string, not a hand edit)."""
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(q, str) and q.strip() for q in value))
+
+
+def _read_query_sets(fi_dir: Path, *, log: Any = None) -> list[dict[str, Any]]:
+    """The saved query sets. A file that cannot be read as the record is set aside as ``.bad`` (kept, never
+    silently overwritten) and a warning says so; nothing is reused from it."""
+    path = fi_dir / _LITERATURE_QUERIES
+    if not path.exists():
         return []
-    entries = data.get("entries") if isinstance(data, dict) else None
-    return [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("no list of entries")
+    except (OSError, ValueError) as e:
+        try:
+            path.replace(path.with_name(path.name + ".bad"))
+            where = f"it was kept as {path.name}.bad"
+        except OSError:
+            where = "it could not be moved aside"
+        if log is not None:
+            log.warning("[literature] %s could not be read (%s); %s, and the search queries are derived again",
+                        path.name, e, where)
+        return []
+    return [e for e in entries if isinstance(e, dict)]
 
 
-def _record_query_set(fi_dir: Path, entry: dict[str, Any]) -> None:
+def _record_query_set(fi_dir: Path, entry: dict[str, Any], *, log: Any = None) -> None:
     """Add one derivation to ``.fi/literature_queries.json`` (best-effort: a record never stops a search)."""
     try:
-        entries = _read_query_sets(fi_dir) + [entry]
+        entries = _read_query_sets(fi_dir, log=log) + [entry]
         fi_dir.mkdir(parents=True, exist_ok=True)
         tmp = fi_dir / (_LITERATURE_QUERIES + ".tmp")
         tmp.write_text(json.dumps({"schema": 1, "entries": entries[-50:]}, indent=1), encoding="utf-8")
