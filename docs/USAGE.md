@@ -38,7 +38,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. Skipped when `ideate_tournament` is on. |
 | `ideate_tournament` | 0 or C(N,2) | Off by default. When on with the default 3 ideas, fires 3 parallel pairwise comparisons (~one round-trip wall-clock) and picks the highest-win-count idea. |
 | `ideate_query` | 1 per quest, when the knowledge layer is on | Turns the topic into a keyword query for the few sources the idea step is grounded in. |
-| `literature_query` | 1 per literature pass | Turns the topic into keyword search queries. |
+| `literature_query` | 1 per literature pass (a resume that runs the same pass again reuses them) | Turns the topic into keyword search queries. |
 | `literature_foundational` | 1 per literature pass | Names the foundational works a keyword search misses. |
 | `literature_screen` | 1 per literature pass | Grades every retrieved source for citability. |
 | `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |

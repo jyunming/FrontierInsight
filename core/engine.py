@@ -254,6 +254,9 @@ class QuestState(TypedDict, total=False):
     # ``literature_queries``.
     literature_query: str
     literature_queries: list[str]
+    # The literature step's query set as a record: the queries, what they answer (``key``: the derivation prompt and
+    # the search pass), the prompt's hash, the model, why they were derived, and whether they were reused.
+    literature_query_set: dict[str, Any]
     # True when ``literature_query`` is a keyword query (derived from the topic, or the requery that found sources),
     # False when it is the fallback ``title + topic`` concatenation.
     literature_query_derived: bool
@@ -2661,6 +2664,9 @@ class Engine:
         ) if self.knowledge.enabled else []
         if seed_queries:
             self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
+            # Kept for a person to see; the literature step derives its own, from the topic AND the chosen direction.
+            _record_query_set(self.fi_dir, {"stage": "ideate", "queries": seed_queries,
+                                            "reason": "the idea step's grounding search (topic only)"}, log=self._log)
         seeded = await self.knowledge.asearch(
             seed_queries[0] if seed_queries else state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
@@ -2973,12 +2979,44 @@ class Engine:
         # concatenation above is kept, so a flaky model degrades to the old
         # query rather than to no search at all.
         scope = self._work_scope(state)
-        queries = await self._derive_literature_queries(
-            state["topic"], chosen.get("title") or "", hypothesis, work_scope=scope,
-        )
+        # The same search pass with the same inputs uses the queries it derived before (a resume after a pause runs
+        # this step again): no second call, and no drift to other queries finding other papers. A new pass, or
+        # changed inputs, derives them again, and the record says why.
+        title = chosen.get("title") or ""
+        derive_prompt = _literature_query_prompt(state["topic"], title, hypothesis, work_scope=scope)
+        # The model that derives them is part of what they answer: a different model derives them again.
+        deriving_model = self._model_for_node("literature_query") or self.config.provider.model or ""
+        key = _query_set_key(derive_prompt, this_iter, deriving_model)
+        saved = [e for e in _read_query_sets(self.fi_dir, log=self._log) if e.get("stage") == "literature"]
+        same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))), None)
+        if same is not None and self.config.knowledge.enabled:
+            queries = [q.strip() for q in same["queries"]][:3]
+            query_set = {**same, "reused": True}
+            self._log.info("[literature] reusing the search queries derived for this pass (by %s): %r",
+                           same.get("model") or "the model then", queries)
+        else:
+            if any(e.get("iteration") == this_iter for e in saved):
+                reason = "the topic, the chosen direction, the hypothesis or the model changed"
+            elif saved:
+                reason = f"a new search pass ({this_iter})"
+            else:
+                reason = "the first search"
+            queries = await self._derive_literature_queries(
+                state["topic"], title, hypothesis, work_scope=scope,
+            )
+            query_set = {
+                "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
+                "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(),
+                "model": ((self._chat_provenance("literature_query") or {}).get("model") or deriving_model or None)
+                if queries else None,
+                "reason": reason, "reused": False,
+            }
+            if queries:  # a failed derivation is not kept: the next run tries again
+                _record_query_set(self.fi_dir, {k: v for k, v in query_set.items() if k != "reused"}, log=self._log)
         derived = bool(queries)
         if queries:
-            self._log.info("[literature] search queries derived from the topic: %r", queries)
+            if not query_set.get("reused"):
+                self._log.info("[literature] search queries derived from the topic: %r", queries)
             query = queries[0]
         else:
             queries = [query.strip()]
@@ -3272,6 +3310,7 @@ class Engine:
             "literature_query": query.strip(),
             "literature_queries": queries,
             "literature_query_derived": derived,
+            "literature_query_set": query_set,
         }
 
     def _design_prompt(self, state: QuestState) -> str:
@@ -4787,43 +4826,7 @@ class Engine:
         """
         if not self.config.knowledge.enabled:
             return []
-        if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
-            engines = "OpenAlex, Crossref, CORE, OpenAIRE, DOAJ"
-            angle = "a specific period, place, work, group or case within the topic"
-            frame = "the discipline or theoretical frame the topic is studied in"
-            vocabulary = (
-                "Use the words scholars of this subject write under: the names "
-                "of the works, people, periods, places, movements, genres and "
-                "concepts involved, and the discipline's own terms. Do not add "
-                "method words such as model, simulation, dataset or analysis "
-                "unless the topic itself is about them."
-            )
-        else:
-            engines = "arXiv, OpenAlex, Crossref"
-            angle = "the method, mechanism or measured quantity"
-            frame = "the broader problem or application area it belongs to"
-            vocabulary = (
-                "Use the terms researchers in this field publish under: the "
-                "standard names of the methods, the system studied and the "
-                "quantity measured."
-            )
-        prompt = (
-            "Write THREE literature search queries for this research topic, one "
-            f"per facet below. They go to academic search engines ({engines}); "
-            "the first also goes to web search.\n\n"
-            f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
-            + (f"CHOSEN RESEARCH DIRECTION:\n{idea_title[:200]}\n\n" if idea_title else "")
-            + (f"HYPOTHESIS UNDER TEST:\n{hypothesis[:300]}\n\n" if hypothesis else "")
-            + "FACETS:\n"
-            "1. the core subject, in the field's standard terms\n"
-            f"2. {angle}\n"
-            f"3. {frame}\n\n"
-            "A search engine matches keywords, not sentences. " + vocabulary
-            + " Spell out acronyms. No full sentences, quotes, boolean "
-            "operators or wildcards. 3 to 8 words each; shorter queries match "
-            "more.\n\n"
-            'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
-        )
+        prompt = _literature_query_prompt(topic, idea_title, hypothesis, work_scope=work_scope)
         try:
             raw = await self._chat(prompt, node=node)
             parsed = _parse_json_lenient(raw, node=node)
@@ -18203,6 +18206,127 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     # Elsevier / Wiley / …) is also a real paywalled paper the user can fetch.
     from core.knowledge import _is_academic_source
     return _is_academic_source(str(md.get("url") or ""))
+
+
+
+
+def _literature_query_prompt(topic: str, idea_title: str = "", hypothesis: str = "", *,
+                             work_scope: str = WORK_SCOPE_PAPERS) -> str:
+    """The prompt that turns a topic (and, at the literature step, the chosen direction and the hypothesis) into three
+    keyword search queries: one per facet, in the vocabulary of the kind of quest. See
+    ``Engine._derive_literature_queries``."""
+    if work_scope == WORK_SCOPE_PAPERS_AND_BOOKS:
+        engines = "OpenAlex, Crossref, CORE, OpenAIRE, DOAJ"
+        angle = "a specific period, place, work, group or case within the topic"
+        frame = "the discipline or theoretical frame the topic is studied in"
+        vocabulary = (
+            "Use the words scholars of this subject write under: the names "
+            "of the works, people, periods, places, movements, genres and "
+            "concepts involved, and the discipline's own terms. Do not add "
+            "method words such as model, simulation, dataset or analysis "
+            "unless the topic itself is about them."
+        )
+    else:
+        engines = "arXiv, OpenAlex, Crossref"
+        angle = "the method, mechanism or measured quantity"
+        frame = "the broader problem or application area it belongs to"
+        vocabulary = (
+            "Use the terms researchers in this field publish under: the "
+            "standard names of the methods, the system studied and the "
+            "quantity measured."
+        )
+    return (
+        "Write THREE literature search queries for this research topic, one "
+        f"per facet below. They go to academic search engines ({engines}); "
+        "the first also goes to web search.\n\n"
+        f"RESEARCH TOPIC:\n{topic[:1200]}\n\n"
+        + (f"CHOSEN RESEARCH DIRECTION:\n{idea_title[:200]}\n\n" if idea_title else "")
+        + (f"HYPOTHESIS UNDER TEST:\n{hypothesis[:300]}\n\n" if hypothesis else "")
+        + "FACETS:\n"
+        "1. the core subject, in the field's standard terms\n"
+        f"2. {angle}\n"
+        f"3. {frame}\n\n"
+        "A search engine matches keywords, not sentences. " + vocabulary
+        + " Spell out acronyms. No full sentences, quotes, boolean "
+        "operators or wildcards. 3 to 8 words each; shorter queries match "
+        "more.\n\n"
+        'Reply as JSON only: {"queries": ["<facet 1>", "<facet 2>", "<facet 3>"]}'
+    )
+
+
+#: The query sets the literature searches used, one line per derivation (``.fi/literature_queries.json``).
+_LITERATURE_QUERIES = "literature_queries.json"
+
+
+def _query_set_key(prompt: str, iteration: int, model: str = "") -> str:
+    """What a saved query set answers: the exact derivation prompt (topic, chosen direction, hypothesis, kind of
+    quest), the search pass and the model that derives them. A new pass (a broaden-the-literature re-entry) or another
+    model is a new key, so it derives afresh."""
+    return hashlib.sha256(f"{iteration}\n{model}\n{prompt}".encode("utf-8")).hexdigest()
+
+
+def _usable_queries(value: Any) -> bool:
+    """A saved query list that can be reused: a non-empty list of non-empty strings (not a string, not a hand edit)."""
+    return (isinstance(value, list) and bool(value)
+            and all(isinstance(q, str) and q.strip() for q in value))
+
+
+class _QuerySetsUnreadable(Exception):
+    """The record exists but could not be read just now (locked, access denied): it is left alone."""
+
+
+def _read_query_sets(fi_dir: Path, *, log: Any = None, strict: bool = False) -> list[dict[str, Any]]:
+    """The saved query sets. A file that is not the record (bad JSON, wrong shape) is set aside as
+    ``.bad.<time>`` (kept, never silently overwritten) and a warning says so; nothing is reused from it. A file that
+    cannot be read just now is left where it is (``strict``: raise :class:`_QuerySetsUnreadable` so nothing
+    overwrites it)."""
+    path = fi_dir / _LITERATURE_QUERIES
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        if log is not None:
+            log.warning("[literature] %s could not be read just now (%s); it is left as it is, and the search "
+                        "queries are derived again", path.name, e)
+        if strict:
+            raise _QuerySetsUnreadable(str(e)) from None
+        return []
+    try:
+        data = json.loads(text)
+        entries = data.get("entries") if isinstance(data, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("no list of entries")
+    except ValueError as e:
+        bad = path.with_name(f"{path.name}.bad.{time.strftime('%Y%m%dT%H%M%S')}")
+        try:
+            path.replace(bad)
+            where = f"it was kept as {bad.name}"
+        except OSError:
+            where = "it could not be moved aside"
+            if strict:
+                raise _QuerySetsUnreadable(str(e)) from None
+        if log is not None:
+            log.warning("[literature] %s could not be read (%s); %s, and the search queries are derived again",
+                        path.name, e, where)
+        return []
+    return [e for e in entries if isinstance(e, dict)]
+
+
+def _record_query_set(fi_dir: Path, entry: dict[str, Any], *, log: Any = None) -> None:
+    """Add one derivation to ``.fi/literature_queries.json`` (best-effort: a record never stops a search, and a
+    record that could not be read is never overwritten)."""
+    try:
+        entries = _read_query_sets(fi_dir, log=log, strict=True) + [entry]
+    except _QuerySetsUnreadable:
+        return
+    try:
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        tmp = fi_dir / (_LITERATURE_QUERIES + ".tmp")
+        tmp.write_text(json.dumps({"schema": 1, "entries": entries[-50:]}, indent=1), encoding="utf-8")
+        tmp.replace(fi_dir / _LITERATURE_QUERIES)
+    except OSError:
+        pass
 
 
 _PAPERS_ASKED = "papers_asked.json"
