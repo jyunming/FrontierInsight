@@ -823,6 +823,82 @@ def _cli_effort_args(spec: _CliSpec, level: str) -> list[str]:
     return spec.effort_args(level)
 
 
+#: Hosts whose chat calls are streamed. Long non-streamed requests to Moonshot's Kimi API stalled on the way (zero bytes
+#: until the read timeout, 27k-token prompts, 2026-09-27) while the same request streamed completed; other providers
+#: were not seen to stall, so they keep the plain request.
+_STREAMED_HOSTS = frozenset({"api.moonshot.ai", "api.moonshot.cn"})
+
+
+def _http_streams(endpoint: "ResolvedEndpoint") -> bool:
+    """Whether this HTTP endpoint's chat calls are streamed (see :data:`_STREAMED_HOSTS`)."""
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(endpoint.base_url or "").hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _STREAMED_HOSTS
+
+
+async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
+                         timeout: Any) -> dict[str, Any]:
+    """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
+    ``finish_reason``, ``usage``, ``model``). The read timeout applies to each wait for more of the answer, so a stream
+    that stops sending fails with ``httpx.ReadTimeout`` just as a stalled plain request does. An error status raises
+    ``httpx.HTTPStatusError`` as ``raise_for_status`` would; an error sent inside the stream, or a stream that ends before
+    the answer does, raises ``httpx.RemoteProtocolError`` (a transient: the call is tried again)."""
+    stream_body = {**body, "stream": True, "stream_options": {"include_usage": True}}
+    parts: list[str] = []
+    usage: dict[str, Any] = {}
+    model = body.get("model")
+    finish = None
+    done = False
+    async with http.stream("POST", url, json=stream_body, headers=headers, timeout=timeout) as r:
+        if r.status_code >= 400:
+            await r.aread()
+            r.raise_for_status()
+        async for line in r.aiter_lines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            try:
+                chunk = json.loads(data)
+            except ValueError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                err = chunk["error"]
+                msg = err.get("message") if isinstance(err, dict) else str(err)
+                raise httpx.RemoteProtocolError(f"the model's stream reported an error: {str(msg)[:300]}")
+            if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+                usage = chunk["usage"]
+            if isinstance(chunk.get("model"), str) and chunk["model"]:
+                model = chunk["model"]
+            for choice in chunk.get("choices") or []:
+                if not isinstance(choice, dict):
+                    continue
+                piece = (choice.get("delta") or {}).get("content")
+                if isinstance(piece, str) and piece:
+                    parts.append(piece)
+                if choice.get("finish_reason"):
+                    finish = choice["finish_reason"]
+                    # Some servers send the usage on the choice that finishes.
+                    if isinstance(choice.get("usage"), dict) and choice["usage"]:
+                        usage = choice["usage"]
+    if not done and finish is None:
+        raise httpx.RemoteProtocolError("the model's stream ended before its answer did")
+    return {
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(parts)}, "finish_reason": finish}],
+        "usage": usage,
+    }
+
+
 def _http_reasoning_effort(endpoint: "ResolvedEndpoint") -> str:
     """The ``reasoning_effort`` value to put in an OpenAI-compatible request
     body, or ``""`` (with a one-time warning) when it must not be sent."""
@@ -3308,15 +3384,18 @@ class LLMClient:
                 http_timeout = node_budget(
                     self._node_http_timeout_s, node, self._http_timeout_s,
                 )
-                r = await self._http.post(
-                    url, json=body, headers=headers, timeout=http_timeout,
-                )
-                # Raise for any error status; the retry predicate
-                # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                # (bad key, quota, content policy, oversized body) surface
-                # immediately instead of burning the backoff budget.
-                r.raise_for_status()
-        data = r.json()
+                if _http_streams(self.endpoint):
+                    data = await _post_streamed(self._http, url, body, headers, http_timeout)
+                else:
+                    r = await self._http.post(
+                        url, json=body, headers=headers, timeout=http_timeout,
+                    )
+                    # Raise for any error status; the retry predicate
+                    # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                    # (bad key, quota, content policy, oversized body) surface
+                    # immediately instead of burning the backoff budget.
+                    r.raise_for_status()
+                    data = r.json()
         # Capture token usage when the upstream returned
         # one. OpenAI-compatible servers (openai / codex / gemini /
         # ollama recent versions) include ``usage`` at the response
