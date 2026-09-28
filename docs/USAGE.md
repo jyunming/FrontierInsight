@@ -232,6 +232,12 @@ provider:
     clarify:       gpt-4o-mini
     write:         claude-3-5-sonnet
     review:        gpt-5
+  # The most a step's answer may be, in tokens (HTTP providers only; the same step names as node_models). Unset, no
+  # limit is sent and the model's own applies. When a step's answer is cut off at its limit, the quest stops and says
+  # which step to raise here (or to give another model); a limit set here is first tried once more at twice the size.
+  node_max_tokens:
+    write:     16000
+    implement: 32000
 
   # Multi-model ensemble per node. Fans out a node's chat call across
   # `models` in parallel and merges with `merge`. Supported on

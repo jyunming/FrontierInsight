@@ -114,6 +114,8 @@ from .provider import (
     append_cost_row,
     model_for_node,
     outcome_of as _outcome_of,
+    _ModelAnswerProblem,
+    ModelAnswerTruncated,
     resolve_endpoint_async,
     set_model_call_archive as _set_model_call_archive,
 )
@@ -1683,7 +1685,13 @@ class Engine:
             self._progress_stage(name)
             began = time.monotonic()
             try:
-                out = await fn(state)
+                try:
+                    out = await fn(state)
+                except _ModelAnswerProblem as e:
+                    # An answer the model did not finish (or the provider withheld) stops for a person, who can give
+                    # the step a larger output limit or another model; the step runs again on resume.
+                    self._pause_for_model_output(name, e)
+                    raise  # unreachable: the pause interrupts
             except GraphBubbleUp as e:
                 if isinstance(e, GraphInterrupt):
                     self._audit("node_paused", node=name, pause=self._audit_pause)
@@ -4134,6 +4142,48 @@ class Engine:
         self._log.info("[%s] paused — %s", kind, headline)
         self._progress(f"Waiting for you: {headline}")
         return interrupt({**payload, "pause": descriptor})
+
+    def _pause_for_model_output(self, step: str, e: Any) -> None:
+        """Stop because a model's answer at ``step`` was cut off at its output limit or withheld by a content filter:
+        say which call it was and what to change. A SUPPLY pause: resume runs the step again with the new settings."""
+        call = str(getattr(e, "node", "") or step)
+        key = call.split(".", 1)[0] if call.startswith("review_panel.") else call
+        who = " / ".join(str(x) for x in (getattr(e, "provider", None), getattr(e, "model", None)) if x) or "the model"
+        truncated = isinstance(e, ModelAnswerTruncated)
+        limit = getattr(e, "limit", None)
+        if truncated:
+            headline = f"the answer at the {call} step was cut off at its output limit"
+            steps = [
+                f"The answer {who} gave at `{call}` stopped at its output limit"
+                + (f" ({limit} tokens)" if limit else " (the model's own; no limit was set)")
+                + ", so it is incomplete and was not used: a cut-off script, plan or paper would be passed on as whole.",
+                "Give that step a larger output limit in the quest's `config.yaml`: "
+                f"`provider: {{node_max_tokens: {{{key}: {max(int(limit or 0) * 2, 16000)}}}}}` (HTTP providers), "
+                "then resume.",
+                f"Or give it a model with a larger output: `provider: {{node_models: {{{key}: <model>}}}}`, then resume.",
+                "Resuming runs this step again with the new setting; what the quest did before it is kept.",
+            ]
+            recommended = f"Raise `provider.node_max_tokens.{key}`, then go on."
+            alternatives = [f"Give `{key}` another model: `provider.node_models.{key}`, then go on."]
+        else:
+            headline = f"the provider withheld the answer at the {call} step with its content filter"
+            steps = [
+                f"{who} answered `{call}`, but the provider's content filter withheld the answer, so there is nothing "
+                "to use. Asking the same model the same thing again gives the same result.",
+                f"Give that step another model: `provider: {{node_models: {{{key}: <model>}}}}` in the quest's "
+                "`config.yaml`, then resume.",
+                "Or change what the quest asks (the topic, or the plan with `--revise-plan \"...\"`) if its wording is "
+                "what the filter refused, then resume.",
+            ]
+            recommended = f"Give `{key}` another model: `provider.node_models.{key}`, then go on."
+            alternatives = ["Change the topic or the plan's wording, then go on."]
+        self._log.warning("[%s] %s: %s", step, headline, e)
+        self._pause_for_human(
+            kind="model_output", interaction="supply", headline=headline, steps=steps,
+            recommended=recommended, alternatives=alternatives,
+            payload={"quest_id": self.quest_id, "step": call, "setting": key,
+                     "reason": "truncated" if truncated else "content_filtered"},
+        )
 
     def _pause_stage_enabled(self, stage: str) -> bool:
         """Whether ``pauses.supply`` asks for a stop at ``stage``. ``both`` is
@@ -11321,10 +11371,18 @@ class Engine:
                 response = await call()
             except Exception as exc:
                 failed = _LAST_CALL.get() or {}
+                if isinstance(exc, _ModelAnswerProblem) and not exc.node:
+                    exc.node = node  # the step a pause names (a CLI does not know it)
                 self._record_attempts(node, messages, attempts, requested_model, final=exc)
                 if not (attempts and attempts[-1].get("exc") is exc):
-                    self._record_model_call(node, messages, None, served={**failed, "reported": False},
-                                            outcome=_outcome_of(exc), requested_model=requested_model)
+                    usage = getattr(exc, "usage", None) if isinstance(getattr(exc, "usage", None), dict) else None
+                    finish = getattr(exc, "finish_reason", None)
+                    self._record_model_call(
+                        node, messages, None,
+                        served={**failed, "reported": False, **({"finish_reason": finish} if finish else {})},
+                        outcome=_outcome_of(exc), requested_model=requested_model, usage=usage)
+                    self._cost_of_failed_attempt(node, getattr(exc, "model", None) or failed.get("model"), usage,
+                                                 messages)
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)
@@ -11337,10 +11395,24 @@ class Engine:
     def _record_attempts(self, node: str, messages: Any, attempts: list[dict[str, Any]], requested_model: str | None,
                          *, final: BaseException | None = None) -> None:
         for a in attempts:
+            usage = a.get("usage") if isinstance(a.get("usage"), dict) else None
             self._record_model_call(
                 node, messages, None, outcome=str(a.get("error") or "error"), requested_model=requested_model,
-                served={"provider": a.get("provider"), "model": a.get("model"), "fallback": bool(a.get("fallback"))},
+                served={"provider": a.get("provider"), "model": a.get("model"), "fallback": bool(a.get("fallback")),
+                        **({"finish_reason": a["finish_reason"]} if a.get("finish_reason") else {})},
+                usage=usage,
             )
+            self._cost_of_failed_attempt(node, a.get("model"), usage, messages)
+
+    def _cost_of_failed_attempt(self, node: str, model: Any, usage: dict[str, Any] | None, messages: Any) -> None:
+        """A failed attempt that did answer (an answer cut off at its limit) was paid for: its cost row too."""
+        if not usage or getattr(self, "fi_dir", None) is None:
+            return
+        try:
+            append_cost_row(self.fi_dir, node=node, model=str(model or ""), usage=usage, messages=messages,
+                            response=None, ledger=False)
+        except Exception as e:  # noqa: BLE001 -- a cost row never touches the quest
+            self._log.debug("[cost] failed attempt not recorded: %r", e)
 
     def _record_model_call(self, node: str, messages: Any, response: Any, *, served: dict[str, Any] | None = None,
                            outcome: str = "ok", usage: dict[str, Any] | None = None,
@@ -11393,9 +11465,10 @@ class Engine:
                 "api_key_env": None,
                 "node_model_fallbacks": {},
                 "fallback": [],
-                # Sampling settings belong to the primary's model, not to a fallback's.
+                # Sampling settings and output limits belong to the primary's model, not to a fallback's.
                 "fixed_temperature": None,
                 "extra_body": {},
+                "node_max_tokens": {},
             })
             ep = await resolve_endpoint_async(derived, self.supervisor)
             self._log.info(
