@@ -1086,7 +1086,11 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert ("analyze", "cross_check") in plain_edges
     # `write → claim_check → review` (claim_check grounds each paper claim to
     # evidence; it's a passthrough when engine.claim_grounding is off).
-    assert ("write", "claim_check") in plain_edges
+    # ... conditional since a person's refine goes to the writer first: a point the text cannot answer sends the
+    # quest back to the design, anything else goes on to the claim check.
+    assert "write" in g.branches
+    write_branch = next(iter(g.branches["write"].values()))
+    assert write_branch.ends == {"check": "claim_check", "redesign": "design"}
     assert ("claim_check", "review") in plain_edges
 
     # Conditional branches: review-revise, execute-reflect-retry,
@@ -1117,7 +1121,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # (accept/reject). Same ``revise``/``done`` labels the auto path uses.
     assert "human_feedback" in g.branches
     hf_branch = next(iter(g.branches["human_feedback"].values()))
-    assert hf_branch.ends == {"revise": "design", "done": END}
+    assert hf_branch.ends == {"rewrite": "write", "revise": "design", "done": END}
     reflect_branch = next(iter(g.branches["execute_reflect"].values()))
     assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))

@@ -377,7 +377,7 @@ export class Bridge {
             [
                 { label: "Accept", description: "Finalise the quest as-is" },
                 { label: "Reject", description: "Mark verdict=rejected and finalise" },
-                { label: "Refine", description: "Loop back to design with feedback" },
+                { label: "Refine", description: "Back to the writing step with your notes; FI goes back to the design only if a point needs a new experiment" },
             ],
             { title: "Human review", placeHolder: "Choose how to resolve this review", ignoreFocusOut: true },
         );
@@ -396,7 +396,7 @@ export class Bridge {
         if (action === "refine") {
             const fb = await vscode.window.showInputBox({
                 title: "Refine — feedback for the next iteration",
-                prompt: "What should the rewriter change? (empty = downgrade to accept)",
+                prompt: "What should change? The writing step answers your notes; a point that needs a new experiment sends the quest back to the design. (Empty = accept)",
                 ignoreFocusOut: true,
             });
             if (fb === undefined) {

@@ -1249,8 +1249,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     review.add_argument(
         "--refine", type=str, default=None, metavar="FEEDBACK",
-        help="With --resume: send the quest back to revise with this feedback, "
-             "e.g. --refine \"tighten the methods section\".",
+        help="With --resume: send your notes back to the writing step first; if a point needs a new experiment, "
+             "FI goes back to the design. e.g. --refine \"tighten the methods section\".",
     )
     p.add_argument(
         "--vscode-bridge-port",
@@ -1736,7 +1736,8 @@ async def _cli_human_feedback_callback(
     if paper:
         print(f"  Paper        : {paper}")
     print()
-    print("Choose: accept (finalise), reject (abandon), refine (loop with feedback)")
+    print("Choose: accept (finalise), reject (abandon), refine (your notes go to the writing step first; "
+          "the design only if a point needs a new experiment)")
     try:
         raw = input("  action [accept]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):

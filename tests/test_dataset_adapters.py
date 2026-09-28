@@ -339,11 +339,9 @@ async def test_worldbank_fetches_indicators_in_parallel(
     top_k=3 and an 8 s per-call timeout, serial worst case is 24 s
     — way over the documented <5 s budget.
 
-    We verify concurrency by having each mocked fetch sleep for
-    ~50 ms; if dispatched in parallel, total wall-clock is roughly
-    50 ms; serial would be 150 ms for 3 indicators. The threshold
-    is generous (100 ms) to avoid CI flakiness, but still well
-    below the serial-execution floor."""
+    We verify concurrency by counting how many mocked fetches are in
+    flight at once (serial calls never overlap), not by wall-clock time.
+    """
     import asyncio as _asyncio
     import time as _time
 
@@ -354,28 +352,33 @@ async def test_worldbank_fetches_indicators_in_parallel(
     ]
     monkeypatch.setattr(wb_mod, "_indicator_cache", indicators)
 
+    import threading as _threading
+
+    lock = _threading.Lock()
+    running = {"now": 0, "max": 0}
+
     def slow_fetch(url: str, *, timeout_s: float = 8.0) -> Any:
         if "/indicator/" in url:
-            _time.sleep(0.05)  # 50 ms per call
+            with lock:
+                running["now"] += 1
+                running["max"] = max(running["max"], running["now"])
+            _time.sleep(0.2)  # long enough that parallel calls overlap on any runner
+            with lock:
+                running["now"] -= 1
         return [
             {"page": 1, "pages": 1, "total": 1},
             [{"country": {"id": "WLD"}, "date": "2022", "value": 100}],
         ]
     monkeypatch.setattr(wb_mod, "_http_get_json_sync", slow_fetch)
 
-    start = _time.monotonic()
     rows = await WorldBankAdapter().search(
         "indicator one two three", top_k=3,
     )
-    elapsed = _time.monotonic() - start
 
     assert len(rows) == 3
-    # Serial would be ~150 ms; parallel ~50 ms + overhead. 130 ms
-    # threshold is below the serial floor with margin for CI jitter.
-    assert elapsed < 0.13, (
-        f"per-indicator fetches must run in parallel; wall-clock "
-        f"{elapsed:.3f}s suggests serial execution"
-    )
+    # How many fetches were in flight at once, not how long they took: a slow runner stretches wall-clock time
+    # (0.188 s on a Windows runner against a 0.13 s limit) but serial calls never overlap.
+    assert running["max"] >= 2, "per-indicator fetches must run in parallel; they ran one at a time"
 
 
 def test_dataset_row_defaults_to_empty_metadata() -> None:

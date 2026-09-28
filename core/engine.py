@@ -387,6 +387,18 @@ class QuestState(TypedDict, total=False):
     # The design node reads ALL of these on every revise pass so a
     # later iteration doesn't drop an earlier ask. Pre-resume empty.
     feedback_history: list[dict[str, Any]]
+    # A person's refine goes to the writing step first (``_route_after_human_feedback``). ``refine_written_for``: how
+    # many refines the writer has answered (so each is answered once). ``refine_needs_experiment``: the points
+    # of it the writer said need a new or different experiment (then the quest goes back to the design).
+    # ``refine_scope``: what the refine came to, ``paper`` or ``experiment`` (empty on a write that answered none).
+    # ``feedback_rounds_from``: the first round of ``feedback_history`` the review is shown (the rounds since the last
+    # gate answer). ``feedback_rewrite_for``: the refine count when a rewrite was made for an unanswered note; the
+    # same note flagged again after it sends the quest to the design.
+    refine_written_for: int
+    feedback_rounds_from: int
+    feedback_rewrite_for: int
+    refine_needs_experiment: list[str]
+    refine_scope: str
     # Names of pause-points the engine has already paused at on this
     # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
     # secondary "already paused" signal for test paths that mock the
@@ -814,11 +826,16 @@ class Engine:
                         # iteration==0).
                         if reopen and not prior_snapshot.next:
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
+                            # The notes of earlier refines were answered by earlier passes: this pass redoes the
+                            # design, and neither the writer nor the review treats them as new.
+                            _answered = _refine_count(prior_snapshot.values or {})  # type: ignore[arg-type]
                             await graph.aupdate_state(
                                 run_config,
                                 {
                                     "human_feedback": {"action": "refine"},
                                     "iteration": _it + 1,
+                                    "refine_written_for": _answered,
+                                    "feedback_rounds_from": len((prior_snapshot.values or {}).get("feedback_history") or []),
                                 },
                                 as_node="human_feedback",
                             )
@@ -1666,6 +1683,10 @@ class Engine:
                 "pauses_review": self.config.pauses.review,
             },
             "human_feedback": {"action": (state.get("human_feedback") or {}).get("action", "accept")},
+            "write": {
+                "refine_scope": state.get("refine_scope") or "",
+                "needs_experiment": list(state.get("refine_needs_experiment") or []),
+            },
         }
         return facts.get(source, {})
 
@@ -1836,7 +1857,13 @@ class Engine:
         )
         # write → claim_check → review. claim_check grounds each paper claim to
         # evidence (a no-op passthrough when engine.claim_grounding is off).
-        g.add_edge("write", "claim_check")
+        # A person's refine that the writer says needs a new experiment goes back to the design; everything else goes
+        # on to the checks and the review as always.
+        g.add_conditional_edges(
+            "write",
+            self._audited_route("write", self._route_after_write),
+            {"check": "claim_check", "redesign": "design"},
+        )
         g.add_edge("claim_check", "review")
         g.add_conditional_edges(
             "review",
@@ -1854,12 +1881,12 @@ class Engine:
                 "human_feedback": "human_feedback",
             },
         )
-        # human_feedback resolves to one of three outcomes after the
-        # callback returns: accept / reject → END, refine → design.
+        # human_feedback resolves to one of three outcomes after the callback returns: accept / reject → END,
+        # refine → write (the writer answers the notes; one that needs a new experiment goes on to design).
         g.add_conditional_edges(
             "human_feedback",
             self._audited_route("human_feedback", self._route_after_human_feedback),
-            {"revise": "design", "done": END},
+            {"rewrite": "write", "revise": "design", "done": END},
         )
         return g
 
@@ -2106,6 +2133,13 @@ class Engine:
                     "already re-run its experiment — writing the paper again instead",
                     must_flag, rerun_for,
                 )
+            if (any(_hit_name(h) == _UNANSWERED_NOTE_HIT for h in must_flag)
+                    and state.get("feedback_rewrite_for") == _refine_count(state) and _refine_count(state)):
+                self._log.info(
+                    "[route] the review still finds the person's note unanswered after a rewrite for it — "
+                    "going back to the design",
+                )
+                return "revise"
             if _hits_need_only_a_rewrite(must_flag):
                 self._log.info(
                     "[route] must_flag_hits=%s are all about the text — rewriting the paper",
@@ -2127,21 +2161,37 @@ class Engine:
         return "done"
 
     def _route_after_human_feedback(self, state: QuestState) -> str:
-        """``refine`` loops back to design with the user's feedback in state;
-        ``accept`` / ``reject`` finalise.
+        """``refine`` goes to the writing step with the person's notes; ``accept`` / ``reject`` finalise.
+
+        The notes are answered where they are cheapest first: the writer fixes what the text can fix and lists what
+        needs a new or different experiment, and only that sends the quest back to the design
+        (:meth:`_route_after_write`); after the rewrite the review's own routing applies. A refine used to go to the
+        design every time, so a note about one sentence redesigned the study (and could drift its protocol).
 
         A human ``refine`` is honoured **regardless of ``max_iterations``** — it
         is a deliberate, interactive request, not the unattended review loop the
         cap exists to bound. The user stays in control: the refine runs one
-        design→…→review pass and lands back at the human-review gate, where they
+        pass and lands back at the human-review gate, where they
         can refine again or accept. (Earlier this was gated on the iteration
         budget, so a refine submitted past the cap was silently dropped — the
         user clicked Refine and nothing happened.)"""
         hf = state.get("human_feedback") or {}
         action = hf.get("action", "accept")
         if action == "refine":
-            return "revise"
+            # A refine with no notes is FI re-opening a finished quest (``--reopen``, ``--update``): the steps its
+            # changed settings affect run again, from the design, as before.
+            notes = str(hf.get("feedback") or "").strip()
+            history = [str(h.get("text") or "").strip() for h in (state.get("feedback_history") or [])
+                       if isinstance(h, dict)]
+            # Notes the history does not hold (a state saved before refines were recorded there) reach only the
+            # design, which reads them from ``human_feedback``: send them there rather than drop them.
+            return "rewrite" if notes and history and history[-1] == notes else "revise"
         return "done"
+
+    def _route_after_write(self, state: QuestState) -> str:
+        """After a draft: back to the design when the writer, answering a person's refine, named points that need a
+        new or different experiment; on to the claim check and the review otherwise."""
+        return "redesign" if state.get("refine_needs_experiment") else "check"
 
     # ---- nodes -----------------------------------------------------------
 
@@ -3267,6 +3317,14 @@ class Engine:
                     f"honour every round below, not only the most recent) ---\n"
                     f"{blocks}\n"
                 ).strip()
+        needs = [str(p).strip() for p in state.get("refine_needs_experiment") or [] if str(p).strip()]
+        if needs:
+            review_feedback = (
+                f"{review_feedback}\n\n"
+                "--- POINTS OF THE USER'S FEEDBACK THAT NEED A NEW OR DIFFERENT EXPERIMENT "
+                "(the writer could not answer them in the text) ---\n"
+                + "\n".join(f"  - {p}" for p in needs) + "\n"
+            ).strip()
         frozen_protocol = _frozen.protocol_of(self.quest_root)
         if frozen_protocol:
             review_feedback = (
@@ -8792,7 +8850,7 @@ class Engine:
                     "redesign": True}
         return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
 
-    async def _write_whole_paper(self, state: QuestState, persona_block: str) -> str:
+    async def _write_whole_paper(self, state: QuestState, persona_block: str, *, refine_round: bool = False) -> str:
         """The paper's markdown as the writer gives it: the whole paper, written
         from the study, with the review of an earlier draft (when there is one)
         in the prompt. A first draft always comes from here, and so does a revise
@@ -8842,7 +8900,7 @@ class Engine:
             page_limit_note=_page_limit_note(
                 resolve_page_limit(self.config), _paper_figure_count(state),
             ),
-            review_feedback=_format_review_for_writer(state),
+            review_feedback=_format_review_for_writer(state, refine_round=refine_round),
             skills_block=(
                 self._writing_skills_block(state)
                 or "(no writing guidance selected for this quest)"
@@ -8870,9 +8928,20 @@ class Engine:
         # of the earlier draft and leaves the rest as it was; anything else
         # (a first draft, a hit about the whole paper, edits the engine cannot
         # apply) writes the whole paper.
-        markdown = await self._patch_flagged_passages(state, persona_block)
+        refine_round = _refine_round(state)
+        # A person's notes are answered by the whole-paper writer, which reads them (the passage editor does not).
+        markdown = None if refine_round else await self._patch_flagged_passages(state, persona_block)
         if markdown is None:
-            markdown = await self._write_whole_paper(state, persona_block)
+            markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
+        needs_experiment: list[str] = []
+        if refine_round:
+            markdown, needs_experiment = _take_needs_experiment(markdown)
+            self._log.info(
+                "[write] answered the person's notes%s",
+                (": %d point(s) need a new experiment, so the quest goes back to the design (%s)"
+                 % (len(needs_experiment), "; ".join(p[:80] for p in needs_experiment)))
+                if needs_experiment else " in the text; the experiment stands",
+            )
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -8929,10 +8998,20 @@ class Engine:
         # resume, ``user_pauses_fired`` carries "before_review" and the
         # gate falls through to review.
         self._maybe_pause_for_user_input(state, "before_review")
-        return {
+        out: QuestState = {
             "paper_md": str(paper_path), "literature": literature,
             "paper_basis": _paper_basis(state),
+            "refine_needs_experiment": needs_experiment,
         }
+        if refine_round:
+            out["refine_written_for"] = _refine_count(state)
+            out["refine_scope"] = "experiment" if needs_experiment else "paper"
+        else:
+            out["refine_scope"] = ""
+            if any(_hit_name(h) == _UNANSWERED_NOTE_HIT for h in (state.get("review") or {}).get("must_flag_hits") or []):
+                # A rewrite for a note the review said the paper leaves unanswered: flagged again, it goes to the design.
+                out["feedback_rewrite_for"] = _refine_count(state)
+        return out
 
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
         """The earlier draft with the passages the review named edited, or
@@ -10531,6 +10610,7 @@ class Engine:
             foundational_check_block=_foundational_review_block(
                 state.get("literature") or [], paper_md, self.config.output.audience,
             ),
+            user_feedback_block=_user_feedback_review_block(state),
             # The whole paper. A 16 KB cut hid the second half of a real
             # 34,910-character paper, so the review graded a draft it had not
             # read; the cap now only guards against a runaway file.
@@ -10942,6 +11022,8 @@ class Engine:
                 "Headless run? "
                 f"`fi --resume {self.quest_id} --accept` (or `--reject` / "
                 "`--refine \"what to change\"`).",
+                "Refine sends your notes back to the writing step first; if a point needs a new "
+                "experiment, FI goes back to the design.",
             ],
             payload={"human_review": snapshot},
         )
@@ -10981,6 +11063,8 @@ class Engine:
         if action == "refine":
             update["iteration"] = state.get("iteration", 0) + 1
             history = list(state.get("feedback_history") or [])
+            # The review is shown the notes of this gate answer, not the ones an earlier gate answered.
+            update["feedback_rounds_from"] = len(history)
             history.append({
                 "iteration": state.get("iteration", 0),
                 "text": feedback,
@@ -15644,7 +15728,11 @@ _TEXT_ONLY_HITS = frozenset({
     # experiment ran and recorded its results; the paper quotes a figure none
     # of them holds, so what needs rewriting is the prose, not the experiment.
     "unsourced_number",
+    # A person's refine point the paper does not answer: the writer said it needs no new experiment (a point that
+    # does goes to the design from the writing step), so the paper is written again.
+    "user_feedback_unaddressed",
 })
+_UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be
@@ -15913,7 +16001,54 @@ def _paper_basis(state: QuestState) -> str:
     return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
-def _format_review_for_writer(state: QuestState) -> str:
+# A line of the writer's reply naming a point that needs an experiment: bare, quoted, bulleted, numbered (``1.`` /
+# ``1)``), bold or in backticks.
+_NEEDS_EXPERIMENT_RE = re.compile(
+    r"^[ \t>*_`-]*(?:\d+[.)][ \t]*)?[*_`]*NEEDS_EXPERIMENT[*_`]*:[*_`]*[ \t]*(.+?)[ \t*_`]*$", re.MULTILINE)
+
+
+def _refine_round(state: QuestState) -> bool:
+    """This write answers a person's refine it has not answered yet: a round of ``feedback_history`` the writer has
+    not answered (a refine whose notes are only in ``human_feedback``, an older state's shape, is not one)."""
+    return ((state.get("human_feedback") or {}).get("action") == "refine"
+            and _refine_count(state) > int(state.get("refine_written_for") or 0))
+
+
+def _refine_count(state: QuestState) -> int:
+    """How many refines the person has sent (each is a round of ``feedback_history``)."""
+    return sum(1 for h in state.get("feedback_history") or [] if isinstance(h, dict) and str(h.get("text") or "").strip())
+
+
+def _take_needs_experiment(markdown: str) -> tuple[str, list[str]]:
+    """The paper without its ``NEEDS_EXPERIMENT:`` lines, and the points they name."""
+    points = [m.group(1).strip() for m in _NEEDS_EXPERIMENT_RE.finditer(markdown) if m.group(1).strip()]
+    if not points:
+        return markdown, []
+    cleaned = _NEEDS_EXPERIMENT_RE.sub("", markdown)
+    # A fenced reply followed by the points: with the points gone, the fence is the outer one again.
+    cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", cleaned).strip())
+    return cleaned.rstrip() + "\n", points
+
+
+def _user_feedback_review_block(state: QuestState) -> str:
+    """The review prompt's ``$user_feedback_block``: what the person asked for at the last gate (the rounds since
+    ``feedback_rounds_from``; only the latest one for an older state), so a point the paper leaves unanswered is a
+    must-fix finding. Earlier rounds were answered at an earlier gate and are not raised again. Empty when there is
+    none."""
+    history = [h for h in state.get("feedback_history") or [] if isinstance(h, dict)]
+    start = state.get("feedback_rounds_from")
+    history = history[int(start):] if isinstance(start, int) else history[-1:]
+    rounds = [str(h.get("text") or "").strip() for h in history]
+    rounds = [r for r in rounds if r]
+    if not rounds:
+        return ""
+    return (
+        "\n\n## What the person asked for (their refine notes; a point the paper does not answer is a must-fix "
+        "finding: add `user_feedback_unaddressed` to must_flag_hits)\n" + "\n".join(f"- {r}" for r in rounds)
+    )
+
+
+def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) -> str:
     """The write prompt's ``$review_feedback``: what the review of the previous
     draft asks for (its must-fix hits, the captions that describe what their
     figure does not show, its weaknesses and suggestions, and the claims the
@@ -15961,6 +16096,13 @@ def _format_review_for_writer(state: QuestState) -> str:
         lines += [
             "The user's feedback (honour every round):",
             *(f"  - (round {h.get('iteration', '?')}) {str(h['text']).strip()}" for h in rounds),
+        ]
+    if refine_round and rounds:
+        lines += [
+            "Answer the user's feedback in the text wherever the text can answer it. If a point can only be answered "
+            "by running a new or different experiment, do not write numbers for it: end your reply with one line per "
+            "such point, starting the line with NEEDS_EXPERIMENT: followed by the point in one sentence (FI removes "
+            "these lines and goes back to the design). Write no such line when the text can answer every point.",
         ]
     return "\n".join(lines) or "(none — first draft)"
 

@@ -472,10 +472,75 @@ async def test_human_refine_loops_past_max_iterations(
     artifacts = await asyncio.wait_for(
         engine.run(human_feedback_callback=cb), timeout=300,
     )
-    # The refine looped back to design and returned to the gate → 2 calls.
+    # The refine ran another pass and returned to the gate → 2 calls.
     # (Pre-fix it routed straight to done after the first refine → 1 call.)
     assert len(calls) == 2
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    # A note the text can answer goes to the writer, not the design: the design ran once, before the first review.
+    from core import audit_log
+
+    events = audit_log.read(engine.audit.path)
+    assert sum(1 for e in events if e.get("kind") == "node_completed" and e.get("node") == "design") == 1
+    hf = [e for e in events if e.get("kind") == "route_decision" and e.get("node") == "human_feedback"]
+    assert [e.get("chosen") for e in hf][:1] == ["rewrite"]
+    at = next(i for i, e in enumerate(events) if e is hf[0])
+    after = next(e for e in events[at + 1:] if e.get("kind") == "route_decision" and e.get("node") == "write")
+    assert after["facts"]["refine_scope"] == "paper" and after["chosen"] == "check"
+    first = next(e for e in events if e.get("kind") == "route_decision" and e.get("node") == "write")
+    assert first["facts"]["refine_scope"] == "", "the first draft answered no refine"
+
+
+@pytest.mark.asyncio
+async def test_a_refine_the_text_cannot_answer_redesigns_through_the_real_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The writer names a point that needs an experiment: the design runs again with that point in its prompt, and
+    the review of the new draft is shown the person's notes."""
+    import asyncio
+
+    cfg = Config(
+        topic="smoke-test topic for a refine that needs an experiment",
+        title="hf-refine-redesign",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(
+            max_iterations=1, review_loop=False,
+            human_feedback_gate="after_review", auto_accept_on_pass=False,
+        ),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    designs: list[str] = []
+    reviews: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        if kind == "Experiment Design":
+            designs.append(prompt)
+        if kind == "Review":
+            reviews.append(prompt)
+        reply = _fake_response_for(prompt)
+        if kind == "Writing" and "starting the line with NEEDS_EXPERIMENT:" in prompt:
+            reply += "\n\n1. NEEDS_EXPERIMENT: run a permutation test for the p-value\n"
+        return reply
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+    calls: list[dict] = []
+
+    async def cb(snapshot: dict) -> dict:
+        calls.append(snapshot)
+        if len(calls) == 1:
+            return {"action": "refine", "feedback": "report a p-value for the comparison"}
+        return {"action": "accept"}
+
+    artifacts = await asyncio.wait_for(engine.run(human_feedback_callback=cb), timeout=300)
+    assert len(calls) == 2 and artifacts.paper_md is not None
+    assert len(designs) == 2, "the point that needs an experiment sent the quest back to the design"
+    assert "run a permutation test for the p-value" in designs[1]
+    assert "NEEDS_EXPERIMENT" not in artifacts.paper_md.read_text(encoding="utf-8")
+    assert "report a p-value for the comparison" in reviews[-1] and "What the person asked for" in reviews[-1]
 
 
 @pytest.mark.asyncio
