@@ -49,9 +49,22 @@ class BridgeError(RuntimeError):
     being clicked again would be pointless)."""
 
 
-#: The chat model that answered the current task's last bridge call, as the extension's ``lm_done`` named it
-#: (``{"id", "vendor", "family", "version", "name"}``), or ``None`` when the extension did not say (an older one).
+#: The chat model the extension selected and sent the current task's last bridge call to, as its ``lm_done`` named
+#: it (``{"id", "vendor", "family", "version", "name"}``), or ``None`` when the extension did not say.
 LAST_SERVED: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("fi_vscode_served", default=None)
+#: The token counts of the current task's last bridge call, when the extension measured them.
+LAST_BRIDGE_USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("fi_vscode_usage", default=None)
+
+#: Names a chat picker uses for "let the service choose": they name no model, so they prove nothing about which
+#: model answered.
+_ROUTER_ALIASES = frozenset({"auto", "default", "copilot-auto", "auto-mode"})
+
+
+def is_router_alias(served: dict[str, str] | None) -> bool:
+    """``served`` names a router ("auto") rather than a model."""
+    if not served:
+        return False
+    return any(str(served.get(k) or "").strip().lower() in _ROUTER_ALIASES for k in ("id", "family"))
 
 
 class VSCodeBridgeClient:
@@ -101,8 +114,9 @@ class VSCodeBridgeClient:
         # Streaming-chunk buffers per request, in case the extension
         # streams in chunks before sending the final lm_done.
         self._chunks: dict[int, list[str]] = {}
-        # The model each request's ``lm_done`` named (``served_model``), until ``chat`` takes it for that request.
+        # The model and token counts each request's ``lm_done`` named, until ``chat`` takes them for that request.
         self._served: dict[int, dict[str, str]] = {}
+        self._usage: dict[int, dict] = {}
         self._next_id = 1
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # serialize writes
@@ -162,6 +176,7 @@ class VSCodeBridgeClient:
         self._pending.clear()
         self._chunks.clear()
         self._served.clear()
+        self._usage.clear()
 
     async def chat(
         self,
@@ -189,6 +204,7 @@ class VSCodeBridgeClient:
         assert self._writer is not None
 
         LAST_SERVED.set(None)
+        LAST_BRIDGE_USAGE.set(None)
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
@@ -218,6 +234,7 @@ class VSCodeBridgeClient:
                 # This request's own answer: set in this task's context, so calls made at the same time never read
                 # each other's model.
                 LAST_SERVED.set(self._served.pop(req_id, None))
+                LAST_BRIDGE_USAGE.set(self._usage.pop(req_id, None))
                 return content
             except asyncio.TimeoutError as e:
                 raise BridgeError(
@@ -228,6 +245,7 @@ class VSCodeBridgeClient:
             self._pending.pop(req_id, None)
             self._chunks.pop(req_id, None)
             self._served.pop(req_id, None)
+            self._usage.pop(req_id, None)
 
     async def clarify(self, questions: dict[str, Any]) -> dict[str, Any]:
         """Pause for human-in-the-loop clarify answers. The extension
@@ -334,6 +352,7 @@ class VSCodeBridgeClient:
             self._pending.clear()
             self._chunks.clear()
             self._served.clear()
+            self._usage.clear()
             w = self._writer
             self._reader = None
             self._writer = None
@@ -382,7 +401,7 @@ class VSCodeBridgeClient:
             pt = msg.get("prompt_tokens")
             ct = msg.get("completion_tokens")
             if isinstance(pt, int) and isinstance(ct, int) and msg.get("measured"):
-                self.last_usage = {
+                self.last_usage = self._usage[req_id] = {
                     "prompt_tokens": pt,
                     "completion_tokens": ct,
                     "total_tokens": pt + ct,

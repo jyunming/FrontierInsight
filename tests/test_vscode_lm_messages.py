@@ -84,6 +84,8 @@ console.log(JSON.stringify({
   noId: servedModel({ vendor: "copilot", family: "x" }) === undefined,
   blank: servedModel({ id: "  ", vendor: "copilot" }) === undefined,
   none: servedModel(undefined) === undefined,
+  auto: servedModel({ id: "auto", vendor: "copilot" }) === undefined,
+  autoFamily: servedModel({ id: "copilot-x", vendor: "copilot", family: "Auto" }) === undefined,
 }));
 """
 
@@ -107,3 +109,4 @@ def test_the_extension_names_the_model_that_answered() -> None:
     assert out["full"] == {"id": "gpt-4.1", "vendor": "copilot", "family": "gpt-4.1", "version": "2025-04",
                            "name": "GPT-4.1"}, "only the identity fields, not the model's limits"
     assert out["noId"] and out["blank"] and out["none"], "no id: nothing is reported"
+    assert out["auto"] and out["autoFamily"], "a router alias names no model: nothing is reported"

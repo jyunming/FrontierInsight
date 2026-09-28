@@ -468,7 +468,7 @@ export class PersistentBridge {
                 // that includes the platform's own overhead.
                 usage_scope: "sent_only",
                 measured: promptTokens > 0,
-                // Which model answered, so FI can record it (additive: an older FI ignores it).
+                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
                 served_model: servedModel(model),
             });
             cts2.dispose();

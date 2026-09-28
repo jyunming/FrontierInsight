@@ -10555,8 +10555,9 @@ class Engine:
         ok = [r for r in panel_results if r.get("status") == "ok"]
         if len(ok) < 2 or len({str(r.get("requested_model")) for r in ok}) < 2:
             return None
-        # Only a model the provider reported can show a collapse; a transport that reports none (a CLI, the VS Code
-        # bridge) leaves it unknown, which is not taken for one model.
+        # Only a model the provider reported can show a collapse; a transport that reports none (some CLIs, a VS Code
+        # extension that sends no model name, a router alias such as "auto") leaves it unknown, which is not taken for
+        # one model.
         if not all(r.get("actual_model_reported") for r in ok):
             return None
         actual = {f"{r.get('actual_provider') or '?'}/{r.get('actual_model') or '?'}" for r in ok}
@@ -10841,8 +10842,8 @@ class Engine:
                 "actual_provider": self._chat_provenance(f"review_panel.{name}").get("provider"),
                 "actual_model": self._chat_provenance(f"review_panel.{name}").get("model"),
                 "fallback": bool(self._chat_provenance(f"review_panel.{name}").get("fallback")),
-                # False when the transport does not say which model served the call (a CLI, the VS Code bridge):
-                # ``actual_model`` is then only the model asked for.
+                # False when the transport does not say which model served the call (some CLIs, a VS Code extension
+                # that sends no model name, a router alias): ``actual_model`` is then only the model asked for.
                 "actual_model_reported": bool(self._chat_provenance(f"review_panel.{name}").get("reported")),
             }
 

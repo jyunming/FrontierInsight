@@ -3386,19 +3386,20 @@ class LLMClient:
                 messages, model_override=model, temperature=temperature,
                 node=node,
             )
-            from .vscode_bridge import LAST_SERVED
+            from .vscode_bridge import LAST_BRIDGE_USAGE, LAST_SERVED, is_router_alias
 
             served = LAST_SERVED.get()
-            if served and served.get("id"):
-                # The extension named the chat model it selected for this very call (the one VS Code routes it
-                # to): known as reported, not assumed from the hint.
+            if served and served.get("id") and not is_router_alias(served):
+                # The extension named the chat model it selected and sent this very call to (as VS Code reports it):
+                # known as reported, not assumed from the hint. The provider stays FI's own name; the model's vendor
+                # rides beside it. A router alias ("auto") names no model, so it is left unreported.
                 self.last_model = served["id"]
-                LAST_CALL.set({"provider": served.get("vendor") or "vscode", "model": served["id"], "reported": True})
+                LAST_CALL.set({"provider": self.last_provider, "model": served["id"], "reported": True,
+                               **({"vendor": served["vendor"]} if served.get("vendor") else {})})
             # The extension counts with the model's own tokenizer when it
             # can, which beats the char/4 estimate — take it, and let the
-            # estimator fill in only when it could not.
-            bridge = getattr(self, "_bridge", None)
-            measured = getattr(bridge, "last_usage", None) if bridge else None
+            # estimator fill in only when it could not. This call's own counts (per request, in this task).
+            measured = LAST_BRIDGE_USAGE.get()
             if measured:
                 self.last_usage = measured
             self._fill_usage_estimate_if_missing(messages, text)

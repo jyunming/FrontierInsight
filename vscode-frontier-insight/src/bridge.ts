@@ -649,7 +649,7 @@ export class Bridge {
                 type: "lm_done",
                 id: req.id,
                 content: accumulated,
-                // Which model answered, so FI can record it (additive: an older FI ignores it).
+                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
                 served_model: servedModel(model),
             });
         } catch (e) {
