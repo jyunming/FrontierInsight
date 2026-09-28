@@ -19,7 +19,11 @@ def _bodies(endpoint: ResolvedEndpoint, *calls: dict) -> list[dict]:
     sent: list[dict] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content))
+        body = json.loads(request.content)
+        sent.append(body)
+        if body.get("stream"):  # Kimi's calls are streamed
+            return httpx.Response(200, content=b'data: {"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                                              b"data: [DONE]\n\n")
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}], "usage": {}})
 
     async def run() -> None:

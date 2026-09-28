@@ -823,6 +823,169 @@ def _cli_effort_args(spec: _CliSpec, level: str) -> list[str]:
     return spec.effort_args(level)
 
 
+#: Hosts whose chat calls are streamed. Long non-streamed requests to Moonshot's Kimi API stalled on the way (zero bytes
+#: until the read timeout, 27k-token prompts, 2026-09-27) while the same request streamed completed; other providers
+#: were not seen to stall, so they keep the plain request.
+_STREAMED_HOSTS = frozenset({"api.moonshot.ai", "api.moonshot.cn"})
+
+
+def _http_streams(endpoint: "ResolvedEndpoint") -> bool:
+    """Whether this HTTP endpoint's chat calls are streamed (see :data:`_STREAMED_HOSTS`)."""
+    from urllib.parse import urlparse
+
+    try:
+        host = (urlparse(endpoint.base_url or "").hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _STREAMED_HOSTS
+
+
+#: An error sent inside a stream that will clear by itself (read from its type, code and message): tried again, like a
+#: 429 or a 5xx. Checked first, so "rate limit ... quota exceeded, retry in 20s" is a rate limit, not an empty account.
+_STREAM_TRANSIENT = re.compile(
+    r"\b(rate[ _-]?limit\w*|overload\w*|capacity|try again|retry (in|after)|temporar\w*|timed? ?out|"
+    r"unavailable|busy|server[ _]error|internal[ _]error|bad gateway)\b"
+)
+#: Classes that trying again cannot fix (the same request fails the same way): read from the error's ``type`` and
+#: ``code`` only, never its free-text message, as whole words. Moonshot's ``content_filter`` and
+#: ``exceeded_current_quota_error`` are among them.
+_STREAM_PERMANENT = re.compile(
+    r"\b(content filter|moderation|invalid request|invalid api key|invalid authentication|authentication error|"
+    r"unauthori[sz]ed|permission denied|permission error|forbidden|not found|quota|insufficient balance|"
+    r"insufficient quota|billing|payment required|account suspended|context length exceeded)\b"
+)
+
+
+def _stream_error(error: Any, request: Any) -> BaseException:
+    """The exception an error sent inside a stream becomes: transient (``httpx.RemoteProtocolError``, tried again) when
+    it says it will clear -- a rate limit, an overload, a 429 or 5xx code (:data:`_STREAM_TRANSIENT`) -- or when nothing
+    names a permanent class; a 4xx-equivalent ``httpx.HTTPStatusError`` (not tried again) only when its ``type`` or
+    ``code`` names one (:data:`_STREAM_PERMANENT`)."""
+    if isinstance(error, dict):
+        kind = " ".join(str(error.get(k) or "") for k in ("type", "code"))
+        message = str(error.get("message") or error.get("type") or error.get("code") or error)
+        status = next((error.get(k) for k in ("code", "status", "status_code")
+                       if isinstance(error.get(k), int) or str(error.get(k) or "").isdigit()), None)
+    else:
+        kind, message, status = "", str(error), None
+    text = f"the model's stream reported an error: {message[:300]}"
+
+    def norm(s: str) -> str:
+        return re.sub(r"[_\-]+", " ", s.lower())
+
+    if status is not None and (int(status) == 429 or int(status) >= 500):
+        return httpx.RemoteProtocolError(text)
+    # A permanent type or code wins over a hopeful message ("invalid request ... try again with a shorter prompt"),
+    # unless the type or code itself says it will clear.
+    if _STREAM_PERMANENT.search(norm(kind)) and not _STREAM_TRANSIENT.search(norm(kind)):
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
+    if _STREAM_TRANSIENT.search(norm(f"{kind} {message}")):
+        return httpx.RemoteProtocolError(text)
+    if status is not None and 400 <= int(status) < 500:
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
+    return httpx.RemoteProtocolError(text)
+
+
+async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
+                         timeout: float) -> dict[str, Any]:
+    """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
+    ``finish_reason``, ``usage``, ``model``).
+
+    Time: ``timeout`` (the step's own HTTP budget) bounds the whole call, as it bounded a plain request, which sends
+    nothing until its answer is complete; a stream kept open by keep-alive comments, or one that trickles for longer
+    than that, fails with ``httpx.ReadTimeout`` and is tried again under the usual rules. Events follow the SSE format
+    (several ``data:`` lines of one event are joined; an event that does not parse is a protocol error, never skipped).
+    An error status raises as ``raise_for_status`` would; an error sent inside the stream is a 4xx-equivalent when
+    retrying cannot fix it (:func:`_stream_error`) and transient otherwise. A stream that ends without a
+    ``finish_reason`` was cut off and is tried again; one that finished without ``[DONE]`` or without usage is kept,
+    with a warning."""
+    options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
+    stream_body = {**body, "stream": True, "stream_options": {**options, "include_usage": True}}
+    parts: list[str] = []
+    usage: dict[str, Any] = {}
+    model = body.get("model")
+    finish = None
+    done = False
+    request = httpx.Request("POST", url)
+
+    def take(event_name: str, data_lines: list[str]) -> bool:
+        """Fold one event in; True when it was ``[DONE]``."""
+        nonlocal usage, model, finish
+        if not data_lines:
+            return False
+        data = "\n".join(data_lines)
+        if data.strip() == "[DONE]":
+            return True
+        try:
+            chunk = json.loads(data)
+        except ValueError:
+            if event_name == "error":
+                raise _stream_error(data, request) from None
+            raise httpx.RemoteProtocolError(f"the model's stream sent an event that is not JSON: {data[:200]!r}") from None
+        if event_name == "error" or (isinstance(chunk, dict) and chunk.get("error")):
+            raise _stream_error(chunk.get("error", chunk) if isinstance(chunk, dict) else chunk, request)
+        if not isinstance(chunk, dict):
+            raise httpx.RemoteProtocolError(f"the model's stream sent an event that is not an object: {data[:200]!r}")
+        if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+            usage = chunk["usage"]
+        if isinstance(chunk.get("model"), str) and chunk["model"]:
+            model = chunk["model"]
+        for choice in chunk.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
+            piece = (choice.get("delta") or {}).get("content")
+            if isinstance(piece, str) and piece:
+                parts.append(piece)
+            if choice.get("finish_reason"):
+                finish = choice["finish_reason"]
+                # Some servers send the usage on the choice that finishes.
+                if isinstance(choice.get("usage"), dict) and choice["usage"]:
+                    usage = choice["usage"]
+        return False
+
+    try:
+        async with asyncio.timeout(timeout):
+            async with http.stream("POST", url, json=stream_body, headers=headers, timeout=timeout) as r:
+                request = r.request
+                if r.status_code >= 400:
+                    await r.aread()
+                    r.raise_for_status()
+                event_name, data_lines = "", []
+                async for raw in r.aiter_lines():
+                    line = raw.rstrip("\r")
+                    if line == "":
+                        done = take(event_name, data_lines)
+                        event_name, data_lines = "", []
+                        if done:
+                            break
+                        continue
+                    if line.startswith(":"):
+                        continue  # a comment (keep-alive): not progress
+                    field, _, value = line.partition(":")
+                    value = value[1:] if value.startswith(" ") else value
+                    if field == "data":
+                        data_lines.append(value)
+                    elif field == "event":
+                        event_name = value.strip()
+                if not done:
+                    done = take(event_name, data_lines)
+    except TimeoutError:
+        raise httpx.ReadTimeout(
+            f"the model's stream did not finish its answer within the step's {timeout:g} s budget"
+        ) from None
+    if finish is None:
+        raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no finish reason)")
+    if not done or not usage:
+        _log.warning("[provider] a streamed answer finished (%s) but the stream sent %s; kept as it is",
+                     finish, " and ".join(x for x, ok in (("no [DONE]", done), ("no usage", usage)) if not ok))
+    return {
+        "model": model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(parts) if parts else None},
+                     "finish_reason": finish}],
+        "usage": usage,
+    }
+
+
 def _http_reasoning_effort(endpoint: "ResolvedEndpoint") -> str:
     """The ``reasoning_effort`` value to put in an OpenAI-compatible request
     body, or ``""`` (with a one-time warning) when it must not be sent."""
@@ -3252,6 +3415,14 @@ class LLMClient:
             body.update(self.endpoint.extra_body)
         if extra:
             body.update(extra)
+        streams = _http_streams(self.endpoint)
+        if "stream" in body:
+            # FI decides whether a call streams (only Moonshot's, see _STREAMED_HOSTS) and reads the answer to match; a
+            # `stream` of your own would leave the answer unreadable (a streamed reply parsed as one JSON document).
+            raise ValueError(
+                "provider.extra_body (or a per-call extra) sets `stream`: FI decides that itself -- it streams calls to "
+                "Moonshot's API and sends every other request whole. Remove `stream` from extra_body."
+            )
         url = self.endpoint.base_url.rstrip("/") + "/chat/completions"
         headers: dict[str, str] = {"Content-Type": "application/json"}
         # Ollama (and vLLM with auth disabled) treat the OpenAI-compat
@@ -3308,15 +3479,18 @@ class LLMClient:
                 http_timeout = node_budget(
                     self._node_http_timeout_s, node, self._http_timeout_s,
                 )
-                r = await self._http.post(
-                    url, json=body, headers=headers, timeout=http_timeout,
-                )
-                # Raise for any error status; the retry predicate
-                # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                # (bad key, quota, content policy, oversized body) surface
-                # immediately instead of burning the backoff budget.
-                r.raise_for_status()
-        data = r.json()
+                if streams:
+                    data = await _post_streamed(self._http, url, body, headers, http_timeout)
+                else:
+                    r = await self._http.post(
+                        url, json=body, headers=headers, timeout=http_timeout,
+                    )
+                    # Raise for any error status; the retry predicate
+                    # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                    # (bad key, quota, content policy, oversized body) surface
+                    # immediately instead of burning the backoff budget.
+                    r.raise_for_status()
+                    data = r.json()
         # Capture token usage when the upstream returned
         # one. OpenAI-compatible servers (openai / codex / gemini /
         # ollama recent versions) include ``usage`` at the response
