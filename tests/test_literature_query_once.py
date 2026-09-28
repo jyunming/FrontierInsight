@@ -138,7 +138,8 @@ async def test_an_unreadable_record_is_set_aside_not_overwritten(tmp_path: Path,
     (eng.fi_dir / "literature_queries.json").write_text(content, encoding="utf-8")
     with caplog.at_level(logging.WARNING):
         patch = await eng._node_literature(_state())
-    assert (eng.fi_dir / "literature_queries.json.bad").read_text(encoding="utf-8") == content
+    (bad,) = list(eng.fi_dir.glob("literature_queries.json.bad.*"))
+    assert bad.read_text(encoding="utf-8") == content
     assert calls.count("literature_query") == 1 and patch["literature_queries"] == FACETS
     # The quest's own log (run.log) says so; it does not propagate to the root logger.
     run_log = (eng.fi_dir / "run.log").read_text(encoding="utf-8") if (eng.fi_dir / "run.log").exists() else ""
@@ -170,3 +171,39 @@ async def test_a_real_resume_with_a_new_engine_reuses_the_queries(tmp_path: Path
     patch = await resumed._node_literature(_state())
     assert calls.count("literature_query") == 1 and calls_after.count("literature_query") == 0
     assert patch["literature_query_set"]["reused"] is True and patch["literature_queries"] == FACETS
+
+
+def test_a_record_that_cannot_be_read_just_now_is_never_overwritten(tmp_path: Path, monkeypatch) -> None:
+    from core.engine import _record_query_set
+
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    record = fi / "literature_queries.json"
+    record.write_text('{"schema": 1, "entries": [{"stage": "literature", "queries": ["kept"]}]}', encoding="utf-8")
+    real_read = Path.read_text
+
+    def locked(self, *a, **k):  # noqa: ANN001
+        if self == record:
+            raise PermissionError("locked by another process")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "read_text", locked)
+    _record_query_set(fi, {"stage": "literature", "queries": ["new"]})
+    monkeypatch.setattr(Path, "read_text", real_read)
+    assert "kept" in record.read_text(encoding="utf-8") and "new" not in record.read_text(encoding="utf-8")
+    assert not list(fi.glob("literature_queries.json.bad*")), "a locked record is not set aside"
+
+
+def test_a_second_bad_record_does_not_erase_the_first(tmp_path: Path) -> None:
+    import time as _time
+
+    from core.engine import _read_query_sets
+
+    fi = tmp_path / ".fi"
+    fi.mkdir()
+    for content in ("first bad", "second bad"):
+        (fi / "literature_queries.json").write_text(content, encoding="utf-8")
+        _read_query_sets(fi)
+        _time.sleep(1.1)
+    kept = sorted(p.read_text(encoding="utf-8") for p in fi.glob("literature_queries.json.bad.*"))
+    assert kept == ["first bad", "second bad"]

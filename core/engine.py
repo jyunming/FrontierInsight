@@ -18271,23 +18271,41 @@ def _usable_queries(value: Any) -> bool:
             and all(isinstance(q, str) and q.strip() for q in value))
 
 
-def _read_query_sets(fi_dir: Path, *, log: Any = None) -> list[dict[str, Any]]:
-    """The saved query sets. A file that cannot be read as the record is set aside as ``.bad`` (kept, never
-    silently overwritten) and a warning says so; nothing is reused from it."""
+class _QuerySetsUnreadable(Exception):
+    """The record exists but could not be read just now (locked, access denied): it is left alone."""
+
+
+def _read_query_sets(fi_dir: Path, *, log: Any = None, strict: bool = False) -> list[dict[str, Any]]:
+    """The saved query sets. A file that is not the record (bad JSON, wrong shape) is set aside as
+    ``.bad.<time>`` (kept, never silently overwritten) and a warning says so; nothing is reused from it. A file that
+    cannot be read just now is left where it is (``strict``: raise :class:`_QuerySetsUnreadable` so nothing
+    overwrites it)."""
     path = fi_dir / _LITERATURE_QUERIES
     if not path.exists():
         return []
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        if log is not None:
+            log.warning("[literature] %s could not be read just now (%s); it is left as it is, and the search "
+                        "queries are derived again", path.name, e)
+        if strict:
+            raise _QuerySetsUnreadable(str(e)) from None
+        return []
+    try:
+        data = json.loads(text)
         entries = data.get("entries") if isinstance(data, dict) else None
         if not isinstance(entries, list):
             raise ValueError("no list of entries")
-    except (OSError, ValueError) as e:
+    except ValueError as e:
+        bad = path.with_name(f"{path.name}.bad.{time.strftime('%Y%m%dT%H%M%S')}")
         try:
-            path.replace(path.with_name(path.name + ".bad"))
-            where = f"it was kept as {path.name}.bad"
+            path.replace(bad)
+            where = f"it was kept as {bad.name}"
         except OSError:
             where = "it could not be moved aside"
+            if strict:
+                raise _QuerySetsUnreadable(str(e)) from None
         if log is not None:
             log.warning("[literature] %s could not be read (%s); %s, and the search queries are derived again",
                         path.name, e, where)
@@ -18296,9 +18314,13 @@ def _read_query_sets(fi_dir: Path, *, log: Any = None) -> list[dict[str, Any]]:
 
 
 def _record_query_set(fi_dir: Path, entry: dict[str, Any], *, log: Any = None) -> None:
-    """Add one derivation to ``.fi/literature_queries.json`` (best-effort: a record never stops a search)."""
+    """Add one derivation to ``.fi/literature_queries.json`` (best-effort: a record never stops a search, and a
+    record that could not be read is never overwritten)."""
     try:
-        entries = _read_query_sets(fi_dir, log=log) + [entry]
+        entries = _read_query_sets(fi_dir, log=log, strict=True) + [entry]
+    except _QuerySetsUnreadable:
+        return
+    try:
         fi_dir.mkdir(parents=True, exist_ok=True)
         tmp = fi_dir / (_LITERATURE_QUERIES + ".tmp")
         tmp.write_text(json.dumps({"schema": 1, "entries": entries[-50:]}, indent=1), encoding="utf-8")
