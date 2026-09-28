@@ -36,6 +36,7 @@ from core.provider import (
     PROXY_PROVIDERS,
     ImageInputUnsupported,
     LLMClient,
+    quest_run_log,
     ProxySupervisor,
     append_cost_row,
     image_part,
