@@ -93,3 +93,43 @@ def test_a_name_or_a_function_s_return_inside_the_printed_result_is_followed() -
     # An annotated binding and a conditional at the root.
     code = 'out: dict = {"rmse": min(r, 10.0)}\nprint(json.dumps(out))\n'
     assert _kinds(violations({"rmse": 10.0}, RMSE, code=code)) == ["clamped"]
+
+
+# --- on a declared bound (the 2026-09-27b re-audit) ----------------------------------------------------------------
+
+TEST_RMSE_TO_10 = [Assertion(path="test.rmse", min=0.0, max=10.0)]
+
+
+def test_a_cap_on_train_does_not_reject_test_on_its_bound() -> None:
+    code = 'out = {"train": {"rmse": min(train_rmse, 10.0)}, "test": {"rmse": test_rmse}}\n' + P
+    assert violations({"train": {"rmse": 3.0}, "test": {"rmse": 10.0}}, TEST_RMSE_TO_10, code=code) == [], \
+        "the re-audit's counterexample, on the bound"
+    (found,) = violations({"train": {"rmse": 10.0}, "test": {"rmse": 2.0}},
+                          [Assertion(path="train.rmse", min=0.0, max=10.0)], code=code)
+    assert found.kind == "clamped", "train's own cap still rejects train"
+
+
+def test_a_cap_whose_place_cannot_be_shown_still_rejects_a_value_on_its_bound() -> None:
+    for code in (
+        'rmse = 10.0 if diverged else rmse\nout = {"test": {"rmse": rmse}}\n' + P,  # a branch
+        'errs = np.minimum(errs, 10.0)\nout = {"test": {"rmse": float(errs.mean())}}\n' + P,  # capped, then reduced
+        'out = {"train": {"rmse": min(t, 10.0)}, "test": {"rmse": min(r, 10.0) if x else r}}\n' + P,  # also here
+        'extra = min(y, 10.0)\nout = {"train": {"rmse": min(t, 10.0)}, "test": {"rmse": r}}\n' + P,  # also elsewhere
+        'def summarize(e):\n    return {"rmse": float(e.mean())}\n'
+        'out = {"train": {"rmse": min(t, 10.0)}, "test": summarize(np.minimum(errs, 10.0))}\n' + P,  # on an ancestor
+        'm = {"rmse": min(t, 10.0)}\nout = {"train": m, "test": {**m}}\n' + P,  # spread into test
+        'out = {"train": {"rmse": (c := min(t, 10.0))}, "test": {"rmse": c}}\n' + P,  # carried by :=
+        'tr = {"rmse": min(t, 10.0)}\nout = {"train": tr, "test": {"rmse": tr["rmse"]}}\n' + P,  # read out
+        'tr = {"rmse": min(t, 10.0)}\nout = {"train": tr, "test": tr.copy()}\n' + P,  # copied
+        'tr = {"rmse": min(t, 10.0)}\nout = {"train": tr, "test": {"rmse": 0}}\n'
+        'out["test"]["rmse"] = out["train"]["rmse"]\n' + P,  # assigned across
+        'tr = {"rmse": min(t, 10.0)}\nout = {"train": tr, "test": json.loads(json.dumps(tr))}\n' + P,  # round trip
+    ):
+        found = violations({"train": {"rmse": 1.0}, "test": {"rmse": 10.0}}, TEST_RMSE_TO_10, code=code)
+        assert _kinds(found) == ["clamped"], code
+
+
+def test_printing_through_a_prefix_or_an_fstring_is_still_placed_as_is() -> None:
+    for tail in ('print("RESULT_JSON: " + json.dumps(out))\n', 'print(f"RESULT_JSON: {json.dumps(out)}")\n'):
+        code = 'tr = {"rmse": min(t, 10.0)}\nout = {"train": tr, "test": {"rmse": r}}\n' + tail
+        assert violations({"train": {"rmse": 1.0}, "test": {"rmse": 10.0}}, TEST_RMSE_TO_10, code=code) == [], tail

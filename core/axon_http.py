@@ -211,6 +211,19 @@ class AxonHTTPBrain:
             results = self._request("POST", "/add_texts", {"docs": docs, "project": self.project})
         return sum(1 for r in results if isinstance(r, dict) and r.get("status") == "created")
 
+    def delete_documents(self, doc_ids: list[str]) -> None:
+        """Remove documents (every chunk of each) from FI's project."""
+        if not doc_ids:
+            return
+        with self.session():
+            self._request("POST", "/delete", {"doc_ids": list(doc_ids)})
+
+    def list_sources(self) -> list[str]:
+        """The id of every document in FI's project."""
+        with self.session():
+            out = self._request("GET", "/collection")
+        return [str(f.get("source")) for f in (out.get("files") or []) if isinstance(f, dict) and f.get("source")]
+
     def finalize_ingest(self) -> None:
         with self.session():
             self._request("POST", "/graph/finalize", {})

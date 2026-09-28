@@ -257,6 +257,7 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
     "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
+    "tidy-knowledge": ("--tidy-knowledge", "Remove the out-of-date copy of a quest result whose standing changed (accepted vs preliminary) from the knowledge layer. `fi tools tidy-knowledge [check]`."),
     "fleet": ("--fleet", "Run several quests at once. `fi tools fleet <quest.yaml>...`."),
     "dump-state": ("--dump-state", "Print a quest's saved state, for debugging. `fi tools dump-state <quest_dir>`."),
     "list-drafts": ("--list-drafts", "List proposal drafts `fi tools proposal` wrote. `fi tools list-drafts`."),
@@ -403,6 +404,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "(kind=fi_local_paper) and exit. Requires `axon` to be "
              "installed; optionally pass --axon-config to point at a "
              "non-default Axon corpus. PDF support requires `pypdf` installed.",
+    )
+    mode.add_argument(
+        "--tidy-knowledge",
+        nargs="?", const="remove", choices=("remove", "check"), default=None,
+        help="Find quest results kept in the knowledge layer under both standings (accepted and preliminary: the "
+             "quest was run again and its standing changed) and remove the older copy, so an out-of-date accepted "
+             "result can no longer be cited. `check` only lists them.",
     )
     mode.add_argument(
         "--serve",
@@ -2628,6 +2636,9 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.ingest:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
 
+        if args.tidy_knowledge:
+            return _tidy_knowledge(check_only=args.tidy_knowledge == "check", axon_config_path=args.axon_config)
+
         if args.doctor:
             return _doctor()
 
@@ -4744,6 +4755,39 @@ def _ingest_papers(paths: list[Path], *, axon_config_path: Path | None) -> int:
         return 1
     print(f"[FI ingest] ingested {len(loaded)} file(s) into Axon: {loaded}")
     return 0
+
+
+def _tidy_knowledge(*, check_only: bool, axon_config_path: Path | None) -> int:
+    """Remove (or with ``check_only`` list) the older copy of each quest result kept under both standings."""
+    from core.config import KnowledgeConfig
+    from core.knowledge import Knowledge
+
+    try:
+        k = Knowledge(KnowledgeConfig(enabled=True, axon_config=axon_config_path or None, seed_source_catalog=False))
+    except Exception as e:  # noqa: BLE001
+        print(f"[FI] the knowledge layer could not be opened: {e}", file=sys.stderr)
+        return 1
+    if not k.enabled:
+        print("[FI] the knowledge layer (Axon) is not available.", file=sys.stderr)
+        return 1
+    try:
+        found = k.retire_stale_standing(dry_run=check_only)
+    except RuntimeError as e:
+        print(f"[FI] {e}", file=sys.stderr)
+        return 1
+    if not found:
+        print("[FI] no quest result is kept under both standings; nothing to remove.")
+        return 0
+    for entry in found:
+        if entry.get("undetermined"):
+            print(f"[FI] {entry['quest_id']}: kept under both standings, but which copy is newer cannot be told; "
+                  "nothing removed (run the quest again to write one current copy)")
+            continue
+        verb = "would remove" if check_only else ("removed" if entry.get("ok") else "could NOT remove")
+        print(f"[FI] {entry['quest_id']}: kept the {entry['kept']} copy, {verb} the older {entry['removed']} copy")
+    if check_only:
+        print("[FI] nothing was changed; run `fi tools tidy-knowledge` to remove them.")
+    return 0 if all(e.get("ok") or (check_only and not e.get("undetermined")) for e in found) else 1
 
 
 class _QuestConfigError(Exception):
