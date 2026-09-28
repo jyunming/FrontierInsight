@@ -2540,6 +2540,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
+            _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         # No output AND no exit — genuinely stuck.
         await _kill_and_reap(proc, spec.argv[0])
@@ -2581,6 +2582,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
+            _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         stderr_b = b""
         if proc.stderr is not None:
@@ -2601,7 +2603,18 @@ async def _collect_via_streaming(
         raise _CliTransientError(
             f"{spec.argv[0]} stream error: {error_message[:500]}"
         )
+    _raise_if_cut_off(turns, spec)
     return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
+
+
+def _raise_if_cut_off(turns: list[dict[str, Any]], spec: Any) -> None:
+    """A streamed CLI answer whose last turn stopped at the output limit (``stop_reason: max_tokens``) is cut off: the
+    CLI resumes a turn cut that way, so a LAST one cut means it gave up. Never handed on as whole."""
+    if turns and turns[-1].get("stop") == "max_tokens":
+        raise ModelAnswerTruncated(
+            f"the model's answer was cut off at its output limit ({spec.argv[0]}: stop_reason max_tokens): an "
+            "incomplete answer is not used"
+        )
 
 
 def _finalise_stream_content(
@@ -3076,13 +3089,51 @@ CALL_ATTEMPTS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars
 CALL_SLOT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_call_slot", default=None)
 
 
+class ModelAnswerTruncated(RuntimeError):
+    """The model's answer was cut off at its output limit (``finish_reason: length``): an incomplete answer is never
+    handed on as if it were whole."""
+
+    fi_outcome = "truncated"
+
+
+class ModelAnswerFiltered(RuntimeError):
+    """The provider withheld the model's answer with its content filter (``finish_reason: content_filter``). Asking the
+    same provider again gives the same result, so it is not retried."""
+
+    fi_outcome = "content_filtered"
+
+
+def outcome_of(exc: BaseException | None) -> str:
+    """How a failed call is named in the record of calls: a truncated or filtered answer by what happened to it,
+    anything else by its error's class."""
+    if exc is None:
+        return "error"
+    return str(getattr(exc, "fi_outcome", "") or type(exc).__name__)
+
+
+#: Finish reasons that mean the answer ended as the model meant it to.
+_FINISHED_NORMALLY = frozenset({"stop", "end_turn", "eos", "stop_sequence", "tool_calls", "function_call"})
+#: A call that set ``max_tokens`` and was cut off at it is asked once more with this many times the limit, capped.
+_TRUNCATION_RETRY_GROWTH = 2
+_TRUNCATION_RETRY_CAP = 65536
+
+
+def _finish_reason(data: Any) -> str | None:
+    try:
+        choice = data["choices"][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+    reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    return str(reason) if reason else None
+
+
 def _note_failed_attempt(provider: Any, model: Any, exc: BaseException | None, *, fallback: bool = False) -> None:
     attempts = CALL_ATTEMPTS.get()
     if attempts is None:
         return
     slot = CALL_SLOT.get() or {}
     attempts.append({"provider": slot.get("provider") or provider, "model": model,
-                     "error": type(exc).__name__ if exc else "error",
+                     "error": outcome_of(exc),
                      "fallback": bool(fallback or slot.get("fallback")), "exc": exc})
 
 
@@ -3519,39 +3570,57 @@ class LLMClient:
         # POST instead of letting it propagate. Re-run the two
         # cancellation tests in tests/test_provider.py if you touch
         # this retry config.
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(4),
-            # Jittered backoff: a deterministic ``wait_exponential``
-            # synchronises N concurrent quests in a --fleet that all
-            # hit a transient upstream blip simultaneously, so they
-            # all retry at the same wall-clock instant and re-clog
-            # the upstream. Random-exponential spreads them out over
-            # a window so the upstream sees a gentler ramp.
-            wait=wait_random_exponential(multiplier=1, max=20),
-            retry=retry_if_exception(_retry_http_error),
-            before_sleep=self._retry_note(
-                node, f"{self.endpoint.provider_name or 'provider'} over HTTP", 4, model or self.endpoint.model),
-            reraise=True,
-        ):
-            with attempt:
-                # Per-node HTTP read-timeout: heavy nodes (implement/write) get
-                # headroom, cheap nodes keep the tight base that catches a hung
-                # server fast. Miss → base client timeout.
-                http_timeout = node_budget(
-                    self._node_http_timeout_s, node, self._http_timeout_s,
-                )
-                if streams:
-                    data = await _post_streamed(self._http, url, body, headers, http_timeout)
-                else:
-                    r = await self._http.post(
-                        url, json=body, headers=headers, timeout=http_timeout,
+        async def send(request_body: dict[str, Any]) -> dict[str, Any]:
+            data: dict[str, Any] = {}
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(4),
+                # Jittered backoff: a deterministic ``wait_exponential``
+                # synchronises N concurrent quests in a --fleet that all
+                # hit a transient upstream blip simultaneously, so they
+                # all retry at the same wall-clock instant and re-clog
+                # the upstream. Random-exponential spreads them out over
+                # a window so the upstream sees a gentler ramp.
+                wait=wait_random_exponential(multiplier=1, max=20),
+                retry=retry_if_exception(_retry_http_error),
+                before_sleep=self._retry_note(
+                    node, f"{self.endpoint.provider_name or 'provider'} over HTTP", 4, model or self.endpoint.model),
+                reraise=True,
+            ):
+                with attempt:
+                    # Per-node HTTP read-timeout: heavy nodes (implement/write) get
+                    # headroom, cheap nodes keep the tight base that catches a hung
+                    # server fast. Miss → base client timeout.
+                    http_timeout = node_budget(
+                        self._node_http_timeout_s, node, self._http_timeout_s,
                     )
-                    # Raise for any error status; the retry predicate
-                    # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                    # (bad key, quota, content policy, oversized body) surface
-                    # immediately instead of burning the backoff budget.
-                    r.raise_for_status()
-                    data = r.json()
+                    if streams:
+                        data = await _post_streamed(self._http, url, request_body, headers, http_timeout)
+                    else:
+                        r = await self._http.post(
+                            url, json=request_body, headers=headers, timeout=http_timeout,
+                        )
+                        # Raise for any error status; the retry predicate
+                        # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                        # (bad key, quota, content policy, oversized body) surface
+                        # immediately instead of burning the backoff budget.
+                        r.raise_for_status()
+                        data = r.json()
+            return data
+
+        data = await send(body)
+        finish = _finish_reason(data)
+        limit = body.get("max_tokens")
+        if finish == "length" and isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+            # Cut off at the limit this call set: asked once more with room to finish (bounded), never handed on cut.
+            bigger = min(limit * _TRUNCATION_RETRY_GROWTH, _TRUNCATION_RETRY_CAP)
+            if bigger > limit:
+                _log.warning("[%s] the model's answer was cut off at max_tokens=%d; asking once more with %d",
+                             node or "chat", limit, bigger)
+                _note_failed_attempt(self.last_provider, data.get("model") or model or self.endpoint.model,
+                                     ModelAnswerTruncated("cut off at max_tokens"))
+                body = {**body, "max_tokens": bigger}
+                data = await send(body)
+                finish = _finish_reason(data)
         # Capture token usage when the upstream returned
         # one. OpenAI-compatible servers (openai / codex / gemini /
         # ollama recent versions) include ``usage`` at the response
@@ -3575,6 +3644,21 @@ class LLMClient:
         if isinstance(data.get("model"), str):
             self.last_model = data["model"]
             LAST_CALL.set({"provider": self.last_provider, "model": data["model"], "reported": True})
+        # Why the answer ended, in this call's own record (and so in the quest's record of its calls).
+        LAST_CALL.set({**(LAST_CALL.get() or {}), "finish_reason": finish})
+        if finish == "length":
+            raise ModelAnswerTruncated(
+                "the model's answer was cut off at its output limit (finish_reason: length"
+                + (f", max_tokens {body.get('max_tokens')}" if body.get("max_tokens") else "")
+                + "): an incomplete answer is not used. Give the step a larger output limit, or a model with one"
+            )
+        if finish == "content_filter":
+            raise ModelAnswerFiltered(
+                "the provider withheld the model's answer with its content filter (finish_reason: content_filter); "
+                "asking it again would give the same result"
+            )
+        if finish is not None and finish not in _FINISHED_NORMALLY:
+            _log.info("[%s] the model's answer ended with finish_reason %r (taken as finished)", node or "chat", finish)
         text = data["choices"][0]["message"]["content"]
         # Older Ollama versions omit ``usage`` from the response. Fall
         # through to char-based estimation so the cost.jsonl row still

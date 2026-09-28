@@ -113,6 +113,7 @@ from .provider import (
     ProxySupervisor,
     append_cost_row,
     model_for_node,
+    outcome_of as _outcome_of,
     resolve_endpoint_async,
     set_model_call_archive as _set_model_call_archive,
 )
@@ -11323,7 +11324,7 @@ class Engine:
                 self._record_attempts(node, messages, attempts, requested_model, final=exc)
                 if not (attempts and attempts[-1].get("exc") is exc):
                     self._record_model_call(node, messages, None, served={**failed, "reported": False},
-                                            outcome=type(exc).__name__, requested_model=requested_model)
+                                            outcome=_outcome_of(exc), requested_model=requested_model)
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)

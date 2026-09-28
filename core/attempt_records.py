@@ -463,7 +463,8 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
     """One line of :data:`MODEL_CALLS`: which step asked (``node``, the ``attempt``-th call under it), which model was
     asked for and which answered (``served_model``, ``reported`` when the connection named it, ``vendor`` when it
     did, ``fallback`` when a fallback provider took the call), hashes of the prompt and the answer (never their
-    text), the ``outcome`` (``ok`` or the error's class) and the token counts when the connection gave them.
+    text), the ``outcome`` (``ok``, ``truncated`` for an answer cut off at its output limit, ``content_filtered``, or
+    the error's class), the ``finish_reason`` when the connection gave one, and the token counts when it gave them.
     ``reports_model``: the connection is one that names the model that answered (so ``reported`` false is a gap)."""
     served = dict(served or {})
     return {
@@ -480,6 +481,8 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
         "prompt_sha256": prompt_sha(messages),
         "response_sha256": _text_sha(response),
         "outcome": outcome,
+        # Why the answer ended, when the connection said (``stop``, ``length`` for one cut off at its limit, ...).
+        **({"finish_reason": served["finish_reason"]} if served.get("finish_reason") else {}),
         "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens") if k in usage}
         if isinstance(usage, dict) else None,
     }
