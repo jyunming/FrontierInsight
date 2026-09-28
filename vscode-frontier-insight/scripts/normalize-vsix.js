@@ -38,16 +38,26 @@ function readEntries(buf) {
   if (eocd < 0) throw new Error("not a zip file (no end-of-central-directory record)");
   const count = buf.readUInt16LE(eocd + 10);
   let p = buf.readUInt32LE(eocd + 16);
+  // A zip64 archive keeps its real counts and offsets elsewhere: refuse it rather than misread it.
+  if (count === 0xffff || p === 0xffffffff || buf.readUInt32LE(eocd + 12) === 0xffffffff) {
+    throw new Error("zip64 archives are not handled");
+  }
   const entries = [];
   for (let n = 0; n < count; n++) {
     if (buf.readUInt32LE(p) !== 0x02014b50) throw new Error("broken central directory");
+    const flags = buf.readUInt16LE(p + 8);
     const method = buf.readUInt16LE(p + 10);
     const compSize = buf.readUInt32LE(p + 20);
+    const size = buf.readUInt32LE(p + 24);
     const nameLen = buf.readUInt16LE(p + 28);
     const extraLen = buf.readUInt16LE(p + 30);
     const commentLen = buf.readUInt16LE(p + 32);
     const localOff = buf.readUInt32LE(p + 42);
     const name = buf.toString("utf8", p + 46, p + 46 + nameLen);
+    if (flags & 0x1) throw new Error(`${name}: encrypted entries are not handled`);
+    if (compSize === 0xffffffff || size === 0xffffffff || localOff === 0xffffffff) {
+      throw new Error(`${name}: zip64 entries are not handled`);
+    }
     const lNameLen = buf.readUInt16LE(localOff + 26);
     const lExtraLen = buf.readUInt16LE(localOff + 28);
     const start = localOff + 30 + lNameLen + lExtraLen;
@@ -56,6 +66,7 @@ function readEntries(buf) {
     if (method === 0) data = Buffer.from(raw);
     else if (method === 8) data = zlib.inflateRawSync(raw);
     else throw new Error(`${name}: compression method ${method} is not handled`);
+    if (data.length !== size) throw new Error(`${name}: ${data.length} bytes read, ${size} expected`);
     entries.push({ name, data });
     p += 46 + nameLen + extraLen + commentLen;
   }

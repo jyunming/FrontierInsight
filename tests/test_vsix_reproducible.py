@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
-import time
 import zipfile
 from pathlib import Path
 
@@ -85,13 +83,43 @@ def test_packaging_the_extension_twice_gives_the_same_file(tmp_path: Path) -> No
     shas = []
     for n in range(2):
         out = tmp_path / f"build{n}.vsix"
-        # A fresh compile rewrites out/ with new times: the case that used to change the bytes.
-        now = time.time() + n * 3600
-        for f in (EXT_DIR / "out").glob("*.js"):
-            os.utime(f, (now, now))
+        # vsce recompiles (vscode:prepublish) each time, so out/ gets new times: the case that used to change bytes.
         proc = subprocess.run([str(_vsce()), "package", "--out", str(out)], cwd=str(EXT_DIR),
                               capture_output=True, text=True, timeout=300)
         assert proc.returncode == 0, proc.stderr[-2000:]
         _normalize(out)
         shas.append(_sha(out))
     assert shas[0] == shas[1], shas
+
+
+_TEXT = (".md", ".json", ".js", ".txt", ".xml", ".svg", ".vsixmanifest")
+
+
+def test_the_committed_vsix_packs_text_with_lf_line_endings() -> None:
+    """A Windows checkout used to pack CRLF (readme, package.json, LICENSE, icon.svg), so its build held other
+    files than CI's: the extension's sources are checked out with LF everywhere (.gitattributes)."""
+    vsix = EXT_DIR / "vscode-frontier-insight.vsix"
+    with zipfile.ZipFile(vsix) as z:
+        crlf = [n for n in z.namelist() if n.endswith(_TEXT) and b"\r\n" in z.read(n)]
+    assert crlf == [], f"packed with CRLF: {crlf}"
+
+
+def test_the_committed_manifest_describes_the_committed_vsix() -> None:
+    vsix = EXT_DIR / "vscode-frontier-insight.vsix"
+    manifest = json.loads((EXT_DIR / "vscode-frontier-insight.vsix.manifest.json").read_text(encoding="utf-8"))
+    with zipfile.ZipFile(vsix) as z:
+        packed = {n: hashlib.sha256(z.read(n)).hexdigest() for n in z.namelist()}
+    assert packed == {n: f["sha256"] for n, f in manifest["files"].items()}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_an_encrypted_entry_is_refused_not_misread(tmp_path: Path) -> None:
+    path = tmp_path / "enc.vsix"
+    _zip(path, {"a.txt": b"x"}, when=(2026, 1, 1, 0, 0, 0), order=["a.txt"])
+    data = bytearray(path.read_bytes())
+    cd = data.rfind(b"PK\x01\x02")
+    data[cd + 8] |= 0x1  # the central directory's "encrypted" flag
+    path.write_bytes(bytes(data))
+    proc = subprocess.run([shutil.which("node") or "node", str(NORMALIZE), str(path)],
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode != 0 and "encrypted" in proc.stderr

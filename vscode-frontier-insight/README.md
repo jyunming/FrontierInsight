@@ -127,10 +127,10 @@ length.
    npm run package        # produces vscode-frontier-insight.vsix
    ```
 
-   The same sources give the same `.vsix`, byte for byte, when built with the same Node major version (the file's
-   sha256 is printed at the end). Next to it, `vscode-frontier-insight.vsix.manifest.json` lists the sha256 of every
-   file packed inside: compare two of those to see whether two builds hold the same files, whatever machine or
-   Node version made them.
+   The last line `npm run package` prints is the `.vsix`'s sha256. Built by CI, the same sources give the same
+   `.vsix` byte for byte (and so do machines whose Node compresses the same way). To compare builds across machines,
+   use `vscode-frontier-insight.vsix.manifest.json`, written next to it: the sha256 of every file packed inside.
+   Two builds with the same manifest hold the same files. CI checks the committed `.vsix` against it.
 
    Then install it in VSCode one of two ways:
 
