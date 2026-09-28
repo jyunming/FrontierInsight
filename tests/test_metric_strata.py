@@ -14,7 +14,7 @@ from typing import Any
 
 from core import metric_spec as ms
 from core import run_manifest as rm
-from core.trial_runner import reported_values_not_run
+from core.trial_runner import given_values_not_run
 
 GRID = {"R0": [1.5, 3.0], "N": [100, 200, 500, 1000, 2000]}
 PROTOCOL = {"grid": GRID, "runs_per_setting": 400, "metrics": [
@@ -66,8 +66,8 @@ def test_strata_over_one_axis_are_held_to_every_trial_fi_ran_in_them() -> None:
 def test_each_stratum_s_values_are_exactly_its_successes() -> None:
     short = {"by_R0": {"R0=1.5": _stratum(150, 2000, n_values=15), "R0=3.0": _stratum(1700, 2000)}}
     (found,) = rm.problems(PROTOCOL, _manifest(), result_json=short)
-    assert "lists 15 value(s) but `p_outbreak_count` says 150" in found
-    assert found in rm.analysis_output_problems(PROTOCOL, _manifest(), short)
+    assert "lists 15 trial(s) but `p_outbreak_count` says 150" in found
+    assert found in rm.analysis_output_problems(PROTOCOL, _manifest(), short, trial_mode=True)
     no_count = {"by_R0": {"R0=1.5": {"mean_final_size_given_major_values": [0.5] * 3}, "R0=3.0": _stratum(1700, 2000)}}
     assert rm.problems(PROTOCOL, _manifest(), result_json=no_count), "a stratum with values and no count is caught"
 
@@ -79,12 +79,77 @@ def test_a_flat_single_stratum_result_still_passes() -> None:
     assert "counts only 400 trial(s)" in found and "keyed like `R0=1.5`" in found
 
 
-def test_the_values_of_a_conditional_mean_must_be_one_quantity_the_trials_returned() -> None:
-    recorded = {"final_size": Counter({0.5: 40, 0.9: 10}), "peak": Counter({7.0: 50})}
-    means = {"mean_final_size_given_major"}
-    honest = {"mean_final_size_given_major_values": [0.5] * 30 + [0.9] * 5}
-    assert reported_values_not_run(recorded, honest, given_means=means) == []
-    made_up = {"mean_final_size_given_major_values": [0.5] * 30 + [0.77]}
-    (found,) = reported_values_not_run(recorded, made_up, given_means=means)
-    assert "not all values of any one quantity" in found
-    assert reported_values_not_run(recorded, made_up) == [], "only a declared conditional mean is held to it"
+def _no_problems(result: dict[str, Any]) -> list[str]:
+    return rm.problems(PROTOCOL, _manifest(), result_json=result)
+
+
+def test_a_stratum_of_the_grid_must_say_how_many_trials_it_covers() -> None:
+    no_total = {"by_R0": {"R0=1.5": {"p_outbreak_count": 150, "mean_final_size_given_major_values": [0.5] * 150},
+                          "R0=3.0": _stratum(1700, 2000)}}
+    (found,) = _no_problems(no_total)
+    assert "gives `p_outbreak_count` but no `p_outbreak_total`" in found
+    assert found in rm.analysis_output_problems(PROTOCOL, _manifest(), no_total)
+
+
+def test_a_mapping_that_names_no_stratum_beside_ones_that_do_is_still_counted_as_a_whole() -> None:
+    mixed = {"by": {"R0=1.5,N=500": _stratum(31, 400), "junk": _stratum(5, 5)}}
+    (found,) = _no_problems(mixed)
+    assert "counts only 5 trial(s)" in found and "where no stratum is named" in found
+
+
+def test_a_stratum_the_grid_does_not_have_is_named() -> None:
+    (found,) = _no_problems({"by_R0": {"R0=9.9": _stratum(3000, 4000)}})
+    assert "`R0=9.9` names a value the protocol's grid does not have" in found
+    (found,) = _no_problems({"by_R0": {"beta=0.1": _stratum(3000, 4000)}})
+    assert "names beta, which the protocol's grid does not have" in found
+
+
+def test_a_count_larger_than_its_total_and_a_stratum_counting_less_than_one_inside_it() -> None:
+    assert any("is larger than `p_outbreak_total`" in f for f in _no_problems(
+        {"by_R0": {"R0=1.5": _stratum(2500, 2000, n_values=2500), "R0=3.0": _stratum(1700, 2000)}}))
+    nested = {"by_R0": {"R0=1.5": _stratum(10, 2000)}, "by_cell": {"R0=1.5,N=500": _stratum(31, 400)}}
+    assert any("counts 10 `p_outbreak` trial(s), fewer than `R0=1.5,N=500`" in f for f in _no_problems(nested))
+
+
+def test_a_null_for_a_diverged_trial_is_one_of_the_subset() -> None:
+    stratum = _stratum(31, 400, n_values=30)
+    stratum["mean_final_size_given_major_values"].append(None)
+    assert _no_problems({"by": {"R0=1.5,N=500": stratum, "R0=3.0,N=500": _stratum(300, 400)}}) == []
+
+
+def test_a_short_list_is_the_analysis_to_fix_only_when_fi_ran_the_trials() -> None:
+    short = {"by_R0": {"R0=1.5": _stratum(150, 2000, n_values=15), "R0=3.0": _stratum(1700, 2000)}}
+    (found,) = _no_problems(short)
+    assert found in rm.analysis_output_problems(PROTOCOL, _manifest(), short, trial_mode=True)
+    assert found not in rm.analysis_output_problems(PROTOCOL, _manifest(), short),         "under the older contract the simulation's own record is what is in doubt"
+
+
+# --- the values themselves, against FI's own record of each setting ---------------------------------------------------
+
+def _per_cell() -> dict[str, dict[str, Counter]]:
+    out: dict[str, dict[str, Counter]] = {}
+    for r in GRID["R0"]:
+        for n in GRID["N"]:
+            size = {1.5: 0.3, 3.0: 0.9}[r] * n
+            out[f"R0={r},N={n}"] = {"final_size": Counter({f"{size:.12g}": 10, "1": 390})}
+    return out
+
+
+def test_a_stratum_s_values_are_its_own_settings_values_or_a_fraction_of_them() -> None:
+    raw = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [150.0] * 10}}}
+    assert given_values_not_run(PROTOCOL, _per_cell(), raw) == []
+    fraction = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.3] * 10}}}
+    assert given_values_not_run(PROTOCOL, _per_cell(), fraction) == [], "final size divided by N is allowed"
+    over_r0 = {"by_R0": {"R0=1.5": {"mean_final_size_given_major_values": [0.3] * 50}}}
+    assert given_values_not_run(PROTOCOL, _per_cell(), over_r0) == [], "a stratum over N pools its settings' fractions"
+
+
+def test_a_made_up_fraction_or_a_value_borrowed_from_another_setting_is_caught() -> None:
+    made_up = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [0.31] * 10}}}
+    (found,) = given_values_not_run(PROTOCOL, _per_cell(), made_up)
+    assert "never produced in those settings" in found and rm.DERIVED in found
+    borrowed = {"by": {"R0=1.5,N=500": {"mean_final_size_given_major_values": [450.0] * 10}}}  # R0=3.0's value
+    assert given_values_not_run(PROTOCOL, _per_cell(), borrowed), "another setting's values are not this one's"
+    suffixed = {"mean_final_size_given_major_R0_1_5_values": [0.31] * 10}
+    assert given_values_not_run(PROTOCOL, _per_cell(), suffixed), "a list with the stratum in its name is checked too"
+    assert rm.DERIVED in rm.analysis_directive(["x"]), "the repair says the same thing the finding does"

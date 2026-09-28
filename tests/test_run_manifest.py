@@ -91,11 +91,18 @@ def test_a_declared_subset_still_catches_fabricated_values_and_missing_counts() 
     majors = {0.9: 3, 1.5: 100, 3.0: 200}
     # Each stratum's values are held to its own count exactly: a mean over the successes averages exactly them.
     short = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, values_per_major=0.1))
-    assert len(short) == 3 and all("value(s) but `prob_major_count` says" in s for s in short), short
-    assert "lists 20 value(s) but `prob_major_count` says 200" in " ".join(short)
+    assert len(short) == 3 and all("trial(s) but `prob_major_count` says" in s for s in short), short
+    assert "lists 20 trial(s) but `prob_major_count` says 200" in " ".join(short)
+    # Whose to fix: the analysis's when FI ran the trials; the simulation's own record under the older contract.
+    result = _conditional(majors, values_per_major=0.1)
+    assert rm.analysis_output_problems(_GIVEN_PROTOCOL, _manifest(), result, trial_mode=True) == short
+    assert rm.analysis_output_problems(_GIVEN_PROTOCOL, _manifest(), result) == []
     # The proportion's own total must still account for the trials the manifest claims.
-    thin = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, total=10))
+    thin = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional({0.9: 3, 1.5: 5, 3.0: 8}, total=10))
     assert len(thin) == 1 and "counts only 30 trial(s) in its `prob_major_total`" in thin[0]
+    # A count larger than the total it is out of is caught on its own.
+    over = rm.problems(_GIVEN_PROTOCOL, _manifest(), result_json=_conditional(majors, total=10))
+    assert len(over) == 2 and all("is larger than `prob_major_total` (10)" in f for f in over)
     # No count for the subset at all: the analysis's to print.
     no_count = {"by_R0": {str(r): {"final_size_values": [0.6] * 5} for r in (0.9, 1.5, 3.0)}}
     assert rm.analysis_output_problems(_GIVEN_PROTOCOL, _manifest(), no_count) == rm.problems(

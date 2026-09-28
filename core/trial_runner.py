@@ -723,7 +723,23 @@ def _value_key(v: Any) -> str | None:
 
 
 def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
-    """Every value FI's trials returned, per name (the keys of ``run_trial``'s dict), counted, and what stood in the way.
+    """Every value FI's trials returned, per name, over all settings (see :func:`recorded_values_by_cell`)."""
+    per_cell, problems = recorded_values_by_cell(quest_root)
+    return pooled(per_cell), problems
+
+
+def pooled(per_cell: dict[str, dict[str, Counter]]) -> dict[str, Counter]:
+    """The per-setting values of :func:`recorded_values_by_cell`, added together per name."""
+    out: dict[str, Counter] = {}
+    for by_name in per_cell.values():
+        for name, counts in by_name.items():
+            out.setdefault(name, Counter()).update(counts)
+    return out
+
+
+def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Counter]], list[str]]:
+    """Every value FI's trials returned, per setting (its cell key) and per name (the keys of ``run_trial``'s dict),
+    counted, and what stood in the way.
 
     The values are in FI's run record (``.fi/trials/run.json``, each trial's dict as the harness reported it); each
     trial's dict is checked against the hash FI's ledger holds for it, so a record edited after the trials ran is found
@@ -744,7 +760,7 @@ def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
                 hashes[(str(row.get("cell")), int(row.get("trial") or 0))] = str(row.get("values_sha256") or "")
     except OSError:
         return {}, []
-    out: dict[str, Counter] = {}
+    out: dict[str, dict[str, Counter]] = {}
     altered = 0
     for cell in record.get("cells") or []:
         for row in cell.get("rows") or []:
@@ -758,13 +774,107 @@ def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
             for name, value in values.items():
                 key = _value_key(value)
                 if key is not None:
-                    out.setdefault(str(name), Counter())[key] += 1
+                    out.setdefault(str(cell.get("key")), {}).setdefault(str(name), Counter())[key] += 1
     problems = []
     if altered:
         problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
                     f"values: the record was changed after the trials ran, so FI runs the trials again"]
         (root / RUN_RECORD).unlink(missing_ok=True)  # the next run cannot reuse it: the trials are run afresh
     return out, problems
+
+
+def _derived_counts(per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
+                    grid: dict[str, list[Any]]) -> list[Counter]:
+    """The values of ``name`` in ``cells`` as they are, and each divided and multiplied by one of the cell's own grid
+    values: every form a list of that quantity may take (a final size, or a final size divided by N)."""
+    from core import run_manifest as _rm
+
+    forms: list[Counter] = [Counter()]
+    per_axis: dict[tuple[str, str], Counter] = {}
+    for key in cells:
+        counts = (per_cell.get(key) or {}).get(name)
+        if not counts:
+            continue
+        forms[0].update(counts)
+        parsed = _rm._parse_cell(key) or {}
+        for axis, raw in parsed.items():
+            try:
+                a = float(raw)
+            except ValueError:
+                continue
+            if not a or not math.isfinite(a):
+                continue
+            for op in ("div", "mul"):
+                target = per_axis.setdefault((axis, op), Counter())
+                for value, n in counts.items():
+                    try:
+                        x = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    y = x / a if op == "div" else x * a
+                    k = _value_key(y)
+                    if k is not None:
+                        target[k] += n
+    return forms + list(per_axis.values())
+
+
+def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, dict[str, Counter]],
+                         result_json: Any) -> list[str]:
+    """The values of each mean over a subset of the trials (a metric with ``given``) that FI's trials never produced in
+    the settings they are reported for, one sentence each. Each list under a stratum key (``R0=1.5``) is held to the
+    trials of exactly those settings; one that names no stratum, and one with the stratum in its name
+    (``<metric>_R0_1_5_values``), to every setting. A value is a trial's own value of one quantity, or that value divided
+    (or multiplied) by one of the trial's own grid values (:data:`core.run_manifest.DERIVED`)."""
+    from core import run_manifest as _rm
+
+    if not isinstance(protocol, dict) or not per_cell or result_json is None:
+        return []
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    means = [str(m["id"]) for m in protocol.get("metrics") or []
+             if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")]
+    names = sorted({n for by_name in per_cell.values() for n in by_name})
+    all_cells = sorted(per_cell)
+    keyed: dict[frozenset, str] = {}
+    for key in per_cell:
+        canon, _why = _rm._canonicalize_cell(key, grid)
+        if canon is not None:
+            keyed[canon] = key
+    out: list[str] = []
+
+    def check(metric: str, where: str, values: list[Any], cells: list[str]) -> None:
+        numbers = [x for x in values if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if not numbers:
+            return
+        for name in names:
+            if any(not _not_among(numbers, form) for form in _derived_counts(per_cell, cells, name, grid)):
+                return
+        out.append(
+            f"the analysis reports `{where}` for `{metric}`, a mean over a subset of the trials, with values FI's trials "
+            f"never produced in {'those settings' if len(cells) < len(all_cells) else 'the run'}: "
+            + _rm.DERIVED
+        )
+
+    for metric in means:
+        stem = re.compile(rf"^{re.escape(metric)}_.+_values$")
+
+        def walk(node: Any, under: Any, path: str) -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    here = f"{path}.{k}" if path else str(k)
+                    if k == f"{metric}_values" and isinstance(v, list):
+                        cells, _why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
+                        own = [keyed[c] for c in (cells or []) if c in keyed] if cells else all_cells
+                        check(metric, here, v, own or all_cells)
+                    elif isinstance(k, str) and stem.match(k) and isinstance(v, list):
+                        check(metric, here, v, all_cells)
+                    else:
+                        walk(v, k, here)
+            elif isinstance(node, list):
+                for v in node[:200]:
+                    walk(v, under, path)
+
+        walk(result_json, None, "")
+    return out
 
 
 def _half_step(x: Any) -> float:
@@ -807,32 +917,21 @@ def _not_among(values: list[Any], recorded: Counter) -> list[float]:
     return extra
 
 
-def reported_values_not_run(recorded: dict[str, Counter], result_json: Any,
-                            given_means: frozenset[str] | set[str] = frozenset()) -> list[str]:
+def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> list[str]:
     """Each ``<name>_values`` list the analysis printed, for a ``<name>`` FI's trials returned, that holds values those
     trials never produced (or more copies of one than they did): one sentence each.
 
     The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
     of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
     checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
-    FI's to check here, except the values of a mean over a subset of the trials (``given_means``): they are that subset's
-    values of one quantity the trials returned, so they must all be values of one recorded quantity."""
+    FI's to check here; a mean over a subset of the trials is checked by :func:`given_values_not_run`."""
     out: list[str] = []
 
     def walk(node: Any, path: str) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
                 here = f"{path}.{k}" if path else str(k)
-                if (isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in given_means
-                        and k[:-7] not in recorded and recorded):
-                    if all(_not_among(v, counts) for counts in recorded.values()):
-                        out.append(
-                            f"the analysis reports `{here}`, the values `{k[:-7]}` averages over a subset of the trials, "
-                            "but they are not all values of any one quantity FI's trials returned: experiment.py must "
-                            "list the trials' own values of the quantity it averages (read from FI_TRIALS), or run_trial "
-                            "must return that quantity"
-                        )
-                elif isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
+                if isinstance(k, str) and k.endswith("_values") and isinstance(v, list) and k[:-7] in recorded:
                     extra = _not_among(v, recorded[k[:-7]])
                     if extra:
                         out.append(

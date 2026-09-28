@@ -5502,10 +5502,10 @@ class Engine:
             manifest, row_problems = _run_manifest.manifest_from_ledger(protocol, ledger, thresholds)
             # FI holds every trial's value: a list the analysis reports for one of the trials' own outcomes is checked
             # value by value, not only counted.
-            recorded, altered = _trial_runner.recorded_values(self.quest_root)
-            not_run = _trial_runner.reported_values_not_run(recorded, result_json, given_means={
-                str(m["id"]) for m in protocol.get("metrics") or []
-                if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")})
+            per_cell, altered = _trial_runner.recorded_values_by_cell(self.quest_root)
+            recorded = _trial_runner.pooled(per_cell)
+            not_run = (_trial_runner.reported_values_not_run(recorded, result_json)
+                       + _trial_runner.given_values_not_run(protocol, per_cell, result_json))
             found = row_problems + altered + _run_manifest.problems(protocol, manifest, result_json=result_json) + not_run
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
@@ -5515,7 +5515,8 @@ class Engine:
                       if self.config.rigor_profile == "research" else [])
             found = found + no_ids
             self._manifest_analysis_problems = (
-                _run_manifest.analysis_output_problems(protocol, manifest, result_json) + not_run + no_ids
+                _run_manifest.analysis_output_problems(protocol, manifest, result_json, trial_mode=True)
+                + not_run + no_ids
             )
             return ("differs" if found else "ok"), found
         if self.config.rigor_profile == "research":
