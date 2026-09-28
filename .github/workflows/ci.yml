@@ -168,17 +168,12 @@ jobs:
         run: npm run compile
 
       # Package (vsce + the normalizer, so a broken normalizer fails here, before merge) and compare the files packed
-      # inside with the committed manifest. The committed .vsix is rebuilt on main after a merge, so a change to the
-      # extension's sources is only a notice here; the rebuild's own commit ([skip vsix]) must match exactly.
+      # inside with the committed manifest. A difference is a notice: after a merge, main's rebuild workflow builds the
+      # .vsix from the sources and commits it (it also runs when a commit changes the .vsix or its manifest directly).
       - name: Package .vsix and compare its files with the committed manifest
-        env:
-          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           cp vscode-frontier-insight.vsix.manifest.json "$RUNNER_TEMP/committed.manifest.json"
           npm run package
           if ! node scripts/check-vsix-manifest.js vscode-frontier-insight.vsix.manifest.json "$RUNNER_TEMP/committed.manifest.json"; then
-            case "$HEAD_MESSAGE" in
-              *"[skip vsix]"*) exit 1 ;;
-              *) echo "::notice::the packed files differ from the committed .vsix; main's rebuild workflow commits a new one after merge" ;;
-            esac
+            echo "::notice::the packed files differ from the committed .vsix; main's rebuild workflow commits one built from the sources after merge"
           fi

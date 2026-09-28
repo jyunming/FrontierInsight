@@ -24,6 +24,10 @@ on:
       - "vscode-frontier-insight/images/icon.png"
       - "vscode-frontier-insight/images/icon.svg"
       - "vscode-frontier-insight/scripts/**"
+      # A commit that changes the packaged file itself is rebuilt from the sources too, so a .vsix (and its manifest)
+      # that does not come from them never stays on main.
+      - "vscode-frontier-insight/vscode-frontier-insight.vsix"
+      - "vscode-frontier-insight/vscode-frontier-insight.vsix.manifest.json"
   workflow_dispatch: {}
 
 permissions:
