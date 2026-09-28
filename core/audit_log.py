@@ -64,7 +64,9 @@ _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{16,}"),
     re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"),
-    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{6,}"),  # whatever follows "Bearer" is a credential
+    # After "Bearer", a token-shaped value: 16 characters or more, or 6 or more with a digit or one of ``._-`` in them.
+    # A plain word ("the bearer protocol", "a Bearer token") is left alone.
+    re.compile(r"(?i)\bbearer\s+(?:[A-Za-z0-9._\-]{16,}|(?=[A-Za-z0-9._\-]*[0-9._\-])[A-Za-z0-9._\-]{6,})"),
     # A credential in a URL's query (``?key=…``, ``&access_token=…``), as a failed request's message prints it.
     re.compile(r"(?i)(?<=[?&])(?:key|api_key|apikey|token|access_token|auth|sig|signature)=[^&\s'\"]{6,}"),
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\b(\s*[:=]\s*)(['\"]?)[^\s'\",;]{6,}"),

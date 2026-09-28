@@ -105,6 +105,7 @@ from .knowledge import (
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
+    CALL_ATTEMPTS as _CALL_ATTEMPTS,
     LAST_CALL as _LAST_CALL,
     FallbackLLMClient,
     LLMClient,
@@ -399,6 +400,9 @@ class QuestState(TypedDict, total=False):
     # same note flagged again after it sends the quest to the design.
     refine_written_for: int
     feedback_rounds_from: int
+    # The engine's own tally of the model calls it made, per step (``node`` key), for the quest's whole life: the record
+    # of its calls (.fi/model_calls.jsonl) must hold at least this many lines per step (core/attempt_records.py).
+    model_call_counts: dict[str, int]
     feedback_rewrite_for: int
     refine_needs_experiment: list[str]
     refine_scope: str
@@ -868,6 +872,11 @@ class Engine:
                     # shows "human review" / "user input" for the whole run.
                     # (Answer files are kept — they're this run's input.)
                     self._clear_stale_pause_markers()
+                    # This run's model calls belong to the record the quest will seal again when it finishes.
+                    try:
+                        (self.fi_dir / _attempts.MODEL_CALLS_CLOSED).unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
                     # Run, handling interrupts as they fire. Two kinds:
                     #   (a) clarify-interactive — pause to collect answers
@@ -1487,13 +1496,21 @@ class Engine:
             paper_sha = hashlib.sha256((self.quest_root / paper_rel).read_bytes()).hexdigest()
         except OSError:
             paper_sha = None
+        self._seed_call_counts(state)
+        counts = dict(self.__dict__.get("_model_call_counts") or {})
         for rel in _evidence.SEALED_LEDGERS:
-            # A record the quest never wrote to is an empty file with a hash, not a name the seal leaves out.
+            # A record the quest never wrote to is an empty file with a hash, not a name the seal leaves out. Not the
+            # record of model calls of a quest that made calls: that one missing is itself the gap.
+            path = self.quest_root / rel
+            if path.exists() or (rel.endswith(_attempts.MODEL_CALLS) and sum(counts.values())):
+                continue
             try:
-                (self.quest_root / rel).parent.mkdir(parents=True, exist_ok=True)
-                (self.quest_root / rel).touch(exist_ok=True)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
             except OSError:
                 pass
+        call_gaps, call_summary = _attempts.model_call_gaps(
+            self.quest_root, {n: dict(v) for n, v in dict(getattr(self, "_last_chat", {}) or {}).items()}, counts)
         files = {}
         for rel in _evidence.SEALED_FILES:
             try:
@@ -1512,7 +1529,14 @@ class Engine:
             paper_path=paper_rel,
             paper_sha256=paper_sha,
             files=files,
+            model_calls={"lines": call_summary.get("lines", 0), "counts": counts, "gaps": call_gaps},
         )
+        # From here, a model call (an output made from the finished quest) goes to a separate record the seal does not
+        # name; a new run of the quest removes this and seals again.
+        try:
+            (self.fi_dir / _attempts.MODEL_CALLS_CLOSED).write_text("sealed\n", encoding="utf-8")
+        except OSError:
+            pass
 
     def _audit_artifacts(self, node: str) -> None:
         # A large file (the trial ledger) whose size and modification time are those it had when last hashed is not
@@ -1643,6 +1667,7 @@ class Engine:
 
         @functools.wraps(fn)
         async def wrapper(state: QuestState) -> Any:
+            self._seed_call_counts(state)
             self.audit.event_count()      # open the chain first: after a restart it says which node was waiting for a person
             resumed = self.audit.paused_node == name
             self._audit_node, self._audit_pause = name, ""
@@ -1667,6 +1692,9 @@ class Engine:
                 "node_completed", node=name, duration_s=round(time.monotonic() - began, 2),
                 wrote=sorted(out) if isinstance(out, dict) else [],
             )
+            counts = dict(self.__dict__.get("_model_call_counts") or {})
+            if isinstance(out, dict) and counts != dict(state.get("model_call_counts") or {}):
+                out = {**out, "model_call_counts": counts}  # kept in the state, so a resumed quest keeps its tally
             return out
 
         return wrapper
@@ -11170,18 +11198,11 @@ class Engine:
             else _temperature_for_node(node)
         )
         messages = [{"role": "user", "content": prompt}]
-        _LAST_CALL.set(None)
-        try:
-            response = await self._client.chat(
-                messages, temperature=temp, model=self._model_for_node(node),
-                node=node or "",
-            )
-        except Exception as exc:
-            self._record_model_call(node or "", messages, None, outcome=type(exc).__name__)
-            raise
-        served = _LAST_CALL.get() or {}
+        response, served = await self._recorded_call(
+            node or "", messages,
+            lambda: self._client.chat(messages, temperature=temp, model=self._model_for_node(node), node=node or ""),
+        )
         self._log_chat_cost(node=node or "", messages=messages, response=response)
-        self._record_model_call(node or "", messages, response, served=served)
         if node:
             # Who answered THIS call (core/provider.py::LAST_CALL, the task's own), so a fallback that actually served
             # it is recorded truthfully and calls made at the same time do not overwrite each other. The client's
@@ -11194,10 +11215,55 @@ class Engine:
                 "reported": bool(served.get("reported")),
                 # The model's vendor as the connection named it (the VS Code extension's), when it did.
                 **({"vendor": served["vendor"]} if served.get("vendor") else {}),
-                "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                # The same hashes as this call's line in .fi/model_calls.jsonl, so the two can be joined.
+                "prompt_hash": _attempts.prompt_sha(messages),
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
         return response
+
+    def _seed_call_counts(self, state: Any) -> None:
+        """Start this run's tally of model calls from the one the quest's state kept (a resumed quest)."""
+        if self.__dict__.get("_model_call_counts_seeded"):
+            return
+        self.__dict__["_model_call_counts_seeded"] = True
+        kept = state.get("model_call_counts") if isinstance(state, dict) else None
+        counts = self.__dict__.setdefault("_model_call_counts", {})
+        for node, n in dict(kept or {}).items():
+            counts[node] = max(int(counts.get(node, 0) or 0), int(n or 0))
+
+    async def _recorded_call(self, node: str, messages: Any, call: Any, *,
+                             requested_model: str | None = None) -> tuple[Any, dict[str, Any]]:
+        """Make one model call (``call()``) and write every attempt of it in the quest's record of its calls: each
+        attempt that failed before it answered or gave up (a retry, a provider the fallback chain passed over), then
+        the answer or the final failure. Returns the answer and who answered it (this task's LAST_CALL)."""
+        attempts: list[dict[str, Any]] = []
+        token = _CALL_ATTEMPTS.set(attempts)
+        _LAST_CALL.set(None)
+        try:
+            try:
+                response = await call()
+            except Exception as exc:
+                failed = _LAST_CALL.get() or {}
+                self._record_attempts(node, messages, attempts, requested_model, final=exc)
+                if not (attempts and attempts[-1].get("exc") is exc):
+                    self._record_model_call(node, messages, None, served={**failed, "reported": False},
+                                            outcome=type(exc).__name__, requested_model=requested_model)
+                raise
+            served = dict(_LAST_CALL.get() or {})
+            self._record_attempts(node, messages, attempts, requested_model)
+            self._record_model_call(node, messages, response, served=served, usage=served.get("usage"),
+                                    requested_model=requested_model)
+            return response, served
+        finally:
+            _CALL_ATTEMPTS.reset(token)
+
+    def _record_attempts(self, node: str, messages: Any, attempts: list[dict[str, Any]], requested_model: str | None,
+                         *, final: BaseException | None = None) -> None:
+        for a in attempts:
+            self._record_model_call(
+                node, messages, None, outcome=str(a.get("error") or "error"), requested_model=requested_model,
+                served={"provider": a.get("provider"), "model": a.get("model"), "fallback": bool(a.get("fallback"))},
+            )
 
     def _record_model_call(self, node: str, messages: Any, response: Any, *, served: dict[str, Any] | None = None,
                            outcome: str = "ok", usage: dict[str, Any] | None = None,
@@ -11211,10 +11277,9 @@ class Engine:
         try:
             counts = self.__dict__.setdefault("_model_call_counts", {})
             counts[node] = counts.get(node, 0) + 1
-            if usage is None and outcome == "ok":
-                usage = getattr(self._client, "last_usage", None)
             row = _attempts.model_call_row(
-                node=node, attempt=counts[node], served=served,
+                # A call of a step paused and run again after a resume is numbered on from the record's own lines.
+                node=node, attempt=max(counts[node], _attempts.next_attempt(fi_dir, node)), served=served,
                 requested_model=requested_model or self._model_for_node(node) or self.config.provider.model or None,
                 reports_model=bool(getattr(self, "_reports_model", False)), messages=messages, response=response,
                 outcome=outcome, usage=usage if isinstance(usage, dict) else None,
@@ -11366,23 +11431,18 @@ class Engine:
             node: str = "",
         ) -> str:
             assert self._client is not None
-            _LAST_CALL.set(None)
-            try:
-                text = await self._client.chat(
-                    messages, temperature=temperature, model=model, node=node,
-                )
-            except Exception as exc:
-                self._record_model_call(node, messages, None, outcome=type(exc).__name__, requested_model=model)
-                raise
-            snap_model = (
-                getattr(self._client, "last_model", None) or model or ""
+            text, served = await self._recorded_call(
+                node, messages,
+                lambda: self._client.chat(messages, temperature=temperature, model=model, node=node),
+                requested_model=model,
             )
-            snap_usage = getattr(self._client, "last_usage", None)
+            # This call's own model and counts (LAST_CALL is the task's own record); the client's shared attributes
+            # only when the transport set nothing.
             self._log_chat_cost(
-                node=node, model=snap_model, usage=snap_usage,
+                node=node, model=served.get("model") or getattr(self._client, "last_model", None) or model or "",
+                usage=served.get("usage") if served.get("usage") is not None
+                else getattr(self._client, "last_usage", None),
             )
-            self._record_model_call(node, messages, text, served=_LAST_CALL.get() or {}, usage=snap_usage,
-                                    requested_model=model)
             return text
 
         messages = [{"role": "user", "content": prompt}]
@@ -11441,17 +11501,12 @@ class Engine:
         source-router) that build their own messages array. Honors the
         same Phase-O per-node model routing as ``_chat``."""
         assert self._client is not None
-        _LAST_CALL.set(None)
-        try:
-            response = await self._client.chat(
-                messages, temperature=temperature, model=self._model_for_node(node),
-                node=node or "",
-            )
-        except Exception as exc:
-            self._record_model_call(node or "", messages, None, outcome=type(exc).__name__)
-            raise
+        response, _served = await self._recorded_call(
+            node or "", messages,
+            lambda: self._client.chat(messages, temperature=temperature, model=self._model_for_node(node),
+                                      node=node or ""),
+        )
         self._log_chat_cost(node=node or "", messages=messages, response=response)
-        self._record_model_call(node or "", messages, response, served=_LAST_CALL.get() or {})
         return response
 
     def _clear_clarify_snapshot(self) -> None:
@@ -11848,6 +11903,7 @@ class Engine:
                 self.config, self.quest_root, dict(state), prompts=self._prompts,
                 fi_repo=Path(__file__).resolve().parent.parent, models_used=models_used,
                 kind=kind, cache=cache, partial=partial,
+                model_call_counts=dict(self.__dict__.get("_model_call_counts") or {}) or None,
             )
             if not partial:
                 self._last_attempt_context = context

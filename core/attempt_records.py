@@ -45,10 +45,11 @@ LEDGER = "branch_ledger.jsonl"
 #: One line per model call the quest made (never the prompt or the answer: their hashes). See :func:`model_call_row`.
 MODEL_CALLS = "model_calls.jsonl"
 MODEL_CALLS_LOST = "model_calls.lost"
-#: Steps of the graph that ask the model every time they run: one the trace says completed with no call line in
-#: :data:`MODEL_CALLS` is a gap in the quest's record of its calls. (Not the design: after the plan pause it takes the
-#: approved plan's design and may ask nothing.)
-MODEL_STEPS = ("write",)
+#: Calls made after the quest sealed its record (the output generators, a later ``--emit``): kept apart, since the seal
+#: names :data:`MODEL_CALLS` as it was when the research record was closed.
+MODEL_CALLS_AFTER_SEAL = "model_calls.after_seal.jsonl"
+#: Present while the quest's record is sealed (Engine._seal_trace writes it; a new run of the quest removes it).
+MODEL_CALLS_CLOSED = "model_calls.closed"
 #: Version 2 added record ids, the scripts' hashes, the question, the policy, the models each step was answered by, the
 #: inputs' completeness and the quest line's four fields. Version 3: code is hashed whole, a context names its
 #: ``context_kind``, and a finished quest's context needs its code, environment and protocol. Version 1 lines carry no
@@ -273,7 +274,7 @@ def _cluster_code_changes(quest_root: Path) -> list[str]:
 def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *, kind: str,
                         prompts: dict[str, Any] | None = None, fi_repo: Path | None = None,
                         models_used: dict[str, Any] | None = None, cache: dict | None = None,
-                        partial: bool = False) -> dict[str, Any]:
+                        partial: bool = False, model_call_counts: dict[str, int] | None = None) -> dict[str, Any]:
     """The conditions an attempt ran under, as far as the quest knows them. Two attempts share a context only when
     these match: the model and the settings that change its answers, the prompts it was given, FI's own version, the
     selected skills, the environment and its packages, the inputs, the protocol and its metric definitions, the budget,
@@ -340,7 +341,9 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
             missing.append("no protocol")
     calls = None
     if kind == "quest_end":
-        call_gaps, calls = model_call_gaps(quest_root, models_used or {})
+        call_gaps, calls = model_call_gaps(quest_root, models_used or {},
+                                           model_call_counts if model_call_counts is not None
+                                           else state.get("model_call_counts"))
         missing.extend(call_gaps)
     changed_while_queued = _cluster_code_changes(quest_root)
     if changed_while_queued:
@@ -436,6 +439,24 @@ def _text_sha(value: Any) -> str | None:
     return _sha(value.encode("utf-8"))
 
 
+def prompt_sha(messages: Any) -> str | None:
+    """The hash of a call's prompt, the same wherever it is written (a line of :data:`MODEL_CALLS`, a step's record,
+    a trace event): the SHA-256 of the messages' text, joined by a blank line (a one-message prompt: of its text)."""
+    if messages is None:
+        return None
+    if isinstance(messages, str):
+        return _text_sha(messages)
+    if isinstance(messages, (list, tuple)) and all(isinstance(m, dict) for m in messages):
+        return _text_sha("\n\n".join(str(m.get("content") if m.get("content") is not None else "") for m in messages))
+    return _text_sha(messages)
+
+
+def next_attempt(fi_dir: Path, node: str) -> int:
+    """The number the next line of ``node`` in the file calls go to takes (1 for its first)."""
+    name = MODEL_CALLS_AFTER_SEAL if (fi_dir / MODEL_CALLS_CLOSED).exists() else MODEL_CALLS
+    return 1 + sum(1 for r in read(fi_dir, name) if r.get("node") == node)
+
+
 def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, requested_model: str | None,
                    reports_model: bool, messages: Any, response: Any, outcome: str = "ok",
                    usage: dict[str, Any] | None = None, call_id: str | None = None) -> dict[str, Any]:
@@ -456,7 +477,7 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
         "reported": bool(served.get("reported")),
         "reports_model": bool(reports_model),
         "fallback": bool(served.get("fallback")),
-        "prompt_sha256": _text_sha(messages),
+        "prompt_sha256": prompt_sha(messages),
         "response_sha256": _text_sha(response),
         "outcome": outcome,
         "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens") if k in usage}
@@ -465,10 +486,12 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
 
 
 def append_model_call(fi_dir: Path, quest_id: str, row: dict[str, Any]) -> bool:
-    """Append one :func:`model_call_row` to the quest's :data:`MODEL_CALLS`; a line that cannot be written is counted
-    in :data:`MODEL_CALLS_LOST` (which the quest's end reads). Never raises."""
+    """Append one :func:`model_call_row` to the quest's :data:`MODEL_CALLS` (to :data:`MODEL_CALLS_AFTER_SEAL` once the
+    quest's record is sealed); a line that cannot be written is counted in :data:`MODEL_CALLS_LOST` (which the quest's
+    end reads). Never raises."""
     try:
-        if append(fi_dir, MODEL_CALLS, {"quest_id": quest_id, **row}):
+        name = MODEL_CALLS_AFTER_SEAL if (fi_dir / MODEL_CALLS_CLOSED).exists() else MODEL_CALLS
+        if append(fi_dir, name, {"quest_id": quest_id, **row}):
             return True
     except Exception:  # noqa: BLE001 -- a record never touches the quest
         pass
@@ -476,11 +499,13 @@ def append_model_call(fi_dir: Path, quest_id: str, row: dict[str, Any]) -> bool:
     return False
 
 
-def model_call_gaps(quest_root: Path, models_used: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
-    """What keeps the quest's record of its model calls from being complete, and that record's hash and line count:
-    lines that could not be written; a step's last call (``models_used``, the engine's per-step record) not among the
-    lines; a step of :data:`MODEL_STEPS` the trace says completed with no line under it; answered calls on a connection
-    that names the answering model whose line names none."""
+def model_call_gaps(quest_root: Path, models_used: dict[str, Any],
+                    counts: dict[str, int] | None = None) -> tuple[list[str], dict[str, Any]]:
+    """What keeps the quest's record of its model calls (:data:`MODEL_CALLS`) from being complete, and that record's
+    hash and line count. ``counts``: the engine's own tally of the calls it made, per step (kept in the quest's state,
+    so a resumed quest keeps it): a step with fewer lines than calls lost lines. Also: lines that could not be written;
+    a step's last call (``models_used``) not among the lines; answered calls on a connection that names the answering
+    model whose line names none."""
     fi_dir = Path(quest_root) / ".fi"
     rows = read(fi_dir, MODEL_CALLS)
     try:
@@ -492,28 +517,19 @@ def model_call_gaps(quest_root: Path, models_used: dict[str, Any]) -> tuple[list
     gaps: list[str] = []
     if summary["not_written"]:
         gaps.append(f"{summary['not_written']} model call record(s) could not be written")
+    per_node: dict[str, int] = {}
+    for r in rows:
+        per_node[str(r.get("node") or "")] = per_node.get(str(r.get("node") or ""), 0) + 1
+    short = sorted(f"{node} ({per_node.get(node, 0)} of {n})" for node, n in (counts or {}).items()
+                   if per_node.get(node, 0) < int(n or 0))
+    if short:
+        gaps.append("the record of model calls has fewer lines than the calls made: " + ", ".join(short[:10]))
     answered = {(str(r.get("node") or ""), r.get("response_sha256")) for r in rows}
     unlisted = sorted(node for node, rec in (models_used or {}).items()
                       if isinstance(rec, dict) and rec.get("response_hash")
                       and (node, rec.get("response_hash")) not in answered)
     if unlisted:
         gaps.append("model calls not in the call record: the last call of " + ", ".join(unlisted[:10]))
-    completed: set[str] = set()
-    try:
-        for line in (fi_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines():
-            try:
-                event = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(event, dict) and event.get("kind") == "node_completed":
-                completed.add(str(event.get("node") or ""))
-    except OSError:
-        pass
-    nodes = {str(r.get("node") or "") for r in rows}
-    silent = [step for step in MODEL_STEPS if step in completed
-              and not any(n == step or n.startswith(step + ".") for n in nodes)]
-    if silent:
-        gaps.append("steps that ask the model completed with no model call recorded: " + ", ".join(silent))
     unnamed = sum(1 for r in rows if r.get("outcome") == "ok" and r.get("reports_model")
                   and not r.get("fallback") and not r.get("reported"))
     if unnamed:

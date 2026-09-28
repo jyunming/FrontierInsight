@@ -50,6 +50,7 @@ def test_under_research_a_missing_or_broken_trace_is_a_gap(tmp_path: Path) -> No
         (root / rel).touch()
     (root / "needs" / "EVIDENCE.json").write_text("{}", encoding="utf-8")  # written before the seal
     log.append("quest_finalized", events_before=3, write_errors=0, nodes_completed=["review", "write"],
+               model_calls={"lines": 0, "counts": {}, "gaps": []},
                files={rel: evidence._file_sha256(root / rel) for rel in evidence.SEALED_FILES},
                paper_path="paper/paper.md", paper_sha256=evidence._file_sha256(root / "paper" / "paper.md"))
     assert not any("decision trace" in g for g in evidence.assess(root, _state(), settings=research)["gaps"])

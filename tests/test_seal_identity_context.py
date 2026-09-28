@@ -90,6 +90,7 @@ def _finished(tmp_path: Path, **seal_over) -> tuple[Path, dict]:
         (root / rel).touch()
     files = {rel: evidence._file_sha256(root / rel) for rel in evidence.SEALED_FILES}
     log.append("quest_finalized", events_before=len(audit_log.read(trace)), write_errors=0, records_not_written=0,
+               model_calls={"lines": 0, "counts": {}, "gaps": []},
                nodes_completed=["review", "write"], files=files, paper_path="paper/paper.md",
                paper_sha256=evidence._file_sha256(root / "paper" / "paper.md"), **seal_over)
     return root, record
@@ -175,6 +176,7 @@ def test_a_record_not_written_before_the_seal_is_a_gap(tmp_path: Path) -> None:
     trace.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
     audit_log.AuditLog(trace, root.name).append(
         "quest_finalized", events_before=len(lines) - 1, write_errors=0, records_not_written=1,
+        model_calls={"lines": 0, "counts": {}, "gaps": []},
         nodes_completed=["review", "write"], paper_path="paper/paper.md",
         paper_sha256=evidence._file_sha256(root / "paper" / "paper.md"),
         files={rel: evidence._file_sha256(root / rel) for rel in evidence.SEALED_FILES})

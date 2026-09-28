@@ -205,6 +205,14 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
         gaps.append(f"{seal['records_not_written']} of the quest's attempt record(s) could not be written")
     if int(seal.get("model_calls_not_written") or 0) > 0:
         gaps.append(f"{seal['model_calls_not_written']} of the quest's model call record(s) could not be written")
+    calls = seal.get("model_calls") if isinstance(seal.get("model_calls"), dict) else None
+    if calls is None:
+        gaps.append("the decision trace's final seal says nothing about the quest's record of its model calls")
+    else:
+        # What the finishing quest found missing from its record of model calls (fewer lines than calls, a call not
+        # in it, an answering model a connection should have named); lost lines are counted just above.
+        gaps.extend(f"the record of the quest's model calls is incomplete: {g}" for g in calls.get("gaps") or []
+                    if "could not be written" not in str(g))
     if seal.get("events_before") != at:
         gaps.append("the decision trace's final seal does not count the events before it (events are missing or were added)")
     if any(e.get("kind") in ("node_started", "node_completed") for e in events[at + 1:]):
