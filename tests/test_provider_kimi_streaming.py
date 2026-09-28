@@ -29,10 +29,10 @@ def _chunk(text: str = "", finish: str | None = None, **top: object) -> dict:
     return {"choices": [{"delta": {"content": text} if text else {}, "finish_reason": finish}], **top}
 
 
-async def _chat(endpoint, handler, **kwargs):
+async def _chat(endpoint, handler, *, timeout_s: float = 120.0, **kwargs):
     http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=30.0)
     try:
-        client = LLMClient(endpoint, http=http)
+        client = LLMClient(endpoint, http=http, timeout_s=timeout_s)
         text = await client.chat([{"role": "user", "content": "hi"}], **kwargs)
         return text, client, dict(LAST_CALL.get() or {})
     finally:
@@ -177,3 +177,140 @@ def test_other_providers_still_send_a_plain_request() -> None:
 
     text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(name="openai", model="gpt-x")), handler))
     assert text == "plain" and "stream" not in sent[0] and "stream_options" not in sent[0]
+
+
+# --- review follow-ups ------------------------------------------------------------------------------------------------
+
+
+class _Forever(httpx.AsyncByteStream):
+    """Bytes keep coming (so no read timeout fires) but the answer never ends: keep-alive comments, or a slow trickle."""
+
+    def __init__(self, line: bytes) -> None:
+        self.line = line
+
+    async def __aiter__(self):
+        while True:
+            await asyncio.sleep(0.05)
+            yield self.line
+
+
+@pytest.mark.parametrize("line", [b": keep-alive\n\n", b'data: {"choices":[{"delta":{"content":"x"}}]}\n\n'],
+                         ids=["keepalive", "trickle"])
+def test_a_stream_that_never_finishes_is_bounded_by_the_step_budget_and_tried_again(line: bytes) -> None:
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, stream=_Forever(line))
+        return httpx.Response(200, content=_sse(_chunk("done", finish="stop")))
+
+    async def run():
+        return await asyncio.wait_for(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler, timeout_s=0.5), 10)
+
+    text, _c, _l = asyncio.run(run())
+    assert text == "done" and len(calls) == 2
+
+
+def test_several_data_lines_of_one_event_are_joined() -> None:
+    body = (b'data: {"choices":[{"delta":\n'
+            b'data: {"content":"kept, LOST-no-more"}}]}\n\n'
+            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+            b"data: [DONE]\n\n")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert text == "kept, LOST-no-more"
+
+
+def test_an_event_that_does_not_parse_is_never_skipped() -> None:
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=b'data: {"choices": [broken\n\n' + _sse(_chunk("x", finish="stop")))
+        return httpx.Response(200, content=_sse(_chunk("clean", finish="stop")))
+
+    text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert text == "clean" and len(calls) == 2, "the broken event failed the attempt instead of being dropped"
+
+
+@pytest.mark.parametrize("error", [
+    {"error": {"type": "content_filter", "message": "The request was rejected because it was considered high risk"}},
+    {"error": {"type": "exceeded_current_quota_error", "message": "Your account is suspended, please check your plan"}},
+    {"error": {"type": "invalid_request_error", "message": "bad"}},
+])
+def test_an_error_retrying_cannot_fix_is_not_tried_again(error: dict) -> None:
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, content=_sse(error, done=False))
+
+    with pytest.raises(httpx.HTTPStatusError) as e:
+        asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert len(calls) == 1 and e.value.response.status_code == 400
+
+
+def test_an_error_event_without_an_error_key_is_an_error() -> None:
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=b'event: error\ndata: {"message": "upstream overloaded"}\n\n')
+        return httpx.Response(200, content=_sse(_chunk("after", finish="stop")))
+
+    text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert text == "after" and len(calls) == 2
+
+
+def test_done_without_a_finish_reason_is_a_cut_off_answer() -> None:
+    calls = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, content=_sse(_chunk("half")))
+        return httpx.Response(200, content=_sse(_chunk("whole", finish="stop")))
+
+    text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert text == "whole" and len(calls) == 2
+
+
+def test_a_finished_answer_without_done_or_usage_is_kept_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_sse(_chunk("final", finish="stop"), done=False))
+
+    with caplog.at_level(logging.WARNING, logger="frontier_insight.provider"):
+        text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert text == "final"
+    assert any("no [DONE]" in r.getMessage() and "no usage" in r.getMessage() for r in caplog.records)
+
+
+def test_stream_options_from_extra_body_are_kept_and_a_stream_key_is_refused() -> None:
+    sent: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, content=_sse(_chunk("ok", finish="stop")))
+
+    kimi = resolve_endpoint(ProviderConfig(**KIMI, extra_body={"stream_options": {"chunk_include_extra": True}}))
+    asyncio.run(_chat(kimi, handler))
+    assert sent[0]["stream_options"] == {"chunk_include_extra": True, "include_usage": True}
+    for cfg in (dict(KIMI, extra_body={"stream": False}), dict(name="openai", extra_body={"stream": True})):
+        with pytest.raises(ValueError, match="stream"):
+            asyncio.run(_chat(resolve_endpoint(ProviderConfig(**cfg)), handler))
+
+
+def test_no_content_at_all_is_none_as_a_plain_call_returns() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_sse(_chunk(finish="tool_calls")))
+
+    text, _c, _l = asyncio.run(_chat(resolve_endpoint(ProviderConfig(**KIMI)), handler))
+    assert text is None
