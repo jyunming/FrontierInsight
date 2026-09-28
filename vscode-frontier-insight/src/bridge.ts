@@ -10,7 +10,7 @@
  *
  *   Extension → Python:
  *     {type:"lm_chunk",  id, delta}
- *     {type:"lm_done",   id, content, total_tokens}
+ *     {type:"lm_done",   id, content, total_tokens, served_model?: {id, vendor, family, version, name}}
  *     {type:"lm_error",  id, error}
  *
  * One bridge instance is created per `@fi /start` invocation. It
@@ -21,7 +21,7 @@
 import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
-import { BridgeMessage, ChatMessageApi, toChatMessages } from "./lm-messages";
+import { BridgeMessage, ChatMessageApi, servedModel, toChatMessages } from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
 // in the chat panel — strip / escape markdown that would
@@ -649,6 +649,8 @@ export class Bridge {
                 type: "lm_done",
                 id: req.id,
                 content: accumulated,
+                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
+                served_model: servedModel(model),
             });
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);

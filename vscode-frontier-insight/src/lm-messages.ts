@@ -65,3 +65,32 @@ export function toChatMessages<T>(messages: BridgeMessage[], api: ChatMessageApi
         return make(parts);
     });
 }
+
+/** The identity of the chat model the extension selected and sent the request to, as its `vscode.lm` model object
+ * states it. Sent on `lm_done` so FI can record it (the selected model as VS Code reports it; not a proof beyond
+ * that). Fields VS Code leaves empty are left out, and a router alias ("auto") names no model, so nothing is sent. */
+export interface ServedModel {
+    id?: string;
+    vendor?: string;
+    family?: string;
+    version?: string;
+    name?: string;
+}
+
+export function servedModel(model: ServedModel | undefined | null): ServedModel | undefined {
+    if (!model) {
+        return undefined;
+    }
+    const out: ServedModel = {};
+    for (const key of ["id", "vendor", "family", "version", "name"] as const) {
+        const value = model[key];
+        if (typeof value === "string" && value.trim()) {
+            out[key] = value;
+        }
+    }
+    const alias = (s?: string) => ["auto", "default", "copilot-auto", "auto-mode"].includes((s ?? "").trim().toLowerCase());
+    if (!out.id || alias(out.id) || alias(out.family)) {
+        return undefined;
+    }
+    return out;
+}

@@ -24,7 +24,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as net from "net";
 import { persistentBridgePath } from "./bridge-path";
-import { BridgeMessage, ChatMessageApi, toChatMessages } from "./lm-messages";
+import { BridgeMessage, ChatMessageApi, servedModel, toChatMessages } from "./lm-messages";
 
 interface LmRequest {
     type: "lm_request";
@@ -468,6 +468,8 @@ export class PersistentBridge {
                 // that includes the platform's own overhead.
                 usage_scope: "sent_only",
                 measured: promptTokens > 0,
+                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
+                served_model: servedModel(model),
             });
             cts2.dispose();
         } catch (e) {
