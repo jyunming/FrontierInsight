@@ -179,6 +179,14 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     # The seal is the trace's last event and names the evidence and attempt records as they are.
     assert audit_log.read(root / ".fi" / "audit.jsonl")[-1]["kind"] == "quest_finalized"
     assert record["trace_seal"] == "verified"
+    # Every model call is a line, and a normal finished quest's call record has no gap.
+    from core import attempt_records as ar
+
+    calls = ar.read(root / ".fi", ar.MODEL_CALLS)
+    assert calls and {"plan", "write", "review_panel"} <= {c["node"].split(".")[0] for c in calls}
+    (end,) = [r for r in ar.read(root / ".fi", ar.ATTEMPTS) if r["kind"] == "quest"]
+    assert end["context"]["model_calls"]["lines"] == len(calls)
+    assert not [m for m in end["context"]["missing"] if "model call" in m], end["context"]["missing"]
 
 
 def test_anything_written_after_the_seal_takes_publication_ready_away(baseline: dict[str, Any], tmp_path: Path) -> None:

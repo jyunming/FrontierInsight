@@ -149,9 +149,12 @@ def _audit_gaps(paper_dir: Path) -> tuple[bool, list[str]]:
 _SEALED_STEPS = ("write", "review")
 
 
-#: Files a finished quest's seal names by hash (quest-relative): what the evidence, the attempt records and the paper
-#: were when the quest sealed its trace. The paper is named by ``paper_sha256``.
-SEALED_FILES = ("needs/EVIDENCE.json", ".fi/attempts.jsonl", ".fi/branch_ledger.jsonl")
+#: The quest's record files: what it tried, the choices along the way, and every model call it made. A quest that
+#: never wrote to one still has it (an empty file), so the seal can name it.
+SEALED_LEDGERS = (".fi/attempts.jsonl", ".fi/branch_ledger.jsonl", ".fi/model_calls.jsonl")
+#: Files a finished quest's seal names by hash (quest-relative), every one of them required: what the evidence and the
+#: record files were when the quest sealed its trace. The paper is named by ``paper_sha256``.
+SEALED_FILES = ("needs/EVIDENCE.json", *SEALED_LEDGERS)
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -200,6 +203,8 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
                     "written after the quest was sealed")
     if int(seal.get("records_not_written") or 0) > 0:
         gaps.append(f"{seal['records_not_written']} of the quest's attempt record(s) could not be written")
+    if int(seal.get("model_calls_not_written") or 0) > 0:
+        gaps.append(f"{seal['model_calls_not_written']} of the quest's model call record(s) could not be written")
     if seal.get("events_before") != at:
         gaps.append("the decision trace's final seal does not count the events before it (events are missing or were added)")
     if any(e.get("kind") in ("node_started", "node_completed") for e in events[at + 1:]):
@@ -213,13 +218,13 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
     quest_root = trace.parent.parent
     files = seal.get("files") if isinstance(seal.get("files"), dict) else None
     if files is None:
-        gaps.append("the decision trace's final seal names no hash of the evidence and attempt records")
+        gaps.append("the decision trace's final seal names no hash of the evidence and the quest's records")
     else:
         for rel in SEALED_FILES:
-            if rel in files and files[rel] != _file_sha256(quest_root / rel):
+            if not files.get(rel):
+                gaps.append(f"the decision trace's final seal names no hash of {rel}")
+            elif files[rel] != _file_sha256(quest_root / rel):
                 gaps.append(f"{rel} changed after the quest was sealed")
-        if "needs/EVIDENCE.json" not in files:
-            gaps.append("the decision trace's final seal names no hash of the evidence record")
     paper = seal.get("paper_path")
     if not paper or not seal.get("paper_sha256"):
         gaps.append("the decision trace's final seal names no hash of the paper")

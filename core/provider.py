@@ -3017,7 +3017,7 @@ def _archive_model_call(fi_dir: Path, record: dict[str, Any], messages: Any, res
 
 def append_cost_row(
     fi_dir: Path, *, node: str, model: str | None, usage: dict[str, Any] | None,
-    messages: Any = None, response: Any = None,
+    messages: Any = None, response: Any = None, ledger: bool = True,
 ) -> None:
     """Append one model call to ``<fi_dir>/cost.jsonl`` as ``{ts, node,
     model, usage, cost_usd}``. The engine's nodes and the output generators
@@ -3044,6 +3044,19 @@ def append_cost_row(
     except OSError as e:
         _log.debug("[cost] failed to write cost.jsonl: %r", e)
     _archive_model_call(fi_dir, record, messages, response)
+    if ledger:
+        # A call made outside the engine (an output generator) also goes in the quest's record of its model calls,
+        # with who answered it as this task last recorded (LAST_CALL). The engine records its own calls itself.
+        from core import attempt_records as _attempts
+
+        try:
+            row = _attempts.model_call_row(
+                node=node, attempt=0, served=LAST_CALL.get() or {"model": model}, requested_model=None,
+                reports_model=False, messages=messages, response=response, usage=usage,
+            )
+            _attempts.append_model_call(fi_dir, fi_dir.parent.name, row)
+        except Exception as e:  # noqa: BLE001 -- accounting never fails a call
+            _log.debug("[cost] failed to record the model call: %r", e)
 
 
 #: The provider and model that answered the most recent chat call made in the current asyncio task. A client's
@@ -3835,11 +3848,6 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
     return False
 
 
-_SECRETISH_RE = re.compile(
-    r"(?i)(bearer\s+|api[_-]?key[=:]\s*|\btoken[=:]\s*|sk-|[?&](?:key|api_key|apikey|token|access_token)=)"
-    r"[A-Za-z0-9._\-%]{6,}")
-
-
 class _AppendToFile(logging.Handler):
     """Appends each record to a file and closes it again: nothing stays open (a Windows lock) and nothing is shared."""
 
@@ -3876,8 +3884,13 @@ def _retry_line(node: str | None, where: str, rs: Any, total: int, *, model: str
     attempt of how many, what went wrong and how long until the next try. Nothing that looks like a key."""
     exc = rs.outcome.exception() if getattr(rs, "outcome", None) else None
     wait = getattr(getattr(rs, "next_action", None), "sleep", None)
-    what = f"{type(exc).__name__}: {str(exc)[:200]}" if exc else "no error captured"
-    what = _SECRETISH_RE.sub(lambda m: m.group(1) + "[redacted]", what).replace("\n", " ")
+    from core.audit_log import redact_text
+
+    # The same credential removal as the audit trace (key-shaped tokens and the values of secret environment
+    # variables), on the whole message first, then cut: a cut first could leave half a key the patterns miss.
+    what = redact_text(f"{type(exc).__name__}: {exc}", whole=True) if exc else "no error captured"
+    what = " ".join(what.split())
+    what = what if len(what) <= 240 else what[:240] + "..."
     return (f"[{node or 'model'}] the model call failed ({where}{', model ' + model if model else ''}), "
             f"attempt {rs.attempt_number} of {total}: {what}; trying again"
             + (f" in {wait:.0f}s" if isinstance(wait, (int, float)) else ""))

@@ -1487,6 +1487,13 @@ class Engine:
             paper_sha = hashlib.sha256((self.quest_root / paper_rel).read_bytes()).hexdigest()
         except OSError:
             paper_sha = None
+        for rel in _evidence.SEALED_LEDGERS:
+            # A record the quest never wrote to is an empty file with a hash, not a name the seal leaves out.
+            try:
+                (self.quest_root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (self.quest_root / rel).touch(exist_ok=True)
+            except OSError:
+                pass
         files = {}
         for rel in _evidence.SEALED_FILES:
             try:
@@ -1498,6 +1505,7 @@ class Engine:
             events_before=len(events),
             write_errors=max(int(getattr(self.audit, "write_errors", 0) or 0), _audit_log.lost_writes(self.audit.path)),
             records_not_written=_attempts.lost(self.fi_dir),
+            model_calls_not_written=_attempts.lost(self.fi_dir, _attempts.MODEL_CALLS_LOST),
             # Kept here, not only in the evidence record the seal protects: whether the seal must be checked.
             rigor_profile=self.config.rigor_profile,
             nodes_completed=sorted({str(e.get("node")) for e in events if e.get("kind") == "node_completed" and e.get("node")}),
@@ -3718,6 +3726,10 @@ class Engine:
             "provider %s -> %s (%s)",
             self.config.provider.name, endpoint.base_url, endpoint.model,
         )
+        # A connection that names the model that answered each call (an HTTP API, the claude CLI): a call on it whose
+        # model went unnamed is a gap in the quest's record of its calls (core/attempt_records.py::model_call_gaps).
+        self._reports_model = (getattr(endpoint, "transport", "") == "http"
+                               or self.config.provider.name == "claude_cli")
         self._client = LLMClient(
             endpoint,
             timeout_s=self.config.provider.http_timeout_s,
@@ -11159,12 +11171,17 @@ class Engine:
         )
         messages = [{"role": "user", "content": prompt}]
         _LAST_CALL.set(None)
-        response = await self._client.chat(
-            messages, temperature=temp, model=self._model_for_node(node),
-            node=node or "",
-        )
+        try:
+            response = await self._client.chat(
+                messages, temperature=temp, model=self._model_for_node(node),
+                node=node or "",
+            )
+        except Exception as exc:
+            self._record_model_call(node or "", messages, None, outcome=type(exc).__name__)
+            raise
         served = _LAST_CALL.get() or {}
         self._log_chat_cost(node=node or "", messages=messages, response=response)
+        self._record_model_call(node or "", messages, response, served=served)
         if node:
             # Who answered THIS call (core/provider.py::LAST_CALL, the task's own), so a fallback that actually served
             # it is recorded truthfully and calls made at the same time do not overwrite each other. The client's
@@ -11181,6 +11198,31 @@ class Engine:
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
         return response
+
+    def _record_model_call(self, node: str, messages: Any, response: Any, *, served: dict[str, Any] | None = None,
+                           outcome: str = "ok", usage: dict[str, Any] | None = None,
+                           requested_model: str | None = None) -> None:
+        """One line in the quest's record of every model call it made (``.fi/model_calls.jsonl``,
+        core/attempt_records.py::model_call_row): the hashes of the prompt and the answer, never their text.
+        Best-effort: a line that cannot be written is counted, never in the way of the quest."""
+        fi_dir = getattr(self, "fi_dir", None)
+        if fi_dir is None:  # an engine without a quest folder (a stand-in) keeps no record
+            return
+        try:
+            counts = self.__dict__.setdefault("_model_call_counts", {})
+            counts[node] = counts.get(node, 0) + 1
+            if usage is None and outcome == "ok":
+                usage = getattr(self._client, "last_usage", None)
+            row = _attempts.model_call_row(
+                node=node, attempt=counts[node], served=served,
+                requested_model=requested_model or self._model_for_node(node) or self.config.provider.model or None,
+                reports_model=bool(getattr(self, "_reports_model", False)), messages=messages, response=response,
+                outcome=outcome, usage=usage if isinstance(usage, dict) else None,
+            )
+            _attempts.append_model_call(fi_dir, getattr(self, "quest_id", ""), row)
+        except Exception as e:  # noqa: BLE001 -- a record never touches the quest
+            _attempts.count_lost(fi_dir, _attempts.MODEL_CALLS_LOST)
+            self._log.debug("[attempts] model call not recorded: %r", e)
 
     def _chat_provenance(self, node: str) -> dict[str, Any]:
         """``provider``/``model`` (and ``vendor`` when the connection named one)/``prompt_hash``/``response_hash`` of the most recent ``_chat(node=...)`` call for this
@@ -11324,9 +11366,14 @@ class Engine:
             node: str = "",
         ) -> str:
             assert self._client is not None
-            text = await self._client.chat(
-                messages, temperature=temperature, model=model, node=node,
-            )
+            _LAST_CALL.set(None)
+            try:
+                text = await self._client.chat(
+                    messages, temperature=temperature, model=model, node=node,
+                )
+            except Exception as exc:
+                self._record_model_call(node, messages, None, outcome=type(exc).__name__, requested_model=model)
+                raise
             snap_model = (
                 getattr(self._client, "last_model", None) or model or ""
             )
@@ -11334,6 +11381,8 @@ class Engine:
             self._log_chat_cost(
                 node=node, model=snap_model, usage=snap_usage,
             )
+            self._record_model_call(node, messages, text, served=_LAST_CALL.get() or {}, usage=snap_usage,
+                                    requested_model=model)
             return text
 
         messages = [{"role": "user", "content": prompt}]
@@ -11392,11 +11441,17 @@ class Engine:
         source-router) that build their own messages array. Honors the
         same Phase-O per-node model routing as ``_chat``."""
         assert self._client is not None
-        response = await self._client.chat(
-            messages, temperature=temperature, model=self._model_for_node(node),
-            node=node or "",
-        )
+        _LAST_CALL.set(None)
+        try:
+            response = await self._client.chat(
+                messages, temperature=temperature, model=self._model_for_node(node),
+                node=node or "",
+            )
+        except Exception as exc:
+            self._record_model_call(node or "", messages, None, outcome=type(exc).__name__)
+            raise
         self._log_chat_cost(node=node or "", messages=messages, response=response)
+        self._record_model_call(node or "", messages, response, served=_LAST_CALL.get() or {})
         return response
 
     def _clear_clarify_snapshot(self) -> None:
@@ -11777,7 +11832,9 @@ class Engine:
             usage = getattr(self._client, "last_usage", None)
         if model is None:
             model = getattr(self._client, "last_model", None) or ""
-        append_cost_row(self.fi_dir, node=node, model=model, usage=usage, messages=messages, response=response)
+        # The engine writes its own line in the call record (``_record_model_call``), with more than a cost row knows.
+        append_cost_row(self.fi_dir, node=node, model=model, usage=usage, messages=messages, response=response,
+                        ledger=False)
 
     async def _attempt_context(self, state: QuestState, *, kind: str, partial: bool = False) -> dict[str, Any]:
         """The conditions an attempt ran under (core/attempt_records.py; ``kind`` is one of its ``CONTEXT_KINDS``); an

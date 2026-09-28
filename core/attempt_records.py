@@ -42,11 +42,19 @@ from . import frozen_protocol as _frozen
 OUTCOMES = ("process_error", "protocol_mismatch", "oracle_failure", "inconclusive", "accepted")
 ATTEMPTS = "attempts.jsonl"
 LEDGER = "branch_ledger.jsonl"
+#: One line per model call the quest made (never the prompt or the answer: their hashes). See :func:`model_call_row`.
+MODEL_CALLS = "model_calls.jsonl"
+MODEL_CALLS_LOST = "model_calls.lost"
+#: Steps of the graph that ask the model every time they run: one the trace says completed with no call line in
+#: :data:`MODEL_CALLS` is a gap in the quest's record of its calls. (Not the design: after the plan pause it takes the
+#: approved plan's design and may ask nothing.)
+MODEL_STEPS = ("write",)
 #: Version 2 added record ids, the scripts' hashes, the question, the policy, the models each step was answered by, the
 #: inputs' completeness and the quest line's four fields. Version 3: code is hashed whole, a context names its
 #: ``context_kind``, and a finished quest's context needs its code, environment and protocol. Version 1 lines carry no
-#: ``schema``.
-SCHEMA = 3
+#: ``schema``. Version 4: every model call is a line of :data:`MODEL_CALLS`, and a finished quest's context is compared
+#: with it (``model_calls``); after a run and at the end, files are read again rather than taken from a cache.
+SCHEMA = 4
 
 #: The quest line's fields (:func:`quest_status`). ``execution_status``: how far it ran. ``review_status``: what the
 #: review said. ``evidence_status``: the evidence level (core/evidence.py). ``claim_outcome``: whether the result
@@ -273,6 +281,10 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
     :data:`CONTEXT_KINDS`: what must be there for the context to be complete depends on it."""
     if kind not in CONTEXT_KINDS:
         raise ValueError(f"kind must be one of {CONTEXT_KINDS}; got {kind!r}")
+    if kind in ("after_run", "quest_end"):
+        # What ran and what the quest ended with are read again, whole: a file's size and modification time can be
+        # kept while its content changes, so a cache keyed by them is no proof of what is there.
+        cache = None
     provider = getattr(config, "provider", None)
     engine = getattr(config, "engine", None)
     execution = getattr(config, "execution", None)
@@ -326,6 +338,10 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
             missing.append("no environment record")
         if protocol_sha is None:
             missing.append("no protocol")
+    calls = None
+    if kind == "quest_end":
+        call_gaps, calls = model_call_gaps(quest_root, models_used or {})
+        missing.extend(call_gaps)
     changed_while_queued = _cluster_code_changes(quest_root)
     if changed_while_queued:
         missing.append("the code changed while the cluster job was queued: " + ", ".join(changed_while_queued[:10]))
@@ -352,9 +368,11 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         "question": question,
         "policy": policy,
         # For each step asked through the engine's one-call path, who answered its last call (provider, model, the prompt's
-        # and reply's hashes). The source router, ensembles and the output generators
-        # call the model another way and are not in it.
+        # and reply's hashes). Every call, of every step (the source router, ensembles and the output generators too),
+        # is a line in .fi/model_calls.jsonl.
         "models_used": dict(models_used or {}),
+        # At the quest's end: the hash and line count of the quest's record of every model call (.fi/model_calls.jsonl).
+        **({"model_calls": calls} if calls is not None else {}),
         "missing": missing,
         "complete": not missing,
         "protocol_sha256": protocol_sha,
@@ -393,27 +411,120 @@ def append(fi_dir: Path, name: str, record: dict[str, Any]) -> str | None:
 LOST = "attempts.lost"
 
 
-def count_lost(fi_dir: Path) -> None:
+def count_lost(fi_dir: Path, name: str = LOST) -> None:
     """Add one to the count of records that could not be built or written, kept in ``fi_dir`` so a later run of the
     quest (after a pause) still sees it. Best-effort."""
     try:
-        (fi_dir / LOST).write_text(str(lost(fi_dir) + 1), encoding="utf-8")
+        (fi_dir / name).write_text(str(lost(fi_dir, name) + 1), encoding="utf-8")
     except OSError:
         pass
 
 
-def lost(fi_dir: Path) -> int:
+def lost(fi_dir: Path, name: str = LOST) -> int:
     """How many records of this quest could not be built or written, over every run of it."""
     try:
-        return int((fi_dir / LOST).read_text(encoding="utf-8").strip() or 0)
+        return int((fi_dir / name).read_text(encoding="utf-8").strip() or 0)
     except (OSError, ValueError):
         return 0
 
 
+def _text_sha(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return _json_sha(value)
+    return _sha(value.encode("utf-8"))
+
+
+def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, requested_model: str | None,
+                   reports_model: bool, messages: Any, response: Any, outcome: str = "ok",
+                   usage: dict[str, Any] | None = None, call_id: str | None = None) -> dict[str, Any]:
+    """One line of :data:`MODEL_CALLS`: which step asked (``node``, the ``attempt``-th call under it), which model was
+    asked for and which answered (``served_model``, ``reported`` when the connection named it, ``vendor`` when it
+    did, ``fallback`` when a fallback provider took the call), hashes of the prompt and the answer (never their
+    text), the ``outcome`` (``ok`` or the error's class) and the token counts when the connection gave them.
+    ``reports_model``: the connection is one that names the model that answered (so ``reported`` false is a gap)."""
+    served = dict(served or {})
+    return {
+        "call_id": call_id or uuid.uuid4().hex,
+        "node": node or "",
+        "attempt": int(attempt),
+        "provider": served.get("provider"),
+        "requested_model": requested_model,
+        "served_model": served.get("model"),
+        **({"vendor": served["vendor"]} if served.get("vendor") else {}),
+        "reported": bool(served.get("reported")),
+        "reports_model": bool(reports_model),
+        "fallback": bool(served.get("fallback")),
+        "prompt_sha256": _text_sha(messages),
+        "response_sha256": _text_sha(response),
+        "outcome": outcome,
+        "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens") if k in usage}
+        if isinstance(usage, dict) else None,
+    }
+
+
+def append_model_call(fi_dir: Path, quest_id: str, row: dict[str, Any]) -> bool:
+    """Append one :func:`model_call_row` to the quest's :data:`MODEL_CALLS`; a line that cannot be written is counted
+    in :data:`MODEL_CALLS_LOST` (which the quest's end reads). Never raises."""
+    try:
+        if append(fi_dir, MODEL_CALLS, {"quest_id": quest_id, **row}):
+            return True
+    except Exception:  # noqa: BLE001 -- a record never touches the quest
+        pass
+    count_lost(fi_dir, MODEL_CALLS_LOST)
+    return False
+
+
+def model_call_gaps(quest_root: Path, models_used: dict[str, Any]) -> tuple[list[str], dict[str, Any]]:
+    """What keeps the quest's record of its model calls from being complete, and that record's hash and line count:
+    lines that could not be written; a step's last call (``models_used``, the engine's per-step record) not among the
+    lines; a step of :data:`MODEL_STEPS` the trace says completed with no line under it; answered calls on a connection
+    that names the answering model whose line names none."""
+    fi_dir = Path(quest_root) / ".fi"
+    rows = read(fi_dir, MODEL_CALLS)
+    try:
+        data = (fi_dir / MODEL_CALLS).read_bytes()
+        summary: dict[str, Any] = {"sha256": _sha(data), "lines": data.count(b"\n")}
+    except OSError:
+        summary = {"sha256": None, "lines": 0}
+    summary["not_written"] = lost(fi_dir, MODEL_CALLS_LOST)
+    gaps: list[str] = []
+    if summary["not_written"]:
+        gaps.append(f"{summary['not_written']} model call record(s) could not be written")
+    answered = {(str(r.get("node") or ""), r.get("response_sha256")) for r in rows}
+    unlisted = sorted(node for node, rec in (models_used or {}).items()
+                      if isinstance(rec, dict) and rec.get("response_hash")
+                      and (node, rec.get("response_hash")) not in answered)
+    if unlisted:
+        gaps.append("model calls not in the call record: the last call of " + ", ".join(unlisted[:10]))
+    completed: set[str] = set()
+    try:
+        for line in (fi_dir / "audit.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict) and event.get("kind") == "node_completed":
+                completed.add(str(event.get("node") or ""))
+    except OSError:
+        pass
+    nodes = {str(r.get("node") or "") for r in rows}
+    silent = [step for step in MODEL_STEPS if step in completed
+              and not any(n == step or n.startswith(step + ".") for n in nodes)]
+    if silent:
+        gaps.append("steps that ask the model completed with no model call recorded: " + ", ".join(silent))
+    unnamed = sum(1 for r in rows if r.get("outcome") == "ok" and r.get("reports_model")
+                  and not r.get("fallback") and not r.get("reported"))
+    if unnamed:
+        gaps.append(f"{unnamed} answered model call(s) on a connection that names the answering model did not name it")
+    return gaps, summary
+
+
 def file_digests(fi_dir: Path) -> dict[str, Any]:
-    """The hash and line count of both record files, for the audit trace to anchor them at the quest's end."""
+    """The hash and line count of the record files, for the audit trace to anchor them at the quest's end."""
     out: dict[str, Any] = {}
-    for name in (ATTEMPTS, LEDGER):
+    for name in (ATTEMPTS, LEDGER, MODEL_CALLS):
         path = fi_dir / name
         try:
             data = path.read_bytes()
