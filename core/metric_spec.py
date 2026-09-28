@@ -443,6 +443,10 @@ def coverage_gaps(protocol: dict[str, Any] | None, replicates: list[dict[str, An
             "the protocol names no prespecified contrasts, so every pairwise comparison of each factor's settings was "
             "computed after the fact (protocol.contrasts can fix the comparisons before the results are seen)"
         )
+    if replicates:
+        from .run_manifest import strata_coverage  # the manifest check reads strata the same way
+
+        gaps.extend(strata_coverage(protocol, replicates[0]))
     return gaps
 
 

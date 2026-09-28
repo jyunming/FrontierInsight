@@ -319,8 +319,280 @@ def _values_listed(result_json: Any, metric_id: str) -> bool:
     return walk(result_json)
 
 
+#: What the values of a mean over a subset of the trials may be, said the same way by the check and the repair.
+DERIVED = (
+    "Each value in a `<metric>_values` list is one trial's own value as FI_TRIALS holds it for that stratum's settings, "
+    "or that value divided by the trial's own size setting (an axis such as N: a final size divided by N is a "
+    "fraction), as computed, not rounded."
+)
+
+#: What fixes a mean over a subset of the trials reported for too few settings for FI to vouch for its count.
+PARTIAL = (
+    "Report every setting of the grid as its own stratum (keyed like `R0=1.5,N=500`, with `{given}_count`, "
+    "`{given}_total` and the values), or have run_trial return `{given}` as 1 or 0 for each trial so FI can count the "
+    "subset itself; a headline setting can still be named in the summary."
+)
+
+#: How a stratified result is laid out, said the same way to the plan, the analysis and every repair.
+NESTING = (
+    "A result reported per setting or per group of settings (a stratum) puts each stratum's numbers in a mapping of its "
+    "own, keyed like `R0=1.5` (or `R0=1.5,N=500`), with the metric's own names inside it (`p_outbreak_count`, "
+    "`p_outbreak_total`, `<metric>_values`), never the stratum inside the name (`p_outbreak_R0_1_5_count`)."
+)
+
+
+def _fragment_cells(key: Any, grid: dict[str, list[Any]]) -> set[frozenset[tuple[str, Any]]] | None:
+    """The protocol's settings a stratum key names: ``"R0=1.5"`` is every setting with R0 = 1.5, ``"R0=1.5,N=500"``
+    one setting. ``None`` when the key is not ``axis=value[,...]`` over the grid's own axes and values."""
+    parsed = _parse_cell(key)
+    if not parsed or not set(parsed) <= set(grid):
+        return None
+    fixed: list[tuple[str, Any]] = []
+    for axis, raw in parsed.items():
+        matched = _match_grid_value(raw, grid[axis])
+        if matched is _NO_MATCH:
+            return None
+        fixed.append((axis, matched))
+    return {cell for cell in _all_cells(grid) if all(pair in cell for pair in fixed)}
+
+
+def _mappings_with(result_json: Any, key: str) -> list[tuple[Any, dict[str, Any]]]:
+    """``(the key the mapping sits under, the mapping)`` for every mapping in ``result_json`` holding a list under
+    ``key``; the top level sits under ``None``."""
+    out: list[tuple[Any, dict[str, Any]]] = []
+
+    def walk(node: Any, under: Any) -> None:
+        if isinstance(node, dict):
+            if isinstance(node.get(key), list):
+                out.append((under, node))
+            for k, v in node.items():
+                walk(v, k)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v, under)
+
+    walk(result_json, None)
+    return out
+
+
+def _suffixed_keys(result_json: Any, stem: str, tail: str) -> list[str]:
+    """Keys like ``p_outbreak_R0_1_5_count`` for ``stem="p_outbreak"``, ``tail="count"``: a stratum written into the
+    name instead of a mapping of its own."""
+    pattern = re.compile(rf"^{re.escape(stem)}_(.+)_{re.escape(tail)}$")
+    found: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str) and pattern.match(k) and (
+                        isinstance(v, list) if tail == "values" else isinstance(v, (int, float))):
+                    found.append(k)
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(result_json)
+    return found
+
+
+def _suffixed_pairs(result_json: Any, metric: str) -> list[tuple[str, dict[str, Any]]]:
+    """``(suffix, the mapping)`` for each ``<metric>_<suffix>_values`` list in ``result_json``."""
+    pattern = re.compile(rf"^{re.escape(metric)}_(.+)_values$")
+    out: list[tuple[str, dict[str, Any]]] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                m = pattern.match(k) if isinstance(k, str) else None
+                if m and isinstance(v, list):
+                    out.append((m.group(1), node))
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(result_json)
+    return out
+
+
+def _ok_per_cell(manifest: dict[str, Any], grid: dict[str, list[Any]]) -> dict[frozenset[tuple[str, Any]], float]:
+    out: dict[frozenset[tuple[str, Any]], float] = {}
+    successful = manifest.get("successful_per_cell")
+    for key, n in (successful.items() if isinstance(successful, dict) else []):
+        cell, _why = _canonicalize_cell(key, grid)
+        if cell is not None and _num(n) is not None:
+            out[cell] = out.get(cell, 0.0) + float(_num(n))
+    return out
+
+
+def _stratum_cells(key: Any, grid: dict[str, list[Any]]) -> tuple[set[frozenset[tuple[str, Any]]] | None, str | None]:
+    """``(the grid settings a stratum key names, why it names none)``. A key that is not ``axis=value`` at all is no
+    stratum (``(None, None)``); one that is, but names an axis or a value the grid does not have, is a stratum that
+    cannot be placed (``(None, why)``)."""
+    parsed = _parse_cell(key)
+    if not parsed:
+        return None, None
+    if not set(parsed) <= set(grid):
+        extra = sorted(set(parsed) - set(grid))
+        return None, f"the stratum `{key}` names {', '.join(extra)}, which the protocol's grid does not have"
+    cells = _fragment_cells(key, grid)
+    if not cells:
+        return None, ("the stratum `" + str(key) + "` names a value the protocol's grid does not have ("
+                      + "; ".join(f"{axis}: {_fmt(list(vals))}" for axis, vals in grid.items()) + ")")
+    return cells, None
+
+
+def _values_of(mapping: dict[str, Any], metric: str) -> list[Any]:
+    """The per-trial entries of ``<metric>_values``: numbers, and ``null`` for a trial whose value is undefined (a
+    diverged run reports null, never a clamped number): each is one trial of the subset."""
+    return [x for x in mapping.get(f"{metric}_values") or []
+            if x is None or (isinstance(x, (int, float)) and not isinstance(x, bool))]
+
+
+def _given_findings(
+    metric: str, given: str, grid: dict[str, list[Any]], manifest: dict[str, Any], result_json: Any,
+    expected_total: float, *, trial_mode: bool,
+) -> list[tuple[str, bool]]:
+    """Findings for a mean over the trials a proportion counts (``given``). Every mapping holding ``<metric>_values``
+    must hold ``<given>_count`` too, and exactly that many entries (``null`` for a trial whose value is undefined
+    counts: it is one of the subset). A mapping keyed by a stratum of the grid (``R0=1.5``) also needs
+    ``<given>_total``, equal to FI's own count of the trials that ran in those settings, and a count no larger than it.
+    A key shaped like a stratum that the grid does not have is a problem. Mappings that name no stratum are read
+    together as before: their totals must account for the trials the manifest reports."""
+    out: list[tuple[str, bool]] = []
+    ok = _ok_per_cell(manifest, grid)
+    placed: list[tuple[Any, set[frozenset[tuple[str, Any]]], float]] = []
+    loose = False
+    for under, mapping in _mappings_with(result_json, f"{metric}_values"):
+        where = f"`{under}`" if under is not None else "the top level"
+        values = _values_of(mapping, metric)
+        count = _num(mapping.get(f"{given}_count"))
+        total = _num(mapping.get(f"{given}_total"))
+        if count is None:
+            out.append((
+                f"the metric `{metric}` is a mean over the trials `{given}` counts, and its values at {where} have no "
+                f"`{given}_count` beside them, so the subset they average cannot be counted. {NESTING}",
+                True,
+            ))
+            continue
+        if len(values) != int(count):
+            out.append((
+                f"at {where}, `{metric}_values` lists {len(values)} trial(s) but `{given}_count` says {count:g}: a "
+                f"mean over the trials `{given}` counts lists exactly those trials (a trial whose value is undefined "
+                "as null)",
+                trial_mode,
+            ))
+        if total is not None and count > total:
+            out.append((f"at {where}, `{given}_count` ({count:g}) is larger than `{given}_total` ({total:g})", True))
+        cells, why = _stratum_cells(under, grid) if under is not None else (None, None)
+        if why:
+            out.append((f"{why}: key each stratum by the grid's own axes and values. {NESTING}", True))
+            continue
+        if not cells:
+            loose = True
+            continue
+        if total is None:
+            out.append((
+                f"the stratum `{under}` gives `{given}_count` but no `{given}_total`, so how many trials it covers "
+                f"cannot be checked. {NESTING}",
+                True,
+            ))
+            continue
+        ran = sum(ok.get(c, 0.0) for c in cells)
+        if ok and total != ran:
+            out.append((
+                f"at `{under}`, `{given}_total` says {total:g} trial(s), but FI ran {ran:g} successful trial(s) in those "
+                "settings: a stratum counts every trial FI_TRIALS holds for its own settings, and only those",
+                trial_mode,
+            ))
+        placed.append((under, cells, count))
+    # A stratum written into the name: its list is still held to the count written beside it the same way.
+    for suffix, holder in _suffixed_pairs(result_json, metric):
+        values = _values_of({f"{metric}_values": holder[f"{metric}_{suffix}_values"]}, metric)
+        count = _num(holder.get(f"{given}_{suffix}_count"))
+        if count is None:
+            out.append((
+                f"`{metric}_{suffix}_values` has no `{given}_{suffix}_count` beside it, so the subset it averages "
+                f"cannot be counted. {NESTING}",
+                True,
+            ))
+        elif len(values) != int(count):
+            out.append((
+                f"`{metric}_{suffix}_values` lists {len(values)} trial(s) but `{given}_{suffix}_count` says {count:g}: "
+                f"a mean over the trials `{given}` counts lists exactly those trials",
+                trial_mode,
+            ))
+    if placed and not trial_mode and not out:
+        # FI ran no trials here: nothing but the totals backs the strata. Main's floor still applies to them.
+        union: set[frozenset[tuple[str, Any]]] = set()
+        for _key, cells, _count in placed:
+            union |= cells
+        covered = sum(ok.get(c, 0.0) for c in union) if ok else 0.0
+        if ok and covered < expected_total * 0.5:
+            out.append((
+                f"`{metric}` is reported for settings holding {covered:g} of the {expected_total:g} successful trials: "
+                "the claimed trial count is not backed by the data the analysis actually used. "
+                + PARTIAL.format(given=given),
+                False,
+            ))
+    # A stratum that contains another cannot count fewer successes than it.
+    for big_key, big_cells, big_count in placed:
+        for small_key, small_cells, small_count in placed:
+            if small_cells < big_cells and small_count > big_count:
+                out.append((
+                    f"the stratum `{big_key}` counts {big_count:g} `{given}` trial(s), fewer than `{small_key}` inside "
+                    f"it ({small_count:g})",
+                    True,
+                ))
+    if loose and not out:
+        # What names no stratum is read as a whole, as before: it must account for the trials the manifest reports.
+        given_total = _total_counts_reported(
+            [m for u, m in _mappings_with(result_json, f"{metric}_values")
+             if u is None or _stratum_cells(u, grid)[0] is None],
+            f"{given}_total", beside=f"{metric}_values")
+        if given_total < expected_total * 0.5:
+            out.append((
+                f"the manifest reports {expected_total:g} successful trial(s) in total, but `{given}`, the proportion "
+                f"`{metric}` is a mean over, counts only {given_total:g} trial(s) in its `{given}_total` where no stratum "
+                "is named — the claimed trial count is not backed by the data the analysis actually used. If the "
+                f"result is reported for some strata only, say which: {NESTING}",
+                trial_mode,
+            ))
+    return out
+
+
+def strata_coverage(protocol: dict[str, Any] | None, result_json: Any) -> list[str]:
+    """For each mean over the trials a proportion counts that is reported per stratum, how many of the protocol's
+    settings its strata cover when that is fewer than all: a result for some strata only is allowed, and said."""
+    if not isinstance(protocol, dict) or result_json is None:
+        return []
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    if not grid:
+        return []
+    everything = _all_cells(grid)
+    out: list[str] = []
+    for spec in protocol.get("metrics") or []:
+        if not isinstance(spec, dict) or spec.get("kind") != "mean" or not spec.get("given") or not spec.get("id"):
+            continue
+        covered: set[frozenset[tuple[str, Any]]] = set()
+        named = False
+        for under, _mapping in _mappings_with(result_json, f"{spec['id']}_values"):
+            cells = _fragment_cells(under, grid) if under is not None else None
+            if cells:
+                named = True
+                covered |= cells
+        if named and len(covered) < len(everything):
+            out.append(
+                f"`{spec['id']}` is reported for {len(covered)} of the protocol's {len(everything)} settings, so it "
+                "describes those settings only, not the whole design"
+            )
+    return out
+
+
 def _value_count_findings(
-    protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any,
+    protocol: dict[str, Any], manifest: dict[str, Any], result_json: Any, *, trial_mode: bool = False,
 ) -> list[tuple[str, bool]]:
     """``(sentence, the analysis listed no values at all)`` for each `kind: "mean"` metric whose claimed trial count is
     not backed by the per-trial values the analysis printed.
@@ -355,23 +627,23 @@ def _value_count_findings(
         base, over = expected_total, f"{expected_total:g} successful trial(s)"
         if given:
             if not _counts_listed(result_json, f"{given}_count"):
+                suffixed = _suffixed_keys(result_json, given, "count") + _suffixed_keys(result_json, metric, "values")
                 out.append((
                     f"the metric `{metric}` is a mean over the trials `{given}` counts, but the analysis's RESULT_JSON "
-                    f"prints no `{given}_count`, so the subset it averages over cannot be counted",
+                    f"prints no `{given}_count`, so the subset it averages over cannot be counted"
+                    + (f" (it prints {', '.join(f'`{k}`' for k in suffixed[:4])}: the stratum is in the name)"
+                       if suffixed else "")
+                    + f". {NESTING}",
                     True,
                 ))
                 continue
-            base, over = _total_counts_reported(result_json, f"{given}_count", beside=f"{metric}_values"), \
-                f"the trials `{given}` counts"
-            given_total = _total_counts_reported(result_json, f"{given}_total", beside=f"{metric}_values")
-            if given_total < expected_total * 0.5:
-                out.append((
-                    f"the manifest reports {expected_total:g} successful trial(s) in total, but `{given}`, the "
-                    f"proportion `{metric}` is a mean over, counts only {given_total:g} trial(s) in its `{given}_total` "
-                    "— the claimed trial count is not backed by the data the analysis actually used",
-                    False,
-                ))
+            found = _given_findings(metric, given, grid, manifest, result_json, expected_total,
+                                    trial_mode=trial_mode)
+            if found:
+                out.extend(found)
                 continue
+            if _values_listed(result_json, metric):
+                continue  # every mapping's values are exactly the trials its `<given>_count` counts
         if not _values_listed(result_json, metric):
             out.append((
                 f"the metric `{metric}` is a mean over {over} ({base:g}), but the analysis's "
@@ -444,18 +716,21 @@ def _counts_listed(result_json: Any, key: str) -> bool:
 
 
 def analysis_output_problems(
-    protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any,
+    protocol: dict[str, Any], manifest: dict[str, Any] | None, result_json: Any, *, trial_mode: bool = False,
 ) -> list[str]:
     """The differences :func:`problems` reports that are the analysis's to fix, not the simulation's: a mean metric the
     analysis printed no per-trial values for. The caller sends experiment.py back for these, simulate.py for the rest."""
     if not isinstance(manifest, dict):
         return []
-    return [sentence for sentence, analysis in _value_count_findings(protocol, manifest, result_json) if analysis]
+    # ``trial_mode``: FI ran the trials and holds their record, so a count the analysis's values do not back is the
+    # analysis's to fix; under the older contract the simulation's own record is what is in doubt.
+    return [sentence for sentence, analysis in _value_count_findings(protocol, manifest, result_json,
+                                                                     trial_mode=trial_mode) if analysis]
 
 
 def problems(
     protocol: dict[str, Any], manifest: dict[str, Any] | None, why: str = "",
-    result_json: dict[str, Any] | None = None,
+    result_json: dict[str, Any] | None = None, *, trial_mode: bool = False,
 ) -> list[str]:
     """How the run differs from the protocol, one sentence each; empty when the manifest matches it.
 
@@ -539,7 +814,8 @@ def problems(
             if short:
                 shown = ", ".join(f"{c}: {n}" for c, n in list(short.items())[:4])
                 out.append(f"the protocol fixes {runs:g} runs per setting; {len(short)} setting(s) ran another number ({shown})")
-        out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json))
+        out.extend(sentence for sentence, _ in _value_count_findings(protocol, manifest, result_json,
+                                                                     trial_mode=trial_mode))
 
     listed = manifest.get("failed_trials")
     listed = listed if isinstance(listed, list) else []
@@ -662,7 +938,8 @@ def analysis_directive(found: list[str]) -> str:
         + "\n".join(f"- {line}" for line in found[:8])
         + "\n\nRewrite experiment.py (not simulate.py) so that, for each of those metrics, RESULT_JSON carries a "
         "`<metric>_values` list: the per-trial values, read from the raw files, that the metric's mean is computed from "
-        "(per setting when the metric is reported per setting). Do not invent values: every number must come from the raw "
+        "(per setting when the metric is reported per setting). " + NESTING + " " + DERIVED + " Do not invent values: "
+        "every number must come from the raw "
         "files. A metric that is not a mean over trials at all (a closed-form or deterministic value) has no per-trial "
         "values to list; say so plainly in the analysis rather than printing a made-up list. Keep everything else."
     )

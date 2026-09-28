@@ -15,7 +15,8 @@ same PR that adds, splits or renames one.
   (also used, unmodified, for the tamper-recovery restore — see `propose_tamper_recovery`).
 - `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol?
 - `core/run_manifest.py` — runtime check: does what the simulation says it ran (`run_manifest.json`) match the
-  protocol's exact Cartesian product? Also the two-script split-analysis lint.
+  protocol's exact Cartesian product? Also the two-script split-analysis lint, and the strata of a `given` mean
+  (`NESTING`, `DERIVED`, `_given_findings`, `strata_coverage`, read by `metric_spec.coverage_gaps`).
 - `core/oracle_check.py` — an oracle the script must pass before its main run, judged by the engine against the
   protocol's own expected value and tolerance, not by the script's self-report. Also owns what a repair may propose
   about a check (`proposals`, never applied without a person) and the note that carries the engine's verdicts to
@@ -53,7 +54,7 @@ same PR that adds, splits or renames one.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
   one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
-  `run_oracle` in `_oracle_gate`); the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`); `code_changed_while_queued` compares the code at submission with the code at collection.
+  `run_oracle` in `_oracle_gate`); `recorded_values_by_cell` / `given_values_not_run` hold each reported value to the trials of its own settings; the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`); `code_changed_while_queued` compares the code at submission with the code at collection.
 - `core/profile.py` — the person's author line, asked on the first interview and kept in
   `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
   submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).

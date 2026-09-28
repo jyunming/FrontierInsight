@@ -723,7 +723,23 @@ def _value_key(v: Any) -> str | None:
 
 
 def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
-    """Every value FI's trials returned, per name (the keys of ``run_trial``'s dict), counted, and what stood in the way.
+    """Every value FI's trials returned, per name, over all settings (see :func:`recorded_values_by_cell`)."""
+    per_cell, problems = recorded_values_by_cell(quest_root)
+    return pooled(per_cell), problems
+
+
+def pooled(per_cell: dict[str, dict[str, Counter]]) -> dict[str, Counter]:
+    """The per-setting values of :func:`recorded_values_by_cell`, added together per name."""
+    out: dict[str, Counter] = {}
+    for by_name in per_cell.values():
+        for name, counts in by_name.items():
+            out.setdefault(name, Counter()).update(counts)
+    return out
+
+
+def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Counter]], list[str]]:
+    """Every value FI's trials returned, per setting (its cell key) and per name (the keys of ``run_trial``'s dict),
+    counted, and what stood in the way.
 
     The values are in FI's run record (``.fi/trials/run.json``, each trial's dict as the harness reported it); each
     trial's dict is checked against the hash FI's ledger holds for it, so a record edited after the trials ran is found
@@ -744,7 +760,7 @@ def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
                 hashes[(str(row.get("cell")), int(row.get("trial") or 0))] = str(row.get("values_sha256") or "")
     except OSError:
         return {}, []
-    out: dict[str, Counter] = {}
+    out: dict[str, dict[str, Counter]] = {}
     altered = 0
     for cell in record.get("cells") or []:
         for row in cell.get("rows") or []:
@@ -758,13 +774,209 @@ def recorded_values(quest_root: Path) -> tuple[dict[str, Counter], list[str]]:
             for name, value in values.items():
                 key = _value_key(value)
                 if key is not None:
-                    out.setdefault(str(name), Counter())[key] += 1
+                    out.setdefault(str(cell.get("key")), {}).setdefault(str(name), Counter())[key] += 1
     problems = []
     if altered:
         problems = [f"{altered} trial(s) in FI's run record (.fi/trials/run.json) no longer match the ledger's hash of their "
                     f"values: the record was changed after the trials ran, so FI runs the trials again"]
         (root / RUN_RECORD).unlink(missing_ok=True)  # the next run cannot reuse it: the trials are run afresh
     return out, problems
+
+
+#: Grid axis names that are a size (a population, a number of agents): the only axes a trial's value may be divided by.
+_SIZE_AXIS = re.compile(
+    r"^(n|n_\w+|\w+_n|size|\w+_size|size_\w+|population|pop\w*|agents|n_?agents|particles|n_?particles|"
+    r"individuals|nodes|n_?nodes|households)$",
+    re.IGNORECASE,
+)
+
+
+def _count_axes(grid: dict[str, list[Any]]) -> list[str]:
+    """The grid axes that are sizes: named like one (N, population, agents, ...: never a seed, a replicate or a rate
+    such as R0) and every value a whole number above 1. The only axes a trial's value may be divided by to make it a
+    fraction."""
+    out = []
+    for axis, values in grid.items():
+        nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+        if (_SIZE_AXIS.match(str(axis).strip()) and nums and len(nums) == len(values)
+                and all(float(v).is_integer() and v > 1 for v in nums)):
+            out.append(axis)
+    return out
+
+
+def _exact_key(v: Any) -> str | None:
+    """A number to ten significant digits: equal up to floating-point noise, never up to a rounding a script chose."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return f"{float(v):.10g}"
+
+
+def _derived_counts(per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
+                    grid: dict[str, list[Any]]) -> list[Counter]:
+    """The values of ``name`` in ``cells`` as they are, and each divided by one of the cell's own size axes
+    (:func:`_count_axes`): every form a list of that quantity may take (a final size, or a final size divided by N).
+    Keyed by :func:`_exact_key`."""
+    from core import run_manifest as _rm
+
+    sizes = _count_axes(grid)
+    forms: dict[str | None, Counter] = {None: Counter()}
+    for key in cells:
+        counts = (per_cell.get(key) or {}).get(name)
+        if not counts:
+            continue
+        parsed = _rm._parse_cell(key) or {}
+        for value, n in counts.items():
+            try:
+                x = float(value)
+            except (TypeError, ValueError):
+                continue
+            k = _exact_key(x)
+            if k is not None:
+                forms[None][k] += n
+            for axis in sizes:
+                try:
+                    a = float(parsed.get(axis, "nan"))
+                except ValueError:
+                    continue
+                if a and math.isfinite(a):
+                    k = _exact_key(x / a)
+                    if k is not None:
+                        forms.setdefault(axis, Counter())[k] += n
+    return list(forms.values())
+
+
+#: How close a printed value must be to a trial's: a float32 or a float printed in full passes, a rounding does not.
+_VALUE_REL_TOL = 1e-6
+
+
+def _missing_exact(values: list[Any], counts: Counter) -> int:
+    """How many of ``values`` are not among ``counts`` (each counted value used once): equal within a relative
+    :data:`_VALUE_REL_TOL` (the noise of storing a number in fewer bits), never within a rounding the script chose."""
+    import bisect
+
+    pool = sorted(float(k) for k, n in counts.items() for _ in range(max(int(n), 0)))
+    missing = 0
+    for x in values:
+        if isinstance(x, bool) or not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+            continue
+        v = float(x)
+        tol = max(abs(v) * _VALUE_REL_TOL, 1e-12)
+        i = bisect.bisect_left(pool, v - tol)
+        if i < len(pool) and pool[i] <= v + tol:
+            pool.pop(i)
+        else:
+            missing += 1
+    return missing
+
+
+def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, dict[str, Counter]],
+                         result_json: Any) -> list[str]:
+    """The values of each mean over a subset of the trials (a metric with ``given``) that FI's trials never produced in
+    the settings they are reported for, one sentence each. Each list under a stratum key (``R0=1.5``) is held to the
+    trials of exactly those settings; one that names no stratum, and one with the stratum in its name
+    (``<metric>_R0_1_5_values``), to every setting. A value is a trial's own value of one quantity, or that value divided
+    by the trial's own size setting (:data:`core.run_manifest.DERIVED`), compared exactly; where the trials return the proportion as 0/1, each stratum's count is held to FI's own count."""
+    from core import run_manifest as _rm
+
+    if not isinstance(protocol, dict) or not per_cell or result_json is None:
+        return []
+    grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+    means = [str(m["id"]) for m in protocol.get("metrics") or []
+             if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")]
+    names = sorted({n for by_name in per_cell.values() for n in by_name})
+    all_cells = sorted(per_cell)
+    keyed: dict[frozenset, str] = {}
+    for key in per_cell:
+        canon, _why = _rm._canonicalize_cell(key, grid)
+        if canon is not None:
+            keyed[canon] = key
+    out: list[str] = []
+
+    def check(metric: str, where: str, values: list[Any], cells: list[str]) -> None:
+        numbers = [x for x in values if isinstance(x, (int, float)) and not isinstance(x, bool)]
+        if not numbers:
+            return
+        for name in names:
+            if any(not _missing_exact(numbers, form) for form in _derived_counts(per_cell, cells, name, grid)):
+                return
+        out.append(
+            f"the analysis reports `{where}` for `{metric}`, a mean over a subset of the trials, with values FI's trials "
+            f"never produced in {'those settings' if len(cells) < len(all_cells) else 'the run'}: "
+            + _rm.DERIVED
+        )
+
+    given_of = {str(m["id"]): str(m["given"]) for m in protocol.get("metrics") or []
+                if isinstance(m, dict) and m.get("kind") == "mean" and m.get("given") and m.get("id")}
+
+    def members(proportion: str, cells: list[str]) -> float | None:
+        """How many trials of ``cells`` are in the proportion's subset, when the trials returned it as 0/1; ``None``
+        when FI cannot tell (the analysis decides membership itself, from a threshold)."""
+        total = 0.0
+        seen = False
+        for key in cells:
+            counts = (per_cell.get(key) or {}).get(proportion)
+            if not counts:
+                continue
+            for value, n in counts.items():
+                if float(value) not in (0.0, 1.0):
+                    return None
+                total += float(value) * n
+                seen = True
+        return total if seen else None
+
+    ok_trials = {key: max((sum(c.values()) for c in by_name.values()), default=0) for key, by_name in per_cell.items()}
+    everything = sum(ok_trials.values())
+    for metric in means:
+        # The strata the mean is reported for: when FI cannot count their subset itself and they hold under half
+        # the run's trials, a selection of the trials cannot be told from the whole (see run_manifest.PARTIAL).
+        given = given_of.get(metric, "")
+        covered: set[str] = set()
+        unverifiable = False
+        for under, _mapping in _rm._mappings_with(result_json, f"{metric}_values"):
+            cells, _why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
+            if cells is None:
+                continue
+            own = [keyed[c] for c in cells if c in keyed]
+            covered.update(own)
+            if members(given, own) is None:
+                unverifiable = True
+        reported = sum(ok_trials.get(k, 0) for k in covered)
+        if covered and unverifiable and everything and reported < 0.5 * everything:
+            out.append(
+                f"`{metric}` is reported for settings holding {reported:g} of the run's {everything:g} trials, and FI "
+                f"cannot count its subset (`{given}`) itself, so a selection of the trials cannot be told from all of "
+                "them. " + _rm.PARTIAL.format(given=given)
+            )
+        stem = re.compile(rf"^{re.escape(metric)}_.+_values$")
+
+        def walk(node: Any, under: Any, path: str) -> None:
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    here = f"{path}.{k}" if path else str(k)
+                    if k == f"{metric}_values" and isinstance(v, list):
+                        cells, _why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
+                        own = [keyed[c] for c in (cells or []) if c in keyed] if cells else all_cells
+                        check(metric, here, v, own or all_cells)
+                        given = given_of.get(metric, "")
+                        count = node.get(f"{given}_count")
+                        exact = members(given, own or all_cells) if cells else None
+                        if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
+                                and float(count) != exact:
+                            out.append(
+                                f"at `{path or 'the top level'}`, `{given}_count` says {count:g}, but FI's trials of "
+                                f"those settings returned `{given}` = 1 for {exact:g} of them: the mean averages "
+                                "every trial in the subset, not a selection"
+                            )
+                    elif isinstance(k, str) and stem.match(k) and isinstance(v, list):
+                        check(metric, here, v, all_cells)
+                    else:
+                        walk(v, k, here)
+            elif isinstance(node, list):
+                for v in node[:200]:
+                    walk(v, under, path)
+
+        walk(result_json, None, "")
+    return out
 
 
 def _half_step(x: Any) -> float:
@@ -814,7 +1026,7 @@ def reported_values_not_run(recorded: dict[str, Counter], result_json: Any) -> l
     The run-manifest check counts a metric's values against the trials; a script could still print that many numbers
     of its own. Under the trial contract FI holds every trial's value, so a list the analysis says it computed from is
     checked value by value. A list named for something the analysis derived itself (no trial returned that name) is not
-    FI's to check here."""
+    FI's to check here; a mean over a subset of the trials is checked by :func:`given_values_not_run`."""
     out: list[str] = []
 
     def walk(node: Any, path: str) -> None:
