@@ -12305,6 +12305,9 @@ class Engine:
     def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState,
                               evidence_status: str | None = None) -> None:
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
+            # This quest no longer writes to the knowledge base: a note from an earlier write-back is not its to act on.
+            if getattr(self, "fi_dir", None) is not None:
+                (self.fi_dir / "knowledge_problem.json").unlink(missing_ok=True)
             return
         if artifacts.paper_md is None:
             return

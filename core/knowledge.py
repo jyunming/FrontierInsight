@@ -70,6 +70,7 @@ The router parallelizes calls via `asyncio.to_thread` + `asyncio.gather`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import hashlib
 import html as _htmlmod
@@ -77,12 +78,15 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
 from itertools import zip_longest
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any, Callable
 from urllib.parse import quote
 
@@ -3555,62 +3559,103 @@ def _quest_docs(brain: Any) -> list[tuple[str, dict[str, Any]]]:
     return out
 
 
-#: A cited paper's card: written once per paper, naming the accepted quests that used it (``consumed_by_quests``).
+#: A cited paper's entry in the knowledge base: one per paper, naming the accepted quests that used it
+#: (``consumed_by_quests``).
 REF_SPINE = "fi_external_ref_spine"
-#: The line a ref spine's text ends with, naming its consumers: the text changes whenever they do, so writing the card
+#: The line a paper entry's text ends with, naming its quests: the text changes whenever they do, so writing the entry
 #: again is never skipped as a text the knowledge base has already stored.
 _CITED_BY = "CITED BY FI QUESTS: "
+#: Metadata Axon adds to each stored piece of a document; never written back as FI's own.
+_AXON_CHUNK_KEYS = frozenset({
+    "source", "source_id", "chunk", "total_chunks", "chunk_index", "chunk_kind", "subdoc_locator", "parent_text",
+    "parent_id", "dedup_hash", "doc_hash", "children_ids", "raptor_level", "level", "window", "file_type", "filename",
+    "project", "score", "vector_score", "bm25_score", "fused_score",
+})
+#: What a search used as proof asks for: every match, whatever its similarity.
+_PROOF_SEARCH = {"top_k": 50, "threshold": 0.0}
 
 
-def _standing_present(brain: Any, quest_id: str, kinds: tuple[str, ...]) -> bool | None:
-    """Whether the knowledge base holds any of the quest's documents of ``kinds``; ``None`` when that cannot be shown
-    (the service's list or the chunk index could not be read)."""
-    if callable(getattr(brain, "list_sources", None)):
-        try:
-            sources = brain.list_sources()
-        except Exception:  # noqa: BLE001
-            return None
-        return any(s.startswith(f"{k}:{quest_id}:") or s == f"{k}:{quest_id}" for s in sources for k in kinds)
+def _corpus(brain: Any) -> list[dict[str, Any]] | None:
+    """Every stored piece of an in-process brain's own project (its keyword index, loaded first: after a restart it can
+    still be an unread payload); ``None`` when the brain keeps none FI can read (the HTTP one)."""
     bm25 = _bm25_of(brain)
-    corpus = getattr(bm25, "corpus", None) if bm25 is not None else None
-    if corpus is None:
+    if bm25 is None:
         return None
     try:
-        return any((c.get("metadata") or {}).get("quest_id") == quest_id
-                   and (c.get("metadata") or {}).get("kind") in kinds for c in list(corpus))
+        load = getattr(bm25, "ensure_corpus_loaded", None)
+        if callable(load):
+            load()
+        corpus = getattr(bm25, "corpus", None)
+        return None if corpus is None else list(corpus)
     except Exception:  # noqa: BLE001
         return None
 
 
-def _ref_spine_rows(brain: Any, pid: str) -> list[dict[str, Any]] | None:
-    """The stored card(s) of cited paper ``pid`` as ``{"text", "metadata"}``; ``[]`` when there is none; ``None`` when
-    that cannot be shown (a card listed by the service that a search does not return is "cannot tell", not "none")."""
-    if callable(getattr(brain, "list_sources", None)):
-        try:
-            listed = any(s == f"{REF_SPINE}:{pid}" or s.startswith(f"{REF_SPINE}:{pid}:") for s in brain.list_sources())
-            if not listed:
-                return []
-            rows, _diag, _ = brain.search_raw(pid, filters={"kind": REF_SPINE, "paper_id": pid},
-                                              overrides={"top_k": 5})
-        except Exception:  # noqa: BLE001
-            return None
-        found = [{"text": str(r.get("text") or r.get("content") or ""), "metadata": dict(r.get("metadata") or {})}
-                 for r in rows if (r.get("metadata") or {}).get("paper_id") == pid]
-        return found or None
-    bm25 = _bm25_of(brain)
-    corpus = getattr(bm25, "corpus", None) if bm25 is not None else None
-    if corpus is None:
+def _search_rows(brain: Any, filters: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """The stored pieces matching ``filters`` exactly, found by a search that keeps every match; ``None`` when the
+    brain cannot be searched."""
+    search = getattr(brain, "search_raw", None)
+    if not callable(search):
         return None
-    return [{"text": str(c.get("text") or ""), "metadata": dict(c.get("metadata") or {})} for c in list(corpus)
-            if (c.get("metadata") or {}).get("kind") == REF_SPINE and (c.get("metadata") or {}).get("paper_id") == pid]
+    try:
+        rows, _diag, _trace = search(str(next(iter(filters.values()))), filters=dict(filters),
+                                     overrides=dict(_PROOF_SEARCH))
+    except Exception:  # noqa: BLE001
+        return None
+    return [r for r in rows or [] if isinstance(r, dict)
+            and all((r.get("metadata") or {}).get(k) == v for k, v in filters.items())]
+
+
+def _list_sources(brain: Any) -> list[str] | None:
+    """The document ids the Axon service lists; ``None`` for a brain that lists none or a listing that failed."""
+    listing = getattr(brain, "list_sources", None)
+    if not callable(listing):
+        return None
+    try:
+        return list(listing())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _standing_present(brain: Any, quest_id: str, kinds: tuple[str, ...],
+                      sources: list[str] | None = None) -> bool | None:
+    """Whether the knowledge base holds any of the quest's documents of ``kinds``; ``None`` when that cannot be shown.
+    In process the keyword index is read whole; over the service a listing can only show presence (it may be cut
+    short), so absence needs a search for each kind that answers and finds nothing."""
+    corpus = _corpus(brain)
+    if corpus is not None:
+        return any((c.get("metadata") or {}).get("quest_id") == quest_id
+                   and (c.get("metadata") or {}).get("kind") in kinds for c in corpus)
+    if sources is None:
+        sources = _list_sources(brain)
+    if sources and any(s.startswith(f"{k}:{quest_id}:") or s == f"{k}:{quest_id}" for s in sources for k in kinds):
+        return True
+    answered = True
+    for kind in kinds:
+        rows = _search_rows(brain, {"quest_id": quest_id, "kind": kind})
+        if rows is None:
+            answered = False
+        elif rows:
+            return True
+    return False if answered else None
+
+
+def _paper_entry(brain: Any, pid: str) -> list[dict[str, Any]] | None:
+    """The stored pieces of cited paper ``pid``'s entry (``[]`` when there is none); ``None`` when that cannot be
+    shown. Found by kind and paper id, so an entry stored under the older metadata is found too."""
+    corpus = _corpus(brain)
+    if corpus is not None:
+        return [c for c in corpus
+                if (c.get("metadata") or {}).get("kind") == REF_SPINE and (c.get("metadata") or {}).get("paper_id") == pid]
+    return _search_rows(brain, {"kind": REF_SPINE, "paper_id": pid})
 
 
 def _consumers(rows: list[dict[str, Any]]) -> set[str]:
     out: set[str] = set()
     for r in rows:
-        value = r["metadata"].get("consumed_by_quests")
-        if isinstance(value, str):
-            value = [v for v in value.split(",") if v]
+        value = (r.get("metadata") or {}).get("consumed_by_quests")
+        if isinstance(value, str):  # a store that keeps a list as text (Chroma joins it with "|")
+            value = [v.strip() for v in re.split(r"[|,]", value) if v.strip()]
         out |= {str(v) for v in (value or [])}
     return out
 
@@ -3618,6 +3663,35 @@ def _consumers(rows: list[dict[str, Any]]) -> set[str]:
 def _with_consumers(text: str, consumers: set[str]) -> str:
     body = "\n".join(line for line in text.splitlines() if not line.startswith(_CITED_BY)).rstrip()
     return f"{body}\n\n{_CITED_BY}{', '.join(sorted(consumers))}"
+
+
+def _entry_text(rows: list[dict[str, Any]]) -> str:
+    """The entry's text from all its stored pieces, in order, without the line naming its quests."""
+    def order(r: dict[str, Any]) -> tuple:
+        m = r.get("metadata") or {}
+        return (str(m.get("source_id") or ""), int(m.get("chunk_index", m.get("chunk", 0)) or 0))
+
+    text = "\n".join(str(r.get("text") or r.get("content") or "") for r in sorted(rows, key=order))
+    return "\n".join(line for line in text.splitlines() if not line.startswith(_CITED_BY)).rstrip()
+
+
+def _entry_meta(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """FI's own metadata of a stored entry: Axon's per-piece keys removed; a ``source`` an older write-back stored
+    (which hid the entry from the service's listing) kept as ``ref_source``."""
+    meta = dict((rows[0].get("metadata") or {}) if rows else {})
+    old = meta.get("source")
+    if old and "ref_source" not in meta and not str(old).startswith(f"{REF_SPINE}:"):
+        meta["ref_source"] = old
+    return {k: v for k, v in meta.items() if k not in _AXON_CHUNK_KEYS and k != "kind"}
+
+
+@contextmanager
+def _paper_entries_lock() -> Iterator[None]:
+    """Held while a quest reads, removes and writes paper entries: two FI processes (a fleet, the web page and the
+    CLI) updating the same paper's quests must not overwrite each other. A file every FI process names the same."""
+    lock = _axon_http._ProcessLock(Path(tempfile.gettempdir()) / "fi-paper-entries.lock")
+    with lock.held():
+        yield
 
 
 def _delete_in_process(brain: Any, *, quest_id: str, kinds: tuple[str, ...]) -> bool:
@@ -4435,24 +4509,36 @@ class Knowledge:
             except Exception as e:
                 _log.warning("axon finalize_ingest failed: %s", e)
 
-    def _remove_ref_spine(self, pid: str) -> bool:
-        """Remove cited paper ``pid``'s card (every chunk of it)."""
+    def _remove_paper_entry(self, pid: str, rows: list[dict[str, Any]]) -> bool:
+        """Remove cited paper ``pid``'s entry (every stored piece of it: by its document id and, for an entry stored
+        under the older metadata, by each piece's id)."""
         brain = self._brain
+        ids = list(dict.fromkeys([f"{REF_SPINE}:{pid}", *[str(r["id"]) for r in rows if r.get("id")]]))
         try:
             if callable(getattr(brain, "delete_documents", None)):
-                ids = [s for s in brain.list_sources() if s == f"{REF_SPINE}:{pid}" or s.startswith(f"{REF_SPINE}:{pid}:")]
-                brain.delete_documents(ids or [f"{REF_SPINE}:{pid}"])
-                return True
-            return _delete_in_process_where(brain, lambda m: m.get("kind") == REF_SPINE and m.get("paper_id") == pid)
+                brain.delete_documents(ids)
+            else:
+                _delete_in_process_where(brain, lambda m: m.get("kind") == REF_SPINE and m.get("paper_id") == pid)
         except Exception as e:  # noqa: BLE001
-            _log.warning("axon: could not remove the card of cited paper %s: %s", pid, e)
+            _log.warning("axon: could not remove the entry of cited paper %s: %s", pid, e)
             return False
+        left = _paper_entry(brain, pid)
+        if left:
+            _log.warning("axon: the entry of cited paper %s was not removed (%d piece(s) left)", pid, len(left))
+            return False
+        return True
 
-    def _drop_consumer(self, pid: str, quest_id: str, *, dry_run: bool = False) -> dict[str, Any] | None:
-        """Take ``quest_id`` off cited paper ``pid``'s card: the card goes when no accepted quest is left on it, and is
-        written again with the others otherwise. ``None`` when nothing changes; ``{"undetermined": True}`` when the card
-        cannot be read (nothing is changed then)."""
-        rows = _ref_spine_rows(self._brain, pid)
+    def _paper_entry_doc(self, pid: str, meta: dict[str, Any], text: str, consumers: set[str]) -> dict[str, Any]:
+        merged = {**meta, "paper_id": pid, "tag": f"fi-paper:{pid}", "consumed_by_quests": sorted(consumers),
+                  "kind": REF_SPINE}
+        return {"id": self._mint_doc_id(REF_SPINE, merged), "text": _with_consumers(text, consumers), "metadata": merged}
+
+    def _drop_consumer(self, pid: str, quest_id: str, *, ref: dict[str, Any] | None = None,
+                       dry_run: bool = False) -> dict[str, Any] | None:
+        """Take ``quest_id`` off cited paper ``pid``'s entry: the entry goes when no quest is left on it, and is
+        written again with the others otherwise (restored as it was if that write fails). ``None`` when nothing
+        changes; ``{"undetermined": True}`` when the entry cannot be read (nothing is changed then)."""
+        rows = _paper_entry(self._brain, pid)
         if rows is None:
             return {"paper": pid, "undetermined": True}
         consumers = _consumers(rows)
@@ -4462,27 +4548,43 @@ class Knowledge:
         entry: dict[str, Any] = {"paper": pid, "removed_consumer": quest_id, "left": sorted(left)}
         if dry_run:
             return entry
-        if not self._remove_ref_spine(pid):
+        meta, old_text = _entry_meta(rows), _entry_text(rows)
+        if not self._remove_paper_entry(pid, rows):
             entry["ok"] = False
             return entry
         if left:
-            meta = {**rows[0]["metadata"], "consumed_by_quests": sorted(left)}
-            meta.pop("kind", None)
-            text = _with_consumers(rows[0]["text"], left)
-            self._brain.ingest([{"id": self._mint_doc_id(REF_SPINE, {**meta, "kind": REF_SPINE}), "text": text,
-                                 "metadata": {**meta, "kind": REF_SPINE}}])
-            self._finalize_ingest_if_supported()
+            text = _render_paper_spine(ref, abstract=ref.get("abstract", "")) if ref else old_text
+            try:
+                self._brain.ingest([self._paper_entry_doc(pid, meta, text, left)])
+                self._finalize_ingest_if_supported()
+            except Exception as e:  # noqa: BLE001
+                _log.warning("axon: could not write the entry of cited paper %s again (%s); restoring it", pid, e)
+                self._restore_entries([(pid, meta, old_text, consumers)])
+                entry["ok"] = False
+                return entry
         entry["ok"] = True
         return entry
 
+    def _restore_entries(self, entries: list[tuple[str, dict[str, Any], str, set[str]]]) -> None:
+        """Write removed paper entries back as they were (a write that replaced them failed)."""
+        try:
+            self._brain.ingest([self._paper_entry_doc(pid, meta, text, consumers)
+                                for pid, meta, text, consumers in entries])
+            self._finalize_ingest_if_supported()
+        except Exception as e:  # noqa: BLE001
+            _log.warning("axon: could not restore the entries of cited papers %s: %s",
+                         ", ".join(pid for pid, *_ in entries), e)
+
     def retire_stale_ref_spines(self, *, dry_run: bool = False) -> list[dict[str, Any]]:
-        """Cited papers' cards that name a quest whose result is now preliminary only (it no longer vouches for the
-        paper): that quest is taken off the card, and a card left with no quest is removed. A quest the knowledge base
-        holds nothing of is left on its card (it cannot be told apart from one written elsewhere)."""
+        """Cited papers' entries that name a quest whose result is now preliminary only (it no longer vouches for the
+        paper): that quest is taken off the entry, and an entry left with no quest is removed. A quest is taken off
+        only when the knowledge base is shown to hold no accepted copy of it (a listing may be cut short). An entry
+        stored under the older metadata (hidden from the service's listing) is written again under the current one."""
         if not self.enabled or self._brain is None:
             return []
+        brain = self._brain
         try:
-            docs = _quest_docs(self._brain)
+            docs = _quest_docs(brain)
         except Exception as e:  # noqa: BLE001
             raise RuntimeError(f"the knowledge layer's documents could not be listed: {e}") from None
         standings: dict[str, set[str]] = {}
@@ -4490,29 +4592,48 @@ class Knowledge:
             standing = next((s for s, kinds in STANDING_KINDS.items() if meta.get("kind") in kinds), None)
             if standing and meta.get("quest_id"):
                 standings.setdefault(str(meta["quest_id"]), set()).add(standing)
-        prelim_only = {q for q, s in standings.items() if s == {"preliminary"}}
         pids: set[str] = set()
-        brain = self._brain
-        if callable(getattr(brain, "list_sources", None)):
-            for source in brain.list_sources():
+        corpus = _corpus(brain)
+        if corpus is not None:
+            pids = {str((c.get("metadata") or {}).get("paper_id")) for c in corpus
+                    if (c.get("metadata") or {}).get("kind") == REF_SPINE and (c.get("metadata") or {}).get("paper_id")}
+        else:
+            for source in _list_sources(brain) or []:
                 if source.startswith(f"{REF_SPINE}:"):
                     pids.add(source[len(REF_SPINE) + 1:])  # the paper id itself may hold a colon (doi:...)
-        else:
-            bm25 = _bm25_of(brain)
-            for c in list(getattr(bm25, "corpus", None) or []):
-                meta = c.get("metadata") or {}
-                if meta.get("kind") == REF_SPINE and meta.get("paper_id"):
-                    pids.add(str(meta["paper_id"]))
+            for row in _search_rows(brain, {"kind": REF_SPINE}) or []:
+                if (row.get("metadata") or {}).get("paper_id"):
+                    pids.add(str(row["metadata"]["paper_id"]))
         out = []
-        for pid in sorted(pids):
-            rows = _ref_spine_rows(brain, pid)
-            if rows is None:
-                out.append({"paper": pid, "undetermined": True})
-                continue
-            for qid in sorted(_consumers(rows) & prelim_only):
-                entry = self._drop_consumer(pid, qid, dry_run=dry_run)
-                if entry:
-                    out.append(entry)
+        with _paper_entries_lock():
+            for pid in sorted(pids):
+                rows = _paper_entry(brain, pid)
+                if rows is None:
+                    out.append({"paper": pid, "undetermined": True})
+                    continue
+                for qid in sorted(_consumers(rows)):
+                    if standings.get(qid) != {"preliminary"}:
+                        continue
+                    if _standing_present(brain, qid, STANDING_KINDS["accepted"]) is not False:
+                        continue  # an accepted copy may still be there: leave the quest on the entry
+                    change = self._drop_consumer(pid, qid, dry_run=dry_run)
+                    if change:
+                        out.append(change)
+                if dry_run or corpus is not None:
+                    continue
+                rows = _paper_entry(brain, pid)
+                if rows and any((r.get("metadata") or {}).get("source") and "ref_source" not in (r.get("metadata") or {})
+                                and not str(r["metadata"]["source"]).startswith(f"{REF_SPINE}:") for r in rows):
+                    meta, text, consumers = _entry_meta(rows), _entry_text(rows), _consumers(rows)
+                    ok = self._remove_paper_entry(pid, rows)
+                    if ok:
+                        try:
+                            self._brain.ingest([self._paper_entry_doc(pid, meta, text, consumers)])
+                            self._finalize_ingest_if_supported()
+                        except Exception:  # noqa: BLE001
+                            self._restore_entries([(pid, meta, text, consumers)])
+                            ok = False
+                    out.append({"paper": pid, "migrated": True, "ok": ok})
         return out
 
     def _retire(self, doc_ids: list[str], *, quest_id: str, kinds: tuple[str, ...]) -> bool:
@@ -4664,15 +4785,12 @@ class Knowledge:
             # Axon skips a text it has already stored, so the same paper under the new standing would not be written.
             other = "accepted" if preliminary else "preliminary"
             other_ids = [self._mint_doc_id(k, {**base_meta, "kind": k}) for k in STANDING_KINDS[other]]
-            if callable(getattr(self._brain, "list_sources", None)):
-                try:  # the ids really stored, whatever metadata minted them
-                    stored = {s for s in self._brain.list_sources()
-                              if any(s.startswith(f"{k}:{quest_id}:") or s == f"{k}:{quest_id}"
-                                     for k in STANDING_KINDS[other])}
-                    other_ids = sorted(set(other_ids) | stored)
-                except Exception as e:  # noqa: BLE001
-                    _log.debug("axon: could not list documents for quest %s: %s", quest_id, e)
-            had_other = _standing_present(self._brain, quest_id, STANDING_KINDS[other])
+            sources = _list_sources(self._brain)  # once: each listing reads the whole store
+            if sources is not None:  # the ids really stored, whatever metadata minted them
+                stored = {s for s in sources if any(s.startswith(f"{k}:{quest_id}:") or s == f"{k}:{quest_id}"
+                                                    for k in STANDING_KINDS[other])}
+                other_ids = sorted(set(other_ids) | stored)
+            had_other = _standing_present(self._brain, quest_id, STANDING_KINDS[other], sources)
             removed = self._retire(other_ids, quest_id=quest_id, kinds=STANDING_KINDS[other])
             if not removed and had_other is not False:
                 # Fail closed: writing the new copy beside an old one the knowledge base still holds would leave both
@@ -4685,13 +4803,15 @@ class Knowledge:
                 _log.warning("axon write-back for quest %s: %s", quest_id, self.last_writeback_problem)
                 return False
             retired = removed and bool(had_other)
-            if preliminary:
-                # A preliminary result vouches for no paper: take this quest off the cards of the papers it cited.
-                for ref in external_refs:
-                    change = self._drop_consumer(_paper_short_id(ref), quest_id)
-                    if change and change.get("undetermined"):
-                        _log.warning("axon: could not read the card of cited paper %s; quest %s may still be named "
-                                     "on it (`fi tools tidy-knowledge` checks it again)", change["paper"], quest_id)
+            if preliminary and external_refs:
+                # A preliminary result vouches for no paper: take this quest off the entries of the papers it cited.
+                with _paper_entries_lock():
+                    for ref in external_refs:
+                        change = self._drop_consumer(_paper_short_id(ref), quest_id, ref={**ref, "topic": topic})
+                        if change and (change.get("undetermined") or change.get("ok") is False):
+                            _log.warning("axon: the entry of cited paper %s could not be updated; quest %s may still "
+                                         "be named on it (`fi tools tidy-knowledge` checks it again)",
+                                         change["paper"], quest_id)
 
             docs: list[dict[str, Any]] = []
 
@@ -4759,54 +4879,62 @@ class Knowledge:
 
             # (5) External-ref spines — curated card-catalog entries for
             # papers that actually contributed to an accepted quest.
-            for ref in external_refs_for_spines:
-                ref_paper_id = _paper_short_id(ref)
-                # The card names every accepted quest that used the paper, not only the last: read who is on it now.
-                rows = _ref_spine_rows(self._brain, ref_paper_id)
-                if rows is None:
-                    _log.warning("axon: could not read the card of cited paper %s, so it is left as it is (quest %s "
-                                 "is not added to it)", ref_paper_id, quest_id)
-                    continue
-                before = _consumers(rows)
-                consumers = before | {quest_id}
-                if rows and consumers == before:
-                    continue  # already names this quest: writing the same card again would change nothing
-                if rows and not self._remove_ref_spine(ref_paper_id):
-                    continue
-                ref_spine_text = _with_consumers(_render_paper_spine(
-                    {**ref, "topic": topic},
-                    abstract=ref.get("abstract", ""),
-                ), consumers)
-                _enq(REF_SPINE, ref_spine_text, {
-                    **{k: v for k, v in ref.items() if k != "abstract"},
-                    "paper_id": ref_paper_id,
-                    "tag": f"fi-paper:{ref_paper_id}",
-                    "topic_id": topic_id,
-                    "consumed_by_quests": sorted(consumers),
-                    "ingested_at": now,
-                })
-
-            self._brain.ingest(docs)
+            # Paper entries are read, removed and written under one lock with this quest's documents; an entry removed
+            # is written back as it was if the write fails.
+            # A quest written back again (resumed, refined) keeps the ids of its documents: the copy there now goes
+            # first, or a store that refuses an id it already holds (the in-process vector stores do) fails the write.
+            own_ids = [d["id"] for d in docs]
+            self._retire(own_ids, quest_id=quest_id, kinds=(*kind_of.values(), "fi_topic_event"))
+            lock = _paper_entries_lock() if external_refs_for_spines else contextlib.nullcontext()
+            with lock:
+                replaced: list[tuple[str, dict[str, Any], str, set[str]]] = []
+                for ref in external_refs_for_spines:
+                    ref_paper_id = _paper_short_id(ref)
+                    # The entry names every accepted quest that used the paper, not only the last: read who is on it.
+                    rows = _paper_entry(self._brain, ref_paper_id)
+                    if rows is None:
+                        _log.warning("axon: could not read the entry of cited paper %s, so it is left as it is (quest "
+                                     "%s is not added to it)", ref_paper_id, quest_id)
+                        continue
+                    before = _consumers(rows)
+                    if rows and quest_id in before:
+                        continue  # already names this quest: writing the same entry again would change nothing
+                    ref_meta = {k: v for k, v in ref.items() if k not in ("abstract", "source")}
+                    if ref.get("source"):
+                        # Not ``source``: the Axon service files a document under that key, and a paper's own source
+                        # (arxiv, openalex) there would hide the entry from its listing.
+                        ref_meta["ref_source"] = ref["source"]
+                    text = _render_paper_spine({**ref, "topic": topic}, abstract=ref.get("abstract", ""))
+                    if rows:
+                        old = (ref_paper_id, _entry_meta(rows), _entry_text(rows), before)
+                        if not self._remove_paper_entry(ref_paper_id, rows):
+                            continue
+                        replaced.append(old)
+                    docs.append(self._paper_entry_doc(
+                        ref_paper_id, {**ref_meta, "topic_id": topic_id, "ingested_at": now}, text,
+                        before | {quest_id}))
+                try:
+                    self._brain.ingest(docs)
+                except Exception:
+                    if replaced:
+                        self._restore_entries(replaced)
+                    raise
             self._finalize_ingest_if_supported()
             # The Axon service's /delete leaves the per-chunk duplicate records behind (jyunming/Axon#168), so the
             # same paper written again under the new standing can be skipped chunk by chunk. Check what landed.
             # Only this quest's own result documents: a cited paper's card may already be there under another quest,
             # and the service files it under the paper's own source.
-            own = [d["id"] for d in docs if d["metadata"].get("kind") in kind_of.values()]
-            missing: list[str] = []
-            if own and callable(getattr(self._brain, "list_sources", None)):
-                try:
-                    present = set(self._brain.list_sources())
-                    missing = [i for i in own if i not in present]
-                except Exception as e:  # noqa: BLE001
-                    _log.debug("axon: could not list what was written for quest %s: %s", quest_id, e)
+            # Axon also skips a text another document already holds (in process too), so each of this quest's own
+            # documents is looked for by its kind.
+            missing = [d["id"] for d in docs if d["metadata"].get("kind") in kind_of.values()
+                       and _standing_present(self._brain, quest_id, (d["metadata"]["kind"],)) is False]
             if missing:
                 _log.warning("axon write-back for quest %s: %d document(s) did not land in the knowledge base (%s): "
-                             "the Axon service skipped text it had stored before; later quests may not find all of "
+                             "Axon skipped text it had stored before; later quests may not find all of "
                              "this result", quest_id, len(missing), ", ".join(missing[:5]))
             # Exactly one standing now: the other copy must not have survived (a removal that reported success but
             # left chunks behind, or a copy written meanwhile).
-            left_over = _standing_present(self._brain, quest_id, STANDING_KINDS[other])
+            left_over = _standing_present(self._brain, quest_id, STANDING_KINDS[other], _list_sources(self._brain))
             if left_over is not False:
                 self.last_writeback_problem = (
                     f"this quest's result was written as {'preliminary' if preliminary else 'accepted'}, but the "
