@@ -12435,6 +12435,23 @@ class Engine:
             "[write-back] axon ingest=%s (verdict=%s, score=%s, kept as %s: result for %s, evidence %s)",
             ok, verdict, review.get("score"), standing, result_use, evidence_status or "unknown",
         )
+        # What kept the knowledge base from holding exactly one current copy of this result: in run.log and on the
+        # quest's card until a later write-back succeeds.
+        problem = getattr(self.knowledge, "last_writeback_problem", None)
+        if problem:
+            self._log.warning("[write-back] %s", problem)
+        if getattr(self, "fi_dir", None) is None:
+            return
+        record = self.fi_dir / "knowledge_problem.json"
+        try:
+            if problem:
+                record.write_text(json.dumps({"quest_id": self.quest_id, "problem": problem}, indent=2) + "\n",
+                                  encoding="utf-8")
+            else:
+                record.unlink(missing_ok=True)
+            _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
+        except OSError as e:
+            self._log.debug("[write-back] could not record the knowledge-base note: %r", e)
 
 
 # ---- module-level helpers ------------------------------------------------

@@ -257,7 +257,7 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
     "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
-    "tidy-knowledge": ("--tidy-knowledge", "Remove the out-of-date copy of a quest result whose standing changed (accepted vs preliminary) from the knowledge layer. `fi tools tidy-knowledge [check]`."),
+    "tidy-knowledge": ("--tidy-knowledge", "Remove out-of-date copies of quest results (accepted vs preliminary), and quests that are now preliminary from cited papers' cards, in the knowledge layer. `fi tools tidy-knowledge [check]`."),
     "fleet": ("--fleet", "Run several quests at once. `fi tools fleet <quest.yaml>...`."),
     "dump-state": ("--dump-state", "Print a quest's saved state, for debugging. `fi tools dump-state <quest_dir>`."),
     "list-drafts": ("--list-drafts", "List proposal drafts `fi tools proposal` wrote. `fi tools list-drafts`."),
@@ -410,7 +410,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?", const="remove", choices=("remove", "check"), default=None,
         help="Find quest results kept in the knowledge layer under both standings (accepted and preliminary: the "
              "quest was run again and its standing changed) and remove the older copy, so an out-of-date accepted "
-             "result can no longer be cited. `check` only lists them.",
+             "result can no longer be cited; also takes quests that are now preliminary off the cards of the papers they "
+             "cited. `check` only lists them.",
     )
     mode.add_argument(
         "--serve",
@@ -4773,11 +4774,13 @@ def _tidy_knowledge(*, check_only: bool, axon_config_path: Path | None) -> int:
         return 1
     try:
         found = k.retire_stale_standing(dry_run=check_only)
+        cards = k.retire_stale_ref_spines(dry_run=check_only)
     except RuntimeError as e:
         print(f"[FI] {e}", file=sys.stderr)
         return 1
-    if not found:
-        print("[FI] no quest result is kept under both standings; nothing to remove.")
+    if not found and not cards:
+        print("[FI] no quest result is kept under both standings and no cited paper's card names a quest that is now "
+              "preliminary only; nothing to remove.")
         return 0
     for entry in found:
         if entry.get("undetermined"):
@@ -4786,9 +4789,19 @@ def _tidy_knowledge(*, check_only: bool, axon_config_path: Path | None) -> int:
             continue
         verb = "would remove" if check_only else ("removed" if entry.get("ok") else "could NOT remove")
         print(f"[FI] {entry['quest_id']}: kept the {entry['kept']} copy, {verb} the older {entry['removed']} copy")
+    for entry in cards:
+        if entry.get("undetermined"):
+            print(f"[FI] cited paper {entry['paper']}: its card could not be read; nothing changed")
+            continue
+        verb = "would take" if check_only else ("took" if entry.get("ok") else "could NOT take")
+        tail = (f"{len(entry['left'])} accepted quest(s) still use it" if entry["left"]
+                else "no accepted quest uses it any more, so the card " + ("would go" if check_only else "went"))
+        print(f"[FI] cited paper {entry['paper']}: {verb} {entry['removed_consumer']} (now preliminary only) off its "
+              f"card; {tail}")
     if check_only:
         print("[FI] nothing was changed; run `fi tools tidy-knowledge` to remove them.")
-    return 0 if all(e.get("ok") or (check_only and not e.get("undetermined")) for e in found) else 1
+    everything = [*found, *cards]
+    return 0 if all(e.get("ok") or (check_only and not e.get("undetermined")) for e in everything) else 1
 
 
 class _QuestConfigError(Exception):

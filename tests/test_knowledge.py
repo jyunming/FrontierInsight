@@ -151,6 +151,14 @@ def test_add_quest_artifacts_returns_false_when_writeback_disabled(tmp_path: Pat
 # --- fallback chain in add_quest_artifacts -----------------------------------
 
 
+class _ChunkIndex:
+    def __init__(self) -> None:
+        self.corpus: list[dict] = []
+
+    def delete_documents(self, ids: list[str]) -> None:
+        self.corpus = [c for c in self.corpus if c["id"] not in ids]
+
+
 class _BrainAddText:
     """Mock brain that captures ``brain.ingest(documents)`` calls.
 
@@ -168,11 +176,16 @@ class _BrainAddText:
         self.calls: list[tuple[str, dict]] = []
         self.batches: list[list[dict]] = []
         self.finalize_calls: int = 0
+        # A readable chunk index, as a real in-process AxonBrain has: the write-back checks it for a copy of the
+        # quest under the other standing, and fails closed when it cannot be read.
+        self._own_bm25 = _ChunkIndex()
 
     def ingest(self, documents: list[dict]) -> None:
         self.batches.append(list(documents))
         for doc in documents:
             self.calls.append((doc.get("text", ""), doc.get("metadata", {}) or {}))
+            self._own_bm25.corpus.append({"id": doc.get("id"), "text": doc.get("text", ""),
+                                          "metadata": dict(doc.get("metadata", {}) or {})})
 
     def finalize_ingest(self) -> None:
         self.finalize_calls += 1
