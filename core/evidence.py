@@ -151,7 +151,8 @@ _SEALED_STEPS = ("write", "review")
 
 #: The quest's record files: what it tried, the choices along the way, and every model call it made. A quest that
 #: never wrote to one still has it (an empty file), so the seal can name it.
-SEALED_LEDGERS = (".fi/attempts.jsonl", ".fi/branch_ledger.jsonl", ".fi/model_calls.jsonl")
+SEALED_LEDGERS = (".fi/attempts.jsonl", ".fi/branch_ledger.jsonl", ".fi/model_calls.jsonl",
+                  ".fi/shadow_recommendations.jsonl")
 #: The record of the literature search queries (each entry with its digest): what the quest searched for.
 SEALED_QUERIES = ".fi/literature_queries.json"
 #: Files a finished quest's seal names by hash (quest-relative), every one of them required: what the evidence, the
