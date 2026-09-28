@@ -252,7 +252,7 @@ def test_a_skipped_write_back_keeps_only_what_is_true(tmp_path: Path) -> None:
     class _Knowledge:
         enabled = True
         last_writeback_problem = None
-        conflict: str | None = None
+        conflict: bool | None = False
 
         def standing_conflict(self, quest_id):  # noqa: ANN001
             return self.conflict
@@ -269,12 +269,77 @@ def test_a_skipped_write_back_keeps_only_what_is_true(tmp_path: Path) -> None:
                                figures_dir=None, bundle_manifest=None, raw_state={})
     note = eng.fi_dir / "knowledge_problem.json"
     rejected = {"review": {"verdict": "revise", "status": "ok"}}
-    note.write_text('{"problem": "still holds the earlier copy"}', encoding="utf-8")
+    note.write_text('{"problem": "still holds the earlier copy", "kind": "both"}', encoding="utf-8")
     eng._write_back_knowledge(artifacts, rejected, None)
     assert not note.exists(), "no longer true: the note goes"
-    eng.knowledge.conflict = "the knowledge base holds both an accepted and a preliminary copy"
+    eng.knowledge.conflict = True
     eng._write_back_knowledge(artifacts, rejected, None)
     assert "holds both" in json.loads(note.read_text(encoding="utf-8"))["problem"], "still true: it stays"
+
+
+def test_a_note_is_kept_when_the_check_cannot_tell(tmp_path: Path) -> None:
+    """Both copies planted, the service's list and search failing, a revise verdict: the note stays."""
+    brain = _Http()
+    k = _enabled_knowledge_with(brain)
+    assert _write(k, tmp_path, "accepted")
+    for d in list(brain.docs.values()):  # a preliminary copy beside it
+        if d["metadata"].get("kind") in STANDING_KINDS["accepted"]:
+            kind = STANDING_KINDS["preliminary"][STANDING_KINDS["accepted"].index(d["metadata"]["kind"])]
+            brain.docs[d["id"].replace(d["metadata"]["kind"], kind, 1)] = {
+                **d, "metadata": {**d["metadata"], "kind": kind, "source": d["id"].replace(d["metadata"]["kind"], kind, 1)}}
+    assert k.standing_conflict("q1") is True
+    eng = _skip_engine(tmp_path, k)
+    note = eng.fi_dir / "knowledge_problem.json"
+    note.write_text(json.dumps({"problem": "holds both", "kind": "both"}), encoding="utf-8")
+
+    def down(*a, **kw):  # noqa: ANN001
+        raise RuntimeError("the Axon service is down")
+
+    brain.search_raw = down
+    brain.list_sources = down
+    assert k.standing_conflict("q1") is None
+    eng._write_back_knowledge(_artifacts(tmp_path), {"review": {"verdict": "revise", "status": "ok"}}, None)
+    assert note.exists(), "cannot tell: left as it is"
+
+
+def test_a_not_written_note_is_cleared_only_by_a_write_that_succeeds(tmp_path: Path) -> None:
+    brain = _Http()
+    k = _enabled_knowledge_with(brain)
+    eng = _skip_engine(tmp_path, k)
+    note = eng.fi_dir / "knowledge_problem.json"
+    note.write_text(json.dumps({"problem": "the write failed", "kind": "unwritten"}), encoding="utf-8")
+    assert k.standing_conflict("probe") is False
+    eng._write_back_knowledge(_artifacts(tmp_path), {"review": {"verdict": "revise", "status": "ok"}}, None)
+    assert note.exists(), "a skipped write-back does not settle an unwritten result"
+
+
+def test_a_failed_first_write_does_not_speak_of_an_earlier_copy(tmp_path: Path) -> None:
+    brain = _InProcess()
+    k = _enabled_knowledge_with(brain)
+
+    def broken(docs):  # noqa: ANN001
+        raise RuntimeError("the store went away")
+
+    brain.ingest = broken
+    assert _write(k, tmp_path, "accepted") is False
+    assert "earlier copy" not in k.last_writeback_problem and "resume the quest" in k.last_writeback_problem
+
+
+def _skip_engine(tmp_path: Path, knowledge) -> Engine:  # noqa: ANN001
+    eng = object.__new__(Engine)
+    eng.quest_id, eng.quest_root, eng.fi_dir = "probe", tmp_path, tmp_path / ".fi"
+    eng.fi_dir.mkdir(exist_ok=True)
+    eng.knowledge = knowledge
+    eng.config = SimpleNamespace(knowledge=SimpleNamespace(write_back_quests=True, write_back_only_on_accept=True))
+    eng._log = SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None, debug=lambda *a, **k: None)
+    return eng
+
+
+def _artifacts(tmp_path: Path) -> QuestArtifacts:
+    paper = tmp_path / "probe.md"
+    paper.write_text("# Probe", encoding="utf-8")
+    return QuestArtifacts(quest_id="probe", quest_root=tmp_path, paper_md=paper, paper_pdf=None,
+                          figures_dir=None, bundle_manifest=None, raw_state={})
 
 
 def test_a_lock_it_cannot_open_is_waited_for_then_said_plainly(tmp_path: Path) -> None:

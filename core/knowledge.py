@@ -4662,14 +4662,24 @@ class Knowledge:
             _log.warning("axon: could not remove %s of quest %s: %s", ", ".join(kinds), quest_id, e)
             return False
 
-    def standing_conflict(self, quest_id: str) -> str | None:
-        """A plain sentence when the knowledge base is shown to hold both an accepted and a preliminary copy of the
-        quest; ``None`` otherwise (one copy, none, or it cannot be told)."""
+    #: What :meth:`standing_conflict` says when both copies are held.
+    BOTH_COPIES = ("the knowledge base holds both an accepted and a preliminary copy of this quest's result; run "
+                   "`fi tools tidy-knowledge` once the Axon service is reachable")
+
+    def standing_conflict(self, quest_id: str) -> bool | None:
+        """Whether the knowledge base holds both an accepted and a preliminary copy of the quest: ``True`` / ``False``
+        when that is shown, ``None`` when it cannot be told (no brain, a check that failed or could not answer)."""
         if not self.enabled or self._brain is None:
             return None
-        both = all(_standing_present(self._brain, quest_id, kinds) for kinds in STANDING_KINDS.values())
-        return ("the knowledge base holds both an accepted and a preliminary copy of this quest's result; run "
-                "`fi tools tidy-knowledge` once the Axon service is reachable") if both else None
+        try:
+            held = [_standing_present(self._brain, quest_id, kinds) for kinds in STANDING_KINDS.values()]
+        except Exception:  # noqa: BLE001
+            return None
+        if all(h is True for h in held):
+            return True
+        if any(h is False for h in held):
+            return False
+        return None
 
     def retire_stale_standing(self, *, dry_run: bool = False) -> list[dict[str, Any]]:
         """Quests that have documents under both standings (accepted and preliminary), which a quest whose standing
@@ -4750,6 +4760,9 @@ class Knowledge:
         # What kept this write-back from leaving exactly one current copy, in words for the person (the engine puts it
         # in run.log and on the quest's card); None when it did.
         self.last_writeback_problem = None
+        #: ``"both"`` (the knowledge base holds a leftover copy beside this one: a later check can tell it is gone) or
+        #: ``"unwritten"`` (this result is not written: only a write-back that succeeds settles it).
+        self.last_writeback_problem_kind = None
         if not self.enabled or self._brain is None:
             return False
         if not self.cfg.write_back_quests:
@@ -4818,6 +4831,7 @@ class Knowledge:
                     + ("" if had_other else " (or could not show it does not)")
                     + ", which could not be removed, so nothing new was written; once the Axon service is reachable, "
                     "run `fi tools tidy-knowledge`, then run the quest's write-back again (resume the quest)")
+                self.last_writeback_problem_kind = "unwritten"
                 _log.warning("axon write-back for quest %s: %s", quest_id, self.last_writeback_problem)
                 return False
             retired = removed and bool(had_other)
@@ -4902,7 +4916,9 @@ class Knowledge:
             # A quest written back again (resumed, refined) keeps the ids of its documents: the copy there now goes
             # first, or a store that refuses an id it already holds (the in-process vector stores do) fails the write.
             own_ids = [d["id"] for d in docs]
-            own_removed = self._retire(own_ids, quest_id=quest_id, kinds=(*kind_of.values(), "fi_topic_event"))
+            own_kinds = (*kind_of.values(), "fi_topic_event")
+            own_there = _standing_present(self._brain, quest_id, own_kinds, sources)
+            own_removed = self._retire(own_ids, quest_id=quest_id, kinds=own_kinds) and own_there is not False
             lock = _paper_entries_lock() if external_refs_for_spines else contextlib.nullcontext()
             with lock:
                 replaced: list[tuple[str, dict[str, Any], str, set[str]]] = []
@@ -4958,6 +4974,7 @@ class Knowledge:
                     f"this quest's result was written as {'preliminary' if preliminary else 'accepted'}, but the "
                     f"knowledge base {'still holds its earlier ' + other + ' copy' if left_over else 'could not be shown to hold no earlier ' + other + ' copy'}"
                     "; run `fi tools tidy-knowledge` once the Axon service is reachable")
+                self.last_writeback_problem_kind = "both"
                 _log.warning("axon write-back for quest %s: %s", quest_id, self.last_writeback_problem)
                 return False
             _log.info(
@@ -4974,5 +4991,6 @@ class Knowledge:
                 + ("; its earlier copy had already been removed, so the knowledge base may hold no copy of this "
                    "result now" if removed_first else "")
                 + "; resume the quest to write it again")
+            self.last_writeback_problem_kind = "unwritten"
             _log.warning("axon write-back for quest %s: %s", quest_id, self.last_writeback_problem)
             return False

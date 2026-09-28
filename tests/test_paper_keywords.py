@@ -127,11 +127,18 @@ def test_the_index_card_carries_the_keywords(tmp_path: Path) -> None:
     assert "KEYWORDS: symplectic integrator, energy drift" in text
 
     class Brain:
+        """Keeps what it is given, readable as a real in-process AxonBrain's keyword index is (the write-back checks
+        it for an earlier copy of the quest, and fails closed when it cannot)."""
+
         def __init__(self) -> None:
             self.docs: list[dict] = []
+            self._own_bm25 = SimpleNamespace(corpus=self.docs)
 
         def ingest(self, documents: list[dict]) -> None:
             self.docs.extend(documents)
+
+        def delete_documents(self, ids: list[str]) -> None:
+            self.docs[:] = [d for d in self.docs if d["id"] not in ids]
 
         def finalize_ingest(self) -> None:
             pass
