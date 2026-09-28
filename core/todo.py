@@ -13,6 +13,7 @@ pauses can pass better ones (the oracle stop names the change it proposes).
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,8 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
     "numeric": (
         "The run printed numerical warnings. Fix the script, or accept them?",
         "Fix experiment.py (a changed script is run again), then go on.",
-        ["Go on unchanged: the warnings are accepted and recorded."],
+        ["Go on unchanged: the warnings are accepted and recorded, and the evidence then does not count the run as "
+         "holding to its protocol."],
     ),
     "oracle": (
         "The script has not passed its oracle checks (a result with a known answer). Fix the script, or the check?",
@@ -146,12 +148,103 @@ def advice(kind: str) -> tuple[str, str, list[str]]:
     return decide, rec, list(alts)
 
 
+_SETTING_RE = re.compile(r"`(?:(?P<section>engine|execution|pauses)\.)?(?P<key>\w+):\s*(?P<value>[^`]+?)\s*`")
+
+#: What a person under ``rigor_profile: research`` can do instead of relaxing a check the profile holds fixed, by
+#: pause kind, before (``False``) and after (``True``) the protocol is frozen. A frozen protocol cannot be changed from
+#: a stop before the review, so after the freeze nothing here points at the plan.
+_RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
+    "oracle": {
+        False: "This quest is set up for research, so the oracle check cannot be relaxed: fix the script and resume, "
+               "or, if the oracle itself is wrong, change it in the plan (`--revise-plan`) and resume.",
+        True: "This quest is set up for research and its protocol is frozen, so the oracle check cannot be relaxed or "
+              "its oracle changed inside this quest: fix the script and resume, or, if the oracle itself is wrong, "
+              "start a new quest whose plan states the right one.",
+    },
+    "split": {
+        False: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "
+               "and the two scripts are asked for again.",
+        True: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "
+              "and the two scripts are asked for again.",
+    },
+}
+_RESEARCH_INSTEAD_ANY = {
+    False: "This quest is set up for research, so that check cannot be relaxed: fix what it found and resume (FI "
+           "repairs the script), change the plan (`--revise-plan`), or start a new quest set up to explore.",
+    True: "This quest is set up for research and its protocol is frozen, so that check cannot be relaxed: fix what it "
+          "found and resume (FI repairs the script), or start a new quest if the protocol itself is wrong.",
+}
+
+
+def research_instead(kind: str, *, frozen: bool) -> str:
+    """What to do instead of relaxing a check, under ``rigor_profile: research``."""
+    return _RESEARCH_INSTEAD.get(kind, _RESEARCH_INSTEAD_ANY)[frozen]
+
+
+#: Kept for callers that name no pause: the text before the freeze.
+RESEARCH_INSTEAD = _RESEARCH_INSTEAD_ANY[False]
+
+
+def refused_settings(text: str, profile: str) -> list[str]:
+    """The settings ``text`` suggests (``engine.run_manifest_check: warn``, ...) that ``profile`` refuses."""
+    if profile != "research":
+        return []
+    from .config import _RESEARCH_PROFILE  # the one table of what research holds fixed
+
+    out = []
+    for m in _SETTING_RE.finditer(text or ""):
+        sections = [m["section"]] if m["section"] else list(_RESEARCH_PROFILE)
+        for section in sections:
+            forced = (_RESEARCH_PROFILE.get(section) or {}).get(m["key"])
+            if forced is None or isinstance(forced, list):
+                continue
+            if _plain(m["value"]) != _plain(forced):
+                out.append(m.group(0))
+    return out
+
+
+def _plain(value: Any) -> str:
+    return str(value).strip().strip("'\"").strip().lower()
+
+
+def _without_refused(lines: list[str], profile: str) -> tuple[list[str], bool]:
+    """``lines`` with every sentence or clause (split at ``.``, ``;``, ``:``) that suggests a refused setting dropped
+    (a line left empty goes); and whether any was dropped."""
+    kept, dropped = [], False
+    for line in lines:
+        if not refused_settings(line, profile):
+            kept.append(line)
+            continue
+        dropped = True
+        parts = re.split(r"(?<=[.:])\s+(?=[A-Z(`])|;\s+", line)
+        rest = [p.strip() for p in parts if p.strip() and not refused_settings(p, profile)]
+        text = "; ".join(rest).strip()
+        if text and text[-1] not in ".!?":
+            text += "."
+        if text:
+            kept.append(text[0].upper() + text[1:])
+    return kept, dropped
+
+
 def pause_item(kind: str, headline: str, steps: list[str], *, recommended: str | None = None,
-               alternatives: list[str] | None = None) -> Item:
-    """The item for the pause that stopped the quest."""
+               alternatives: list[str] | None = None, profile: str = "default", frozen: bool = False) -> Item:
+    """The item for the pause that stopped the quest. Under ``profile`` ``research`` no line suggests a setting the
+    profile refuses (it would be refused when the quest is resumed); what the person can do instead is said, for this
+    kind of pause and whether the protocol is ``frozen``."""
     decide, rec, alts = advice(kind)
-    return Item(kind=kind, why=headline, decide=decide, recommended=recommended or rec,
-                alternatives=list(alternatives) if alternatives is not None else alts, steps=list(steps), blocking=True)
+    rec = recommended or rec
+    alts = list(alternatives) if alternatives is not None else alts
+    steps, dropped_steps = _without_refused(list(steps), profile)
+    alts, dropped_alts = _without_refused(alts, profile)
+    if profile == "research" and frozen:
+        # After the freeze the plan no longer changes the protocol: a suggestion to rewrite it would contradict the card.
+        alts = [a for a in alts if "--revise-plan" not in a]
+    instead = research_instead(kind, frozen=frozen)
+    if refused_settings(rec, profile):
+        rec, dropped_alts = instead, True
+    elif dropped_steps or dropped_alts:
+        alts.append(instead)
+    return Item(kind=kind, why=headline, decide=decide, recommended=rec, alternatives=alts, steps=steps, blocking=True)
 
 
 def _read_json(path: Path) -> Any:
@@ -199,7 +292,13 @@ def waiting(quest_root: Path) -> list[Item]:
         out.append(Item("papers", "Some papers could not be downloaded (needs/WANTED_PAPERS.md lists them, most "
                                   "relevant first).",
                         recommended="Nothing to do unless one of them matters: put its PDF in inputs/papers/ and go on."))
-    failures = _read_json(root / ".fi" / "source_failures.json")
+    declined = _read_json(root / ".fi" / "papers_declined.json")
+    if isinstance(declined, list) and declined:
+        out.append(Item("papers_declined", f"{len(declined)} paper(s) you went on without are read from their "
+                                           "abstracts only (.fi/papers_declined.json).",
+                        recommended="Nothing to do unless one of them matters: put its PDF in inputs/papers/; it is "
+                                    "read in full the next time the quest searches the literature."))
+    failures =_read_json(root / ".fi" / "source_failures.json")
     # The record is written on every run; only one that counts a failure is worth a look.
     if (isinstance(failures, dict) and failures.get("total")) or (isinstance(failures, list) and failures):
         out.append(Item("sources", "Some literature sources could not be reached (.fi/source_failures.json).",

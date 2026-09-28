@@ -574,4 +574,4 @@ async def test_cli_retry_before_sleep_logs_caught_exception(
     assert any("the marker exception text we expect to see" in m for m in msgs), (
         f"expected the caught exception text in WARNING logs; got {msgs}"
     )
-    assert any("attempt 1" in m.lower() and "retrying" in m.lower() for m in msgs)
+    assert any("attempt 1" in m.lower() and "trying again" in m.lower() for m in msgs)

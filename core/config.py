@@ -327,6 +327,34 @@ class ProviderConfig(BaseModel):
     # — no regression for quests without ensemble configured).
     node_ensemble: dict[str, "NodeEnsembleConfig"] | None = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _timeouts_over_the_defaults(cls, data: Any) -> Any:
+        """``node_http_timeout_s`` and ``node_cli_timeout_s`` from the config name only the steps they change: those
+        keys are kept exactly as written, and every other step keeps its built-in budget. (A one-key map used to
+        replace the whole table, so every other step silently fell back to the base timeout.) An empty map or ``null``
+        changes no step. An explicit ``http_timeout_s`` / ``cli_timeout_s`` is a floor for the built-in budgets it
+        exceeds: raising the base never makes a step shorter. (For the CLI with no map, ``_cli_timeout_is_a_floor``
+        applies the same rule.)"""
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for field, base in (("node_http_timeout_s", "http_timeout_s"), ("node_cli_timeout_s", "cli_timeout_s")):
+            if field not in out and not (field == "node_http_timeout_s" and out.get(base) is not None):
+                continue
+            given = out.get(field)
+            if given is not None and not isinstance(given, dict):
+                continue
+            built_in = cls.model_fields[field].default_factory()
+            try:
+                floor = float(out[base]) if out.get(base) is not None else None
+            except (TypeError, ValueError):
+                floor = None
+            if floor is not None:
+                built_in = {node: max(seconds, floor) for node, seconds in built_in.items()}
+            out[field] = {**built_in, **(given or {})}
+        return out
+
     @field_validator("reasoning_effort", mode="before")
     @classmethod
     def _normalise_reasoning_effort(cls, v: object) -> object:

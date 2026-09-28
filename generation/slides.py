@@ -55,6 +55,7 @@ from core.engine import (
 )
 from core.provider import (
     LLMClient,
+    quest_run_log,
     ProxySupervisor,
     PROXY_PROVIDERS,
     append_cost_row,
@@ -272,7 +273,7 @@ class SlideGenerator:
         own_supervisor = supervisor is None
         sup = supervisor or ProxySupervisor()
         endpoint = await resolve_endpoint_async(self.config.provider, sup)
-        client = LLMClient(endpoint)
+        client = LLMClient(endpoint, run_log=quest_run_log(art.quest_root))
         try:
             text = await client.chat(
                 [{"role": "user", "content": prompt}],

@@ -791,6 +791,7 @@ class Engine:
                             return self._collect_artifacts({})
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
+                        forget_papers_asked(self.fi_dir, declined=False)
                         where, moved = _rerun_from.back_up(self.quest_root, from_step)
                         self._audit("rerun_from", step=from_step, moved=moved)
                         self._log.info("[run] rerunning from the %s step; the earlier outputs are in %s (%s)",
@@ -825,6 +826,7 @@ class Engine:
                         # JSON is embedded (the design node skips it at
                         # iteration==0).
                         if reopen and not prior_snapshot.next:
+                            forget_papers_asked(self.fi_dir, declined=False)
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             # The notes of earlier refines were answered by earlier passes: this pass redoes the
                             # design, and neither the writer nor the review treats them as new.
@@ -3202,6 +3204,15 @@ class Engine:
                     "pausing the quest for them.",
                     len(oa_unfetched),
                 )
+            # Resuming from the papers pause without adding files is the answer "go on without them": those papers
+            # are not asked for again. Only the papers not yet declined are asked for.
+            declined_now = _take_papers_declined(self.fi_dir, self.quest_root,
+                                                 getattr(self, "_resumed_from_pause", None))
+            if declined_now:
+                self._audit("papers_declined", count=len(declined_now), papers=sorted(declined_now)[:40])
+                self._log.info("[literature] going on without %d paper(s) you were asked for (none was added to "
+                               "inputs/papers/): they are read from their abstracts only", len(declined_now))
+            needed, already = _papers_to_ask(needed, self.fi_dir)
             if needed or oa_unfetched:
                 _write_paper_need_stubs(
                     self.quest_root, needed, self._log,
@@ -3215,9 +3226,13 @@ class Engine:
                     steps=[
                         f"{len(needed)} relevant paper(s) came back abstract-only "
                         "(paywalled). They're listed, most-relevant-first, in "
-                        "`needs/WANTED_PAPERS.md` with a download link each.",
+                        "`needs/WANTED_PAPERS.md` with a download link each."
+                        + (f" ({already} other(s) you went on without earlier are not asked for again.)"
+                           if already else ""),
                         "Download the few that matter and drop the PDFs into "
                         "`inputs/papers/` — they're ingested as full text.",
+                        "Or go on without them: resume without adding files, and those papers are used from "
+                        "their abstracts only (FI will not ask for them again).",
                     ],
                     payload={
                         "papers_required": True,
@@ -3678,6 +3693,7 @@ class Engine:
             ),
             max_prompt_chars=self.config.provider.max_prompt_chars,
             heartbeat_cb=self._llm_heartbeat,
+            run_log=self._log,
         )
         # Wrap in a fallback chain so a single provider's outage doesn't
         # forfeit the quest. No-op (unwrapped) when no fallback configured.
@@ -3894,7 +3910,9 @@ class Engine:
         the person: why it stopped, what there is to decide, the recommendation, the alternatives, what to do, and
         everything else waiting, then how to go on. ``interaction`` (answer / supply) is kept in ``pause.json``.
         Best-effort; a write failure never stops a quest."""
-        item = _todo.pause_item(kind, headline, steps, recommended=recommended, alternatives=alternatives)
+        item = _todo.pause_item(kind, headline, steps, recommended=recommended, alternatives=alternatives,
+                                profile=getattr(self.config, "rigor_profile", "default"),
+                                frozen=_frozen.load(self.quest_root) is not None)
         _todo.write(self.quest_root, self.fi_dir, self.quest_id, item)
         return item
 
@@ -3939,7 +3957,7 @@ class Engine:
             "decide": item.decide,
             "recommended": item.recommended,
             "alternatives": item.alternatives,
-            "steps": list(steps),
+            "steps": list(item.steps),
             "quest_id": self.quest_id,
             "next_step_file": "NEXT_STEP.md",
             # For a SUPPLY pause: which upload target(s) the web banner should
@@ -5571,8 +5589,9 @@ class Engine:
             steps=[
                 what[0].upper() + what[1:] + ": " + "; ".join(found) + ".",
                 "The quest keeps its simulation and its analysis in two scripts (execution.split_failure: block), so it does not go on "
-                "with something else. Resume to ask for the scripts again; set `execution.split_failure: warn` to let the quest run "
-                "as one script instead.",
+                "with something else. Resume to ask for the scripts again"
+                + ("." if getattr(self.config, "rigor_profile", "default") == "research" else
+                   "; set `execution.split_failure: warn` to let the quest run as one script instead."),
             ],
             problems=found,
         )
@@ -6425,9 +6444,14 @@ class Engine:
         wrong, its proposal is shown beside what the script measured, and whether accepting it would simply let this run
         pass -- the person decides; nothing here applies it."""
         frozen = _frozen.load(self.quest_root) is not None
+        research = getattr(self.config, "rigor_profile", "default") == "research"
         # After the freeze an oracle changes only through an amendment, and a quest stopped here never reaches the review
-        # where one is asked for: going on with the failure recorded is the way there.
+        # where one is asked for: going on with the failure recorded is the way there. A research quest cannot relax
+        # the check, so for it the oracle cannot change inside this quest at all.
         amend = (
+            "The protocol is frozen and this quest is set up for research, so an oracle cannot be changed or relaxed "
+            "inside it: if the oracle itself is wrong, start a new quest whose plan states the right one."
+        ) if research else (
             "The protocol is frozen, so editing plan.md does not change it. To change an oracle: set "
             "`engine.oracle_check: warn` in the quest's YAML and resume, so the run goes on with this failure recorded, "
             "then ask for the change when the quest is refined at the review and approve the amendment it asks for."
@@ -6460,6 +6484,9 @@ class Engine:
                         "not the result." if passes else f" The script measured {value:g}, which would still fail it."
                     )
             how = (
+                "This research quest cannot take that change (its protocol is frozen); to use it, start a new quest "
+                f"whose plan states it: {_oracle.proposal_request(p)}"
+                if frozen and research else
                 "Accepting it needs an amendment (above): ask, at the review, for this change: "
                 f"{_oracle.proposal_request(p)}"
                 if frozen else
@@ -6484,7 +6511,7 @@ class Engine:
             alternatives=[
                 "Set `engine.oracle_check: warn` and go on: the failure is recorded, and the oracle can be changed "
                 "later through an amendment approved at the review.",
-            ] if frozen else None,
+            ] if frozen and not research else [_todo.research_instead("oracle", frozen=True)] if frozen else None,
             payload={
                 "oracle_stage": True, "quest_id": self.quest_id, "problems": found,
                 "plan_file": str(_plan.plan_path(self.quest_root)),
@@ -7065,20 +7092,28 @@ class Engine:
                 pass
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
             self._clear_stale_figures()
+            research = getattr(self.config, "rigor_profile", "default") == "research"
+            # A research quest cannot relax this check, nor reach the review where an amendment is asked for.
+            otherwise = (
+                " This quest is set up for research, so the difference cannot be accepted inside it: if the protocol "
+                "itself is wrong, start a new quest whose plan states the right one."
+            ) if research else ""
             if set(manifest_found) <= set(self._manifest_analysis_problems):
                 headline = "the analysis does not report the values the protocol's metrics need"
                 fix = (
                     f"Change `{self.quest_root / 'code' / _split_run.ANALYSIS_NAME}` so that its RESULT_JSON lists the per-trial "
                     "values (`<metric>_values`, read from the raw files) each mean metric above is computed from, then resume. "
-                    "If a metric is not a mean over trials at all (a closed-form value), the protocol declared it wrongly: that "
-                    "needs an amendment. Set `engine.run_manifest_check: warn` to go on with the difference recorded."
+                    "If a metric is not a mean over trials at all (a closed-form value), the protocol declared it wrongly"
+                    + (": " + otherwise.strip() if research else ": that needs an amendment. Set "
+                       "`engine.run_manifest_check: warn` to go on with the difference recorded.")
                 )
             else:
                 headline = "the simulation does not do what the protocol fixed"
                 fix = (
                     f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that it runs the protocol's design and writes the "
-                    "manifest from what its loops did, then resume. (The protocol is frozen: a different design needs an amendment.) "
-                    "Set `engine.run_manifest_check: warn` to go on with the difference recorded."
+                    "manifest from what its loops did, then resume."
+                    + (otherwise if research else " (The protocol is frozen: a different design needs an amendment.) "
+                       "Set `engine.run_manifest_check: warn` to go on with the difference recorded.")
                 )
             self._pause_for_contract(
                 kind="manifest",
@@ -11174,6 +11209,7 @@ class Engine:
                 node_model_fallbacks={},
                 max_prompt_chars=self.config.provider.max_prompt_chars,
                 heartbeat_cb=self._llm_heartbeat,
+                run_log=self._log,
             )
         return _factory
 
@@ -11451,6 +11487,12 @@ class Engine:
         markers alone, since those are state ("already paused here"), not
         display. Any node that genuinely re-pauses re-writes its own marker, so
         a real pending pause re-appears within the same run."""
+        # Which pause this run goes on from, read before its marker goes: a node that needs to know what the person
+        # answered by resuming (the papers pause) asks the engine, not the file.
+        try:
+            self._resumed_from_pause = json.loads((self.fi_dir / "pause.json").read_text(encoding="utf-8")).get("kind")
+        except (OSError, ValueError, AttributeError):
+            self._resumed_from_pause = None
         for p in (
             self.quest_root / "NEXT_STEP.md",
             self.fi_dir / "pause.json",
@@ -18145,6 +18187,78 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
     # Elsevier / Wiley / …) is also a real paywalled paper the user can fetch.
     from core.knowledge import _is_academic_source
     return _is_academic_source(str(md.get("url") or ""))
+
+
+_PAPERS_ASKED = "papers_asked.json"
+_PAPERS_DECLINED = "papers_declined.json"
+
+
+def _paper_key(doc: "RetrievedDoc") -> str:
+    """A paper's identity across retrievals: its DOI, else its link, else its title."""
+    md = doc.metadata or {}
+    for k in ("doi", "url", "source_url", "title"):
+        v = str(md.get(k) or "").strip().lower()
+        if v:
+            return f"{k}:{v}"
+    return "text:" + hashlib.sha256((doc.content or "")[:500].encode("utf-8")).hexdigest()
+
+
+def _papers_to_ask(needed: list["RetrievedDoc"], fi_dir: Path) -> tuple[list["RetrievedDoc"], int]:
+    """The paywalled papers to stop and ask the person for -- those not declined before -- and how many were left out
+    because they were. The ones asked for are recorded (``.fi/papers_asked.json``) so a resume from this pause can
+    tell which papers it answered."""
+    declined = _read_key_set(fi_dir / _PAPERS_DECLINED)
+    new = [d for d in needed if _paper_key(d) not in declined]
+    if new:
+        _write_key_set(fi_dir / _PAPERS_ASKED, {_paper_key(d) for d in new})
+    return new, len(needed) - len(new)
+
+
+def _take_papers_declined(fi_dir: Path, quest_root: Path, resumed_from: str | None) -> set[str]:
+    """When this run goes on from the papers pause (``resumed_from``, the pause kind the engine read before clearing
+    the markers) and no paper was added to ``inputs/papers/``, the papers it asked for were declined: they are moved
+    to ``.fi/papers_declined.json`` and returned. Anything else (another pause, an ``--update``, a run from a step:
+    :func:`forget_papers_asked`) declines nothing."""
+    asked = _read_key_set(fi_dir / _PAPERS_ASKED)
+    if not asked or _papers_dir_has_files(quest_root) or resumed_from != "papers":
+        return set()
+    _write_key_set(fi_dir / _PAPERS_DECLINED, _read_key_set(fi_dir / _PAPERS_DECLINED) | asked)
+    try:
+        (fi_dir / _PAPERS_ASKED).unlink()
+    except OSError:
+        pass
+    return asked
+
+
+def forget_papers_asked(fi_dir: Path, *, declined: bool = True) -> None:
+    """An unanswered papers pause is not answered by changing the quest (``--update``) or running it again from a step
+    or re-opening it. ``declined``: also forget the papers the person went on without (a changed quest may ask for them
+    again); a run from a step or a re-opened quest does not search the literature again, so it keeps them."""
+    for name in ((_PAPERS_ASKED, _PAPERS_DECLINED) if declined else (_PAPERS_ASKED,)):
+        try:
+            (Path(fi_dir) / name).unlink()
+        except OSError:
+            pass
+
+
+def papers_declined_count(fi_dir: Path) -> int:
+    return len(_read_key_set(Path(fi_dir) / _PAPERS_DECLINED))
+
+
+def _read_key_set(path: Path) -> set[str]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {str(k) for k in data} if isinstance(data, list) else set()
+
+
+def _write_key_set(path: Path, keys: set[str]) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(keys), indent=1) + "\n", encoding="utf-8")
+    except OSError:
+        pass
 
 
 def _papers_dir_has_files(quest_root: Path) -> bool:
