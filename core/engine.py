@@ -12304,9 +12304,19 @@ class Engine:
 
     def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState,
                               evidence_status: str | None = None) -> None:
+        unreachable = getattr(self.knowledge, "unavailable_reason", None)
+        if unreachable and self.config.knowledge.write_back_quests:
+            # Asked for but not there: what the knowledge base holds cannot be seen, so its note is left as it is.
+            if self._knowledge_note() is not None:
+                self._log.warning("[write-back] %s, so this quest's knowledge-base note (.fi/knowledge_problem.json) "
+                                  "was not checked again", unreachable)
+            return
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
+            # This quest no longer writes to the knowledge base: a note from an earlier write-back is not its to act on.
+            self._settle_knowledge_note(None)
             return
         if artifacts.paper_md is None:
+            self._settle_skipped_knowledge_note()
             return
 
         review = state.get("review") or {}
@@ -12321,10 +12331,12 @@ class Engine:
                 "[write-back] skipped: verdict=%s (write_back_only_on_accept=True)",
                 verdict,
             )
+            self._settle_skipped_knowledge_note()
             return
         # An accept no reviewer gave is not research the review signed off on.
         if self.config.knowledge.write_back_only_on_accept and not _review_was_real(review):
             self._log.info("[write-back] skipped: the accept was not a reviewer's (review status %s)", review.get("status"))
+            self._settle_skipped_knowledge_note()
             return
 
         # What the result may stand for in the long-term store: accepted evidence only when the quest was a study
@@ -12435,6 +12447,60 @@ class Engine:
             "[write-back] axon ingest=%s (verdict=%s, score=%s, kept as %s: result for %s, evidence %s)",
             ok, verdict, review.get("score"), standing, result_use, evidence_status or "unknown",
         )
+        # What kept the knowledge base from holding exactly one current copy of this result: in run.log and on the
+        # quest's card until a later write-back settles it.
+        self._settle_knowledge_note(getattr(self.knowledge, "last_writeback_problem", None),
+                                    kind=getattr(self.knowledge, "last_writeback_problem_kind", None) or "unwritten")
+
+    def _settle_skipped_knowledge_note(self) -> None:
+        """A finished quest that skips its write-back: its note says only what is still true. A note that the result
+        is not written stays (only a write-back that succeeds settles it); one that both copies are held stays while
+        they are, goes when they are shown not to be, and stays when that cannot be told."""
+        try:
+            check = getattr(self.knowledge, "standing_conflict", None)
+            both = check(self.quest_id) if callable(check) else None
+        except Exception:  # noqa: BLE001 -- a note about the knowledge base never touches the quest
+            both = None
+        if both is None:
+            return
+        note = self._knowledge_note()
+        if note is not None and note.get("kind", "unwritten") != "both":
+            return
+        if both:
+            self._settle_knowledge_note(getattr(self.knowledge, "BOTH_COPIES", None) or
+                                        "the knowledge base holds both an accepted and a preliminary copy of this "
+                                        "quest's result", kind="both")
+        elif note is not None:
+            self._settle_knowledge_note(None)
+
+    def _knowledge_note(self) -> dict[str, Any] | None:
+        if getattr(self, "fi_dir", None) is None:
+            return None
+        try:
+            note = json.loads((self.fi_dir / "knowledge_problem.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return note if isinstance(note, dict) else None
+
+    def _settle_knowledge_note(self, problem: str | None, *, kind: str = "unwritten") -> None:
+        """Keep ``.fi/knowledge_problem.json`` (and the card) to what is true now: ``problem`` written (with its
+        ``kind``, see Knowledge.last_writeback_problem_kind), or the note removed when there is none."""
+        if problem:
+            self._log.warning("[write-back] %s", problem)
+        if getattr(self, "fi_dir", None) is None:
+            return
+        record = self.fi_dir / "knowledge_problem.json"
+        try:
+            if problem:
+                record.write_text(json.dumps({"quest_id": self.quest_id, "problem": problem, "kind": kind},
+                                             indent=2) + "\n", encoding="utf-8")
+            elif not record.is_file():
+                return
+            else:
+                record.unlink(missing_ok=True)
+            _todo.write(self.quest_root, self.fi_dir, self.quest_id, None)
+        except OSError as e:
+            self._log.debug("[write-back] could not record the knowledge-base note: %r", e)
 
 
 # ---- module-level helpers ------------------------------------------------

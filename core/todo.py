@@ -298,6 +298,12 @@ def waiting(quest_root: Path) -> list[Item]:
                                            "abstracts only (.fi/papers_declined.json).",
                         recommended="Nothing to do unless one of them matters: put its PDF in inputs/papers/; it is "
                                     "read in full the next time the quest searches the literature."))
+    knowledge = _read_json(root / ".fi" / "knowledge_problem.json")
+    if isinstance(knowledge, dict) and knowledge.get("problem"):
+        out.append(Item("knowledge", "The knowledge base's copy of this result is not current: "
+                                     + str(knowledge["problem"]) + " (.fi/knowledge_problem.json).",
+                        recommended="Once the Axon service is reachable, run `fi tools tidy-knowledge`, then resume "
+                                    "the quest to write it back again."))
     failures =_read_json(root / ".fi" / "source_failures.json")
     # The record is written on every run; only one that counts a failure is worth a look.
     if (isinstance(failures, dict) and failures.get("total")) or (isinstance(failures, list) and failures):

@@ -48,7 +48,7 @@ same PR that adds, splits or renames one.
 
 ## Knowledge / literature
 
-- `core/knowledge.py` — `Knowledge`, the three-layer retrieval (pinned papers → Axon → external router); `add_quest_artifacts` writes accepted or preliminary kinds by `metadata['standing']` (decided in `Engine._write_back_knowledge`; read back by `engine._is_preliminary_memory` / `_preliminary_reminders`); the copy under the other standing (`STANDING_KINDS`) is removed first (`_retire`, `_delete_in_process`), and `retire_stale_standing` backs `fi tools tidy-knowledge`.
+- `core/knowledge.py` — `Knowledge`, the three-layer retrieval (pinned papers → Axon → external router); `add_quest_artifacts` writes accepted or preliminary kinds by `metadata['standing']` (decided in `Engine._write_back_knowledge`; read back by `engine._is_preliminary_memory` / `_preliminary_reminders`); the copy under the other standing (`STANDING_KINDS`) is removed first (`_retire`, `_delete_in_process`), and `retire_stale_standing` / `retire_stale_ref_spines` back `fi tools tidy-knowledge`; a removal that fails stops the write (`last_writeback_problem`, which the engine puts in run.log and `.fi/knowledge_problem.json` for the card); cited papers' entries (`REF_SPINE`) keep every accepted consumer (`_paper_entry`, `_drop_consumer`, under `_paper_entries_lock`).
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client (`AxonHTTPBrain`: ingest, delete_documents, list_sources, search_raw), sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
