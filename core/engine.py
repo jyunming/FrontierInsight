@@ -12304,6 +12304,13 @@ class Engine:
 
     def _write_back_knowledge(self, artifacts: QuestArtifacts, state: QuestState,
                               evidence_status: str | None = None) -> None:
+        unreachable = getattr(self.knowledge, "unavailable_reason", None)
+        if unreachable and self.config.knowledge.write_back_quests:
+            # Asked for but not there: what the knowledge base holds cannot be seen, so its note is left as it is.
+            if self._knowledge_note() is not None:
+                self._log.warning("[write-back] %s, so this quest's knowledge-base note (.fi/knowledge_problem.json) "
+                                  "was not checked again", unreachable)
+            return
         if not self.knowledge.enabled or not self.config.knowledge.write_back_quests:
             # This quest no longer writes to the knowledge base: a note from an earlier write-back is not its to act on.
             self._settle_knowledge_note(None)

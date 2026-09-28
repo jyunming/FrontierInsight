@@ -325,6 +325,44 @@ def test_a_failed_first_write_does_not_speak_of_an_earlier_copy(tmp_path: Path) 
     assert "earlier copy" not in k.last_writeback_problem and "resume the quest" in k.last_writeback_problem
 
 
+def test_an_unreachable_knowledge_base_leaves_the_note_and_a_turned_off_one_clears_it(tmp_path: Path) -> None:
+    warnings: list[str] = []
+    k = SimpleNamespace(enabled=False, unavailable_reason="the Axon knowledge base could not be reached (refused)")
+    eng = _skip_engine(tmp_path, k)
+    eng._log = SimpleNamespace(info=lambda *a, **kw: None, warning=lambda msg, *a: warnings.append(msg % a),
+                               debug=lambda *a, **kw: None)
+    note = eng.fi_dir / "knowledge_problem.json"
+    note.write_text(json.dumps({"problem": "holds both", "kind": "both"}), encoding="utf-8")
+    accept = {"review": {"verdict": "accept", "status": "ok"}, "analysis": {}, "design": {}}
+    eng._write_back_knowledge(_artifacts(tmp_path), accept, "publication_ready")
+    assert note.exists(), "unreachable is not turned off: the note stays"
+    assert any("could not be reached" in w and "not checked again" in w for w in warnings)
+    eng.knowledge = SimpleNamespace(enabled=False, unavailable_reason=None)
+    eng._write_back_knowledge(_artifacts(tmp_path), accept, "publication_ready")
+    assert not note.exists(), "the knowledge base turned off in the config: the note goes"
+    note.write_text(json.dumps({"problem": "holds both", "kind": "both"}), encoding="utf-8")
+    eng.config.knowledge.write_back_quests = False
+    eng.knowledge = SimpleNamespace(enabled=True, unavailable_reason=None)
+    eng._write_back_knowledge(_artifacts(tmp_path), accept, "publication_ready")
+    assert not note.exists(), "write-back turned off in the config: the note is not this quest's to act on"
+
+
+def test_knowledge_says_why_it_is_not_there(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import knowledge as kmod
+    from core.axon_http import AxonUnavailable
+    from core.config import KnowledgeConfig
+
+    monkeypatch.setattr(kmod, "_AXON_AVAILABLE", True)
+
+    def unreachable(cfg):  # noqa: ANN001
+        raise AxonUnavailable("connection refused")
+
+    monkeypatch.setattr(kmod.Knowledge, "_build_brain", staticmethod(unreachable))
+    k = kmod.Knowledge(KnowledgeConfig(enabled=True, seed_source_catalog=False))
+    assert k.enabled is False and "could not be reached" in k.unavailable_reason
+    assert kmod.Knowledge(KnowledgeConfig(enabled=False)).unavailable_reason is None
+
+
 def _skip_engine(tmp_path: Path, knowledge) -> Engine:  # noqa: ANN001
     eng = object.__new__(Engine)
     eng.quest_id, eng.quest_root, eng.fi_dir = "probe", tmp_path, tmp_path / ".fi"

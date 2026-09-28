@@ -3784,6 +3784,10 @@ class Knowledge:
             if value and not os.environ.get(env_name):
                 os.environ[env_name] = value
         self.enabled = cfg.enabled and _AXON_AVAILABLE
+        #: Why a knowledge base the config asks for is not there (Axon not installed, or not reachable); None when it
+        #: is there or the config turns it off. Not the same as turned off: what it holds cannot be seen, not absent.
+        self.unavailable_reason: str | None = (
+            f"axon is not installed ({_AXON_IMPORT_ERROR})" if cfg.enabled and not _AXON_AVAILABLE else None)
         self._brain: Any | None = None
         self._retriever: Any | None = None
         if cfg.enabled and not _AXON_AVAILABLE:
@@ -3805,6 +3809,7 @@ class Knowledge:
                 )
                 self.enabled = False
                 self._brain = None
+                self.unavailable_reason = f"the Axon knowledge base could not be reached ({e})"
         if self.enabled:
             self._retriever = AxonRetriever(brain=self._brain, top_k=cfg.top_k)
             if cfg.seed_source_catalog:
