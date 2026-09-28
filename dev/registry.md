@@ -135,7 +135,8 @@ same PR that adds, splits or renames one.
 - `web/quest_launcher.py` — the subprocess pool for quests started from the web UI.
 - `vscode-frontier-insight/src/extension.ts` — the `@fi` chat participant and every slash command.
 - `vscode-frontier-insight/src/bridge.ts`, `persistent-bridge.ts` — the `vscode.lm.*` bridge a spawned `launch.py`
-  talks to over a local socket.
+  talks to over a local socket; `lm_done` carries `served_model` (`lm-messages.ts` `servedModel`), which
+  `core/vscode_bridge.py` hands to the call's own `LAST_SERVED` and `core/provider.py` records as `LAST_CALL`.
 - `vscode-frontier-insight/src/interview-core.ts`, `interview.ts` — the VS Code interview (mirrors `core/interview.py`
   question-for-question; keep both in sync when the question set changes).
 

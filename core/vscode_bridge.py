@@ -34,6 +34,7 @@ keeps stdout free for normal logs and the bridge separate.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 from typing import Any
@@ -46,6 +47,11 @@ class BridgeError(RuntimeError):
     bridge connection drops mid-call. Distinct from RuntimeError so
     LLMClient's retry layer can ignore it (re-trying without VSCode
     being clicked again would be pointless)."""
+
+
+#: The chat model that answered the current task's last bridge call, as the extension's ``lm_done`` named it
+#: (``{"id", "vendor", "family", "version", "name"}``), or ``None`` when the extension did not say (an older one).
+LAST_SERVED: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("fi_vscode_served", default=None)
 
 
 class VSCodeBridgeClient:
@@ -95,6 +101,8 @@ class VSCodeBridgeClient:
         # Streaming-chunk buffers per request, in case the extension
         # streams in chunks before sending the final lm_done.
         self._chunks: dict[int, list[str]] = {}
+        # The model each request's ``lm_done`` named (``served_model``), until ``chat`` takes it for that request.
+        self._served: dict[int, dict[str, str]] = {}
         self._next_id = 1
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # serialize writes
@@ -153,6 +161,7 @@ class VSCodeBridgeClient:
                 fut.set_exception(BridgeError("bridge closed"))
         self._pending.clear()
         self._chunks.clear()
+        self._served.clear()
 
     async def chat(
         self,
@@ -179,6 +188,7 @@ class VSCodeBridgeClient:
             await self.connect()
         assert self._writer is not None
 
+        LAST_SERVED.set(None)
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
@@ -204,7 +214,11 @@ class VSCodeBridgeClient:
             # load-bearing: ``_TRANSIENT_BRIDGE_MARKERS`` in
             # ``core/provider.py`` matches on it so tenacity retries.
             try:
-                return await asyncio.wait_for(fut, timeout=self.cli_timeout_s)
+                content = await asyncio.wait_for(fut, timeout=self.cli_timeout_s)
+                # This request's own answer: set in this task's context, so calls made at the same time never read
+                # each other's model.
+                LAST_SERVED.set(self._served.pop(req_id, None))
+                return content
             except asyncio.TimeoutError as e:
                 raise BridgeError(
                     f"bridge stalled (no response within "
@@ -213,6 +227,7 @@ class VSCodeBridgeClient:
         finally:
             self._pending.pop(req_id, None)
             self._chunks.pop(req_id, None)
+            self._served.pop(req_id, None)
 
     async def clarify(self, questions: dict[str, Any]) -> dict[str, Any]:
         """Pause for human-in-the-loop clarify answers. The extension
@@ -318,6 +333,7 @@ class VSCodeBridgeClient:
                     fut.set_exception(BridgeError("bridge connection dropped"))
             self._pending.clear()
             self._chunks.clear()
+            self._served.clear()
             w = self._writer
             self._reader = None
             self._writer = None
@@ -373,6 +389,10 @@ class VSCodeBridgeClient:
                     "estimated": False,
                     "usage_scope": str(msg.get("usage_scope") or "sent_only"),
                 }
+            served = msg.get("served_model")
+            if isinstance(served, dict) and isinstance(served.get("id"), str) and served["id"].strip():
+                self._served[req_id] = {k: str(v) for k, v in served.items()
+                                        if k in ("id", "vendor", "family", "version", "name") and isinstance(v, str)}
             fut.set_result(content)
         elif mtype == "lm_error":
             req_id = int(msg.get("id", 0))

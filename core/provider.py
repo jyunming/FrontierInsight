@@ -3386,6 +3386,14 @@ class LLMClient:
                 messages, model_override=model, temperature=temperature,
                 node=node,
             )
+            from .vscode_bridge import LAST_SERVED
+
+            served = LAST_SERVED.get()
+            if served and served.get("id"):
+                # The extension named the chat model it selected for this very call (the one VS Code routes it
+                # to): known as reported, not assumed from the hint.
+                self.last_model = served["id"]
+                LAST_CALL.set({"provider": served.get("vendor") or "vscode", "model": served["id"], "reported": True})
             # The extension counts with the model's own tokenizer when it
             # can, which beats the char/4 estimate — take it, and let the
             # estimator fill in only when it could not.

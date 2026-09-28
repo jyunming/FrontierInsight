@@ -802,3 +802,99 @@ async def test_llmclient_chat_routes_vscode_bridge_transport() -> None:
     finally:
         await client.aclose()
         await server.stop()
+
+
+# --- which model answered ---------------------------------------------------
+
+
+def _bridge_client(port: int) -> LLMClient:
+    ep = ResolvedEndpoint(
+        base_url="", model="(VSCode chat default)", api_key="not-needed",
+        transport="vscode_bridge", vscode_bridge_port=port,
+    )
+    return LLMClient(ep)
+
+
+@pytest.mark.asyncio
+async def test_a_model_the_extension_names_is_reported() -> None:
+    from core.provider import LAST_CALL
+
+    server = _MockBridgeServer()
+
+    def handler(msg: dict[str, Any], w) -> list[dict[str, Any]]:
+        return [{"type": "lm_done", "id": msg["id"], "content": "ok",
+                 "served_model": {"id": "gpt-4.1", "vendor": "copilot", "family": "gpt-4.1", "version": "2025-04"}}]
+
+    port = await server.start(handler)
+    client = _bridge_client(port)
+    try:
+        await client.chat([{"role": "user", "content": "hi"}])
+        assert LAST_CALL.get() == {"provider": "copilot", "model": "gpt-4.1", "reported": True}
+        assert client.last_model == "gpt-4.1"
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_older_extension_that_names_no_model_is_not_reported() -> None:
+    from core.provider import LAST_CALL
+
+    server = _MockBridgeServer()
+
+    def handler(msg: dict[str, Any], w) -> list[dict[str, Any]]:
+        return [{"type": "lm_done", "id": msg["id"], "content": "ok"}]
+
+    port = await server.start(handler)
+    client = _bridge_client(port)
+    try:
+        await client.chat([{"role": "user", "content": "hi"}])
+        assert LAST_CALL.get()["reported"] is False
+    finally:
+        await client.aclose()
+        await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_calls_at_the_same_time_keep_their_own_models() -> None:
+    """Two reviewers asked at once on one bridge: each records the model its own answer named, even when the answers
+    come back in the other order."""
+    from core.provider import LAST_CALL
+
+    server = _MockBridgeServer()
+    parked: list[tuple[asyncio.StreamWriter, dict[str, Any]]] = []
+
+    def handler(msg: dict[str, Any], w) -> list[dict[str, Any]]:
+        if msg["type"] == "lm_request" and msg["messages"][0]["content"] == "warm":
+            return [{"type": "lm_done", "id": msg["id"], "content": "ok"}]
+        if msg["type"] == "lm_request":
+            model = "model-" + msg["messages"][0]["content"]
+            parked.append((w, {"type": "lm_done", "id": msg["id"], "content": msg["messages"][0]["content"],
+                               "served_model": {"id": model, "vendor": "copilot"}}))
+        return []
+
+    port = await server.start(handler)
+    client = _bridge_client(port)
+
+    async def ask(text: str) -> tuple[str, dict]:
+        out = await client.chat([{"role": "user", "content": text}])
+        return out, dict(LAST_CALL.get() or {})
+
+    try:
+        await client.chat([{"role": "user", "content": "warm"}])  # the bridge is built lazily on the first call
+        t1 = asyncio.create_task(ask("a"))
+        t2 = asyncio.create_task(ask("b"))
+        for _ in range(100):
+            await asyncio.sleep(0.01)
+            if len(parked) == 2:
+                break
+        assert len(parked) == 2
+        for w, resp in reversed(parked):
+            w.write((json.dumps(resp) + "\n").encode("utf-8"))
+            await w.drain()
+        (text_a, call_a), (text_b, call_b) = await asyncio.gather(t1, t2)
+        assert call_a["model"] == "model-a" and call_b["model"] == "model-b"
+        assert call_a["reported"] and call_b["reported"]
+    finally:
+        await client.aclose()
+        await server.stop()

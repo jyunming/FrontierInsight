@@ -74,3 +74,36 @@ def test_images_become_data_parts_and_an_old_vscode_says_it_cannot_send_them() -
     }
     assert out["messages"][2] == {"role": "assistant", "content": "ok"}
     assert out["old"] == "unsupported"
+
+
+SERVED_SCRIPT = """
+const { servedModel } = require(%s);
+console.log(JSON.stringify({
+  full: servedModel({ id: "gpt-4.1", vendor: "copilot", family: "gpt-4.1", version: "2025-04", name: "GPT-4.1",
+                      maxInputTokens: 128000 }),
+  noId: servedModel({ vendor: "copilot", family: "x" }) === undefined,
+  blank: servedModel({ id: "  ", vendor: "copilot" }) === undefined,
+  none: servedModel(undefined) === undefined,
+}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node not on PATH")
+def test_the_extension_names_the_model_that_answered() -> None:
+    if not COMPILED.exists():
+        npm = shutil.which("npm")
+        if npm is None or not (EXT_DIR / "node_modules").is_dir():
+            pytest.skip("run `npm install && npm run compile` in vscode-frontier-insight/ first")
+        subprocess.run([npm, "run", "compile"], cwd=str(EXT_DIR), capture_output=True, text=True, timeout=180, check=True)
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8") as handle:
+        handle.write(SERVED_SCRIPT % json.dumps(str(COMPILED).replace("\\", "/")))
+        driver = handle.name
+    try:
+        run = subprocess.run([shutil.which("node"), driver], capture_output=True, text=True, timeout=30)
+    finally:
+        Path(driver).unlink(missing_ok=True)
+    assert run.returncode == 0, run.stderr
+    out = json.loads(run.stdout)
+    assert out["full"] == {"id": "gpt-4.1", "vendor": "copilot", "family": "gpt-4.1", "version": "2025-04",
+                           "name": "GPT-4.1"}, "only the identity fields, not the model's limits"
+    assert out["noId"] and out["blank"] and out["none"], "no id: nothing is reported"
