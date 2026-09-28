@@ -1,0 +1,8 @@
+# The VS Code extension is packed into a .vsix from these files: they are checked out with LF on every machine, so a
+# build on Windows packs the same bytes as one on Linux (CI).
+vscode-frontier-insight/** text=auto eol=lf
+*.vsix binary
+*.png binary
+*.ico binary
+*.woff binary
+*.woff2 binary

@@ -206,7 +206,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package --out vscode-frontier-insight.vsix"
+    "package": "vsce package --out vscode-frontier-insight.vsix && node scripts/normalize-vsix.js vscode-frontier-insight.vsix"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

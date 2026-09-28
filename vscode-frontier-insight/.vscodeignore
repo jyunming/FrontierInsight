@@ -9,3 +9,5 @@ tsconfig.json
 node_modules/**
 !node_modules/.package-lock.json
 *.vsix
+scripts/**
+*.vsix.manifest.json
