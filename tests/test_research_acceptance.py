@@ -179,6 +179,58 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     # The seal is the trace's last event and names the evidence and attempt records as they are.
     assert audit_log.read(root / ".fi" / "audit.jsonl")[-1]["kind"] == "quest_finalized"
     assert record["trace_seal"] == "verified"
+    # Every model call is a line, and a normal finished quest's call record has no gap.
+    from core import attempt_records as ar
+
+    calls = ar.read(root / ".fi", ar.MODEL_CALLS)
+    assert calls and {"plan", "write", "review_panel"} <= {c["node"].split(".")[0] for c in calls}
+    (end,) = [r for r in ar.read(root / ".fi", ar.ATTEMPTS) if r["kind"] == "quest"]
+    assert end["context"]["model_calls"]["lines"] == len(calls)
+    assert not [m for m in end["context"]["missing"] if "model call" in m], end["context"]["missing"]
+    seal = audit_log.read(root / ".fi" / "audit.jsonl")[-1]
+    assert seal["model_calls"]["gaps"] == [] and sum(seal["model_calls"]["counts"].values()) <= len(calls)
+    # The plan step ran on both sides of the plan pause: its calls are numbered on, not again from 1.
+    plan = [c["attempt"] for c in calls if c["node"] == "plan"]
+    assert len(plan) == len(set(plan)), plan
+
+
+def test_an_output_made_after_the_seal_does_not_break_it(baseline: dict[str, Any], tmp_path: Path) -> None:
+    from core import attempt_records as ar
+    from core.provider import append_cost_row
+
+    _config_copy, root = _copy(baseline, tmp_path)
+    before = (root / ".fi" / ar.MODEL_CALLS).read_bytes()
+    append_cost_row(root / ".fi", node="slides", model="m", usage=None,
+                    messages=[{"role": "user", "content": "make slides"}], response="deck")
+    assert (root / ".fi" / ar.MODEL_CALLS).read_bytes() == before
+    assert [r["node"] for r in ar.read(root / ".fi", ar.MODEL_CALLS_AFTER_SEAL)] == ["slides"]
+    record = _evidence(root)
+    assert record["trace_seal"] == "verified" and record["status"] == "publication_ready", record.get("gaps")
+
+
+def test_a_record_of_model_calls_cut_short_during_the_run_is_a_gap(tmp_path: Path) -> None:
+    from core import attempt_records as ar
+
+    calls: list[str] = []
+    fake = _fake(RESEARCH_PROTOCOL, SIM, ANALYSIS_TRIAL, calls)
+    cut = {"done": False}
+
+    async def cutting(self, messages, **kw):  # noqa: ANN001
+        text = await fake(self, messages, **kw)
+        if not cut["done"] and messages[-1]["content"].lstrip().startswith("**Persona:"):
+            # Something truncates the record while the quest runs (the reviewers are still to be asked).
+            for ledger in tmp_path.rglob(ar.MODEL_CALLS):
+                ledger.write_text("", encoding="utf-8")
+            cut["done"] = True
+        return text
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("core.engine.LLMClient.chat", cutting)
+        engine, _artifacts, _pauses = _run_through_pauses(_config(tmp_path), interview=True)
+    assert cut["done"]
+    record = _evidence(engine.quest_root)
+    assert record["status"] != "publication_ready"
+    assert any("fewer lines than the calls made" in g for g in _all_gaps(record)), _all_gaps(record)
 
 
 def test_anything_written_after_the_seal_takes_publication_ready_away(baseline: dict[str, Any], tmp_path: Path) -> None:

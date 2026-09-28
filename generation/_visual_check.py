@@ -250,7 +250,7 @@ async def _ask(
             node="visual_check",
         )
         append_cost_row(quest_root / ".fi", node="visual_check", model=client.last_model, usage=client.last_usage,
-                        messages=messages, response=reply)
+                        client=client, messages=messages, response=reply)
         return reply
     finally:
         await client.aclose()

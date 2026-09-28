@@ -829,7 +829,7 @@ async def test_a_model_the_extension_names_is_reported() -> None:
     client = _bridge_client(port)
     try:
         await client.chat([{"role": "user", "content": "hi"}])
-        assert LAST_CALL.get() == {"provider": client.last_provider, "model": "gpt-4.1", "reported": True,
+        assert {k: v for k, v in LAST_CALL.get().items() if k != "usage"} == {"provider": client.last_provider, "model": "gpt-4.1", "reported": True,
                                    "vendor": "copilot"}
         assert client.last_model == "gpt-4.1"
     finally:
@@ -973,7 +973,7 @@ async def test_a_failed_call_then_a_retry_reports_the_retry_s_model() -> None:
         finally:
             prov.wait_random_exponential = orig
         assert seen["n"] == 2
-        assert LAST_CALL.get() == {"provider": client.last_provider, "model": "claude-x", "reported": True,
+        assert {k: v for k, v in LAST_CALL.get().items() if k != "usage"} == {"provider": client.last_provider, "model": "claude-x", "reported": True,
                                    "vendor": "copilot"}
     finally:
         await client.aclose()

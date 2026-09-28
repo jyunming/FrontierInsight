@@ -903,7 +903,8 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
     stream_body = {**body, "stream": True, "stream_options": {**options, "include_usage": True}}
     parts: list[str] = []
     usage: dict[str, Any] = {}
-    model = body.get("model")
+    # Only a model the stream names: the one asked for is not a report of who answered.
+    model: str | None = None
     finish = None
     done = False
     request = httpx.Request("POST", url)
@@ -3017,7 +3018,7 @@ def _archive_model_call(fi_dir: Path, record: dict[str, Any], messages: Any, res
 
 def append_cost_row(
     fi_dir: Path, *, node: str, model: str | None, usage: dict[str, Any] | None,
-    messages: Any = None, response: Any = None,
+    messages: Any = None, response: Any = None, ledger: bool = True, client: Any = None,
 ) -> None:
     """Append one model call to ``<fi_dir>/cost.jsonl`` as ``{ts, node,
     model, usage, cost_usd}``. The engine's nodes and the output generators
@@ -3044,6 +3045,20 @@ def append_cost_row(
     except OSError as e:
         _log.debug("[cost] failed to write cost.jsonl: %r", e)
     _archive_model_call(fi_dir, record, messages, response)
+    if ledger:
+        # A call made outside the engine (an output generator) also goes in the quest's record of its model calls,
+        # with who answered it as this task last recorded (LAST_CALL). The engine records its own calls itself.
+        from core import attempt_records as _attempts
+
+        try:
+            row = _attempts.model_call_row(
+                node=node, attempt=_attempts.next_attempt(fi_dir, node), served=LAST_CALL.get() or {"model": model},
+                requested_model=None, reports_model=reports_model(client) if client is not None else False,
+                messages=messages, response=response, usage=usage,
+            )
+            _attempts.append_model_call(fi_dir, fi_dir.parent.name, row)
+        except Exception as e:  # noqa: BLE001 -- accounting never fails a call
+            _log.debug("[cost] failed to record the model call: %r", e)
 
 
 #: The provider and model that answered the most recent chat call made in the current asyncio task. A client's
@@ -3051,6 +3066,33 @@ def append_cost_row(
 #: panel's reviewers) overwrite each other's; a context variable is the task's own. The engine clears it before a call
 #: and reads it after (``Engine._chat``).
 LAST_CALL: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_last_call", default=None)
+#: The attempts of the current call that failed before it answered or gave up (a retry, a provider the fallback chain
+#: passed over): ``{"provider", "model", "error", "fallback", "exc"}`` each. The engine sets a fresh list before a call
+#: and writes one line per entry in the quest's record of its model calls; ``None`` (nobody listening) records nothing.
+CALL_ATTEMPTS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
+    "fi_call_attempts", default=None)
+#: The provider of the fallback chain being tried now (``{"provider", "fallback"}``), so a retry inside it is noted
+#: under that provider, not whichever the client last named.
+CALL_SLOT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_call_slot", default=None)
+
+
+def _note_failed_attempt(provider: Any, model: Any, exc: BaseException | None, *, fallback: bool = False) -> None:
+    attempts = CALL_ATTEMPTS.get()
+    if attempts is None:
+        return
+    slot = CALL_SLOT.get() or {}
+    attempts.append({"provider": slot.get("provider") or provider, "model": model,
+                     "error": type(exc).__name__ if exc else "error",
+                     "fallback": bool(fallback or slot.get("fallback")), "exc": exc})
+
+
+def reports_model(client: Any) -> bool:
+    """Whether ``client``'s connection names the model that answered each call (an HTTP API, the claude CLI), so a call
+    on it whose model went unnamed is a gap."""
+    endpoint = getattr(client, "endpoint", None) or getattr(getattr(client, "_primary", None), "endpoint", None)
+    if endpoint is None:
+        return False
+    return getattr(endpoint, "transport", "") == "http" or getattr(endpoint, "provider_name", "") == "claude_cli"
 
 class LLMClient:
     """Thin async wrapper that speaks OpenAI Chat Completions.
@@ -3194,7 +3236,7 @@ class LLMClient:
             # only for this one dispatch and released on return, so retries /
             # fallbacks re-queue rather than deadlock.
             async with _llm_call_slot():
-                return await self._chat_impl(
+                text = await self._chat_impl(
                     messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
@@ -3202,6 +3244,10 @@ class LLMClient:
                     model=model,
                     node=node,
                 )
+                # This call's own token counts, in this task's record of it: the client's ``last_usage`` is shared by
+                # calls running at the same time.
+                LAST_CALL.set({**(LAST_CALL.get() or {}), "usage": self.last_usage})
+                return text
         except Exception as e:
             # ``except Exception`` excludes ``asyncio.CancelledError``
             # (a BaseException subclass since Python 3.8) — see the
@@ -3270,6 +3316,12 @@ class LLMClient:
                     model: Callable[[Any], str | None] | str | None = None) -> Callable[[Any], None]:
         """tenacity ``before_sleep``: the failed call and the coming retry, in FI's log and the quest's run.log."""
         def note(rs: Any) -> None:
+            try:
+                exc = rs.outcome.exception() if getattr(rs, "outcome", None) else None
+                _note_failed_attempt(self.last_provider, (model(rs) if callable(model) else model) or self.last_model,
+                                     exc)
+            except Exception:  # noqa: BLE001 -- a record never stops a retry
+                pass
             try:
                 line = _retry_line(node, where, rs, total, model=model(rs) if callable(model) else model)
                 _log.warning("%s", line)
@@ -3835,11 +3887,6 @@ def _is_fatal_provider_error(exc: BaseException) -> bool:
     return False
 
 
-_SECRETISH_RE = re.compile(
-    r"(?i)(bearer\s+|api[_-]?key[=:]\s*|\btoken[=:]\s*|sk-|[?&](?:key|api_key|apikey|token|access_token)=)"
-    r"[A-Za-z0-9._\-%]{6,}")
-
-
 class _AppendToFile(logging.Handler):
     """Appends each record to a file and closes it again: nothing stays open (a Windows lock) and nothing is shared."""
 
@@ -3876,8 +3923,13 @@ def _retry_line(node: str | None, where: str, rs: Any, total: int, *, model: str
     attempt of how many, what went wrong and how long until the next try. Nothing that looks like a key."""
     exc = rs.outcome.exception() if getattr(rs, "outcome", None) else None
     wait = getattr(getattr(rs, "next_action", None), "sleep", None)
-    what = f"{type(exc).__name__}: {str(exc)[:200]}" if exc else "no error captured"
-    what = _SECRETISH_RE.sub(lambda m: m.group(1) + "[redacted]", what).replace("\n", " ")
+    from core.audit_log import redact_text
+
+    # The same credential removal as the audit trace (key-shaped tokens and the values of secret environment
+    # variables), on the whole message first, then cut: a cut first could leave half a key the patterns miss.
+    what = redact_text(f"{type(exc).__name__}: {exc}", whole=True) if exc else "no error captured"
+    what = " ".join(what.split())
+    what = what if len(what) <= 240 else what[:240] + "..."
     return (f"[{node or 'model'}] the model call failed ({where}{', model ' + model if model else ''}), "
             f"attempt {rs.attempt_number} of {total}: {what}; trying again"
             + (f" in {wait:.0f}s" if isinstance(wait, (int, float)) else ""))
@@ -4005,12 +4057,18 @@ class FallbackLLMClient:
                 )
                 errors.append((slot.label, e))
                 continue
+            # This provider's own record of the call: what an earlier one named is not this one's answer.
+            LAST_CALL.set(None)
+            slot_token = CALL_SLOT.set({"provider": slot.label, "fallback": idx > 0})
             try:
                 text = await client.chat(messages, **kwargs)
             except asyncio.CancelledError:
                 # Cancellation is not a provider failure — never fall back on it.
                 raise
             except Exception as e:
+                failed = LAST_CALL.get() or {}
+                _note_failed_attempt(slot.label, failed.get("model") or getattr(client, "last_model", None), e,
+                                     fallback=idx > 0)
                 fatal = _is_fatal_provider_error(e)
                 slot.record_failure(self._threshold, fatal=fatal, now=time.monotonic())
                 more = idx < len(self._slots) - 1
@@ -4022,6 +4080,8 @@ class FallbackLLMClient:
                 )
                 errors.append((slot.label, e))
                 continue
+            finally:
+                CALL_SLOT.reset(slot_token)
             # Success — snapshot the serving provider's cost fields, and close
             # the circuit (a successful half-open probe re-admits the provider).
             if probing:
