@@ -22,14 +22,24 @@ def _unscored(monkeypatch):
     monkeypatch.setattr(pmod, "_embed_scores", lambda blobs, q: None)
 
 
-def _counting(eng):
+class _Client:
+    """The model client, faked below ``Engine._chat``: every call goes through the engine's own recording path, so the
+    record of model calls gets its real lines and ids."""
+
+    def __init__(self, calls: list[str], answer=None) -> None:
+        self.calls, self.answer = calls, answer
+        self.last_usage = None
+
+    async def chat(self, messages, *, temperature=None, model=None, node=""):  # noqa: ANN001
+        self.calls.append(node)
+        if isinstance(self.answer, BaseException):
+            raise self.answer
+        return self.answer if self.answer is not None else json.dumps({"queries": FACETS})
+
+
+def _counting(eng, answer=None):
     calls: list[str] = []
-
-    async def chat(prompt, node=""):  # noqa: ANN001
-        calls.append(node)
-        return json.dumps({"queries": FACETS})
-
-    eng._chat = chat
+    eng._client = _Client(calls, answer)
 
     async def no_hits(query, **kw):  # noqa: ANN001
         return []
@@ -79,17 +89,12 @@ async def test_a_new_pass_or_changed_inputs_derive_again_and_say_why(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_a_failed_derivation_is_not_kept(tmp_path: Path) -> None:
+async def test_a_failed_derivation_is_recorded_but_never_reused(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
-    calls = _counting(eng)
-
-    async def broken(prompt, node=""):  # noqa: ANN001
-        calls.append(node)
-        return "not json"
-
-    eng._chat = broken
+    _counting(eng, answer="not json")
     await eng._node_literature(_state())
-    assert not (eng.fi_dir / "literature_queries.json").exists()
+    (entry,) = _sets(eng)
+    assert entry["queries"] == [] and "gave no query (its answer held none)" in entry["reason"]
     calls2 = _counting(eng)  # the model answers now: the next run tries again
     patch = await eng._node_literature(_state())
     assert calls2.count("literature_query") == 1 and patch["literature_queries"] == FACETS

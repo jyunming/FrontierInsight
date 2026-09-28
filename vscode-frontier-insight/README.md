@@ -421,7 +421,11 @@ quest pause and write a ranked
 run, the chat panel surfaces that list with instructions to drop the
 PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
 ingested as real full text. You can also pre-load a folder of papers via
-`knowledge.local_papers` (a directory is scanned recursively).
+`knowledge.local_papers` (a directory is scanned recursively). To search
+with your own queries instead of the ones FI derives, write them in
+`inputs/search_queries.txt` in the quest folder, one per line (the first
+three are used), then `@fi /resume <quest_id>`; remove the file to go
+back to FI's.
 
 Example files for the experiment itself (a simulation setup, an input deck, a config — any type) go in `execution.inputs`, or into `<quest>/inputs/examples/` while the quest is paused; the design and the code are written from them and the experiment finds the folder in `FI_INPUT_DIR`.
 

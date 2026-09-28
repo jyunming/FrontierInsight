@@ -1472,6 +1472,8 @@ class Engine:
         ".fi/trials/run.json", "paper/claims.json",
         # What the quest tried (core/attempt_records.py): anchored in the trace, so an edit after the fact shows.
         ".fi/attempts.jsonl", ".fi/branch_ledger.jsonl",
+        # The search queries used: a change between steps shows in the trace, the seal covers the rest.
+        ".fi/literature_queries.json",
     )
 
     def _audit(self, kind: str, *, node: str | None = None, provenance: str = _audit_log.DETERMINISTIC, **fields: Any) -> None:
@@ -1509,10 +1511,10 @@ class Engine:
                 path.touch(exist_ok=True)
             except OSError:
                 pass
-        # The record of the search queries likewise: an empty one when no query was ever derived; missing after a
-        # derivation, it is the gap.
+        # The record of the search queries likewise: an empty one when no query was ever derived (every derivation,
+        # failed or not, leaves an entry); missing after an answered derivation, it is the gap.
         if not (self.fi_dir / _LITERATURE_QUERIES).exists() and not (
-                counts.get("literature_query") or counts.get("ideate_query")):
+                _ok_call_ids(self.fi_dir, "literature_query") or _ok_call_ids(self.fi_dir, "ideate_query")):
             _write_query_sets(self.fi_dir, [])
         call_gaps, call_summary = _attempts.model_call_gaps(
             self.quest_root, {n: dict(v) for n, v in dict(getattr(self, "_last_chat", {}) or {}).items()}, counts)
@@ -2700,17 +2702,22 @@ class Engine:
         # topic's sentences: the same one-call keyword derivation the
         # literature step uses turns the topic into the field's terms first
         # (the topic as written when it gives none, as before).
+        self.__dict__.setdefault("_last_call_id", {}).pop("ideate_query", None)
         seed_queries = await self._derive_literature_queries(
             state["topic"], work_scope=self._work_scope(state), node="ideate_query",
         ) if self.knowledge.enabled else []
-        if seed_queries:
-            self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
-            # Kept for a person to see; the literature step derives its own, from the topic AND the chosen direction.
+        if self.knowledge.enabled:
+            if seed_queries:
+                self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
+            # Kept for a person to see (a failed one too); the literature step derives its own, from the topic AND the
+            # chosen direction.
             _record_query_set(self.fi_dir, {
                 "stage": "ideate", "queries": seed_queries,
                 "model": (self._chat_provenance("ideate_query") or {}).get("model"),
                 "call_id": self.__dict__.get("_last_call_id", {}).get("ideate_query"),
-                "reason": "the idea step's grounding search (topic only)", "revised_by": "fi"}, log=self._log)
+                "reason": "the idea step's grounding search (topic only)" + (
+                    "" if seed_queries else "; the derivation gave no query, so the topic was searched as written"),
+                "revised_by": "fi"}, log=self._log)
         seeded = await self.knowledge.asearch(
             seed_queries[0] if seed_queries else state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
@@ -3041,8 +3048,10 @@ class Engine:
                 "line)", _LITERATURE_QUERIES, _PERSON_QUERIES.as_posix())
             self._audit("check_result", check="literature_queries", status="edited",
                         summary=f"{len(edited)} saved query set(s) for this pass no longer match their digest")
+        ok_calls = _ok_call_ids(self.fi_dir, "literature_query")
         same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))
-                     and _query_set_standing(e) == "verified"), None)
+                     and e.get("revised_by") != "person" and _query_set_standing(e) == "verified"
+                     and (e.get("call_id") in ok_calls)), None)
         person = _person_queries(self.quest_root) if self.config.knowledge.enabled else None
         if person is not None:
             # A person's own queries: used as given, recorded as their revision (once per version of the file).
@@ -3059,6 +3068,9 @@ class Engine:
             query_set = {**query_set, "reused": known is not None}
             if known is None:
                 _record_query_set(self.fi_dir, query_set, log=self._log)
+            self._audit("check_result", check="literature_queries", status="person",
+                        summary=f"searched with the person's own queries ({_PERSON_QUERIES.as_posix()})",
+                        source=_PERSON_QUERIES.as_posix(), source_sha256=source_sha, queries=queries)
             self._log.info("[literature] searching with your queries from %s: %r", _PERSON_QUERIES.as_posix(), queries)
         elif same is not None and self.config.knowledge.enabled:
             queries = [q.strip() for q in same["queries"]][:3]
@@ -3069,7 +3081,10 @@ class Engine:
             if edited:
                 reason = "the saved queries for this pass were changed after FI wrote them"
             elif any(e.get("key") == key and _query_set_standing(e) == "unverified" for e in saved):
-                reason = "the saved queries for this pass carry no digest (written before FI signed them)"
+                reason = "the saved queries for this pass carry no digest (written before FI recorded one)"
+            elif any(e.get("key") == key and e.get("revised_by") != "person" and _usable_queries(e.get("queries"))
+                     and e.get("call_id") not in ok_calls for e in saved):
+                reason = "the saved queries for this pass name no answered call in the record of model calls"
             elif any(e.get("iteration") == this_iter for e in saved):
                 reason = "the topic, the chosen direction, the hypothesis or the model changed"
             elif saved:
@@ -3088,9 +3103,12 @@ class Engine:
                 if queries else None,
                 "call_id": call_id, "reason": reason, "revised_by": "fi", "reused": False,
             }
-            if queries or call_id:
-                # A derivation whose call answered is kept, even one whose answer gave no query (its empty list is never
-                # reused, so the next run tries again): the record holds every answered call the literature step made.
+            if not queries:
+                query_set["reason"] = (f"{reason}; the derivation gave no query "
+                                       + ("(its answer held none)" if call_id else "(the call failed)")
+                                       + ", so the search used the topic and the chosen direction as written")
+            # Every derivation is kept, a failed one too (its empty list is never reused, so the next run tries again).
+            if self.config.knowledge.enabled:
                 _record_query_set(self.fi_dir, query_set, log=self._log)
         derived = bool(queries)
         if queries:
@@ -18497,7 +18515,7 @@ def _usable_queries(value: Any) -> bool:
 
 
 #: The fields of a saved query set its digest covers: what was searched, why, and which model call produced it.
-_QUERY_SET_SIGNED = ("stage", "key", "iteration", "queries", "prompt_sha256", "model", "call_id", "reason",
+_QUERY_SET_HASHED = ("stage", "key", "iteration", "queries", "prompt_sha256", "model", "call_id", "reason",
                      "revised_by", "source_sha256")
 
 #: Search queries a person gives the quest themselves, one per line (the first three are used), in its inputs folder.
@@ -18505,18 +18523,26 @@ _PERSON_QUERIES = Path("inputs") / "search_queries.txt"
 
 
 def _query_set_digest(entry: dict[str, Any]) -> str:
-    """The SHA-256 over an entry's signed fields (:data:`_QUERY_SET_SIGNED`)."""
-    signed = {k: entry.get(k) for k in _QUERY_SET_SIGNED}
-    return hashlib.sha256(json.dumps(signed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    """The SHA-256 over an entry's hashed fields (:data:`_QUERY_SET_HASHED`)."""
+    hashed = {k: entry.get(k) for k in _QUERY_SET_HASHED}
+    return hashlib.sha256(json.dumps(hashed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def _query_set_standing(entry: dict[str, Any]) -> str:
     """``verified`` (its digest checks out), ``unverified`` (written before entries carried a digest) or ``edited``
-    (changed after FI wrote it). Only a verified entry is ever reused."""
+    (changed after FI wrote it). The digest has no key: it catches an accidental or uninformed edit, not a deliberate
+    one that recomputes it; the trace (each step's hash of the file) and, once the quest is closed, the seal are what
+    protect the record. Only a verified entry is ever reused."""
     digest = entry.get("digest")
     if not digest:
         return "unverified"
     return "verified" if digest == _query_set_digest(entry) else "edited"
+
+
+def _ok_call_ids(fi_dir: Path, node: str) -> set[str]:
+    """The ids of the answered calls of ``node`` in the quest's record of model calls."""
+    return {str(r.get("call_id")) for r in _attempts.read(fi_dir, _attempts.MODEL_CALLS)
+            if r.get("node") == node and r.get("outcome") == "ok" and r.get("call_id")}
 
 
 def _person_queries(quest_root: Path) -> tuple[list[str], str] | None:

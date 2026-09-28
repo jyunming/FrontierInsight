@@ -1,9 +1,11 @@
-"""The saved search queries are a sealed record (the 2026-09-28 R2 re-audit, P2-01).
+"""The saved search queries are a record the seal names (the 2026-09-28 R2 re-audit, P2-01).
 
 Each entry of ``.fi/literature_queries.json`` carries a digest over what was searched, why, and which model call
-produced it; entries are only ever added. An entry changed after FI wrote it is never reused (FI derives again and
-says so); a person's own queries go in ``inputs/search_queries.txt`` and are recorded as their revision. Under
-``rigor_profile: research`` the seal names the file, so an edit after the seal is a gap.
+produced it; FI only adds entries. The digest has no key: it catches an accidental or uninformed edit (never reused;
+FI derives again and says so); FI's own entry is also reused only when it names an answered call in the record of model
+calls. The trace hashes the file after each step, and under ``rigor_profile: research`` the seal names it, so an edit
+after the quest is closed is a gap. A person's own queries go in ``inputs/search_queries.txt`` and are recorded as
+their revision.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ async def test_every_entry_carries_a_digest_that_checks_out(tmp_path: Path) -> N
     await eng._node_literature(_state())
     (entry,) = _sets(eng)
     assert entry["digest"] == _query_set_digest(entry) and _query_set_standing(entry) == "verified"
-    assert entry["revised_by"] == "fi" and "call_id" in entry and "model" in entry
+    assert entry["revised_by"] == "fi" and entry["call_id"] and "model" in entry
     for field, value in (("queries", ["another query"]), ("model", "other-model"), ("call_id", "x"),
                          ("reason", "made up")):
         assert _query_set_standing({**entry, field: value}) == "edited", field
@@ -100,7 +102,7 @@ async def test_entries_from_before_the_digest_are_unverified_and_derived_once_mo
         "the saved queries for this pass carry no digest")
     assert _query_set_standing(_sets(eng)[-1]) == "verified"
     await eng._node_literature(_state())
-    assert calls.count("literature_query") == 2, "then the signed one is reused"
+    assert calls.count("literature_query") == 2, "then the new one, with its digest, is reused"
 
 
 def _sealed(tmp_path: Path) -> Path:
@@ -153,3 +155,76 @@ def test_a_seal_that_names_no_query_record_is_a_gap(tmp_path: Path) -> None:
                if rel != evidence.SEALED_QUERIES})
     assert any("names no hash of .fi/literature_queries.json" in g
                for g in evidence.read(root)["all_gaps"]["publication_ready"])
+
+
+def _call_ids(eng, node: str) -> set[str]:
+    from core import attempt_records as ar
+
+    return {r["call_id"] for r in ar.read(eng.fi_dir, ar.MODEL_CALLS) if r.get("node") == node and r.get("outcome") == "ok"}
+
+
+@pytest.mark.asyncio
+async def test_an_entry_names_its_real_line_in_the_record_of_model_calls(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    _counting(eng)
+    await eng._node_literature(_state())
+    (entry,) = _sets(eng)
+    assert entry["call_id"] and entry["call_id"] in _call_ids(eng, "literature_query")
+
+
+@pytest.mark.asyncio
+async def test_a_forged_entry_whose_digest_was_recomputed_is_not_reused(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    calls = _counting(eng)
+    await eng._node_literature(_state())
+    (entry,) = _sets(eng)
+    forged = {k: v for k, v in entry.items() if k != "digest"}
+    forged.update(queries=["planted query"], call_id="not-a-real-call")
+    forged["digest"] = _query_set_digest(forged)
+    assert _query_set_standing(forged) == "verified", "the digest alone cannot tell (it has no key)"
+    _write(eng, [entry, forged])
+    patch = await eng._node_literature(_state())
+    # The newer forgery names no answered call: passed over; the genuine entry is the one reused.
+    assert patch["literature_queries"] == FACETS and calls.count("literature_query") == 1
+    _write(eng, [forged])  # only the forgery left: derived again rather than trusted
+    patch = await eng._node_literature(_state())
+    assert "planted query" not in patch["literature_queries"] and calls.count("literature_query") == 2
+    assert patch["literature_query_set"]["reason"] == \
+        "the saved queries for this pass name no answered call in the record of model calls"
+
+
+@pytest.mark.asyncio
+async def test_removing_your_own_queries_goes_back_to_fi_s(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    calls = _counting(eng)
+    mine = eng.quest_root / "inputs" / "search_queries.txt"
+    mine.parent.mkdir(parents=True, exist_ok=True)
+    mine.write_text("my own query\n", encoding="utf-8")
+    first = await eng._node_literature(_state())
+    assert first["literature_queries"] == ["my own query"] and calls.count("literature_query") == 0
+    events = audit_log.read(eng.audit.path)
+    assert any(e.get("kind") == "check_result" and e.get("check") == "literature_queries"
+               and e.get("status") == "person" and e.get("source_sha256") for e in events)
+    mine.unlink()
+    second = await eng._node_literature(_state())
+    assert second["literature_queries"] == FACETS and calls.count("literature_query") == 1
+    assert second["literature_query_set"]["revised_by"] == "fi"
+
+
+def test_the_record_is_watched_step_by_step_in_the_trace() -> None:
+    from core.engine import Engine
+
+    assert ".fi/literature_queries.json" in Engine._AUDIT_WATCHED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [RuntimeError("provider down"), "not json"])
+async def test_a_failed_derivation_leaves_a_record_the_seal_can_name(tmp_path: Path, answer) -> None:
+    eng = _engine(tmp_path)
+    _counting(eng, answer=answer)
+    await eng._node_literature(_state())
+    (entry,) = _sets(eng)
+    assert entry["queries"] == [] and "gave no query" in entry["reason"]
+    assert ("(the call failed)" in entry["reason"]) == isinstance(answer, BaseException)
+    # What the seal would name exists (so a failed call is not a gap), and it names nothing to reuse.
+    assert evidence._file_sha256(eng.quest_root / evidence.SEALED_QUERIES)
