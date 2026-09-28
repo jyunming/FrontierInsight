@@ -328,3 +328,70 @@ def test_bearer_takes_a_token_and_leaves_the_word() -> None:
     assert redact_text("the bearer protocol and a Bearer token", whole=True) == "the bearer protocol and a Bearer token"
     for token in ("sk-abcdefghijkl", "abc123def", "abcdefghijklmnopqrst"):
         assert token not in redact_text(f"Authorization: Bearer {token}", whole=True), token
+
+
+@pytest.mark.parametrize("text", ["a Bearer token.", "use Bearer tokens.", "the bearer protocol"])
+def test_bearer_in_a_sentence_is_kept(text: str) -> None:
+    from core.audit_log import redact_text
+
+    assert redact_text(text, whole=True) == text
+
+
+@pytest.mark.parametrize("token", ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", "sk-proj-abcdefgh", "ya29.a0AfH6SM",
+                                   "QUJDREVGR0hJSktMTU5PUFFS+/xyz="])
+def test_bearer_takes_token_shaped_values(token: str) -> None:
+    from core.audit_log import redact_text
+
+    assert token not in redact_text(f"Authorization: Bearer {token}.", whole=True)
+
+
+class _NamesThenFails:
+    last_usage = None
+    last_model = "primary-model"
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        LAST_CALL.set({"provider": "primary", "model": "primary-model", "reported": True})
+        raise TimeoutError("down")
+
+
+class _NamesNothing:
+    last_usage = None
+    last_model = None
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        return "fallback answer"
+
+
+def test_a_fallback_answer_that_names_no_model_is_not_taken_for_the_primary_s(tmp_path: Path) -> None:
+    from core.provider import FallbackLLMClient
+
+    async def make():
+        return _NamesNothing()
+
+    eng = _engine(tmp_path, FallbackLLMClient(_NamesThenFails(), [("fallback", make)]))
+    asyncio.run(eng._chat("p", node="write"))
+    rows = ar.read(eng.fi_dir, ar.MODEL_CALLS)
+    assert rows[-1]["provider"] == "fallback" and rows[-1]["served_model"] != "primary-model"
+    assert rows[-1]["reported"] is False
+
+
+def test_a_retry_inside_a_fallback_provider_is_noted_under_it(tmp_path: Path) -> None:
+    from core.provider import FallbackLLMClient, _note_failed_attempt
+
+    class _RetriesThenAnswers:
+        last_usage = None
+        last_model = "fb-model"
+        last_provider = "some-other-name"
+
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            _note_failed_attempt(self.last_provider, "fb-model", TimeoutError("slow"))
+            return "ok"
+
+    async def make():
+        return _RetriesThenAnswers()
+
+    eng = _engine(tmp_path, FallbackLLMClient(_NamesThenFails(), [("fallback", make)]))
+    asyncio.run(eng._chat("p", node="write"))
+    rows = ar.read(eng.fi_dir, ar.MODEL_CALLS)
+    assert [(r["provider"], r["fallback"], r["outcome"]) for r in rows] == [
+        ("primary", False, "TimeoutError"), ("fallback", True, "TimeoutError"), ("fallback", True, "ok")]

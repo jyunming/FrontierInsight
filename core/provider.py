@@ -3071,14 +3071,19 @@ LAST_CALL: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVa
 #: and writes one line per entry in the quest's record of its model calls; ``None`` (nobody listening) records nothing.
 CALL_ATTEMPTS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars.ContextVar(
     "fi_call_attempts", default=None)
+#: The provider of the fallback chain being tried now (``{"provider", "fallback"}``), so a retry inside it is noted
+#: under that provider, not whichever the client last named.
+CALL_SLOT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_call_slot", default=None)
 
 
 def _note_failed_attempt(provider: Any, model: Any, exc: BaseException | None, *, fallback: bool = False) -> None:
     attempts = CALL_ATTEMPTS.get()
     if attempts is None:
         return
-    attempts.append({"provider": provider, "model": model, "error": type(exc).__name__ if exc else "error",
-                     "fallback": fallback, "exc": exc})
+    slot = CALL_SLOT.get() or {}
+    attempts.append({"provider": slot.get("provider") or provider, "model": model,
+                     "error": type(exc).__name__ if exc else "error",
+                     "fallback": bool(fallback or slot.get("fallback")), "exc": exc})
 
 
 def reports_model(client: Any) -> bool:
@@ -4052,6 +4057,9 @@ class FallbackLLMClient:
                 )
                 errors.append((slot.label, e))
                 continue
+            # This provider's own record of the call: what an earlier one named is not this one's answer.
+            LAST_CALL.set(None)
+            slot_token = CALL_SLOT.set({"provider": slot.label, "fallback": idx > 0})
             try:
                 text = await client.chat(messages, **kwargs)
             except asyncio.CancelledError:
@@ -4072,6 +4080,8 @@ class FallbackLLMClient:
                 )
                 errors.append((slot.label, e))
                 continue
+            finally:
+                CALL_SLOT.reset(slot_token)
             # Success — snapshot the serving provider's cost fields, and close
             # the circuit (a successful half-open probe re-admits the provider).
             if probing:

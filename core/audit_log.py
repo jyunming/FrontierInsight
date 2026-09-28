@@ -64,13 +64,27 @@ _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_\-]{16,}"),
     re.compile(r"\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{16,}"),
     re.compile(r"\bAIza[0-9A-Za-z_\-]{20,}"),
-    # After "Bearer", a token-shaped value: 16 characters or more, or 6 or more with a digit or one of ``._-`` in them.
-    # A plain word ("the bearer protocol", "a Bearer token") is left alone.
-    re.compile(r"(?i)\bbearer\s+(?:[A-Za-z0-9._\-]{16,}|(?=[A-Za-z0-9._\-]*[0-9._\-])[A-Za-z0-9._\-]{6,})"),
     # A credential in a URL's query (``?key=…``, ``&access_token=…``), as a failed request's message prints it.
     re.compile(r"(?i)(?<=[?&])(?:key|api_key|apikey|token|access_token|auth|sig|signature)=[^&\s'\"]{6,}"),
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\b(\s*[:=]\s*)(['\"]?)[^\s'\",;]{6,}"),
 )
+# After "Bearer": the value, then whether it is token-shaped (:func:`_redact_bearer`).
+_BEARER = re.compile(r"(?i)\b(bearer\s+)([A-Za-z0-9._\-+/=~]+)")
+
+
+def _redact_bearer(match: re.Match) -> str:
+    """A token-shaped value after "Bearer" goes (JWTs, ``ghp_…``, ``sk-proj-…``, ``ya29.…``, base64 with ``+``/``/``);
+    a plain word stays ("the bearer protocol", "a Bearer token."). Sentence punctuation at the end is not the token's:
+    the value is token-shaped when, without it, it is 16 characters or more, or 6 or more with a digit or a ``._-+/=~``
+    inside it."""
+    value = match.group(2)
+    core = value.rstrip(".,;:")
+    tail = value[len(core):]
+    shaped = len(core) >= 16 or (len(core) >= 6 and (any(c.isdigit() for c in core)
+                                                     or any(c in "._-+/=~" for c in core)))
+    return f"{match.group(1)}{_REDACTED}{tail}" if shaped else match.group(0)
+
+
 _SECRET_ENV_NAME = re.compile(r"(?i)(api[_-]?key|secret|token|passw(or)?d|credential)")
 
 
@@ -92,6 +106,7 @@ def redact_text(text: str, *, secrets: list[str] | None = None, whole: bool = Fa
         text = text.replace(value, _REDACTED)
     for pattern in _SECRET_PATTERNS[:-1]:
         text = pattern.sub(_REDACTED, text)
+    text = _BEARER.sub(_redact_bearer, text)
     text = _SECRET_PATTERNS[-1].sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{_REDACTED}", text)
     for home in _home_variants():
         text = text.replace(home, "~")
