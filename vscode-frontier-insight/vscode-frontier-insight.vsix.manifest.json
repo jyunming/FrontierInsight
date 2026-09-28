@@ -1,0 +1,101 @@
+{
+  "vsix_sha256": "cfb28962020d6ffcf8f095adc49748a87ffbedb682f2871da0f752fdbf1fee2c",
+  "files": {
+    "[Content_Types].xml": {
+      "sha256": "d5db7b640ed10be3c4e1b415ee39b6e6db263afcd7b8554d9627249890bc6703",
+      "bytes": 517
+    },
+    "extension.vsixmanifest": {
+      "sha256": "f5c7c1b87a69a162a00694bf907bf6964af06aa555dccdfb7fda06ae07de3eda",
+      "bytes": 2898
+    },
+    "extension/LICENSE.txt": {
+      "sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
+      "bytes": 11558
+    },
+    "extension/images/fi_glyph_teal.png": {
+      "sha256": "92a6f749646b3341ec1e2113a2853dd9cdcdb4a41519ad30d58738c0e8f48e45",
+      "bytes": 11694
+    },
+    "extension/images/icon.png": {
+      "sha256": "9a43abffb91617f18361f56952d0cefeb355a13b0d3e1353deef820ed4af8b63",
+      "bytes": 12586
+    },
+    "extension/images/icon.svg": {
+      "sha256": "25f4c1c369e5470896e17ed15f3ff326d320d7137ed996c8a5face8fd73b99bd",
+      "bytes": 1059
+    },
+    "extension/out/axon-endpoint.js": {
+      "sha256": "82288d27a7478ea725d8d0a575ec81ece50818839c3fa73f8f97569a7235c5bd",
+      "bytes": 20019
+    },
+    "extension/out/bridge-path.js": {
+      "sha256": "1c41a5d81404ac6e51b7add395280bdff37efec3d862f06b7339557f95782310",
+      "bytes": 3245
+    },
+    "extension/out/bridge.js": {
+      "sha256": "9afe206b16f82f130f5b219de7d81693af821fc9f6c43ae944b6686deb7dec66",
+      "bytes": 35683
+    },
+    "extension/out/extension.js": {
+      "sha256": "c57ab43c9f085d0d09d83556a6f46c276f1310b7f822f97a8509b1252ce4a262",
+      "bytes": 101745
+    },
+    "extension/out/interview-core.js": {
+      "sha256": "d12d03e7c4f43304339ca209266707ec68bdb2e3774cccb8b0f6e1f3f2db3a78",
+      "bytes": 26679
+    },
+    "extension/out/interview.js": {
+      "sha256": "11203bf1a9bdeac2160bed5c2b429250d1265c4f505e5506e2e71d9788fad678",
+      "bytes": 68955
+    },
+    "extension/out/lm-messages.js": {
+      "sha256": "8e959d9b8b2aef3eb50f72849daee49f0cf61788c9d250382eac4472371fdaaf",
+      "bytes": 2748
+    },
+    "extension/out/persistent-bridge.js": {
+      "sha256": "c99e0f97a3ecdf05e3e4ab0db76ed11ed0805d6e6c2ba626e25dd29e288fbf17",
+      "bytes": 23862
+    },
+    "extension/out/probe.js": {
+      "sha256": "83f33fe220bbf749d6d1e1413e8773cf0e0c98718a6726348b6950024b988bd4",
+      "bytes": 21679
+    },
+    "extension/out/roots-config.js": {
+      "sha256": "c818847d5849cf4a207e125d6986238d2ded806ad3abaea1f02448c1fce1f9da",
+      "bytes": 1948
+    },
+    "extension/out/roots.js": {
+      "sha256": "fbc73fa21ee5cd8159574c19fcb122a85de64ebd3a3dd95c675052f10b003648",
+      "bytes": 3536
+    },
+    "extension/out/skill-args.js": {
+      "sha256": "8a5032dd52542fdc0aa25d9a3152743762e6fb0935f4cc4da97902ee0dcf8c40",
+      "bytes": 2329
+    },
+    "extension/out/skills.js": {
+      "sha256": "870fefe482ab9463d7a5a49567f60dc4a17df833512acb2a6e5fec9505439cb0",
+      "bytes": 23950
+    },
+    "extension/out/terminal-command.js": {
+      "sha256": "93ad8b7ae61222ec9469c2070360f842d4f10c5d6817a4e9b14c62651435c9e3",
+      "bytes": 8357
+    },
+    "extension/out/trace-args.js": {
+      "sha256": "0e4254a39b3fc2cd49cff9c8b3ef9239f84793705d335fc186620cbb2e3ba78f",
+      "bytes": 2756
+    },
+    "extension/out/trace.js": {
+      "sha256": "c3a7ba7e0f744ee9f7ed713942530cc4202f3da882317c6e82e66659d13a3536",
+      "bytes": 11600
+    },
+    "extension/package.json": {
+      "sha256": "5c8a916475d175c1b448383884376c62d206ec41a035e99a4d3ad99106a955cd",
+      "bytes": 13777
+    },
+    "extension/readme.md": {
+      "sha256": "9d0fffd6657fd778c1ac01a74b27d8c673905bf4393fc4acdd8822d789e8d84d",
+      "bytes": 66346
+    }
+  }
+}

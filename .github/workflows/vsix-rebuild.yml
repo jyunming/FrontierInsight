@@ -23,6 +23,7 @@ on:
       - "vscode-frontier-insight/LICENSE"
       - "vscode-frontier-insight/images/icon.png"
       - "vscode-frontier-insight/images/icon.svg"
+      - "vscode-frontier-insight/scripts/**"
   workflow_dispatch: {}
 
 permissions:
@@ -70,10 +71,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- vscode-frontier-insight/vscode-frontier-insight.vsix; then
+          if git diff --quiet -- vscode-frontier-insight/vscode-frontier-insight.vsix \
+               vscode-frontier-insight/vscode-frontier-insight.vsix.manifest.json; then
             echo "No change in .vsix — skipping commit."
           else
-            git add vscode-frontier-insight/vscode-frontier-insight.vsix
+            git add vscode-frontier-insight/vscode-frontier-insight.vsix \
+                    vscode-frontier-insight/vscode-frontier-insight.vsix.manifest.json
             git commit -m "chore(vsix): auto-rebuild after extension source change [skip vsix]"
             # main may have advanced (a concurrent non-vsix push) between our
             # checkout and here; rebase our single binary commit on top before

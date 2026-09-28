@@ -139,6 +139,10 @@ same PR that adds, splits or renames one.
   `core/vscode_bridge.py` hands to the call's own `LAST_SERVED` and `core/provider.py` records as `LAST_CALL`.
 - `vscode-frontier-insight/src/interview-core.ts`, `interview.ts` — the VS Code interview (mirrors `core/interview.py`
   question-for-question; keep both in sync when the question set changes).
+- `vscode-frontier-insight/scripts/normalize-vsix.js` — run by `npm run package` after vsce: sorts the zip entries,
+  fixes their timestamp and compression so a build is byte-reproducible (same Node major), and writes
+  `vscode-frontier-insight.vsix.manifest.json` (sha256 per packed file; committed with the `.vsix` by
+  `.github/workflows/vsix-rebuild.yml`).
 
 ## Platform / diagnostics
 

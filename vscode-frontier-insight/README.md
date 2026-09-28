@@ -127,6 +127,11 @@ length.
    npm run package        # produces vscode-frontier-insight.vsix
    ```
 
+   The same sources give the same `.vsix`, byte for byte, when built with the same Node major version (the file's
+   sha256 is printed at the end). Next to it, `vscode-frontier-insight.vsix.manifest.json` lists the sha256 of every
+   file packed inside: compare two of those to see whether two builds hold the same files, whatever machine or
+   Node version made them.
+
    Then install it in VSCode one of two ways:
 
    - **GUI**: Extensions sidebar → ⋯ menu → "Install from VSIX..." →
