@@ -1066,3 +1066,32 @@ async def test_token_counts_stay_with_their_own_call() -> None:
     finally:
         await bridge.aclose()
         await server.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_vendor_reaches_the_engine_s_record_of_the_call(tmp_path) -> None:
+    """The engine's per-step record (read by the review receipts and the trace) carries the vendor the extension named;
+    the collapse check still compares provider/model."""
+    from types import SimpleNamespace
+
+    from core.engine import Engine
+    from core.provider import LAST_CALL
+
+    eng = object.__new__(Engine)
+    eng._last_chat = {}
+    eng.config = SimpleNamespace(provider=SimpleNamespace(name="vscode_extension", model="(VSCode chat default)"))
+    eng._log_chat_cost = lambda **kw: None
+    eng._model_for_node = lambda node: None
+
+    class _Client:
+        last_provider = "vscode_extension"
+        last_model = None
+
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            LAST_CALL.set({"provider": "vscode_extension", "model": "gpt-4.1", "reported": True, "vendor": "copilot"})
+            return "ok"
+
+    eng._client = _Client()
+    await Engine._chat(eng, "prompt", node="review_panel.statistician")
+    record = eng._chat_provenance("review_panel.statistician")
+    assert record["vendor"] == "copilot" and record["provider"] == "vscode_extension" and record["model"] == "gpt-4.1"

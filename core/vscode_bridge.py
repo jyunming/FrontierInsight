@@ -109,7 +109,6 @@ class VSCodeBridgeClient:
         # response text; clarify requests resolve to the answers dict.
         # We mix kinds in one map keyed by id because each id is unique
         # across the lifetime of the client.
-        self.last_usage: dict | None = None
         self._pending: dict[int, asyncio.Future[Any]] = {}
         # Streaming-chunk buffers per request, in case the extension
         # streams in chunks before sending the final lm_done.
@@ -401,7 +400,7 @@ class VSCodeBridgeClient:
             pt = msg.get("prompt_tokens")
             ct = msg.get("completion_tokens")
             if isinstance(pt, int) and isinstance(ct, int) and msg.get("measured"):
-                self.last_usage = self._usage[req_id] = {
+                self._usage[req_id] = {
                     "prompt_tokens": pt,
                     "completion_tokens": ct,
                     "total_tokens": pt + ct,

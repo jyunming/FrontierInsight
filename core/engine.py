@@ -10841,6 +10841,7 @@ class Engine:
                 "requested_model": self._reviewer_model(name),
                 "actual_provider": self._chat_provenance(f"review_panel.{name}").get("provider"),
                 "actual_model": self._chat_provenance(f"review_panel.{name}").get("model"),
+                "actual_vendor": self._chat_provenance(f"review_panel.{name}").get("vendor"),
                 "fallback": bool(self._chat_provenance(f"review_panel.{name}").get("fallback")),
                 # False when the transport does not say which model served the call (some CLIs, a VS Code extension
                 # that sends no model name, a router alias): ``actual_model`` is then only the model asked for.
@@ -11171,13 +11172,15 @@ class Engine:
                           or self.config.provider.model),
                 "fallback": bool(served.get("fallback")),
                 "reported": bool(served.get("reported")),
+                # The model's vendor as the connection named it (the VS Code extension's), when it did.
+                **({"vendor": served["vendor"]} if served.get("vendor") else {}),
                 "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
         return response
 
     def _chat_provenance(self, node: str) -> dict[str, Any]:
-        """``provider``/``model``/``prompt_hash``/``response_hash`` of the most recent ``_chat(node=...)`` call for this
+        """``provider``/``model`` (and ``vendor`` when the connection named one)/``prompt_hash``/``response_hash`` of the most recent ``_chat(node=...)`` call for this
         key, or ``{}`` when none was made under it (a rule-decided shortcut, an ensemble path) — ``_audit_claims`` merges
         this into a ``model_claim`` event so the trace says which model actually produced the claim, not just that some
         model did."""
