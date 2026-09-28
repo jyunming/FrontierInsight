@@ -257,6 +257,7 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
     "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
+    "shadow-report": ("--shadow-report", "Score what past failed attempts would have recommended against what then happened (recorded only; it changed nothing). `fi tools shadow-report [--output-root DIR]`."),
     "tidy-knowledge": ("--tidy-knowledge", "Remove out-of-date copies of quest results (accepted vs preliminary), and quests that are now preliminary from cited papers' entries, in the knowledge layer. `fi tools tidy-knowledge [check]`."),
     "fleet": ("--fleet", "Run several quests at once. `fi tools fleet <quest.yaml>...`."),
     "dump-state": ("--dump-state", "Print a quest's saved state, for debugging. `fi tools dump-state <quest_dir>`."),
@@ -412,6 +413,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "quest was run again and its standing changed) and remove the older copy, so an out-of-date accepted "
              "result can no longer be cited; also takes quests that are now preliminary off the entries of the papers they "
              "cited. `check` only lists them.",
+    )
+    mode.add_argument(
+        "--shadow-report",
+        action="store_true",
+        help="Score the shadow recommendations of the quests under --output-root: at each decision FI records what past "
+             "failed attempts would have recommended (block, check, note or nothing) without acting on it; this counts "
+             "how often a warning was followed by a failure, by model. Counts only; no model call.",
     )
     mode.add_argument(
         "--serve",
@@ -2594,6 +2602,7 @@ async def main_async(args: argparse.Namespace) -> int:
     # never touch Axon, plus when --no-axon-sidecar is passed.
     _axon_inert_modes = bool(
         getattr(args, "install_tectonic", False)
+        or getattr(args, "shadow_report", False)
         or getattr(args, "install_tectonic_from", None) is not None
         or getattr(args, "list_drafts", False)
         or getattr(args, "export_models", None) is not None
@@ -2637,6 +2646,13 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.ingest:
             return _ingest_papers(args.ingest, axon_config_path=args.axon_config)
+
+        if args.shadow_report:
+            from core import attempt_memory as _memory
+
+            for line in _memory.report_lines(_memory.score(Path(args.output_root))):
+                print(f"[FI] {line}")
+            return 0
 
         if args.tidy_knowledge:
             return _tidy_knowledge(check_only=args.tidy_knowledge == "check", axon_config_path=args.axon_config)

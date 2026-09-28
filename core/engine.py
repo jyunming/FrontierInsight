@@ -67,6 +67,7 @@ from . import frozen_protocol as _frozen
 from . import todo as _todo
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
+from . import attempt_memory as _memory
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
@@ -3829,6 +3830,8 @@ class Engine:
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
                        len((extra or {}).get("literature") or []) if isinstance(extra, dict) else 0, len(audit))
+        await self._shadow("plan", {**state, "design": normalized},
+                           taken="held the plan for the person" if ask else "went on with the plan")
         if ask:
             self._pause_for_plan()
         return {"design_objections": objections} if isinstance(objections, list) else {}
@@ -5458,6 +5461,7 @@ class Engine:
         return {"implement_outline": outline}
 
     async def _node_implement(self, state: QuestState) -> QuestState:
+        await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
             return {**_FRESH_SCRIPT, **kept}
@@ -6979,6 +6983,7 @@ class Engine:
         # what protects a `--resume` that continues straight into execute without design re-running
         # (design's own tamper check, in `_hold_design_to_frozen`, only fires when design executes).
         self._resolved_frozen()
+        await self._shadow("execute", state, taken="ran the experiment")
         # Docker sandbox: the selected, approved external skills are mounted
         # read-only in every container this node starts (a thread: resolving
         # the skills can run their self-tests).
@@ -7864,6 +7869,7 @@ class Engine:
             )
             return {}
 
+        await self._shadow("repair", state, taken="repaired the script")
         history = list(state.get("exec_reflect_history") or [])
         history_block = _format_reflect_history(history)
 
@@ -12137,6 +12143,38 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
             self._log.debug("[attempts] context not read: %r", e)
             return {}
+
+    async def _shadow(self, decision: str, state: QuestState | dict[str, Any], *, taken: str) -> None:
+        """Shadow mode (core/attempt_memory.py): what past failed attempts would recommend at this decision, written to
+        ``.fi/shadow_recommendations.jsonl`` and nothing else. It never changes the state, the route, a prompt or the
+        trace; a failure here is counted and never touches the quest."""
+        if not getattr(self, "_shadow_enabled", True):
+            return
+        try:
+            snapshot = dict(state)
+            models_used = {node: dict(v) for node, v in dict(getattr(self, "_last_chat", {}) or {}).items()}
+            cache = self.__dict__.setdefault("_shadow_digests", {})
+            index = self.__dict__.get("_shadow_index")
+            if index is None:
+                index = _memory.Index(self.quest_root.parent, own_fi_dir=self.fi_dir)
+                self.__dict__["_shadow_index"] = index
+
+            def work() -> None:
+                context = _attempts.context_fingerprint(
+                    self.config, self.quest_root, snapshot, kind="in_progress", prompts=self._prompts,
+                    fi_repo=Path(__file__).resolve().parent.parent, models_used=models_used, cache=cache,
+                )
+                rec = _memory.recommend(context, index.attempts(), decision=decision)
+                _memory.record(self.fi_dir, self.quest_id, decision=decision, taken=taken, candidate=context,
+                               recommendation=rec)
+
+            await asyncio.wait_for(asyncio.to_thread(work), timeout=60)
+        except Exception as e:  # noqa: BLE001 -- a shadow recommendation never touches the quest
+            try:
+                _attempts.count_lost(self.fi_dir, _memory.SHADOW_LOST)
+            except Exception:  # noqa: BLE001
+                pass
+            self._log.debug("[shadow] no recommendation recorded at %s: %r", decision, e)
 
     def _record(self, name: str, build: Any) -> str | None:
         """Append to one of the quest's attempt records (core/attempt_records.py). ``build`` returns the record (or is
