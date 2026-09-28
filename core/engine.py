@@ -5720,8 +5720,16 @@ class Engine:
             recorded = _trial_runner.pooled(per_cell)
             not_run = (_trial_runner.reported_values_not_run(recorded, result_json)
                        + _trial_runner.given_values_not_run(protocol, per_cell, result_json))
+            # Research: a mean over a subset of the trials is recomputed from FI's own rows, trial by trial (the
+            # subset's membership and value of the same trial), not from two separate pools of values.
+            row_sim: list[str] = []
+            if self.config.rigor_profile == "research":
+                row_analysis, row_sim = _trial_runner.given_rows_problems(
+                    protocol, _trial_runner.recorded_rows_by_cell(self.quest_root), result_json)
+                not_run = not_run + row_analysis
             found = (row_problems + altered
-                     + _run_manifest.problems(protocol, manifest, result_json=result_json, trial_mode=True) + not_run)
+                     + _run_manifest.problems(protocol, manifest, result_json=result_json, trial_mode=True) + not_run
+                     + row_sim)
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
             # again).
@@ -13934,6 +13942,9 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 - The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
   (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
   reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
+- When a protocol metric is a mean over the trials a proportion counts (`"given": "<proportion>"`), the dict also holds
+  that proportion as 1 (this trial is in the subset) or 0 (it is not) for EVERY trial, next to the value being
+  averaged (`{"major": 1.0, "final_size": 812.0}`): FI picks the subset trial by trial from its own record.
 - When the protocol lists oracles: `def oracle() -> dict` computes, with the SAME simulation code, the values the
   protocol's oracles name (the cases with a known answer), returned as a dict keyed by the oracle names; this replaces
   the `FI_ORACLE` rule above. `FI_PILOT` does not apply.

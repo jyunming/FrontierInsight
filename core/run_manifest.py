@@ -182,6 +182,19 @@ def _num(value: Any) -> float | None:
     return None
 
 
+def _whole(value: Any) -> tuple[float | None, str | None]:
+    """A count as a whole number: ``(the count, None)``, ``(None, None)`` when there is none, and ``(None, why)`` for a
+    value that is not one (a bool, NaN, an infinity, a negative number, a fraction). An exact whole float (``10.0``)
+    is a count; ``10.9`` is not truncated to 10."""
+    if value is None:
+        return None, None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, f"is {value!r}, not a whole number"
+    if not math.isfinite(value) or value < 0 or float(value) != int(value):
+        return None, f"is {value!r}, not a whole number of trials"
+    return float(value), None
+
+
 def _same(a: Any, b: Any) -> bool:
     x, y = _num(a), _num(b)
     if x is not None and y is not None:
@@ -468,8 +481,12 @@ def _given_findings(
     for under, mapping in _mappings_with(result_json, f"{metric}_values"):
         where = f"`{under}`" if under is not None else "the top level"
         values = _values_of(mapping, metric)
-        count = _num(mapping.get(f"{given}_count"))
-        total = _num(mapping.get(f"{given}_total"))
+        count, count_why = _whole(mapping.get(f"{given}_count"))
+        total, total_why = _whole(mapping.get(f"{given}_total"))
+        bad = [f"`{given}_{name}` {why}" for name, why in (("count", count_why), ("total", total_why)) if why]
+        if bad:
+            out.append((f"at {where}, " + "; ".join(bad) + ": a count of trials is a whole number, never rounded", True))
+            continue
         if count is None:
             out.append((
                 f"the metric `{metric}` is a mean over the trials `{given}` counts, and its values at {where} have no "
@@ -477,7 +494,7 @@ def _given_findings(
                 True,
             ))
             continue
-        if len(values) != int(count):
+        if len(values) != count:
             out.append((
                 f"at {where}, `{metric}_values` lists {len(values)} trial(s) but `{given}_count` says {count:g}: a "
                 f"mean over the trials `{given}` counts lists exactly those trials (a trial whose value is undefined "
@@ -511,14 +528,16 @@ def _given_findings(
     # A stratum written into the name: its list is still held to the count written beside it the same way.
     for suffix, holder in _suffixed_pairs(result_json, metric):
         values = _values_of({f"{metric}_values": holder[f"{metric}_{suffix}_values"]}, metric)
-        count = _num(holder.get(f"{given}_{suffix}_count"))
-        if count is None:
+        count, count_why = _whole(holder.get(f"{given}_{suffix}_count"))
+        if count_why:
+            out.append((f"`{given}_{suffix}_count` {count_why}: a count of trials is a whole number, never rounded", True))
+        elif count is None:
             out.append((
                 f"`{metric}_{suffix}_values` has no `{given}_{suffix}_count` beside it, so the subset it averages "
                 f"cannot be counted. {NESTING}",
                 True,
             ))
-        elif len(values) != int(count):
+        elif len(values) != count:
             out.append((
                 f"`{metric}_{suffix}_values` lists {len(values)} trial(s) but `{given}_{suffix}_count` says {count:g}: "
                 f"a mean over the trials `{given}` counts lists exactly those trials",
