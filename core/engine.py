@@ -1509,6 +1509,11 @@ class Engine:
                 path.touch(exist_ok=True)
             except OSError:
                 pass
+        # The record of the search queries likewise: an empty one when no query was ever derived; missing after a
+        # derivation, it is the gap.
+        if not (self.fi_dir / _LITERATURE_QUERIES).exists() and not (
+                counts.get("literature_query") or counts.get("ideate_query")):
+            _write_query_sets(self.fi_dir, [])
         call_gaps, call_summary = _attempts.model_call_gaps(
             self.quest_root, {n: dict(v) for n, v in dict(getattr(self, "_last_chat", {}) or {}).items()}, counts)
         files = {}
@@ -2701,8 +2706,11 @@ class Engine:
         if seed_queries:
             self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
             # Kept for a person to see; the literature step derives its own, from the topic AND the chosen direction.
-            _record_query_set(self.fi_dir, {"stage": "ideate", "queries": seed_queries,
-                                            "reason": "the idea step's grounding search (topic only)"}, log=self._log)
+            _record_query_set(self.fi_dir, {
+                "stage": "ideate", "queries": seed_queries,
+                "model": (self._chat_provenance("ideate_query") or {}).get("model"),
+                "call_id": self.__dict__.get("_last_call_id", {}).get("ideate_query"),
+                "reason": "the idea step's grounding search (topic only)", "revised_by": "fi"}, log=self._log)
         seeded = await self.knowledge.asearch(
             seed_queries[0] if seed_queries else state["topic"], top_k=3,
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
@@ -3024,34 +3032,69 @@ class Engine:
         deriving_model = self._model_for_node("literature_query") or self.config.provider.model or ""
         key = _query_set_key(derive_prompt, this_iter, deriving_model)
         saved = [e for e in _read_query_sets(self.fi_dir, log=self._log) if e.get("stage") == "literature"]
-        same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))), None)
-        if same is not None and self.config.knowledge.enabled:
+        # Only an entry whose digest checks out is used again. One changed after FI wrote it is said so, never used.
+        edited = [e for e in saved if e.get("key") == key and _query_set_standing(e) == "edited"]
+        if edited:
+            self._log.warning(
+                "[literature] the saved search queries for this pass in .fi/%s were changed after FI wrote them; they "
+                "are not used, and FI derives them again (to search with your own queries, put them in %s, one per "
+                "line)", _LITERATURE_QUERIES, _PERSON_QUERIES.as_posix())
+            self._audit("check_result", check="literature_queries", status="edited",
+                        summary=f"{len(edited)} saved query set(s) for this pass no longer match their digest")
+        same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))
+                     and _query_set_standing(e) == "verified"), None)
+        person = _person_queries(self.quest_root) if self.config.knowledge.enabled else None
+        if person is not None:
+            # A person's own queries: used as given, recorded as their revision (once per version of the file).
+            queries, source_sha = person
+            known = next((e for e in reversed(saved) if e.get("revised_by") == "person"
+                          and e.get("source_sha256") == source_sha and e.get("iteration") == this_iter
+                          and _query_set_standing(e) == "verified"), None)
+            query_set = known or {
+                "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
+                "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(), "model": None,
+                "call_id": None, "reason": f"your queries in {_PERSON_QUERIES.as_posix()}", "revised_by": "person",
+                "source_sha256": source_sha,
+            }
+            query_set = {**query_set, "reused": known is not None}
+            if known is None:
+                _record_query_set(self.fi_dir, query_set, log=self._log)
+            self._log.info("[literature] searching with your queries from %s: %r", _PERSON_QUERIES.as_posix(), queries)
+        elif same is not None and self.config.knowledge.enabled:
             queries = [q.strip() for q in same["queries"]][:3]
             query_set = {**same, "reused": True}
             self._log.info("[literature] reusing the search queries derived for this pass (by %s): %r",
                            same.get("model") or "the model then", queries)
         else:
-            if any(e.get("iteration") == this_iter for e in saved):
+            if edited:
+                reason = "the saved queries for this pass were changed after FI wrote them"
+            elif any(e.get("key") == key and _query_set_standing(e) == "unverified" for e in saved):
+                reason = "the saved queries for this pass carry no digest (written before FI signed them)"
+            elif any(e.get("iteration") == this_iter for e in saved):
                 reason = "the topic, the chosen direction, the hypothesis or the model changed"
             elif saved:
                 reason = f"a new search pass ({this_iter})"
             else:
                 reason = "the first search"
+            self.__dict__.setdefault("_last_call_id", {}).pop("literature_query", None)
             queries = await self._derive_literature_queries(
                 state["topic"], title, hypothesis, work_scope=scope,
             )
+            call_id = self.__dict__.get("_last_call_id", {}).get("literature_query")
             query_set = {
                 "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
                 "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(),
                 "model": ((self._chat_provenance("literature_query") or {}).get("model") or deriving_model or None)
                 if queries else None,
-                "reason": reason, "reused": False,
+                "call_id": call_id, "reason": reason, "revised_by": "fi", "reused": False,
             }
-            if queries:  # a failed derivation is not kept: the next run tries again
-                _record_query_set(self.fi_dir, {k: v for k, v in query_set.items() if k != "reused"}, log=self._log)
+            if queries or call_id:
+                # A derivation whose call answered is kept, even one whose answer gave no query (its empty list is never
+                # reused, so the next run tries again): the record holds every answered call the literature step made.
+                _record_query_set(self.fi_dir, query_set, log=self._log)
         derived = bool(queries)
         if queries:
-            if not query_set.get("reused"):
+            if not query_set.get("reused") and query_set.get("revised_by") != "person":
                 self._log.info("[literature] search queries derived from the topic: %r", queries)
             query = queries[0]
         else:
@@ -11285,6 +11328,9 @@ class Engine:
                 outcome=outcome, usage=usage if isinstance(usage, dict) else None,
             )
             _attempts.append_model_call(fi_dir, getattr(self, "quest_id", ""), row)
+            if outcome == "ok":
+                # Which line of the record an answer came from, for a record built on it (the search queries).
+                self.__dict__.setdefault("_last_call_id", {})[node] = row["call_id"]
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
             _attempts.count_lost(fi_dir, _attempts.MODEL_CALLS_LOST)
             self._log.debug("[attempts] model call not recorded: %r", e)
@@ -18450,6 +18496,42 @@ def _usable_queries(value: Any) -> bool:
             and all(isinstance(q, str) and q.strip() for q in value))
 
 
+#: The fields of a saved query set its digest covers: what was searched, why, and which model call produced it.
+_QUERY_SET_SIGNED = ("stage", "key", "iteration", "queries", "prompt_sha256", "model", "call_id", "reason",
+                     "revised_by", "source_sha256")
+
+#: Search queries a person gives the quest themselves, one per line (the first three are used), in its inputs folder.
+_PERSON_QUERIES = Path("inputs") / "search_queries.txt"
+
+
+def _query_set_digest(entry: dict[str, Any]) -> str:
+    """The SHA-256 over an entry's signed fields (:data:`_QUERY_SET_SIGNED`)."""
+    signed = {k: entry.get(k) for k in _QUERY_SET_SIGNED}
+    return hashlib.sha256(json.dumps(signed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def _query_set_standing(entry: dict[str, Any]) -> str:
+    """``verified`` (its digest checks out), ``unverified`` (written before entries carried a digest) or ``edited``
+    (changed after FI wrote it). Only a verified entry is ever reused."""
+    digest = entry.get("digest")
+    if not digest:
+        return "unverified"
+    return "verified" if digest == _query_set_digest(entry) else "edited"
+
+
+def _person_queries(quest_root: Path) -> tuple[list[str], str] | None:
+    """The queries a person wrote in ``inputs/search_queries.txt`` (up to three non-empty lines, ``#`` lines skipped)
+    and the file's SHA-256; ``None`` when there is no such file or it names no query."""
+    path = Path(quest_root) / _PERSON_QUERIES
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    lines = [" ".join(line.split()) for line in data.decode("utf-8", errors="replace").splitlines()]
+    queries = [q for q in lines if q and not q.startswith("#")][:3]
+    return (queries, hashlib.sha256(data).hexdigest()) if queries else None
+
+
 class _QuerySetsUnreadable(Exception):
     """The record exists but could not be read just now (locked, access denied): it is left alone."""
 
@@ -18493,16 +18575,23 @@ def _read_query_sets(fi_dir: Path, *, log: Any = None, strict: bool = False) -> 
 
 
 def _record_query_set(fi_dir: Path, entry: dict[str, Any], *, log: Any = None) -> None:
-    """Add one derivation to ``.fi/literature_queries.json`` (best-effort: a record never stops a search, and a
-    record that could not be read is never overwritten)."""
+    """Add one entry to ``.fi/literature_queries.json``, with its digest (:func:`_query_set_digest`). Entries are only
+    ever added: the ones already there are written back exactly as read (best-effort: a record never stops a search,
+    and a record that could not be read is never overwritten)."""
     try:
-        entries = _read_query_sets(fi_dir, log=log, strict=True) + [entry]
+        entries = _read_query_sets(fi_dir, log=log, strict=True)
     except _QuerySetsUnreadable:
         return
+    entry = {k: v for k, v in entry.items() if k not in ("digest", "reused")}
+    entry["digest"] = _query_set_digest(entry)
+    _write_query_sets(fi_dir, [*entries, entry])
+
+
+def _write_query_sets(fi_dir: Path, entries: list[dict[str, Any]]) -> None:
     try:
         fi_dir.mkdir(parents=True, exist_ok=True)
         tmp = fi_dir / (_LITERATURE_QUERIES + ".tmp")
-        tmp.write_text(json.dumps({"schema": 1, "entries": entries[-50:]}, indent=1), encoding="utf-8")
+        tmp.write_text(json.dumps({"schema": 2, "entries": entries}, indent=1), encoding="utf-8")
         tmp.replace(fi_dir / _LITERATURE_QUERIES)
     except OSError:
         pass

@@ -160,7 +160,7 @@ def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = 
     log.append("node_completed", node="review")
     record = evidence.assess(root, _state(), settings={**RESEARCH, "sealing": True})
     (root / "needs" / "EVIDENCE.json").write_text(json.dumps(record), encoding="utf-8")
-    for rel in evidence.SEALED_LEDGERS:
+    for rel in (*evidence.SEALED_LEDGERS, evidence.SEALED_QUERIES):
         (root / rel).touch()
     files = {rel: (None if rel in null else evidence._file_sha256(root / rel))
              for rel in evidence.SEALED_FILES if rel not in drop}
