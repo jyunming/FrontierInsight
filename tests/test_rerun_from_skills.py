@@ -151,7 +151,8 @@ async def test_a_skill_excluded_since_the_run_is_gone_after_rerunning_from_skill
     assert before["selected_skills"] == [SKILL]
     log = (first.fi_dir / "run.log").read_text(encoding="utf-8")
     # The failure the person met: the skill's name is asked of pip on every write of the code.
-    assert "pip install" in log and SKILL in log.split("pip install", 1)[1].splitlines()[0]
+    first_installs = [ln for ln in log.splitlines() if "pip install" in ln and "[execute]" in ln]
+    assert first_installs and SKILL in first_installs[0]
     frozen = first.quest_root / "needs" / "FROZEN_PROTOCOL.json"
     plan = first.quest_root / "plan.md"
     frozen_hash = _digest(frozen) if frozen.is_file() else ""
