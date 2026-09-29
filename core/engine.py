@@ -3952,6 +3952,8 @@ class Engine:
             normalized, why = _plan.normalize_design(trial)
             for note in repaired_notes:
                 self._log.warning("[plan] %s", note)
+                if "`protocol.grid`" in note:
+                    print(f"[FI] {note}")
         if normalized is None:
             self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
             return {}

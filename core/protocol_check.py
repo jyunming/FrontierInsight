@@ -414,7 +414,8 @@ def grid_notes(design: dict[str, Any] | None) -> list[str]:
     text = " ".join(str((design or {}).get(k) or "") for k in ("hypothesis", "expected_outcome", "method"))
     if not _CLAIM_WORDS.search(text):
         return []
-    thin = [f"{axis} ({len(values)} values)" for axis, values in grid.items() if isinstance(values, list) and 1 < len(values) < 5]
+    thin = [f"{axis} ({len(values)} values)" for axis, values in grid.items()
+            if isinstance(values, list) and 1 < len(values) < 5 and all(isinstance(v, (int, float)) for v in values)]
     if not thin:
         return []
     return [
