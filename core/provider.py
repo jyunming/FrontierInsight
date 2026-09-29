@@ -1651,11 +1651,124 @@ def _retry_http_error(exc: BaseException) -> bool:
         resp = getattr(exc, "response", None)
         sc = getattr(resp, "status_code", None)
         if isinstance(sc, int):
+            if sc == 429 and _is_exhausted_quota(resp):
+                # An empty account or used-up quota does not come back in minutes: fail now, not after a long wait.
+                return False
             return sc >= 500 or sc == 429
         # A real HTTP error always carries an int status; a malformed/absent
         # one is surfaced rather than looped.
         return False
     return False
+
+
+def _is_exhausted_quota(resp: Any) -> bool:
+    """A 429 whose error ``type`` or ``code`` names a used-up quota, credit or billing problem (OpenAI's
+    ``insufficient_quota``, Moonshot's ``exceeded_current_quota_error``) rather than a per-minute rate limit. Read the
+    way :func:`_stream_error` reads an in-stream error: the type and code only, never the free-text message, and a
+    type or code that also says it will clear ("rate limit") is a rate limit. A body that cannot be read, or names
+    neither, is a rate limit (worth waiting for)."""
+    try:
+        err = resp.json()
+    except Exception:  # noqa: BLE001 -- no JSON body: nothing names a quota
+        return False
+    if isinstance(err, dict) and isinstance(err.get("error"), dict):
+        err = err["error"]
+    if not isinstance(err, dict):
+        return False
+    kind = re.sub(r"[_\-]+", " ", " ".join(str(err.get(k) or "") for k in ("type", "code")).lower())
+    return bool(_STREAM_PERMANENT.search(kind)) and not _STREAM_TRANSIENT.search(kind)
+
+
+#: Waits (seconds, before jitter) after each failed attempt while the provider's server is down or busy -- an HTTP 5xx
+#: (a Cloudflare 520-529 in front of the provider among them) or a 429 rate limit. A provider outage of a few minutes
+#: used to end the quest: four attempts about a second apart (a Moonshot 521 on 2026-09-30, after ~134k tokens spent).
+#: Five waits of 10-90 s, each jittered by +/-20 % so the quests of a --fleet do not retry in step, ride out
+#: about 3-4.5 minutes (176-264 s) before the call fails.
+_HTTP_OUTAGE_WAITS_S: tuple[float, ...] = (10.0, 20.0, 40.0, 60.0, 90.0)
+#: Attempts in all while the server is down or busy (one more than the waits); other transient failures keep four.
+_HTTP_OUTAGE_ATTEMPTS = len(_HTTP_OUTAGE_WAITS_S) + 1
+_HTTP_ATTEMPTS = 4
+#: The longest ``Retry-After`` FI waits for. A longer one (or an unreadable one) is ignored in favour of the schedule
+#: above, so a server asking for an hour cannot hold a quest that long.
+_RETRY_AFTER_MAX_S = 120.0
+
+
+def _http_outage_status(exc: BaseException | None) -> int | None:
+    """The status when ``exc`` is a server outage or rate limit worth a long wait (5xx, or a 429 that is not a used-up
+    quota), else ``None``."""
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+    sc = getattr(getattr(exc, "response", None), "status_code", None)
+    if not isinstance(sc, int):
+        return None
+    if sc >= 500 or (sc == 429 and not _is_exhausted_quota(exc.response)):
+        return sc
+    return None
+
+
+def _retry_after_s(exc: BaseException | None) -> float | None:
+    """The server's ``Retry-After`` (seconds or an HTTP date) when it is present and sane: above zero and at most
+    :data:`_RETRY_AFTER_MAX_S`. ``None`` otherwise."""
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None)
+    raw = headers.get("retry-after") if headers is not None else None
+    if not raw:
+        return None
+    raw = str(raw).strip()
+    try:
+        seconds = float(raw)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+
+        try:
+            when = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when is None:
+            return None
+        import datetime as _dt
+
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_dt.timezone.utc)
+        seconds = (when - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    if not (seconds == seconds) or seconds <= 0 or seconds > _RETRY_AFTER_MAX_S:  # NaN, past, or too long
+        return None
+    return seconds
+
+
+def _http_outage_wait_s(attempt_number: int, exc: BaseException | None) -> float:
+    """Seconds to wait after failed attempt ``attempt_number`` while the server is down or busy: the server's own
+    ``Retry-After`` when sane (plus up to 10 % so a fleet does not return in step), else the jittered schedule."""
+    import random
+
+    ra = _retry_after_s(exc)
+    if ra is not None:
+        return ra * random.uniform(1.0, 1.1)
+    base = _HTTP_OUTAGE_WAITS_S[min(max(attempt_number, 1), len(_HTTP_OUTAGE_WAITS_S)) - 1]
+    return base * random.uniform(0.8, 1.2)
+
+
+def _http_retry_wait(retry_state: "Any") -> float:
+    """tenacity ``wait`` for the HTTP transport: a long, jittered wait while the provider's server is down or busy
+    (:func:`_http_outage_wait_s`); the short jittered exponential wait (at most 20 s) for anything else transient -- a
+    dropped connection or a read timeout."""
+    outcome = getattr(retry_state, "outcome", None)
+    exc = outcome.exception() if outcome is not None else None
+    if _http_outage_status(exc) is not None:
+        return _http_outage_wait_s(retry_state.attempt_number, exc)
+    return wait_random_exponential(multiplier=1, max=20)(retry_state)
+
+
+def _http_attempts(exc: BaseException | None) -> int:
+    """How many attempts the HTTP transport makes in all, given the latest failure."""
+    return _HTTP_OUTAGE_ATTEMPTS if _http_outage_status(exc) is not None else _HTTP_ATTEMPTS
+
+
+def _http_retry_stop(retry_state: "Any") -> bool:
+    """tenacity ``stop`` for the HTTP transport: six attempts while the server is down or busy, four otherwise."""
+    outcome = getattr(retry_state, "outcome", None)
+    exc = outcome.exception() if outcome is not None else None
+    return retry_state.attempt_number >= _http_attempts(exc)
 
 
 def _retry_cli_error(exc: BaseException) -> bool:
@@ -3462,7 +3575,7 @@ class LLMClient:
             f"or model-unauthorized key."
         )
 
-    def _retry_note(self, node: str | None, where: str, total: int,
+    def _retry_note(self, node: str | None, where: str, total: "int | Callable[[Any], int]",
                     model: Callable[[Any], str | None] | str | None = None) -> Callable[[Any], None]:
         """tenacity ``before_sleep``: the failed call and the coming retry, in FI's log and the quest's run.log."""
         def note(rs: Any) -> None:
@@ -3473,7 +3586,8 @@ class LLMClient:
             except Exception:  # noqa: BLE001 -- a record never stops a retry
                 pass
             try:
-                line = _retry_line(node, where, rs, total, model=model(rs) if callable(model) else model)
+                line = _retry_line(node, where, rs, total(rs) if callable(total) else total,
+                                   model=model(rs) if callable(model) else model)
                 _log.warning("%s", line)
                 if self._run_log is not None:
                     self._run_log.warning("%s", line)
@@ -3676,17 +3790,22 @@ class LLMClient:
         async def send(request_body: dict[str, Any]) -> dict[str, Any]:
             data: dict[str, Any] = {}
             async for attempt in AsyncRetrying(
-                stop=stop_after_attempt(4),
-                # Jittered backoff: a deterministic ``wait_exponential``
+                # Six attempts over about 3-4.5 minutes while the provider's
+                # server is down or busy (5xx, 429 rate limit; a sane
+                # Retry-After is honoured), four with short waits for a
+                # dropped connection or read timeout; a 4xx and a used-up
+                # quota are not retried (see _http_retry_wait / _stop).
+                # Every wait is jittered: a deterministic schedule
                 # synchronises N concurrent quests in a --fleet that all
-                # hit a transient upstream blip simultaneously, so they
-                # all retry at the same wall-clock instant and re-clog
-                # the upstream. Random-exponential spreads them out over
-                # a window so the upstream sees a gentler ramp.
-                wait=wait_random_exponential(multiplier=1, max=20),
+                # hit the same upstream blip, so they would all retry at
+                # the same instant and re-clog the upstream.
+                stop=_http_retry_stop,
+                wait=_http_retry_wait,
                 retry=retry_if_exception(_retry_http_error),
                 before_sleep=self._retry_note(
-                    node, f"{self.endpoint.provider_name or 'provider'} over HTTP", 4, model or self.endpoint.model),
+                    node, f"{self.endpoint.provider_name or 'provider'} over HTTP",
+                    lambda rs: _http_attempts(rs.outcome.exception() if getattr(rs, "outcome", None) else None),
+                    model or self.endpoint.model),
                 reraise=True,
             ):
                 with attempt:
@@ -4159,6 +4278,11 @@ def _retry_line(node: str | None, where: str, rs: Any, total: int, *, model: str
     what = redact_text(f"{type(exc).__name__}: {exc}", whole=True) if exc else "no error captured"
     what = " ".join(what.split())
     what = what if len(what) <= 240 else what[:240] + "..."
+    status = _http_outage_status(exc)
+    if status == 429:
+        what = f"the provider is limiting how often FI may call it (HTTP 429): {what}"
+    elif status is not None:
+        what = f"the provider's server is down or busy (HTTP {status}): {what}"
     return (f"[{node or 'model'}] the model call failed ({where}{', model ' + model if model else ''}), "
             f"attempt {rs.attempt_number} of {total}: {what}; trying again"
             + (f" in {wait:.0f}s" if isinstance(wait, (int, float)) else ""))
