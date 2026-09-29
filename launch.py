@@ -5035,7 +5035,7 @@ def _import_skill(
         from core.skills.scaffold import generate_selftest
 
         try:
-            generate_selftest(got.path, got.name)
+            generate_selftest(got.path, got.name, pip_requires=pip_requires)
             print("Generated a self-test: it probes that every bundled script")
             print("is present and answers `--help`. That catches a broken or")
             print("moved install — it does NOT check the tool behaves the way")
@@ -5329,7 +5329,7 @@ def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
 
 def _pip_cmd_args(names: "list[str]") -> str:
     """Names as one shell-safe string: a version floor like statsmodels>=0.14.6 would otherwise be read as a redirect."""
-    return " ".join(repr(n) if any(c in n for c in "<>") else n for n in names)
+    return " ".join(repr(n) if any(c in n for c in "<>|&; []'") else n for n in names)
 
 
 def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:

@@ -629,7 +629,10 @@ if __name__ == "__main__":
 '''
 
 
-def generate_selftest(skill_dir: Path, name: str = "", *, overwrite: bool = False) -> Path:
+def generate_selftest(
+    skill_dir: Path, name: str = "", *, overwrite: bool = False,
+    pip_requires: list[str] | None = None,
+) -> Path:
     """Write a generated self-test into a skill directory.
 
     Refuses to overwrite an existing one unless asked: a hand-written test is
@@ -653,8 +656,13 @@ def generate_selftest(skill_dir: Path, name: str = "", *, overwrite: bool = Fals
         if scripts_dir.is_dir() else []
     )
     from core.skills.known_checks import KNOWN_CHECKS
+    from core.skills.known_requirements import PRESET_PIP_REQUIRES
 
-    checks = KNOWN_CHECKS.get(name or skill_dir.name, [])
+    # A known-value check belongs to a skill imported with the preset's library list, not to any skill that happens
+    # to share the name: a skill of one's own called ``map`` is not the cartopy one.
+    key = name or skill_dir.name
+    preset = PRESET_PIP_REQUIRES.get(key) or []
+    checks = KNOWN_CHECKS.get(key, []) if preset and set(preset) <= set(pip_requires or []) else []
     target.write_text(
         _selftest_source(name or skill_dir.name, scripts, checks), encoding="utf-8"
     )

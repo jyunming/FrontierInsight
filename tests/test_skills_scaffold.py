@@ -511,40 +511,71 @@ def _run_selftest(d: Path):
     )
 
 
-def test_a_scriptless_skill_with_a_known_value_check_runs_it(tmp_path: Path) -> None:
-    pytest.importorskip("scipy")
-    d = _bare_skill(tmp_path, "scipy")
-    scaffold.generate_selftest(d, "scipy")
-    text = (d / "selftest.py").read_text(encoding="utf-8")
-    assert "NOTHING beyond" not in text
+def _preset(monkeypatch, name: str, checks: list[tuple[str, str]]) -> list[str]:
+    from core.skills import known_checks, known_requirements
+
+    monkeypatch.setitem(known_checks.KNOWN_CHECKS, name, checks)
+    monkeypatch.setitem(known_requirements.PRESET_PIP_REQUIRES, name, [name])
+    return [name]
+
+
+def test_a_scriptless_skill_with_a_known_value_check_runs_it(tmp_path: Path, monkeypatch) -> None:
+    req = _preset(monkeypatch, "okskill", [("one is one", "ok = 1 == 1"), ("two is two", "ok = 2 == 2")])
+    d = _bare_skill(tmp_path, "okskill")
+    scaffold.generate_selftest(d, "okskill", pip_requires=req)
+    assert "NOTHING beyond" not in (d / "selftest.py").read_text(encoding="utf-8")
     proc = _run_selftest(d)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "2 known-value check(s) passed" in proc.stdout
 
 
 def test_a_wrong_known_value_fails_the_selftest(tmp_path: Path, monkeypatch) -> None:
-    from core.skills import known_checks
-
-    monkeypatch.setitem(known_checks.KNOWN_CHECKS, "wrongskill", [("one is two", "ok = 1 == 2")])
+    req = _preset(monkeypatch, "wrongskill", [("one is two", "ok = 1 == 2")])
     d = _bare_skill(tmp_path, "wrongskill")
-    scaffold.generate_selftest(d, "wrongskill")
+    scaffold.generate_selftest(d, "wrongskill", pip_requires=req)
     proc = _run_selftest(d)
     assert proc.returncode == 1
     assert "one is two" in proc.stdout
 
 
 def test_a_missing_library_fails_the_known_value_check(tmp_path: Path, monkeypatch) -> None:
-    from core.skills import known_checks
-
-    monkeypatch.setitem(
-        known_checks.KNOWN_CHECKS, "gone",
-        [("needs a package", "import no_such_package_xyz\nok = True")],
-    )
+    req = _preset(monkeypatch, "gone", [("needs a package", "import no_such_package_xyz\nok = True")])
     d = _bare_skill(tmp_path, "gone")
-    scaffold.generate_selftest(d, "gone")
+    scaffold.generate_selftest(d, "gone", pip_requires=req)
     proc = _run_selftest(d)
     assert proc.returncode == 1
     assert "ModuleNotFoundError" in proc.stdout
+
+
+def test_a_skill_of_ones_own_with_a_preset_name_gets_no_known_check(tmp_path: Path, monkeypatch) -> None:
+    _preset(monkeypatch, "myown", [("one is two", "ok = 1 == 2")])
+    d = _bare_skill(tmp_path, "myown")
+    scaffold.generate_selftest(d, "myown")
+    assert "NOTHING beyond" in (d / "selftest.py").read_text(encoding="utf-8")
+    assert _run_selftest(d).returncode == 0
+
+
+def test_the_import_script_refreshes_a_generated_selftest_but_never_a_written_one(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    import importlib.util
+
+    req = _preset(monkeypatch, "fresh", [("one is one", "ok = 1 == 1")])
+    spec = importlib.util.spec_from_file_location(
+        "import_scientist_skills", Path(__file__).resolve().parents[1] / "scripts" / "import_scientist_skills.py"
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    monkeypatch.setattr("core.skills.registry.skills_root", lambda: tmp_path)
+    d = _bare_skill(tmp_path, "fresh")
+    scaffold.generate_selftest(d, "fresh")
+    assert "NOTHING beyond" in (d / "selftest.py").read_text(encoding="utf-8")
+    mod._refresh_generated_selftest("fresh", req)
+    assert "1 known-value" in _run_selftest(d).stdout
+    assert "approve it again" in capsys.readouterr().out
+    (d / "selftest.py").write_text("print('mine')\n", encoding="utf-8")
+    mod._refresh_generated_selftest("fresh", req)
+    assert (d / "selftest.py").read_text(encoding="utf-8") == "print('mine')\n"
 
 
 def test_a_skill_without_a_check_still_says_it_proves_nothing(tmp_path: Path) -> None:
