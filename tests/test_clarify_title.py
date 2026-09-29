@@ -67,7 +67,7 @@ async def test_agent_picked_title_replaces_the_raw_topic(tmp_path: Path) -> None
     eng = _engine(tmp_path, answerable=False)
     patch = await eng._node_clarify({"topic": _RAW, "title": "verlet-euler"})
     assert patch["title"] == "Step size and error in Verlet integration"
-    assert patch["title_confirmed"] is True
+    assert not patch.get("title_confirmed"), "an agent pick is a suggestion, not something a person chose"
     assert "Suggestions:" in patch["clarify_questions"]["title"]["question"]
     assert "options" not in patch["clarify_questions"]["title"]
 
@@ -134,3 +134,45 @@ async def test_a_callback_that_answers_nothing_never_loops_the_run(tmp_path: Pat
     with pytest.raises(_Reached):
         await asyncio.wait_for(engine.run(clarify_callback=callback), timeout=90)
     assert len(asked) == 1, "one question round, then the defaults are used"
+
+
+def test_a_placeholder_or_numbered_title_is_not_taken_literally() -> None:
+    assert _clean_title("<a short, plain title>") == ""
+    qs = {"title": {"question": "Name?", "default": "", "options": ["A study of X", "Y in Z"]}}
+    from core.engine import _spell_out_title_options
+    _spell_out_title_options(qs)
+    assert qs["title"]["suggestions"] == ["A study of X", "Y in Z"]
+
+
+async def test_a_dismissed_prompt_or_a_yaml_title_or_an_unattended_start_never_stalls(
+        tmp_path: Path, monkeypatch) -> None:
+    import asyncio
+
+    from core.vscode_bridge import BridgeError
+    from tests.test_engine_smoke import _fake_response_for
+
+    class _Reached(Exception):
+        pass
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001, ANN003
+        return _fake_response_for(messages[-1]["content"])
+
+    async def stop_here(self, state):  # noqa: ANN001
+        raise _Reached
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    monkeypatch.setattr(Engine, "_node_select_skills", stop_here)
+
+    async def dismissed(questions):  # noqa: ANN001
+        raise BridgeError("cancelled")
+
+    with pytest.raises(_Reached):
+        await asyncio.wait_for(Engine(_cfg(tmp_path)).run(clarify_callback=dismissed), timeout=90)
+
+    async def never(questions):  # noqa: ANN001
+        await asyncio.sleep(3600)
+
+    eng = Engine(_cfg(tmp_path / "b"))
+    eng.human_feedback_timeout_s = 1
+    with pytest.raises(_Reached):
+        await asyncio.wait_for(eng.run(clarify_callback=never), timeout=90)

@@ -64,6 +64,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
 
+from .vscode_bridge import BridgeError
 from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
@@ -1171,16 +1172,32 @@ class Engine:
                                 else:
                                     answers = await clarify_callback(questions)
                                 self._clear_clarify_snapshot()
-                                # An empty dict is read by LangGraph as "no resume value" and re-fires the
-                                # interrupt forever, so an empty answer is wrapped and the node fills defaults.
+                                # LangGraph reads an empty dict as an (empty) map of interrupt ids, so nothing is
+                                # resumed and the pause re-fires forever; an empty answer is wrapped and the node
+                                # fills in the defaults.
                                 payload = Command(resume={"clarify_answers": answers or {}})
                                 continue
                             except asyncio.TimeoutError:
+                                if self.config.pauses.clarify is None:
+                                    # Nobody set "ask": an unattended start must not stall, so answer for itself.
+                                    self._log.warning(
+                                        "[run] nobody answered the setup questions within %ss — using the defaults",
+                                        self.human_feedback_timeout_s,
+                                    )
+                                    self._clear_clarify_snapshot()
+                                    payload = Command(resume={"clarify_answers": {}})
+                                    continue
                                 self._log.warning(
                                     "[run] clarify callback timed out after %ss — "
                                     "falling back to answer-file / pause-exit",
                                     self.human_feedback_timeout_s,
                                 )
+                            except BridgeError as e:
+                                # The person dismissed the VS Code prompt: carry on with the defaults.
+                                self._log.warning("[run] setup questions dismissed (%s) — using the defaults", e)
+                                self._clear_clarify_snapshot()
+                                payload = Command(resume={"clarify_answers": {}})
+                                continue
                         if clarify_answer_path.is_file():
                             try:
                                 answers = json.loads(
@@ -2401,8 +2418,14 @@ class Engine:
         if self.config.title or not isinstance(answers, dict):
             return patch
         title = _clean_title(answers.get("title"))
+        picks = (patch.get("clarify_questions") or {}).get("title", {}).get("suggestions") or []
+        if title.isdigit() and 1 <= int(title) <= len(picks):
+            title = picks[int(title) - 1]
         if title:
-            patch = {**patch, "title": title, "title_confirmed": True}
+            patch = {**patch, "title": title}
+            if self.config.pauses.clarify == "ask" or (
+                    self.config.pauses.clarify is None and self._clarify_answerable):
+                patch["title_confirmed"] = True
             self._log.info("[clarify] quest title: %s", title)
         return patch
 
@@ -2527,6 +2550,8 @@ class Engine:
             self._log.warning("[clarify] LLM returned no parseable questions; using minimal defaults")
             questions = _default_clarify_questions(state["topic"])
         _spell_out_title_options(questions)
+        if self.config.title:
+            questions.pop("title", None)
 
         if mode == "auto":
             agent_answers = {
@@ -15585,6 +15610,8 @@ def _clean_title(value: Any) -> str:
     if not isinstance(value, str):
         return ""
     text = " ".join(value.split()).strip("\"'`“”‘’ ")
+    if text.startswith("<") and text.endswith(">"):
+        return ""
     return text[:120].rstrip()
 
 
@@ -15597,6 +15624,7 @@ def _spell_out_title_options(questions: dict[str, Any]) -> None:
     options = [t for t in (_clean_title(o) for o in (slot.pop("options", None) or [])) if t][:5]
     if options and not _clean_title(slot.get("default")):
         slot["default"] = options[0]
+    slot["suggestions"] = options
     if options:
         slot["question"] = (
             f"{slot.get('question') or 'What should this study be called?'} "
