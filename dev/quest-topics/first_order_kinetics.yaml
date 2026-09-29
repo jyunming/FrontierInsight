@@ -1,0 +1,50 @@
+# General-science test topic (chemistry). A field-neutral simulation with a known answer, so a run can be checked
+# against theory. Run: python launch.py --config dev/quest-topics/first_order_kinetics.yaml
+topic: |
+  TOPIC. How accurately can a reaction rate constant and activation energy be recovered from noisy concentration measurements?
+
+  CONTEXT. A first-order reaction follows c(t) = c0 * exp(-k * t), and the rate constant follows the Arrhenius law k = A * exp(-Ea / (R * T)).
+  SCOPE. Simulate noisy concentration-time data at five temperatures spanning a 10-fold range of k (with known A and Ea), with sampling times from 0 to 3/k at each temperature and additive Gaussian noise of a stated size. Fit k at each temperature by nonlinear least squares, then fit ln k against 1/T (centre 1/T, weight each point by the variance of its ln k) to recover Ea and ln A. Vary the noise level and the number of time points, and report bias, the spread of the estimates, and how often the true value falls inside the reported 95 percent interval. Note that the Ea and ln A estimates are strongly correlated.
+
+  GOALS.
+    - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
+    - Two or three figures that answer the question directly, each with the reference or theory value drawn.
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
+
+title: kinetics-parameter-recovery
+
+result_use: research
+
+# The only thing to set before you run this: which model answers (see docs/PROVIDERS.md).
+provider:
+  name: openai
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  top_k: 5
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
+
+pauses:
+  papers: false
+  review: "off"
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs

@@ -1,0 +1,50 @@
+# General-science test topic (neuroscience). A field-neutral simulation with a known answer, so a run can be checked
+# against theory. Run: python launch.py --config dev/quest-topics/neuron_firing_rate.yaml
+topic: |
+  TOPIC. How does the firing rate of a simple model neuron depend on its input current, and how well does a closed-form expression predict it?
+
+  CONTEXT. A leaky integrate-and-fire neuron obeys tau * dV/dt = -(V - V_rest) + R * I and fires when V reaches a threshold, then resets to V_reset and stays silent for a refractory period t_ref of 2 ms. Use tau = 20 ms, V_rest = V_reset = -70 mV, V_thresh = -50 mV and R = 1 (so the input current I is in mV). For a constant input above threshold, the firing rate is 1 / (t_ref + tau * ln[(R*I + V_rest - V_reset) / (R*I + V_rest - V_thresh)]).
+  SCOPE. Simulate the neuron for constant currents from below to well above threshold with several time steps, measure the firing rate from the mean interval between spikes, and compare with the closed form. Report the error against step size, and repeat with added white noise to show how noise smooths the sharp onset of firing. Add the noise as sigma * sqrt(dt / tau) * (a standard normal draw) to V at each step, with sigma a stated size in mV (for example 3 mV), and draw the Siegert first-passage rate for the same sigma as the theory value: rate = 1 / (t_ref + tau * sqrt(pi) * integral of erfcx(-u) du (erfcx(x) = exp(x**2) * erfc(x), scipy.special.erfcx, which avoids overflow) from (V_reset - mu) / sigma to (V_thresh - mu) / sigma), with mu = V_rest + R*I.
+
+  GOALS.
+    - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
+    - Two or three figures that answer the question directly, each with the reference or theory value drawn.
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
+
+title: integrate-and-fire-rate
+
+result_use: research
+
+# The only thing to set before you run this: which model answers (see docs/PROVIDERS.md).
+provider:
+  name: openai
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  top_k: 5
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
+
+pauses:
+  papers: false
+  review: "off"
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs
