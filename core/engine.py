@@ -5125,7 +5125,7 @@ class Engine:
                              self.__dict__.get("_last_call_id", {}).get("literature_screen"))
         call_id = self.__dict__.get("_last_call_id", {}).get("literature_screen")
         grades = _screen_grades(parsed, len(docs))
-        if grades is None:
+        if not grades:
             self._log.info("[literature] screen reply unreadable; keeping all %d sources", len(docs))
             return _kept_all("unreadable", "the screen's answer could not be read, so every source is kept", call_id)
         # A grade the model gave a user-supplied paper anyway does not count.

@@ -63,7 +63,8 @@ async def test_a_source_kept_only_to_reach_the_minimum_says_so(tmp_path: Path) -
 
 
 @pytest.mark.parametrize("reply,outcome", [
-    ("not json at all", "unreadable"), ('{"verdict": "fine"}', "unreadable"), (RuntimeError("down"), "failed")])
+    ("not json at all", "unreadable"), ('{"verdict": "fine"}', "unreadable"),
+    ('{"grades": []}', "unreadable"), (RuntimeError("down"), "failed")])
 @pytest.mark.asyncio
 async def test_a_screen_that_could_not_grade_is_recorded_as_keeping_everything(tmp_path: Path, reply, outcome) -> None:
     eng = _engine(tmp_path)
