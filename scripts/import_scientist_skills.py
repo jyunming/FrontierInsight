@@ -5,7 +5,7 @@ FI ships no skills — the discovery root is user state
 content, so a fresh clone of this repo starts with an empty skill library
 (see ``core/skills/registry.py``). The skills below were sourced and
 reviewed across two working sessions; this script reproduces the
-*sourcing* step so nobody has to re-derive ten source repos, seventy-odd
+*sourcing* step so nobody has to re-derive eleven source repos, seventy-odd
 folder names, and the command sequence by hand. It does NOT approve
 anything for you — approval binds to a person's judgement
 (``--approve-skill --approve-as WHO``) and is deliberately not a thing a
@@ -47,6 +47,9 @@ Sources (repo -> what it contributes):
     skipped as redundant with the already-imported pymc skill.
   * HughYau/neuroforge-skills — neuroscience: MEG/EEG, spiking network
     simulation, neuroimaging ML, spike-sorting.
+  * e-eight/scicomp-skills — one skill, numerical-verification: how to check
+    a simulation against an independent answer (MIT licence; the
+    repository's LICENSE is copied next to the skill).
 
 What this does, per skill:
   1. Clone (or refresh an already-cloned) source repo into ``--cache-dir``.
@@ -104,6 +107,7 @@ REPOS: dict[str, str] = {
     "sciagent": "https://github.com/jaechang-hits/SciAgent-Skills.git",
     "baygent": "https://github.com/Learning-Bayesian-Statistics/baygent-skills.git",
     "neuroforge": "https://github.com/HughYau/neuroforge-skills.git",
+    "scicomp": "https://github.com/e-eight/scicomp-skills.git",
 }
 
 # name -> (repo key, relative path inside that clone, needs --despite-findings). The pip packages each needs are
@@ -207,6 +211,9 @@ SKILLS: dict[str, tuple[str, str, bool]] = {
     "brian2": ("neuroforge", "skills/brian2", False),
     "nilearn": ("neuroforge", "skills/nilearn", False),
     "spikeinterface": ("neuroforge", "skills/spikeinterface", False),
+    # -- e-eight/scicomp-skills (MIT, Copyright (c) 2026 Soham Pal; one skill, the rest overlap) --
+    # How to check a simulation's answer against an independent one (slow twin, invariants, convergence order).
+    "numerical-verification": ("scicomp", "skills/numerical-verification", False),
 }
 
 # One clone or pull gets this long. A sparse, shallow clone of a large repository takes a few
@@ -398,6 +405,22 @@ def _resolve_source(skill_dir: Path) -> Path:
 
 
 
+# Sources whose licence asks for its text to travel with a copy: the repository's LICENSE is copied next to the
+# skill's SKILL.md (an import carries only the skill's own folder, which does not include it).
+KEEP_LICENSE = {"scicomp"}
+
+
+def _keep_license(repo_dir: Path, name: str) -> None:
+    from core.skills.registry import skills_root
+
+    src = repo_dir / "LICENSE"
+    dest = skills_root() / name / "LICENSE"
+    if not src.is_file():
+        print(f"   {name}: NOTE its source has no LICENSE file at {src}; add the licence text next to the skill by hand.")
+    elif not dest.exists():
+        shutil.copyfile(src, dest)
+
+
 def _refresh_generated_selftest(name: str, pip_pkgs: list[str]) -> None:
     """A skill imported earlier keeps the self-test generated then. If that file is still the generated one, write the
     current one (it may carry a known-value check now); a hand-written test is never touched. The skill's approval
@@ -525,6 +548,8 @@ def main() -> int:
             str(source), name, domains="", pip_requires=list(pip_pkgs),
         )
         imported = rc == 0
+        if imported and repo_key in KEEP_LICENSE:
+            _keep_license(repo_dir, name)
         results.append((name, imported, needs_despite, pip_pkgs))
         print()
 

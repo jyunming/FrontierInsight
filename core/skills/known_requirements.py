@@ -57,6 +57,7 @@ PRESET_PIP_REQUIRES: dict[str, list[str]] = {
     "nonlinear-solvers": [],
     "numerical-integration": [],
     "numerical-stability": [],
+    "numerical-verification": [],
     "time-stepping": [],
     "benchmark-and-mms-planner": [],
     "scikit-image": ["scikit-image"],
