@@ -150,8 +150,8 @@ export function lmDoneMessage<T extends object>(
     const withNote = (keep: number) =>
         thinking.slice(0, keep) + `\n[${total - keep} more characters not sent]`;
     if (size(withNote(0)) > maxBytes) {
-        // The answer leaves no room for any of it: say that the reasoning existed rather than send nothing. The marker
-        // is always a little shorter than the note, so it fits where the note just did not.
+        // The marker is only 3 bytes shorter than the note, so it helps only when the answer misses the limit by a
+        // hair; a longer answer still sends no reasoning at all.
         const marker = `[${total} chars not sent: no room]`;
         return size(marker) <= maxBytes ? { ...base, thinking: marker } : base;
     }
