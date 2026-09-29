@@ -749,7 +749,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     problems: list[str] = []
     timed_out = False
     # The simulation must not be able to tell it is being checked: a case runs with the environment a trial of the main run
-    # has (``case_env``), never with the oracle-mode variable ``FI_ORACLE`` set for the script's own oracle().
+    # has (``case_env``; the engine gives it exactly that), never with the oracle-mode variable ``FI_ORACLE`` set for the script's own oracle().
     cenv = case_env if case_env is not None else {k: v for k, v in (env or {}).items() if k != "FI_ORACLE"}
     for oracle in oracles:
         own = _oracle.case_of(oracle)
@@ -776,7 +776,7 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
             timed_out = timed_out or "ran out of time" in why
         else:
             checks += [{"name": k, "value": v, "measured_by": "script"} for k, v in values.items()
-                       if not any(c["name"].lower() == str(k).strip().lower() for c in checks)]
+                       if not any(str(o["name"]).strip().lower() == str(k).strip().lower() for o in oracles if _oracle.case_of(o))]
     return checks, problems, timed_out
 
 

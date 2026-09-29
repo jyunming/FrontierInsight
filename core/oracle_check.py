@@ -168,7 +168,7 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
 
 def script_measured(judged_list: list[dict[str, Any]]) -> list[str]:
     """The names of the judged oracles whose value the script reported (not one the engine measured by running the simulation)."""
-    return [str(j["name"]) for j in judged_list if j.get("measured_by") != "engine"]
+    return [str(j["name"]) for j in judged_list if j.get("measured_by") != "engine" and j.get("value") is not None]
 
 
 def last_judged(record: Any) -> list[dict[str, Any]]:

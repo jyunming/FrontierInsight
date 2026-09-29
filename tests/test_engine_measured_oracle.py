@@ -153,6 +153,11 @@ def test_a_simulation_that_answers_differently_when_it_sees_the_oracle_variable_
     assert len(found) == 1 and "failed" in found[0], found
 
 
+def test_a_failed_case_is_not_filled_in_by_the_scripts_own_value_for_the_same_name(tmp_path: Path) -> None:
+    checks, problems, _ = _measure(tmp_path, CLOSED_FORM_ORACLE, [{**TIGHT, "case": {"wrong_key": 1}}])
+    assert problems and checks == []
+
+
 def test_a_case_that_times_out_does_not_hide_the_failure_of_another_oracle(tmp_path: Path) -> None:
     slow = EULER_NAMED_RK4 + """
 import time

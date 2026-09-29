@@ -6782,7 +6782,6 @@ class Engine:
         # a real seed's raw dir — keeps this pre-check honest without the prompt needing to special-case it.
         oracle_raw_dir = self._raw_root() / "oracle_check"
         oracle_raw_dir.mkdir(parents=True, exist_ok=True)
-        (self._raw_root() / "case_check").mkdir(parents=True, exist_ok=True)
         # What the repairs said about the checks themselves (``oracle_check.proposals``), latest per oracle. Shown to the
         # person at the stop; never applied here.
         self._oracle_proposals: dict[str, dict[str, Any]] = {}
@@ -6818,10 +6817,7 @@ class Engine:
                         self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(), oracles,
                         timeout_s=timeout, env=env,
                         thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                        case_env={
-                            **_replicate_env(exec_env, 0, stride),
-                            _split_run.RAW_DIR_ENV: _split_run.env_value(self._raw_root() / "case_check", self.quest_root),
-                        },
+                        case_env=dict(_replicate_env(exec_env, 0, stride)),
                     )
                 except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
                     checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
@@ -6833,6 +6829,8 @@ class Engine:
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
                     )
                     reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
+                    if isinstance(reported, dict):
+                        reported.pop("engine_measured", None)  # only the engine's own measurement carries this mark
                     # What could not be installed comes first: the repair then fixes the import, not a symptom.
                     stderr_tail = getattr(self, "_packages_note", "") + (ran.stderr or "")[-2000:]
                 except Exception as e:  # noqa: BLE001 -- an oracle run that cannot start is a problem to report
