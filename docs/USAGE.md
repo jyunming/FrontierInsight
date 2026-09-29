@@ -672,7 +672,8 @@ slides.md / slides.pptx / slides.pdf  ← if `slides` is in output.kinds
 poster.tex / poster.pdf               ← if `poster`
 talk.md                               ← if `speech`
 figures/*.png                         ← every plot the experiment produced
-code/experiment.py                    ← the exact code that ran
+code/                                 ← the code that ran, runnable on its own: experiment.py (+ simulate.py), run.py, requirements.txt, README.md, CHANGELOG.md (+ its own git history)
+run_output/                           ← only if you run `python code/run.py`: its own results, apart from the quest's
 config.yaml                           ← copy of the YAML for /resume
 .fi/run.log                           ← full run log
 .fi/state.sqlite                      ← LangGraph checkpoint

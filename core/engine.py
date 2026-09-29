@@ -68,6 +68,7 @@ from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
+from . import code_project as _code_project
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
@@ -5881,7 +5882,61 @@ class Engine:
                 code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         if extracted:
             code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps, extended=bool(extend))
+        if extend:
+            note = "added what a refine asked for: " + "; ".join(extend)[:200]
+        elif int(state.get("iteration", 0) or 0) > 0:
+            note = f"revised after review (round {int(state.get('iteration', 0) or 0)})"
+        else:
+            note = "code written"
+        await self._refresh_code_project(state, deps, note)
         return {**_FRESH_SCRIPT, "code": code, "deps": deps, "refine_extend": [], "extend_missed": []}
+
+    async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "") -> None:
+        """Keep ``code/`` a project that runs on its own (README, requirements, run.py) and, with a ``note``, record
+        what changed in its history and CHANGELOG.md; never stops a quest."""
+        try:
+            idea = state.get("chosen_idea") if isinstance(state.get("chosen_idea"), dict) else {}
+            question = str(idea.get("question") or idea.get("title") or state.get("topic") or "")[:500]
+            # git and the file scan block: keep them off the event loop so a --fleet's other quests keep going.
+            await asyncio.to_thread(
+                _code_project.refresh,
+                self.quest_root, deps=deps, protocol=self._protocol_block(state),
+                title=str(state.get("title") or ""), question=question, split=self._split_on(state),
+                log=self._log,
+            )
+            if note:
+                await asyncio.to_thread(_code_project.record_change, self.quest_root, note, log=self._log)
+        except Exception as exc:  # noqa: BLE001 -- these files are a convenience, not part of the result
+            self._log.warning("[code] could not update the runnable project in code/: %s", exc)
+
+    def _ask_about_edited_project_files(self) -> None:
+        """A file of ``code/`` that a person edited and FI would now change: ask once before touching it (a pause when
+        the quest is interactive), otherwise keep it and say so. FI never replaces it either way."""
+        try:
+            names = _code_project.unasked_conflicts(self.quest_root)
+            if not names:
+                return
+            _code_project.mark_asked(self.quest_root, names)
+        except Exception as exc:  # noqa: BLE001 -- a convenience, never a reason to stop
+            self._log.warning("[code] could not check your edits to code/: %s", exc)
+            return
+        listed = ", ".join(f"code/{n}" for n in names)
+        hint = ("FI kept your version. To let FI update it, delete or rename the file; it writes its own on the next "
+                "step.")
+        if self.config.pauses.review != "ask":
+            self._log.warning("[code] you edited %s and FI has a newer version. %s", listed, hint)
+            return
+        self._pause_for_human(
+            kind="code_project",
+            interaction="supply",
+            headline="you edited files that FI would update",
+            steps=[
+                f"You edited {listed}, and FI has a newer version of it.",
+                "To keep your version, just resume: FI leaves it as it is.",
+                "To let FI update it, delete or rename the file, then resume: FI writes its own.",
+            ],
+            payload={"code_project": True, "quest_id": self.quest_id, "files": names},
+        )
 
     # ---- the protocol gate ---------------------------------------------------
 
@@ -7355,6 +7410,13 @@ class Engine:
         deps = [d for d in install_list if d not in not_installed]
 
         py = self.executor.python_path(self.quest_root)
+        pinned = deps
+        if self.config.execution.sandbox == "venv":
+            try:
+                pinned = await asyncio.to_thread(_code_project.pin, py, deps)
+            except Exception as exc:  # noqa: BLE001 -- versions in requirements.txt are a convenience
+                self._log.warning("[code] could not read the installed versions for requirements.txt: %s", exc)
+        _code_project.record_installed(self.quest_root, pinned)
         code_path = self.quest_root / "code" / "experiment.py"
         # Two scripts (execution.split_analysis): every run of ``experiment.py`` below goes
         # through ``runner``, which runs ``simulate.py`` first unless the raw files it wrote
@@ -8934,6 +8996,11 @@ class Engine:
 
     async def _node_analyze(self, state: QuestState) -> QuestState:
         self._log.info("[analyze] interpreting results")
+        await self._refresh_code_project(
+            state, list(state.get("deps") or []),
+            "changes made after it was written (a crash fix, or your own edits)",
+        )
+        self._ask_about_edited_project_files()
         exec_result = state.get("exec_result") or {}
         # Authoritative degenerate-run detection against the FINAL result
         # the analysis will describe (the execute-repair loop may have
@@ -9738,7 +9805,28 @@ class Engine:
             )
         return markdown
 
+    async def _check_code_project(self) -> None:
+        """Run ``code/`` as a person would (clean environment, only requirements.txt) once per version of the code and
+        say the outcome in plain words. A failure is a warning only: it never changes the result or stops the quest."""
+        if self.config.execution.sandbox != "venv" or self.config.execution.background_jobs:
+            return
+        try:
+            digest = json.dumps(_attempts.script_hashes(self.quest_root), sort_keys=True)
+            marker = self.fi_dir / "code_project_checked.json"
+            if marker.is_file() and marker.read_text(encoding="utf-8") == digest:
+                return
+            self._progress("Trying code/ in a clean environment")
+            result = await asyncio.to_thread(
+                _code_project.verify, self.quest_root,
+                run_timeout_s=float(self.config.execution.timeout_s),
+            )
+            marker.write_text(digest, encoding="utf-8")
+            (self._log.info if result.get("ok") else self._log.warning)("[code] %s", result.get("says"))
+        except Exception as exc:  # noqa: BLE001 -- a check of a convenience, never a reason to stop
+            self._log.warning("[code] could not try code/ in a clean environment: %s", exc)
+
     async def _node_write(self, state: QuestState) -> QuestState:
+        await self._check_code_project()
         persona_block = self._resolve_write_persona(state)
         self._log.info(
             "[write] authoring paper.md (persona=%s)",

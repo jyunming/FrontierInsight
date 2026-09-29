@@ -467,4 +467,10 @@ def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
     # The folders every step expects to find are put back empty.
     for folder in ("figures", "code", "paper"):
         (quest_root / folder).mkdir(parents=True, exist_ok=True)
+    history = dest / "code" / ".git"
+    if history.is_dir() and not (quest_root / "code" / ".git").exists():
+        try:  # code/'s change history carries on through a re-run of the code step
+            shutil.copytree(history, quest_root / "code" / ".git")
+        except OSError:
+            pass
     return (dest if moved else None), moved

@@ -221,6 +221,26 @@ def _folder_manifest(folder: Path, limit: int = _INPUT_FILES_LIMIT, cache: dict 
     return {"sha256": h.hexdigest(), "files": len(files), "bytes": total, "complete": complete}
 
 
+def _generated_project_files(quest_root: Path) -> set[str]:
+    """The README, requirements and run.py FI wrote into ``code/`` (core/code_project.py) and a person has not
+    edited: they describe the code, they are not the code an attempt ran."""
+    try:
+        record = json.loads((quest_root / ".fi" / "code_project.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(record, dict):
+        return set()
+    out: set[str] = set()
+    for name in ("README.md", "requirements.txt", "run.py"):
+        try:
+            text = (quest_root / "code" / name).read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if record.get(name) == hashlib.sha256(text.encode("utf-8")).hexdigest():
+            out.add(name)
+    return out
+
+
 def script_hashes(quest_root: Path, cache: dict | None = None) -> dict[str, str]:
     """The hash of every file in the quest's ``code/`` folder, subfolders included (the experiment, the simulation, a
     cluster submit script, whatever they import or read from there), by relative path, each read whole: the code an
@@ -229,8 +249,11 @@ def script_hashes(quest_root: Path, cache: dict | None = None) -> dict[str, str]
     incomplete."""
     code = quest_root / "code"
     out: dict[str, str] = {}
+    generated = _generated_project_files(quest_root)
     if code.is_dir():
-        for path in sorted(p for p in code.rglob("*") if p.is_file() and "__pycache__" not in p.parts):
+        for path in sorted(p for p in code.rglob("*") if p.is_file() and "__pycache__" not in p.parts and ".git" not in p.parts):
+            if path.parent == code and (path.name in generated or path.name == "CHANGELOG.md"):
+                continue
             digest, _ = _digest(path, cache, whole=True)
             if digest:
                 out[path.relative_to(code).as_posix()] = digest

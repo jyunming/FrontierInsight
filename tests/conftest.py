@@ -70,6 +70,18 @@ def pytest_terminal_summary(terminalreporter):
 
 
 @pytest.fixture(autouse=True)
+def _no_clean_venv_check(request, monkeypatch):
+    """The engine tries code/ in a fresh venv with a real pip install before it writes; no engine test does that
+    (slow, needs the network). tests/test_code_project.py exercises the real check itself."""
+    if request.module.__name__.endswith("test_code_project"):
+        return
+    import core.code_project as _cp
+
+    monkeypatch.setattr(_cp, "verify", lambda *a, **k: {"ok": True, "says": "stub"})
+
+
+
+@pytest.fixture(autouse=True)
 def _no_embed_model_download(monkeypatch):
     """Keep the test suite hermetic: never let passage ranking download the
     sentence-transformer model (CI has no cache, and a download is slow +
