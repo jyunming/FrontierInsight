@@ -5681,7 +5681,7 @@ class Engine:
                 self._log.info("[implement] wrote %s (%d bytes)", simulate_path, len(simulate_code))
             else:
                 self._log.info("[implement] %s is unchanged; its raw files stay in use", simulate_path.name)
-        elif simulate_path.is_file():
+        elif simulate_path.is_file() and not self._split_on(state):
             simulate_path.unlink()  # no leftover simulation from an earlier pass beside a one-script quest
         submit_path = self.quest_root / "code" / _trial_runner.SUBMIT_NAME
         if submit_code.strip():
@@ -7358,6 +7358,7 @@ class Engine:
         # counter`` means three runs of almost exactly the same trials.
         stride = max(1, int(self.config.engine.replicate_seed_stride))
         primary_env = _replicate_env(exec_env, 0, stride)
+        run_started = time.time()
         result: ExecutionResult = await self._await_with_heartbeat(
             runner.execute(
                 [str(py), str(code_path)],
@@ -7393,6 +7394,7 @@ class Engine:
                 timeout_s=self.config.execution.timeout_s,
                 env=primary_env,
             )
+        self._save_run_data(run_started, split)
         # Which of the two scripts failed, for the repair; read now, before a replicate
         # runs through the same runner.
         failed_script = runner.failed_script if split else None
@@ -12779,6 +12781,43 @@ class Engine:
             return ""
         return "" if state is not None and self._split_on(state) else _JOB_PROTOCOL
 
+    _RUN_DATA_SUFFIXES = frozenset({
+        ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",
+    })
+    _RUN_DATA_MAX_BYTES = 200 * 1024 * 1024
+
+    def _save_run_data(self, since: float, split: bool) -> list[str]:
+        """Copy what the experiment produced into ``data/results/``, so the numbers behind a paper are in ``data/`` too.
+
+        The scripts run from the quest folder, so a table a script writes lands beside ``plan.md``; a two-script quest's
+        raw files are in ``raw/``. Both are copied (the originals stay where the scripts and FI's records expect them),
+        raw files only while they are small enough not to double a large quest's disk use. Never raises."""
+        saved: list[str] = []
+        dest = self.quest_root / "data" / "results"
+        try:
+            for path in sorted(self.quest_root.iterdir()):
+                if (
+                    path.is_file() and path.suffix.lower() in self._RUN_DATA_SUFFIXES
+                    and path.stat().st_mtime >= since - 1
+                ):
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest / path.name)
+                    saved.append(path.name)
+            if split:
+                raw = _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
+                if raw.is_dir():
+                    files = [p for p in raw.rglob("*") if p.is_file()]
+                    if sum(p.stat().st_size for p in files) <= self._RUN_DATA_MAX_BYTES:
+                        shutil.copytree(raw, dest / "raw", dirs_exist_ok=True)
+                        saved.append("raw/")
+                    else:
+                        self._log.info("[execute] the raw files in %s are large; they stay there and are not copied to data/results/", raw)
+        except OSError as exc:
+            self._log.warning("[execute] could not copy the run's data into data/results/: %s", exc)
+        if saved:
+            self._log.info("[execute] the run's data is kept in %s: %s", dest, ", ".join(saved))
+        return saved
+
     def _split_on(self, state: QuestState) -> bool:
         """Whether this quest keeps its simulation and its analysis in two scripts (``execution.split_analysis``).
 
@@ -12794,6 +12833,10 @@ class Engine:
             or self.config.engine.analyze_local_first
         ):
             return False
+        # A quest that already has its simulation keeps it: a later design that reads less stochastic must not turn
+        # the quest into a one-script one, which deleted simulate.py.
+        if (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
+            return True
         # A background job (a cluster) with a stochastic design runs FI's trials as a job array (core/trial_runner.py):
         # two scripts and submit.py. A deterministic one stays the one-script job it was.
         return _split_run.design_is_stochastic(state.get("design") or {})
