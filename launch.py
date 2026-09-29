@@ -660,9 +660,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const=_LIST_STEPS,
         default="",
-        help="With --resume or --rerun: the step to run again from — skills, code, run, analysis, writing or review; "
-             "what that step and the later ones made is first moved to .fi/previous/<time>/. Given with no step, "
-             "lists the steps this quest reached, which are the ones it can be run again from. With --teach-skill: "
+        help="With --resume or --rerun: the step to run again from (give none to list them); "
+             "what that step and the later ones made is first moved to .fi/previous/<time>/. ideas, literature, "
+             "plan and design replace the frozen protocol and need --approve-as <you>. With --teach-skill: "
              "the importable module the skill wraps, e.g. `ambit`.",
     )
     mode.add_argument(
@@ -1943,6 +1943,7 @@ async def run_one(
     auto_accept_on_pass: bool | None = None,
     reopen: bool = False,
     from_step: str | None = None,
+    approved_by: str | None = None,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -1994,8 +1995,9 @@ async def run_one(
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
         human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
+        approved_by=approved_by,
     )
-    print(f"[FI] {art.quest_id} -> {art.quest_root}")
+    print(f"[FI] {art.quest_id} ->{art.quest_root}")
     # The to-do card (core/todo.py): why it stopped, what to decide, the recommendation and the alternatives, or what
     # a finished quest left worth a look. NEXT_STEP.md has the same card with the commands.
     from core import todo as _todo
@@ -2397,6 +2399,7 @@ async def _maybe_profiled(
     human_feedback_callback: object = None,
     reopen: bool = False,
     from_step: str | None = None,
+    approved_by: str | None = None,
 ) -> QuestArtifacts:
     if not profile:
         return await engine.run(
@@ -2404,6 +2407,7 @@ async def _maybe_profiled(
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
+            approved_by=approved_by,
         )
     try:
         from viztracer import VizTracer  # type: ignore[import-not-found]
@@ -2414,6 +2418,7 @@ async def _maybe_profiled(
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
+            approved_by=approved_by,
         )
     trace_path = engine.fi_dir / "profile.json"
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
@@ -2423,6 +2428,7 @@ async def _maybe_profiled(
             human_feedback_callback=human_feedback_callback,
             reopen=reopen,
             from_step=from_step,
+            approved_by=approved_by,
         )
     print(f"[FI] {art.quest_id} profile -> {trace_path}")
     return art
@@ -2595,6 +2601,11 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"[FI] --from {args.teach_from!r} is not a step this quest can be rerun from; choose one of: "
                   f"{_rerun_from.choices()}; `--from` with no step lists the ones this quest reached. "
                   "(To change the plan, use --revise-plan.)", file=sys.stderr)
+            return 2
+        if _rerun_from.needs_approval(_from_step) and not (args.approve_as or "").strip():
+            print(f"[FI] --from {_from_step} replaces this quest's plan and frozen protocol (the old ones are kept in "
+                  f".fi/previous/), so it needs your name: add --approve-as <you>. Nothing was changed.",
+                  file=sys.stderr)
             return 2
     # Ensure Axon sidecar is up before anything that touches the
     # knowledge layer. Idempotent: returns fast if already running.
@@ -2926,6 +2937,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 auto_accept_on_pass=args.auto_accept_on_pass,
                 reopen=_reopen,
                 from_step=_from_step,
+                approved_by=args.approve_as or None,
             )
             return 0
 

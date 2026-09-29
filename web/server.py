@@ -1129,7 +1129,9 @@ def make_app(
             _close_quest_logger(quest_id)
         return JSONResponse({
             "quest_id": quest_id,
-            "steps": [{"step": step, "redoes": _rerun_from.REDOES[step]} for step in steps],
+            "steps": [{"step": s["name"], "redoes": s["sentence"], "group": s["group"],
+                       "needs_approval": s["needs_approval"], "outputs": s["outputs"]}
+                      for s in steps if s["reached"]],
         })
 
     @app.post("/api/quests/{quest_id}/resume")
@@ -1169,6 +1171,9 @@ def make_app(
         if from_step and step is None:
             raise HTTPException(400, f"{from_step!r} is not a step a quest can be rerun from; choose one of: "
                                      f"{_rerun_from.choices()}")
+        if step and _rerun_from.needs_approval(step):
+            raise HTTPException(400, f"running again from {step} replaces the plan and the frozen protocol, which needs "
+                                     f"a named approval: use the command line with --from {step} --approve-as <you>")
         resume_flag = "--rerun" if rerun else "--resume"
         try:
             launched = app.state.launcher.launch_command(

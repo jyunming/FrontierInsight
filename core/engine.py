@@ -651,8 +651,12 @@ class Engine:
         human_feedback_callback: "HumanFeedbackCallback | None" = None,
         reopen: bool = False,
         from_step: str | None = None,
+        approved_by: str | None = None,
     ) -> QuestArtifacts:
         """Run the quest to terminal state.
+
+        ``from_step`` (see ``core/rerun_from.py``) runs it again from that step. The steps up to the design replace the
+        frozen protocol, so they need ``approved_by`` (``--approve-as <you>``); without it nothing is changed.
 
         ``clarify_callback`` is called only when ``engine.clarify_mode``
         is ``"interactive"`` AND the clarify node fires an
@@ -804,13 +808,31 @@ class Engine:
                                   f"`python launch.py --resume {self.quest_id}`; "
                                   f"`--resume {self.quest_id} --from` with no step lists the steps it did reach.")
                             return self._collect_artifacts({})
+                        replaced_sha = ""
+                        if _rerun_from.needs_approval(from_step):
+                            if not (approved_by or "").strip():
+                                self._log.warning("[run] --from %s replaces the frozen protocol and needs --approve-as", from_step)
+                                print(f"[FI] running quest {self.quest_id} again from the {from_step} step replaces its plan "
+                                      f"and its frozen protocol (the old ones are kept in .fi/previous/). Nothing was "
+                                      f"changed. To go ahead: --resume {self.quest_id} --from {from_step} "
+                                      f"--approve-as <you>")
+                                return self._collect_artifacts({})
+                            frozen_file = _frozen.frozen_path(self.quest_root)
+                            if frozen_file.is_file():
+                                replaced_sha = hashlib.sha256(frozen_file.read_bytes()).hexdigest()
+                            fork_config = await self._keep_design_history(graph, fork_config, from_step)
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
                         forget_papers_asked(self.fi_dir, declined=False)
                         if _rerun_from.picks_skills(from_step):
                             fork_config = await self._repick_skills(graph, fork_config)
                         where, moved = _rerun_from.back_up(self.quest_root, from_step)
-                        self._audit("rerun_from", step=from_step, moved=moved)
+                        extra_audit: dict[str, Any] = {}
+                        if _rerun_from.needs_approval(from_step):
+                            extra_audit = {"approved_by": approved_by, "replaced_protocol_sha256": replaced_sha}
+                            print(f"[FI] the old plan and frozen protocol are replaced; they are kept in "
+                                  f"{where.relative_to(self.quest_root).as_posix() if where else '.fi/previous/'}")
+                        self._audit("rerun_from", step=from_step, moved=moved, **extra_audit)
                         self._log.info("[run] rerunning from the %s step; the earlier outputs are in %s (%s)",
                                        from_step, where or "(nothing to move)", ", ".join(moved) or "none")
                         self._progress(f"Rerunning from the {from_step} step; the earlier outputs are kept in "
@@ -1773,9 +1795,30 @@ class Engine:
 
         return wrapper
 
-    async def rerun_steps(self) -> list[str]:
-        """The steps this quest reached, which ``--from`` can run it again from (read from its checkpoint history; no
-        model call, nothing written)."""
+    async def _keep_design_history(self, graph: Any, fork_config: dict[str, Any], step: str) -> dict[str, Any]:
+        """A restart at or before the design goes back to a checkpoint from before the design history existed. The
+        history on disk (``needs/DESIGN_HISTORY.json``) is put back into the state first, so the new design is recorded
+        after the old ones as a change made after results were seen, never as a fresh start."""
+        path = self.quest_root / "needs" / "DESIGN_HISTORY.json"
+        try:
+            on_disk = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+        except (OSError, ValueError):
+            on_disk = []
+        snapshot = await graph.aget_state(fork_config)
+        in_state = list((snapshot.values or {}).get("design_history") or [])
+        if not isinstance(on_disk, list) or len(on_disk) <= len(in_state):
+            return fork_config
+        return await graph.aupdate_state(fork_config, {"design_history": on_disk},
+                                         as_node=_rerun_from.LEADS_INTO[step])
+
+    async def rerun_steps(self) -> list[dict[str, Any]]:
+        """Every step ``--from`` can run the quest again from, in graph order: name, block, plain sentence, whether it
+        needs approval, whether this quest reached it, and what would be moved aside. Read from the checkpoint history;
+        no model call, nothing written."""
+        reached = await self._reached_steps()
+        return [_rerun_from.step_info(step, reached=step in reached) for step in _rerun_from.STEPS]
+
+    async def _reached_steps(self) -> list[str]:
         import aiosqlite
 
         path = self.fi_dir / "state.sqlite"
