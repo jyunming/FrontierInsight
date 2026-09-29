@@ -553,7 +553,10 @@ class PausesConfig(BaseModel):
 
     # ANSWER — pre-flight clarifying questions before the research starts.
     #   "off"  skip · "auto" agent self-answers · "ask" pause for the human.
-    clarify: ClarifyPause = "off"
+    # Left unset, the quest talks the topic over with you first when someone can answer (the terminal
+    # ``--interactive``, the web page, VS Code) and lets the agent answer for itself when nobody can (a
+    # headless run or a fleet). Set it to ``off`` to skip the discussion.
+    clarify: ClarifyPause | None = None
     # SUPPLY — pause when a relevant paper came back abstract-only (paywalled)
     # so the user can download it and drop the PDF into inputs/papers/.
     # On by default: a relevant paywalled paper the open-access cascade could

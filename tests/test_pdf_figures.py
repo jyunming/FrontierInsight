@@ -310,7 +310,7 @@ async def test_a_stop_to_change_the_figure_model_exits_cleanly_through_the_real_
         engine=EngineConfig(max_iterations=1, review_loop=False, execute_replicates=1, pilot_run=False),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
-        pauses=PausesConfig(review="off"),
+        pauses=PausesConfig(review="off", clarify="off"),
     )
     asked: list = []
 

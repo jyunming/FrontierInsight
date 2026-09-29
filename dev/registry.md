@@ -40,6 +40,9 @@ same PR that adds, splits or renames one.
 - `core/attempt_memory.py` — shadow recommendations from past failed attempts: `Index` (failed attempts under the output root), `recommend` (BLOCK / VERIFY / INFO / IGNORE for a decision's context), `record` (`.fi/shadow_recommendations.jsonl`, written by `Engine._shadow` at plan / implement / execute / repair), `score` / `report_lines` (`fi tools shadow-report`); per-decision `KEYS`, `failure_signature` (also on every run, stop and crashed-quest record), one locked `index_for` per output root, lineage by `stamp` / `take` / `settle_without_record` (`parent_shadow_ids`; every plan of a quest is kept until it ends); the index is process-shared derived state alongside `ProxySupervisor` (read-only, locked, newest 500 quests, rebuildable); the worker is a daemon thread; `Engine._shadow` / `_shadow_close` (deadline, discard when late, closed before the seal); `engine.attempt_memory: shadow | off`; recorded only, read by nothing that decides.
 - `core/plan_settings.py` — the settings a quest was approved with (`.fi/approved_plan.json`), checked at every start
   (`Engine._stop_for_changed_settings`); `interview_update.approve_settings` records a change `--update` approves.
+- `core/engine.py` `_node_clarify` — the first discussion of a quest (what you want to see, the title, scope). `pauses.clarify`
+  unset means ask when a callback or staged answer exists, else auto (`Engine._clarify_answerable`); the title chosen there
+  is `state["title"]` (`title_confirmed`), which the writer is told to use.
 - `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; a question asked only for
   some earlier answer carries `ask_if`, checked by `question_applies` (the web page and VS Code mirror it; today only
   `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry.

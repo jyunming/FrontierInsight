@@ -1164,7 +1164,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--interactive",
         action="store_true",
-        help="When `engine.clarify_mode: interactive` is set in the YAML, "
+        help="Talk the topic over first: "
              "pause at the clarify node and read answers from stdin. "
              "Single-quest mode only — fleet runs are headless.",
     )
@@ -1976,6 +1976,7 @@ async def run_one(
     reopen: bool = False,
     from_step: str | None = None,
     approved_by: str | None = None,
+    headless: bool = False,
 ) -> dict[str, object]:
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
@@ -2013,7 +2014,7 @@ async def run_one(
     #   otherwise              → None; clarify_mode=interactive crashes
     #                            (the engine catches this and produces
     #                            a clear RuntimeError).
-    callback = _pick_clarify_callback(cfg, engine, interactive)
+    callback = None if headless else _pick_clarify_callback(cfg, engine, interactive)
     # Wire the human-feedback gate callback when the gate is on. CLI
     # ``--interactive`` gets terminal prompts; ``vscode_extension``
     # provider gets a bridge round-trip. Headless runs (no flag, not
@@ -2568,7 +2569,7 @@ async def run_fleet(
                 _status_line(engine.quest_id, "start")
                 summary = await run_one(
                     cfg, supervisor=supervisor, profile=profile, engine=engine,
-                    source_yaml_path=yaml_path,
+                    source_yaml_path=yaml_path, headless=True,
                 )
                 state["running"] -= 1
                 state["done"] += 1
