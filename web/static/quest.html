@@ -319,7 +319,7 @@
   <!-- Add files to this quest (any quest) — papers / data the next run picks up. -->
   <section id="add-files-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
     <h3 class="font-label-sm text-label-sm text-outline uppercase">Add papers / data to this quest</h3>
-    <p class="text-on-surface-variant text-body-sm">Drop reference papers (.pdf / .md / .txt) or datasets (.csv / .json / .tsv / …). They're saved into the quest's <span class="text-on-surface">inputs/</span> and picked up on the next run — drop files, then <span class="text-on-surface">Resume</span> (or, at the review step, <span class="text-on-surface">Refine</span>).</p>
+    <p class="text-on-surface-variant text-body-sm">Drop reference papers (.pdf / .md / .txt) or datasets (.csv / .json / .tsv / …). They're saved into the quest's <span class="text-on-surface">inputs/</span> and picked up on the next run — drop files, then <span class="text-on-surface">Resume</span> (or, at the review step, <span class="text-on-surface">Refine</span>). To search with your own queries instead of the ones FI derives, do not drop the file here (a .txt dropped here is read as a paper): put <span class="text-on-surface">search_queries.txt</span> straight into the quest folder's <span class="text-on-surface">inputs/</span>, one query per line (the first three are used).</p>
     <div class="flex flex-wrap items-center gap-3">
       <input id="add-files-input" type="file" multiple class="text-on-surface text-body-sm"/>
       <button id="add-files-btn" onclick="addFilesToQuest()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Add to quest</button>

@@ -145,7 +145,7 @@ RESEARCH = {**ON, "rigor_profile": "research"}
 def _seal(log: audit_log.AuditLog, trace: Path, **over) -> None:
     events = audit_log.read(trace)
     root = trace.parent.parent
-    for rel in evidence.SEALED_LEDGERS:  # as a finishing quest does: an unused record is an empty file
+    for rel in (*evidence.SEALED_LEDGERS, evidence.SEALED_QUERIES):  # as a finishing quest does: an unused record is an empty file
         (root / rel).touch()
     if not (root / "needs" / "EVIDENCE.json").is_file():  # a finishing quest writes its evidence before the seal
         (root / "needs" / "EVIDENCE.json").write_text("{}", encoding="utf-8")

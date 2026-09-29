@@ -85,7 +85,7 @@ def _finished(tmp_path: Path, **seal_over) -> tuple[Path, dict]:
     log.append("node_completed", node="review")
     record = evidence.assess(root, _state(), settings={**RESEARCH, "sealing": True})
     (root / "needs" / "EVIDENCE.json").write_text(json.dumps(record), encoding="utf-8")
-    for rel in evidence.SEALED_LEDGERS:  # as a finishing quest does: an unused record is an empty file
+    for rel in (*evidence.SEALED_LEDGERS, evidence.SEALED_QUERIES):  # as a finishing quest does: an unused record is an empty file
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).touch()
     files = {rel: evidence._file_sha256(root / rel) for rel in evidence.SEALED_FILES}

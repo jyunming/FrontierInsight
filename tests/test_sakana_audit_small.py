@@ -46,7 +46,7 @@ def test_under_research_a_missing_or_broken_trace_is_a_gap(tmp_path: Path) -> No
     log.append("quest_started")
     log.append("node_completed", node="write")
     log.append("node_completed", node="review")
-    for rel in evidence.SEALED_LEDGERS:  # as a finishing quest does: an unused record is an empty file
+    for rel in (*evidence.SEALED_LEDGERS, evidence.SEALED_QUERIES):  # as a finishing quest does: an unused record is an empty file
         (root / rel).touch()
     (root / "needs" / "EVIDENCE.json").write_text("{}", encoding="utf-8")  # written before the seal
     log.append("quest_finalized", events_before=3, write_errors=0, nodes_completed=["review", "write"],
