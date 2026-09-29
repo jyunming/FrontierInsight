@@ -1,8 +1,14 @@
 """Property tests for the audit trace's hash chain and the quest seal.
 
 The example tests pin the cases someone thought of; these generate the trace and the edits, so a tamper the authors did
-not think of still has to be caught. Kept small (few examples, no deadline) so they run in the fast tier; without
-``hypothesis`` installed they skip.
+not think of still has to be caught. Each test is kept under about a second (few examples, no deadline, derandomized so a
+CI failure reproduces) so they run in the fast tier; ``pytest --durations`` shows the actual time per test.
+
+``hypothesis`` is a dev dependency: if it is missing these tests fail on import, they do not skip.
+
+Not covered here: ``cost.jsonl``, ``trial_runner`` and ``web/server.py`` read their files with ``str.splitlines()``. That is
+safe today because they write with ``ensure_ascii=True`` (U+0085/U+2028/U+2029 are escaped), so a record never holds a raw
+line separator; do not switch those writers to ``ensure_ascii=False`` without changing the readers.
 """
 from __future__ import annotations
 
@@ -12,19 +18,19 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
-hypothesis = pytest.importorskip("hypothesis")
-from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
+from core import attempt_records, audit_log, evidence
 
-from core import audit_log, evidence  # noqa: E402
+FAST = settings(max_examples=15, deadline=None, derandomize=True,
+                suppress_health_check=[HealthCheck.too_slow, HealthCheck.filter_too_much])
 
-FAST = settings(max_examples=40, deadline=None, suppress_health_check=list(HealthCheck))
-
-# U+0085, U+2028 and U+2029 are kept out of the generated text: the tamper tests below cut the file into lines with
-# str.splitlines(), which would split on them. The readers themselves split only on
-# a newline, and the tests named *line_separator* cover those characters directly.
-_text = st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=0x2FFF, blacklist_categories=("Cs",),
-                                       blacklist_characters="\x85\u2028\u2029"), max_size=20)
+# Any Unicode (CJK, emoji, control characters) plus the three characters str.splitlines() would split on and the
+# readers must not. The tests cut the file with split("\n"), like the readers do.
+_text = st.text(alphabet=st.one_of(st.characters(blacklist_categories=("Cs",)),
+                                   st.sampled_from(["\x85", "\u2028", "\u2029", "\x00", "\x1f", "\r"])), max_size=20)
+# Each seal example writes a dozen files, so it gets fewer examples to stay under a second.
+SEAL = settings(FAST, max_examples=6)
 _fields = st.dictionaries(st.sampled_from(["a", "b", "c", "note", "n"]), st.one_of(_text, st.integers(-5, 5), st.booleans()),
                           max_size=3)
 _events = st.lists(st.tuples(st.sampled_from(["decision", "node_completed", "note"]), _fields), min_size=2, max_size=8)
@@ -48,7 +54,9 @@ def _chain(root: Path, events) -> Path:
 
 
 def _lines(trace: Path) -> list[str]:
-    return trace.read_text(encoding="utf-8").splitlines()
+    lines = trace.read_text(encoding="utf-8").split("\n")
+    assert lines[-1] == "", "a trace ends with a newline"
+    return lines[:-1]
 
 
 def _write_lines(trace: Path, lines: list[str]) -> None:
@@ -140,7 +148,7 @@ def test_swapping_two_different_lines_is_detected(events, data) -> None:
 
 @FAST
 @given(_events, st.data())
-def test_an_event_forged_into_the_middle_is_detected(events, data) -> None:
+def test_a_line_copied_into_the_middle_is_detected(events, data) -> None:
     with _Dir() as root:
         trace = _chain(root, events)
         lines = _lines(trace)
@@ -148,6 +156,49 @@ def test_an_event_forged_into_the_middle_is_detected(events, data) -> None:
         lines.insert(i, lines[data.draw(st.integers(0, len(lines) - 1))])
         _write_lines(trace, lines)
         assert not audit_log.verify(trace).ok
+
+
+@FAST
+@given(_events, st.data())
+def test_deleting_a_line_and_renumbering_the_later_ones_is_detected(events, data) -> None:
+    with _Dir() as root:
+        trace = _chain(root, events)
+        lines = _lines(trace)
+        i = data.draw(st.integers(0, len(lines) - 2))
+        del lines[i]
+        for k in range(i, len(lines)):
+            ev = json.loads(lines[k])
+            ev["seq"] = k + 1
+            lines[k] = json.dumps(ev, ensure_ascii=False)
+        _write_lines(trace, lines)
+        assert not audit_log.verify(trace).ok
+
+
+@FAST
+@given(_events, st.data())
+def test_editing_an_event_and_recomputing_only_its_own_hash_is_detected(events, data) -> None:
+    with _Dir() as root:
+        trace = _chain(root, events)
+        lines = _lines(trace)
+        i = data.draw(st.integers(0, len(lines) - 2))
+        ev = json.loads(lines[i])
+        ev["note"] = data.draw(_text.filter(lambda x: x != ev.get("note")))
+        ev.pop("hash")
+        ev["hash"] = audit_log.hash_of(ev["prev"], ev)
+        lines[i] = json.dumps(ev, ensure_ascii=False)
+        _write_lines(trace, lines)
+        assert not audit_log.verify(trace).ok, "the next event's prev no longer matches"
+
+
+@FAST
+@given(_text)
+def test_attempt_records_read_keeps_a_record_holding_a_line_separator(text) -> None:
+    with _Dir() as root:
+        notes = ["x\x85y", "x\u2028y", "x\u2029y", text]
+        for name in (attempt_records.ATTEMPTS, attempt_records.MODEL_CALLS):
+            for note in notes:
+                assert attempt_records.append(root, name, {"kind": "k", "note": note}) is not None
+            assert [r["note"] for r in attempt_records.read(root, name)] == notes
 
 
 # ---- the seal -------------------------------------------------------------------------------------------------------
@@ -190,7 +241,7 @@ def test_an_untouched_seal_verifies() -> None:
         assert _standing(root) == "verified"
 
 
-@FAST
+@SEAL
 @given(st.sampled_from(evidence.SEALED_FILES), st.text(min_size=1, max_size=10))
 def test_any_change_to_a_sealed_file_breaks_the_seal(rel, tail) -> None:
     with _Dir() as root:
@@ -202,7 +253,7 @@ def test_any_change_to_a_sealed_file_breaks_the_seal(rel, tail) -> None:
         assert any(rel in g for g in out["all_gaps"]["publication_ready"])
 
 
-@FAST
+@SEAL
 @given(st.sampled_from(evidence.SEALED_FILES))
 def test_a_deleted_sealed_file_breaks_the_seal(rel) -> None:
     with _Dir() as root:
@@ -211,7 +262,7 @@ def test_a_deleted_sealed_file_breaks_the_seal(rel) -> None:
         assert _standing(root) == "not_verified"
 
 
-@FAST
+@SEAL
 @given(st.text(min_size=1, max_size=10))
 def test_a_changed_paper_breaks_the_seal(tail) -> None:
     with _Dir() as root:
@@ -221,7 +272,7 @@ def test_a_changed_paper_breaks_the_seal(tail) -> None:
         assert _standing(root) == "not_verified"
 
 
-@FAST
+@SEAL
 @given(_events)
 def test_an_event_after_the_seal_breaks_it(events) -> None:
     with _Dir() as root:
@@ -233,7 +284,7 @@ def test_an_event_after_the_seal_breaks_it(events) -> None:
         assert _standing(root) == "not_verified"
 
 
-@FAST
+@SEAL
 @given(st.integers(1, 3))
 def test_cutting_events_off_the_end_of_a_sealed_trace_breaks_it(n) -> None:
     with _Dir() as root:
@@ -244,7 +295,7 @@ def test_cutting_events_off_the_end_of_a_sealed_trace_breaks_it(n) -> None:
         assert _standing(root) == "not_verified"
 
 
-@FAST
+@SEAL
 @given(st.data())
 def test_a_forged_seal_with_a_wrong_hash_is_caught(data) -> None:
     with _Dir() as root:
@@ -268,7 +319,7 @@ def test_a_seal_from_before_the_shadow_record_still_verifies() -> None:
         assert _standing(root) == "verified"
 
 
-@FAST
+@SEAL
 @given(st.sampled_from([f for f in evidence.SEALED_FILES if "shadow" not in f]), st.text(min_size=1, max_size=5))
 def test_an_old_seal_still_notices_a_change_to_the_files_it_did_name(rel, tail) -> None:
     old = tuple(f for f in evidence.SEALED_FILES if "shadow" not in f)
