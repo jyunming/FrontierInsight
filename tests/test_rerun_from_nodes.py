@@ -18,7 +18,7 @@ from tests.test_rerun_from import _cfg, _Graph
 
 NEW_STEPS = ["ideas", "literature", "plan", "design", "figures", "crosscheck", "evidence", "claims"]
 # The nodes that are deliberately not a step, and the step that covers the others.
-NOT_A_STEP = {"clarify", "pause_after_literature", "wait_for_data", "execute_reflect", "human_feedback"}
+NOT_A_STEP = {"clarify", "pause_after_literature", "wait_for_data", "execute_reflect", "human_feedback", "replot_layout"}
 
 # Pinned here, apart from the module, so that dropping an entry from OUTPUTS fails a test: what each new step moves,
 # and what it leaves.

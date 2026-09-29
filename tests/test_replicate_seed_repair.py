@@ -177,7 +177,7 @@ async def test_an_ignoring_script_is_repaired_once_and_its_replicates_are_then_i
     # starts the exec_reflect budget from zero (it is never spent by the seed repair).
     from core.engine import _FRESH_SCRIPT
 
-    assert set(patch) == {"code", "deps", *_FRESH_SCRIPT}
+    assert set(patch) == {"code", "deps", "refine_extend", "extend_missed", *_FRESH_SCRIPT}
     assert patch["exec_reflect_iter"] == 0 and patch["exec_reflect_history"] == []
     assert patch["deps"] == ["numpy", "scipy"]
     assert not [w for w in _warnings(logged)], _warnings(logged)
