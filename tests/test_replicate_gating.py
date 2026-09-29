@@ -473,6 +473,16 @@ def test_randomness_in_a_module_beside_the_script_counts(tmp_path: Path) -> None
     assert _script_has_random_source(tmp_path / "experiment.py") is True
 
 
+def test_a_comment_about_randomness_and_unrelated_files_beside_the_script_do_not_count(tmp_path: Path) -> None:
+    from core.engine import _script_has_random_source
+
+    script = tmp_path / "simulate.py"
+    script.write_text("# Deterministic ODE integration: no random seed is needed\nprint(1)\n", encoding="utf-8")
+    (tmp_path / "experiment.py").write_text('m = {"seed": 0}\nprint(m["seed"])\n', encoding="utf-8")
+    (tmp_path / "replot_figures.py").write_text("seed = 0\n", encoding="utf-8")
+    assert _script_has_random_source(script) is False
+
+
 @pytest.mark.asyncio
 async def test_a_stale_seed_ignored_verdict_is_cleared_when_a_pass_runs_no_replicates(tmp_path: Path) -> None:
     eng = _engine(tmp_path, replicates=1)

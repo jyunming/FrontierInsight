@@ -21,7 +21,9 @@ import logging
 import math
 import os
 import platform
+import io
 import re
+import tokenize
 import shutil
 import string
 import sys
@@ -15811,22 +15813,62 @@ _RANDOM_SOURCE_PATTERN = re.compile(
 )
 
 
+def _without_comments(text: str) -> str:
+    """The source with ``#`` comments removed, so a note saying "no random seed is needed" is not a random source."""
+    try:
+        kept = [
+            tok for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+            if tok.type != tokenize.COMMENT
+        ]
+        return " ".join(tok.string for tok in kept)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return text
+
+
+def _imported_module_names(tree: ast.AST) -> list[str]:
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module)
+            names += [f"{node.module}.{a.name}" for a in node.names]
+    return names
+
+
 def _script_has_random_source(code_path: Path) -> bool:
-    """Whether the script, or any module beside it, can draw a random number at all.
+    """Whether the script, or a module it imports from its own folder, can draw a random number at all.
 
     A script with none (an ODE integrator, a closed-form sweep, a lattice sum) is deterministic by construction,
-    so a repeat count is not what makes its result trustworthy. A deliberately generous source scan over every ``.py``
-    file in the script's folder (a multi-module project keeps its sampler in another file): any mention of a random
-    module, seed argument, sampler or graph generator counts, so "none" is only said when nothing could draw.
-    Over-detecting only brings back the old warning. An unreadable file returns ``True`` because silence is not
-    evidence of determinism.
+    so a repeat count is not what makes its result trustworthy. A deliberately generous scan of the code (comments
+    aside): any mention of a random module, seed argument, sampler or graph generator counts, so "none" is only said
+    when nothing could draw. It follows the script's own imports into sibling files (a multi-module project keeps its
+    sampler elsewhere) but not the whole folder, which also holds the analysis script and FI's own helpers.
+    Over-detecting only brings back the old warning. An unreadable or unparsable file returns ``True`` because
+    silence is not evidence of determinism.
     """
+    folder = code_path.parent
+    seen: set[Path] = set()
+    todo = [code_path]
     try:
-        files = [code_path, *sorted(code_path.parent.rglob("*.py"))[:200]]
-        return any(
-            _RANDOM_SOURCE_PATTERN.search(f.read_text(encoding="utf-8", errors="replace")) is not None
-            for f in files
-        )
+        while todo and len(seen) < 100:
+            path = todo.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if _RANDOM_SOURCE_PATTERN.search(_without_comments(text)) is not None:
+                return True
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError):
+                return True
+            for name in _imported_module_names(tree):
+                stem = folder.joinpath(*name.split("."))
+                for candidate in (stem.with_suffix(".py"), stem / "__init__.py"):
+                    if candidate.is_file():
+                        todo.append(candidate)
+        return False
     except OSError:
         return True
 
