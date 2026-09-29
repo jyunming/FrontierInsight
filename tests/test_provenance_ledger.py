@@ -151,7 +151,7 @@ def test_a_same_size_edit_with_its_time_put_back_changes_the_hash_at_the_end(tmp
 
 # --- F-04: the seal names every record ---------------------------------------------------------------------------
 
-def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = ()) -> Path:
+def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = (), records: int | None = None) -> Path:
     root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
     trace = root / ".fi" / "audit.jsonl"
     trace.unlink(missing_ok=True)
@@ -167,7 +167,8 @@ def _sealed(tmp_path: Path, drop: tuple[str, ...] = (), null: tuple[str, ...] = 
     log.append("quest_finalized", events_before=len(audit_log.read(trace)), write_errors=0, records_not_written=0,
                model_calls={"lines": 0, "counts": {}, "gaps": []},
                nodes_completed=["review", "write"], files=files, paper_path="paper/paper.md",
-               paper_sha256=evidence._file_sha256(root / "paper" / "paper.md"), rigor_profile="research")
+               paper_sha256=evidence._file_sha256(root / "paper" / "paper.md"), rigor_profile="research",
+               **({"sealed_records": records} if records else {}))
     return root
 
 
@@ -178,6 +179,16 @@ def test_a_seal_that_leaves_out_the_attempt_records_is_not_verified(tmp_path: Pa
     assert any("names no hash of .fi/attempts.jsonl" in g for g in left_out["all_gaps"]["publication_ready"])
     nulled = evidence.read(_sealed(tmp_path / "b", null=(".fi/model_calls.jsonl",)))
     assert any("names no hash of .fi/model_calls.jsonl" in g for g in nulled["all_gaps"]["publication_ready"])
+
+
+def test_a_seal_made_before_the_shadow_record_existed_is_still_verified(tmp_path: Path) -> None:
+    shadow = ".fi/shadow_recommendations.jsonl"
+    old = evidence.read(_sealed(tmp_path / "old", drop=(shadow,)))
+    assert old["trace_seal"] == "verified", "a seal that never named the shadow record is checked against what it named"
+    new = evidence.read(_sealed(tmp_path / "new", drop=(shadow,), records=evidence.SEAL_RECORDS))
+    assert new["trace_seal"] == "not_verified", "a current seal must name it"
+    assert any(f"names no hash of {shadow}" in g for g in new["all_gaps"]["publication_ready"])
+    assert evidence.read(_sealed(tmp_path / "cur", records=evidence.SEAL_RECORDS))["trace_seal"] == "verified"
 
 
 # --- F-05: one credential filter -----------------------------------------------------------------------------------

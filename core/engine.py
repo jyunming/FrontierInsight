@@ -680,6 +680,7 @@ class Engine:
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
+        self.__dict__.pop("_shadow_closed", None)  # a quest run again records again
 
         from . import source_failures as _source_failures
 
@@ -1546,6 +1547,7 @@ class Engine:
             paper_path=paper_rel,
             paper_sha256=paper_sha,
             files=files,
+            sealed_records=_evidence.SEAL_RECORDS,
             model_calls={"lines": call_summary.get("lines", 0), "counts": counts, "gaps": call_gaps},
         )
         # From here, a model call (an output made from the finished quest) goes to a separate record the seal does not
@@ -7642,15 +7644,19 @@ class Engine:
                 returncode=result.returncode, has_result=bool(result_json), manifest_status=str(manifest_status or ""),
                 oracle_status=oracle_status,
             )
+            # The one signature of this run: the record keeps it and a repair of this run reads it back, so both are
+            # made from the same inputs (the last 2000 characters of stderr, the return code, the time limit, the check).
+            signature = _memory.failure_signature(
+                returncode=result.returncode, stderr=str(result.stderr or "")[-2000:],
+                timed_out=bool(getattr(result, "timed_out", False)),
+                pause=outcome if outcome in ("protocol_mismatch", "oracle_failure") else None)
+            self._last_run_signature = signature
             if outcome is None:
                 return None
             frozen = _attempts._read_json(self.quest_root / "needs" / "FROZEN_PROTOCOL.json")
             return {
                 "kind": "run", "outcome": outcome, "returncode": result.returncode,
-                "failure_signature": _memory.failure_signature(
-                    returncode=result.returncode, stderr=str(result.stderr or ""),
-                    timed_out=bool(getattr(result, "timed_out", False)),
-                    pause=outcome if outcome in ("protocol_mismatch", "oracle_failure") else None),
+                "failure_signature": signature,
                 "scripts": dict(run_context.get("code") or {}),
                 # What it came from: the frozen protocol's run, and the design revision or repair recorded last.
                 "run_id": frozen.get("run_id") if isinstance(frozen, dict) else None,
@@ -12184,8 +12190,8 @@ class Engine:
             exclude_lineage = None
             if decision == "repair":
                 er = snapshot.get("exec_result") if isinstance(snapshot.get("exec_result"), dict) else {}
-                signature = _memory.failure_signature(
-                    returncode=er.get("returncode"), stderr=str(er.get("stderr_tail") or er.get("stderr") or ""),
+                signature = getattr(self, "_last_run_signature", None) or _memory.failure_signature(
+                    returncode=er.get("returncode"), stderr=str(er.get("stderr_tail") or "")[-2000:],
                     timed_out=bool(er.get("timed_out")))
                 if getattr(self, "_last_run_record_id", None):
                     exclude_ids.add(self._last_run_record_id)
@@ -12218,12 +12224,27 @@ class Engine:
                         recommendation=rec, excluded=sorted(exclude_ids),
                     )
 
-            pool = self.__dict__.get("_shadow_pool")
-            if pool is None:
-                pool = self.__dict__["_shadow_pool"] = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=1, thread_name_prefix="fi-shadow")
-            future = asyncio.get_running_loop().run_in_executor(pool, work)
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[None] = loop.create_future()
+
+            def settle(error: BaseException | None) -> None:
+                if not future.done():
+                    future.set_exception(error) if error is not None else future.set_result(None)
+
+            def runner() -> None:
+                # A daemon thread: a hash that never returns cannot keep the process from ending.
+                error: BaseException | None = None
+                try:
+                    work()
+                except BaseException as e:  # noqa: BLE001
+                    error = e
+                try:
+                    loop.call_soon_threadsafe(settle, error)
+                except RuntimeError:
+                    pass  # the loop is gone: nothing is waiting
+
             self.__dict__["_shadow_future"] = future
+            threading.Thread(target=runner, name="fi-shadow", daemon=True).start()
             try:
                 await asyncio.wait_for(asyncio.shield(future), timeout=_memory.DEADLINE_S)
             except asyncio.TimeoutError:
@@ -12240,14 +12261,12 @@ class Engine:
             self._log.debug("[shadow] no recommendation recorded at %s: %r", decision, e)
 
     def _shadow_close(self) -> None:
-        """No shadow recommendation is written after this (the quest is sealing or stopping); the worker is let go."""
+        """No shadow recommendation is written after this (the quest is sealing or stopping); a worker still running
+        is left to finish on its own and writes nothing."""
         closed = self.__dict__.setdefault("_shadow_closed", threading.Event())
         lock = self.__dict__.setdefault("_shadow_lock", threading.Lock())
         with lock:
             closed.set()
-        pool = self.__dict__.pop("_shadow_pool", None)
-        if pool is not None:
-            pool.shutdown(wait=False, cancel_futures=True)
 
     def _record(self, name: str, build: Any) -> str | None:
         """Append to one of the quest's attempt records (core/attempt_records.py). ``build`` returns the record (or is
@@ -12257,7 +12276,8 @@ class Engine:
             record = build() if callable(build) else build
             if not record:
                 return None
-            if name == _attempts.ATTEMPTS and record.get("kind") in ("run", "stop", "quest"):
+            if (name == _attempts.ATTEMPTS and record.get("kind") in ("run", "stop", "quest")
+                    and getattr(self.config.engine, "attempt_memory", "shadow") == "shadow"):
                 # The shadow recommendations this record is about (core/attempt_memory.py): how they are scored.
                 ids = _memory.take(self.fi_dir, str(record.get("kind")))
                 if ids:
@@ -12289,6 +12309,9 @@ class Engine:
             kind = str((pause or {}).get("kind") or "")
             outcome = _attempts.STOP_OUTCOMES.get(kind)
             if outcome is None:
+                # Waiting for you, not a failed check: what was recommended before it is not about the run after it.
+                if getattr(self.config.engine, "attempt_memory", "shadow") == "shadow":
+                    _memory.settle_without_record(self.fi_dir)
                 return None
             return {"kind": "stop", "pause": kind, "outcome": outcome, "execution_status": "stopped",
                     "failure_signature": _memory.failure_signature(pause=kind),

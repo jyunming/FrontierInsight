@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import threading
+import os
 import textwrap
 import time
 from pathlib import Path
@@ -96,11 +98,12 @@ def test_the_same_code_is_the_same_test_whoever_wrote_it() -> None:
     assert rec.action == "BLOCK"
 
 
-def test_an_environment_only_one_side_knows_is_not_compared() -> None:
-    rec = mem.recommend(_cand("execute", environment_sha256=None), [_failed("a"), _failed("b")], decision="execute")
-    assert rec.action == "BLOCK"
-    assert mem.recommend(_cand("execute", environment_sha256="env2"), [_failed("a"), _failed("b")],
-                         decision="execute").action == "INFO", "both known and different: similar only"
+def test_the_installed_environment_is_not_compared() -> None:
+    """A decision is made before the packages are installed and a past record after: the packages asked for stand for
+    it, so a different (or unknown) environment neither blocks nor hides a match."""
+    for env in (None, "env2"):
+        rec = mem.recommend(_cand("execute", environment_sha256=env), [_failed("a"), _failed("b")], decision="execute")
+        assert rec.action == "BLOCK", env
 
 
 def test_plan_implement_and_repair_are_at_most_a_check() -> None:
@@ -170,6 +173,35 @@ def test_recommendations_are_linked_to_the_records_they_are_about(tmp_path: Path
     assert mem.take(fi, "run") == []
 
 
+def test_a_re_plan_does_not_make_the_first_plan_unknown(tmp_path: Path) -> None:
+    mem.stamp(tmp_path, "plan", "p1")
+    mem.stamp(tmp_path, "plan", "p2")
+    assert sorted(mem.take(tmp_path, "quest")) == ["p1", "p2"]
+
+
+def test_a_stop_that_is_not_a_failed_check_does_not_carry_decisions_to_the_next_run(tmp_path: Path) -> None:
+    mem.stamp(tmp_path, "plan", "p1")
+    mem.stamp(tmp_path, "execute", "e1")
+    mem.settle_without_record(tmp_path)
+    assert mem.take(tmp_path, "run") == ["p1"], "the execute before the wait is not about the run after it"
+
+
+def test_the_index_forgets_a_quest_that_fell_out_of_the_newest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mem, "MAX_QUESTS", 2)
+    for i in range(3):
+        q = tmp_path / f"q{i}" / ".fi"
+        q.mkdir(parents=True)
+        ar.append(q, ar.ATTEMPTS, {"quest_id": f"q{i}", "kind": "run", "outcome": "process_error",
+                                   "context": _ctx(), "failure_signature": mem.failure_signature(error="E")})
+        os.utime(q / ar.ATTEMPTS, (1000 + i, 1000 + i))
+    index = mem.Index(tmp_path)
+    index.attempts()
+    assert len(index._files) == 2
+    os.utime(tmp_path / "q0" / ".fi" / ar.ATTEMPTS, (5000, 5000))
+    index.attempts()
+    assert sorted(Path(k).parts[-3] for k in index._files) == ["q0", "q2"], "q1 is gone, not kept forever"
+
+
 def test_the_report_scores_by_decision_with_a_base_rate(tmp_path: Path) -> None:
     fi = tmp_path / "q1" / ".fi"
 
@@ -236,6 +268,39 @@ async def test_off_reads_and_writes_nothing(tmp_path: Path) -> None:
     eng = _bare_engine(tmp_path, mode="off")
     await eng._shadow("execute", {"topic": "t"}, taken="ran the experiment")
     assert not (eng.fi_dir / mem.SHADOW).exists() and not (eng.fi_dir / mem.SHADOW_PENDING).exists()
+    eng._attempt_ids = None
+    eng._record(ar.ATTEMPTS, {"kind": "run", "outcome": "process_error"})
+    assert not (eng.fi_dir / mem.SHADOW_PENDING).exists(), "off: the pending file is not read or written either"
+    (row,) = ar.read(eng.fi_dir, ar.ATTEMPTS)
+    assert "parent_shadow_ids" not in row
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_never_returns_cannot_keep_the_process_alive(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _bare_engine(tmp_path)
+    release = threading.Event()
+    monkeypatch.setattr(mem, "DEADLINE_S", 0.1)
+    monkeypatch.setattr(mem, "recommend", lambda *a, **k: release.wait(30))
+    await eng._shadow("execute", {"topic": "t"}, taken="ran the experiment")
+    eng._shadow_close()
+    (worker,) = [t for t in threading.enumerate() if t.name == "fi-shadow"]
+    assert worker.daemon
+    release.set()
+    worker.join(2)
+
+
+@pytest.mark.asyncio
+async def test_a_quest_run_again_records_again(tmp_path: Path) -> None:
+    eng = _bare_engine(tmp_path)
+    await eng._shadow("implement", {"topic": "t"}, taken="x")
+    eng._shadow_close()
+    await eng._shadow("implement", {"topic": "t"}, taken="x")
+    assert len(ar.read(eng.fi_dir, mem.SHADOW)) == 1, "closed: nothing more"
+    eng.__dict__.pop("_shadow_closed", None)  # what run() does on entry
+    await eng._shadow("implement", {"topic": "t"}, taken="x")
+    assert len(ar.read(eng.fi_dir, mem.SHADOW)) == 2
+    eng._shadow_close()
 
 
 @pytest.mark.asyncio
@@ -380,3 +445,61 @@ async def test_a_quest_runs_the_same_with_the_recording_on_or_off(tmp_path: Path
     assert differ == [], differ
     assert ar.read(on_eng.fi_dir, mem.SHADOW)
     assert not ar.read(off_eng.fi_dir, mem.SHADOW), "off: nothing recorded (the seal may leave an empty file)"
+
+
+def _failing_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.test_engine_smoke import _fake_response_for
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        head = prompt.lstrip().splitlines()[0] if prompt.strip() else ""
+        if "Implementation" in head or "Execute-Reflect" in head:
+            return json.dumps({"code": _BAD, "deps": [], "patch_summary": "same", "give_up_reason": ""})
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_later_quest_is_blocked_by_what_an_earlier_one_produced(tmp_path: Path,
+                                                                         monkeypatch: pytest.MonkeyPatch) -> None:
+    """Made by the engine itself: quest A's records (written after its packages were installed) are matched by quest
+    B's first execute decision (made before B installs anything)."""
+    from core.engine import Engine
+
+    _failing_chat(monkeypatch)
+    out = tmp_path / "out"
+    first = Engine(_cfg(out, repairs=2))
+    await first.run()
+    second = Engine(_cfg(out, repairs=0))
+    assert second.quest_id != first.quest_id
+    await second.run()
+    execute = next(r for r in ar.read(second.fi_dir, mem.SHADOW) if r["decision"] == "execute")
+    assert execute["action"] == "BLOCK", execute  # B's first execute, before it has failed even once itself
+    first_runs = {r["record_id"] for r in ar.read(first.fi_dir, ar.ATTEMPTS) if r.get("kind") == "run"}
+    assert set(execute["matched_attempt_ids"]) <= first_runs and execute["matched_attempt_ids"]
+
+
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_a_failing_quest_with_repairs_runs_the_same_with_the_recording_on_or_off(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.engine import Engine
+
+    _failing_chat(monkeypatch)
+    runs = {}
+    for mode in ("shadow", "off"):
+        engine = Engine(_cfg(tmp_path / mode, repairs=2, mode=mode))
+        runs[mode] = (engine, await engine.run())
+    (on_eng, on_art), (off_eng, off_art) = runs["shadow"], runs["off"]
+
+    def routes(fi_dir: Path) -> list[tuple]:
+        return [(e.get("kind"), e.get("node"), e.get("chosen")) for e in audit_log.read(fi_dir / "audit.jsonl")
+                if e.get("kind") in ("node_completed", "route_decision")]
+
+    assert routes(on_eng.fi_dir) == routes(off_eng.fi_dir)
+    on_state, off_state = (_normalized_state(a, e.quest_root) for e, a in ((on_eng, on_art), (off_eng, off_art)))
+    assert sorted(k for k in set(on_state) | set(off_state) if on_state.get(k) != off_state.get(k)) == []
+    assert [r["decision"] for r in ar.read(on_eng.fi_dir, mem.SHADOW)].count("repair") >= 1
+    assert not ar.read(off_eng.fi_dir, mem.SHADOW) and not (off_eng.fi_dir / mem.SHADOW_PENDING).exists()

@@ -23,8 +23,9 @@ comparison (memory on/off x exploration constrained/free) before any of them may
 - ``repair``: the code and the failure signature (return code, exception type, the check that stopped it). The run
   that triggered the repair, and the repair lineage of the same design in the same quest, are never matched.
 
-The environment and dependency lock are compared only where both sides know them (a first run writes its
-environment during the run). A part that is not known on either side makes a match information only.
+The installed environment is not compared: a decision is made before the packages are installed and a past record
+was written after, so the packages asked for stand for it. A part that is not known on either side makes a match
+information only.
 
 **Actions**: ``BLOCK`` only before an experiment runs, when the same key failed with the same non-transient signature
 at least :data:`REPRODUCED` times (a timeout, running out of memory or a provider/transport error never counts);
@@ -62,9 +63,10 @@ KEYS: dict[str, tuple[str, ...]] = {
     "execute": ("code", "deps", "inputs", "data", "protocol", "runs_per_setting", "timeout_s", "seeds", "harness"),
     "repair": ("code", "signature"),
 }
-#: Compared only when both sides know them.
+#: Compared only when both sides know them. None today: a candidate's environment is read before the packages are
+#: installed and a past record's after, so the two are never the same moment; the packages asked for stand for it.
 OPTIONAL: dict[str, tuple[str, ...]] = {
-    "plan": (), "implement": ("environment", "lock"), "execute": ("environment", "lock"), "repair": (),
+    "plan": (), "implement": (), "execute": (), "repair": (),
 }
 #: Parts that, when the same, make a failure "similar" (INFO) even if the rest differs.
 ANCHORS: dict[str, tuple[str, ...]] = {
@@ -228,7 +230,12 @@ class Index:
 
     def attempts(self, *, also: Path | None = None) -> list[Attempt]:
         out: list[Attempt] = []
-        for path in self._paths(also):
+        paths = self._paths(also)
+        with self._lock:
+            keep = {str(p) for p in paths}
+            for stale in [k for k in self._files if k not in keep]:
+                del self._files[stale]  # a quest that fell out of the newest MAX_QUESTS is forgotten
+        for path in paths:
             try:
                 st = path.stat()
             except OSError:
@@ -388,7 +395,9 @@ def stamp(fi_dir: Path, decision: str, record_id: str) -> None:
     until the next run or stop."""
     data = _read_pending(fi_dir)
     if decision == "plan":
-        data["plan"] = record_id
+        # Every plan put forward stays until the quest ends: a re-plan does not make the first one unknown.
+        data["plans"] = [*list(data.get("plans") or ([data["plan"]] if data.get("plan") else [])), record_id]
+        data.pop("plan", None)
     else:
         data["pending"] = [*list(data.get("pending") or []), record_id]
     _write_pending(fi_dir, data)
@@ -399,14 +408,22 @@ def take(fi_dir: Path, kind: str) -> list[str]:
     data = _read_pending(fi_dir)
     if not data:
         return []
-    ids = list(data.get("pending") or [])
-    if data.get("plan"):
-        ids.append(str(data["plan"]))
+    plans = list(data.get("plans") or ([data["plan"]] if data.get("plan") else []))
+    ids = [*list(data.get("pending") or []), *[str(p) for p in plans]]
     data["pending"] = []
-    if kind == "quest":
-        data["plan"] = None
+    data.pop("plan", None)
+    data["plans"] = [] if kind == "quest" else plans
     _write_pending(fi_dir, data)
     return ids
+
+
+def settle_without_record(fi_dir: Path) -> None:
+    """The quest stopped without a failed check (it waits for you): the decisions made so far are not about whatever
+    run comes after the wait, so they are not carried to it. A plan stays: it is about the whole quest."""
+    data = _read_pending(fi_dir)
+    if data.get("pending"):
+        data["pending"] = []
+        _write_pending(fi_dir, data)
 
 
 # ---- scoring ------------------------------------------------------------------------------------------------------
