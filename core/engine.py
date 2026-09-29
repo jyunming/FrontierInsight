@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import fnmatch
 import concurrent.futures
 import functools
 import hashlib
@@ -7398,8 +7399,6 @@ class Engine:
                 timeout_s=self.config.execution.timeout_s,
                 env=primary_env,
             )
-        if result.returncode == 0:
-            await asyncio.to_thread(self._save_run_data, run_started, split)
         # Which of the two scripts failed, for the repair; read now, before a replicate
         # runs through the same runner.
         failed_script = runner.failed_script if split else None
@@ -7452,6 +7451,11 @@ class Engine:
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
         })
+        # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
+        # nor a job still pending (its raw files are half written).
+        run_accepted = result.returncode == 0 and manifest_status not in ("stopped", "pending", "repairing")
+        if run_accepted:
+            await asyncio.to_thread(self._save_run_data, run_started, split)
         if manifest_status == "stopped":
             try:
                 manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")
@@ -7698,7 +7702,7 @@ class Engine:
                 "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
                 if unseeded_rng else "it never reads FI_REPLICATE_SEED",
             )
-        if replicates_ran and split and result.returncode == 0:
+        if replicates_ran and split and run_accepted:
             await asyncio.to_thread(self._save_run_data, run_started, split, root_files=False)
         replotted: dict[str, int] = {}
         # A figure drawn as "the mean of the seeds" over replicates that are one
@@ -12792,7 +12796,11 @@ class Engine:
         ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",
     })
     _RUN_DATA_MAX_BYTES = 200 * 1024 * 1024
-    _RUN_DATA_SKIP = ("requirements", "constraints", "credential", "secret", "token", "apikey", "api_key", "password")
+    # Names that are secrets or setup files, never a result table; matched whole, so `tokens.csv` is kept.
+    _RUN_DATA_SKIP = (
+        ".env*", "id_rsa*", "*.pem", "*.key", "token.json", "tokens.json", "access_token*", "refresh_token*",
+        "credentials*.json", "client_secret*.json", "secret.json", "secrets*.json", "requirements*.txt", "constraints*.txt",
+    )
 
     def _save_run_data(self, since: float, split: bool, root_files: bool = True) -> list[str]:
         """Copy what a successful run produced into ``data/results/``, so the numbers behind a paper are in ``data/`` too.
@@ -12805,11 +12813,18 @@ class Engine:
         saved: list[str] = []
         dest = self.quest_root / "data" / "results"
         try:
+            if root_files and dest.is_dir():
+                # Tables an earlier iteration left are not this run's; what a script wrote here itself is newer.
+                for old in dest.iterdir():
+                    if old.is_file() and old.stat().st_mtime < since - 2:
+                        old.unlink(missing_ok=True)
             for path in sorted(self.quest_root.iterdir() if root_files else []):
-                lowered = path.name.lower()
+                if any(fnmatch.fnmatch(path.name.lower(), pat) for pat in self._RUN_DATA_SKIP):
+                    if path.suffix.lower() in self._RUN_DATA_SUFFIXES:
+                        self._log.info("[execute] %s looks like a secret or setup file; not copied to data/results/", path.name)
+                    continue
                 if (
                     path.is_file() and path.suffix.lower() in self._RUN_DATA_SUFFIXES
-                    and not any(word in lowered for word in self._RUN_DATA_SKIP)
                     and path.stat().st_mtime >= since - 2
                     and path.stat().st_size <= self._RUN_DATA_MAX_BYTES
                 ):
@@ -12831,6 +12846,7 @@ class Engine:
                         shutil.copytree(raw, target)
                         saved.append("raw/")
                     else:
+                        shutil.rmtree(target, ignore_errors=True)  # an earlier, smaller copy would be a partial one
                         self._log.info("[execute] the raw files in %s are large; they stay there and are not copied to data/results/", raw)
         except OSError as exc:
             self._log.warning("[execute] could not copy the run's data into data/results/: %s", exc)

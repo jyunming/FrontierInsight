@@ -72,7 +72,8 @@ def test_save_run_data_replaces_raw_skips_secrets_and_big_files(tmp_path: Path, 
     since = time.time()
     (root / "results.csv").write_text("x\n1\n", encoding="utf-8")
     (root / "requirements.txt").write_text("numpy\n", encoding="utf-8")
-    (root / "api_token.json").write_text("{}", encoding="utf-8")
+    (root / "token.json").write_text("{}", encoding="utf-8")
+    (root / "tokens.csv").write_text("t\n1\n", encoding="utf-8")
     (root / "big.npy").write_bytes(b"0" * 2048)
     monkeypatch.setattr(Engine, "_RUN_DATA_MAX_BYTES", 1024)
     raw = root / "raw"
@@ -84,7 +85,8 @@ def test_save_run_data_replaces_raw_skips_secrets_and_big_files(tmp_path: Path, 
     saved = engine._save_run_data(since, True)
     out = root / "data" / "results"
     assert (out / "results.csv").is_file() and (out / "raw" / "seed0" / "a.csv").is_file()
-    assert not (out / "requirements.txt").exists() and not (out / "api_token.json").exists()
+    assert not (out / "requirements.txt").exists() and not (out / "token.json").exists()
+    assert (out / "tokens.csv").is_file(), "a result table whose name holds the word token is kept"
     assert not (out / "big.npy").exists()
     assert not (out / "raw" / "old_seed").exists(), "the raw copy is a snapshot of the last run"
     assert "raw/" in saved
@@ -124,3 +126,68 @@ async def test_a_one_script_reply_removes_the_stale_simulation(tmp_path: Path, m
     assert not (code_dir / "simulate.py").exists()
     assert (code_dir / "experiment.py").is_file()
     assert engine._split_on(state) is False
+
+
+def test_a_table_from_an_earlier_iteration_is_not_kept_beside_this_runs(tmp_path: Path) -> None:
+    import os
+    import time
+
+    engine = Engine(_config(tmp_path))
+    root = engine.quest_root
+    out = root / "data" / "results"
+    out.mkdir(parents=True)
+    old = out / "table_a.csv"
+    old.write_text("a\n", encoding="utf-8")
+    os.utime(old, (time.time() - 600, time.time() - 600))
+    since = time.time()
+    (out / "written_by_the_script.csv").write_text("s\n", encoding="utf-8")
+    (root / "table_b.csv").write_text("b\n", encoding="utf-8")
+    engine._save_run_data(since, False)
+    assert not old.exists()
+    assert (out / "table_b.csv").is_file() and (out / "written_by_the_script.csv").is_file()
+
+
+def test_raw_files_past_the_cap_leave_no_older_partial_copy(tmp_path: Path, monkeypatch) -> None:
+    import time
+
+    cfg = _config(tmp_path)
+    cfg.execution.split_analysis = True
+    engine = Engine(cfg)
+    root = engine.quest_root
+    (root / "raw").mkdir(parents=True)
+    (root / "raw" / "a.csv").write_text("a\n", encoding="utf-8")
+    engine._save_run_data(time.time(), True)
+    assert (root / "data" / "results" / "raw" / "a.csv").is_file()
+    monkeypatch.setattr(Engine, "_RUN_DATA_MAX_BYTES", 4)
+    (root / "raw" / "b.csv").write_text("b" * 100, encoding="utf-8")
+    engine._save_run_data(time.time(), True)
+    assert not (root / "data" / "results" / "raw").exists()
+
+
+def test_data_results_is_not_offered_to_web_plots_as_user_data(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    data = engine.quest_root / "data"
+    (data / "results").mkdir(parents=True)
+    (data / "results" / "out.csv").write_text("marker_from_run,1\n", encoding="utf-8")
+    (data / "given.csv").write_text("marker_given,2\n", encoding="utf-8")
+    text = engine._gather_collected_text({})
+    assert "marker_given" in text and "marker_from_run" not in text
+
+
+@pytest.mark.asyncio
+async def test_the_replicate_seeds_raw_files_reach_data_results_and_a_crash_saves_nothing(tmp_path: Path) -> None:
+    from tests.test_split_analysis import _engine, _write
+
+    eng = _engine(tmp_path, replicates=2)
+    _write(eng)
+    out = await eng._node_execute({"deps": []})
+    assert out["exec_result"]["returncode"] == 0
+    kept = eng.quest_root / "data" / "results" / "raw"
+    assert (kept / "seed0" / "values.json").is_file() and (kept / "seed1" / "values.json").is_file()
+
+    crashed = _engine(tmp_path / "crash", replicates=1)
+    _write(crashed)
+    (crashed.quest_root / "analysis_should_fail").write_text("", encoding="utf-8")
+    bad = await crashed._node_execute({"deps": []})
+    assert bad["exec_result"]["returncode"] != 0
+    assert not (crashed.quest_root / "data" / "results").exists()
