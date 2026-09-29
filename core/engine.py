@@ -807,6 +807,8 @@ class Engine:
                         if reopen:
                             self._log.info("[run] --from %s is used; --rerun's re-opening at the review is not", from_step)
                         forget_papers_asked(self.fi_dir, declined=False)
+                        if _rerun_from.picks_skills(from_step):
+                            fork_config = await self._repick_skills(graph, fork_config)
                         where, moved = _rerun_from.back_up(self.quest_root, from_step)
                         self._audit("rerun_from", step=from_step, moved=moved)
                         self._log.info("[run] rerunning from the %s step; the earlier outputs are in %s (%s)",
@@ -5427,7 +5429,7 @@ class Engine:
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
-                skills_block=self._outline_skills_block(state) or "(no skills selected for this quest)",
+                skills_block=(self._outline_skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(),
             )
@@ -5484,7 +5486,7 @@ class Engine:
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
-                skills_block=self._skills_block(state) or "(no skills selected for this quest)",
+                skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(state),
                 split_block=self._split_block(state),
@@ -5509,7 +5511,7 @@ class Engine:
             prompt = self._prompts["implement"].substitute(
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
-                skills_block=self._skills_block(state) or "(no skills selected for this quest)",
+                skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
                 job_block=self._job_block(state),
                 split_block=self._split_block(state),
@@ -5585,6 +5587,13 @@ class Engine:
             (state.get("design") or {}).get("dependencies")
         )
         deps = sorted({*deps, *design_deps})
+        left_out = self._dropped_tool_names(state)
+        if left_out:
+            kept = [d for d in deps if _experiment_deps.normalize(_experiment_deps.requirement_name(d) or d) not in left_out]
+            for d in deps:
+                if d not in kept:
+                    self._log.info("[implement] not asking pip for %r: it is a skill this quest no longer carries", d)
+            deps = kept
 
         code_path = self.quest_root / "code" / "experiment.py"
         simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
@@ -7020,6 +7029,26 @@ class Engine:
         dropped = [*dropped, *skill_failures]
         for dep, why in skill_failures:
             self._log.info("[execute] %r could not be installed: it %s", dep, why)
+        # A skill whose own declared packages could not be installed cannot be used in this environment: it is dropped
+        # from the pick, with a plain line, rather than offered again to every repair and every later step. A failure
+        # counts only when it repeats: one dropped connection must not remove a skill from the quest for good.
+        wanted_again = [r for sk in skills for r in _experiment_deps.skill_requirements([sk])
+                        if r in {dep for dep, _ in failed_installs}]
+        if wanted_again:
+            still_failing = await self._install_packages(list(dict.fromkeys(wanted_again)))
+            recovered = set(wanted_again) - {dep for dep, _ in still_failing}
+            if recovered:
+                await self._record_environment(stage="after installing the experiment's packages again")
+                self._log.info("[skills] installed on the second try: %s", ", ".join(sorted(recovered)))
+            failed_installs = [(dep, why) for dep, why in failed_installs if dep not in recovered]
+        failed_names = {dep for dep, _ in failed_installs}
+        broken_skills = [
+            (sk, [r for r in _experiment_deps.skill_requirements([sk]) if r in failed_names]) for sk in skills
+        ]
+        broken_skills = [(sk, bad) for sk, bad in broken_skills if bad]
+        for sk, bad in broken_skills:
+            self._log.info("[skills] dropped %s: its package %s could not be installed here", sk.name, ", ".join(bad))
+            self._unusable_skills = [*getattr(self, "_unusable_skills", []), sk.name]
         self._packages_note = _experiment_deps.repair_note(
             dropped, failed_installs, getattr(self, "_unusable_skills", []),
         )
@@ -7626,6 +7655,16 @@ class Engine:
             "result_json": result_json or {},
             "exec_patch_pending": False,
         }
+        if broken_skills:
+            gone = {sk.name for sk, _ in broken_skills}
+            selection = dict(state.get("skill_selection") or {})
+            selection["dropped"] = [
+                *[d for d in self._dropped_skills(state) if d.get("name") not in gone],
+                *[{"name": sk.name, "kind": _experiment_deps._kind(sk),
+                   "why": f"its package {', '.join(bad)} could not be installed here"} for sk, bad in broken_skills],
+            ]
+            patch["selected_skills"] = [n for n in state.get("selected_skills") or [] if n not in gone]
+            patch["skill_selection"] = selection
         patch["numeric_warnings_accepted"] = False
         for w in _assertion_warnings({**state, **patch}):
             self._log.warning("[plausibility] warning, not a stop: %s", w.describe())
@@ -9797,6 +9836,107 @@ class Engine:
         if required:
             record["forced"] = required
         return {"selected_skills": sel.chosen, "skill_selection": record}
+
+    @staticmethod
+    def _dropped_skills(state: Any) -> list[dict[str, Any]]:
+        return [d for d in ((state or {}).get("skill_selection") or {}).get("dropped") or [] if isinstance(d, dict)]
+
+    def _dropped_tool_names(self, state: Any) -> set[str]:
+        """Normalised names of the dropped skills that are tools (never Python packages). A library skill is often named
+        after its pip package, so its name is not taken out of what pip is asked for."""
+        return {_experiment_deps.normalize(str(d.get("name"))) for d in self._dropped_skills(state)
+                if str(d.get("kind")) == "tool" and d.get("name")}
+
+    def _dropped_skills_note(self, state: Any) -> str:
+        """Tells the code-writing steps which skills this quest no longer carries, so a name the frozen plan or an
+        earlier pick used is not imported, run or listed as a package."""
+        names = [str(d["name"]) for d in self._dropped_skills(state) if d.get("name")]
+        if not names:
+            return ""
+        return ("\n\nNot available to this quest (do not use, import, run or list as a dependency): "
+                + ", ".join(names) + ". If the design mentions one, do the same work another way and say so in `method`.")
+
+    def _skill_kinds(self, names: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+        """``(kinds, unusable)``: the kind of each named skill that can be found, and why each unusable one is."""
+        from core.skills import loadable_skills
+
+        kinds: dict[str, str] = {}
+        unusable: dict[str, str] = {}
+        if not names:
+            return kinds, unusable
+        try:
+            usable, rejected = loadable_skills(names, external_dirs=self._skill_dirs)
+        except Exception as exc:  # noqa: BLE001 -- the kind is only used to narrow what is dropped
+            self._log.warning("[skills] could not look the earlier pick up (%s)", exc)
+            return kinds, unusable
+        for st in usable:
+            kinds[st.skill.name] = str(getattr(st.skill.kind, "value", st.skill.kind)).lower()
+        for st in rejected:
+            kinds[st.skill.name] = str(getattr(st.skill.kind, "value", st.skill.kind)).lower()
+            unusable[st.skill.name] = f"{st.status.value}: {st.reason}"
+        return kinds, unusable
+
+    async def _repick_skills(self, graph: Any, fork_config: dict[str, Any]) -> dict[str, Any]:
+        """``--from skills``: pick the skills again from the quest's CURRENT config, on the checkpoint just before the
+        code (or the data) is made, and return the config of the checkpoint that carries the new pick.
+
+        Only ``selected_skills``, ``skill_selection`` and the outline (which was written for the old pick) change. The
+        literature, plan.md, the design and the frozen protocol are not touched: the plan is not re-run, so nothing
+        that a person approved is rewritten. A skill the new pick drops is written to ``skill_selection["dropped"]``
+        with the reason, so the code-writing steps are told it is not available."""
+        snapshot = await graph.aget_state(fork_config)
+        values = dict(snapshot.values or {})
+        old = [str(n) for n in values.get("selected_skills") or []]
+        exclude = set(self.config.engine.skills_exclude or [])
+        kinds, unusable = await asyncio.to_thread(self._skill_kinds, old)
+        fresh = await self._node_select_skills(values)  # type: ignore[arg-type]
+        record = dict(fresh.get("skill_selection") or {})
+        new = [str(n) for n in fresh.get("selected_skills") or []]
+        if record.get("error") and not new:
+            # The registry or the pick call failed: keep what still stands of the old pick rather than none.
+            new = [n for n in old if n not in exclude and n not in unusable]
+            record = dict(values.get("skill_selection") or {}) | {"error": record.get("error")}
+            self._log.warning("[skills] the pick could not be made again (%s); the earlier pick is kept without the "
+                              "skills that are excluded or no longer usable", record.get("error"))
+        dropped: list[dict[str, str]] = []
+        for name in old:
+            if name in new:
+                continue
+            if name in exclude:
+                why = "it is excluded in this quest's config (engine.skills_exclude)"
+            elif name in unusable:
+                why = f"it is not usable now ({unusable[name]})"
+            else:
+                why = "the new pick did not choose it"
+            dropped.append({"name": name, "why": why, "kind": kinds.get(name, "")})
+            self._log.info("[skills] dropped %s: %s", name, why)
+            self._progress(f"[FI] skill {name} is no longer used by this quest: {why}.")
+        added = [n for n in new if n not in old]
+        self._log.info("[skills] picked again: kept %s; added %s; dropped %s",
+                       [n for n in new if n in old] or "none", added or "none", [d["name"] for d in dropped] or "none")
+        if dropped:
+            record["dropped"] = dropped
+        else:
+            record.pop("dropped", None)
+        # A frozen plan is never rewritten here. If it names a dropped skill, say so plainly and how to change it.
+        plan_path = self.quest_root / "plan.md"
+        text = (plan_path.read_text(encoding="utf-8", errors="replace") if plan_path.is_file() else "")
+        text += " " + json.dumps(values.get("design") or {}, ensure_ascii=False)
+        text = text.lower()
+        for d in dropped:
+            spelled = r"[-_ ]+".join(re.escape(part) for part in re.split(r"[-_ ]+", d["name"].lower()) if part)
+            if spelled and re.search(rf"(?<!\w)(?<!\w-){spelled}(?!\w)(?!-\w)", text):
+                self._log.warning("[skills] the plan or design names %s, which is no longer used; the plan is left as "
+                                  "it is, and the code is told the skill is not available", d["name"])
+                self._progress(f"[FI] the plan names the skill {d['name']}, which this quest no longer uses. The plan is "
+                               f"not changed; the code is written without it. To change the plan, use --revise-plan.")
+        writes = list(((snapshot.metadata or {}).get("writes") or {}).keys())
+        as_node = next((w for w in writes if w in ("design", "synthesize", "data_load")), "design")
+        return await graph.aupdate_state(
+            fork_config,
+            {"selected_skills": new, "skill_selection": record, "implement_outline": {}},
+            as_node=as_node,
+        )
 
     def _skills_block(self, state: QuestState | None = None) -> str:
         """Instructions for the skills this quest actually selected.

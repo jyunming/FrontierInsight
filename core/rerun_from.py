@@ -5,8 +5,9 @@ a step continues from the latest checkpoint taken just before that step ran, so 
 there is kept and everything from there on is done again. The outputs of that step and the ones after it are first
 moved to ``.fi/previous/<time>/``, so the new ones never mix with the old and both can be compared.
 
-The steps offered start at the code: an earlier change is a change to the plan, which the frozen protocol holds, and
-goes through ``--revise-plan``.
+The steps offered start at the skills: an earlier change is a change to the plan, which the frozen protocol holds, and
+goes through ``--revise-plan``. The ``skills`` step picks the quest's skills again (from the quest's current config)
+and writes the code again; the literature, the plan and the frozen protocol are not touched.
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ from typing import Any
 
 # Plain name -> the graph nodes the step is made of (run in that order). The node names are accepted too.
 STEPS: dict[str, tuple[str, ...]] = {
+    # The skills are picked again just before the code (or, with no simulation, the data) is made: the same place in
+    # the graph as ``code``, so the checkpoint is the same; the pick itself is redone by the engine (``Engine.run``).
+    "skills": ("implement_outline", "auto_collect_data"),
     "code": ("implement_outline", "implement"),
     # The no-simulation path's run is the data: collected, waited for, loaded.
     "run": ("execute", "auto_collect_data", "wait_for_data", "data_load"),
@@ -29,6 +33,8 @@ STEPS: dict[str, tuple[str, ...]] = {
 _WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect",)}
 # What running the quest again from each step does, in one sentence a person reads before choosing.
 REDOES: dict[str, str] = {
+    "skills": "picks the skills again from the quest's current config, writes the code again, then runs it and does "
+              "everything after; the literature and the plan are not redone",
     "code": "writes the experiment's code again, then runs it and does everything after",
     "run": "runs the same code again for new results, then analyses, writes and reviews them",
     "analysis": "analyses the same results again, then writes and reviews",
@@ -36,6 +42,7 @@ REDOES: dict[str, str] = {
     "review": "reviews the same paper again (and makes the slides and poster from it again)",
 }
 _ALIASES = {
+    "select_skills": "skills", "skill": "skills",
     "implement": "code", "implement_outline": "code", "execute": "run", "data_load": "run", "auto_collect_data": "run", "analyze": "analysis",
     "write": "writing", "paper": "writing",
 }
@@ -54,6 +61,7 @@ OUTPUTS: dict[str, list[str]] = {
     # The mean-over-seeds redraw is written into code/ by the run.
     "run": ["figures", "raw", "results.json", "code/replot_figures.py", "code/replot_figures.json", *_PAPER],
     "code": ["code", "figures", "raw", "results.json", *_PAPER],
+    "skills": ["code", "figures", "raw", "results.json", *_PAPER],
 }
 
 
@@ -95,10 +103,15 @@ async def reached(graph: Any, run_config: dict[str, Any]) -> list[str]:
     return [step for step, nodes in STEPS.items() if seen & set(nodes)]
 
 
+def picks_skills(step: str) -> bool:
+    """Whether running again from ``step`` picks the quest's skills again."""
+    return step == "skills"
+
+
 def listing(quest_id: str, steps: list[str]) -> str:
     """The reached steps as a person reads them, with how to use one."""
     if not steps:
-        return (f"Quest {quest_id} has not reached the code step yet, so there is no step to run it again from. "
+        return (f"Quest {quest_id} has not reached the skills or code step yet, so there is no step to run it again from. "
                 f"`--resume {quest_id}` goes on from where it stopped; to change the plan, use --revise-plan.")
     width = max(len(step) for step in steps)
     lines = [f"Quest {quest_id} can be run again from:"]
@@ -112,7 +125,12 @@ def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
     """Move what ``step`` and the steps after it wrote into ``.fi/previous/<time>/``. Returns the folder and what was
     moved (relative paths); ``(None, [])`` when there was nothing to move."""
     quest_root = Path(quest_root)
-    dest = quest_root / ".fi" / "previous" / time.strftime("%Y%m%d-%H%M%S")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = quest_root / ".fi" / "previous" / stamp
+    n = 2
+    while dest.exists():
+        dest = quest_root / ".fi" / "previous" / f"{stamp}-{n}"
+        n += 1
     moved: list[str] = []
     for rel in dict.fromkeys(OUTPUTS[step]):
         src = quest_root / rel
