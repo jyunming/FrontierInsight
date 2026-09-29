@@ -78,7 +78,7 @@ numbers. A line figure, error bars included, is drawn as the mean of the seeds, 
 confidence interval, with its legend outside the axes when it has four or more entries or would sit over the lines; bar charts, histograms and scatters show replicate seed 0 only (every run that seed made), and the paper is told so. Every run gets its own seed, spaced far enough apart that no two runs draw the same
 ones, so what varies between them is variation the experiment produced; a script that never names its seed is sent back once,
 right after it is written, to read it (one extra model call, spent only then); and when the experiment still turns out not to read its seed
-at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical.
+at all, the chat says so and the paper reports a single measurement instead of an interval over runs that were identical (a script with no random source at all is reported as a deterministic study instead, resting on convergence and conservation checks).
 The same call goes out when the script reads the seed and builds a random generator without one anyway -- its runs differ, so nothing looks wrong, but the seed reached none
 of the randomness and no run can be reproduced; the chat names the line, and says so in the log if the repair does not land. You see every node firing live in the chat panel.
 

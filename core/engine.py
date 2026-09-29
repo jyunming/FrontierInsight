@@ -21,7 +21,9 @@ import logging
 import math
 import os
 import platform
+import io
 import re
+import tokenize
 import shutil
 import string
 import sys
@@ -322,6 +324,9 @@ class QuestState(TypedDict, total=False):
     # published in that case; this records WHY, so analyze can tell the paper it
     # holds a single measurement rather than quietly losing its error bars.
     result_json_replicate_seed_ignored: bool
+    # True (only alongside the flag above) when the script has no random source at all: a deterministic study, where
+    # one run is the whole result and the analyze note says so instead of calling it unreplicated.
+    result_json_no_random_source: bool
     # The design's asserted paths some run of this quest has reported (``plausibility.bounded_paths``). A later result
     # that no longer reports one of them is a plausibility violation: a repair must not rename or drop a bounded quantity.
     bounded_seen: list[str]
@@ -7290,6 +7295,7 @@ class Engine:
             or state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
             or (reads_seed and not unseeded)
+            or (not reads_seed and not _script_has_random_source(code_path))
         ):
             return code, deps
         if reads_seed:
@@ -7882,6 +7888,7 @@ class Engine:
         unseeded_rng = _unseeded_rng_calls(seed_path)
         seed_reaches_rng = _replicate_seed_reaches_rng(seed_path)
         seed_ignored = False
+        no_random_source = not _script_has_random_source(seed_path)
         replicates_ran = False
         primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
         if result.returncode == 0 and result_json is not None:
@@ -7981,6 +7988,15 @@ class Engine:
                                     "skipping the remaining %d replicate(s)",
                                     replicates_n - 2,
                                 )
+                        elif no_random_source:
+                            seed_ignored = True
+                            self._log.info(
+                                "[execute] %s draws no random numbers, so this study is deterministic: one run "
+                                "is the whole result, and its trust comes from convergence, conservation and "
+                                "analytic-limit checks rather than repeat counts. Skipping the remaining %d "
+                                "replicate(s).",
+                                seed_path.name, max(0, replicates_n - 2),
+                            )
                         elif reads_seed:
                             # Named but not obeyed: it reads FI_REPLICATE_SEED (so it is not the
                             # "never reads it" case below), but that value reaches no generator this
@@ -8179,8 +8195,11 @@ class Engine:
             # earlier script ignored the seed from carrying "there is one
             # measurement here" alongside this script's full aggregate.
             patch["result_json_replicate_seed_ignored"] = False
+        # Both flags are written on every pass: a pass that ran no replicates (every extra run failed, trial mode,
+        # a background job) must not inherit the previous script's verdict.
+        patch["result_json_no_random_source"] = bool(seed_ignored and no_random_source)
+        patch["result_json_replicate_seed_ignored"] = bool(seed_ignored)
         if seed_ignored:
-            patch["result_json_replicate_seed_ignored"] = True
             # The same hazard the other way round. An earlier pass may have
             # left a replicate list on the state, and merely withholding the
             # key would KEEP it -- so analyze would aggregate the previous
@@ -9182,7 +9201,16 @@ class Engine:
                 "says about the question, and no number may be reported as a result of this run.\n\n"
                 + stdout_for_analyze
             )
-        if state.get("result_json_replicate_seed_ignored"):
+        if state.get("result_json_replicate_seed_ignored") and state.get("result_json_no_random_source"):
+            stdout_for_analyze = (
+                "[FI NOTE] This study is deterministic: the script draws no random numbers, so one run is the whole "
+                "result and repeating it returns the same numbers. Report it as a single deterministic run and do NOT "
+                "report a mean over seeds, a standard error or a confidence interval. Do not list missing repeats as "
+                "a limitation. Say instead that its trust rests on convergence, conservation and analytic-limit "
+                "checks, and name which of those were and were not done.\n\n"
+                + stdout_for_analyze
+            )
+        elif state.get("result_json_replicate_seed_ignored"):
             stdout_for_analyze = (
                 "[FI NOTE] Replication was configured, but the experiment script "
                 "never reads FI_REPLICATE_SEED, so every replicate repeated the "
@@ -15944,6 +15972,75 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
         return "FI_REPLICATE_SEED" in code_path.read_text(
             encoding="utf-8", errors="replace",
         )
+    except OSError:
+        return True
+
+
+_RANDOM_SOURCE_PATTERN = re.compile(
+    r"random|seed|secrets|\brng\b|default_rng|SeedSequence|\brvs\b|randn|randint|randrange|randperm|shuffle|permutation"
+    r"|multinomial|gillespie|bootstrap|scramble|sobol|halton|latin_?hypercube|dropout|erdos_renyi|watts_strogatz"
+    r"|barabasi_albert|torch|tensorflow|keras|\bjax\b"
+    r"|\.(rand|normal|uniform|binomial|poisson|exponential|choice|choices|sample|integers|standard_normal)\(",
+    re.IGNORECASE,
+)
+
+
+def _without_comments(text: str) -> str:
+    """The source with ``#`` comments removed, so a note saying "no random seed is needed" is not a random source."""
+    try:
+        kept = [
+            tok for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+            if tok.type != tokenize.COMMENT
+        ]
+        return " ".join(tok.string for tok in kept)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return text
+
+
+def _imported_module_names(tree: ast.AST) -> list[str]:
+    names: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names += [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.append(node.module)
+            names += [f"{node.module}.{a.name}" for a in node.names]
+    return names
+
+
+def _script_has_random_source(code_path: Path) -> bool:
+    """Whether the script, or a module it imports from its own folder, can draw a random number at all.
+
+    A script with none (an ODE integrator, a closed-form sweep, a lattice sum) is deterministic by construction,
+    so a repeat count is not what makes its result trustworthy. A deliberately generous scan of the code (comments
+    aside): any mention of a random module, seed argument, sampler or graph generator counts, so "none" is only said
+    when nothing could draw. It follows the script's own imports into sibling files (a multi-module project keeps its
+    sampler elsewhere) but not the whole folder, which also holds the analysis script and FI's own helpers.
+    Over-detecting only brings back the old warning. An unreadable or unparsable file returns ``True`` because
+    silence is not evidence of determinism.
+    """
+    folder = code_path.parent
+    seen: set[Path] = set()
+    todo = [code_path]
+    try:
+        while todo and len(seen) < 100:
+            path = todo.pop()
+            if path in seen:
+                continue
+            seen.add(path)
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if _RANDOM_SOURCE_PATTERN.search(_without_comments(text)) is not None:
+                return True
+            try:
+                tree = ast.parse(text)
+            except (SyntaxError, ValueError):
+                return True
+            for name in _imported_module_names(tree):
+                stem = folder.joinpath(*name.split("."))
+                for candidate in (stem.with_suffix(".py"), stem / "__init__.py"):
+                    if candidate.is_file():
+                        todo.append(candidate)
+        return False
     except OSError:
         return True
 

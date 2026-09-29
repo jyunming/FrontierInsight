@@ -281,6 +281,17 @@ async def test_no_call_when_no_replicate_runs_would_be_made(tmp_path: Path, why:
 
 
 @pytest.mark.asyncio
+async def test_no_call_to_seed_a_script_that_draws_no_random_numbers(tmp_path: Path) -> None:
+    deterministic = 'import json\nprint("RESULT_JSON: " + json.dumps({"err": 0.01}))\n'
+    eng, client, _ = _engine(tmp_path, [_implement_reply(deterministic)])
+
+    patch = await eng._node_implement(_implement_state())  # type: ignore[arg-type]
+
+    assert client.nodes == ["implement"], "a deterministic script was sent for a seed rewrite"
+    assert patch["code"].strip() == deterministic.strip()
+
+
+@pytest.mark.asyncio
 async def test_no_call_to_seed_the_stub_written_when_implement_returned_nothing(tmp_path: Path) -> None:
     eng, client, _ = _engine(tmp_path, ["I could not write this."])
 

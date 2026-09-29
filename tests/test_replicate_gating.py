@@ -17,6 +17,7 @@ flat-JSON fixtures could not:
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -413,6 +414,140 @@ async def test_an_ordinary_run_gets_no_such_note(tmp_path: Path) -> None:
         "exec_result": {"returncode": 0}, "figures": [], "design": {},
     })
     assert "never reads FI_REPLICATE_SEED" not in prompt
+
+
+# --- a deterministic study is not an unreplicated one ------------------------
+
+DETERMINISTIC_SCRIPT = (
+    "import json\n"
+    "def rk4(n):\n"
+    "    return 1.0 / n\n"
+    'print("RESULT_JSON: " + json.dumps({"err": rk4(100)}))\n'
+)
+
+
+def _capture_log(eng: Engine) -> list[tuple[int, str]]:
+    logged: list[tuple[int, str]] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            logged.append((record.levelno, record.getMessage()))
+
+    eng._log.addHandler(_Capture())
+    eng._log.setLevel(logging.INFO)
+    return logged
+
+
+def test_a_script_with_no_random_source_is_recognised(tmp_path: Path) -> None:
+    from core.engine import _script_has_random_source
+
+    none = tmp_path / "det.py"
+    none.write_text(DETERMINISTIC_SCRIPT, encoding="utf-8")
+    assert _script_has_random_source(none) is False
+    seeded = tmp_path / "rnd.py"
+    seeded.write_text(TERRA_SHAPED_SCRIPT, encoding="utf-8")
+    assert _script_has_random_source(seeded) is True
+    assert _script_has_random_source(tmp_path / "missing.py") is True
+
+
+@pytest.mark.parametrize("body", [
+    "import networkx as nx\ng = nx.erdos_renyi_graph(500, 0.01, seed=42)\n",
+    "from sklearn.ensemble import RandomForestClassifier\nm = RandomForestClassifier(random_state=0)\n",
+    "from scipy import stats\nr = stats.permutation_test((a, b), f)\n",
+    "import torch\nx = torch.randperm(10)\n",
+])
+def test_randomness_spelled_without_the_word_random_is_still_a_random_source(tmp_path: Path, body: str) -> None:
+    from core.engine import _script_has_random_source
+
+    script = tmp_path / "experiment.py"
+    script.write_text(body, encoding="utf-8")
+    assert _script_has_random_source(script) is True
+
+
+def test_randomness_in_a_module_beside_the_script_counts(tmp_path: Path) -> None:
+    from core.engine import _script_has_random_source
+
+    (tmp_path / "experiment.py").write_text("from sim import run_sim\nprint(run_sim())\n", encoding="utf-8")
+    assert _script_has_random_source(tmp_path / "experiment.py") is False
+    (tmp_path / "sim.py").write_text("import numpy as np\nrng = np.random.default_rng(42)\n", encoding="utf-8")
+    assert _script_has_random_source(tmp_path / "experiment.py") is True
+
+
+def test_a_comment_about_randomness_and_unrelated_files_beside_the_script_do_not_count(tmp_path: Path) -> None:
+    from core.engine import _script_has_random_source
+
+    script = tmp_path / "simulate.py"
+    script.write_text("# Deterministic ODE integration: no random seed is needed\nprint(1)\n", encoding="utf-8")
+    (tmp_path / "experiment.py").write_text('m = {"seed": 0}\nprint(m["seed"])\n', encoding="utf-8")
+    (tmp_path / "replot_figures.py").write_text("seed = 0\n", encoding="utf-8")
+    assert _script_has_random_source(script) is False
+
+
+@pytest.mark.asyncio
+async def test_a_stale_seed_ignored_verdict_is_cleared_when_a_pass_runs_no_replicates(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, replicates=1)
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"err": 0.01}')))
+    patch = await eng._node_execute({
+        "deps": [], "result_json_replicate_seed_ignored": True, "result_json_no_random_source": True,
+    })
+    assert patch["result_json_replicate_seed_ignored"] is False
+    assert patch["result_json_no_random_source"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_script_with_no_random_source_is_reported_as_deterministic_not_single_measurement(
+    tmp_path: Path,
+) -> None:
+    eng = _engine(tmp_path, replicates=3)
+    (eng.quest_root / "code" / "experiment.py").write_text(DETERMINISTIC_SCRIPT, encoding="utf-8")
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"err": 0.01}')))
+    logged = _capture_log(eng)
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 2
+    assert patch["result_json_replicate_seed_ignored"] is True
+    assert patch["result_json_no_random_source"] is True
+    assert not patch.get("result_json_replicates")
+    text = " ".join(m for _, m in logged)
+    assert "this study is deterministic" in text
+    assert "convergence, conservation and analytic-limit checks" in text
+    assert "single measurement" not in text
+    assert [m for lvl, m in logged if lvl >= logging.WARNING and "seed" in m] == []
+
+
+@pytest.mark.asyncio
+async def test_a_random_script_that_ignores_its_seed_keeps_the_warning(
+    tmp_path: Path,
+) -> None:
+    eng = _engine(tmp_path, replicates=3)
+    (eng.quest_root / "code" / "experiment.py").write_text(TERRA_SHAPED_SCRIPT, encoding="utf-8")
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"p": 0.667}')))
+    logged = _capture_log(eng)
+    patch = await eng._node_execute({"deps": []})
+
+    assert patch["result_json_replicate_seed_ignored"] is True
+    assert patch["result_json_no_random_source"] is False
+    assert "the quest stands on a single measurement" in " ".join(m for _, m in logged)
+
+
+@pytest.mark.asyncio
+async def test_analyze_is_told_a_deterministic_study_needs_no_repeat_count(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, replicates=3)
+    eng.quest_root = tmp_path  # type: ignore[attr-defined]
+    prompt = await _analyze_prompt(eng, {
+        "result_json": {"err": 0.01},
+        "result_json_replicate_seed_ignored": True,
+        "result_json_no_random_source": True,
+        "exec_result": {"returncode": 0}, "figures": [], "design": {},
+    })
+    assert "This study is deterministic" in prompt
+    assert "convergence, conservation and analytic-limit" in prompt
+    assert "Do not list missing repeats as a limitation" in prompt
+    assert "was not replicated because" not in prompt
+    assert "ONE measurement here" not in prompt
 
 
 # --- and the verdict does not outlive the script it was about ----------------
