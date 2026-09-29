@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -162,3 +166,107 @@ def _hermetic_pandoc_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "generation._pandoc._pypandoc_pandoc", lambda: None, raising=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Template venv for fast test execution
+# ---------------------------------------------------------------------------
+# Building a fresh per-quest venv from scratch takes ~10 s on CI.  Copying a
+# pre-built template takes ~2.4 s.  The fixtures below build one template venv
+# per Python interpreter per machine (keyed by sys.executable) and patch
+# core.execution._build_venv to copy it whenever a test asks for a new venv.
+#
+# pytest-xdist safety: the template lives outside pytest's tmp hierarchy in a
+# stable path under tempfile.gettempdir().  A FileLock on a sibling file
+# ensures only one worker builds it; the rest wait and reuse it.
+#
+# Opt-out: tests/test_execution.py asserts real venv-creation behavior (the
+# pyvenv.cfg flags, partial-build detection, python_version fallback logging,
+# etc.) and must never see the stub.  Any other test that needs real venv
+# creation can skip the patch by checking ``request.fspath.basename``.
+
+
+def _template_venv_root() -> Path:
+    """Stable per-interpreter path shared across pytest-xdist workers."""
+    key = hashlib.sha256(sys.executable.encode()).hexdigest()[:12]
+    return Path(tempfile.gettempdir()) / f"fi_template_venv_{key}"
+
+
+def _venv_python(venv_dir: Path) -> Path:
+    if sys.platform.startswith("win"):
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
+@pytest.fixture(scope="session")
+def _fi_template_venv() -> Path:
+    """Return the path to a ready template venv, building it if needed.
+
+    Session-scoped so it is built at most once per worker.  The FileLock
+    serialises across workers so the first arrival builds and the rest wait.
+    """
+    from filelock import FileLock
+
+    # Import the REAL _build_venv before any monkeypatching can reach it.
+    # (Session fixtures run before function-scoped ones so this is safe, but
+    # importing here rather than at module level is an extra guard.)
+    from core.execution import _build_venv as _real_build_venv
+
+    root = _template_venv_root()
+    template_dir = root / "venv"
+    sentinel = root / ".ready"
+    lock_path = root / ".lock"
+
+    root.mkdir(parents=True, exist_ok=True)
+    lock = FileLock(str(lock_path), timeout=180)
+    with lock:
+        # Rebuild if the sentinel or the actual venv directory is missing.
+        if not sentinel.exists() or not (template_dir / "pyvenv.cfg").exists():
+            if template_dir.exists():
+                shutil.rmtree(template_dir, ignore_errors=True)
+            _real_build_venv(template_dir, with_pip=True, clear=False)
+            # Verify the copied venv's python actually works and pip is reachable.
+            py = _venv_python(template_dir)
+            probe = subprocess.run(
+                [str(py), "-c", "import pip; print('ok')"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if probe.returncode != 0:
+                raise RuntimeError(
+                    f"template venv pip probe failed (rc={probe.returncode}):\n"
+                    f"{probe.stderr}"
+                )
+            sentinel.write_text("ok", encoding="utf-8")
+
+    return template_dir
+
+
+@pytest.fixture(autouse=True)
+def _fast_build_venv(_fi_template_venv: Path, request: pytest.FixtureRequest,
+                     monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch _build_venv to copy the template instead of building fresh.
+
+    Opted out for tests/test_execution.py, which tests real venv creation.
+    The copy preserves symlinks (so the ``python`` symlink in ``bin/`` still
+    points to the system interpreter) and takes ~2.4 s vs ~10.7 s to build.
+    VenvExecutor always calls ``python -m pip``, never the pip script, so
+    hard-coded shebang paths in the copied scripts are never executed.
+    """
+    if request.fspath.basename == "test_execution.py":
+        return
+
+    template = _fi_template_venv
+
+    def _copy_venv(
+        venv_dir: Path,
+        *,
+        with_pip: bool,
+        clear: bool = False,
+        python_version: str = "3.11",
+        system_site_packages: bool = True,
+    ) -> None:
+        if clear and venv_dir.exists():
+            shutil.rmtree(venv_dir, ignore_errors=True)
+        shutil.copytree(template, venv_dir, symlinks=True)
+
+    monkeypatch.setattr("core.execution._build_venv", _copy_venv)
