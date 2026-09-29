@@ -4,15 +4,15 @@ topic: |
   TOPIC. When many hypotheses are tested at once, how do Bonferroni correction and the Benjamini-Hochberg procedure compare in false discoveries and in power?
 
   CONTEXT. Testing thousands of hypotheses at a 5 percent level produces many false positives. Bonferroni controls the chance of any false positive; Benjamini-Hochberg controls the expected share of false positives among the positives found (the false discovery rate).
-  SCOPE. Simulate m tests (m in {20, 200, 2000}) in which a fraction pi1 in {0.0, 0.05, 0.2} of the effects are real, with effect sizes drawn so the real ones are moderately detectable. Compare uncorrected, Bonferroni and Benjamini-Hochberg at a nominal 5 percent: report the realised false discovery rate and the power, with uncertainty over repeats.
+  SCOPE. Simulate m tests (m in {20, 200, 2000}) in which a fraction pi1 in {0.0, 0.05, 0.2} of the effects are real, using one-sided z-tests in which each real effect shifts the test statistic by 2.5. Compare uncorrected, Bonferroni and Benjamini-Hochberg at a nominal 5 percent: report the realised false discovery rate (draw the reference pi0 * 0.05 for Benjamini-Hochberg) and the power, with uncertainty over repeats. When pi1 = 0 there are no real effects, so power is undefined; report only the chance of any false discovery.
 
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
     - A short paper of at most 4 pages that cites at least three primary references.
   CONSTRAINTS.
-    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
-    - Report every number with its uncertainty, and say when a result is only a check of the code.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
 
 title: fdr-bonferroni-vs-bh
 
@@ -35,6 +35,8 @@ execution:
 knowledge:
   enabled: true
   top_k: 5
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
 
 pauses:
   papers: false

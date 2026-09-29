@@ -3,16 +3,16 @@
 topic: |
   TOPIC. How does the firing rate of a simple model neuron depend on its input current, and how well does a closed-form expression predict it?
 
-  CONTEXT. A leaky integrate-and-fire neuron obeys tau * dV/dt = -(V - V_rest) + R * I and fires when V reaches a threshold, then resets. For a constant input above threshold, the firing rate has a closed form.
-  SCOPE. Simulate the neuron for constant currents from below to well above threshold with several time steps, measure the firing rate, and compare with the closed form. Report the error against step size, and repeat with added noise to show how noise smooths the sharp onset of firing.
+  CONTEXT. A leaky integrate-and-fire neuron obeys tau * dV/dt = -(V - V_rest) + R * I and fires when V reaches a threshold, then resets to V_rest and stays silent for a refractory period t_ref of 2 ms. Use tau = 20 ms. For a constant input above threshold, the firing rate is 1 / (t_ref + tau * ln[(R*I + V_rest - V_reset) / (R*I + V_rest - V_thresh)]).
+  SCOPE. Simulate the neuron for constant currents from below to well above threshold with several time steps, measure the firing rate from the mean interval between spikes, and compare with the closed form. Report the error against step size, and repeat with added white noise of a stated amplitude (scaled by the square root of the step) to show how noise smooths the sharp onset of firing, drawing the Siegert (Brunel 2000) first-passage rate as the theory value.
 
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
     - A short paper of at most 4 pages that cites at least three primary references.
   CONSTRAINTS.
-    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
-    - Report every number with its uncertainty, and say when a result is only a check of the code.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
 
 title: integrate-and-fire-rate
 
@@ -35,6 +35,8 @@ execution:
 knowledge:
   enabled: true
   top_k: 5
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
 
 pauses:
   papers: false

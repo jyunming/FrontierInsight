@@ -3,16 +3,16 @@
 topic: |
   TOPIC. How well does a stochastic epidemic simulation match the textbook final-size relation, and how does it depart from it in a small population?
 
-  CONTEXT. In the simple SIR epidemic model the fraction of people ever infected, z, satisfies z = 1 - exp(-R0 * z) (R0 is the average number of people one case infects in a fully susceptible population). With few people and random chance, some outbreaks die out early, so the average final size falls below that curve.
-  SCOPE. Simulate a stochastic SIR epidemic (population N, one starting case). For N in {50, 200, 1000} and R0 in {0.8, 1.2, 1.5, 2.0, 3.0}, run many outbreaks and report the mean final fraction infected, the share of outbreaks that die out early, and the analytic z. State how the gap shrinks as N grows.
+  CONTEXT. In the simple SIR epidemic model the fraction of people ever infected, z, satisfies z = 1 - exp(-R0 * z) (R0 is the average number of people one case infects in a fully susceptible population). Use the Markov model: each infected person recovers at rate 1 and infects each susceptible at rate R0 / N. With one starting case and random chance, a share of outbreaks die out early (about 1/R0 of them when R0 > 1); the rest take off and end close to z.
+  SCOPE. Simulate this stochastic SIR epidemic (population N, one starting case). For N in {50, 200, 1000} and R0 in {0.8, 1.2, 1.5, 2.0, 3.0}, run many outbreaks. Call an outbreak "died out early" if fewer than 10 percent of the N people were ever infected. Report (a) the mean final fraction infected among outbreaks that did not die out early, compared with z, and how that gap shrinks as N grows; (b) the share of outbreaks that died out early, compared with 1/R0. Treat R0 = 0.8 as a control: below 1 there is no take-off, z is 0, and the expected outbreak size is 1 / (1 - R0) = 5 cases.
 
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
     - A short paper of at most 4 pages that cites at least three primary references.
   CONSTRAINTS.
-    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
-    - Report every number with its uncertainty, and say when a result is only a check of the code.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
 
 title: sir-final-size-vs-r0
 
@@ -35,6 +35,8 @@ execution:
 knowledge:
   enabled: true
   top_k: 5
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
 
 pauses:
   papers: false

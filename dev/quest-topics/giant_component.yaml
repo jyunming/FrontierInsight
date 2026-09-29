@@ -1,18 +1,18 @@
 # General-science test topic (network science). A field-neutral simulation with a known answer, so a run can be checked
 # against theory. Run: python launch.py --config dev/quest-topics/giant_component.yaml
 topic: |
-  TOPIC. At what average number of connections does a random network suddenly form one giant connected cluster, and how sharp is that change?
+  TOPIC. At what average number of connections does a random network form one giant connected cluster, and how sharp is that change?
 
-  CONTEXT. In a random graph where each pair of nodes is linked with probability p, the average number of links per node is c = p * (N - 1). Theory says a giant connected cluster appears at c = 1, and above it the giant cluster's share of the nodes S satisfies S = 1 - exp(-c * S).
-  SCOPE. Generate random graphs with N in {100, 1000, 10000} and c from 0.2 to 3.0, measure the share of nodes in the largest cluster, and compare it with the theoretical S. Show how the transition sharpens as N grows, and estimate where it happens for each N.
+  CONTEXT. In a random graph where each pair of nodes is linked with probability p, the average number of links per node is c = p * (N - 1). Theory says a giant connected cluster appears at c = 1 (a continuous change, roughly S = 2(c - 1) just above it), and above it the giant cluster's share of the nodes S satisfies S = 1 - exp(-c * S).
+  SCOPE. Generate random graphs with N in {100, 1000, 10000} and c from 0.2 to 3.0, measure the share of nodes in the largest cluster, and compare it with the theoretical S. Show how the transition sharpens as N grows, and estimate where it happens for each N as the c at which the second-largest cluster is biggest. Sample edges (draw the number of links, then random pairs) and use scipy.sparse.csgraph.connected_components rather than building an N by N matrix.
 
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
     - A short paper of at most 4 pages that cites at least three primary references.
   CONSTRAINTS.
-    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
-    - Report every number with its uncertainty, and say when a result is only a check of the code.
+    - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
+    - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
 
 title: giant-component-threshold
 
@@ -35,6 +35,8 @@ execution:
 knowledge:
   enabled: true
   top_k: 5
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
 
 pauses:
   papers: false
