@@ -191,6 +191,52 @@ def step_info(step: str, *, reached: bool) -> dict[str, Any]:
             "reached": reached, "outputs": outputs_of(step)}
 
 
+# The graph's nodes in the order the quest runs them, each with its block on the map and one plain sentence. Every node
+# is shown; only the ones that resolve to a step (see ``resolve``) and were reached can be restarted from.
+NODES: dict[str, tuple[str, str]] = {
+    "clarify": ("Ideas & literature", "Checks the setup and asks what is unclear."),
+    "ideate": ("Ideas & literature", "Chooses the research angle to take."),
+    "literature": ("Ideas & literature", "Searches the literature."),
+    "pause_after_literature": ("Skills & plan", "Waits for you to add papers the search could not get in full."),
+    "select_skills": ("Skills & plan", "Chooses which tools (skills) the experiment may use."),
+    "plan": ("Skills & plan", "Writes the plan and waits for you to read it."),
+    "design": ("Design", "Designs the experiment and freezes the protocol it will be judged by."),
+    "implement_outline": ("Code", "Sketches the experiment's code."),
+    "implement": ("Code", "Writes the experiment's code."),
+    "execute": ("Run", "Runs the experiment."),
+    "execute_reflect": ("Run", "Repairs a script that crashed, then runs it again."),
+    "auto_collect_data": ("Run", "Looks for data (a quest with no simulation)."),
+    "wait_for_data": ("Run", "Waits for you to add data (a quest with no simulation)."),
+    "data_load": ("Run", "Loads the data (a quest with no simulation)."),
+    "web_plots": ("Run", "Plans the plots from the loaded data (a quest with no simulation)."),
+    "web_figures": ("Run", "Draws the figures from the loaded data (a quest with no simulation)."),
+    "analyze": ("Analysis", "Analyses the results."),
+    "cross_check": ("Analysis", "Checks the analysis against the literature and the design."),
+    "evidence_gate": ("Analysis", "Weighs how strong the evidence for the results is."),
+    "write": ("Writing", "Writes the paper."),
+    "claim_check": ("Writing", "Checks every claim in the paper against the results."),
+    "review": ("Review", "Reviews the paper."),
+    "human_feedback": ("Review", "Waits for your decision on the paper."),
+}
+
+
+def node_map(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every graph node as a map shows it, in graph order: name, block, sentence, the step a restart from it means (or
+    ``""``), and whether it can be clicked. ``steps`` is what ``Engine.rerun_steps()`` returns. A node is clickable only
+    when it names a step that has its backup list and sentence and the quest reached that step."""
+    by_step = {s["name"]: s for s in steps}
+    out = []
+    for node, (block, sentence) in NODES.items():
+        step = resolve(node) or ""
+        info = by_step.get(step) if step in OUTPUTS and step in REDOES else None
+        out.append({"node": node, "block": block, "sentence": sentence, "step": step if info else "",
+                    "clickable": bool(info and info["reached"]),
+                    "needs_approval": bool(info and info["needs_approval"]),
+                    "redoes": info["sentence"] if info else "",
+                    "outputs": info["outputs"] if info else []})
+    return out
+
+
 async def _current_branch(graph: Any, run_config: dict[str, Any]):
     """The checkpoints of the quest's present line, newest first. After a run from an earlier step the history also
     holds the line it left, whose later steps the quest no longer has; only the newest checkpoint and its parents (each

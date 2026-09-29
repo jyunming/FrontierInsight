@@ -1115,7 +1115,8 @@ def make_app(
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file() or not (quest_root / ".fi" / "state.sqlite").is_file():
-            return JSONResponse({"quest_id": quest_id, "steps": []})
+            return JSONResponse({"quest_id": quest_id, "steps": [], "nodes": [], "blocks": [],
+                                 "config_path": str(yaml_path)})
         from core import rerun_from as _rerun_from
         from core.config import Config
         from core.engine import Engine, _close_quest_logger
@@ -1129,6 +1130,9 @@ def make_app(
             _close_quest_logger(quest_id)
         return JSONResponse({
             "quest_id": quest_id,
+            "config_path": str(yaml_path),
+            "blocks": list(_rerun_from.GROUPS),
+            "nodes": _rerun_from.node_map(steps),
             "steps": [{"step": s["name"], "redoes": s["sentence"], "group": s["group"],
                        "needs_approval": s["needs_approval"], "outputs": s["outputs"]}
                       for s in steps if s["reached"]],

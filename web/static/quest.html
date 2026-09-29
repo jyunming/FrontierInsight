@@ -158,6 +158,25 @@
     </div>
   </div>
 
+  <!-- Quest map: every step of the quest in big blocks; the ones the quest reached can be clicked to run it again from there. -->
+  <section id="quest-map" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
+    <h2 class="font-headline-md text-headline-md text-on-surface">Quest map</h2>
+    <p class="font-body-md text-body-md text-on-surface-variant">Every step of this quest. Click one it has reached to see what running it again from there keeps and what it redoes. Grey steps have not been reached, or are not a place to restart from.</p>
+    <div id="quest-map-blocks" class="flex flex-wrap gap-4"></div>
+    <div id="quest-map-panel" class="hidden flex-col gap-3 bg-surface-low border border-white/10 rounded-lg p-4">
+      <div id="quest-map-title" class="font-label-sm text-label-sm uppercase text-on-surface"></div>
+      <p id="quest-map-sentence" class="text-on-surface-variant text-body-sm"></p>
+      <p id="quest-map-redoes" class="text-on-surface-variant text-body-sm"></p>
+      <div id="quest-map-approval" class="hidden fi-banner fi-banner-warning"><span class="text-on-surface-variant">Going back this far changes the design, so the frozen protocol (the experiment plan the results are judged by) has to be approved again, with your name. Use the command below; the button here cannot do it.</span></div>
+      <div class="text-on-surface-variant text-body-sm">The same from a terminal:</div>
+      <code id="quest-map-cli" class="font-code-md text-code-md text-on-surface break-all select-all"></code>
+      <div class="flex flex-wrap items-center gap-3">
+        <button id="quest-map-go" onclick="mapRestart()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Run again from here</button>
+        <span id="quest-map-status" class="text-on-surface-variant text-body-sm"></span>
+      </div>
+    </div>
+  </section>
+
   <!-- The plan (plan.md): written after the literature and before the experiment is designed. -->
   <section id="plan-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
     <div class="flex flex-wrap items-baseline justify-between gap-2">
@@ -451,8 +470,12 @@
     const menu = document.getElementById('rerun-from');
     menu.classList.toggle('hidden', !(resumable || questAnswerPaused));
     // The menu offers only the steps this quest reached; asked again whenever it is shown after running.
-    if (data.alive) rerunStepsLoaded = false;
-    else if ((resumable || questAnswerPaused) && !rerunStepsLoaded) loadRerunSteps();
+    questAlive = !!data.alive;
+    if (data.alive) {
+      rerunStepsLoaded = false;
+      const mapEl = document.getElementById('quest-map');
+      mapEl.classList.add('hidden'); mapEl.classList.remove('flex');   // a running quest is not restarted from the map
+    } else if ((resumable || questAnswerPaused) && !rerunStepsLoaded) loadRerunSteps();
     // At an answer pause going on is that pause's own form: the empty choice only invites picking a step.
     const firstChoice = questAnswerPaused ? 'Redo from a step…' : 'Go on from where it stopped';
     // Written only when it changes: rewriting an option on every refresh closes an open menu.
@@ -1491,7 +1514,9 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/rerun-steps`);
       if (!res.ok) { rerunStepsLoaded = false; return; }
-      const steps = (await res.json()).steps || [];
+      const body = await res.json();
+      const steps = body.steps || [];
+      renderQuestMap(body);
       const menu = document.getElementById('rerun-from');
       const chosen = menu.value;
       while (menu.options.length > 1) menu.remove(1);
@@ -1506,6 +1531,83 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       menu.value = steps.some((s) => s.step === chosen) ? chosen : '';
     } catch (e) {
       rerunStepsLoaded = false;
+    }
+  }
+  // The quest map: the graph's own nodes in big blocks. Reached ones are buttons; the rest are greyed.
+  let questAlive = false;
+  let mapData = null;
+  let mapSelected = '';
+  function renderQuestMap(body) {
+    mapData = body;
+    const section = document.getElementById('quest-map');
+    const nodes = body.nodes || [];
+    const any = nodes.some((n) => n.clickable);
+    section.classList.toggle('hidden', !any);
+    section.classList.toggle('flex', any);
+    if (!any) return;
+    const host = document.getElementById('quest-map-blocks');
+    host.textContent = '';
+    for (const block of body.blocks || []) {
+      const members = nodes.filter((n) => n.block === block);
+      if (!members.length) continue;
+      const col = document.createElement('div');
+      col.className = 'flex flex-col gap-2 min-w-[9rem]';
+      const head = document.createElement('div');
+      head.className = 'font-label-sm text-label-sm uppercase text-outline';
+      head.textContent = block;
+      col.appendChild(head);
+      for (const n of members) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.dataset.node = n.node;
+        b.textContent = n.node;
+        b.title = n.sentence;
+        b.className = 'px-3 py-1 rounded-full font-label-sm text-label-sm text-left ' +
+          (n.clickable ? 'cyber-border text-on-surface hover:bg-surface-high' : 'opacity-40 cursor-not-allowed border border-white/10 text-on-surface-variant');
+        b.disabled = !n.clickable;
+        if (n.clickable) b.onclick = () => selectMapNode(n.node);
+        if (n.node === mapSelected) b.classList.add('cyber-border-active');
+        col.appendChild(b);
+      }
+      host.appendChild(col);
+    }
+    if (mapSelected) selectMapNode(mapSelected);
+  }
+  function mapCommand(n) {
+    const cfg = mapData.config_path || '<config.yaml>';
+    return 'python launch.py --config ' + cfg + ' --resume ' + questId + ' --from ' + n.node +
+      (n.needs_approval ? ' --approve-as "<your name>"' : '');
+  }
+  function selectMapNode(node) {
+    const n = ((mapData && mapData.nodes) || []).find((x) => x.node === node && x.clickable);
+    if (!n) return;
+    mapSelected = node;
+    document.querySelectorAll('#quest-map-blocks button').forEach((b) => b.classList.toggle('cyber-border-active', b.dataset.node === node));
+    document.getElementById('quest-map-panel').classList.remove('hidden');
+    document.getElementById('quest-map-panel').classList.add('flex');
+    document.getElementById('quest-map-title').textContent = n.block + ': ' + n.node;
+    document.getElementById('quest-map-sentence').textContent = n.sentence;
+    document.getElementById('quest-map-redoes').textContent = 'Running again from here: ' + n.redoes + '. What it and the later steps made is first moved to .fi/previous/.';
+    const appr = document.getElementById('quest-map-approval');
+    appr.classList.toggle('hidden', !n.needs_approval);
+    document.getElementById('quest-map-cli').textContent = mapCommand(n);
+    document.getElementById('quest-map-go').disabled = !!n.needs_approval || !!questAlive;
+    document.getElementById('quest-map-status').textContent = '';
+  }
+  async function mapRestart() {
+    const n = ((mapData && mapData.nodes) || []).find((x) => x.node === mapSelected && x.clickable);
+    if (!n || n.needs_approval) return;
+    const status = document.getElementById('quest-map-status');
+    status.textContent = 'Starting…';
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/resume?from=${encodeURIComponent(n.node)}`, { method: 'POST' });
+      if (!res.ok) { status.textContent = 'Could not start: ' + await res.text(); return; }
+      status.textContent = 'Started. The quest is running again from ' + n.node + '.';
+      rerunStepsLoaded = false;
+      if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+      refresh();
+    } catch (e) {
+      status.textContent = 'Could not start: ' + e;
     }
   }
   let questFinishedForRerun = false;
