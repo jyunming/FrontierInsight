@@ -19,17 +19,17 @@ from core import trial_runner as tr
 GRID = {"R0": [1.5, 3.0], "N": [100]}
 PROTOCOL = {"grid": GRID, "runs_per_setting": 50, "metrics": [
     {"id": "p", "kind": "proportion", "estimand": "P(major)", "unit": "run"},
-    {"id": "m", "kind": "mean", "estimand": "E[y | major]", "unit": "run", "given": "p"},
+    {"id": "m", "kind": "mean", "estimand": "E[m | major]", "unit": "run", "given": "p"},
 ]}
 
 
 def _rows(successes: dict[str, int], n: int = 50, *, membership: bool = True) -> dict[str, list[dict[str, Any]]]:
-    """Per cell: the first k trials are in the subset (y = 100 + trial), the rest are not (y = 1)."""
+    """Per cell: the first k trials are in the subset (m = 100 + trial), the rest are not (m = 1)."""
     out: dict[str, list[dict[str, Any]]] = {}
     for key, k in successes.items():
         rows = []
         for t in range(n):
-            values: dict[str, float] = {"y": float(100 + t) if t < k else 1.0}
+            values: dict[str, float] = {"m": float(100 + t) if t < k else 1.0}
             if membership:
                 values["p"] = 1.0 if t < k else 0.0
             rows.append({"cell": key, "trial": t, "seed": t, "values": values})
@@ -52,7 +52,7 @@ def test_values_of_trials_outside_the_subset_do_not_pass() -> None:
     """The re-audit's counterexample: the count is right and 1 is a real value, but not one of the subset's."""
     forged = {"R0=1.5,N=100": _stratum([1.0] * 10, 10)}
     analysis, simulation = _check(forged)
-    assert simulation == [] and any("not the values of the trials whose `p` is 1" in a for a in analysis)
+    assert simulation == [] and any("not the values of `m` for the trials whose `p` is 1" in a for a in analysis)
 
 
 def test_the_subset_s_own_values_pass_in_any_order_and_as_fractions_of_n() -> None:
@@ -64,13 +64,13 @@ def test_the_subset_s_own_values_pass_in_any_order_and_as_fractions_of_n() -> No
     assert _check(fractions) == ([], [])
     mixed = {"R0=1.5,N=100": _stratum([float(100 + t) for t in range(10)], 10),
              "R0=3.0,N=100": _stratum([(100 + t) / 100 for t in range(40)], 40)}
-    assert any("one mean averages one quantity" in a for a in _check(mixed)[0]), "sizes here, fractions there"
+    assert any("in the same form" in a for a in _check(mixed)[0]), "sizes here, fractions there"
 
 
 def test_values_borrowed_from_another_setting_do_not_pass() -> None:
     borrowed = {"R0=1.5,N=100": _stratum([float(100 + t) for t in range(30, 40)], 10)}
     analysis, _ = _check(borrowed)
-    assert any("not the values of the trials" in a for a in analysis)
+    assert any("not the values of `m`" in a for a in analysis)
 
 
 def test_a_count_other_than_the_subset_s_size_is_the_analysis_s_to_fix() -> None:
@@ -84,7 +84,7 @@ def test_a_record_without_the_membership_is_the_simulation_s_to_fix() -> None:
     analysis, simulation = _check({"R0=1.5,N=100": _stratum([1.0] * 10, 10)}, no_p)
     assert analysis == [] and len(simulation) == 1
     assert "run_trial must return, under the proportion's own id `p`, 1" in simulation[0], "a doable repair"
-    assert tr.RETURN_MEMBERSHIP.format(given="p") in simulation[0]
+    assert tr.RETURN_MEMBERSHIP.format(given="p", metric="m") in simulation[0]
 
 
 def test_counts_must_be_whole_numbers() -> None:
@@ -110,7 +110,7 @@ def test_rows_are_read_from_fi_s_record_and_an_edited_row_is_left_out(tmp_path: 
     (tmp_path / tr.RAW_DIRNAME).mkdir()
     (tmp_path / tr.RAW_DIRNAME / tr.LEDGER_NAME).write_text("\n".join(ledger) + "\n", encoding="utf-8")
     record_rows = [{"trial": r["trial"], "seed": r["seed"], "status": "ok", "values": dict(r["values"])} for r in rows]
-    record_rows[2]["values"]["y"] = 999.0  # changed after the trials ran
+    record_rows[2]["values"]["m"] = 999.0  # changed after the trials ran
     run = tmp_path / tr.RUN_RECORD
     run.parent.mkdir(parents=True, exist_ok=True)
     run.write_text(json.dumps({"cells": [{"key": "R0=1.5,N=100", "rows": record_rows}]}), encoding="utf-8")
@@ -143,26 +143,57 @@ def test_a_mean_under_a_wrapper_key_is_checked_against_the_whole_run() -> None:
                    {"results": [_stratum([1.0] * 50, 50)]},
                    {"metrics": {"summary": _stratum([1.0] * 50, 50)}}):
         analysis, _ = _check(forged)
-        assert any("not the values of the trials" in a for a in analysis), forged
+        assert any("not the values of `m`" in a for a in analysis), forged
     assert _check({"summary": _stratum(whole, 50)}) == ([], []), "the honest whole-run mean under a wrapper passes"
 
 
-def test_a_flag_quantity_never_stands_in_for_the_averaged_one() -> None:
-    rows = {k: [{**r, "values": {**r["values"], "ok": 1.0}} for r in v] for k, v in ROWS.items()}
+def test_only_the_named_quantity_is_averaged() -> None:
+    """The second-round bypass: a quantity z that is 1 in the subset and 0.5 outside is not 0/1, so it was no flag; the
+    ten forged 1s passed. The mean's values are the subset's values of the mean's own id, nothing else."""
+    rows = {k: [{**r, "values": {**r["values"], "z": 1.0 if r["values"]["p"] == 1 else 0.5}} for r in v]
+            for k, v in ROWS.items()}
     forged = {"R0=1.5,N=100": _stratum([1.0] * 10, 10)}
     analysis, _ = _check(forged, rows)
-    assert any("not the values of the trials" in a for a in analysis)
+    assert any("not the values of `m`" in a for a in analysis)
 
 
-def test_one_quantity_in_every_stratum() -> None:
-    rows = {k: [{**r, "values": {**r["values"], "z": r["values"]["y"] * 3}} for r in v] for k, v in ROWS.items()}
-    mixed = {"R0=1.5,N=100": _stratum([float(100 + t) for t in range(10)], 10),
-             "R0=3.0,N=100": _stratum([float(100 + t) * 3 for t in range(40)], 40)}
-    analysis, _ = _check(mixed, rows)
-    assert any("one mean averages one quantity" in a for a in analysis)
-    same = {"R0=1.5,N=100": _stratum([float(100 + t) * 3 for t in range(10)], 10),
-            "R0=3.0,N=100": _stratum([float(100 + t) * 3 for t in range(40)], 40)}
-    assert _check(same, rows) == ([], [])
+def test_a_mean_of_a_0_1_quantity_passes() -> None:
+    """E[extinct | outbreak]: the averaged quantity is itself 0 or 1, and is no flag."""
+    rows = {"R0=1.5,N=100": [{"cell": "R0=1.5,N=100", "trial": t, "seed": t,
+                              "values": {"p": 1.0 if t < 4 else 0.0, "m": float(t % 2)}} for t in range(8)]}
+    protocol = {**PROTOCOL, "grid": {"R0": [1.5], "N": [100]}}
+    honest = {"R0=1.5,N=100": _stratum([0.0, 1.0, 0.0, 1.0], 4, 8)}
+    assert tr.given_rows_problems(protocol, rows, honest) == ([], [])
+    forged = {"R0=1.5,N=100": _stratum([1.0] * 4, 4, 8)}
+    assert tr.given_rows_problems(protocol, rows, forged)[0]
+
+
+def test_a_record_without_the_averaged_quantity_is_the_simulation_s_to_fix() -> None:
+    rows = {k: [{**r, "values": {"p": r["values"]["p"]}} for r in v] for k, v in ROWS.items()}
+    analysis, simulation = _check({"R0=1.5,N=100": _stratum([1.0] * 10, 10)}, rows)
+    assert analysis == [] and len(simulation) == 1 and "under `m`" in simulation[0]
+
+
+def test_one_form_in_every_stratum_is_the_intersection_of_what_each_stratum_fits() -> None:
+    """A stratum whose values fit two forms (all zero: 0 and 0/N) must not decide the form for the next one."""
+    rows = {"R0=1.5,N=100": [{"cell": "R0=1.5,N=100", "trial": t, "seed": t, "values": {"p": 1.0, "m": 0.0}}
+                             for t in range(3)],
+            "R0=3.0,N=100": [{"cell": "R0=3.0,N=100", "trial": t, "seed": t, "values": {"p": 1.0, "m": 50.0 + t}}
+                             for t in range(3)]}
+    fractions = {"R0=1.5,N=100": _stratum([0.0] * 3, 3, 3), "R0=3.0,N=100": _stratum([0.5, 0.51, 0.52], 3, 3)}
+    assert _check(fractions, rows) == ([], [])
+    mixed = {"R0=1.5,N=100": _stratum([0.0] * 3, 3, 3), "R0=3.0,N=100": _stratum([50.0, 51.0, 52.0], 3, 3)}
+    assert _check(mixed, rows) == ([], [])
+    sizes_and_fractions = {"R0=1.5,N=100": _stratum([1.0, 1.0, 1.0], 3, 3)}
+    assert _check(sizes_and_fractions, rows)[0]
+
+
+def test_records_that_name_their_setting_as_fields_are_told_to_use_stratum_keys() -> None:
+    records = {"results": [{"R0": 1.5, "N": 100, **_stratum([float(100 + t) for t in range(10)], 10)},
+                           {"R0": 3.0, "N": 100, **_stratum([float(100 + t) for t in range(40)], 40)}]}
+    analysis, _ = _check(records)
+    assert any("`R0=1.5,N=100`" in a and "stratum" in a and "as fields" in a for a in analysis), analysis
+    assert not any("not the values of" in a for a in analysis), "not a mismatch against the whole run"
 
 
 def test_the_writer_and_the_reader_agree(tmp_path: Path) -> None:
@@ -175,7 +206,7 @@ def test_the_writer_and_the_reader_agree(tmp_path: Path) -> None:
     spec = json.loads((tmp_path / plan[0]["spec"]).read_text(encoding="utf-8"))
     assert spec["thresholds"] == {"major": 0.1}, "the protocol's thresholds reach the harness"
     lines = [json.dumps({"nonce": plan[0]["nonce"], "trial": t["trial"], "seed": t["seed"], "status": "ok",
-                         "values": {"p": float(t["trial"] < 2), "y": 10.0 + t["trial"]}}) for t in plan[0]["trials"]]
+                         "values": {"p": float(t["trial"] < 2), "m": 10.0 + t["trial"]}}) for t in plan[0]["trials"]]
     (tmp_path / plan[0]["out"]).write_text("\n".join(lines) + "\n", encoding="utf-8")
     ok = type("R", (), {"returncode": 0, "timed_out": False, "stderr": ""})()
     run = tr._collect(tmp_path, plan, {0: ok}, run_id="r", thresholds={"major": 0.1}, not_reported="")
@@ -195,3 +226,47 @@ def test_the_harness_sets_the_thresholds_before_loading_the_simulation() -> None
 def test_a_row_without_a_trial_id_is_never_read_as_trial_0() -> None:
     assert tr._trial_id({"trial": None}) is None and tr._trial_id({}) is None and tr._trial_id({"trial": True}) is None
     assert tr._trial_id({"trial": 0}) == 0
+
+
+ORACLE_READING_THRESHOLDS = '''
+import json, os
+TH = json.loads(os.environ["FI_THRESHOLDS"])
+
+def run_trial(cell, trial_id, seed):
+    return {"p": 1.0, "m": 1.0}
+
+def oracle():
+    return {"closed_form": float(TH["major"])}
+'''
+
+
+def test_the_oracle_reads_the_protocol_s_thresholds(tmp_path: Path) -> None:
+    """Run for real: an oracle that reads TH["major"] at import used to die with KeyError (FI_THRESHOLDS was {})."""
+    import asyncio
+    import sys
+
+    from core.execution import SharedInterpreterExecutor
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(ORACLE_READING_THRESHOLDS, encoding="utf-8")
+
+    def run(**kw: Any) -> tuple[Any, str]:
+        return asyncio.run(tr.run_oracle(SharedInterpreterExecutor(python_version="3.11"), sys.executable, root,
+                                         "code/simulate.py", timeout_s=60, **kw))
+
+    values, why = run(thresholds={"major": 0.25})
+    assert values == {"closed_form": 0.25} and not why, why
+    values, why = run()
+    assert values is None, "without thresholds the oracle cannot read them"
+
+
+def test_the_engine_hands_the_protocol_s_thresholds_to_the_oracle() -> None:
+    import inspect
+
+    from core import engine
+
+    source = inspect.getsource(engine.Engine)
+    call = source[source.index("_trial_runner.run_oracle("):]
+    call = call[:call.index("reported = {")]
+    assert 'protocol.get("thresholds")' in call

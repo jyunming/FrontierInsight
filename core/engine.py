@@ -6494,6 +6494,7 @@ class Engine:
                 values, why = await _trial_runner.run_oracle(
                     self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
                     timeout_s=timeout, env=env,
+                    thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                 )
                 reported = {"checks": [{"name": k, "value": v} for k, v in values.items()]} if values is not None else None
                 returncode, timed_out = (0 if values is not None else 1), "ran out of time" in why
@@ -13951,8 +13952,10 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
   reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
 - When a protocol metric is a mean over the trials a proportion counts (`"given": "p_outbreak"`), the dict also holds,
-  under that proportion's own id, 1 (this trial is in the subset) or 0 (it is not) for EVERY trial, next to the value
-  being averaged (`{"p_outbreak": 1.0, "final_size": 812.0}`): FI picks the subset trial by trial from its own record.
+  under that proportion's own id, 1 (this trial is in the subset) or 0 (it is not) for EVERY trial, and the value being
+  averaged under that mean metric's own id (mean id `final_size_given_outbreak`:
+  `{"p_outbreak": 1.0, "final_size_given_outbreak": 812.0}`): FI picks the subset trial by trial from its own record and
+  looks only at those two names.
   A cut-off that decides it (what counts as a major outbreak) is read from the protocol's thresholds,
   `json.loads(os.environ["FI_THRESHOLDS"])`, never written into the script as a number of its own.
 - When the protocol lists oracles: `def oracle() -> dict` computes, with the SAME simulation code, the values the

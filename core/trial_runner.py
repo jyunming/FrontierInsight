@@ -670,7 +670,7 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
 
 
 async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
-                     env: dict[str, str] | None = None) -> tuple[dict[str, float] | None, str]:
+                     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None) -> tuple[dict[str, float] | None, str]:
     """Call the simulation's ``oracle()`` in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
@@ -681,7 +681,8 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
     out.unlink(missing_ok=True)
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
     spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": "oracle", "cell": {},
-                                "trials": [{"trial": 0, "seed": None}], "nonce": nonce}), encoding="utf-8")
+                                "trials": [{"trial": 0, "seed": None}], "nonce": nonce,
+                            "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     result = await executor.execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
@@ -790,8 +791,8 @@ def recorded_rows_by_cell(quest_root: Path) -> dict[str, list[dict[str, Any]]]:
 RETURN_MEMBERSHIP = (
     "Under research, a mean over the trials a proportion counts is recomputed by FI from its own trial record, trial "
     "by trial: run_trial must return, under the proportion's own id `{given}`, 1 (the trial is in the subset) or 0 "
-    "(it is not) for every trial, next to the value being averaged; a cut-off that decides it is read from "
-    "FI_THRESHOLDS, never written into the script."
+    "(it is not) for every trial, and the quantity the mean averages under the mean's own id `{metric}`; a cut-off "
+    "that decides it is read from FI_THRESHOLDS, never written into the script."
 )
 
 
@@ -845,38 +846,36 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
             simulation.append(
                 f"`{metric}` is a mean over the trials `{given}` counts, but FI's trial record does not hold `{given}` "
                 f"as 1 or 0 for every trial, so FI cannot tell which trials the mean is over. "
-                + RETURN_MEMBERSHIP.format(given=given)
+                + RETURN_MEMBERSHIP.format(given=given, metric=metric)
             )
             continue
 
-        # A quantity every trial returned only as 0 or 1 (an `ok`, a `converged`, the membership itself) is a flag,
-        # not what a mean over the subset averages: a list of 1s drawn from it is not the subset's values.
-        flags = {n for n in {n for r in rows for n in r["values"]}
-                 if all(r["values"].get(n) in (0, 1) and not isinstance(r["values"].get(n), bool) for r in rows)}
+        if any(not isinstance(r["values"].get(metric), (int, float)) or isinstance(r["values"].get(metric), bool)
+               for r in rows if membership(r, given) == 1):
+            simulation.append(
+                f"`{metric}` is a mean over the trials `{given}` counts, but FI's trial record does not hold the "
+                f"quantity it averages, under `{metric}`, as a number for every trial in the subset. "
+                + RETURN_MEMBERSHIP.format(given=given, metric=metric)
+            )
+            continue
 
-        def forms(subset: list[dict[str, Any]]) -> list[tuple[str, list[float | None]]]:
-            """Each quantity the subset's trials returned (not a 0/1 flag), and each such quantity divided by a size
-            setting, as the list of per-trial values (``None`` where a trial's value is not a finite number)."""
-            names = sorted({n for r in subset for n in r["values"] if n != given and n not in flags})
-            out: list[tuple[str, list[float | None]]] = []
-            for name in names:
-                plain: list[float | None] = []
-                divided: dict[str, list[float | None]] = {axis: [] for axis in sizes}
-                for r in subset:
-                    v = r["values"].get(name)
-                    x = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) \
-                        else None
-                    plain.append(x)
-                    parsed = _rm._parse_cell(r["cell"]) or {}
-                    for axis in sizes:
-                        try:
-                            a = float(parsed.get(axis, "nan"))
-                        except ValueError:
-                            a = float("nan")
-                        divided[axis].append(x / a if x is not None and a and math.isfinite(a) else None)
-                out.append((name, plain))
-                out.extend((f"{name}/{axis}", vals) for axis, vals in divided.items())
-            return out
+        def forms(subset: list[dict[str, Any]]) -> dict[str, list[float | None]]:
+            """The subset's values of ``metric`` as the trials returned them, and each divided by a size setting, as
+            the list of per-trial values (``None`` where a trial's value is not a finite number)."""
+            plain: list[float | None] = []
+            divided: dict[str, list[float | None]] = {axis: [] for axis in sizes}
+            for r in subset:
+                v = r["values"].get(metric)
+                x = float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+                plain.append(x)
+                parsed = _rm._parse_cell(r["cell"]) or {}
+                for axis in sizes:
+                    try:
+                        a = float(parsed.get(axis, "nan"))
+                    except ValueError:
+                        a = float("nan")
+                    divided[axis].append(x / a if x is not None and a and math.isfinite(a) else None)
+            return {metric: plain, **{f"{metric}/{axis}": vals for axis, vals in divided.items()}}
 
         def same_multiset(reported: list[Any], expected: list[float | None]) -> bool:
             if len(reported) != len(expected):
@@ -888,12 +887,20 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
             numbers = [x for x in reported if x is not None]
             return _missing_exact(numbers, counts) == 0
 
-        chosen: str | None = None
+        common: set[str] | None = None
+        first_at = ""
         for under, mapping in _rm._mappings_with(result_json, f"{metric}_values"):
             where = f"`{under}`" if under is not None else "the top level"
             cells, why = _rm._stratum_cells(under, grid) if under is not None else (None, None)
             if why:
                 continue  # shaped like a stratum the grid does not have: the manifest check reports it
+            if not cells and any(axis in mapping for axis in grid):  # a record that names its setting as fields
+                analysis.append(
+                    f"{where} holds a stratum's values with its setting as fields, not as a key: each setting is its own "
+                    "stratum, keyed like `R0=1.5,N=100` (its settings, as `name=value`), so its mean is checked "
+                    "against that setting's trials and not against the whole run"
+                )
+                continue
             # A key that is no setting at all (`summary`, `results`, a list of records) holds the whole run's mean.
             own = [keyed[c] for c in cells if c in keyed] if cells else all_cells
             subset = [r for key in own for r in rows_by_cell.get(key, []) if membership(r, given) == 1]
@@ -907,20 +914,22 @@ def given_rows_problems(protocol: dict[str, Any] | None, rows_by_cell: dict[str,
                     f"`{given}` = 1 for {len(subset)} of them: the mean is over every trial in the subset, not a "
                     "selection"
                 )
-            matched = [name for name, vals in forms(subset) if same_multiset(reported, vals)]
+            matched = {name for name, vals in forms(subset).items() if same_multiset(reported, vals)}
             if not matched:
                 analysis.append(
-                    f"at {where}, `{metric}_values` are not the values of the trials whose `{given}` is 1 (FI took those "
-                    f"{len(subset)} trial(s) from its own record, trial by trial): a mean over a subset lists each of "
-                    "its trials' own value once, and no trial outside it. " + _rm.DERIVED
+                    f"at {where}, `{metric}_values` are not the values of `{metric}` for the trials whose `{given}` is "
+                    f"1 (FI took those {len(subset)} trial(s) from its own record, trial by trial): a mean over a "
+                    "subset lists each of its trials' own value once, and no trial outside it. " + _rm.DERIVED
                 )
-            elif chosen is None:
-                chosen = matched[0]
-            elif chosen not in matched:
+            elif common is None:
+                common, first_at = matched, where
+            elif not (common & matched):
                 analysis.append(
-                    f"at {where}, `{metric}_values` are the subset's values of `{matched[0]}`, but elsewhere they are of "
-                    f"`{chosen}`: one mean averages one quantity in every stratum"
+                    f"at {where}, `{metric}_values` are the subset's values as `{sorted(matched)[0]}`, but at {first_at} "
+                    f"as `{sorted(common)[0]}`: one mean averages one quantity, in the same form, in every stratum"
                 )
+            else:
+                common &= matched
     return analysis, simulation
 
 
