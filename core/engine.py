@@ -105,6 +105,7 @@ from .knowledge import (
 )
 from .protocol import derive_protocol, route_for_topic_type
 from .provider import (
+    CLI_PROVIDERS as _CLI_PROVIDERS_SET,
     CALL_ATTEMPTS as _CALL_ATTEMPTS,
     LAST_CALL as _LAST_CALL,
     FallbackLLMClient,
@@ -4151,27 +4152,70 @@ class Engine:
         who = " / ".join(str(x) for x in (getattr(e, "provider", None), getattr(e, "model", None)) if x) or "the model"
         truncated = isinstance(e, ModelAnswerTruncated)
         limit = getattr(e, "limit", None)
-        if truncated:
+        pname = str(getattr(e, "provider", None) or self.config.provider.name or "")
+        is_cli = pname in _CLI_PROVIDERS_SET
+        refused = bool(getattr(e, "refused", False))
+        steps_names = (
+            "Step names you can use: `plan` (the design), `implement`, `write`, `review`, `review_panel`, "
+            "`claim_check`, `cross_check`, `analyze`; a name with a dot (`write.patch`) uses its first part."
+        )
+        change_model = (
+            f"Give that step a model with a larger output: `provider: {{node_models: {{{key}: <model>}}}}` in the "
+            "quest's `config.yaml`, then approve the change with "
+            f"`python launch.py --update {self.quest_id}` (it resumes the quest too)."
+        )
+        if truncated and refused:
+            headline = f"the model refused the output limit set for the {call} step"
+            steps = [
+                f"{who} would not take an output limit of {limit} tokens at `{call}`: the model's own maximum is lower, "
+                "so the step could not run with room to finish.",
+                f"Give `{key}` a smaller limit the model accepts (`provider: {{node_max_tokens: {{{key}: <smaller>}}}}`) "
+                "and resume; if that is too small for the answer to fit, use a model with a larger output instead.",
+                change_model,
+            ]
+            recommended = f"Use another model for `{key}`: `provider.node_models.{key}`."
+            alternatives = [f"Lower `provider.node_max_tokens.{key}` to what the model accepts, then resume."]
+        elif truncated:
             headline = f"the answer at the {call} step was cut off at its output limit"
+            used = (getattr(e, "usage", None) or {}).get("completion_tokens")
+            base = max(int(used or 0), int(limit or 0))
+            suggested = min(base * 2, 65536) if base else 0
             steps = [
                 f"The answer {who} gave at `{call}` stopped at its output limit"
                 + (f" ({limit} tokens)" if limit else " (the model's own; no limit was set)")
                 + ", so it is incomplete and was not used: a cut-off script, plan or paper would be passed on as whole.",
-                "Give that step a larger output limit in the quest's `config.yaml`: "
-                f"`provider: {{node_max_tokens: {{{key}: {max(int(limit or 0) * 2, 16000)}}}}}` (HTTP providers), "
-                "then resume.",
-                f"Or give it a model with a larger output: `provider: {{node_models: {{{key}: <model>}}}}`, then resume.",
-                "Resuming runs this step again with the new setting; what the quest did before it is kept.",
             ]
-            recommended = f"Raise `provider.node_max_tokens.{key}`, then go on."
-            alternatives = [f"Give `{key}` another model: `provider.node_models.{key}`, then go on."]
+            if is_cli:
+                steps.append(
+                    f"`provider.node_max_tokens` does not reach a CLI provider ({pname}). {change_model}"
+                )
+                recommended = f"Use another model for `{key}`: `provider.node_models.{key}`."
+                alternatives = ["Ask for a shorter piece of work (the topic, or the plan with `--revise-plan`), then resume."]
+            else:
+                ask = (f"{suggested}" if suggested else "<a number larger than the answer needs>")
+                steps += [
+                    f"Give that step a larger output limit in the quest's `config.yaml`: "
+                    f"`provider: {{node_max_tokens: {{{key}: {ask}}}}}`"
+                    + (f" (twice the {base} tokens the cut-off answer used)" if suggested else "")
+                    + ". If the model refuses that number, lower it: every model has its own maximum. Then resume.",
+                    change_model,
+                ]
+                if "ollama" in pname.lower():
+                    steps.append(
+                        "Ollama can also report `length` when the context window is full, not only the output limit; "
+                        "then `num_ctx` needs raising in Ollama (not checked here)."
+                    )
+                recommended = f"Raise `provider.node_max_tokens.{key}`, then go on."
+                alternatives = [f"Give `{key}` another model: `provider.node_models.{key}`, then go on."]
+            steps += [steps_names, "Resuming runs this step again with the new setting; what the quest did before it is kept."]
         else:
             headline = f"the provider withheld the answer at the {call} step with its content filter"
             steps = [
                 f"{who} answered `{call}`, but the provider's content filter withheld the answer, so there is nothing "
                 "to use. Asking the same model the same thing again gives the same result.",
                 f"Give that step another model: `provider: {{node_models: {{{key}: <model>}}}}` in the quest's "
-                "`config.yaml`, then resume.",
+                f"`config.yaml`, then approve the change with `python launch.py --update {self.quest_id}` (it resumes "
+                "the quest too).",
                 "Or change what the quest asks (the topic, or the plan with `--revise-plan \"...\"`) if its wording is "
                 "what the filter refused, then resume.",
             ]
@@ -8658,6 +8702,8 @@ class Engine:
                 else:
                     resp = await self._chat(prompt, node="cross_check")
                     parsed = _parse_json_lenient(resp) or {}
+            except _ModelAnswerProblem:
+                raise
             except Exception as e:
                 self._log.warning("[cross_check] classify call failed: %s", e)
                 parsed = {}
@@ -9409,6 +9455,8 @@ class Engine:
         # grounding cleared, and the review forces ``citations_unchecked``.
         try:
             text = await self._chat(prompt, node="claim_check")
+        except _ModelAnswerProblem:
+            raise
         except Exception as e:
             reason = f"{type(e).__name__}: {e}"[:300]
             self._log.warning(
@@ -10857,6 +10905,8 @@ class Engine:
                 for _ask in range(2):
                     try:
                         text = await self._chat(base_prompt, node="review")
+                    except _ModelAnswerProblem:
+                        raise
                     except Exception as e:
                         problem = f"the review call failed ({_one_line(e, 300)})"
                         break
@@ -10983,6 +11033,8 @@ class Engine:
             for _ask in range(2):
                 try:
                     text = await self._chat(prompt, node=f"review_panel.{name}")
+                except _ModelAnswerProblem:
+                    raise
                 except Exception as e:
                     self._log.warning("[review] panelist %s could not be asked (%s)", name, e)
                     return {"persona": name, "status": "call_failed", "error": _one_line(e, 300)}
@@ -11030,6 +11082,8 @@ class Engine:
         for r in panel_results_raw:
             if isinstance(r, asyncio.CancelledError):
                 raise r
+            if isinstance(r, _ModelAnswerProblem):
+                raise r
             if isinstance(r, BaseException):
                 self._log.warning("[review] a panelist raised unexpectedly: %r", r)
             elif isinstance(r, dict):
@@ -11061,6 +11115,8 @@ class Engine:
             )
             mod_text = await self._chat(mod_prompt, node="review_moderator")
             mod_parsed = _parse_json_lenient(mod_text) or {}
+        except _ModelAnswerProblem:
+            raise
         except Exception as e:
             self._log.warning("[review] moderator call failed: %s", e)
             mod_parsed = {}

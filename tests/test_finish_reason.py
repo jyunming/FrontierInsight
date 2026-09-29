@@ -344,3 +344,109 @@ async def test_a_filtered_step_stops_with_what_to_change(tmp_path, monkeypatch) 
     assert "content filter" in card and "node_models" in card, card
     assert json.loads((eng.fi_dir / "pause.json").read_text(encoding="utf-8"))["kind"] == "model_output"
     assert not (eng.quest_root / "quest_failed.md").exists()
+
+
+def test_a_first_call_the_model_refuses_for_its_output_size_is_named_for_a_person() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "max_tokens is too large: 999999 > 8192"}})
+
+    with pytest.raises(ModelAnswerTruncated, match="refused an output limit of 999999 tokens") as caught:
+        asyncio.run(_chat(PLAIN, handler, max_tokens=999999))
+    assert caught.value.refused and caught.value.limit == 999999
+
+
+def test_a_400_that_is_not_about_the_output_size_stays_the_provider_error() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "invalid api key"}})
+
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(_chat(PLAIN, handler, max_tokens=1000))
+
+
+def test_the_seal_records_the_output_limits() -> None:
+    src = (ar.__file__ and open(ar.__file__, encoding="utf-8").read()) or ""
+    assert '"node_max_tokens"' in src
+
+
+def _card_of(exc, *, provider_name: str = "openai") -> list[str]:
+    from core.engine import Engine
+
+    eng = object.__new__(Engine)
+    eng.quest_id = "q1"
+    eng.config = SimpleNamespace(provider=SimpleNamespace(name=provider_name))
+    eng._log = SimpleNamespace(warning=lambda *a, **k: None)
+    got: dict = {}
+    eng._pause_for_human = lambda **kw: got.update(kw)  # type: ignore[method-assign]
+    eng._pause_for_model_output("write", exc)
+    return got["steps"] + [got["recommended"]] + got["alternatives"]
+
+
+def test_the_card_suggests_twice_what_the_cut_off_answer_used_and_says_how_to_approve_a_model_change() -> None:
+    exc = ModelAnswerTruncated("cut", node="write", limit=4000, provider="openai",
+                               usage={"prompt_tokens": 1, "completion_tokens": 9000, "total_tokens": 9001})
+    text = "\n".join(_card_of(exc))
+    assert "node_max_tokens: {write: 18000}" in text, text
+    assert "python launch.py --update q1" in text
+    assert "`plan`" in text and "`review_panel`" in text, "the step names are listed"
+
+
+def test_the_card_does_not_offer_an_output_limit_to_a_cli_provider() -> None:
+    exc = ModelAnswerTruncated("cut", node="write", provider="claude_cli")
+    text = "\n".join(_card_of(exc, provider_name="claude_cli"))
+    assert "does not reach a CLI provider" in text and "node_max_tokens: {write" not in text
+    assert "node_models" in text
+
+
+def test_the_card_for_ollama_mentions_the_context_window_as_unchecked() -> None:
+    text = "\n".join(_card_of(ModelAnswerTruncated("cut", node="write", limit=1000, provider="ollama")))
+    assert "num_ctx" in text and "not checked" in text
+
+
+def test_the_card_for_a_refused_limit_says_so() -> None:
+    exc = ModelAnswerTruncated("refused", node="write", limit=99999, provider="openai", refused=True)
+    text = "\n".join(_card_of(exc))
+    assert "would not take an output limit of 99999" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("head,step", [("Review", "review"), ("ClaimCheck", "claim_check")])
+async def test_a_cut_off_review_step_is_a_model_output_pause_not_a_reviewer_outage(tmp_path, monkeypatch, head, step) -> None:
+    from core.engine import Engine
+    from tests.test_engine_smoke import _classify, _fake_response_for
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == head:
+            raise ModelAnswerTruncated("cut off at its output limit", model="m", node=kw.get("node") or step)
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    eng = Engine(_quest_config(tmp_path, f"cut-{step}"))
+    await eng.run()
+    pause = json.loads((eng.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert pause["kind"] == "model_output", pause["kind"]
+    card = (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert f"node_max_tokens: {{{step}:" in card, card
+    assert "usage limit" not in card
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_panel_reviewer_is_a_model_output_pause_naming_the_panel_key(tmp_path, monkeypatch) -> None:
+    from core.engine import Engine
+    from tests.test_engine_smoke import _classify, _fake_response_for
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        node = kw.get("node") or ""
+        if node.startswith("review_panel."):
+            raise ModelAnswerTruncated("cut off at its output limit", model="m", node=node)
+        return _fake_response_for(prompt)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    cfg = _quest_config(tmp_path, "cut-panel")
+    cfg.engine.review_panel = ["skeptic", "methodologist"]
+    eng = Engine(cfg)
+    await eng.run()
+    pause = json.loads((eng.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert pause["kind"] == "model_output", pause["kind"]
+    assert "node_max_tokens: {review_panel:" in (eng.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")

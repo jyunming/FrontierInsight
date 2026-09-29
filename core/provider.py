@@ -3112,8 +3112,10 @@ class _ModelAnswerProblem(RuntimeError):
     fi_outcome = "error"
 
     def __init__(self, message: str, *, node: str = "", limit: int | None = None, usage: dict[str, Any] | None = None,
-                 provider: str | None = None, model: str | None = None, finish_reason: str | None = None) -> None:
+                 provider: str | None = None, model: str | None = None, finish_reason: str | None = None,
+                 refused: bool = False) -> None:
         super().__init__(message)
+        self.refused = refused  # the model turned down ``limit`` as an output size (HTTP 4xx), rather than cutting off at it
         self.node, self.limit, self.usage = node, limit, usage
         self.provider, self.model, self.finish_reason = provider, model, finish_reason
 
@@ -3655,17 +3657,41 @@ class LLMClient:
                                     + (u.get("completion_tokens", 0) or 0)),
             }
 
-        def problem(kind: type, reply: dict[str, Any], why: str, limit: int | None) -> _ModelAnswerProblem:
+        def problem(kind: type, reply: dict[str, Any], why: str, limit: int | None,
+                    refused: bool = False) -> _ModelAnswerProblem:
             return kind(why, node=node, limit=limit, usage=usage_of(reply), provider=self.last_provider,
                         model=reply.get("model") if isinstance(reply.get("model"), str) else (model or self.endpoint.model),
-                        finish_reason=_finish_reason(reply))
+                        finish_reason=_finish_reason(reply), refused=refused)
+
+        def refused_limit(e: httpx.HTTPStatusError, asked: int, prefix: str) -> _ModelAnswerProblem | None:
+            """A 4xx that is about the output size asked for (not a key, quota or rate problem): named for a person."""
+            resp = getattr(e, "response", None)
+            sc = getattr(resp, "status_code", None)
+            if not (isinstance(sc, int) and sc in (400, 413, 422)):
+                return None
+            try:
+                said = str(getattr(resp, "text", "") or "")[:600]
+            except Exception:  # noqa: BLE001 -- a body that cannot be read only loses the detail
+                said = ""
+            if not re.search(r"max[_ ]?(completion[_ ])?tokens|output|context|too large|exceed|limit", said, re.I):
+                return None
+            return problem(ModelAnswerTruncated, {}, (
+                f"{prefix}the model refused an output limit of {asked} tokens (HTTP {sc}: {' '.join(said.split())[:200]})"),
+                asked, refused=True)
 
         def cut_off(reply: dict[str, Any], limit: int | None) -> _ModelAnswerProblem:
             return problem(ModelAnswerTruncated, reply,
                            "the model's answer was cut off at its output limit"
                            + (f" ({limit} tokens)" if limit else "") + ": an incomplete answer is not used", limit)
 
-        data = await send(body)
+        asked = body.get("max_tokens")
+        try:
+            data = await send(body)
+        except httpx.HTTPStatusError as e:
+            refused = refused_limit(e, asked, "") if isinstance(asked, int) and not isinstance(asked, bool) else None
+            if refused is not None:
+                raise refused from e
+            raise
         finish = _finish_reason(data)
         limit = body.get("max_tokens")
         if finish in _CUT_OFF and isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
@@ -3685,7 +3711,7 @@ class LLMClient:
                         # The larger limit is more than this model allows: the answer stays cut off at the first one.
                         raise problem(ModelAnswerTruncated, {}, (
                             f"the model's answer was cut off at its output limit ({limit} tokens), and the model "
-                            f"refused a larger one ({bigger} tokens: HTTP {sc})"), limit) from e
+                            f"refused a larger one ({bigger} tokens: HTTP {sc})"), bigger, refused=True) from e
                     raise
                 finish = _finish_reason(data)
         # Capture token usage when the upstream returned

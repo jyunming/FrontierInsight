@@ -354,6 +354,7 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         "model": getattr(provider, "model", "") or None,
         "settings": {
             "node_models": dict(getattr(provider, "node_models", {}) or {}),
+            "node_max_tokens": dict(getattr(provider, "node_max_tokens", {}) or {}),
             "reasoning_effort": getattr(provider, "reasoning_effort", None) or None,
             "fixed_temperature": getattr(provider, "fixed_temperature", None),
             "base_url": getattr(provider, "base_url", None),

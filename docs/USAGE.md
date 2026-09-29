@@ -235,6 +235,11 @@ provider:
   # The most a step's answer may be, in tokens (HTTP providers only; the same step names as node_models). Unset, no
   # limit is sent and the model's own applies. When a step's answer is cut off at its limit, the quest stops and says
   # which step to raise here (or to give another model); a limit set here is first tried once more at twice the size.
+  # Step names: plan (the design), implement, write, review, review_panel, claim_check, cross_check, analyze; a name
+  # with a dot (write.patch) uses its first part. A model refuses a number above its own maximum: then lower it.
+  # Not sent to the CLI providers or the VS Code bridge, which set their own. Ollama can also stop an answer when its
+  # context window is full; then Ollama's `num_ctx` needs raising (not checked). Changing node_models needs
+  # `python launch.py --update <quest_id>` to approve it; node_max_tokens does not.
   node_max_tokens:
     write:     16000
     implement: 32000
