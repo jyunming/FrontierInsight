@@ -112,6 +112,8 @@ dev = [
   "pytest-mock>=3.14",
   "pytest-cov>=6.0",
   "pytest-testmon>=2.2",
+  # The seal and audit-trace property tests generate their inputs; without it they skip.
+  "hypothesis>=6.100",
   # The plot-style and figure-redraw tests draw real figures; without it
   # they skip.
   "matplotlib>=3.7",

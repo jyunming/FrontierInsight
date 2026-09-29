@@ -1,0 +1,281 @@
+"""Property tests for the audit trace's hash chain and the quest seal.
+
+The example tests pin the cases someone thought of; these generate the trace and the edits, so a tamper the authors did
+not think of still has to be caught. Kept small (few examples, no deadline) so they run in the fast tier; without
+``hypothesis`` installed they skip.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
+
+hypothesis = pytest.importorskip("hypothesis")
+from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
+
+from core import audit_log, evidence  # noqa: E402
+
+FAST = settings(max_examples=40, deadline=None, suppress_health_check=list(HealthCheck))
+
+# U+0085, U+2028 and U+2029 are left out here: str.splitlines() treats them as line breaks, which the trace reader
+# trips over (see test_a_line_separator_character_in_an_event_does_not_break_the_chain below).
+_text = st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=0x2FFF, blacklist_categories=("Cs",),
+                                       blacklist_characters="\x85\u2028\u2029"), max_size=20)
+_fields = st.dictionaries(st.sampled_from(["a", "b", "c", "note", "n"]), st.one_of(_text, st.integers(-5, 5), st.booleans()),
+                          max_size=3)
+_events = st.lists(st.tuples(st.sampled_from(["decision", "node_completed", "note"]), _fields), min_size=2, max_size=8)
+
+
+class _Dir:
+    def __enter__(self) -> Path:
+        self.path = Path(tempfile.mkdtemp(prefix="fi_prop_"))
+        return self.path
+
+    def __exit__(self, *exc) -> None:
+        shutil.rmtree(self.path, ignore_errors=True)
+
+
+def _chain(root: Path, events) -> Path:
+    trace = root / "audit.jsonl"
+    log = audit_log.AuditLog(trace, "q")
+    for kind, fields in events:
+        log.append(kind, **fields)
+    return trace
+
+
+def _lines(trace: Path) -> list[str]:
+    return trace.read_text(encoding="utf-8").splitlines()
+
+
+def _write_lines(trace: Path, lines: list[str]) -> None:
+    trace.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@FAST
+@given(_events)
+def test_a_chain_written_by_the_log_verifies(events) -> None:
+    with _Dir() as root:
+        v = audit_log.verify(_chain(root, events))
+        assert v.ok and v.events == len(events)
+
+
+@pytest.mark.xfail(strict=True, reason="known defect: verify()/read() split the trace with str.splitlines(), so an event "
+                   "holding U+0085, U+2028 or U+2029 (the writer keeps them raw) makes the whole chain read as broken")
+@pytest.mark.parametrize("char", ["\x85", "\u2028", "\u2029"])
+def test_a_line_separator_character_in_an_event_does_not_break_the_chain(char) -> None:
+    with _Dir() as root:
+        trace = _chain(root, [("note", {"a": "x" + char + "y"}), ("note", {})])
+        assert audit_log.verify(trace).ok
+
+
+@FAST
+@given(_events, _events)
+def test_appending_never_breaks_what_was_already_verified(first, more) -> None:
+    with _Dir() as root:
+        trace = _chain(root, first)
+        before = _lines(trace)
+        log = audit_log.AuditLog(trace, "q")
+        for kind, fields in more:
+            log.append(kind, **fields)
+        assert _lines(trace)[: len(before)] == before, "an append rewrites nothing that was already there"
+        assert audit_log.verify(trace).ok
+
+
+@FAST
+@given(_events, st.data())
+def test_changing_any_value_in_any_event_is_detected(events, data) -> None:
+    with _Dir() as root:
+        trace = _chain(root, events)
+        lines = _lines(trace)
+        i = data.draw(st.integers(0, len(lines) - 1))
+        ev = json.loads(lines[i])
+        key = data.draw(st.sampled_from([k for k in ev if k not in ("prev", "hash")]))
+        new = data.draw(st.one_of(_text, st.integers(), st.none(), st.booleans()).filter(lambda x: x != ev[key]))
+        ev[key] = new
+        lines[i] = json.dumps(ev, ensure_ascii=False)
+        _write_lines(trace, lines)
+        v = audit_log.verify(trace)
+        assert not v.ok and v.bad_seq is not None
+
+
+@FAST
+@given(_events, st.data())
+def test_deleting_any_line_but_the_last_is_detected(events, data) -> None:
+    with _Dir() as root:
+        trace = _chain(root, events)
+        lines = _lines(trace)
+        i = data.draw(st.integers(0, len(lines) - 2))
+        del lines[i]
+        _write_lines(trace, lines)
+        assert not audit_log.verify(trace).ok
+
+
+@FAST
+@given(_events, st.data())
+def test_swapping_two_different_lines_is_detected(events, data) -> None:
+    with _Dir() as root:
+        trace = _chain(root, events)
+        lines = _lines(trace)
+        i = data.draw(st.integers(0, len(lines) - 2))
+        j = data.draw(st.integers(i + 1, len(lines) - 1))
+        lines[i], lines[j] = lines[j], lines[i]
+        _write_lines(trace, lines)
+        assert not audit_log.verify(trace).ok
+
+
+@FAST
+@given(_events, st.data())
+def test_an_event_forged_into_the_middle_is_detected(events, data) -> None:
+    with _Dir() as root:
+        trace = _chain(root, events)
+        lines = _lines(trace)
+        i = data.draw(st.integers(0, len(lines) - 1))
+        lines.insert(i, lines[data.draw(st.integers(0, len(lines) - 1))])
+        _write_lines(trace, lines)
+        assert not audit_log.verify(trace).ok
+
+
+# ---- the seal -------------------------------------------------------------------------------------------------------
+
+_RECORD = {"rigor_profile": "research", "status": "publication_ready",
+           "levels": {lv: True for lv in evidence.LEVELS}, "all_gaps": {},
+           "ladder": [{"level": lv, "reached": True} for lv in evidence.LEVELS]}
+
+
+def _sealed(root: Path, files: tuple[str, ...] | None = None, *, sealed_records: int | None = evidence.SEAL_RECORDS,
+            content: str = "x") -> Path:
+    (root / ".fi").mkdir(exist_ok=True)
+    (root / "needs").mkdir(exist_ok=True)
+    (root / "paper").mkdir(exist_ok=True)
+    (root / "paper" / "paper.md").write_text("# paper " + content, encoding="utf-8")
+    named = files if files is not None else evidence.SEALED_FILES
+    for rel in evidence.SEALED_FILES:
+        (root / rel).write_text(content if rel.endswith(".json") is False else "{}", encoding="utf-8")
+    trace = root / ".fi" / "audit.jsonl"
+    log = audit_log.AuditLog(trace, "q")
+    log.append("quest_started")
+    log.append("node_completed", node="write")
+    log.append("node_completed", node="review")
+    extra = {"sealed_records": sealed_records} if sealed_records is not None else {}
+    log.append("quest_finalized", events_before=len(audit_log.read(trace)), write_errors=0, records_not_written=0,
+               model_calls={"lines": 0, "counts": {}, "gaps": []}, rigor_profile="research",
+               nodes_completed=["review", "write"], paper_path="paper/paper.md",
+               paper_sha256=evidence._file_sha256(root / "paper" / "paper.md"),
+               files={rel: evidence._file_sha256(root / rel) for rel in named}, **extra)
+    return trace
+
+
+def _standing(root: Path) -> str:
+    return evidence.verify_seal(root, dict(_RECORD))["trace_seal"]
+
+
+def test_an_untouched_seal_verifies() -> None:
+    with _Dir() as root:
+        _sealed(root)
+        assert _standing(root) == "verified"
+
+
+@FAST
+@given(st.sampled_from(evidence.SEALED_FILES), st.text(min_size=1, max_size=10))
+def test_any_change_to_a_sealed_file_breaks_the_seal(rel, tail) -> None:
+    with _Dir() as root:
+        _sealed(root)
+        p = root / rel
+        p.write_text(p.read_text(encoding="utf-8") + tail, encoding="utf-8")
+        out = evidence.verify_seal(root, dict(_RECORD))
+        assert out["trace_seal"] == "not_verified" and out["status"] != "publication_ready"
+        assert any(rel in g for g in out["all_gaps"]["publication_ready"])
+
+
+@FAST
+@given(st.sampled_from(evidence.SEALED_FILES))
+def test_a_deleted_sealed_file_breaks_the_seal(rel) -> None:
+    with _Dir() as root:
+        _sealed(root)
+        (root / rel).unlink()
+        assert _standing(root) == "not_verified"
+
+
+@FAST
+@given(st.text(min_size=1, max_size=10))
+def test_a_changed_paper_breaks_the_seal(tail) -> None:
+    with _Dir() as root:
+        _sealed(root)
+        p = root / "paper" / "paper.md"
+        p.write_text(p.read_text(encoding="utf-8") + tail, encoding="utf-8")
+        assert _standing(root) == "not_verified"
+
+
+@FAST
+@given(_events)
+def test_an_event_after_the_seal_breaks_it(events) -> None:
+    with _Dir() as root:
+        trace = _sealed(root)
+        log = audit_log.AuditLog(trace, "q")
+        kind, fields = events[0]
+        log.append(kind, **fields)
+        assert audit_log.verify(trace).ok, "the chain is still intact, only the seal is no longer last"
+        assert _standing(root) == "not_verified"
+
+
+@FAST
+@given(st.integers(1, 3))
+def test_cutting_events_off_the_end_of_a_sealed_trace_breaks_it(n) -> None:
+    with _Dir() as root:
+        trace = _sealed(root)
+        lines = _lines(trace)
+        _write_lines(trace, lines[: len(lines) - n])
+        assert audit_log.verify(trace).ok, "a shorter chain is still a valid chain; only the missing seal shows it"
+        assert _standing(root) == "not_verified"
+
+
+@FAST
+@given(st.data())
+def test_a_forged_seal_with_a_wrong_hash_is_caught(data) -> None:
+    with _Dir() as root:
+        trace = _sealed(root)
+        lines = _lines(trace)
+        seal = json.loads(lines[-1])
+        rel = data.draw(st.sampled_from(sorted(seal["files"])))
+        seal["files"][rel] = data.draw(st.text(alphabet="0123456789abcdef", min_size=64, max_size=64))
+        lines[-1] = json.dumps(seal)
+        _write_lines(trace, lines)
+        assert _standing(root) == "not_verified", "edited seal no longer matches its own hash in the chain"
+
+
+def test_a_seal_from_before_the_shadow_record_still_verifies() -> None:
+    old = tuple(f for f in evidence.SEALED_FILES if "shadow" not in f)
+    with _Dir() as root:
+        _sealed(root, files=old, sealed_records=None)
+        assert _standing(root) == "verified"
+    with _Dir() as root:
+        _sealed(root, files=old, sealed_records=1)
+        assert _standing(root) == "verified"
+
+
+@FAST
+@given(st.sampled_from([f for f in evidence.SEALED_FILES if "shadow" not in f]), st.text(min_size=1, max_size=5))
+def test_an_old_seal_still_notices_a_change_to_the_files_it_did_name(rel, tail) -> None:
+    old = tuple(f for f in evidence.SEALED_FILES if "shadow" not in f)
+    with _Dir() as root:
+        _sealed(root, files=old, sealed_records=None)
+        p = root / rel
+        p.write_text(p.read_text(encoding="utf-8") + tail, encoding="utf-8")
+        assert _standing(root) == "not_verified"
+
+
+def test_a_current_seal_that_leaves_a_file_unnamed_is_not_verified() -> None:
+    with _Dir() as root:
+        _sealed(root, files=evidence.SEALED_FILES[:-1], sealed_records=evidence.SEAL_RECORDS)
+        assert _standing(root) == "not_verified"
+
+
+def test_the_record_cannot_vouch_for_its_own_seal() -> None:
+    with _Dir() as root:
+        _sealed(root)
+        (root / "paper" / "paper.md").write_text("changed", encoding="utf-8")
+        out = evidence.verify_seal(root, {**_RECORD, "trace_seal": "verified"})
+        assert out["trace_seal"] == "not_verified"
