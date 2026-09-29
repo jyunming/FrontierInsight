@@ -196,6 +196,14 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
             for key in ("expected", "tolerance"):
                 if isinstance(item.get(key), (dict, list, bool)):
                     return None, f"`protocol.oracles` entry {index}: `{key}` must be a number (the engine judges the script's value against it)"
+            # A `case`, `measure` or `order` that is not usable is left out (the oracle is then read from the script's
+            # own oracle(), as before) instead of refusing a plan, or dropping every oracle of a draft, over one field.
+            if not isinstance(item.get("case"), dict):
+                item = {k: v for k, v in item.items() if k != "case"}
+            if not isinstance(item.get("measure"), str):
+                item = {k: v for k, v in item.items() if k != "measure"}
+            if isinstance(item.get("order"), bool) or not isinstance(item.get("order"), (int, float)):
+                item = {k: v for k, v in item.items() if k != "order"}
             mode = item.get("tolerance_mode")
             if mode is not None and str(mode).strip().lower() not in ("absolute", "relative"):
                 return None, f"`protocol.oracles` entry {index}: `tolerance_mode` must be `absolute` or `relative`"

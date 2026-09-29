@@ -26,7 +26,7 @@ Mandatory checklist — if any apply, you MUST patch them:
 
 10. **Numerical convergence** — if a solver, a grid or a step size is involved, does the design say how it is shown converged (halve the step or the tolerance and compare) and which conservation law or invariant every run must satisfy?
 
-11. **An oracle** — does `protocol.oracles` name at least one check that does not rely on the script's own numbers being right (a closed form, a limiting case, an invariant, an exact small case, an independent implementation)? If not, add one.
+11. **An oracle** — does `protocol.oracles` name at least one check that does not rely on the script's own numbers being right (a closed form, a limiting case, an invariant, an exact small case, an independent implementation)? If not, add one. Give each a numeric `expected` and `tolerance`, a `case` (the settings of one small run, e.g. `{"dt": 0.1}`) and a `measure` (the name of the number that run returns), so the engine can run the simulation on that case itself instead of trusting a number the script reports; add `order` when the check claims an order of accuracy.
 
 12. **Failed runs** — what happens to a run that fails, diverges or returns a NaN: is it dropped, counted, or repaired, and is the number of such runs reported? Silent exclusion changes the estimand.
 

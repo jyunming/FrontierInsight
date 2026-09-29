@@ -42,6 +42,8 @@ from itertools import product
 from pathlib import Path
 from typing import Any
 
+from . import oracle_check as _oracle
+
 RAW_DIRNAME = "raw"
 LEDGER_NAME = "ledger.jsonl"
 SUMMARY_NAME = "trials.json"
@@ -679,9 +681,10 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
     return TrialRun(cells=[CellRun(**c) for c in record.get("cells") or []], ledger_path=ledger, summary_path=summary)
 
 
-async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
-                     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None) -> tuple[dict[str, float] | None, str]:
-    """Call the simulation's ``oracle()`` in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
+async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, entry: str, cell: dict[str, Any],
+                   seed: int | None, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
+                   label: str) -> tuple[dict[str, float] | None, str]:
+    """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -690,9 +693,9 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
     out = work / "oracle.out.jsonl"
     out.unlink(missing_ok=True)
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
-    spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": "oracle", "cell": {},
-                                "trials": [{"trial": 0, "seed": None}], "nonce": nonce,
-                            "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
+    spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry, "cell": cell,
+                                "trials": [{"trial": 0, "seed": seed}], "nonce": nonce,
+                                "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     result = await executor.execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
         cwd=quest_root, timeout_s=timeout_s, env=env,
@@ -709,9 +712,72 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
         if row.get("status") == "ok":
             return dict(row.get("values") or {}), ""
         if row.get("status") == "failed":
-            return None, str(row.get("reason") or "oracle() failed")
-    return None, ("oracle() ran out of time" if getattr(result, "timed_out", False)
-                  else f"oracle() did not report (exit code {result.returncode})")
+            return None, str(row.get("reason") or f"{label} failed")
+    return None, (f"{label} ran out of time" if getattr(result, "timed_out", False)
+                  else f"{label} did not report (exit code {result.returncode})")
+
+
+async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
+                     env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None) -> tuple[dict[str, float] | None, str]:
+    """Call the simulation's ``oracle()`` in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
+    return await _run_one(executor, python, quest_root, module, entry="oracle", cell={}, seed=None, timeout_s=timeout_s,
+                          env=env, thresholds=thresholds, label="oracle()")
+
+
+async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
+                   timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
+                   ) -> tuple[dict[str, float] | None, str]:
+    """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial 0 with the seed FI gives every
+    trial 0 of that cell, or ``run_cell``): ``(the metrics it returned, "")``, or ``(None, why)``. This is how an oracle is
+    measured without asking the script for the number."""
+    have = entries(Path(module) if Path(module).is_absolute() else Path(quest_root) / module)
+    entry = "run_trial" if "run_trial" in have else "run_cell"
+    base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
+    seed = trial_seed(base, cell_key(cell), 0) if entry == "run_trial" else None
+    return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,
+                          env=env, thresholds=thresholds, label=f"{entry}()")
+
+
+async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, module: Path | str,
+                          oracles: list[dict[str, Any]], *, timeout_s: int, env: dict[str, str] | None = None,
+                          thresholds: dict[str, Any] | None = None, case_env: dict[str, str] | None = None,
+                          ) -> tuple[list[dict[str, Any]], list[str], bool]:
+    """``(checks, problems, timed_out)`` for the declared oracles. An oracle with a case is measured by the ENGINE: it calls
+    the simulation function on that case and reads the measure from what comes back (``measured_by: "engine"``). The rest
+    are read from the script's ``oracle()`` (``measured_by: "script"``), called once and only when one needs it."""
+    checks: list[dict[str, Any]] = []
+    problems: list[str] = []
+    timed_out = False
+    # The simulation must not be able to tell it is being checked: a case runs with the environment a trial of the main run
+    # has (``case_env``), never with the oracle-mode variable ``FI_ORACLE`` set for the script's own oracle().
+    cenv = case_env if case_env is not None else {k: v for k, v in (env or {}).items() if k != "FI_ORACLE"}
+    for oracle in oracles:
+        own = _oracle.case_of(oracle)
+        if own is None:
+            continue
+        case, measure = own
+        name = str(oracle["name"]).strip()
+        values, why = await run_case(executor, python, quest_root, module, cell=case, timeout_s=timeout_s, env=cenv,
+                                     thresholds=thresholds)
+        if values is None:
+            problems.append(f"the oracle {name!r}: the simulation could not be run on its case ({why[:300]})")
+            timed_out = timed_out or "ran out of time" in why
+        elif measure not in values:
+            problems.append(
+                f"the oracle {name!r}: the simulation returned {', '.join(sorted(values)) or 'nothing'} but the oracle "
+                f"measures {measure!r} (the simulation function must return it)"
+            )
+        else:
+            checks.append({"name": name, "value": values[measure], "measured_by": "engine"})
+    if any(_oracle.case_of(o) is None for o in oracles):
+        values, why = await run_oracle(executor, python, quest_root, module, timeout_s=timeout_s, env=env, thresholds=thresholds)
+        if values is None:
+            problems.append(f"simulate.py's oracle() did not give its values: {why.strip()[-300:] or 'no reason given'}")
+            timed_out = timed_out or "ran out of time" in why
+        else:
+            checks += [{"name": k, "value": v, "measured_by": "script"} for k, v in values.items()
+                       if not any(c["name"].lower() == str(k).strip().lower() for c in checks)]
+    return checks, problems, timed_out
 
 
 def read_ledger(quest_root: Path) -> list[dict[str, Any]] | None:

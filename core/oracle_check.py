@@ -22,6 +22,13 @@ expected value and its own tolerance can always be made to pass, which is what a
 reports a check as failed itself is still a problem.) For an invariant (conservation, monotonicity) the value is the worst
 violation observed and the expected value is 0.
 
+An oracle may also name a **case** (the settings of one run, e.g. ``{"dt": 0.1}``) and a **measure** (which number the
+simulation returns for it). The engine then calls the simulation function (``run_trial``/``run_cell``) itself on that case
+and reads the measure from what it returns: the number never passes through anything the script wrote for the check, so a
+script whose own ``oracle()`` returns the closed form without simulating cannot pass. An oracle without a case falls back to
+the script's ``oracle()``; the record says which of the two produced each value, and a value the script reported is not
+counted as independent evidence.
+
 A **problem** is any of: the design declares no oracle; a declared oracle fixes no numeric ``expected`` and ``tolerance`` (the
 engine cannot judge it); the script printed no ``ORACLE_JSON`` line; a declared oracle does not appear among the checks or
 reports no finite numeric ``value``; the value is outside the tolerance; the script reports the check as failed itself; the
@@ -89,6 +96,40 @@ def limit_of(oracle: dict[str, Any]) -> tuple[float | None, float | None, str]:
     return expected, tolerance, mode
 
 
+def case_of(oracle: dict[str, Any]) -> tuple[dict[str, Any], str] | None:
+    """``(case, measure)`` when the oracle names a run of the simulation the engine can make itself (a ``case`` mapping and a
+    ``measure``, the name of the number that run returns); ``None`` when it does not."""
+    case, measure = oracle.get("case"), str(oracle.get("measure") or "").strip()
+    if isinstance(case, dict) and measure:
+        return dict(case), measure
+    return None
+
+
+_STEP_KEYS = ("dt", "h", "step", "dx", "delta_t", "timestep", "step_size")
+
+
+def loose_tolerance(oracle: dict[str, Any]) -> str | None:
+    """A sentence when the oracle claims an order of accuracy (``order``, 2 or more) on a case with a step size below 1 and its
+    tolerance could not tell that method from a first-order one: an error of about ``step ** order`` is what the claimed
+    method gives and about ``step`` what a first-order one gives, and a tolerance above the geometric middle of the two,
+    ``step ** ((1 + order) / 2)``, lets both through. ``None`` otherwise. A warning, never a verdict: the constant in front of
+    the error is not known."""
+    order, expected, limit, _ = (_num(oracle.get("order")),) + limit_of(oracle)
+    case = oracle.get("case")
+    if order is None or order < 2 or limit is None or expected is None or not isinstance(case, dict):
+        return None
+    step = next((_num(case[k]) for k in _STEP_KEYS if k in case and _num(case[k]) is not None), None)
+    if step is None or not 0 < step < 1:
+        return None
+    scale = abs(expected) if expected != 0 else 1.0
+    middle = step ** ((1 + order) / 2)
+    if limit / scale < middle:
+        return None
+    return (
+        f"the oracle {str(oracle['name']).strip()!r} claims order {_fmt(order)} at step {_fmt(step)}, but its tolerance "
+        f"({_fmt(limit / scale)}) is above {_fmt(middle)}: a first-order method would pass it too"
+    )
+
 def unjudgeable(oracles: list[dict[str, Any]]) -> list[str]:
     """The declared oracles the engine cannot judge, one sentence each: they fix no numeric ``expected`` and ``tolerance``."""
     out: list[str] = []
@@ -120,8 +161,14 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
         out.append({
             "name": name, "value": value, "expected": expected, "tolerance": oracle.get("tolerance"), "mode": mode,
             "limit": limit, "passed_by_engine": verdict, "script_said": (check or {}).get("passed"),
+            "measured_by": "engine" if (reported or {}).get("engine_measured") and (check or {}).get("measured_by") == "engine" else "script",
         })
     return out
+
+
+def script_measured(judged_list: list[dict[str, Any]]) -> list[str]:
+    """The names of the judged oracles whose value the script reported (not one the engine measured by running the simulation)."""
+    return [str(j["name"]) for j in judged_list if j.get("measured_by") != "engine"]
 
 
 def last_judged(record: Any) -> list[dict[str, Any]]:
@@ -144,6 +191,7 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
     for j in judged_list:
         value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
         verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
+        verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
         if value is None or expected is None or limit is None:
             lines.append(f"- {j['name']}: {verdict}")
         else:
@@ -199,6 +247,24 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
     if not out and returncode != 0:
         out.append(f"every declared oracle passed, but the script exited with code {returncode}")
     return out
+
+
+def with_run_problems(run_problems: list[str], found: list[str], oracles: list[dict[str, Any]] | None = None) -> list[str]:
+    """``found`` led by the reasons a value could not be measured, without the sentences that only repeat them: a missing
+    value or one that is not a number for an oracle a run problem already names (all the oracles that have no case when
+    the script's own ``oracle()`` gave nothing), and the non-zero exit / timeout of the run. What is about a value that was
+    measured (a failed check) or about another oracle stays."""
+    named = " ".join(run_problems)
+    covered = [str(o["name"]).strip() for o in (oracles or []) if repr(str(o["name"]).strip()) in named]
+    if any(p.startswith("simulate.py's oracle()") for p in run_problems):
+        covered += [str(o["name"]).strip() for o in (oracles or []) if case_of(o) is None]
+
+    def repeats(sentence: str) -> bool:
+        if "exited with code" in sentence or "did not finish" in sentence:
+            return True
+        return ("was not checked" in sentence or "no finite numeric" in sentence) and any(repr(n) in sentence for n in covered)
+
+    return list(run_problems) + [f for f in found if not repeats(f)]
 
 
 def directive(oracles: list[dict[str, Any]], found: list[str]) -> str:
