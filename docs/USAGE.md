@@ -41,7 +41,7 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 8. **Write the paper** — the paper, then a check that each claim is backed.
 9. **Review** — a reviewer reads it; the quest is done, or goes back.
 
-It goes back in three places: a crashed script is fixed and run again; a finding that needs a new experiment or more reading returns to the plan and design; a review that asks for changes returns to writing (the text was the problem), to running (a number was the problem) or to the design. When you refine a finished quest, a note about layout only redraws the figures, a missing number extends the existing script, and only a design problem redoes the experiment. The model that writes the paper decides which it is, so read the log line that says which one it picked.
+It can go back at several points, each bounded: a crashed script is fixed and run again; a finding that needs a new experiment returns to the design, and one that needs more reading goes back to the literature first; the evidence check can send it back to the literature once, or to the design once when the run produced no results; a review that asks for changes returns to writing (the text was the problem), to running (a number was the problem) or to the design. Optional steps are left out above: an interview about your topic before the ideas (off by default), and for a topic with no experiment, data collection instead of running code. When you refine a finished quest, a note about layout only redraws the figures, a missing number extends the existing script, and only a design problem redoes the experiment. The model that writes the paper decides which it is, so read the log line that says which one it picked.
 
 ### Per-quest LLM call breakdown
 

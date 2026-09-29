@@ -112,8 +112,9 @@ Conditional edges visible in the graph:
 | `review → implement` | a problem the run itself computed (a saved number, a figure's data, the experiment file): the experiment is written and run again | a small fixed number of times per quest, and `engine.max_iterations` |
 | `review → human_feedback` | `pauses.review: ask`; the person accepts, rejects or refines | a person's refine is honoured whatever `engine.max_iterations` says |
 | `human_feedback → write` | a person's refine goes to `write` first, with their notes | none |
-| `evidence_gate → literature` | the sufficiency check found the evidence too thin; a `broaden` verdict searches once more | `engine.evidence_gate_max_broaden` |
-| `evidence_gate → design` | the experiment produced no results at all | once, while an iteration is left |
+| `human_feedback → design` | a reopened quest with no new notes to answer | none |
+| `evidence_gate → literature` | the evidence check found the evidence too thin (a `broaden` verdict); only when retrieval is on and the run is not `--analyze` | `engine.evidence_gate_max_broaden` (default 1) |
+| `evidence_gate → design` | the experiment produced no results at all (simulate path only) | once, while an iteration is left |
 | `write → design` | only after a person's refine: the writer named a point that needs a new or different experiment | none (a person asked for it) |
 | `design → auto_collect_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `auto_collect_data → wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 
