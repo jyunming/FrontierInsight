@@ -557,3 +557,19 @@ async def test_a_plan_whose_protocol_has_one_unusable_key_is_still_written_and_s
     assert written["protocol"] == {"runs_per_setting": 300}
     assert "`protocol.thresholds` was left out of the plan" in text
     assert eng._client.chat.await_count == 2, "the design was not drafted again"
+
+
+def test_a_grid_axis_may_be_names_but_not_a_mix_or_a_bool() -> None:
+    ok, why = plan.normalize_protocol({"grid": {"method": ["euler", " rk4 "], "dt": [0.1, 0.01]}})
+    assert why is None and ok["grid"] == {"method": ["euler", "rk4"], "dt": [0.1, 0.01]}
+    single, why = plan.normalize_protocol({"grid": {"method": "euler"}})
+    assert why is None and single["grid"] == {"method": ["euler"]}
+    for bad in (["euler", 2], [True, False], [], [""]):
+        got, why = plan.normalize_protocol({"grid": {"method": bad}})
+        assert got is None and "protocol.grid.method" in why
+
+
+def test_a_grid_that_cannot_be_read_is_reported_in_plain_words() -> None:
+    out, notes = plan.repair_protocol({"grid": {"method": ["euler", 2]}, "runs_per_setting": 3})
+    assert "grid" not in out and len(notes) == 1
+    assert "NO settings to vary" in notes[0] and "[euler, rk4]" in notes[0]

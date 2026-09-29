@@ -289,3 +289,40 @@ def test_a_value_printed_to_fewer_places_matches_the_trial_it_rounds_from() -> N
     assert _not_among([1.2346], rec([1.23456789])) == []
     assert _not_among([2], rec([1.4])) == [2.0] and _not_among([5.0], rec([1.0])) == [5.0]
     assert _not_among([1.0, 1.0], rec([1.0])) == [1.0], "each trial's value is used once"
+
+
+METHOD_SIM = '''
+def run_trial(cell, trial_id, seed):
+    return {"err": 1.0 if cell["method"] == "euler" else 0.1}
+'''
+
+
+def test_a_named_setting_runs_like_a_number(tmp_path: Path) -> None:
+    from core import plan
+    proto, why = plan.normalize_protocol({"grid": {"method": ["euler", "rk4"]}, "runs_per_setting": 2})
+    assert why is None and proto["grid"] == {"method": ["euler", "rk4"]}
+    assert [trial_runner.cell_key(c) for c in trial_runner.cells(proto["grid"])] == ["method=euler", "method=rk4"]
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(METHOD_SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(ANALYSIS.replace("infected", "err"), encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version="3.11"), quest_root=root, protocol=lambda: proto, deterministic=False,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+    )
+    result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60, env={}))
+    assert result.returncode == 0 and '"method=euler": 2' in result.stdout and '"method=rk4": 2' in result.stdout
+
+
+def test_no_grid_and_a_script_that_reads_its_setting_is_not_run_with_an_empty_setting(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(METHOD_SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version="3.11"), quest_root=root, protocol=lambda: {"runs_per_setting": 2},
+        deterministic=False, simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py",
+    )
+    result = asyncio.run(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=60, env={}))
+    assert result.returncode != 0 and "no `grid`" in result.stderr and runner.failed_script == "simulate.py"
+    assert runner.last is None

@@ -468,6 +468,7 @@ def collect_cluster(quest_root: Path, record: dict[str, Any], *, run_id: str = "
                                  "on the cluster says why)")
 
 
+_READS_CELL = re.compile(r"\bcell\s*\[")
 _ENTRY_RE = re.compile(r"^def\s+(run_trial|run_cell|oracle)\s*\(", re.MULTILINE)
 
 
@@ -561,6 +562,15 @@ class TrialsRunner:
         else:
             # Run here, not on a cluster: what an earlier cluster job's code did while queued is not this run's.
             _forget_queued_changes(self.quest_root)
+            if not grid and _READS_CELL.search(self.simulate.read_text(encoding="utf-8", errors="replace")):
+                self.failed_script = self.simulate.name
+                return ExecutionResult(
+                    returncode=1, stdout="", duration_s=time.monotonic() - started,
+                    stderr=("simulate.py reads the setting it is given (`cell[...]`), but the plan's protocol has no `grid`, so "
+                            "FI would give it an empty setting and every trial would fail. Put the settings in the plan's "
+                            "protocol as `grid` (one list per parameter: numbers, or names such as [euler, rk4]); no change "
+                            "to simulate.py is needed."),
+                )
             run = await run_trials(
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,

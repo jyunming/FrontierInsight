@@ -142,13 +142,14 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
     if grid is not None:
         if not isinstance(grid, dict):
             return None, "`protocol.grid` must map each parameter to the list of values it takes"
-        fixed: dict[str, list[float]] = {}
+        fixed: dict[str, list[Any]] = {}
         for axis, values in grid.items():
-            if _number(values):
+            if _number(values) or (isinstance(values, str) and values.strip()):
                 values = [values]
-            if not isinstance(values, list) or not values or not all(_number(v) for v in values):
-                return None, f"`protocol.grid.{axis}` must be a non-empty list of numbers"
-            fixed[str(axis)] = list(values)
+            if (not isinstance(values, list) or not values
+                    or not (all(_number(v) for v in values) or all(isinstance(v, str) and v.strip() for v in values))):
+                return None, f"`protocol.grid.{axis}` must be a non-empty list of numbers, or a non-empty list of names (text), not a mix"
+            fixed[str(axis)] = [v.strip() if isinstance(v, str) else v for v in values]
         out["grid"] = fixed
     runs = out.get("runs_per_setting")
     if runs is not None and (not _number(runs) or runs < 1 or int(runs) != runs):
@@ -254,7 +255,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     for name, out_value in ((n, protocol["thresholds"][n]) for n in left_out)
                 )
                 continue
-        notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
+        if key == "grid":
+            notes.append(
+                f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has NO settings to vary and the "
+                "experiment would run one setting only. Write each parameter as a list of numbers, or a list of names such as "
+                "[euler, rk4], in the protocol of this plan before the experiment runs."
+            )
+        else:
+            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
         del out[key]
     return None, notes
 
