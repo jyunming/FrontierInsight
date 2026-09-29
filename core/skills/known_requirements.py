@@ -15,6 +15,10 @@ import sys
 from typing import Any
 
 PRESET_PIP_REQUIRES: dict[str, list[str]] = {
+    "invariant-guards": [],
+    "reference-cross-check": [],
+    "numerical-property-tests": ["hypothesis"],
+    "dimensional-consistency": [],
     "pymc": ["pymc", "arviz"],
     "astropy": ["astropy"],
     "rdkit": ["rdkit"],
