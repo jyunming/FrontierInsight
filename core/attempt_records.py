@@ -55,7 +55,7 @@ MODEL_CALLS_CLOSED = "model_calls.closed"
 #: ``context_kind``, and a finished quest's context needs its code, environment and protocol. Version 1 lines carry no
 #: ``schema``. Version 4: every model call is a line of :data:`MODEL_CALLS`, and a finished quest's context is compared
 #: with it (``model_calls``); after a run and at the end, files are read again rather than taken from a cache.
-SCHEMA = 4
+SCHEMA = 5
 
 #: The quest line's fields (:func:`quest_status`). ``execution_status``: how far it ran. ``review_status``: what the
 #: review said. ``evidence_status``: the evidence level (core/evidence.py). ``claim_outcome``: whether the result
@@ -271,6 +271,15 @@ def _cluster_code_changes(quest_root: Path) -> list[str]:
     return [str(c) for c in changed] if isinstance(changed, list) else []
 
 
+@functools.lru_cache(maxsize=1)
+def _harness_sha() -> str | None:
+    try:
+        from .trial_runner import HARNESS_SOURCE
+    except Exception:  # noqa: BLE001
+        return None
+    return _sha(HARNESS_SOURCE.encode("utf-8"))
+
+
 def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *, kind: str,
                         prompts: dict[str, Any] | None = None, fi_repo: Path | None = None,
                         models_used: dict[str, Any] | None = None, cache: dict | None = None,
@@ -362,6 +371,17 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
             "node_ensemble": sorted((getattr(provider, "node_ensemble", None) or {}).keys()),
         },
         "prompts_sha256": _json_sha({k: getattr(v, "template", str(v)) for k, v in (prompts or {}).items()}),
+        # Each prompt on its own, so a decision can be compared on the prompt it was made with.
+        "prompt_shas": {k: _json_sha(getattr(v, "template", str(v))) for k, v in (prompts or {}).items()},
+        # The packages the design asked for, and FI's trial harness (what runs each trial), by hash.
+        "deps_sha256": _json_sha(sorted(str(d) for d in (state.get("deps") or []))) if state.get("deps") else None,
+        "harness_sha256": _harness_sha(),
+        # What the design measures and over which settings, without its wording.
+        "design_features": {
+            "metrics": sorted(str(m.get("id")) for m in (protocol.get("metrics") or []) if isinstance(m, dict)),
+            "grid_axes": sorted(str(k) for k in (protocol.get("grid") or {})) if isinstance(protocol.get("grid"), dict)
+            else [],
+        },
         "fi": fi,
         "skills": sorted(str(s) for s in (state.get("selected_skills") or [])),
         "environment_sha256": environment_sha,
@@ -387,6 +407,7 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
             "execute_replicates": getattr(engine, "execute_replicates", None),
             "runs_per_setting": protocol.get("runs_per_setting"),
             "timeout_s": getattr(execution, "timeout_s", None),
+            "replicate_seed_stride": getattr(engine, "replicate_seed_stride", None),
         },
         "lineage": {
             "iteration": int(state.get("iteration", 0) or 0),

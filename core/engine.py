@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import concurrent.futures
 import functools
 import hashlib
 import json
@@ -23,6 +24,7 @@ import re
 import shutil
 import string
 import sys
+import threading
 import time
 import traceback
 import unicodedata
@@ -67,6 +69,7 @@ from . import frozen_protocol as _frozen
 from . import todo as _todo
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
+from . import attempt_memory as _memory
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
@@ -677,6 +680,7 @@ class Engine:
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
+        self.__dict__.pop("_shadow_closed", None)  # a quest run again records again
 
         from . import source_failures as _source_failures
 
@@ -1278,6 +1282,7 @@ class Engine:
                 except OSError:
                     pass
             # Nothing may be written to the trace after this.
+            self._shadow_close()
             self._seal_trace(final_state)
             if evidence_record is not None:
                 sealed = _evidence.verify_seal(self.quest_root, evidence_record)
@@ -1384,6 +1389,7 @@ class Engine:
                 self._record(_attempts.ATTEMPTS, lambda: {
                     "kind": "quest", "execution_status": "crashed", "review_status": "none",
                     "evidence_status": "unknown", "claim_outcome": None, "error": type(exc).__name__,
+                    "failure_signature": _memory.failure_signature(error=type(exc).__name__),
                     "run_record_ids": list(getattr(self, "_run_record_ids", [])),
                     "records_not_written": _attempts.lost(self.fi_dir),
                     "answered_by": self._answering_model(),
@@ -1392,6 +1398,7 @@ class Engine:
                 self._audit("attempts_sealed", files=_attempts.file_digests(self.fi_dir))
             raise
         finally:
+            self._shadow_close()
             # Outer cleanup: releases the per-quest run.log FileHandler
             # on EVERY exit path — normal completion, exception from
             # ``graph.ainvoke``, missing-callback RuntimeError, errors
@@ -1540,6 +1547,7 @@ class Engine:
             paper_path=paper_rel,
             paper_sha256=paper_sha,
             files=files,
+            sealed_records=_evidence.SEAL_RECORDS,
             model_calls={"lines": call_summary.get("lines", 0), "counts": counts, "gaps": call_gaps},
         )
         # From here, a model call (an output made from the finished quest) goes to a separate record the seal does not
@@ -3829,6 +3837,8 @@ class Engine:
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
                        len((extra or {}).get("literature") or []) if isinstance(extra, dict) else 0, len(audit))
+        await self._shadow("plan", {**state, "design": normalized},
+                           taken="held the plan for the person" if ask else "went on with the plan")
         if ask:
             self._pause_for_plan()
         return {"design_objections": objections} if isinstance(objections, list) else {}
@@ -5458,6 +5468,7 @@ class Engine:
         return {"implement_outline": outline}
 
     async def _node_implement(self, state: QuestState) -> QuestState:
+        await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
             return {**_FRESH_SCRIPT, **kept}
@@ -6979,6 +6990,7 @@ class Engine:
         # what protects a `--resume` that continues straight into execute without design re-running
         # (design's own tamper check, in `_hold_design_to_frozen`, only fires when design executes).
         self._resolved_frozen()
+        await self._shadow("execute", state, taken="ran the experiment")
         # Docker sandbox: the selected, approved external skills are mounted
         # read-only in every container this node starts (a thread: resolving
         # the skills can run their self-tests).
@@ -7632,11 +7644,19 @@ class Engine:
                 returncode=result.returncode, has_result=bool(result_json), manifest_status=str(manifest_status or ""),
                 oracle_status=oracle_status,
             )
+            # The one signature of this run: the record keeps it and a repair of this run reads it back, so both are
+            # made from the same inputs (the last 2000 characters of stderr, the return code, the time limit, the check).
+            signature = _memory.failure_signature(
+                returncode=result.returncode, stderr=str(result.stderr or "")[-2000:],
+                timed_out=bool(getattr(result, "timed_out", False)),
+                pause=outcome if outcome in ("protocol_mismatch", "oracle_failure") else None)
+            self._last_run_signature = signature
             if outcome is None:
                 return None
             frozen = _attempts._read_json(self.quest_root / "needs" / "FROZEN_PROTOCOL.json")
             return {
                 "kind": "run", "outcome": outcome, "returncode": result.returncode,
+                "failure_signature": signature,
                 "scripts": dict(run_context.get("code") or {}),
                 # What it came from: the frozen protocol's run, and the design revision or repair recorded last.
                 "run_id": frozen.get("run_id") if isinstance(frozen, dict) else None,
@@ -7864,6 +7884,7 @@ class Engine:
             )
             return {}
 
+        await self._shadow("repair", state, taken="repaired the script")
         history = list(state.get("exec_reflect_history") or [])
         history_block = _format_reflect_history(history)
 
@@ -12138,6 +12159,115 @@ class Engine:
             self._log.debug("[attempts] context not read: %r", e)
             return {}
 
+    async def _shadow(self, decision: str, state: QuestState | dict[str, Any], *, taken: str) -> None:
+        """Shadow mode (core/attempt_memory.py, ``engine.attempt_memory: shadow``): what past failed attempts would
+        recommend at this decision, written to ``.fi/shadow_recommendations.jsonl`` and nothing else. It never changes
+        the state, the route, a prompt or the trace. It is worked out on this engine's own worker thread within
+        ``attempt_memory.DEADLINE_S``; a result that comes later is discarded, never written, and counted, as is any
+        failure. A decision made while the previous one is still being worked out is skipped (counted)."""
+        if getattr(self.config.engine, "attempt_memory", "shadow") != "shadow":
+            return
+        try:
+            closed = self.__dict__.setdefault("_shadow_closed", threading.Event())
+            if closed.is_set():
+                return
+            busy = self.__dict__.get("_shadow_future")
+            if busy is not None and not busy.done():
+                _attempts.count_lost(self.fi_dir, _memory.SHADOW_LOST)
+                return
+            record_id = uuid.uuid4().hex
+            decided_at = time.time()
+            # Stamped now, before the run or stop it is about can be written: lineage, not wall clock.
+            _memory.stamp(self.fi_dir, decision, record_id)
+            snapshot = dict(state)
+            models_used = {node: dict(v) for node, v in dict(getattr(self, "_last_chat", {}) or {}).items()}
+            asked = {"plan": self._model_for_node("plan"), "implement": self._model_for_node("implement")}.get(
+                decision) or self.config.provider.model
+            # The same "provider/model" form the records keep for the model that answered.
+            requested = f"{self.config.provider.name}/{asked}" if asked else None
+            signature = None
+            exclude_ids: set[str] = set()
+            exclude_lineage = None
+            if decision == "repair":
+                er = snapshot.get("exec_result") if isinstance(snapshot.get("exec_result"), dict) else {}
+                signature = getattr(self, "_last_run_signature", None) or _memory.failure_signature(
+                    returncode=er.get("returncode"), stderr=str(er.get("stderr_tail") or "")[-2000:],
+                    timed_out=bool(er.get("timed_out")))
+                if getattr(self, "_last_run_record_id", None):
+                    exclude_ids.add(self._last_run_record_id)
+                history = snapshot.get("design_history")
+                exclude_lineage = (self.quest_id, (len(history) - 1) if history else None)
+            cancel = threading.Event()
+            lock = self.__dict__.setdefault("_shadow_lock", threading.Lock())
+            index = _memory.index_for(self.quest_root.parent)
+            cache = self.__dict__.setdefault("_shadow_digests", {})
+
+            def work() -> None:
+                context = _attempts.context_fingerprint(
+                    self.config, self.quest_root, snapshot, kind="in_progress", prompts=self._prompts,
+                    models_used=models_used, cache=cache,
+                )
+                cand = _memory.parts(context, decision, signature=signature, requested_model=requested)
+                if cancel.is_set():
+                    return
+                rec = _memory.recommend(cand, index.attempts(also=self.fi_dir), decision=decision,
+                                        exclude_ids=exclude_ids, exclude_lineage=exclude_lineage)
+                with lock:
+                    if cancel.is_set() or closed.is_set():
+                        return  # too late: dropped, never written with a wrong time
+                    _memory.record(
+                        self.fi_dir, self.quest_id, record_id=record_id, decided_at=decided_at, decision=decision,
+                        taken=taken, candidate=cand,
+                        # FI's own source is deliberately not read here (no decision is compared on it).
+                        context_missing=[m for m in context.get("missing") or [] if not m.startswith("FI's source")],
+                        model_family=str(cand.get("model_plan") or cand.get("model_implement") or requested or "?"),
+                        recommendation=rec, excluded=sorted(exclude_ids),
+                    )
+
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[None] = loop.create_future()
+
+            def settle(error: BaseException | None) -> None:
+                if not future.done():
+                    future.set_exception(error) if error is not None else future.set_result(None)
+
+            def runner() -> None:
+                # A daemon thread: a hash that never returns cannot keep the process from ending.
+                error: BaseException | None = None
+                try:
+                    work()
+                except BaseException as e:  # noqa: BLE001
+                    error = e
+                try:
+                    loop.call_soon_threadsafe(settle, error)
+                except RuntimeError:
+                    pass  # the loop is gone: nothing is waiting
+
+            self.__dict__["_shadow_future"] = future
+            threading.Thread(target=runner, name="fi-shadow", daemon=True).start()
+            try:
+                await asyncio.wait_for(asyncio.shield(future), timeout=_memory.DEADLINE_S)
+            except asyncio.TimeoutError:
+                cancel.set()
+                _attempts.count_lost(self.fi_dir, _memory.SHADOW_LOST)
+                self._log.debug("[shadow] the recommendation at %s took too long; dropped", decision)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a shadow recommendation never touches the quest
+            try:
+                _attempts.count_lost(self.fi_dir, _memory.SHADOW_LOST)
+            except Exception:  # noqa: BLE001
+                pass
+            self._log.debug("[shadow] no recommendation recorded at %s: %r", decision, e)
+
+    def _shadow_close(self) -> None:
+        """No shadow recommendation is written after this (the quest is sealing or stopping); a worker still running
+        is left to finish on its own and writes nothing."""
+        closed = self.__dict__.setdefault("_shadow_closed", threading.Event())
+        lock = self.__dict__.setdefault("_shadow_lock", threading.Lock())
+        with lock:
+            closed.set()
+
     def _record(self, name: str, build: Any) -> str | None:
         """Append to one of the quest's attempt records (core/attempt_records.py). ``build`` returns the record (or is
         it); building it and writing it are both best-effort, so a record never touches the quest. Records only: read
@@ -12146,6 +12276,12 @@ class Engine:
             record = build() if callable(build) else build
             if not record:
                 return None
+            if (name == _attempts.ATTEMPTS and record.get("kind") in ("run", "stop", "quest")
+                    and getattr(self.config.engine, "attempt_memory", "shadow") == "shadow"):
+                # The shadow recommendations this record is about (core/attempt_memory.py): how they are scored.
+                ids = _memory.take(self.fi_dir, str(record.get("kind")))
+                if ids:
+                    record = {**record, "parent_shadow_ids": ids}
             record_id = _attempts.append(self.fi_dir, name, {"quest_id": self.quest_id, **record})
             if not record_id:
                 _attempts.count_lost(self.fi_dir)
@@ -12173,8 +12309,12 @@ class Engine:
             kind = str((pause or {}).get("kind") or "")
             outcome = _attempts.STOP_OUTCOMES.get(kind)
             if outcome is None:
+                # Waiting for you, not a failed check: what was recommended before it is not about the run after it.
+                if getattr(self.config.engine, "attempt_memory", "shadow") == "shadow":
+                    _memory.settle_without_record(self.fi_dir)
                 return None
             return {"kind": "stop", "pause": kind, "outcome": outcome, "execution_status": "stopped",
+                    "failure_signature": _memory.failure_signature(pause=kind),
                     "run_record_id": (getattr(self, "_last_run_record_id", None)
                                       or _attempts.last_id(self.fi_dir, _attempts.ATTEMPTS, ("run",))),
                     "answered_by": self._answering_model(), "context": context}

@@ -151,12 +151,21 @@ _SEALED_STEPS = ("write", "review")
 
 #: The quest's record files: what it tried, the choices along the way, and every model call it made. A quest that
 #: never wrote to one still has it (an empty file), so the seal can name it.
-SEALED_LEDGERS = (".fi/attempts.jsonl", ".fi/branch_ledger.jsonl", ".fi/model_calls.jsonl")
+SEALED_LEDGERS = (".fi/attempts.jsonl", ".fi/branch_ledger.jsonl", ".fi/model_calls.jsonl",
+                  ".fi/shadow_recommendations.jsonl")
 #: The record of the literature search queries (each entry with its digest): what the quest searched for.
 SEALED_QUERIES = ".fi/literature_queries.json"
 #: Files a finished quest's seal names by hash (quest-relative), every one of them required: what the evidence, the
 #: record files and the search queries were when the quest sealed its trace. The paper is named by ``paper_sha256``.
 SEALED_FILES = ("needs/EVIDENCE.json", *SEALED_LEDGERS, SEALED_QUERIES)
+#: A seal that does not say which record files it names (written before the shadow record existed) is not required to
+#: name it; a seal that says ``sealed_records: 2`` names all of :data:`SEALED_FILES`.
+SEAL_RECORDS = 2
+_SEALED_FILES_V1 = tuple(f for f in SEALED_FILES if f != ".fi/shadow_recommendations.jsonl")
+
+
+def _required_files(seal: dict[str, Any]) -> tuple[str, ...]:
+    return SEALED_FILES if (seal.get("sealed_records") or 1) >= SEAL_RECORDS else _SEALED_FILES_V1
 
 
 def _file_sha256(path: Path) -> str | None:
@@ -230,7 +239,7 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
     if files is None:
         gaps.append("the decision trace's final seal names no hash of the evidence and the quest's records")
     else:
-        for rel in SEALED_FILES:
+        for rel in _required_files(seal):
             if not files.get(rel):
                 gaps.append(f"the decision trace's final seal names no hash of {rel}")
             elif files[rel] != _file_sha256(quest_root / rel):

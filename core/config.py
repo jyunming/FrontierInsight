@@ -623,6 +623,11 @@ class EngineConfig(BaseModel):
     # then does not stop for its reviewers' models, and its result is not publication-ready (the evidence level says
     # the review was one model's view).
     one_model_review: bool = False
+    # What past failed attempts would recommend at each decision (core/attempt_memory.py). ``shadow`` (the default)
+    # records it in .fi/shadow_recommendations.jsonl and acts on none of it; to work it out FI reads the failure
+    # records of the other quests under the same output folder (their ids, hashes and exception type names are copied
+    # into this quest's record). ``off`` reads and writes nothing.
+    attempt_memory: Literal["shadow", "off"] = "shadow"
     # Human-feedback gate. ``"after_review"`` (the default) pauses
     # the quest AFTER the review node fires and waits for the user
     # to accept / reject / refine the result before finalising. The
