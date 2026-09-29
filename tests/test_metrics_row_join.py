@@ -267,6 +267,6 @@ def test_the_engine_hands_the_protocol_s_thresholds_to_the_oracle() -> None:
     from core import engine
 
     source = inspect.getsource(engine.Engine)
-    call = source[source.index("_trial_runner.run_oracle("):]
+    call = source[source.index("_trial_runner.measure_oracles("):]
     call = call[:call.index("reported = {")]
     assert 'protocol.get("thresholds")' in call
