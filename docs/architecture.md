@@ -2,6 +2,8 @@
 
 ## Layered design
 
+The picture is simplified: it leaves out the literature pause, skill selection, planning and the outline step, and shows only the main loops. The table of conditional edges below is the complete list of ways back.
+
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
 │ launch.py                                                              │
@@ -106,6 +108,13 @@ Conditional edges visible in the graph:
 | `cross_check → design` | `analyze.next_step == "re_experiment"` | `engine.max_iterations` (default 2) |
 | `cross_check → literature` | `analyze.next_step == "broaden_lit"` — re-enters the literature node so a second retrieval fetches fresh evidence (the design's hypothesis is folded into the query); new docs merge into the existing list with DOI / URL / content-prefix dedup. | `engine.max_iterations` (default 2) |
 | `review → design` | `review.verdict == "revise"` | `engine.max_iterations` (default 2) |
+| `review → write` | every problem the review found is in the text (an unbacked claim, a caption that does not match its figure); the experiment stands | the same `engine.max_iterations` (a draft over the page limit is shortened up to a few times outside it) |
+| `review → implement` | a problem the run itself computed (a saved number, a figure's data, the experiment file): the experiment is written and run again | a small fixed number of times per quest, and `engine.max_iterations` |
+| `review → human_feedback` | `pauses.review: ask`; the person accepts, rejects or refines | a person's refine is honoured whatever `engine.max_iterations` says |
+| `human_feedback → write` | a person's refine goes to `write` first, with their notes | none |
+| `evidence_gate → literature` | the sufficiency check found the evidence too thin; a `broaden` verdict searches once more | `engine.evidence_gate_max_broaden` |
+| `evidence_gate → design` | the experiment produced no results at all | once, while an iteration is left |
+| `write → design` | only after a person's refine: the writer named a point that needs a new or different experiment | none (a person asked for it) |
 | `design → auto_collect_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `auto_collect_data → wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 
 ## Key contracts
