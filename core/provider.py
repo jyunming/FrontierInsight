@@ -71,6 +71,7 @@ from tenacity import (
 )
 
 from .config import ProviderConfig
+from .thinking_capture import add_thinking, note_thinking
 
 _log = logging.getLogger("frontier_insight.provider")
 
@@ -898,6 +899,22 @@ def _stream_error(error: Any, request: Any) -> BaseException:
     return httpx.RemoteProtocolError(text)
 
 
+def _reasoning_of(data: dict[str, Any]) -> str:
+    """The reasoning text an OpenAI-compatible reply carries next to its answer (``reasoning_content`` or
+    ``reasoning``), or ``""``."""
+    try:
+        message = data["choices"][0]["message"]
+    except (KeyError, IndexError, TypeError):
+        return ""
+    if not isinstance(message, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
                          timeout: float) -> dict[str, Any]:
     """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
@@ -914,6 +931,7 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
     options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
     stream_body = {**body, "stream": True, "stream_options": {**options, "include_usage": True}}
     parts: list[str] = []
+    reasoning: list[str] = []
     usage: dict[str, Any] = {}
     # Only a model the stream names: the one asked for is not a report of who answered.
     model: str | None = None
@@ -946,9 +964,13 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
-            piece = (choice.get("delta") or {}).get("content")
+            delta = choice.get("delta") or {}
+            piece = delta.get("content")
             if isinstance(piece, str) and piece:
                 parts.append(piece)
+            thought = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(thought, str) and thought:
+                reasoning.append(thought)
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
                 # Some servers send the usage on the choice that finishes.
@@ -993,7 +1015,8 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
                      finish, " and ".join(x for x, ok in (("no [DONE]", done), ("no usage", usage)) if not ok))
     return {
         "model": model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(parts) if parts else None},
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "".join(parts) if parts else None,
+                                             **({"reasoning_content": "".join(reasoning)} if reasoning else {})},
                      "finish_reason": finish}],
         "usage": usage,
     }
@@ -2339,6 +2362,8 @@ async def _collect_via_streaming(
     # with ``aggregated.append`` so the two never drift.
     text_chars_total = 0
     thinking_token_count = 0
+    thinking_streamed = False  # a thinking_delta was seen: the final assistant message would repeat it
+    note_thinking("")  # this attempt's own reasoning only
     error_message: str | None = None  # populated from stream_json error events
     result_envelope_seen = False  # see _parse_stream_json_line caller below
     unreadable_line: str | None = None  # a line past even _CLI_STREAM_LIMIT: see read_stdout
@@ -2357,7 +2382,7 @@ async def _collect_via_streaming(
             pass
 
     async def read_stdout() -> None:
-        nonlocal last_activity, thinking_token_count, error_message
+        nonlocal last_activity, thinking_token_count, error_message, thinking_streamed
         nonlocal text_chars_total, result_envelope_seen, unreadable_line
         while True:
             try:
@@ -2388,6 +2413,12 @@ async def _collect_via_streaming(
                 text_delta, thinking_inc, err, is_result = (
                     _parse_stream_json_line(line)
                 )
+                for kind, thought in _stream_thinking(line):
+                    if kind == "delta":
+                        thinking_streamed = True
+                        add_thinking(thought)
+                    elif not thinking_streamed:
+                        add_thinking(thought + "\n")
                 turn_mark = _stream_turn_mark(line)
                 if turn_mark == "start":
                     turns.append({"text": [], "stop": None})
@@ -2709,6 +2740,30 @@ def _stream_turn_mark(raw: bytes) -> str | None:
         reason = (event.get("delta") or {}).get("stop_reason")
         return str(reason) if reason else None
     return None
+
+
+def _stream_thinking(raw: bytes) -> list[tuple[str, str]]:
+    """The reasoning text one stream-json line carries: ``("delta", text)`` for a streamed ``thinking_delta``, or
+    ``("block", text)`` for a thinking block of a whole assistant message (used only when nothing was streamed)."""
+    if b"thinking" not in raw:
+        return []
+    try:
+        msg = json.loads(raw.decode("utf-8", errors="replace"))
+    except ValueError:
+        return []
+    if not isinstance(msg, dict):
+        return []
+    if msg.get("type") == "stream_event":
+        delta = (msg.get("event") or {}).get("delta") if isinstance(msg.get("event"), dict) else None
+        if isinstance(delta, dict) and delta.get("type") == "thinking_delta" and isinstance(delta.get("thinking"), str):
+            return [("delta", delta["thinking"])]
+        return []
+    if msg.get("type") == "assistant" and isinstance(msg.get("message"), dict):
+        content = msg["message"].get("content")
+        if isinstance(content, list):
+            return [("block", b["thinking"]) for b in content
+                    if isinstance(b, dict) and b.get("type") == "thinking" and isinstance(b.get("thinking"), str)]
+    return []
 
 
 def _parse_stream_json_line(raw: bytes) -> tuple[str, int, str | None, bool]:
@@ -3526,8 +3581,9 @@ class LLMClient:
                 messages, model_override=model, temperature=temperature,
                 node=node,
             )
-            from .vscode_bridge import LAST_BRIDGE_USAGE, LAST_SERVED, is_router_alias
+            from .vscode_bridge import LAST_BRIDGE_THINKING, LAST_BRIDGE_USAGE, LAST_SERVED, is_router_alias
 
+            note_thinking(LAST_BRIDGE_THINKING.get() or "")
             served = LAST_SERVED.get()
             if served and served.get("id") and not is_router_alias(served):
                 # The extension named the chat model it selected and sent this very call to (as VS Code reports it):
@@ -3731,6 +3787,7 @@ class LLMClient:
             LAST_CALL.set({"provider": self.last_provider, "model": data["model"], "reported": True})
         # Why the answer ended, and what it cost, in this call's own record (and so in the quest's record of its calls).
         LAST_CALL.set({**(LAST_CALL.get() or {}), "finish_reason": finish, "usage": self.last_usage})
+        note_thinking(_reasoning_of(data))
         if finish in _CUT_OFF:
             raise cut_off(data, body.get("max_tokens"))
         if finish in _FILTERED:

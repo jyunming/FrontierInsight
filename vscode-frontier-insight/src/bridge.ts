@@ -515,6 +515,8 @@ export class Bridge {
             // can flood the chat and slow VSCode when models stream
             // many small fragments.
             let thinkingBuf = "";
+            // Everything the model reasoned, kept whole for FI's .fi/thinking.jsonl (thinkingBuf is emptied on each flush).
+            let thinkingAll = "";
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
             const nodeLabel = req.node || "(unnamed-node)";
@@ -623,9 +625,10 @@ export class Bridge {
                         thinkingChars += value.length;
                         // Buffer thinking fragments; the heartbeat
                         // flushes them at most once per HEARTBEAT_MS.
-                        // We DON'T send to Python — reasoning isn't
-                        // the answer.
+                        // It is not sent as a chunk (reasoning isn't
+                        // the answer); the whole text rides on lm_done.
                         thinkingBuf += value;
+                        thinkingAll += value;
                     } else if (kind === "tool") {
                         // FI doesn't request tool calls; the model
                         // shouldn't emit any. Log if it happens so we
@@ -651,6 +654,8 @@ export class Bridge {
                 content: accumulated,
                 // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
                 served_model: servedModel(model),
+                // The model's own reasoning, when it sent any (additive: an older FI ignores it).
+                ...(thinkingAll ? { thinking: thinkingAll } : {}),
             });
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);

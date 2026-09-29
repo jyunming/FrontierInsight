@@ -70,6 +70,7 @@ from . import todo as _todo
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
+from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
@@ -11436,7 +11437,12 @@ class Engine:
                 "reported": bool(served.get("reported")),
                 # The model's vendor as the connection named it (the VS Code extension's), when it did.
                 **({"vendor": served["vendor"]} if served.get("vendor") else {}),
-                # The same hashes as this call's line in .fi/model_calls.jsonl, so the two can be joined.
+                # The same hashes as this call's line in .fi/model_calls.jsonl, so the two can be joined -- and its id, the
+                # model asked for and why the answer ended (as the engine recorded them; nothing the model said).
+                **({"call_id": self.__dict__["_last_call_id"][node or ""]}
+                   if (node or "") in self.__dict__.get("_last_call_id", {}) else {}),
+                "requested_model": self._model_for_node(node) or self.config.provider.model or None,
+                **({"finish_reason": served["finish_reason"]} if served.get("finish_reason") else {}),
                 "prompt_hash": _attempts.prompt_sha(messages),
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
@@ -11460,6 +11466,7 @@ class Engine:
         attempts: list[dict[str, Any]] = []
         token = _CALL_ATTEMPTS.set(attempts)
         _LAST_CALL.set(None)
+        holder = _thinking.open_holder()
         try:
             try:
                 response = await call()
@@ -11477,14 +11484,37 @@ class Engine:
                         outcome=_outcome_of(exc), requested_model=requested_model, usage=usage)
                     self._cost_of_failed_attempt(node, getattr(exc, "model", None) or failed.get("model"), usage,
                                                  messages)
+                self._save_thinking(node, holder, requested_model)
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)
             self._record_model_call(node, messages, response, served=served, usage=served.get("usage"),
                                     requested_model=requested_model)
+            self._save_thinking(node, holder, requested_model)
             return response, served
         finally:
+            _thinking.close_holder()
             _CALL_ATTEMPTS.reset(token)
+
+    def _save_thinking(self, node: str, holder: dict[str, str], requested_model: str | None) -> None:
+        """One line in ``.fi/thinking.jsonl`` for a call whose connection handed back the model's reasoning: the text
+        (credentials and the home folder removed), which call it belongs to (``call_id``, the line of
+        ``.fi/model_calls.jsonl``) and a note that it is the model's own account. Not sealed, not evidence, and never
+        in the way of the quest."""
+        text = holder.get("text") or ""
+        fi_dir = getattr(self, "fi_dir", None)
+        if not text.strip() or fi_dir is None or not self.config.output.save_thinking:
+            return
+        try:
+            _attempts.append(fi_dir, _thinking.THINKING_FILE, {
+                "quest_id": getattr(self, "quest_id", ""), "node": node,
+                "call_id": self.__dict__.get("_last_call_id", {}).get(node),
+                "requested_model": requested_model or self._model_for_node(node) or self.config.provider.model or None,
+                "note": _thinking.THINKING_NOTE,
+                "thinking": _audit_log.redact_text(text, whole=True),
+            })
+        except Exception as e:  # noqa: BLE001 -- a keepsake never touches the quest
+            self._log.debug("[thinking] not kept: %r", e)
 
     def _record_attempts(self, node: str, messages: Any, attempts: list[dict[str, Any]], requested_model: str | None,
                          *, final: BaseException | None = None) -> None:

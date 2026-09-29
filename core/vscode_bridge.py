@@ -54,6 +54,8 @@ class BridgeError(RuntimeError):
 LAST_SERVED: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("fi_vscode_served", default=None)
 #: The token counts of the current task's last bridge call, when the extension measured them.
 LAST_BRIDGE_USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("fi_vscode_usage", default=None)
+#: The reasoning text the chat model sent with the current task's last bridge call, when the extension passed it on.
+LAST_BRIDGE_THINKING: contextvars.ContextVar[str | None] = contextvars.ContextVar("fi_vscode_thinking", default=None)
 
 #: Names a chat picker uses for "let the service choose": they name no model, so they prove nothing about which
 #: model answered.
@@ -116,6 +118,7 @@ class VSCodeBridgeClient:
         # The model and token counts each request's ``lm_done`` named, until ``chat`` takes them for that request.
         self._served: dict[int, dict[str, str]] = {}
         self._usage: dict[int, dict] = {}
+        self._thinking: dict[int, str] = {}
         self._next_id = 1
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # serialize writes
@@ -204,6 +207,7 @@ class VSCodeBridgeClient:
 
         LAST_SERVED.set(None)
         LAST_BRIDGE_USAGE.set(None)
+        LAST_BRIDGE_THINKING.set(None)
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
@@ -234,6 +238,7 @@ class VSCodeBridgeClient:
                 # each other's model.
                 LAST_SERVED.set(self._served.pop(req_id, None))
                 LAST_BRIDGE_USAGE.set(self._usage.pop(req_id, None))
+                LAST_BRIDGE_THINKING.set(self._thinking.pop(req_id, None))
                 return content
             except asyncio.TimeoutError as e:
                 raise BridgeError(
@@ -245,6 +250,7 @@ class VSCodeBridgeClient:
             self._chunks.pop(req_id, None)
             self._served.pop(req_id, None)
             self._usage.pop(req_id, None)
+            self._thinking.pop(req_id, None)
 
     async def clarify(self, questions: dict[str, Any]) -> dict[str, Any]:
         """Pause for human-in-the-loop clarify answers. The extension
@@ -352,6 +358,7 @@ class VSCodeBridgeClient:
             self._chunks.clear()
             self._served.clear()
             self._usage.clear()
+            self._thinking.clear()
             w = self._writer
             self._reader = None
             self._writer = None
@@ -407,6 +414,9 @@ class VSCodeBridgeClient:
                     "estimated": False,
                     "usage_scope": str(msg.get("usage_scope") or "sent_only"),
                 }
+            thinking = msg.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                self._thinking[req_id] = thinking
             served = msg.get("served_model")
             if isinstance(served, dict) and isinstance(served.get("id"), str) and served["id"].strip():
                 self._served[req_id] = {k: str(v) for k, v in served.items()

@@ -353,6 +353,7 @@ output:
   paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   save_model_calls: false           # keep every prompt and answer, whole, in .fi/io/ (one file per call); see docs/trace.md
+  save_thinking: true               # keep the reasoning a model returns, when its connection gives it, in .fi/thinking.jsonl (for reading; never evidence); false keeps none
   require_pdf: false                # strict mode for paper_pdf — see below
   html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
   paper_style: latex                # paper.pdf look: latex (Computer Modern article, default) | briefing (FI brand look, HTML-rendered)

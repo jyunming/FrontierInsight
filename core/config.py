@@ -1480,6 +1480,11 @@ class OutputConfig(BaseModel):
     # default: a quest makes 30-90 calls and the files can reach tens of MB. For finding out exactly what a model was
     # told; the trace (`--trace`, `--why`) already records every decision without it.
     save_model_calls: bool = False
+    # Keep what a model says about its own reasoning, when the connection hands it back (a reasoning model's
+    # `reasoning_content`, Claude's thinking, VS Code's thinking parts), in <quest>/.fi/thinking.jsonl, one line per call.
+    # For reading only: it is the model's own account, never checked or sealed, and never evidence. On by default;
+    # set false to keep none.
+    save_thinking: bool = True
     # When True AND ``paper_pdf`` is in ``kinds``, treat a failed PDF
     # compile as a hard quest failure rather than a graceful skip.
     # Pairs with the engine's pre-flight check: at ``Engine.run``
