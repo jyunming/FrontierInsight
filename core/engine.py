@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import fnmatch
 import concurrent.futures
 import functools
 import hashlib
@@ -5682,7 +5683,11 @@ class Engine:
             else:
                 self._log.info("[implement] %s is unchanged; its raw files stay in use", simulate_path.name)
         elif simulate_path.is_file():
-            simulate_path.unlink()  # no leftover simulation from an earlier pass beside a one-script quest
+            # This pass wrote ONE script: a simulation left from an earlier pass would run beside it and mix two
+            # iterations. Under ``auto`` a quest with a simulation asks for two scripts every time (``_split_on``), so
+            # this is reached only when the reply held one script, or when ``split_analysis`` is false.
+            simulate_path.unlink()
+            self._log.warning("[implement] removed the earlier %s: this pass wrote one script", simulate_path.name)
         submit_path = self.quest_root / "code" / _trial_runner.SUBMIT_NAME
         if submit_code.strip():
             submit_path.write_text(submit_code, encoding="utf-8")
@@ -7358,6 +7363,7 @@ class Engine:
         # counter`` means three runs of almost exactly the same trials.
         stride = max(1, int(self.config.engine.replicate_seed_stride))
         primary_env = _replicate_env(exec_env, 0, stride)
+        run_started = time.time()
         result: ExecutionResult = await self._await_with_heartbeat(
             runner.execute(
                 [str(py), str(code_path)],
@@ -7445,6 +7451,11 @@ class Engine:
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
         })
+        # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
+        # nor a job still pending (its raw files are half written).
+        run_accepted = result.returncode == 0 and manifest_status not in ("stopped", "pending", "repairing")
+        if run_accepted:
+            await asyncio.to_thread(self._save_run_data, run_started, split)
         if manifest_status == "stopped":
             try:
                 manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")
@@ -7691,6 +7702,8 @@ class Engine:
                 "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
                 if unseeded_rng else "it never reads FI_REPLICATE_SEED",
             )
+        if replicates_ran and split and run_accepted:
+            await asyncio.to_thread(self._save_run_data, run_started, split, root_files=False)
         replotted: dict[str, int] = {}
         # A figure drawn as "the mean of the seeds" over replicates that are one
         # run repeated would be a mean of one number, captioned as several.
@@ -8296,7 +8309,7 @@ class Engine:
         from .summarizer import _classify_extension, _read_text
         data_dir = self.quest_root / "data"
         if data_dir.is_dir():
-            _skip_top = {"literature", "auto_collected"}
+            _skip_top = {"literature", "auto_collected", "results"}
             # Collect matching files lazily and STOP after limit*2 — don't
             # materialize + sort the whole data/ tree (could be large). Sort
             # only the small collected set for deterministic prompt order,
@@ -12779,12 +12792,75 @@ class Engine:
             return ""
         return "" if state is not None and self._split_on(state) else _JOB_PROTOCOL
 
+    _RUN_DATA_SUFFIXES = frozenset({
+        ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",
+    })
+    _RUN_DATA_MAX_BYTES = 200 * 1024 * 1024
+    # Names that are secrets or setup files, never a result table; matched whole, so `tokens.csv` is kept.
+    _RUN_DATA_SKIP = (
+        ".env*", "id_rsa*", "*.pem", "*.key", "token.json", "tokens.json", "access_token*", "refresh_token*",
+        "credentials*.json", "client_secret*.json", "secret.json", "secrets*.json", "requirements*.txt", "constraints*.txt",
+    )
+
+    def _save_run_data(self, since: float, split: bool, root_files: bool = True) -> list[str]:
+        """Copy what a successful run produced into ``data/results/``, so the numbers behind a paper are in ``data/`` too.
+
+        The scripts run from the quest folder, so a table a script writes lands beside ``plan.md``; a two-script quest's
+        raw files are in ``raw/``. Both are copied (the originals stay where the scripts and FI's records expect them),
+        each file and the raw folder only while small enough not to double a large quest's disk use. The raw copy is
+        replaced, not merged, so it never keeps a file an earlier run wrote. ``root_files=False`` refreshes only the raw
+        copy (after the replicate seeds ran, which add raw files but overwrite the root tables). Never raises."""
+        saved: list[str] = []
+        dest = self.quest_root / "data" / "results"
+        try:
+            if root_files and dest.is_dir():
+                # Tables an earlier iteration left are not this run's; what a script wrote here itself is newer.
+                for old in dest.iterdir():
+                    if old.is_file() and old.stat().st_mtime < since - 2:
+                        old.unlink(missing_ok=True)
+            for path in sorted(self.quest_root.iterdir() if root_files else []):
+                if any(fnmatch.fnmatch(path.name.lower(), pat) for pat in self._RUN_DATA_SKIP):
+                    if path.suffix.lower() in self._RUN_DATA_SUFFIXES:
+                        self._log.info("[execute] %s looks like a secret or setup file; not copied to data/results/", path.name)
+                    continue
+                if (
+                    path.is_file() and path.suffix.lower() in self._RUN_DATA_SUFFIXES
+                    and path.stat().st_mtime >= since - 2
+                    and path.stat().st_size <= self._RUN_DATA_MAX_BYTES
+                ):
+                    dest.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, dest / path.name)
+                    saved.append(path.name)
+            if split:
+                raw = _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
+                target = dest / "raw"
+                if raw.is_dir() and not raw.resolve().is_relative_to(dest.resolve()):
+                    total = 0
+                    for p in raw.rglob("*"):
+                        if p.is_file():
+                            total += p.stat().st_size
+                            if total > self._RUN_DATA_MAX_BYTES:
+                                break
+                    if total <= self._RUN_DATA_MAX_BYTES:
+                        shutil.rmtree(target, ignore_errors=True)
+                        shutil.copytree(raw, target)
+                        saved.append("raw/")
+                    else:
+                        shutil.rmtree(target, ignore_errors=True)  # an earlier, smaller copy would be a partial one
+                        self._log.info("[execute] the raw files in %s are large; they stay there and are not copied to data/results/", raw)
+        except OSError as exc:
+            self._log.warning("[execute] could not copy the run's data into data/results/: %s", exc)
+        if saved:
+            self._log.info("[execute] the run's data is kept in %s: %s", dest, ", ".join(saved))
+        return saved
+
     def _split_on(self, state: QuestState) -> bool:
         """Whether this quest keeps its simulation and its analysis in two scripts (``execution.split_analysis``).
 
-        ``true`` and ``false`` decide for every quest. ``auto`` decides from the design, so it is the same on every
-        call and after a resume: on for a stochastic study (:func:`core.split_run.design_is_stochastic`), off for a
-        background job, a study with no experiment and a run that only analyses data."""
+        ``true`` and ``false`` decide for every quest. ``auto`` decides from the design: on for a stochastic study
+        (:func:`core.split_run.design_is_stochastic`), off for a study with no experiment and a run that only
+        analyses data. Once a quest has its ``simulate.py`` it stays two-script under ``auto`` (a later redesign that
+        reads less stochastic must not delete the simulation); ``split_analysis: false`` is the way back to one script."""
         mode = self.config.execution.split_analysis
         if mode != "auto":
             return bool(mode)
@@ -12794,6 +12870,10 @@ class Engine:
             or self.config.engine.analyze_local_first
         ):
             return False
+        # A quest that already has its simulation keeps it: a later design that reads less stochastic must not turn
+        # the quest into a one-script one, which deleted simulate.py.
+        if (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
+            return True
         # A background job (a cluster) with a stochastic design runs FI's trials as a job array (core/trial_runner.py):
         # two scripts and submit.py. A deterministic one stays the one-script job it was.
         return _split_run.design_is_stochastic(state.get("design") or {})
