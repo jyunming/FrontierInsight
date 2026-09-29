@@ -9820,6 +9820,7 @@ class Engine:
                 _code_project.verify, self.quest_root,
                 run_timeout_s=float(self.config.execution.timeout_s),
             )
+            marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(digest, encoding="utf-8")
             (self._log.info if result.get("ok") else self._log.warning)("[code] %s", result.get("says"))
         except Exception as exc:  # noqa: BLE001 -- a check of a convenience, never a reason to stop
