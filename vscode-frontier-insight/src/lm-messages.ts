@@ -121,6 +121,9 @@ export function partKind(
 // One message is one line, and an FI that has not raised its reader's 64 KiB line limit drops the connection on a
 // longer one, so the whole `lm_done` line stays under this.
 export const LM_DONE_MAX_BYTES = 48 * 1024;
+// The one-line "not sent" marker (about 40 bytes) may go past the limit above, up to here, so an answer that fills
+// the limit still says its reasoning was left out; this stays clear of the 64 KiB reader limit.
+export const LM_DONE_HARD_BYTES = 60 * 1024;
 
 /** The reasoning of one answer as it streams in: only what could ever be sent is kept, the rest is only counted. */
 export class ThinkingCollector {
@@ -150,10 +153,10 @@ export function lmDoneMessage<T extends object>(
     const withNote = (keep: number) =>
         thinking.slice(0, keep) + `\n[${total - keep} more characters not sent]`;
     if (size(withNote(0)) > maxBytes) {
-        // The marker is only 3 bytes shorter than the note, so it helps only when the answer misses the limit by a
-        // hair; a longer answer still sends no reasoning at all.
+        // The marker is a fixed few dozen bytes, so it may use the room between the limit and the hard limit; an
+        // answer that fills even that sends no reasoning at all.
         const marker = `[${total} chars not sent: no room]`;
-        return size(marker) <= maxBytes ? { ...base, thinking: marker } : base;
+        return size(marker) <= Math.max(maxBytes, LM_DONE_HARD_BYTES) ? { ...base, thinking: marker } : base;
     }
     let lo = 0;
     let hi = thinking.length;

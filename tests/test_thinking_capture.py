@@ -546,7 +546,7 @@ async def test_a_no_room_marker_from_the_extension_is_kept_as_a_line(smoke_confi
 # --- the extension's message builder (compiled TypeScript, run under node) --------------------------------------------
 
 _NODE_DONE = """
-const { lmDoneMessage, LM_DONE_MAX_BYTES, ThinkingCollector, partKind } = require(%s);
+const { lmDoneMessage, LM_DONE_MAX_BYTES, LM_DONE_HARD_BYTES, ThinkingCollector, partKind } = require(%s);
 const bytes = (m) => Buffer.byteLength(JSON.stringify(m), "utf8") + 1;
 const base = { type: "lm_done", id: 1, content: "Answer" };
 const huge = lmDoneMessage(base, "t".repeat(2000000));
@@ -563,7 +563,9 @@ process.stdout.write(JSON.stringify({
     }
     return null;
   })(),
-  hugeAnswer: "thinking" in lmDoneMessage({ ...base, content: "a".repeat(LM_DONE_MAX_BYTES) }, "reasoning"),
+  fullAnswer: (() => { const m = lmDoneMessage({ ...base, content: "a".repeat(LM_DONE_MAX_BYTES) }, "reasoning"); return [m.thinking, bytes(m)]; })(),
+  hugeAnswer: "thinking" in lmDoneMessage({ ...base, content: "a".repeat(LM_DONE_HARD_BYTES) }, "reasoning"),
+  hard: LM_DONE_HARD_BYTES,
   max: LM_DONE_MAX_BYTES,
   kept: (() => { const c = new ThinkingCollector(); for (let i = 0; i < 50; i++) c.add("z".repeat(100000)); return [c.text.length, c.total]; })(),
   streamed: (() => {
@@ -631,6 +633,8 @@ def test_the_extension_cuts_the_thinking_so_an_lm_done_line_stays_small(tmp_path
     big_bytes, marker = out["bigAnswer"]  # the answer leaves no room: a short marker, not silence
     assert big_bytes <= out["max"]
     assert marker == "[5000 chars not sent: no room]"
+    note, full_bytes = out["fullAnswer"]  # an answer at the limit still gets the marker, which may pass it a little
+    assert note.endswith("no room]") and out["max"] < full_bytes <= out["hard"] < 65536
     assert out["hugeAnswer"] is False  # not even the marker fits: the line is left as the answer alone
     assert out["kept"][0] <= out["max"] and out["kept"][1] == 5_000_000  # only what can be sent is held; all counted
     assert out["streamed"][0] <= out["max"] and out["streamed"][1].endswith("more characters not sent]")
