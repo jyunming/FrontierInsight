@@ -116,6 +116,8 @@ same PR that adds, splits or renames one.
   from existing code.
 - `core/skills/known_checks.py` — known-value checks (a physical constant, a reverse complement) that a generated
   self-test runs for a script-less skill whose library is declared, so a broken install fails instead of passing.
+  `core/skills/scaffold.py` writes each one into `selftest.py` as a plain function (no `exec`), so the skill scanner
+  sees the code it runs and a generated self-test carries no high-severity finding.
 - `core/skills/mounts.py` — making an approved external skill reachable inside the Docker sandbox.
 - `core/skills/usage.py`, `core/skills/selftest_cache.py` — usage provenance, and which exact contents last passed
   self-test under which Python.

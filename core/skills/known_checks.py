@@ -13,7 +13,10 @@ quarantine a working skill.
 
 Each check is ``(label, source)``; ``source`` is a Python block that must leave
 ``ok = True``. The import it needs is inside the source, so a missing package
-is the failure.
+is the failure. The generated self-test writes each source out as the body of
+a plain function (never a string passed to ``exec``), so a person approving the
+skill reads exactly what it runs; keep sources free of multi-line string
+literals, which cannot be indented into a function unchanged.
 """
 from __future__ import annotations
 

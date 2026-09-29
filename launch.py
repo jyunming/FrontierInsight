@@ -5094,7 +5094,7 @@ def _import_skill(
             print("SKILL.md describes, which is what a self-test is really")
             print("for. The file says so, and --skills flags it, until you")
             print("replace it with real checks.")
-        except OSError as e:
+        except (OSError, ValueError) as e:
             print(f"Could not generate a self-test ({e}); the skill stays "
                   "UNTESTED and cannot be used until one exists.")
         print()
