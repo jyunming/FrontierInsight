@@ -450,6 +450,41 @@ def test_a_script_with_no_random_source_is_recognised(tmp_path: Path) -> None:
     assert _script_has_random_source(tmp_path / "missing.py") is True
 
 
+@pytest.mark.parametrize("body", [
+    "import networkx as nx\ng = nx.erdos_renyi_graph(500, 0.01, seed=42)\n",
+    "from sklearn.ensemble import RandomForestClassifier\nm = RandomForestClassifier(random_state=0)\n",
+    "from scipy import stats\nr = stats.permutation_test((a, b), f)\n",
+    "import torch\nx = torch.randperm(10)\n",
+])
+def test_randomness_spelled_without_the_word_random_is_still_a_random_source(tmp_path: Path, body: str) -> None:
+    from core.engine import _script_has_random_source
+
+    script = tmp_path / "experiment.py"
+    script.write_text(body, encoding="utf-8")
+    assert _script_has_random_source(script) is True
+
+
+def test_randomness_in_a_module_beside_the_script_counts(tmp_path: Path) -> None:
+    from core.engine import _script_has_random_source
+
+    (tmp_path / "experiment.py").write_text("from sim import run_sim\nprint(run_sim())\n", encoding="utf-8")
+    assert _script_has_random_source(tmp_path / "experiment.py") is False
+    (tmp_path / "sim.py").write_text("import numpy as np\nrng = np.random.default_rng(42)\n", encoding="utf-8")
+    assert _script_has_random_source(tmp_path / "experiment.py") is True
+
+
+@pytest.mark.asyncio
+async def test_a_stale_seed_ignored_verdict_is_cleared_when_a_pass_runs_no_replicates(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, replicates=1)
+    eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
+        return_value=_er(_rj('{"err": 0.01}')))
+    patch = await eng._node_execute({
+        "deps": [], "result_json_replicate_seed_ignored": True, "result_json_no_random_source": True,
+    })
+    assert patch["result_json_replicate_seed_ignored"] is False
+    assert patch["result_json_no_random_source"] is False
+
+
 @pytest.mark.asyncio
 async def test_a_script_with_no_random_source_is_reported_as_deterministic_not_single_measurement(
     tmp_path: Path,

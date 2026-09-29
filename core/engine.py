@@ -8078,9 +8078,11 @@ class Engine:
             # earlier script ignored the seed from carrying "there is one
             # measurement here" alongside this script's full aggregate.
             patch["result_json_replicate_seed_ignored"] = False
+        # Both flags are written on every pass: a pass that ran no replicates (every extra run failed, trial mode,
+        # a background job) must not inherit the previous script's verdict.
         patch["result_json_no_random_source"] = bool(seed_ignored and no_random_source)
+        patch["result_json_replicate_seed_ignored"] = bool(seed_ignored)
         if seed_ignored:
-            patch["result_json_replicate_seed_ignored"] = True
             # The same hazard the other way round. An earlier pass may have
             # left a replicate list on the state, and merely withholding the
             # key would KEEP it -- so analyze would aggregate the previous
@@ -15801,26 +15803,32 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
 
 
 _RANDOM_SOURCE_PATTERN = re.compile(
-    r"\b(random|secrets|rng|default_rng|RandomState|SeedSequence|rvs|randn|randint|randrange|shuffle|permutation"
-    r"|manual_seed|multinomial|gillespie)\b"
+    r"random|seed|secrets|\brng\b|default_rng|SeedSequence|\brvs\b|randn|randint|randrange|randperm|shuffle|permutation"
+    r"|multinomial|gillespie|bootstrap|scramble|sobol|halton|latin_?hypercube|dropout|erdos_renyi|watts_strogatz"
+    r"|barabasi_albert|torch|tensorflow|keras|\bjax\b"
     r"|\.(rand|normal|uniform|binomial|poisson|exponential|choice|choices|sample|integers|standard_normal)\(",
     re.IGNORECASE,
 )
 
 
 def _script_has_random_source(code_path: Path) -> bool:
-    """Whether the script can draw a random number at all.
+    """Whether the script, or any module beside it, can draw a random number at all.
 
     A script with none (an ODE integrator, a closed-form sweep, a lattice sum) is deterministic by construction,
-    so a repeat count is not what makes its result trustworthy. A deliberately generous source scan: any mention of a
-    random module, generator or sampler counts, so "none" is only said for a script with nothing that could draw.
-    An unreadable file returns ``True`` because silence is not evidence of determinism.
+    so a repeat count is not what makes its result trustworthy. A deliberately generous source scan over every ``.py``
+    file in the script's folder (a multi-module project keeps its sampler in another file): any mention of a random
+    module, seed argument, sampler or graph generator counts, so "none" is only said when nothing could draw.
+    Over-detecting only brings back the old warning. An unreadable file returns ``True`` because silence is not
+    evidence of determinism.
     """
     try:
-        text = code_path.read_text(encoding="utf-8", errors="replace")
+        files = [code_path, *sorted(code_path.parent.rglob("*.py"))[:200]]
+        return any(
+            _RANDOM_SOURCE_PATTERN.search(f.read_text(encoding="utf-8", errors="replace")) is not None
+            for f in files
+        )
     except OSError:
         return True
-    return _RANDOM_SOURCE_PATTERN.search(text) is not None
 
 
 # Generators that draw from OS entropy when they are handed no seed.
