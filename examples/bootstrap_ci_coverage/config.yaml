@@ -1,0 +1,67 @@
+topic: |
+  TOPIC. How often do bootstrap confidence intervals actually contain the
+  true value when the sample is small and the data are skewed?
+
+  CONTEXT. A 95% confidence interval should contain the true mean in 95% of
+  repeated experiments. With few observations and a skewed distribution
+  (lognormal, exponential) the usual t-interval and the percentile
+  bootstrap interval are both known to fall short, by different amounts.
+  This is a routine question in any field that reports a mean from a small
+  sample: biology, engineering, medicine, economics.
+
+  SCOPE (SIMULATION ONLY, NO SPECIAL DATA NEEDED).
+    1. Draw samples of size n from a normal, an exponential and a lognormal
+       distribution whose true mean is known.
+    2. For each sample build three 95% intervals for the mean: the t-interval,
+       the percentile bootstrap, and the BCa bootstrap.
+    3. Repeat many times per setting and report the coverage (the fraction of
+       intervals that contain the true mean) with its own uncertainty.
+    4. Sweep n in {5, 10, 20, 50, 100}.
+    5. State at which n each method reaches coverage within 2 points of 95%
+       for each distribution.
+
+  GOALS.
+    - One Python script using numpy and scipy, with matplotlib (Agg backend).
+    - Two figures: coverage against n for every method and distribution, with
+      the 95% line drawn; and interval width against n.
+    - Write a short paper (at most 4 pages) that cites the standard
+      references on the bootstrap (Efron and Tibshirani) and on BCa
+      intervals, with at least three primary references.
+
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime.
+    - Fix the random seeds and say so in the paper.
+
+title: bootstrap-ci-coverage-small-samples
+
+# What the result is for (explore, research or decision). Left out, a quest is an exploration and its paper
+# is marked preliminary.
+result_use: research
+
+provider:
+  name: ollama
+  model: gpt-oss:120b-cloud
+  base_url: http://127.0.0.1:11434/v1
+
+engine:
+  framework: langgraph
+  max_iterations: 1
+  review_loop: false
+
+execution:
+  sandbox: venv
+  timeout_s: 600
+  python_version: "3.11"
+
+knowledge:
+  enabled: false   # No Axon brain configured locally; degrade cleanly.
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+    - slides
+    - poster
+    - speech
+  paper_format: generic
+  output_dir: ./outputs

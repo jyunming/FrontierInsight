@@ -732,6 +732,6 @@ Their figures are cut out too, each with its caption, into `data/literature/figu
 | Example | What it does | Wall time |
 |---|---|---|
 | [`examples/integrator_bakeoff/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/integrator_bakeoff) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
-| [`examples/euv_mor_shot_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/euv_mor_shot_noise) | Theoretical LER floor in metal-oxide EUV resists. Uses the literature router. | ~15 min |
+| [`examples/bootstrap_ci_coverage/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/euv_mor_shot_noise) | Coverage of bootstrap and t confidence intervals for small, skewed samples. Uses the literature router. | ~15 min |
 | [`examples/bernstein_vazirani_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bernstein_vazirani_noise) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
 

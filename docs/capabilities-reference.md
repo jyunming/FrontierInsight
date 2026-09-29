@@ -396,7 +396,7 @@ landmarks:
 | Example | Provider used | Topic |
 |---|---|---|
 | [`integrator_bakeoff`](../examples/integrator_bakeoff/config.yaml) | (any) | Three numerical integrators on a damped harmonic oscillator (RK4 / Velocity-Verlet / forward Euler). |
-| [`euv_mor_shot_noise`](../examples/euv_mor_shot_noise/config.yaml) | `ollama` → cloud-routed reasoning models | Theoretical LER floor imposed by Poisson photon shot noise in metal-oxide EUV resists at production doses (10–60 mJ/cm²). |
+| [`bootstrap_ci_coverage`](../examples/bootstrap_ci_coverage/config.yaml) | `ollama` → cloud-routed reasoning models | How often bootstrap and t confidence intervals contain the true mean for small, skewed samples (n = 5 to 100). |
 | [`bernstein_vazirani_noise`](../examples/bernstein_vazirani_noise/config.yaml) | `claude_cli` (reuses `claude login` OAuth) | Bernstein-Vazirani algorithm under per-gate depolarizing noise. |
 
 ## Demo scripts
