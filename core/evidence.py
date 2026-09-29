@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import oracle_check as _oracle_check
 from . import receipts as _receipts
 from . import run_manifest as _run_manifest
 
@@ -67,10 +68,16 @@ INFO: dict[str, dict[str, Any]] = {
                       "raw/ledger.jsonl"],
     },
     "independently_validated": {
-        "assurance_claim": "The engine judged the script's oracle measurements against the protocol's expected values and tolerances.",
+        "assurance_claim": (
+            "The engine ran the simulation on each oracle's case and judged what it returned against the protocol's expected "
+            "values and tolerances (an oracle without a case is judged on the number the script's own oracle() reported, and the "
+            "record says so)."
+        ),
         "known_blind_spots": [
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
-            "simulator that agrees with it."
+            "simulator that agrees with it.",
+            "A tolerance looser than the gap between the claimed method and a cruder one passes both; the record warns when the "
+            "case names an order, and does not when it does not.",
         ],
         "artifacts": ["needs/ORACLE_CHECK.json"],
     },
@@ -355,6 +362,11 @@ def assess(
         valid_gaps.append(f"the script did not pass an independent oracle (oracle check: {status})")
     elif protocol is not None and oracle_record.get("judged_by") != "engine":
         valid_gaps.append("the oracle verdict is the script's own (this quest began before the engine judged oracles): it is not independent evidence")
+    elif protocol is not None and oracle_record.get("contract") == "trial" and (scripted := _oracle_check.script_measured(_oracle_check.last_judged(oracle_record))):
+        valid_gaps.append(
+            f"the value of {', '.join(scripted)} came from the script's own oracle(), not from the engine running the simulation "
+            "on the oracle's case: a script that returns a closed form without simulating would pass (give the oracle a `case` and a `measure`)"
+        )
     validated = matched and not valid_gaps
 
     # statistically adequate

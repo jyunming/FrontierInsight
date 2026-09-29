@@ -6920,22 +6920,30 @@ class Engine:
             reported: dict[str, Any] | None = None
             returncode, timed_out = 0, False
             stderr_tail = ""
+            trial_problems: list[str] = []
             if oracles and not incomplete and getattr(self, "_trial_mode", False):
-                # The trial contract: FI calls the simulation's oracle() in its own process.
-                values, why = await _trial_runner.run_oracle(
-                    self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
-                    timeout_s=timeout, env=env,
-                    thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                )
-                reported = {"checks": [{"name": k, "value": v} for k, v in values.items()]} if values is not None else None
-                returncode, timed_out = (0 if values is not None else 1), "ran out of time" in why
-                stderr_tail = getattr(self, "_packages_note", "") + why
+                # The trial contract. An oracle with a case is measured by the ENGINE: it calls the simulation function on
+                # that case in its own process and reads the measure from what comes back, so no number of the script's own
+                # making stands in for the simulation. The rest fall back to the script's oracle().
+                try:
+                    checks, trial_problems, _ = await _trial_runner.measure_oracles(
+                        self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(), oracles,
+                        timeout_s=timeout, env=env,
+                        thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+                        case_env=dict(_replicate_env(exec_env, 0, stride)),
+                    )
+                except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
+                    checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
+                reported = {"checks": checks, "engine_measured": True}
+                stderr_tail = getattr(self, "_packages_note", "") + "; ".join(trial_problems)
             elif oracles and not incomplete:
                 try:
                     ran = await self.executor.execute(
                         [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
                     )
                     reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
+                    if isinstance(reported, dict):
+                        reported.pop("engine_measured", None)  # only the engine's own measurement carries this mark
                     # What could not be installed comes first: the repair then fixes the import, not a symptom.
                     stderr_tail = getattr(self, "_packages_note", "") + (ran.stderr or "")[-2000:]
                 except Exception as e:  # noqa: BLE001 -- an oracle run that cannot start is a problem to report
@@ -6943,9 +6951,9 @@ class Engine:
                 if reported is None and returncode not in (0, -1):
                     self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail[-300:])
             found = incomplete or _oracle.problems(oracles, reported, returncode, timed_out)
-            if getattr(self, "_trial_mode", False) and reported is None and not incomplete:
-                # The trial contract: FI calls oracle(); there is no FI_ORACLE run and no ORACLE_JSON line to print.
-                found = [f"simulate.py's oracle() did not give its values: {stderr_tail.strip()[-300:] or 'no reason given'}"]
+            if trial_problems and not incomplete:
+                # The trial contract: there is no FI_ORACLE run and no ORACLE_JSON line; say why a value is missing.
+                found = _oracle.with_run_problems(trial_problems, found, oracles)
             attempts.append({
                 "attempt": attempt, "oracles": [o["name"] for o in oracles], "problems": found,
                 "checks": (reported or {}).get("checks"),
@@ -6978,8 +6986,13 @@ class Engine:
                 new_code = text
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
         proposed = list(self._oracle_proposals.values())
+        loose = [w for w in (_oracle.loose_tolerance(o) for o in oracles) if w]
+        for warning in loose:
+            self._log.warning("[oracle] %s", warning)
         self._oracle_record({
             "status": status, "judged_by": "engine", "attempts": attempts, "problems": found,
+            **({"contract": "trial"} if getattr(self, "_trial_mode", False) else {}),
+            **({"warnings": loose} if loose else {}),
             **({"proposed_changes": proposed} if proposed else {}),
         })
         if not found:
@@ -7038,7 +7051,10 @@ class Engine:
             "measurement must agree with, worked out here from the closed form, the limit or the invariant; 0 for an "
             "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
             "`tolerance_mode` (`absolute`, the default, or `relative`) and a `reference` saying where the expected value comes "
-            "from. The engine judges the script's measurement against these numbers. Change nothing else."
+            "from. Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
+            "`measure` (the name of the number that run returns), so the engine can run the simulation on it itself; when the "
+            "check claims an order of accuracy, give `order` too. The engine judges the measurement against these numbers. "
+            "Change nothing else."
             )
         try:
             await self.revise_plan(request)
@@ -7087,7 +7103,8 @@ class Engine:
         try:
             ast.parse(new_code)
             usable = bool(new_code.strip()) and (
-                "def oracle" in new_code if getattr(self, "_trial_mode", False) else "FI_ORACLE" in new_code
+                ("def oracle" in new_code or all(_oracle.case_of(o) for o in oracles))
+                if getattr(self, "_trial_mode", False) else "FI_ORACLE" in new_code
             )
         except (SyntaxError, ValueError):
             usable = False
@@ -15033,9 +15050,11 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   looks only at those two names.
   A cut-off that decides it (what counts as a major outbreak) is read from the protocol's thresholds,
   `json.loads(os.environ["FI_THRESHOLDS"])`, never written into the script as a number of its own.
-- When the protocol lists oracles: `def oracle() -> dict` computes, with the SAME simulation code, the values the
-  protocol's oracles name (the cases with a known answer), returned as a dict keyed by the oracle names; this replaces
-  the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
+- When the protocol lists oracles: an oracle that names a `case` (the settings of one run) and a `measure` is run by
+  FI itself: it calls run_trial / run_cell on that case and reads `measure` from the dict returned, so that function
+  must return the number, computed by the real simulation. Only an oracle without a `case` needs `def oracle() -> dict`,
+  which computes, with the SAME simulation code, the values those oracles name, returned as a dict keyed by the oracle
+  names; this replaces the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
 
 **experiment.py is the analysis.** FI runs it once, after all the trials. It reads FI's record of them from the file
 the environment variable `FI_TRIALS` names: `json.load(open(os.environ["FI_TRIALS"]))` gives
@@ -15112,10 +15131,12 @@ Reply with exactly two fenced Python blocks: the first starting with the line `#
 
 _TRIAL_ORACLE_NOTE = """
 
-THE TRIAL CONTRACT: simulate.py defines run_trial (or run_cell), and FI calls its `oracle()` function directly: there is
-no FI_ORACLE variable and no ORACLE_JSON line. Fix `def oracle() -> dict` in simulate.py so that it computes, with the
-same simulation code, each check the protocol names and returns them as a dict keyed by the check's name, e.g.
-`{"closed_form_limit": 0.4987}`. Return the whole of simulate.py.
+THE TRIAL CONTRACT: simulate.py defines run_trial (or run_cell). An oracle that names a `case` and a `measure` is NOT
+measured by anything you write for the check: FI calls run_trial (or run_cell) itself on that case and reads `measure` from
+the dict it returns, so the simulation function must return that number, computed by the real simulation. Only an oracle
+without a `case` is measured by `def oracle() -> dict` in simulate.py, which must compute, with the same simulation code,
+each such check and return them as a dict keyed by the check's name, e.g. `{"closed_form_limit": 0.4987}`. There is no
+FI_ORACLE variable and no ORACLE_JSON line. Return the whole of simulate.py.
 """
 
 _SPLIT_RERUN_NOTE = """

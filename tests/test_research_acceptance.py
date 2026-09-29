@@ -29,7 +29,10 @@ pytestmark = pytest.mark.slow
 METRIC = {"id": "final_size", "kind": "mean", "estimand": "mean final epidemic size", "unit": "trial"}
 RESEARCH_PROTOCOL = {
     **PROTOCOL,
-    "oracles": [{"name": "half", "check": "a known case", "expected": 0.5, "tolerance": 0.01}],
+    "oracles": [{
+        "name": "no_spread", "check": "with R0 = 0 nobody is infected", "expected": 0.0, "tolerance": 0.01,
+        "case": {"R0": 0.0}, "measure": "outbreak",
+    }],
     "metrics": [METRIC],
     "contrasts": [{"metric": "final_size", "a": "R0=0.9", "b": "R0=3.0"}],
 }
