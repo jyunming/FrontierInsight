@@ -223,8 +223,10 @@ async def test_a_skill_the_plan_names_is_reported_and_the_plan_is_left_as_it_is(
     excluded = cfg.model_copy(deep=True)
     excluded.engine.skills_exclude = [SKILL]
     capsys.readouterr()
+    log_path = first.fi_dir / "run.log"
+    seen = len(log_path.read_text(encoding="utf-8"))
     await Engine(excluded, resume_quest_id=first.quest_id).run(from_step="skills")
-    out = capsys.readouterr().out
+    out = capsys.readouterr().out + log_path.read_text(encoding="utf-8")[seen:]
     assert f"skill {SKILL} is no longer used by this quest" in out
     assert f"the plan names the skill {SKILL}" in out and "--revise-plan" in out
     assert _digest(plan) == plan_hash
@@ -250,3 +252,81 @@ async def test_a_skill_whose_own_packages_cannot_be_installed_is_dropped_from_th
     assert "could not be installed here" in state["skill_selection"]["dropped"][0]["why"]
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert f"dropped {SKILL}: its package zz-no-such-package-fi-test could not be installed here" in log
+
+
+@pytest.mark.asyncio
+async def test_a_skill_package_that_fails_once_but_installs_on_the_second_try_keeps_its_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_skill: Path,
+) -> None:
+    prov = node_skill / SKILL / "provenance.json"
+    prov.write_text(json.dumps({"kind": "tool", "pip_requires": ["zz-flaky-package"]}), encoding="utf-8")
+    for sk in discover():
+        approval.approve(sk.ledger_name, sk.content_hash(), approved_by="test", note="t")
+    calls: list[str] = []
+    _fake(monkeypatch, calls, [], deps=[])
+    real_install = Engine._install_packages
+    attempts: list[str] = []
+
+    async def flaky(self, packages):  # noqa: ANN001
+        rest = [p for p in packages if p != "zz-flaky-package"]
+        failed = await real_install(self, rest) if rest else []
+        if "zz-flaky-package" in packages:
+            attempts.append("zz-flaky-package")
+            if len(attempts) == 1:
+                failed.append(("zz-flaky-package", "connection reset"))
+        return failed
+
+    monkeypatch.setattr(Engine, "_install_packages", flaky)
+    cfg = _cfg_with_skill(tmp_path)
+    cfg.execution.shared_interpreter = False
+    engine = Engine(cfg)
+    await engine.run()
+    assert len(attempts) == 2, "a failed install of a skill's package was not tried a second time"
+    state = await _state(engine)
+    assert state["selected_skills"] == [SKILL]
+    assert not (state.get("skill_selection") or {}).get("dropped")
+    assert f"dropped {SKILL}" not in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_skill_whose_name_only_appears_inside_a_longer_name_is_not_reported_as_named_by_the_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_skill: Path,
+) -> None:
+    calls: list[str] = []
+    _fake(monkeypatch, calls, [], deps=[])
+    cfg = _cfg_with_skill(tmp_path)
+    first = Engine(cfg)
+    await first.run()
+    plan = first.quest_root / "plan.md"
+    plan.write_text(f"Use the {SKILL}-extras and pre-{SKILL} helpers.\n", encoding="utf-8")
+    excluded = cfg.model_copy(deep=True)
+    excluded.engine.skills_exclude = [SKILL]
+    log_path = first.fi_dir / "run.log"
+    seen = len(log_path.read_text(encoding="utf-8"))
+    await Engine(excluded, resume_quest_id=first.quest_id).run(from_step="skills")
+    new_log = log_path.read_text(encoding="utf-8")[seen:]
+    assert f"the plan names the skill {SKILL}" not in new_log
+    assert "the plan or design names" not in new_log
+
+
+def test_a_dropped_library_skill_is_left_out_of_what_pip_is_asked_for(tmp_path: Path) -> None:
+    engine = Engine(_cfg(tmp_path))
+    state = {"skill_selection": {"dropped": [{"name": "My_Lib-skill", "kind": "library", "why": "x"},
+                                             {"name": "chart-tool", "kind": "tool", "why": "y"},
+                                             {"name": "", "kind": "library"}]}}
+    assert engine._dropped_skill_names(state) == {"my-lib-skill", "chart-tool"}
+    assert engine._dropped_skill_names({}) == set()
+
+
+def test_two_backups_in_the_same_second_get_their_own_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rerun_from.time, "strftime", lambda fmt: "20260929-100000")
+    folders = []
+    for n in range(3):
+        (tmp_path / "code").mkdir(exist_ok=True)
+        (tmp_path / "code" / "experiment.py").write_text(str(n), encoding="utf-8")
+        where, moved = rerun_from.back_up(tmp_path, "code")
+        assert where is not None and "code" in moved
+        folders.append(where.name)
+    assert folders == ["20260929-100000", "20260929-100000-2", "20260929-100000-3"]
+    assert [(tmp_path / ".fi" / "previous" / f / "code" / "experiment.py").read_text(encoding="utf-8")
+            for f in folders] == ["0", "1", "2"]

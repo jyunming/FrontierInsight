@@ -40,7 +40,7 @@
       </a>
       <select id="rerun-from" onchange="showResumeButton(questResumable)" class="hidden w-auto bg-surface-mid cyber-border text-on-surface px-4 py-2 rounded-full font-label-sm text-label-sm" title="Where to go on from. Redoing a step first moves what that step and the later ones made to .fi/previous/.">
         <option value="">Go on from where it stopped</option>
-        <option value="skills">Redo from the skills</option>
+        <option value="skills" title="Picks the skills again from this quest's saved settings (config.yaml in the quest folder). The pick only changes if you edited engine.skills_exclude, engine.skills or engine.skills_required there.">Redo from the skills (uses the quest's saved settings)</option>
         <option value="code">Redo from the code</option>
         <option value="run">Redo from the run</option>
         <option value="analysis">Redo from the analysis</option>

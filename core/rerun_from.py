@@ -125,7 +125,12 @@ def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
     """Move what ``step`` and the steps after it wrote into ``.fi/previous/<time>/``. Returns the folder and what was
     moved (relative paths); ``(None, [])`` when there was nothing to move."""
     quest_root = Path(quest_root)
-    dest = quest_root / ".fi" / "previous" / time.strftime("%Y%m%d-%H%M%S")
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    dest = quest_root / ".fi" / "previous" / stamp
+    n = 2
+    while dest.exists():
+        dest = quest_root / ".fi" / "previous" / f"{stamp}-{n}"
+        n += 1
     moved: list[str] = []
     for rel in dict.fromkeys(OUTPUTS[step]):
         src = quest_root / rel

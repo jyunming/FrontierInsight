@@ -5587,7 +5587,7 @@ class Engine:
             (state.get("design") or {}).get("dependencies")
         )
         deps = sorted({*deps, *design_deps})
-        left_out = self._dropped_tool_names(state)
+        left_out = self._dropped_skill_names(state)
         if left_out:
             kept = [d for d in deps if _experiment_deps.normalize(_experiment_deps.requirement_name(d) or d) not in left_out]
             for d in deps:
@@ -7030,7 +7030,16 @@ class Engine:
         for dep, why in skill_failures:
             self._log.info("[execute] %r could not be installed: it %s", dep, why)
         # A skill whose own declared packages could not be installed cannot be used in this environment: it is dropped
-        # from the pick, with a plain line, rather than offered again to every repair and every later step.
+        # from the pick, with a plain line, rather than offered again to every repair and every later step. A failure
+        # counts only when it repeats: one dropped connection must not remove a skill from the quest for good.
+        wanted_again = [r for sk in skills for r in _experiment_deps.skill_requirements([sk])
+                        if r in {dep for dep, _ in failed_installs}]
+        if wanted_again:
+            still_failing = await self._install_packages(list(dict.fromkeys(wanted_again)))
+            recovered = {dep for dep, _ in failed_installs} - {dep for dep, _ in still_failing}
+            if recovered:
+                self._log.info("[skills] installed on the second try: %s", ", ".join(sorted(recovered)))
+            failed_installs = [(dep, why) for dep, why in failed_installs if dep not in recovered]
         failed_names = {dep for dep, _ in failed_installs}
         broken_skills = [
             (sk, [r for r in _experiment_deps.skill_requirements([sk]) if r in failed_names]) for sk in skills
@@ -9831,10 +9840,9 @@ class Engine:
     def _dropped_skills(state: Any) -> list[dict[str, Any]]:
         return [d for d in ((state or {}).get("skill_selection") or {}).get("dropped") or [] if isinstance(d, dict)]
 
-    def _dropped_tool_names(self, state: Any) -> set[str]:
-        """Normalised names of the skills a rerun from ``skills`` dropped that are tools (never Python packages)."""
-        return {_experiment_deps.normalize(str(d.get("name"))) for d in self._dropped_skills(state)
-                if str(d.get("kind")) == "tool" and d.get("name")}
+    def _dropped_skill_names(self, state: Any) -> set[str]:
+        """Normalised names of the skills this quest no longer carries (tool or library), so pip is never asked for them."""
+        return {_experiment_deps.normalize(str(d.get("name"))) for d in self._dropped_skills(state) if d.get("name")}
 
     def _dropped_skills_note(self, state: Any) -> str:
         """Tells the code-writing steps which skills this quest no longer carries, so a name the frozen plan or an
@@ -9899,7 +9907,7 @@ class Engine:
                 why = "the new pick did not choose it"
             dropped.append({"name": name, "why": why, "kind": kinds.get(name, "")})
             self._log.info("[skills] dropped %s: %s", name, why)
-            print(f"[FI] skill {name} is no longer used by this quest: {why}.")
+            self._progress(f"[FI] skill {name} is no longer used by this quest: {why}.")
         added = [n for n in new if n not in old]
         self._log.info("[skills] picked again: kept %s; added %s; dropped %s",
                        [n for n in new if n in old] or "none", added or "none", [d["name"] for d in dropped] or "none")
@@ -9911,13 +9919,14 @@ class Engine:
         plan_path = self.quest_root / "plan.md"
         text = (plan_path.read_text(encoding="utf-8", errors="replace") if plan_path.is_file() else "")
         text += " " + json.dumps(values.get("design") or {}, ensure_ascii=False)
-        text = re.sub(r"[-_ ]+", "-", text.lower())
+        text = text.lower()
         for d in dropped:
-            if re.sub(r"[-_ ]+", "-", d["name"].lower()) in text:
+            spelled = r"[-_ ]+".join(re.escape(part) for part in re.split(r"[-_ ]+", d["name"].lower()) if part)
+            if spelled and re.search(rf"(?<!\w)(?<!\w-){spelled}(?!\w)(?!-\w)", text):
                 self._log.warning("[skills] the plan or design names %s, which is no longer used; the plan is left as "
                                   "it is, and the code is told the skill is not available", d["name"])
-                print(f"[FI] the plan names the skill {d['name']}, which this quest no longer uses. The plan is not "
-                      f"changed; the code is written without it. To change the plan, use --revise-plan.")
+                self._progress(f"[FI] the plan names the skill {d['name']}, which this quest no longer uses. The plan is "
+                               f"not changed; the code is written without it. To change the plan, use --revise-plan.")
         writes = list(((snapshot.metadata or {}).get("writes") or {}).keys())
         as_node = next((w for w in writes if w in ("design", "synthesize", "data_load")), "design")
         return await graph.aupdate_state(
