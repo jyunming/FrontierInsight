@@ -1115,7 +1115,8 @@ def make_app(
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file() or not (quest_root / ".fi" / "state.sqlite").is_file():
-            return JSONResponse({"quest_id": quest_id, "steps": []})
+            return JSONResponse({"quest_id": quest_id, "steps": [], "nodes": [], "blocks": [],
+                                 "config_path": str(yaml_path)})
         from core import rerun_from as _rerun_from
         from core.config import Config
         from core.engine import Engine, _close_quest_logger
@@ -1123,12 +1124,17 @@ def make_app(
         cfg = Config.from_yaml(yaml_path)
         cfg.output.output_dir = quest_root.parent
         try:
-            steps = await Engine(cfg, resume_quest_id=quest_id).rerun_steps()
+            engine = Engine(cfg, resume_quest_id=quest_id)
+            steps = await engine.rerun_steps()
+            no_sim = await engine.rerun_no_simulation()
         finally:
             # The Engine opened the quest's log files for this process; nothing is logged, so they are closed now.
             _close_quest_logger(quest_id)
+        finished = (quest_root / "frontier_insight_summary.json").is_file()
         return JSONResponse({
             "quest_id": quest_id,
+            "config_path": str(yaml_path),
+            **_rerun_from.map_payload(steps, finished=finished, no_simulation=no_sim),
             "steps": [{"step": s["name"], "redoes": s["sentence"], "group": s["group"],
                        "needs_approval": s["needs_approval"], "outputs": s["outputs"]}
                       for s in steps if s["reached"]],

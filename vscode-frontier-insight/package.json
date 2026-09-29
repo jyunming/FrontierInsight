@@ -38,6 +38,10 @@
             "description": "Interactive setup — walks you through topic, outputs, clarify mode, reviewer panel; generates a config.yaml and runs it. Recommended for first-time users."
           },
           {
+            "name": "map",
+            "description": "Open a quest's map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button. Example: @fi /map 1790003131-my-quest"
+          },
+          {
             "name": "start",
             "description": "Start a quest from an existing YAML. Example: @fi /start examples/integrator_bakeoff/config.yaml"
           },
@@ -164,6 +168,13 @@
         ]
       }
     ],
+    "commands": [
+      {
+        "command": "frontierInsight.questMap",
+        "title": "FI: Quest map",
+        "category": "Frontier Insight"
+      }
+    ],
     "configuration": {
       "title": "Frontier Insight",
       "properties": {
@@ -208,7 +219,7 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "node scripts/copy-quest-map.js && tsc -p ./",
     "watch": "tsc -watch -p ./",
     "package": "vsce package --out vscode-frontier-insight.vsix && node scripts/normalize-vsix.js vscode-frontier-insight.vsix"
   },
