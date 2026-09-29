@@ -1218,7 +1218,7 @@ async function runQuest(
             const finishedId = resumeQuestId ?? questIdSeen;
             if (finishedId) await surfaceWorthALook(outputsDir, stream, finishedId);
         }
-        await surfaceWantedPapers(outputsDir, stream, resumeQuestId);
+        await surfaceWantedPapers(outputsDir, stream, resumeQuestId, !!card);
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
@@ -1305,6 +1305,7 @@ async function surfaceWantedPapers(
     outputsDir: string,
     stream: vscode.ChatResponseStream,
     knownQuestId?: string,
+    waiting = true,
 ): Promise<void> {
     try {
         let questId: string | null = null;
@@ -1341,11 +1342,14 @@ async function surfaceWantedPapers(
         const md = await fsPromises.readFile(
             path.join(outputsDir, best.id, "needs", "WANTED_PAPERS.md"), "utf-8",
         );
+        const next = waiting
+            ? `, then \`@fi /resume ${best.id}\` — or resume without adding any: those papers ` +
+              `are used from their abstracts, and FI does not ask for them again.`
+            : `. The quest did not stop for them, so there is nothing to resume: it went on with their abstracts.`;
         stream.markdown(
-            "\n\n---\n\n📄 **Some relevant papers were paywalled** — only the abstract " +
-            `was reachable. Download the ones that matter, drop the PDFs into ` +
-            `\`${papersDir}\`, then \`@fi /resume ${best.id}\` — or resume without adding any: those papers ` +
-            `are used from their abstracts, and FI does not ask for them again.\n\n${md}\n`,
+            "\n\n---\n\n📄 **Some relevant papers are not confirmed free to read** — FI downloads only free " +
+            `papers, so it has only their abstracts. Download the ones that matter and drop the PDFs into ` +
+            `\`${papersDir}\`${next}\n\n${md}\n`,
         );
     } catch { /* best-effort */ }
 }

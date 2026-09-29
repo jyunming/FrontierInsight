@@ -88,7 +88,7 @@ async def test_the_literature_step_pauses_then_goes_on_without_the_papers(tmp_pa
     eng._resumed_from_pause = None  # a later literature pass in a run that did not resume from the papers pause
     with pytest.raises(_Paused):
         await eng._node_literature(dict(state))
-    assert asked[-1]["headline"] == "download 1 paywalled paper(s)"
+    assert asked[-1]["headline"] == "download 1 paper(s) not confirmed free to read"
     assert "2 other(s) you went on without" in asked[-1]["steps"][0]
 
 

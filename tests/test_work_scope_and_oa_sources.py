@@ -283,7 +283,8 @@ def _openaire_record(title: str, instance_type: str, doi: str = "10.1/oa") -> di
         "authors": [{"fullName": "E. Bialystok"}],
         "descriptions": ["<jats:p>Bilingual <jats:italic>advantage</jats:italic>.</jats:p>"],
         "pids": [{"scheme": "doi", "value": doi}],
-        "instances": [{"type": instance_type, "urls": ["https://example.org/x"]}],
+        "instances": [{"type": instance_type, "urls": ["https://example.org/x"],
+                       "accessRight": {"label": "OPEN"}}],
         "bestAccessRight": {"label": "OPEN"},
     }
 

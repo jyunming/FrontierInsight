@@ -413,14 +413,16 @@ full text is stored uncapped on disk, and each
 node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
-When a relevant paper is genuinely paywalled (SPIE / IEEE / Elsevier …)
+FI downloads only papers that are free to read; it does not fetch a
+paper that is not confirmed free, even from a network with a subscription.
+When a relevant paper is not confirmed free (SPIE / IEEE / Elsevier …)
 and only its abstract is reachable, **Supply paywalled papers** (on by
 default; turn it off in the interview for an unattended run) makes the
 quest pause and write a ranked
 `needs/WANTED_PAPERS.md` (download links + why each matters). After the
 run, the chat panel surfaces that list with instructions to drop the
-PDFs into `inputs/papers/` and `@fi /resume <quest_id>` — they're then
-ingested as real full text. You can also pre-load a folder of papers via
+PDFs into `inputs/papers/` and, when the quest is waiting, `@fi /resume <quest_id>` — they're then
+ingested as real full text. A quest that did not stop for them just lists them. You can also pre-load a folder of papers via
 `knowledge.local_papers` (a directory is scanned recursively). To search
 with your own queries instead of the ones FI derives, write them in
 `inputs/search_queries.txt` in the quest folder, one per line (the first
