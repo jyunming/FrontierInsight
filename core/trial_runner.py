@@ -1154,7 +1154,7 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
         return total if seen else None
 
     cutoffs = [float(v) for v in (protocol.get("thresholds") or {}).values()
-               if isinstance(v, (int, float)) and not isinstance(v, bool)]         if isinstance(protocol.get("thresholds"), dict) else []
+               if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(protocol.get("thresholds"), dict) else []
     ok_trials = {key: max((sum(c.values()) for c in by_name.values()), default=0) for key, by_name in per_cell.items()}
     everything = sum(ok_trials.values())
     for metric in means:
@@ -1191,15 +1191,18 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                         given = given_of.get(metric, "")
                         count = node.get(f"{given}_count")
                         exact = members(given, own or all_cells) if cells else None
-                        side = _extreme_selection(v, per_cell, own or all_cells, metric, grid, cutoffs)                             if cells and exact is None else None
+                        side = (_extreme_selection(v, per_cell, own or all_cells, metric, grid, cutoffs)
+                                if cells and exact is None else None)
+                        n_given = sum(1 for x in v if isinstance(x, (int, float)) and not isinstance(x, bool)
+                                      and math.isfinite(float(x)))
                         if side:
                             out.append(
-                                f"at `{path or 'the top level'}`, your {len(v)} values of `{metric}` are exactly the "
-                                f"{len(v)} {side} values of the trials of those settings. That is what the trials beyond "
-                                f"a cut-off look like, and also what the best {len(v)} picked by hand look like, and FI "
+                                f"at `{path or 'the top level'}`, your {n_given} values of `{metric}` are exactly the "
+                                f"{n_given} {side} values of the trials of those settings. That is what the trials beyond "
+                                f"a cut-off look like, and also what the best {n_given} picked by hand look like, and FI "
                                 f"can tell them apart only if each trial records whether it is in the subset: have "
                                 f"run_trial return `{given}` as 1 or 0 for each trial. A cut-off the protocol fixes "
-                                "(`thresholds`) on this same quantity is accepted as it is."
+                                "(`thresholds`) that falls between them and the other trials is accepted as it is."
                             )
                         if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
                                 and float(count) != exact:

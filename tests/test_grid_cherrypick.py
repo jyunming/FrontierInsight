@@ -129,3 +129,10 @@ def test_a_setting_with_too_few_trials_to_tell_is_not_judged() -> None:
     per_cell = _per_cell(small)
     top3 = sorted((_m(t) for t in range(8)), reverse=True)[:3]
     assert tr.given_values_not_run(PROTOCOL, per_cell, _cherry(top3)) == []
+
+
+def test_the_message_counts_the_values_it_judged_not_the_nulls_beside_them() -> None:
+    per_cell = _per_cell(_rows(membership=False))
+    padded = {key: _stratum(TOP10 + [None, None], 10) for key in CELLS}
+    problems = tr.given_values_not_run(PROTOCOL, per_cell, padded)
+    assert problems and all("your 10 values" in p and "10 largest" in p for p in problems)
