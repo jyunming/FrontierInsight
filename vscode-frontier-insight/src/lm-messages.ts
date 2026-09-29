@@ -94,3 +94,75 @@ export function servedModel(model: ServedModel | undefined | null): ServedModel 
     }
     return out;
 }
+
+/** What one part of a streamed response is. The vscode API is passed in so this runs under plain node. */
+export function partKind(
+    api: any,
+    p: unknown,
+    unknownStringAs: "text" | "unknown" = "unknown",
+): "text" | "thinking" | "tool" | "unknown" {
+    const TextPart = api?.LanguageModelTextPart;
+    const ThinkingPart = api?.LanguageModelThinkingPart;
+    const ToolCallPart = api?.LanguageModelToolCallPart;
+    if (TextPart && p instanceof TextPart) return "text";
+    if (ThinkingPart && p instanceof ThinkingPart) return "thinking";
+    if (ToolCallPart && p instanceof ToolCallPart) return "tool";
+    // Versions that do not export the classes still give the parts a usable shape.
+    const obj = p as any;
+    if (obj && typeof obj.value === "string") {
+        if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
+        if (obj.constructor?.name === "LanguageModelTextPart") return "text";
+        // A part that names itself as neither is not taken for the answer unless the caller says to.
+        return unknownStringAs;
+    }
+    return "unknown";
+}
+
+// One message is one line, and an FI that has not raised its reader's 64 KiB line limit drops the connection on a
+// longer one, so the whole `lm_done` line stays under this.
+export const LM_DONE_MAX_BYTES = 48 * 1024;
+// The one-line "not sent" marker (about 40 bytes) may go past the limit above, up to here, so an answer that fills
+// the limit still says its reasoning was left out; this stays clear of the 64 KiB reader limit.
+export const LM_DONE_HARD_BYTES = 60 * 1024;
+
+/** The reasoning of one answer as it streams in: only what could ever be sent is kept, the rest is only counted. */
+export class ThinkingCollector {
+    text = "";
+    total = 0;
+    add(fragment: string, keepChars: number = LM_DONE_MAX_BYTES): void {
+        this.total += fragment.length;
+        if (this.text.length < keepChars) this.text += fragment.slice(0, keepChars - this.text.length);
+    }
+}
+
+/**
+ * The `lm_done` message for an answer, carrying the model's reasoning (`thinking`) when there is room for it: the
+ * reasoning is cut to what fits and says how much was left out; when the answer alone leaves no room, a short marker
+ * that says so is sent in its place. The answer itself is never cut here.
+ * `total` is how many characters the model produced when `thinking` holds only the start of them.
+ */
+export function lmDoneMessage<T extends object>(
+    base: T,
+    thinking: string,
+    maxBytes: number = LM_DONE_MAX_BYTES,
+    total: number = thinking.length,
+): T {
+    if (!thinking) return base;
+    const size = (t: string) => Buffer.byteLength(JSON.stringify({ ...base, thinking: t }), "utf8") + 1;
+    if (total === thinking.length && size(thinking) <= maxBytes) return { ...base, thinking };
+    const withNote = (keep: number) =>
+        thinking.slice(0, keep) + `\n[${total - keep} more characters not sent]`;
+    if (size(withNote(0)) > maxBytes) {
+        // The marker is a fixed few dozen bytes, so it may use the room between the limit and the hard limit; an
+        // answer that fills even that sends no reasoning at all.
+        const marker = `[${total} chars not sent: no room]`;
+        return size(marker) <= Math.max(maxBytes, LM_DONE_HARD_BYTES) ? { ...base, thinking: marker } : base;
+    }
+    let lo = 0;
+    let hi = thinking.length;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (size(withNote(mid)) <= maxBytes) lo = mid; else hi = mid - 1;
+    }
+    return { ...base, thinking: withNote(lo) };
+}

@@ -21,7 +21,9 @@
 import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
-import { BridgeMessage, ChatMessageApi, servedModel, toChatMessages } from "./lm-messages";
+import {
+    BridgeMessage, ChatMessageApi, ThinkingCollector, lmDoneMessage, partKind as partKindOf, servedModel, toChatMessages,
+} from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
 // in the chat panel — strip / escape markdown that would
@@ -515,6 +517,8 @@ export class Bridge {
             // can flood the chat and slow VSCode when models stream
             // many small fragments.
             let thinkingBuf = "";
+            // Everything the model reasoned, for FI's .fi/thinking.jsonl (thinkingBuf is emptied on each flush).
+            const thinkingAll = new ThinkingCollector();
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
             const nodeLabel = req.node || "(unnamed-node)";
@@ -555,27 +559,7 @@ export class Bridge {
             // refs lazily so a missing class on older builds doesn't
             // crash the extension; fall back to duck-typing on .value.
             const LM = vscode as any;
-            const TextPart = LM.LanguageModelTextPart;
-            const ThinkingPart = LM.LanguageModelThinkingPart;
-            const ToolCallPart = LM.LanguageModelToolCallPart;
-            const partKind = (p: unknown): "text" | "thinking" | "tool" | "unknown" => {
-                if (TextPart && p instanceof TextPart) return "text";
-                if (ThinkingPart && p instanceof ThinkingPart) return "thinking";
-                if (ToolCallPart && p instanceof ToolCallPart) return "tool";
-                // Duck-typing fallback for versions where the classes
-                // aren't exported but the parts still have a usable
-                // shape.
-                const obj = p as any;
-                if (obj && typeof obj.value === "string") {
-                    if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
-                    if (obj.constructor?.name === "LanguageModelTextPart") return "text";
-                    // Heuristic: assume text. Worst case: reasoning leaks
-                    // into the answer; Python's lenient JSON parsers
-                    // and our fenced-block parser tolerate prose.
-                    return "text";
-                }
-                return "unknown";
-            };
+            const partKind = (p: unknown) => partKindOf(LM, p, "text");
 
             try {
                 while (true) {
@@ -623,9 +607,10 @@ export class Bridge {
                         thinkingChars += value.length;
                         // Buffer thinking fragments; the heartbeat
                         // flushes them at most once per HEARTBEAT_MS.
-                        // We DON'T send to Python — reasoning isn't
-                        // the answer.
+                        // It is not sent as a chunk (reasoning isn't
+                        // the answer); the whole text rides on lm_done.
                         thinkingBuf += value;
+                        thinkingAll.add(value);
                     } else if (kind === "tool") {
                         // FI doesn't request tool calls; the model
                         // shouldn't emit any. Log if it happens so we
@@ -645,13 +630,14 @@ export class Bridge {
                 `  ✅ \`${nodeLabel}\` done — ${chunkCount} chunks, ${chars} chars, ` +
                 `${thinkingChars} thinking, ${totalElapsed} s\n\n`,
             );
-            this.send({
+            // The model selected and sent this request, so FI can record it. The model's own reasoning rides along when
+            // there is room (cut to fit; FI keeps it in .fi/thinking.jsonl). Both additions are ignored by an older FI.
+            this.send(lmDoneMessage({
                 type: "lm_done",
                 id: req.id,
                 content: accumulated,
-                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
                 served_model: servedModel(model),
-            });
+            }, thinkingAll.text, undefined, thinkingAll.total));
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             this.send({

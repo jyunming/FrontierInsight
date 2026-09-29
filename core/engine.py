@@ -70,6 +70,7 @@ from . import todo as _todo
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
+from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
 from . import trial_runner as _trial_runner
@@ -11659,7 +11660,11 @@ class Engine:
                 "reported": bool(served.get("reported")),
                 # The model's vendor as the connection named it (the VS Code extension's), when it did.
                 **({"vendor": served["vendor"]} if served.get("vendor") else {}),
-                # The same hashes as this call's line in .fi/model_calls.jsonl, so the two can be joined.
+                # The same hashes as this call's line in .fi/model_calls.jsonl, so the two can be joined -- and its id, the
+                # model asked for and why the answer ended (as the engine recorded them; nothing the model said).
+                **({"call_id": served["call_id"]} if served.get("call_id") else {}),
+                **({"requested_model": rm} if (rm := self._model_for_node(node) or self.config.provider.model) else {}),
+                **({"finish_reason": served["finish_reason"]} if served.get("finish_reason") else {}),
                 "prompt_hash": _attempts.prompt_sha(messages),
                 "response_hash": hashlib.sha256(response.encode("utf-8")).hexdigest(),
             }
@@ -11683,6 +11688,9 @@ class Engine:
         attempts: list[dict[str, Any]] = []
         token = _CALL_ATTEMPTS.set(attempts)
         _LAST_CALL.set(None)
+        # This call's own id: one left by an earlier call of the node must not be read if this call's record fails.
+        self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
+        holder, holder_token = _thinking.open_holder()
         try:
             try:
                 response = await call()
@@ -11690,36 +11698,79 @@ class Engine:
                 failed = _LAST_CALL.get() or {}
                 if isinstance(exc, _ModelAnswerProblem) and not exc.node:
                     exc.node = node  # the step a pause names (a CLI does not know it)
-                self._record_attempts(node, messages, attempts, requested_model, final=exc)
+                final_id = self._record_attempts(node, messages, attempts, requested_model, final=exc)
                 if not (attempts and attempts[-1].get("exc") is exc):
                     usage = getattr(exc, "usage", None) if isinstance(getattr(exc, "usage", None), dict) else None
                     finish = getattr(exc, "finish_reason", None)
-                    self._record_model_call(
+                    # Only the final record's id is this call's; a failed attempt's id must not stand in for it.
+                    self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
+                    final_id = self._record_model_call(
                         node, messages, None,
                         served={**failed, "reported": False, **({"finish_reason": finish} if finish else {})},
                         outcome=_outcome_of(exc), requested_model=requested_model, usage=usage)
                     self._cost_of_failed_attempt(node, getattr(exc, "model", None) or failed.get("model"), usage,
                                                  messages)
+                self._save_thinking(node, holder, requested_model, failed, outcome=_outcome_of(exc), call_id=final_id)
                 raise
             served = dict(_LAST_CALL.get() or {})
             self._record_attempts(node, messages, attempts, requested_model)
-            self._record_model_call(node, messages, response, served=served, usage=served.get("usage"),
-                                    requested_model=requested_model)
+            self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
+            final_id = self._record_model_call(node, messages, response, served=served, usage=served.get("usage"),
+                                               requested_model=requested_model)
+            self._save_thinking(node, holder, requested_model, served, outcome="ok", call_id=final_id)
+            if final_id:
+                served["call_id"] = final_id  # this call's own id, not the node's shared latest (a same-node call may run at once)
             return response, served
         finally:
+            _thinking.close_holder(holder_token)
             _CALL_ATTEMPTS.reset(token)
 
+    def _save_thinking(self, node: str, holder: dict[str, str], requested_model: str | None,
+                       served: dict[str, Any], *, outcome: str, call_id: str | None = None) -> None:
+        """One line in ``.fi/thinking.jsonl`` for a call whose connection handed back the model's reasoning: the text
+        (credentials and the home folder removed), which call it belongs to (``call_id``, the line of
+        ``.fi/model_calls.jsonl``), who answered it and a note that it is the model's own account. One line is cut at
+        :data:`thinking_capture.THINKING_LINE_CHARS` and the file stops growing at ``THINKING_FILE_BYTES``. Not sealed,
+        not evidence, and never in the way of the quest."""
+        text = holder.get("text") or ""
+        fi_dir = getattr(self, "fi_dir", None)
+        if not text.strip() or fi_dir is None or not self.config.output.save_thinking:
+            return
+        try:
+            path = fi_dir / _thinking.THINKING_FILE
+            if path.exists() and path.stat().st_size >= _thinking.THINKING_FILE_BYTES:
+                return
+            kept = _audit_log.redact_text(text, whole=True)
+            if len(kept) > _thinking.THINKING_LINE_CHARS:
+                kept = (kept[:_thinking.THINKING_LINE_CHARS]
+                        + f"... [{len(kept) - _thinking.THINKING_LINE_CHARS} more characters not kept]")
+            _attempts.append(fi_dir, _thinking.THINKING_FILE, {
+                "quest_id": getattr(self, "quest_id", ""), "node": node,
+                "call_id": call_id,
+                "provider": served.get("provider"), "model": served.get("model"), "outcome": outcome,
+                "requested_model": requested_model or self._model_for_node(node) or self.config.provider.model or None,
+                "note": _thinking.THINKING_NOTE,
+                "thinking": kept,
+            })
+        except Exception as e:  # noqa: BLE001 -- a keepsake never touches the quest
+            self._log.debug("[thinking] not kept: %r", e)
+
     def _record_attempts(self, node: str, messages: Any, attempts: list[dict[str, Any]], requested_model: str | None,
-                         *, final: BaseException | None = None) -> None:
+                         *, final: BaseException | None = None) -> str | None:
+        """Write each failed attempt; returns the id of the LAST attempt's record, or None when that record could not be
+        written (an earlier attempt's id is never returned nor left as the node's latest in its place)."""
+        last_id: str | None = None
         for a in attempts:
+            self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
             usage = a.get("usage") if isinstance(a.get("usage"), dict) else None
-            self._record_model_call(
+            last_id = self._record_model_call(
                 node, messages, None, outcome=str(a.get("error") or "error"), requested_model=requested_model,
                 served={"provider": a.get("provider"), "model": a.get("model"), "fallback": bool(a.get("fallback")),
                         **({"finish_reason": a["finish_reason"]} if a.get("finish_reason") else {})},
                 usage=usage,
             )
             self._cost_of_failed_attempt(node, a.get("model"), usage, messages)
+        return last_id
 
     def _cost_of_failed_attempt(self, node: str, model: Any, usage: dict[str, Any] | None, messages: Any) -> None:
         """A failed attempt that did answer (an answer cut off at its limit) was paid for: its cost row too."""
@@ -11733,13 +11784,13 @@ class Engine:
 
     def _record_model_call(self, node: str, messages: Any, response: Any, *, served: dict[str, Any] | None = None,
                            outcome: str = "ok", usage: dict[str, Any] | None = None,
-                           requested_model: str | None = None) -> None:
+                           requested_model: str | None = None) -> str | None:
         """One line in the quest's record of every model call it made (``.fi/model_calls.jsonl``,
         core/attempt_records.py::model_call_row): the hashes of the prompt and the answer, never their text.
         Best-effort: a line that cannot be written is counted, never in the way of the quest."""
         fi_dir = getattr(self, "fi_dir", None)
         if fi_dir is None:  # an engine without a quest folder (a stand-in) keeps no record
-            return
+            return None
         try:
             counts = self.__dict__.setdefault("_model_call_counts", {})
             counts[node] = counts.get(node, 0) + 1
@@ -11754,9 +11805,11 @@ class Engine:
             # Which line of the record the latest call of a step is, for a record built on it (the search queries).
             self.__dict__.setdefault("_last_call_id", {})[node] = row["call_id"]
             self.__dict__.setdefault("_last_call_outcome", {})[node] = outcome
+            return row["call_id"]
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
             _attempts.count_lost(fi_dir, _attempts.MODEL_CALLS_LOST)
             self._log.debug("[attempts] model call not recorded: %r", e)
+            return None
 
     def _chat_provenance(self, node: str) -> dict[str, Any]:
         """``provider``/``model`` (and ``vendor`` when the connection named one)/``prompt_hash``/``response_hash`` of the most recent ``_chat(node=...)`` call for this
