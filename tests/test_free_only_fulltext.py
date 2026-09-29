@@ -344,3 +344,237 @@ def test_a_free_hit_with_only_a_doi_or_publisher_url_requests_nothing(monkeypatc
     monkeypatch.setattr(kn, "_fetch_via_open_apis", lambda *a, **k: None)
     assert kn._fetch_full_text(doc, timeout_s=5, max_kb=64) is None
     assert spy.urls == []
+
+
+# --- round 3: redirects, unlisted scholarly hosts, the page-metadata backstop, free-flag without a free address ---
+
+import httpx  # noqa: E402
+
+
+def _mock_client(monkeypatch, handler):
+    """Every httpx.Client the fetchers open goes through ``handler`` (no network); returns the list of requested URLs."""
+    asked: list[str] = []
+    real = httpx.Client
+
+    def wrapped(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        return handler(request)
+
+    def factory(*a, **k):
+        k["transport"] = httpx.MockTransport(wrapped)
+        return real(*a, **k)
+
+    monkeypatch.setattr(kn.httpx, "Client", factory)
+    monkeypatch.setattr(kn, "_fetch_via_open_apis", lambda *a, **k: None)
+    return asked
+
+
+def test_a_redirect_from_an_ordinary_page_to_a_journal_article_is_not_followed(monkeypatch) -> None:
+    def handler(req):
+        if req.url.host == "old.example":
+            return httpx.Response(302, headers={"location": "https://opg.optica.org/abstract.cfm?doi=10.1364/x"})
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="<html>" + "paper " * 500 + "</html>")
+
+    asked = _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://old.example/some-page"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False) is None
+    assert asked == ["https://old.example/some-page"]
+
+
+def test_a_redirect_to_a_free_server_is_followed(monkeypatch) -> None:
+    def handler(req):
+        if req.url.host == "old.example":
+            return httpx.Response(301, headers={"location": "https://arxiv.org/abs/2401.00001"})
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="<html><p>" + "real text " * 300 + "</p></html>")
+
+    asked = _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://old.example/x"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False)
+    assert asked[-1] == "https://arxiv.org/abs/2401.00001"
+
+
+def test_a_pdf_redirect_to_a_publisher_is_refused(monkeypatch) -> None:
+    def handler(req):
+        return httpx.Response(302, headers={"location": "https://www.sciencedirect.com/science/article/pii/S1/pdf"})
+
+    asked = _mock_client(monkeypatch, handler)
+    assert kn._fetch_pdf_bytes("https://repo.example/paper.pdf", timeout_s=5) is None
+    assert asked == ["https://repo.example/paper.pdf"]
+
+
+def test_a_free_page_naming_a_publisher_pdf_does_not_reach_it(monkeypatch) -> None:
+    page = '<html><head><meta name="citation_pdf_url" content="https://direct.mit.edu/x/pdf"></head></html>'
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=page)
+
+    asked = _mock_client(monkeypatch, handler)
+    assert kn._pdf_from_free_page("https://repo.example/landing", timeout_s=5) is None
+    assert asked == ["https://repo.example/landing"]
+
+
+def test_a_redirect_chain_that_is_too_long_is_dropped(monkeypatch) -> None:
+    n = {"i": 0}
+
+    def handler(req):
+        n["i"] += 1
+        return httpx.Response(302, headers={"location": f"https://hop{n['i']}.example/"})
+
+    _mock_client(monkeypatch, handler)
+    assert kn._fetch_pdf_bytes("https://repo.example/p.pdf", timeout_s=5) is None
+    assert n["i"] <= kn._MAX_HOPS + 1
+
+
+def test_the_headless_render_is_told_to_refuse_a_navigation_to_a_journal(monkeypatch) -> None:
+    seen: dict = {}
+
+    def fake_render(url, *, timeout_s, allow=None):
+        seen["allow"] = allow
+        return None
+
+    monkeypatch.setattr(kn, "_playwright_fetch_html", fake_render)
+    monkeypatch.setattr(kn, "_fetch_via_open_apis", lambda *a, **k: None)
+
+    def handler(req):
+        return httpx.Response(403, text="blocked")
+
+    _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://news.example/story"})
+    kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=True)
+    allow = seen["allow"]
+    assert allow("https://news.example/other") is True
+    assert allow("https://direct.mit.edu/article/10.1162/x") is False
+
+
+@pytest.mark.parametrize("url", [
+    "https://muse.jhu.edu/article/123456",
+    "https://direct.mit.edu/daed/article/151/3/1/1234",
+    "https://www.jneurosci.org/content/41/1/1",
+    "https://www.igi-global.com/gateway/article/12345",
+    "https://www.ingentaconnect.com/content/x/y/2020/1/1",
+    "https://www.proquest.com/docview/123",
+    "https://search.ebscohost.com/login.aspx?direct=true",
+    "https://www.cairn.info/revue-x-2020-1-page-1.htm",
+    "https://www.taylorfrancis.com/books/x",
+    "https://pubs.geoscienceworld.org/gsa/article/1",
+    "https://ashpublications.org/blood/article/1",
+    "https://aacrjournals.org/cancerres/article/1",
+    "https://rupress.org/jcb/article/1",
+    "https://muse.jhu.edu./article/1",
+])
+def test_scholarly_hosts_seen_in_the_wild_are_not_fetched(url, monkeypatch, spy) -> None:
+    monkeypatch.setattr(kn, "_fetch_via_open_apis", lambda *a, **k: None)
+    monkeypatch.setattr(kn, "_playwright_fetch_html", lambda *a, **k: "<html>x</html>")
+    doc = RetrievedDoc(content="s", metadata={"url": url})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=True) is None
+    assert spy.urls == []
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.example-news.com/article/climate-report-released",
+    "https://blog.example.org/content/how-we-built-it",
+    "https://www.bbc.com/news/articles/c1234abcd",
+])
+def test_news_style_article_paths_are_not_taken_for_scholarly(url) -> None:
+    assert kn._looks_scholarly({"url": url}) is False and not kn._is_academic_source(url)
+
+
+def test_a_page_that_says_it_is_a_journal_article_is_discarded_and_never_rendered(monkeypatch) -> None:
+    page = ('<html><head><meta name="citation_journal_title" content="J"><meta name="citation_doi" content="10.1/x">'
+            "</head><body>" + "paywalled article text " * 200 + "</body></html>")
+    rendered: list[str] = []
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=page)
+
+    _mock_client(monkeypatch, handler)
+    monkeypatch.setattr(kn, "_playwright_fetch_html", lambda u, **k: rendered.append(u) or "<html>x</html>")
+    doc = RetrievedDoc(content="s", metadata={"url": "https://unlisted-publisher.example/read/77"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=True) is None
+    assert rendered == []
+    assert doc.metadata["scholarly_page"] is True
+
+
+def test_a_rendered_page_with_journal_metadata_is_discarded(monkeypatch) -> None:
+    def handler(req):
+        return httpx.Response(403, headers={"content-type": "text/html"}, text="blocked")
+
+    _mock_client(monkeypatch, handler)
+    rendered_html = ('<html><head><script type="application/ld+json">{"@type": "ScholarlyArticle"}</script></head>'
+                     "<body>" + "text " * 500 + "</body></html>")
+    monkeypatch.setattr(kn, "_playwright_fetch_html", lambda u, **k: rendered_html)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://unlisted-publisher.example/read/77"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=True) is None
+    assert doc.metadata["scholarly_page"] is True
+
+
+def test_a_page_with_journal_metadata_that_is_confirmed_free_is_kept(monkeypatch) -> None:
+    page = ('<html><head><meta name="citation_doi" content="10.3390/x"></head><body>'
+            + "<p>open access text here</p>" * 100 + "</body></html>")
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=page)
+
+    _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://www.mdpi.com/2073-4441/12/3/456"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False)
+
+
+def test_a_discarded_scholarly_page_is_asked_for_by_the_papers_gate() -> None:
+    from core.engine import _is_abstract_only
+    md = {"source": "web_search", "title": "T", "url": "https://x.example/1"}
+    assert _is_abstract_only(RetrievedDoc(content="short", metadata={**md, "scholarly_page": True})) is True
+
+
+def test_a_doi_resolver_is_never_a_free_location_for_any_source() -> None:
+    assert kn._free_locations({"free_url": "https://doi.org/10.1/x", "url": "https://dx.doi.org/10.1/x"}) == []
+    assert kn._free_locations({"free_url": "https://repo.example/p.pdf"}) == ["https://repo.example/p.pdf"]
+
+
+@pytest.mark.parametrize("md,free", [
+    ({"doi": "10.1101/2020.01.01.123456"}, True),
+    ({"doi": "10.1101/gad.123456"}, False),
+    ({"doi": "10.1101/sqb.2020.85.1"}, False),
+    ({"url": "https://zenodo.org/records/1"}, True),
+    ({"url": "https://osf.io/abcde"}, True),
+    ({"url": "https://europepmc.org/article/MED/1"}, True),
+    ({"url": "https://www.ncbi.nlm.nih.gov/pmcfoo"}, False),
+    ({"url": "https://arxiv.org./abs/1"}, True),
+])
+def test_free_rules_after_review(md, free) -> None:
+    assert is_open_access(md) is free
+
+
+def test_a_free_flag_with_no_free_address_goes_to_the_person() -> None:
+    from core.engine import _is_open_access
+    flagged = RetrievedDoc(content="a", metadata={"open_access": True, "url": "https://doi.org/10.1/x"})
+    assert _is_open_access(flagged) is False
+    with_id = RetrievedDoc(content="a", metadata={"open_access": True, "arxiv_id": "2401.1", "url": "https://doi.org/10.1/x"})
+    assert _is_open_access(with_id) is True
+    named = RetrievedDoc(content="a", metadata={"open_access": True, "free_url": "https://repo.example/p.pdf"})
+    assert _is_open_access(named) is True
+
+
+def test_url_host_ignores_a_trailing_dot() -> None:
+    assert kn._url_host("https://Muse.JHU.edu./article/1").lower() == "muse.jhu.edu"
+
+
+@pytest.mark.asyncio
+async def test_the_attended_pause_card_does_not_say_paywalled(tmp_path: Path, monkeypatch) -> None:
+    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=True)
+    await eng._node_literature(_state())
+    card = paused[0]
+    text = card["headline"] + " ".join(card["steps"])
+    assert "paywalled" not in text and "not confirmed free" in text
+
+
+@pytest.mark.asyncio
+async def test_the_papers_readme_follows_the_current_run(tmp_path: Path, monkeypatch) -> None:
+    eng, paused, lines = _gate_engine(tmp_path, monkeypatch, [_paywalled()], pauses_papers=False)
+    await eng._node_literature(_state())
+    readme = eng.quest_root / "inputs" / "papers" / "README.md"
+    assert "nothing to resume" in readme.read_text(encoding="utf-8")
+    eng.config.pauses.papers = True
+    await eng._node_literature(_state())
+    text = readme.read_text(encoding="utf-8")
+    assert "nothing to resume" not in text and "--resume" in text

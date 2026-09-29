@@ -319,7 +319,7 @@ def test_wanted_papers_md_title_falls_back_to_identifier(tmp_path: Path) -> None
     {"doi": "10.1101/2024.01.01.573000"},          # bioRxiv / medRxiv
     {"url": "https://arxiv.org/abs/2401.01234"},
     {"url": "https://www.ncbi.nlm.nih.gov/pmc/articles/PMC123456/"},
-    {"open_access": True, "doi": "10.1000/x"},      # OpenAlex is_oa flag
+    {"open_access": True, "doi": "10.1000/x", "free_url": "https://repo.example/x.pdf"},  # OpenAlex is_oa flag + its free copy
 ])
 def test_open_access_sources_detected(md: dict) -> None:
     assert _is_open_access(RetrievedDoc("x" * 400, md)) is True

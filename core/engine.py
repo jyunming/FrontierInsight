@@ -3398,10 +3398,10 @@ class Engine:
                 self._pause_for_human(
                     kind="papers",
                     interaction="supply",
-                    headline=f"download {len(needed)} paywalled paper(s)",
+                    headline=f"download {len(needed)} paper(s) not confirmed free to read",
                     steps=[
                         f"{len(needed)} relevant paper(s) came back abstract-only "
-                        "(paywalled). They're listed, most-relevant-first, in "
+                        "(not confirmed free to read). They're listed, most-relevant-first, in "
                         "`needs/WANTED_PAPERS.md` with a download link each."
                         + (f" ({already} other(s) you went on without earlier are not asked for again.)"
                            if already else ""),
@@ -18705,8 +18705,10 @@ def _is_open_access(doc: "RetrievedDoc") -> bool:
     papers gate does with it: asking a person to hand-download an arXiv PDF is asking them to work around a fetch
     failure (blocked network, proxy), not a paywall. A paper that is not confirmed free is the one a person is
     asked to download; FI never fetches it from the publisher itself."""
-    from core.knowledge import is_open_access
-    return is_open_access(doc.metadata)
+    from core.knowledge import has_free_route, is_open_access
+    # A record marked free with no free address and no id to look a free copy up by cannot be fetched: it goes
+    # to the person like any paper not confirmed free.
+    return is_open_access(doc.metadata) and has_free_route(doc.metadata)
 
 
 def _is_abstract_only(doc: "RetrievedDoc") -> bool:
@@ -18726,6 +18728,10 @@ def _is_abstract_only(doc: "RetrievedDoc") -> bool:
         return False
     if md.get("source") in ("local_paper", "user_supplied"):
         return False
+    # A page whose own metadata said it is a journal article, and that nothing confirmed free: its text was
+    # discarded, so a person is asked for the paper.
+    if md.get("scholarly_page"):
+        return True
     # FI-internal cross-quest memory (prior papers / summaries / spines stored
     # in Axon) is NOT a paper to download — it's already in the corpus. Never
     # flag it: even when a spine carries a DOI/URL, the user has nothing to
@@ -19232,14 +19238,14 @@ def _write_paper_need_stubs(
         paused=paused,
     )
     readme = papers_dir / "README.md"
-    if not readme.exists():
-        try:
-            readme.write_text(
-                _PAPERS_README.format(after=_papers_next_step(quest_root.name, paused)),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            log.debug("[literature] papers README write failed: %r", e)
+    readme_text = _PAPERS_README.format(after=_papers_next_step(quest_root.name, paused))
+    try:
+        # Rewritten when the quest's state changed (a later run can pause where the first did not), so the
+        # next-step text never contradicts the current run.
+        if not readme.exists() or readme.read_text(encoding="utf-8") != readme_text:
+            readme.write_text(readme_text, encoding="utf-8")
+    except OSError as e:
+        log.debug("[literature] papers README write failed: %r", e)
     for i, doc in enumerate(needed):
         md = doc.metadata or {}
         title = _paper_display_title(md, f"paper-{i+1}")

@@ -980,7 +980,7 @@ def test_fetch_web_page_text_headless_fallback_on_403(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "core.knowledge._playwright_fetch_html",
-        lambda url, *, timeout_s: f"<html><body><article><p>{_body}</p></article></body></html>",
+        lambda url, *, timeout_s, allow=None: f"<html><body><article><p>{_body}</p></article></body></html>",
     )
     doc = RD("", {"url": "https://iea.example/blocked"})
     # headless on → recovers via the renderer.

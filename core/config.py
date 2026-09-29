@@ -1366,7 +1366,11 @@ class KnowledgeConfig(BaseModel):
     # OpenAlex, OpenAIRE, DOAJ, Unpaywall, Semantic Scholar or CORE lists a
     # free copy of; only that free copy is requested). A paper that is not
     # confirmed free is not fetched from the publisher, not even from a
-    # network that has a subscription (VPN / campus login): download it yourself and put it in
+    # network that has a subscription (VPN / campus login): journal pages are
+    # recognised by host, DOI or article path, redirects are re-checked, and a
+    # page whose own metadata says it is a journal article is discarded unread
+    # (at worst one landing-page request happens for a host FI does not
+    # know). Download it yourself and put it in
     # ``inputs/papers/`` or ``knowledge.local_papers``. On by default: a free
     # copy is the difference between the writer quoting a paper and quoting
     # its abstract. The whole batch shares ``full_text_fetch_total_s``; set

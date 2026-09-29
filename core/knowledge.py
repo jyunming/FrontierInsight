@@ -16,10 +16,13 @@ Two responsibilities:
    When `try_fetch_full_text` is true, external hits are augmented
    with full text only when the paper is confirmed free to read
    (`is_open_access`, or a free copy found by the open-access cascade),
-   and then only from the free copy its source named; a paper not
-   confirmed free is never requested from the publisher, so no
-   institutional / VPN access is used (login walls that slip through are
-   still rejected by a Content-Type + `%PDF-` magic-bytes check).
+   and then only from the free copy its source named. A paper not
+   confirmed free is not requested from its publisher: journal pages are
+   recognised by host, DOI or article path, every redirect is checked
+   again, and a page from an unlisted host whose own metadata says it is a
+   journal article is discarded unread (at worst one landing-page request
+   happens for such a host). Login walls that slip through are still
+   rejected by a Content-Type + `%PDF-` magic-bytes check.
 
 2. **Ingest** (`Knowledge.add_quest_artifacts`) for the post-quest
    write-back, gated on `verdict == "accept"` by default. Finished
@@ -1036,7 +1039,7 @@ def _google_scholar_search(query: str, top_k: int, *, timeout_s: float = 30.0) -
 def _url_host(url: str) -> str:
     from urllib.parse import urlparse
     try:
-        return urlparse(url).hostname or ""
+        return (urlparse(url).hostname or "").rstrip(".")
     except Exception:
         return ""
 
@@ -1059,7 +1062,12 @@ _ACADEMIC_HOST_RE = re.compile(
     r"thieme-connect\.com|karger\.com|liebertpub\.com|jamanetwork\.com|nejm\.org|"
     r"thelancet\.com|optica\.org|asme\.org|ascelibrary\.org|lww\.com|ahajournals\.org|"
     r"biomedcentral\.com|springeropen\.com|hindawi\.com|elifesciences\.org|peerj\.com|"
-    r"copernicus\.org|f1000research\.com"
+    r"copernicus\.org|f1000research\.com|"
+    r"muse\.jhu\.edu|direct\.mit\.edu|mitpressjournals\.org|jneurosci\.org|igi-global\.com|"
+    r"ingentaconnect\.com|proquest\.com|ebscohost\.com|cairn\.info|taylorfrancis\.com|scitation\.org|"
+    r"geoscienceworld\.org|ashpublications\.org|aacrjournals\.org|rupress\.org|osapublishing\.org|"
+    r"sciencemag\.org|jbc\.org|physiology\.org|royalsocietypublishing\.org|neurology\.org|"
+    r"atsjournals\.org|endocrine\.org|zenodo\.org|osf\.io"
     r")$",
     re.I,
 )
@@ -1072,11 +1080,18 @@ _OPEN_ACCESS_PUBLISHER_HOSTS = (
     "mdpi.com", "plos.org", "frontiersin.org", "biomedcentral.com", "springeropen.com", "hindawi.com",
     "elifesciences.org", "peerj.com", "copernicus.org", "f1000research.com",
 )
-_FREE_HOSTS = ("arxiv.org", "biorxiv.org", "medrxiv.org", "pmc.ncbi.nlm.nih.gov") + _OPEN_ACCESS_PUBLISHER_HOSTS
+_FREE_HOSTS = (
+    "arxiv.org", "biorxiv.org", "medrxiv.org", "pmc.ncbi.nlm.nih.gov", "europepmc.org", "zenodo.org", "osf.io",
+) + _OPEN_ACCESS_PUBLISHER_HOSTS
 # A URL path that names an article on a scholarly site, for hits that carry no DOI.
 _SCHOLARLY_PATH_RE = re.compile(
-    r"/(?:doi|abs|fulltext|pii|journals?|article/piis?)(?:/|$)", re.I,
+    r"/(?:doi|abs|fulltext|pii|journals?|article/piis?)(?:/|$)"
+    r"|/(?:article|articles|content|abstract|full|pdf)/10\.\d{4,9}/"
+    r"|/(?:article-abstract|articlepdf|science/article|cgi/content/(?:abstract|full|short))(?:/|$)",
+    re.I,
 )
+_BIORXIV_DOI_RE = re.compile(r"^10\.1101/\d{4}\.\d{2}\.\d{2}\.\d+", re.I)
+_DOI_RESOLVER_HOSTS = ("doi.org", "dx.doi.org")
 _DOI_IN_URL_RE = re.compile(r"10\.\d{4,9}/\S+")
 
 
@@ -1096,8 +1111,8 @@ def _is_free_host_url(url: str) -> bool:
         parsed = urlparse(url)
     except Exception:
         return False
-    host = (parsed.hostname or "").lower()
-    return host in ("ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov") and parsed.path.lower().startswith("/pmc")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    return host in ("ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov") and bool(re.match(r"/pmc(?:/|$)", parsed.path.lower()))
 
 
 def is_open_access(md: dict | None) -> bool:
@@ -1113,7 +1128,7 @@ def is_open_access(md: dict | None) -> bool:
         return True
     if md.get("arxiv_id") or md.get("pmcid"):
         return True
-    if str(md.get("doi") or "").startswith("10.1101/"):  # bioRxiv / medRxiv
+    if _BIORXIV_DOI_RE.match(str(md.get("doi") or "")):  # bioRxiv / medRxiv (dated DOIs; other 10.1101 are journals)
         return True
     return _is_free_host_url(str(md.get("url") or ""))
 
@@ -1126,9 +1141,74 @@ def _free_locations(md: dict | None) -> list[str]:
     out: list[str] = []
     for key in ("free_url", "url", "pdf_url"):
         u = str(md.get(key) or "")
-        if u and u not in out and (key == "free_url" or _is_free_host_url(u)):
+        if not u or u in out or _host_in(u, _DOI_RESOLVER_HOSTS):
+            continue
+        if key == "free_url" or _is_free_host_url(u):
             out.append(u)
     return out
+
+
+def has_free_route(md: dict | None) -> bool:
+    """True when a paper marked free can actually be fetched: it has a free address, or an id (arXiv / PMC /
+    bioRxiv DOI) the free-copy lookups resolve. A record marked free with none of these is left for a person."""
+    md = md or {}
+    return bool(
+        _free_locations(md) or md.get("arxiv_id") or md.get("pmcid") or _BIORXIV_DOI_RE.match(str(md.get("doi") or ""))
+    )
+
+
+_SCHOLARLY_META_RE = re.compile(
+    rb"""(?:name\s*=\s*["'](?:citation_doi|citation_journal_title|citation_pdf_url|citation_publisher)["'])"""
+    rb"""|(?:name\s*=\s*["']dc\.identifier["'][^>]*content\s*=\s*["'](?:doi:|https?://(?:dx\.)?doi\.org/)?10\.\d{4})"""
+    rb"""|(?:["']@type["']\s*:\s*["']ScholarlyArticle["'])""",
+    re.I,
+)
+
+
+def _has_scholarly_meta(html: bytes | str) -> bool:
+    """True when a page's own metadata says it is a journal article (citation_* tags, a DOI identifier, or
+    ScholarlyArticle markup), whatever host served it."""
+    head = html[:300_000]
+    if isinstance(head, str):
+        head = head.encode("utf-8", errors="ignore")
+    return bool(_SCHOLARLY_META_RE.search(head))
+
+
+_MAX_HOPS = 5
+
+
+def _redirect_allowed(hop_url: str, origin_url: str) -> bool:
+    """Whether a redirect target may be requested for a fetch that started at ``origin_url``: the same host,
+    a free server, or an address that does not look like a scholarly article page."""
+    if _url_host(hop_url).lower() == _url_host(origin_url).lower():
+        return True
+    if _is_free_host_url(hop_url):
+        return True
+    return not (_is_academic_source(hop_url) or _looks_scholarly({"url": hop_url}))
+
+
+def _get_checked(c, url: str):
+    """GET ``url`` with ``c`` (a client that does not follow redirects), following redirects by hand up to
+    ``_MAX_HOPS`` and re-checking every hop with ``_redirect_allowed``. Returns the final response, or None when
+    a hop is refused, the chain is too long, or the request queue skipped it."""
+    origin = url
+    cur = url
+    for _ in range(_MAX_HOPS + 1):
+        r = _gate.request(cur, lambda u=cur: c.get(u))
+        if r is None:
+            return None
+        if not r.is_redirect:
+            return r
+        loc = r.headers.get("location") or ""
+        if not loc:
+            return r
+        from urllib.parse import urljoin
+        nxt = urljoin(cur, loc)
+        if not _redirect_allowed(nxt, origin):
+            _log.info("redirect from %s to %s refused: not a free location", cur, nxt)
+            return None
+        cur = nxt
+    return None
 
 
 def _looks_scholarly(md: dict | None) -> bool:
@@ -1795,7 +1875,7 @@ def _is_paywall_or_stub(html: str, text: str) -> bool:
 _HEADLESS_RENDER_LOCK = threading.Lock()
 
 
-def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
+def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | None:
     """Render ``url`` in a headless Chromium via Playwright and return its
     HTML. This executes JavaScript and clears most anti-bot challenges
     (Cloudflare) that block a plain HTTP GET — recovering the full article
@@ -1804,7 +1884,8 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
     browser isn't installed. Uses the SYNC API, which is valid here because
     this runs inside an ``asyncio.to_thread`` worker (no event loop in the
     thread). Renders take turns — one browser, and one Node driver, at a time
-    for the whole process (see ``_HEADLESS_RENDER_LOCK``)."""
+    for the whole process (see ``_HEADLESS_RENDER_LOCK``). ``allow(url) -> bool``, when given, is asked about
+    every page navigation (a redirect included); a refused one is aborted and the render returns None."""
     try:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
     except ImportError:
@@ -1855,7 +1936,16 @@ def _playwright_fetch_html(url: str, *, timeout_s: float) -> str | None:
                         locale="en-US",
                     )
                     page = ctx.new_page()
+                    if allow is not None:
+                        def _guard(route, request):
+                            if request.is_navigation_request() and not allow(request.url):
+                                route.abort()
+                            else:
+                                route.continue_()
+                        page.route("**/*", _guard)
                     nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
+                    if allow is not None and not allow(page.url):
+                        return None
                     if nav is not None and nav.status == 429 and _gate.is_arxiv_url(url):
                         _gate.report(url, 429)
                         _sf.record_failure("arxiv", "http_429", status=429, url=url, detail="headless render")
@@ -2416,12 +2506,13 @@ def _fetch_web_page_text(
             return None  # marked free, but no free address to open (the DOI / publisher page is not one)
         url = free[0]
     blocked = False
+    confirmed_free = is_open_access(doc.metadata)
     try:
         with httpx.Client(
-            timeout=timeout_s, follow_redirects=True, headers=_BROWSER_HEADERS,
+            timeout=timeout_s, follow_redirects=False, headers=_BROWSER_HEADERS,
         ) as c:
-            r = _gate.request(url, lambda: c.get(url))
-            if r is None:  # an arXiv page the queue skipped (paused / over budget)
+            r = _get_checked(c, url)
+            if r is None:  # an arXiv page the queue skipped, or a redirect to a page that is not free
                 raise _FetchBlocked()
             if r.status_code >= 400:
                 blocked = r.status_code in (401, 403, 429)
@@ -2439,6 +2530,11 @@ def _fetch_web_page_text(
 
     if body is not None:
         head = body[:2048].lstrip().lower()
+        if not confirmed_free and "html" in ctype and _has_scholarly_meta(body):
+            # The page says it is a journal article and nothing confirmed it free: its text is not used, and it
+            # is not rendered either. A person downloads it.
+            doc.metadata["scholarly_page"] = True
+            return None
         if "application/pdf" in ctype or body[:5] == b"%PDF-":
             text = _pdf_bytes_to_text(body, cap=cap)
             if text:
@@ -2469,9 +2565,14 @@ def _fetch_web_page_text(
         release = _gate.acquire_slot(url) if _gate.is_arxiv_url(url) else (lambda: None)
         if release is not None:
             try:
-                html = _playwright_fetch_html(url, timeout_s=timeout_s)
+                html = _playwright_fetch_html(
+                    url, timeout_s=timeout_s, allow=lambda u, origin=url: _redirect_allowed(u, origin),
+                )
             finally:
                 release()
+        if html and not confirmed_free and _has_scholarly_meta(html):
+            doc.metadata["scholarly_page"] = True
+            return None
         if html:
             text = _html_to_text(html)
             if _keep_fetched_text(text, snippet) and not _is_paywall_or_stub(html, text):
@@ -2667,10 +2768,10 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
     magic-bytes check). Login walls / HTML pages / 4xx all return None."""
     try:
         with httpx.Client(
-            timeout=timeout_s, follow_redirects=True,
+            timeout=timeout_s, follow_redirects=False,
             headers={"User-Agent": "FrontierInsight/1.0"},
         ) as c:
-            r = _gate.request(url, lambda: c.get(url))
+            r = _get_checked(c, url)
             if r is None:
                 return None
             if r.status_code >= 400:
@@ -2694,7 +2795,7 @@ def _fetch_full_text(
 
     Only a free location is requested (``_free_locations``): the copy the source named as free, or an address
     on a free server. A paper that is not (or not known to be) free, and a free paper's DOI / publisher page,
-    are never requested, so no institutional / VPN login is used; they may still come back through the
+    are not requested (a redirect to a publisher is refused too), so no institutional / VPN login is used; they may still come back through the
     free-copy lookups (PMC, Europe PMC, preprint servers, Unpaywall, ...), and otherwise a person downloads
     them.
 
@@ -2724,10 +2825,10 @@ def _pdf_from_free_page(landing: str, *, timeout_s: float) -> bytes | None:
     """Scrape a free copy's own page for its ``citation_pdf_url`` and GET that PDF."""
     try:
         with httpx.Client(
-            timeout=timeout_s, follow_redirects=True,
+            timeout=timeout_s, follow_redirects=False,
             headers={"User-Agent": "FrontierInsight/1.0"},
         ) as c:
-            page = _gate.request(landing, lambda: c.get(landing))
+            page = _get_checked(c, landing)
             _sf.record_response(_sf.source_for_url(landing, "free_page"), page, url=landing)
             if page is None or page.status_code >= 400:
                 return None
@@ -2737,6 +2838,9 @@ def _pdf_from_free_page(landing: str, *, timeout_s: float) -> bytes | None:
             if not candidate.startswith(("http://", "https://")):
                 from urllib.parse import urljoin
                 candidate = urljoin(str(page.url), candidate)
+            # The page named this PDF itself; it is requested only when it is a free location too.
+            if not _redirect_allowed(candidate, landing):
+                return None
             return _fetch_pdf_bytes(candidate, timeout_s=timeout_s)
     except Exception as e:
         _log.info("free-copy page %s failed: %s", landing, e)
