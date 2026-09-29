@@ -332,6 +332,13 @@ def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulati
     return out
 
 
+def map_payload(steps: list[dict[str, Any]], *, finished: bool = False, no_simulation: bool = False) -> dict[str, Any]:
+    """What the quest map draws, in one piece: ``blocks``, ``finished`` and ``nodes``. The web page and the VS Code panel
+    both get exactly this."""
+    return {"blocks": map_blocks(no_simulation=no_simulation), "finished": finished,
+            "nodes": node_map(steps, finished=finished, no_simulation=no_simulation)}
+
+
 async def _current_branch(graph: Any, run_config: dict[str, Any]):
     """The checkpoints of the quest's present line, newest first. After a run from an earlier step the history also
     holds the line it left, whose later steps the quest no longer has; only the newest checkpoint and its parents (each

@@ -61,3 +61,6 @@ poster.pdf
 
 # Personal scratch quest configs (kept out of the repo; shipped examples live in examples/)
 /*.yaml
+
+# Copied from web/static at compile time (scripts/copy-quest-map.js)
+vscode-frontier-insight/media/

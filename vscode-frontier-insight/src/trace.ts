@@ -22,7 +22,7 @@ interface RunResult {
 /** How much of the trace's own text is shown before it is cut, from the end (the newest events). */
 const OUTPUT_CHARS = 6000;
 
-function runLaunch(python: string, repo: string, workDir: string, args: string[]): Promise<RunResult> {
+export function runLaunch(python: string, repo: string, workDir: string, args: string[]): Promise<RunResult> {
     return new Promise((resolve) => {
         const child = spawn(python, [path.join(repo, "launch.py"), ...args], {
             cwd: workDir,

@@ -181,3 +181,19 @@ def test_quest_page_has_the_map() -> None:
     css = (static / "quest_map.css").read_text(encoding="utf-8")
     for token in ("--accent", "--redo", "prefers-color-scheme: dark", 'data-theme="dark"', "IBM Plex"):
         assert token in css, token
+
+
+def test_map_payload_is_what_the_web_and_vs_code_draw() -> None:
+    steps = _steps({"ideas", "literature"})
+    payload = rerun_from.map_payload(steps, finished=False, no_simulation=True)
+    assert set(payload) == {"blocks", "finished", "nodes"}
+    assert payload["nodes"] == rerun_from.node_map(steps, no_simulation=True)
+    assert payload["blocks"] == rerun_from.map_blocks(no_simulation=True)
+
+
+def test_the_vs_code_panel_loads_the_shared_map_and_restarts_through_chat() -> None:
+    ext = Path(__file__).resolve().parent.parent / "vscode-frontier-insight"
+    ts = (ext / "src" / "quest-map.ts").read_text(encoding="utf-8")
+    assert "quest_map.js" in ts and "--json" in ts and "workbench.action.chat.open" in ts
+    pkg = (ext / "package.json").read_text(encoding="utf-8")
+    assert "frontierInsight.questMap" in pkg and "FI: Quest map" in pkg and "copy-quest-map.js" in pkg

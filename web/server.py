@@ -1133,9 +1133,7 @@ def make_app(
         return JSONResponse({
             "quest_id": quest_id,
             "config_path": str(yaml_path),
-            "blocks": _rerun_from.map_blocks(no_simulation=no_sim),
-            "finished": finished,
-            "nodes": _rerun_from.node_map(steps, finished=finished, no_simulation=no_sim),
+            **_rerun_from.map_payload(steps, finished=finished, no_simulation=no_sim),
             "steps": [{"step": s["name"], "redoes": s["sentence"], "group": s["group"],
                        "needs_approval": s["needs_approval"], "outputs": s["outputs"]}
                       for s in steps if s["reached"]],
