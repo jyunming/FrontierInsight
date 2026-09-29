@@ -1172,8 +1172,9 @@ def make_app(
             raise HTTPException(400, f"{from_step!r} is not a step a quest can be rerun from; choose one of: "
                                      f"{_rerun_from.choices()}")
         if step and _rerun_from.needs_approval(step):
-            raise HTTPException(400, f"running again from {step} replaces the plan and the frozen protocol, which needs "
-                                     f"a named approval: use the command line with --from {step} --approve-as <you>")
+            raise HTTPException(400, f"running again from {step} replaces the plan and the experiment plan (frozen), so it "
+                                     f"needs your name. In a terminal, run: python launch.py --config "
+                                     f"{yaml_path} --resume {quest_id} --from {step} --approve-as <your name>")
         resume_flag = "--rerun" if rerun else "--resume"
         try:
             launched = app.state.launcher.launch_command(

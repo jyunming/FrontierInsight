@@ -25,9 +25,9 @@ NOT_A_STEP = {"clarify", "pause_after_literature", "wait_for_data", "execute_ref
 MOVES = {
     "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json", "code", "paper.md"],
     "literature": ["data/literature", "plan.md", "needs/FROZEN_PROTOCOL.json", "results.json", "slides.pdf"],
-    "plan": ["plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json", "needs/protocol_versions",
+    "plan": ["plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json",
              "needs/receipts/design_audit.json", "code", "paper"],
-    "design": ["needs/FROZEN_PROTOCOL.json", "needs/protocol_versions", "needs/PROTOCOL_AMENDMENT_1.json",
+    "design": ["needs/FROZEN_PROTOCOL.json",
                "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json", "needs/DESIGN_CRITIQUE.json",
                "needs/receipts", "needs/ORACLE_CHECK.json", "code", "figures", "raw", "results.json", "paper"],
     "figures": ["figures", "code/web_plots.py", "needs/receipts/evidence_gate.json", "paper", "paper.pdf"],
@@ -37,10 +37,10 @@ MOVES = {
                "slides.pdf", "poster.pdf"],
 }
 STAYS = {
-    "ideas": [".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
-    "literature": [".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
-    "plan": ["data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
-    "design": ["plan.md", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
+    "ideas": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", ".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
+    "literature": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", ".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
+    "plan": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
+    "design": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "plan.md", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "figures": ["code/experiment.py", "results.json", "raw", "plan.md", "needs/FROZEN_PROTOCOL.json"],
     "crosscheck": ["code/experiment.py", "results.json", "figures", "needs/FROZEN_PROTOCOL.json", "needs/ORACLE_CHECK.json"],
     "evidence": ["code/experiment.py", "results.json", "figures", "needs/FROZEN_PROTOCOL.json"],
@@ -60,7 +60,8 @@ def _lay_out(root: Path) -> None:
     names = {_concrete(p) for step in rerun_from.STEPS for p in rerun_from.OUTPUTS[step]}
     names |= {"code/experiment.py", "paper/paper.md", "paper/claims.json", "needs/receipts/design_audit.json",
               "needs/receipts/claim_check.json", "needs/receipts/evidence_gate.json", "data/literature/lit_001.md",
-              "figures/a.png", "raw/ledger.jsonl", "needs/protocol_versions/v1.json", *BYSTANDERS}
+              "figures/a.png", "raw/ledger.jsonl", "needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json",
+              *BYSTANDERS}
     for name in sorted(names):
         path = root / name
         if path.exists():  # a folder already made for a file inside it
@@ -82,7 +83,7 @@ def test_every_offered_step_has_its_words_its_files_and_a_block() -> None:
         assert set(info) == {"name", "group", "sentence", "needs_approval", "reached", "outputs"}
         assert info["group"] and info["outputs"] == rerun_from.outputs_of(step)
     for step in ("ideas", "literature", "plan", "design"):
-        assert rerun_from.needs_approval(step) and "frozen protocol is replaced" in rerun_from.REDOES[step]
+        assert rerun_from.needs_approval(step) and "experiment plan (frozen) is replaced" in rerun_from.REDOES[step]
     assert not any(rerun_from.needs_approval(s) for s in rerun_from.STEPS if s not in ("ideas", "literature", "plan", "design"))
 
 
@@ -160,13 +161,15 @@ def test_dropping_a_listed_file_from_a_step_would_be_caught(tmp_path: Path, monk
     assert where is not None and not (where / entry).exists(), "the drop is visible as a file that stayed"
 
 
-def test_the_amendment_files_are_matched_by_pattern(tmp_path: Path) -> None:
+def test_the_amendments_and_saved_versions_are_the_record_and_stay(tmp_path: Path) -> None:
+    (tmp_path / "needs" / "protocol_versions").mkdir(parents=True)
     for n in (1, 2):
-        (tmp_path / "needs").mkdir(exist_ok=True)
         (tmp_path / "needs" / f"PROTOCOL_AMENDMENT_{n}.json").write_text("{}", encoding="utf-8")
-    (tmp_path / "needs" / "PROTOCOL_AMENDMENTS_NOTE.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "needs" / "protocol_versions" / "v1.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "needs" / "FROZEN_PROTOCOL.json").write_text("{}", encoding="utf-8")
     _, moved = rerun_from.back_up(tmp_path, "design")
-    assert sorted(moved) == ["needs/PROTOCOL_AMENDMENT_1.json", "needs/PROTOCOL_AMENDMENT_2.json"]
+    assert moved == ["needs/FROZEN_PROTOCOL.json"]
+    assert (tmp_path / "needs" / "PROTOCOL_AMENDMENT_2.json").exists() and (tmp_path / "needs" / "protocol_versions" / "v1.json").exists()
 
 
 async def _first_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Engine, list[str]]:
@@ -199,13 +202,13 @@ async def test_a_restart_at_the_design_needs_a_name_and_replaces_the_protocol_on
     refused = Engine(cfg, resume_quest_id=first.quest_id)
     await refused.run(from_step="design")
     out = capsys.readouterr().out
-    assert "replaces its plan and its frozen protocol" in out and "--approve-as <you>" in out
+    assert "replaces its plan.md and its experiment plan (frozen)" in out and "--approve-as <you>" in out
     assert frozen.read_text(encoding="utf-8") == old and not (refused.fi_dir / "previous").exists()
 
     # With a name: the old protocol is kept aside, the audit says who approved and which protocol was replaced.
     again = Engine(cfg, resume_quest_id=first.quest_id)
     await again.run(from_step="design", approved_by="alice")
-    assert "the old plan and frozen protocol are replaced" in capsys.readouterr().out
+    assert "the old plan.md and experiment plan (frozen) are replaced" in capsys.readouterr().out
     # (The design step takes the design block of plan.md, so it may need no model call; the log shows it ran again.)
     log = (again.fi_dir / "run.log").read_text(encoding="utf-8")
     assert log.count("[design] Designing the experiment.") == 2, "the design was made again"
@@ -244,3 +247,51 @@ def test_from_a_step_before_the_design_needs_approve_as_on_the_command_line() ->
     base = [sys.executable, "-B", "launch.py", "--config", "examples/integrator_bakeoff/config.yaml", "--resume", "q-1"]
     done = subprocess.run([*base, "--from", "plan"], cwd=root, capture_output=True, text=True, timeout=180)
     assert done.returncode == 2 and "--approve-as <you>" in done.stderr and "replaces" in done.stderr, done.stderr[-500:]
+
+
+def test_replacing_a_frozen_protocol_is_recorded_as_a_change_made_after_results_were_seen(tmp_path: Path) -> None:
+    from core import frozen_protocol as fp
+
+    assert fp.record_replacement(tmp_path, approved_by="alice", step="design") is None, "nothing frozen, nothing replaced"
+    old = fp.freeze(tmp_path, {"trials": 3}, approved_by="engine", source="design")
+    record = fp.record_replacement(tmp_path, approved_by="alice", step="design")
+    assert record and record["approved_by"] == "alice" and record["results_seen_before_change"] is True
+    assert record["from_sha256"] == old["sha256"] and record["prespecified"] is False
+    assert fp.open_replacement(tmp_path) == record
+    (tmp_path / "needs" / "FROZEN_PROTOCOL.json").unlink()  # what back_up does
+    new = fp.freeze(tmp_path, {"trials": 9}, approved_by="alice", source="run again from design",
+                    version=record["from_version"] + 1, amendments=record["n"])
+    fp.close_replacement(tmp_path, record, new["sha256"])
+    assert fp.open_replacement(tmp_path) is None
+    assert new["version"] == 2 and new["amendments"] == 1 and new["run_id"] == "run_2"
+    assert (tmp_path / "needs" / "protocol_versions" / "v1.json").is_file() and (tmp_path / "needs" / "protocol_versions" / "v2.json").is_file()
+    assert [a["to_sha256"] for a in fp.amendments(tmp_path)] == [new["sha256"]]
+    assert fp.post_hoc(tmp_path), "the evidence level can no longer say the plan was fixed before the results"
+
+
+@pytest.mark.asyncio
+async def test_a_restart_at_the_design_freezes_the_new_protocol_as_an_amendment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import frozen_protocol as fp
+
+    first, _ = await _first_run(tmp_path, monkeypatch)
+    old = fp.load(first.quest_root)
+    assert old is not None
+    again = Engine(_cfg(tmp_path), resume_quest_id=first.quest_id)
+    await again.run(from_step="design", approved_by="alice")
+    new = fp.load(first.quest_root)
+    assert new is not None and new["version"] == old["version"] + 1 and new["amendments"] == 1
+    found = fp.amendments(first.quest_root)
+    assert len(found) == 1 and found[0]["approved_by"] == "alice" and found[0]["from_sha256"] == old["sha256"]
+    assert found[0]["to_sha256"] == new["sha256"] and fp.post_hoc(first.quest_root)
+
+
+def test_the_console_line_after_a_run_has_its_space(capsys: pytest.CaptureFixture[str]) -> None:
+    text = (Path(__file__).resolve().parent.parent / "launch.py").read_text(encoding="utf-8")
+    assert 'print(f"[FI] {art.quest_id} -> {art.quest_root}")' in text
+
+
+def test_the_web_page_builds_its_rerun_menu_from_the_steps_the_quest_reached() -> None:
+    page = (Path(__file__).resolve().parent.parent / "web" / "static" / "quest.html").read_text(encoding="utf-8")
+    assert "loadRerunSteps" in page and "needs your name" in page

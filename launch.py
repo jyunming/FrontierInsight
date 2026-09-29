@@ -662,7 +662,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="With --resume or --rerun: the step to run again from (give none to list them); "
              "what that step and the later ones made is first moved to .fi/previous/<time>/. ideas, literature, "
-             "plan and design replace the frozen protocol and need --approve-as <you>. With --teach-skill: "
+             "plan and design replace the experiment plan (frozen) and need --approve-as <you>. With --teach-skill: "
              "the importable module the skill wraps, e.g. `ambit`.",
     )
     mode.add_argument(
@@ -1997,7 +1997,7 @@ async def run_one(
         human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
         approved_by=approved_by,
     )
-    print(f"[FI] {art.quest_id} ->{art.quest_root}")
+    print(f"[FI] {art.quest_id} -> {art.quest_root}")
     # The to-do card (core/todo.py): why it stopped, what to decide, the recommendation and the alternatives, or what
     # a finished quest left worth a look. NEXT_STEP.md has the same card with the commands.
     from core import todo as _todo
@@ -2603,8 +2603,8 @@ async def main_async(args: argparse.Namespace) -> int:
                   "(To change the plan, use --revise-plan.)", file=sys.stderr)
             return 2
         if _rerun_from.needs_approval(_from_step) and not (args.approve_as or "").strip():
-            print(f"[FI] --from {_from_step} replaces this quest's plan and frozen protocol (the old ones are kept in "
-                  f".fi/previous/), so it needs your name: add --approve-as <you>. Nothing was changed.",
+            print(f"[FI] --from {_from_step} replaces this quest's plan.md and its experiment plan (frozen); the old ones are kept in "
+                  f".fi/previous/, so it needs your name: add --approve-as <you>. Nothing was changed.",
                   file=sys.stderr)
             return 2
     # Ensure Axon sidecar is up before anything that touches the

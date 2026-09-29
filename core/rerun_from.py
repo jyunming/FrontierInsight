@@ -71,7 +71,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
 NEEDS_APPROVAL: frozenset[str] = frozenset({"ideas", "literature", "plan", "design"})
 
 # What running the quest again from each step does, in one sentence a person reads before choosing.
-_REPLACES = "the frozen protocol is replaced by the new design's"
+_REPLACES = "the experiment plan (frozen) is replaced by the new design's"
 REDOES: dict[str, str] = {
     "ideas": "comes up with the research ideas again, then redoes the literature, plan, design, code and everything "
              f"after; {_REPLACES}, and the old one is kept in .fi/previous/",
@@ -79,8 +79,9 @@ REDOES: dict[str, str] = {
                   f"the ideas are kept, {_REPLACES}, and the old one is kept in .fi/previous/",
     "plan": "writes plan.md again from the same literature and waits for you to read it, then redoes the design, code "
             f"and everything after; {_REPLACES}, and the old one is kept in .fi/previous/",
-    "design": "designs the experiment again from the same plan, then redoes the code and everything after; "
-              f"the literature and the plan are kept, {_REPLACES}, and the old one is kept in .fi/previous/",
+    "design": "takes the design written in plan.md again (edit plan.md first to change it; `plan` writes it anew), then "
+              f"redoes the code and everything after; the literature and the plan are kept, {_REPLACES}, and the old "
+              "one is kept in .fi/previous/",
     "skills": "picks the skills again from the quest's current config, writes the code again, then runs it and does "
               "everything after; the literature and the plan are not redone",
     "code": "writes the experiment's code again, then runs it and does everything after",
@@ -121,14 +122,14 @@ _EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json"]
 # What the run and its checks leave under needs/ (the run writes them again).
 _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json",
                 "needs/ENVIRONMENT.json"]
-# The frozen protocol and its amendments: what a redesign replaces.
-_PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/protocol_versions", "needs/PROTOCOL_AMENDMENT_PENDING.json",
-             "needs/AMENDMENT_APPROVAL.json", "needs/PROTOCOL_AMENDMENT_*.json"]
+# The frozen protocol: what a redesign replaces. The amendments and the saved versions stay, so the new protocol is
+# frozen as a change made after results were seen and the paper says so.
+_PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json"]
 # From the design on: the protocol, the design's audit, and everything the run and the writing made from it.
 _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RUN_RECORDS, "needs/EVIDENCE.json",
                 "code", "figures", "raw", "results.json", "data/auto_collected", *_PAPER]
 
-OUTPUTS: dict[str, list[str]] = {
+_OWN: dict[str, list[str]] = {
     # The review writes no file of its own; what is made from the reviewed paper is made again after it.
     "review": _DELIVERED,
     "claims": [*_CLAIM_CHECK, *_DELIVERED],
@@ -138,14 +139,21 @@ OUTPUTS: dict[str, list[str]] = {
     "analysis": _PAPER,
     "figures": ["figures", "code/web_plots.py", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK],
     # The mean-over-seeds redraw is written into code/ by the run.
-    "run": ["figures", "raw", "results.json", "code/replot_figures.py", "code/replot_figures.json", *_PAPER],
-    "code": ["code", "figures", "raw", "results.json", *_PAPER],
-    "skills": ["code", "figures", "raw", "results.json", *_PAPER],
+    "run": ["figures", "raw", "results.json", "code/replot_figures.py", "code/replot_figures.json", "code/web_plots.py",
+            "data/auto_collected", "needs/RUN_MANIFEST_CHECK.json", "needs/ENVIRONMENT.json", *_PAPER],
+    "code": ["code", "figures", "raw", "results.json", *_RUN_RECORDS, *_PAPER],
+    "skills": ["code", "figures", "raw", "results.json", *_RUN_RECORDS, *_PAPER],
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
     "plan": ["plan.md", ".fi/paused_at_plan.flag", "needs/receipts/design_audit.json", *_FROM_DESIGN],
     "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", *_FROM_DESIGN],
     "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", *_FROM_DESIGN],
+}
+# A step redoes everything after it, so it moves aside everything the later steps write too (a rerun that stops halfway
+# must not leave the old receipts for the evidence level to read).
+OUTPUTS: dict[str, list[str]] = {
+    step: list(dict.fromkeys(f for later in list(STEPS)[list(STEPS).index(step):] for f in _OWN[later]))
+    for step in STEPS
 }
 # The graph node that leads into a step's first node with a plain edge, for the steps up to the design: the state the
 # engine writes before running them again (the design history, see ``Engine.run``) is written as that node's.
@@ -229,7 +237,7 @@ def listing(quest_id: str, steps: list[str] | list[dict[str, Any]]) -> str:
     lines.append(f"Run: --resume {quest_id} --from <step>. What that step and the later ones made is first moved to "
                  ".fi/previous/<time>/.")
     if any(needs_approval(step) for step in names):
-        lines.append("ideas, literature, plan and design replace the frozen protocol, so they also need "
+        lines.append("ideas, literature, plan and design replace the experiment plan (frozen), so they also need "
                      "--approve-as <you>.")
     return "\n".join(lines)
 

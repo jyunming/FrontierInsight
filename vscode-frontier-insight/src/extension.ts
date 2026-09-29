@@ -541,6 +541,15 @@ async function runResume(
     const sanitized = firstToken.replace(/^["']+|["']+$/g, "");
     // /plan <quest_id> <what to change>: the words after the id are the request.
     const planRequest = plan ? rawArg.slice(firstToken.length).trim() : "";
+    if (fromStep && RERUN_STEPS_NEEDING_NAME.includes(fromStep)) {
+        stream.markdown(
+            `❌ Running again from \`${fromStep}\` replaces the plan and the experiment plan (frozen), so it needs ` +
+            "your name. In a terminal, run: `python launch.py --config <quest>/config.yaml --resume <quest_id> " +
+            `--from ${fromStep} --approve-as <your name>\`.
+`,
+        );
+        return;
+    }
     if (fromStep && !RERUN_STEPS.includes(fromStep)) {
         stream.markdown(
             `❌ \`${fromStep}\` is not a step a quest can be run again from. Choose one of: ` +
@@ -683,7 +692,9 @@ async function runResume(
 }
 
 // The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
-const RERUN_STEPS = ["skills", "code", "run", "analysis", "writing", "review"];
+const RERUN_STEPS = ["skills", "code", "run", "figures", "analysis", "crosscheck", "evidence", "writing", "claims", "review"];
+// These replace the plan and need `--approve-as <name>`, which is given on the command line.
+const RERUN_STEPS_NEEDING_NAME = ["ideas", "literature", "plan", "design"];
 
 function parsePathsFromPrompt(prompt: string): string[] {
     // Split on whitespace OUTSIDE of double-quoted spans so users
