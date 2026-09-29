@@ -134,7 +134,8 @@ export class ThinkingCollector {
 
 /**
  * The `lm_done` message for an answer, carrying the model's reasoning (`thinking`) when there is room for it: the
- * reasoning is cut to what fits and says how much was left out. The answer itself is never cut here.
+ * reasoning is cut to what fits and says how much was left out; when the answer alone leaves no room, a short marker
+ * that says so is sent in its place. The answer itself is never cut here.
  * `total` is how many characters the model produced when `thinking` holds only the start of them.
  */
 export function lmDoneMessage<T extends object>(
@@ -148,7 +149,12 @@ export function lmDoneMessage<T extends object>(
     if (total === thinking.length && size(thinking) <= maxBytes) return { ...base, thinking };
     const withNote = (keep: number) =>
         thinking.slice(0, keep) + `\n[${total - keep} more characters not sent]`;
-    if (size(withNote(0)) > maxBytes) return base; // the answer leaves no room
+    if (size(withNote(0)) > maxBytes) {
+        // The answer leaves no room for any of it: say that the reasoning existed rather than send nothing. The marker
+        // is always a little shorter than the note, so it fits where the note just did not.
+        const marker = `[${total} chars not sent: no room]`;
+        return size(marker) <= maxBytes ? { ...base, thinking: marker } : base;
+    }
     let lo = 0;
     let hi = thinking.length;
     while (lo < hi) {

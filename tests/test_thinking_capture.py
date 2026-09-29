@@ -398,6 +398,54 @@ async def test_a_failed_attempts_id_is_not_the_answers_when_the_answers_own_reco
 
 
 @pytest.mark.asyncio
+async def test_a_same_node_call_recorded_meanwhile_does_not_lend_its_id_to_this_claim(smoke_config, monkeypatch) -> None:  # noqa: ANN001, F811
+    engine = _engine(smoke_config, "")
+    real = engine._log_chat_cost
+
+    def another_call_of_the_node_records_now(**kw):  # noqa: ANN003, ANN202
+        engine._record_model_call("design", "someone else's prompt", "someone else's answer")
+        return real(**kw)
+
+    monkeypatch.setattr(engine, "_log_chat_cost", another_call_of_the_node_records_now)
+    await engine._chat("mine", node="design")
+    own, other = [r["call_id"] for r in ar.read(engine.fi_dir, ar.MODEL_CALLS)]
+    assert engine._chat_provenance("design")["call_id"] == own != other
+
+
+@pytest.mark.asyncio
+async def test_a_last_attempt_whose_record_fails_leaves_no_earlier_attempts_id(smoke_config, monkeypatch) -> None:  # noqa: ANN001, F811
+    from core import provider as prov
+
+    engine = _engine(smoke_config, "")
+    final = RuntimeError("gave up")
+
+    async def two_attempts_then_gave_up() -> str:
+        import core.thinking_capture as _t
+
+        _t.note_thinking("reasoning before giving up")
+        prov.CALL_ATTEMPTS.get().extend([
+            {"provider": "p", "model": "m", "error": "timeout", "fallback": False, "exc": RuntimeError("first")},
+            {"provider": "p", "model": "m", "error": "gave up", "fallback": False, "exc": final},
+        ])
+        raise final
+
+    real = engine._record_model_call
+    calls: list[str | None] = []
+
+    def second_record_is_lost(*a, **kw):  # noqa: ANN002, ANN003, ANN202
+        calls.append(real(*a, **kw) if not calls else None)
+        return calls[-1]
+
+    monkeypatch.setattr(engine, "_record_model_call", second_record_is_lost)
+    with pytest.raises(RuntimeError):
+        await engine._recorded_call("design", "prompt", two_attempts_then_gave_up)
+    assert calls[0] and calls[1] is None
+    assert engine._last_call_id.get("design") is None
+    (line,) = ar.read(engine.fi_dir, tc.THINKING_FILE)
+    assert line["call_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_no_model_asked_for_means_no_requested_model_in_the_claim(smoke_config) -> None:  # noqa: ANN001, F811
     smoke_config.provider.model = None
     smoke_config.provider.node_models = {}
@@ -468,6 +516,33 @@ async def test_a_real_bridge_call_reaches_the_file(smoke_config) -> None:  # noq
     assert line["thinking"] == "reasoned over the bridge" and line["node"] == "design"
 
 
+@pytest.mark.asyncio
+async def test_a_no_room_marker_from_the_extension_is_kept_as_a_line(smoke_config) -> None:  # noqa: ANN001, F811
+    from core.provider import ResolvedEndpoint
+
+    marker = "[5000 chars not sent: no room]"
+    server = _MockBridgeServer()
+
+    def handler(msg: dict, w) -> list[dict]:  # noqa: ANN001
+        if msg["type"] != "lm_request":
+            return []
+        return [{"type": "lm_done", "id": msg["id"], "content": "Answer", "thinking": marker}]
+
+    port = await server.start(handler)
+    client = LLMClient(ResolvedEndpoint(base_url="", model="(VSCode chat default)", api_key="not-needed",
+                                        transport="vscode_bridge", vscode_bridge_port=port))
+    engine = Engine(smoke_config)
+    engine.fi_dir.mkdir(parents=True, exist_ok=True)
+    engine._client = client  # type: ignore[assignment]
+    try:
+        assert await engine._chat("prompt", node="design") == "Answer"
+    finally:
+        await client.aclose()
+        await server.stop()
+    (line,) = ar.read(engine.fi_dir, tc.THINKING_FILE)
+    assert line["thinking"] == marker
+
+
 # --- the extension's message builder (compiled TypeScript, run under node) --------------------------------------------
 
 _NODE_DONE = """
@@ -481,7 +556,14 @@ process.stdout.write(JSON.stringify({
   hugeBytes: bytes(huge),
   hugeTail: huge.thinking.split("\\n").pop(),
   cjkBytes: bytes(lmDoneMessage(base, "\\u63a8".repeat(100000))),
-  bigAnswer: "thinking" in lmDoneMessage({ ...base, content: "a".repeat(LM_DONE_MAX_BYTES) }, "reasoning"),
+  bigAnswer: (() => {
+    for (let n = LM_DONE_MAX_BYTES - 150; n <= LM_DONE_MAX_BYTES; n++) {
+      const m = lmDoneMessage({ ...base, content: "a".repeat(n) }, "r".repeat(5000));
+      if (m.thinking && m.thinking.endsWith("no room]")) return [bytes(m), m.thinking];
+    }
+    return null;
+  })(),
+  hugeAnswer: "thinking" in lmDoneMessage({ ...base, content: "a".repeat(LM_DONE_MAX_BYTES) }, "reasoning"),
   max: LM_DONE_MAX_BYTES,
   kept: (() => { const c = new ThinkingCollector(); for (let i = 0; i < 50; i++) c.add("z".repeat(100000)); return [c.text.length, c.total]; })(),
   streamed: (() => {
@@ -516,10 +598,20 @@ def _compile_lm_messages(tmp_path: Path) -> Path:
 
 def test_both_bridges_build_their_lm_done_through_lm_done_message() -> None:
     src = Path(__file__).resolve().parent.parent / "vscode-frontier-insight" / "src"
+    import re
+
     for name in ("bridge.ts", "persistent-bridge.ts"):
-        text = (src / name).read_text(encoding="utf-8")
-        assert "lmDoneMessage(" in text and "ThinkingCollector" in text, name
+        raw = (src / name).read_text(encoding="utf-8")
+        text = re.sub(r"/\*.*?\*/", "", raw, flags=re.S)
+        text = re.sub(r"(?m)^\s*//.*$|(?<=[\s;,)])//\s.*$", "", text)  # comments never count either way
+        assert "ThinkingCollector" in text, name
         assert "thinking:" not in text.replace("thinkingAll", ""), f"{name} builds a thinking field by hand"
+        done = [m.start() for m in re.finditer(r"""["']lm_done["']""", text)]
+        assert done, f"{name} sends no lm_done"
+        for pos in done:
+            # every lm_done object literal is the argument of lmDoneMessage(...), not sent bare
+            head = text[max(0, pos - 200):pos]
+            assert "lmDoneMessage(" in head, f"{name}: an lm_done at offset {pos} is not built by lmDoneMessage"
 
 
 def test_the_extension_cuts_the_thinking_so_an_lm_done_line_stays_small(tmp_path: Path) -> None:
@@ -536,7 +628,10 @@ def test_the_extension_cuts_the_thinking_so_an_lm_done_line_stays_small(tmp_path
     assert out["small"] == "short reasoning" and out["none"] is False
     assert out["hugeBytes"] <= out["max"] and out["cjkBytes"] <= out["max"] < 65536
     assert out["hugeTail"].endswith("more characters not sent]")
-    assert out["bigAnswer"] is False
+    big_bytes, marker = out["bigAnswer"]  # the answer leaves no room: a short marker, not silence
+    assert big_bytes <= out["max"]
+    assert marker == "[5000 chars not sent: no room]"
+    assert out["hugeAnswer"] is False  # not even the marker fits: the line is left as the answer alone
     assert out["kept"][0] <= out["max"] and out["kept"][1] == 5_000_000  # only what can be sent is held; all counted
     assert out["streamed"][0] <= out["max"] and out["streamed"][1].endswith("more characters not sent]")
     assert out["unknownPart"] == ["unknown", "text"]  # an unnamed part is not taken for the answer unless asked

@@ -11439,8 +11439,7 @@ class Engine:
                 **({"vendor": served["vendor"]} if served.get("vendor") else {}),
                 # The same hashes as this call's line in .fi/model_calls.jsonl, so the two can be joined -- and its id, the
                 # model asked for and why the answer ended (as the engine recorded them; nothing the model said).
-                **({"call_id": self.__dict__["_last_call_id"][node or ""]}
-                   if (node or "") in self.__dict__.get("_last_call_id", {}) else {}),
+                **({"call_id": served["call_id"]} if served.get("call_id") else {}),
                 **({"requested_model": rm} if (rm := self._model_for_node(node) or self.config.provider.model) else {}),
                 **({"finish_reason": served["finish_reason"]} if served.get("finish_reason") else {}),
                 "prompt_hash": _attempts.prompt_sha(messages),
@@ -11496,6 +11495,8 @@ class Engine:
             final_id = self._record_model_call(node, messages, response, served=served, usage=served.get("usage"),
                                                requested_model=requested_model)
             self._save_thinking(node, holder, requested_model, served, outcome="ok", call_id=final_id)
+            if final_id:
+                served["call_id"] = final_id  # this call's own id, not the node's shared latest (a same-node call may run at once)
             return response, served
         finally:
             _thinking.close_holder(holder_token)
@@ -11533,9 +11534,11 @@ class Engine:
 
     def _record_attempts(self, node: str, messages: Any, attempts: list[dict[str, Any]], requested_model: str | None,
                          *, final: BaseException | None = None) -> str | None:
-        """Write each failed attempt; returns the id of the last one that was recorded (None when none was)."""
+        """Write each failed attempt; returns the id of the LAST attempt's record, or None when that record could not be
+        written (an earlier attempt's id is never returned nor left as the node's latest in its place)."""
         last_id: str | None = None
         for a in attempts:
+            self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
             usage = a.get("usage") if isinstance(a.get("usage"), dict) else None
             last_id = self._record_model_call(
                 node, messages, None, outcome=str(a.get("error") or "error"), requested_model=requested_model,
