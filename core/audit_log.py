@@ -190,7 +190,7 @@ class AuditLog:
             torn, data = data[cut:], data[:cut]
             self.path.write_bytes(data)
         last = None
-        for line in data.splitlines():
+        for line in data.split(b"\n"):
             if not line.strip():
                 continue
             try:
@@ -299,7 +299,7 @@ def read(path: Path) -> list[dict[str, Any]]:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return events
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line.strip():
             continue
         try:
@@ -334,7 +334,7 @@ def verify(path: Path) -> Verification:
     except OSError as e:
         return Verification(False, 0, f"cannot read the trace: {e!r}")
     prev, count = GENESIS, 0
-    for number, line in enumerate(text.splitlines(), 1):
+    for number, line in enumerate(text.split("\n"), 1):
         if not line.strip():
             continue
         try:

@@ -20,8 +20,9 @@ from core import audit_log, evidence  # noqa: E402
 
 FAST = settings(max_examples=40, deadline=None, suppress_health_check=list(HealthCheck))
 
-# U+0085, U+2028 and U+2029 are left out here: str.splitlines() treats them as line breaks, which the trace reader
-# trips over (see test_a_line_separator_character_in_an_event_does_not_break_the_chain below).
+# U+0085, U+2028 and U+2029 are kept out of the generated text: the tamper tests below cut the file into lines with
+# str.splitlines(), which would split on them. The readers themselves split only on
+# a newline, and the tests named *line_separator* cover those characters directly.
 _text = st.text(alphabet=st.characters(min_codepoint=32, max_codepoint=0x2FFF, blacklist_categories=("Cs",),
                                        blacklist_characters="\x85\u2028\u2029"), max_size=20)
 _fields = st.dictionaries(st.sampled_from(["a", "b", "c", "note", "n"]), st.one_of(_text, st.integers(-5, 5), st.booleans()),
@@ -62,13 +63,24 @@ def test_a_chain_written_by_the_log_verifies(events) -> None:
         assert v.ok and v.events == len(events)
 
 
-@pytest.mark.xfail(strict=True, reason="known defect: verify()/read() split the trace with str.splitlines(), so an event "
-                   "holding U+0085, U+2028 or U+2029 (the writer keeps them raw) makes the whole chain read as broken")
 @pytest.mark.parametrize("char", ["\x85", "\u2028", "\u2029"])
 def test_a_line_separator_character_in_an_event_does_not_break_the_chain(char) -> None:
     with _Dir() as root:
         trace = _chain(root, [("note", {"a": "x" + char + "y"}), ("note", {})])
-        assert audit_log.verify(trace).ok
+        v = audit_log.verify(trace)
+        assert v.ok and v.events == 2 and len(audit_log.read(trace)) == 2
+
+
+@pytest.mark.parametrize("char", ["\x85", "\u2028", "\u2029"])
+def test_a_trace_holding_a_line_separator_character_resumes_and_keeps_verifying(char) -> None:
+    with _Dir() as root:
+        trace = _chain(root, [("note", {"a": "x" + char + "y"}), ("note", {})])
+        log = audit_log.AuditLog(trace, "q")
+        log.append("note", b="after")
+        log.append("note", b=char)
+        v = audit_log.verify(trace)
+        assert v.ok and v.events == 4
+        assert [e["seq"] for e in audit_log.read(trace)] == [1, 2, 3, 4]
 
 
 @FAST

@@ -588,7 +588,7 @@ def read(fi_dir: Path, name: str) -> list[dict[str, Any]]:
     """Every record in ``fi_dir/name`` that parses; a torn line is skipped."""
     out: list[dict[str, Any]] = []
     try:
-        lines = (fi_dir / name).read_text(encoding="utf-8").splitlines()
+        lines = (fi_dir / name).read_text(encoding="utf-8").split("\n")
     except OSError:
         return out
     for line in lines:
