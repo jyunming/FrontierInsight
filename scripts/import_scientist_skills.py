@@ -397,6 +397,22 @@ def _resolve_source(skill_dir: Path) -> Path:
     return skill_dir  # let the importer raise its own FileNotFoundError
 
 
+
+def _refresh_generated_selftest(name: str, pip_pkgs: list[str]) -> None:
+    """A skill imported earlier keeps the self-test generated then. If that file is still the generated one, write the
+    current one (it may carry a known-value check now); a hand-written test is never touched. The skill's approval
+    lapses with the changed file, so it is approved again after this."""
+    from core.skills.registry import skills_root
+    from core.skills.scaffold import generate_selftest, selftest_is_generated
+
+    skill_dir = skills_root() / name
+    if not selftest_is_generated(skill_dir):
+        return
+    before = (skill_dir / "selftest.py").read_text(encoding="utf-8", errors="replace")
+    generate_selftest(skill_dir, name, overwrite=True, pip_requires=pip_pkgs)
+    if (skill_dir / "selftest.py").read_text(encoding="utf-8", errors="replace") != before:
+        print(f"   {name}: its generated self-test was refreshed; approve it again.")
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -504,6 +520,7 @@ def main() -> int:
         # The package list comes from core/skills/known_requirements.py, which a quest also reads for a skill
         # imported before provenance recorded one.
         pip_pkgs = known_requirements.PRESET_PIP_REQUIRES.get(name, [])
+        _refresh_generated_selftest(name, list(pip_pkgs))
         rc = launch._import_skill(
             str(source), name, domains="", pip_requires=list(pip_pkgs),
         )
@@ -518,6 +535,10 @@ def main() -> int:
                 all_pip.append(p)
 
     if args.pip_install and all_pip:
+        for p in all_pip:
+            if "<" in p:
+                print(f"Note: {p} caps a version, so installing it into this interpreter may downgrade a package")
+                print("already here.")
         print(f"Installing underlying packages: {' '.join(all_pip)}")
         _installed, failed = launch._pip_install(all_pip)
         if failed:
@@ -526,7 +547,7 @@ def main() -> int:
         print()
     elif all_pip:
         print("Underlying packages not installed (pass --pip-install, or run yourself):")
-        print(f"  {sys.executable} -m pip install {' '.join(repr(p) if any(c in p for c in '<>') else p for p in all_pip)}")
+        print(f"  {sys.executable} -m pip install {launch._pip_cmd_args(all_pip)}")
         print()
 
     # Deliberately a placeholder rather than `git config user.name`. The ledger

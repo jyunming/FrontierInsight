@@ -87,7 +87,7 @@ PRESET_PIP_REQUIRES: dict[str, list[str]] = {
     "causal-inference": [],
     "amortized-workflow": [],
     "mne-python": ["mne"],
-    "brian2": ["brian2"],
+    "brian2": ["brian2", "numpy<2.4"],
     "nilearn": ["nilearn"],
     "spikeinterface": ["spikeinterface"],
 }
