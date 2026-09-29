@@ -3701,7 +3701,7 @@ def _paper_entries_lock() -> Iterator[None]:
 def _delete_in_process(brain: Any, *, quest_id: str, kinds: tuple[str, ...]) -> bool:
     """Remove from an in-process AxonBrain every chunk of a quest's documents of ``kinds`` (found by metadata: the
     chunk ids Axon makes are its own), any summary node built over them, and their duplicate-check records. The same
-    calls Axon's own ``/delete`` route and its CLI make; ``delete_documents`` does the same on Axon 0.5.0 and later."""
+    calls Axon's own ``/delete`` route and its CLI make; Axon 0.5.0's ``delete_documents`` (which ``_retire`` prefers) matches by id and does not remove summary nodes; FI's quest documents are small, so none is built over them."""
     return _delete_in_process_where(
         brain, lambda m: m.get("quest_id") == quest_id and m.get("kind") in kinds)
 
@@ -4652,8 +4652,8 @@ class Knowledge:
 
     def _retire(self, doc_ids: list[str], *, quest_id: str, kinds: tuple[str, ...]) -> bool:
         """Remove a quest's documents of ``kinds`` (ids ``doc_ids``) from Axon, every chunk of them. Over HTTP the
-        service's ``/delete``; in process, the chunks found by their ``quest_id`` and ``kind``, with their duplicate-check
-        records, so the same text can be written again. True when they are gone or were never there."""
+        service's ``/delete``; in process, ``delete_documents`` where Axon has it (0.5.0 and later), else the chunks found by
+        their ``quest_id`` and ``kind`` with their duplicate-check records, so the same text can be written again. True when they are gone or were never there."""
         brain = self._brain
         if brain is None:
             return False
