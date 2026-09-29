@@ -147,3 +147,37 @@ def test_web_remove_and_restore(env) -> None:
     assert client.post("/api/skills/theirs/restore").json()["restored"] is True
     names = {s["name"] for s in client.get("/api/skills").json()["skills"]}
     assert "theirs" in names
+
+
+def test_web_remove_refuses_a_cross_site_request(env) -> None:
+    _skill(env["own"], "mine")
+    client = TestClient(make_app(env["tmp"] / "outputs"))
+    r = client.post("/api/skills/mine/remove", headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403
+    assert (env["own"] / "mine" / "SKILL.md").exists()
+    ok = client.post("/api/skills/mine/remove", headers={"Origin": "http://testserver"})
+    assert ok.status_code == 200
+
+
+def test_a_failed_delete_is_reported_and_leaves_the_skill_unapproved(env, monkeypatch) -> None:
+    _skill(env["own"], "mine")
+    skill = _get("mine")
+    approval.approve(skill.ledger_name, skill.content_hash(), approved_by="tester")
+
+    def boom(_p):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr("core.skills.removal._delete_tree", boom)
+    result = remove_skill(skill)
+    assert not result.ok and "in use" in result.message
+    assert "mine" not in approval.ledger_path().read_text(encoding="utf-8")
+
+
+def test_a_skill_outside_the_own_folder_is_never_deleted(env) -> None:
+    from dataclasses import replace
+
+    outside = _skill(env["tmp"] / "elsewhere", "mine")
+    _skill(env["own"], "mine")
+    skill = replace(_get("mine"), path=outside)
+    assert not remove_skill(skill).ok
+    assert (outside / "SKILL.md").exists()

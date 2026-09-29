@@ -59,8 +59,11 @@ class RemovalResult:
 def _is_link(path: Path) -> bool:
     if path.is_symlink():
         return True
-    is_junction = getattr(path, "is_junction", None)
-    return bool(is_junction and is_junction())
+    try:
+        attrs = os.lstat(path).st_file_attributes  # Windows only; Python 3.11 has no Path.is_junction
+    except (OSError, AttributeError):
+        return False
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
 
 
 def _make_writable_and_retry(func: Any, path: str, _exc: Any) -> None:
@@ -137,11 +140,13 @@ def remove_skill(skill: Skill) -> RemovalResult:
     if not inside or skill.path.name != name or not (target.exists() or _is_link(target)):
         return RemovalResult(False, f"Refusing to delete {skill.path}: it is not a skill folder of {root}.")
 
+    # Approval goes first: a folder that survives a failed delete is then merely proposed again, never
+    # left approved with half its files gone.
+    withdrawn = _forget(skill)
     try:
         _delete_tree(target)
     except OSError as e:
         return RemovalResult(False, f"Could not delete {target}: {e}. Close whatever is using it and try again.")
-    withdrawn = _forget(skill)
     extra = ", approval withdrawn" if withdrawn else ""
     return RemovalResult(True, f"Removed skill {name}: deleted {target}{extra}.", deleted=target)
 

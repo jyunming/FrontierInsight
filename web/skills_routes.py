@@ -37,6 +37,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -281,10 +282,13 @@ def register_skills_routes(app: FastAPI) -> None:
         return JSONResponse({"revoked": bool(removed), "name": name})
 
     @app.post("/api/skills/{name}/remove")
-    async def remove_skill_route(name: str, config: str = "") -> JSONResponse:
+    async def remove_skill_route(request: Request, name: str, config: str = "") -> JSONResponse:
         from core.skills import discover
         from core.skills.removal import remove_skill
 
+        origin = request.headers.get("origin")
+        if origin and urlsplit(origin).netloc != request.headers.get("host", ""):
+            return JSONResponse({"removed": False, "name": name, "message": "Cross-site request refused."}, status_code=403)
         folders = await _folders(config)
         found = await asyncio.to_thread(discover, external_dirs=_dirs(folders))
         skill = next((s for s in found if s.name == name), None)
