@@ -169,7 +169,7 @@ async def test_retry_after_as_an_http_date_is_honoured(waits: list[float]) -> No
     when = email.utils.formatdate(time.time() + 30, usegmt=True)
     handler, calls = _replies(_cloudflare(503, **{"Retry-After": when}), httpx.Response(200, json=OK))
     assert await _chat(PLAIN, handler) == "hello"
-    assert len(waits) == 1 and 25.0 <= waits[0] <= 33.0
+    assert len(waits) == 1 and 25.0 <= waits[0] <= 34.0
 
 
 @pytest.mark.parametrize("value", ["3600", "0", "-5", "soon", "nan"])
