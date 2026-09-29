@@ -162,3 +162,71 @@ def _hermetic_pandoc_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "generation._pandoc._pypandoc_pandoc", lambda: None, raising=False,
     )
+
+
+# ---------------------------------------------------------------------------
+# Template venv: build once, copy per quest
+# ---------------------------------------------------------------------------
+
+# Modules whose tests assert what a REAL venv build does.
+_REAL_VENV_MODULES = frozenset({"test_execution.py"})
+
+
+def _template_venv(tmp_path_factory, real_build, key: tuple) -> Path:
+    """Return a prebuilt venv for ``key``, building it once per test session.
+
+    Under pytest-xdist every worker shares one directory (the parent of the
+    per-worker basetemp) and a file lock, so the whole run builds each variant
+    once, not once per worker.
+    """
+    import os
+
+    from filelock import FileLock
+
+    base = tmp_path_factory.getbasetemp()
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        base = base.parent
+    tag = "_".join(str(k) for k in key)
+    target = base / f"fi_template_venv_{tag}"
+    with FileLock(str(base / f"fi_template_venv_{tag}.lock")):
+        if not (target / ".fi_template_ready").exists():
+            real_build(
+                target, with_pip=key[0], clear=True,
+                python_version=key[1], system_site_packages=key[2],
+            )
+            (target / ".fi_template_ready").write_text("ok")
+    return target
+
+
+@pytest.fixture(autouse=True)
+def _copy_template_venv(request, tmp_path_factory, monkeypatch):
+    """Make ``core.execution._build_venv`` copy a prebuilt venv instead of
+    building one (~10 s each; a copy is ~2 s).
+
+    A copied venv still runs: ``pyvenv.cfg`` is found relative to the
+    interpreter, so the copy does not depend on the template's path, and
+    ``python -m pip`` (the only way FI invokes pip) does not use the hard-coded
+    shebang of ``bin/pip``. ``tests/test_execution.py`` opts out: it tests the
+    real build.
+    """
+    if Path(str(request.node.fspath)).name in _REAL_VENV_MODULES:
+        return
+    import shutil
+
+    import core.execution as ex
+
+    real_build = ex._build_venv
+
+    def fake_build(venv_dir, *, with_pip, clear=False, python_version="3.11",
+                   system_site_packages=True):
+        key = (bool(with_pip), python_version, bool(system_site_packages))
+        template = _template_venv(tmp_path_factory, real_build, key)
+        venv_dir = Path(venv_dir)
+        if venv_dir.exists():
+            shutil.rmtree(venv_dir, ignore_errors=True)
+        shutil.copytree(
+            template, venv_dir, symlinks=True,
+            ignore=shutil.ignore_patterns(".fi_template_ready"),
+        )
+
+    monkeypatch.setattr(ex, "_build_venv", fake_build)

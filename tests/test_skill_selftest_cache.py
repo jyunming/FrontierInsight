@@ -548,4 +548,7 @@ def test_select_skills_keeps_the_event_loop_responsive(
     out, elapsed, worst_gap = asyncio.run(scenario())
     assert out["skill_selection"] == {"candidates": 0}
     assert elapsed >= SLEEP_S, "the self-tests did not actually run"
-    assert worst_gap < 0.5, f"event loop stalled for {worst_gap:.2f}s while skills loaded"
+    # A blocked loop shows one gap as long as the whole load (>= SLEEP_S); a
+    # loaded CI machine only delays individual ticks. Half of SLEEP_S separates
+    # the two without a wall-clock number tuned to a fast machine.
+    assert worst_gap < SLEEP_S / 2, f"event loop stalled for {worst_gap:.2f}s while skills loaded"
