@@ -100,3 +100,32 @@ def test_only_a_folder_named_skill_sources_marks_a_preset() -> None:
     assert kr.pip_requires(near_miss) == []
     home_cache = SimpleNamespace(name="pymc", provenance=lambda: {"imported_from": "/home/u/.frontier-insight/skill-sources/kdense/skills/pymc/SKILL.md"})
     assert kr.pip_requires(home_cache) == kr.PRESET_PIP_REQUIRES["pymc"]
+
+
+def test_the_general_method_skills_are_in_the_starter_list_with_their_packages() -> None:
+    skills = _script_skills()
+    for name, packages in {
+        "uncertainty-and-units": {"pint", "uncertainties"},
+        "statistical-power": {"statsmodels>=0.14.6", "scipy", "pandas"},
+        "experimental-design": {"pyDOE3"},
+    }.items():
+        assert skills[name] == ("kdense", f"skills/{name}", False)
+        assert packages <= set(kr.PRESET_PIP_REQUIRES[name])
+
+
+def test_docs_state_the_real_number_of_starter_skills_and_repositories() -> None:
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    n_skills = len(_script_skills())
+    text = (root / "docs" / "features.md").read_text(encoding="utf-8") + (root / "docs" / "recipes.md").read_text(encoding="utf-8")
+    claimed = {int(m) for m in re.findall(r"curated set of (\d+) scientist-workflow skills", text)}
+    assert claimed == {n_skills}
+    assert f"imports {n_skills} skills" in text
+
+
+def test_a_printed_install_line_quotes_version_floors() -> None:
+    import launch
+
+    assert launch._pip_cmd_args(["statsmodels>=0.14.6", "scipy"]) == "'statsmodels>=0.14.6' scipy"

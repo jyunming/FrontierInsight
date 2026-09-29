@@ -30,6 +30,10 @@ PRESET_PIP_REQUIRES: dict[str, list[str]] = {
     "matplotlib": ["matplotlib"],
     "seaborn": ["seaborn"],
     "scientific-visualization": ["matplotlib", "seaborn"],
+    "uncertainty-and-units": ["pint", "uncertainties", "numpy", "scipy"],
+    # pingouin is not imported by the bundled scripts; the skill's worked examples use it.
+    "statistical-power": ["statsmodels>=0.14.6", "scipy", "pandas", "pingouin", "numpy", "matplotlib"],
+    "experimental-design": ["numpy", "pandas", "pyDOE3"],
     "analyze-fasta": [],
     "genome-compare": [],
     "variant-annotation": [],
