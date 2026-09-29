@@ -1069,24 +1069,33 @@ def _missing_exact(values: list[Any], counts: Counter) -> int:
 #: Fewest reported values a selection of the trials is looked for in: a single value is the extreme of any list.
 _SELECTION_MIN_VALUES = 3
 
+#: Fewest ways to choose the reported values out of a setting's trials for "they are exactly the largest" to be worth
+#: saying: an honest subset of 3 of 20 trials is the top 3 once in 570 draws, so a small setting is not judged.
+_SELECTION_MIN_CHOICES = 20000
 
-def _is_extreme_selection(values: list[Any], per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
-                          grid: dict[str, list[Any]]) -> bool:
-    """Whether ``values`` are exactly the largest (or exactly the smallest) values of ``name`` among the trials of
-    ``cells``, as they are or divided by a size setting, while the trials returned more values than that: the signature
-    of the best results picked out of every setting."""
+
+def _extreme_selection(values: list[Any], per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
+                       grid: dict[str, list[Any]], thresholds: list[float]) -> str | None:
+    """``"largest"`` or ``"smallest"`` when ``values`` are exactly the largest (or the smallest) values of ``name`` among the trials of ``cells``, as they are or divided by a size setting, while the trials returned more values than
+    that: the signature of the best results picked out of every setting. Not when a threshold the protocol fixes
+    separates them from the rest of the trials: that is what a mean over the trials beyond a cut-off looks like."""
     numbers = [float(x) for x in values if isinstance(x, (int, float)) and not isinstance(x, bool)
                and math.isfinite(float(x))]
-    if len(numbers) < _SELECTION_MIN_VALUES:
-        return False
+    k = len(numbers)
+    if k < _SELECTION_MIN_VALUES:
+        return None
     for form in _derived_counts(per_cell, cells, name, grid):
-        pool = sorted(float(k) for k, n in form.items() for _ in range(max(int(n), 0)))
-        if len(pool) <= len(numbers):
+        pool = sorted(float(v) for v, n in form.items() for _ in range(max(int(n), 0)))
+        if len(pool) <= k or math.comb(len(pool), k) < _SELECTION_MIN_CHOICES:
             continue
-        for part in (pool[-len(numbers):], pool[:len(numbers)]):
-            if not _missing_exact(numbers, Counter(_exact_key(v) for v in part)):
-                return True
-    return False
+        for label, part, edge in (("largest", pool[-k:], (pool[-k - 1], pool[-k])),
+                                  ("smallest", pool[:k], (pool[k - 1], pool[k]))):
+            if _missing_exact(numbers, Counter(_exact_key(v) for v in part)):
+                continue
+            if any(min(edge) <= t <= max(edge) for t in thresholds):
+                continue
+            return label
+    return None
 
 
 def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, dict[str, Counter]],
@@ -1144,6 +1153,8 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                 seen = True
         return total if seen else None
 
+    cutoffs = [float(v) for v in (protocol.get("thresholds") or {}).values()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)]         if isinstance(protocol.get("thresholds"), dict) else []
     ok_trials = {key: max((sum(c.values()) for c in by_name.values()), default=0) for key, by_name in per_cell.items()}
     everything = sum(ok_trials.values())
     for metric in means:
@@ -1180,12 +1191,15 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                         given = given_of.get(metric, "")
                         count = node.get(f"{given}_count")
                         exact = members(given, own or all_cells) if cells else None
-                        if cells and exact is None and _is_extreme_selection(v, per_cell, own or all_cells, metric, grid):
+                        side = _extreme_selection(v, per_cell, own or all_cells, metric, grid, cutoffs)                             if cells and exact is None else None
+                        if side:
                             out.append(
-                                f"at `{path or 'the top level'}`, the {len(v)} values of `{metric}` are the largest (or "
-                                f"smallest) of FI's trials of those settings, and FI cannot count the subset (`{given}`) "
-                                "itself, so they cannot be told from the best results picked out of the run. "
-                                + _rm.PARTIAL.format(given=given)
+                                f"at `{path or 'the top level'}`, your {len(v)} values of `{metric}` are exactly the "
+                                f"{len(v)} {side} values of the trials of those settings. That is what the trials beyond "
+                                f"a cut-off look like, and also what the best {len(v)} picked by hand look like, and FI "
+                                f"can tell them apart only if each trial records whether it is in the subset: have "
+                                f"run_trial return `{given}` as 1 or 0 for each trial. A cut-off the protocol fixes "
+                                "(`thresholds`) on this same quantity is accepted as it is."
                             )
                         if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
                                 and float(count) != exact:
