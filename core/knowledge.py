@@ -3701,7 +3701,7 @@ def _paper_entries_lock() -> Iterator[None]:
 def _delete_in_process(brain: Any, *, quest_id: str, kinds: tuple[str, ...]) -> bool:
     """Remove from an in-process AxonBrain every chunk of a quest's documents of ``kinds`` (found by metadata: the
     chunk ids Axon makes are its own), any summary node built over them, and their duplicate-check records. The same
-    calls Axon's own ``/delete`` route and its CLI make; AxonBrain has no public method for it."""
+    calls Axon's own ``/delete`` route and its CLI make; ``delete_documents`` does the same on Axon 0.5.0 and later."""
     return _delete_in_process_where(
         brain, lambda m: m.get("quest_id") == quest_id and m.get("kind") in kinds)
 
@@ -4959,8 +4959,9 @@ class Knowledge:
                         self._restore_entries(replaced)
                     raise
             self._finalize_ingest_if_supported()
-            # The Axon service's /delete leaves the per-chunk duplicate records behind (jyunming/Axon#168), so the
-            # same paper written again under the new standing can be skipped chunk by chunk. Check what landed.
+            # Axon before 0.5.0 left the per-chunk duplicate records behind on /delete (jyunming/Axon#168), so the
+            # same paper written again under the new standing could be skipped chunk by chunk. 0.5.0 fixes that;
+            # the check stays because Axon still skips a text another document holds. Check what landed.
             # Only this quest's own result documents: a cited paper's card may already be there under another quest,
             # and the service files it under the paper's own source.
             # Axon also skips a text another document already holds (in process too), so each of this quest's own
