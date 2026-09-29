@@ -526,7 +526,7 @@ def main() -> int:
         print()
     elif all_pip:
         print("Underlying packages not installed (pass --pip-install, or run yourself):")
-        print(f"  {sys.executable} -m pip install {' '.join(repr(p) if any(c in p for c in '<>=~!') else p for p in all_pip)}")
+        print(f"  {sys.executable} -m pip install {' '.join(repr(p) if any(c in p for c in '<>') else p for p in all_pip)}")
         print()
 
     # Deliberately a placeholder rather than `git config user.name`. The ledger

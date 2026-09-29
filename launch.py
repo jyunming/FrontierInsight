@@ -5329,7 +5329,7 @@ def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
 
 def _pip_cmd_args(names: "list[str]") -> str:
     """Names as one shell-safe string: a version floor like statsmodels>=0.14.6 would otherwise be read as a redirect."""
-    return " ".join(repr(n) if any(c in n for c in "<>=~!") else n for n in names)
+    return " ".join(repr(n) if any(c in n for c in "<>") else n for n in names)
 
 
 def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:
