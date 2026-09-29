@@ -2417,6 +2417,9 @@ async def _collect_via_streaming(
                     if kind == "delta":
                         thinking_streamed = True
                         add_thinking(thought)
+                    elif kind == "start":
+                        if thinking_streamed:  # a new thinking block: keep it apart from the one before
+                            add_thinking("\n\n")
                     elif not thinking_streamed:
                         add_thinking(thought + "\n")
                 turn_mark = _stream_turn_mark(line)
@@ -2744,7 +2747,8 @@ def _stream_turn_mark(raw: bytes) -> str | None:
 
 def _stream_thinking(raw: bytes) -> list[tuple[str, str]]:
     """The reasoning text one stream-json line carries: ``("delta", text)`` for a streamed ``thinking_delta``, or
-    ``("block", text)`` for a thinking block of a whole assistant message (used only when nothing was streamed)."""
+    ``("block", text)`` for a thinking block of a whole assistant message (used only when nothing was streamed), and
+    ``("start", "")`` where a new streamed thinking block begins."""
     if b"thinking" not in raw:
         return []
     try:
@@ -2755,8 +2759,11 @@ def _stream_thinking(raw: bytes) -> list[tuple[str, str]]:
         return []
     if msg.get("type") == "stream_event":
         delta = (msg.get("event") or {}).get("delta") if isinstance(msg.get("event"), dict) else None
+        event = msg.get("event") if isinstance(msg.get("event"), dict) else {}
         if isinstance(delta, dict) and delta.get("type") == "thinking_delta" and isinstance(delta.get("thinking"), str):
             return [("delta", delta["thinking"])]
+        if event.get("type") == "content_block_start" and (event.get("content_block") or {}).get("type") == "thinking":
+            return [("start", "")]
         return []
     if msg.get("type") == "assistant" and isinstance(msg.get("message"), dict):
         content = msg["message"].get("content")
@@ -3560,6 +3567,7 @@ class LLMClient:
         self.last_usage = None
         self.last_model = (model or self.endpoint.model)
         LAST_CALL.set({"provider": self.last_provider, "model": self.last_model, "reported": False})
+        note_thinking("")  # an earlier attempt's or provider's reasoning is not this attempt's
         # Last-resort prompt-size guard (all transports) — a runaway prompt
         # otherwise blows the context window into a hard 400 / stall.
         messages = self._trim_messages(messages, node=node)
@@ -4280,6 +4288,7 @@ class FallbackLLMClient:
                 continue
             # This provider's own record of the call: what an earlier one named is not this one's answer.
             LAST_CALL.set(None)
+            note_thinking("")
             slot_token = CALL_SLOT.set({"provider": slot.label, "fallback": idx > 0})
             try:
                 text = await client.chat(messages, **kwargs)

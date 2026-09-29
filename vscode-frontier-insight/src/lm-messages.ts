@@ -94,3 +94,46 @@ export function servedModel(model: ServedModel | undefined | null): ServedModel 
     }
     return out;
 }
+
+/** What one part of a streamed response is. The vscode API is passed in so this runs under plain node. */
+export function partKind(api: any, p: unknown): "text" | "thinking" | "tool" | "unknown" {
+    const TextPart = api?.LanguageModelTextPart;
+    const ThinkingPart = api?.LanguageModelThinkingPart;
+    const ToolCallPart = api?.LanguageModelToolCallPart;
+    if (TextPart && p instanceof TextPart) return "text";
+    if (ThinkingPart && p instanceof ThinkingPart) return "thinking";
+    if (ToolCallPart && p instanceof ToolCallPart) return "tool";
+    // Versions that do not export the classes still give the parts a usable shape.
+    const obj = p as any;
+    if (obj && typeof obj.value === "string") {
+        if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
+        if (obj.constructor?.name === "LanguageModelTextPart") return "text";
+        // Assume text: at worst reasoning leaks into the answer, which FI's lenient parsers tolerate.
+        return "text";
+    }
+    return "unknown";
+}
+
+// One message is one line, and an FI that has not raised its reader's 64 KiB line limit drops the connection on a
+// longer one, so the whole `lm_done` line stays under this.
+export const LM_DONE_MAX_BYTES = 48 * 1024;
+
+/**
+ * The `lm_done` message for an answer, carrying the model's reasoning (`thinking`) when there is room for it: the
+ * reasoning is cut to what fits and says how much was left out. The answer itself is never cut here.
+ */
+export function lmDoneMessage<T extends object>(base: T, thinking: string, maxBytes: number = LM_DONE_MAX_BYTES): T {
+    if (!thinking) return base;
+    const size = (t: string) => Buffer.byteLength(JSON.stringify({ ...base, thinking: t }), "utf8") + 1;
+    if (size(thinking) <= maxBytes) return { ...base, thinking };
+    const withNote = (keep: number) =>
+        thinking.slice(0, keep) + `\n[${thinking.length - keep} more characters not sent]`;
+    if (size(withNote(0)) > maxBytes) return base; // the answer leaves no room
+    let lo = 0;
+    let hi = thinking.length;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (size(withNote(mid)) <= maxBytes) lo = mid; else hi = mid - 1;
+    }
+    return { ...base, thinking: withNote(lo) };
+}

@@ -14,19 +14,22 @@ import contextvars
 
 THINKING_FILE = "thinking.jsonl"
 THINKING_NOTE = "the model's own account of its reasoning, not evidence"
+# One line and the whole file are bounded: reasoning models can write tens of thousands of tokens per call.
+THINKING_LINE_CHARS = 64_000
+THINKING_FILE_BYTES = 32 * 1024 * 1024
 
 _HOLDER: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("fi_thinking_holder", default=None)
 
 
-def open_holder() -> dict[str, str]:
-    """Start collecting for one model call in this task; returns the holder to read afterwards."""
+def open_holder() -> tuple[dict[str, str], contextvars.Token]:
+    """Start collecting for one model call in this task; returns the holder to read afterwards and the token that
+    :func:`close_holder` gives back (so a call made inside another one leaves the outer holder as it was)."""
     holder: dict[str, str] = {"text": ""}
-    _HOLDER.set(holder)
-    return holder
+    return holder, _HOLDER.set(holder)
 
 
-def close_holder() -> None:
-    _HOLDER.set(None)
+def close_holder(token: contextvars.Token) -> None:
+    _HOLDER.reset(token)
 
 
 def note_thinking(text: object) -> None:

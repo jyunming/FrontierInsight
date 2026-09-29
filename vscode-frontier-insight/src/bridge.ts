@@ -21,7 +21,7 @@
 import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
-import { BridgeMessage, ChatMessageApi, servedModel, toChatMessages } from "./lm-messages";
+import { BridgeMessage, ChatMessageApi, lmDoneMessage, partKind as partKindOf, servedModel, toChatMessages } from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
 // in the chat panel — strip / escape markdown that would
@@ -515,7 +515,7 @@ export class Bridge {
             // can flood the chat and slow VSCode when models stream
             // many small fragments.
             let thinkingBuf = "";
-            // Everything the model reasoned, kept whole for FI's .fi/thinking.jsonl (thinkingBuf is emptied on each flush).
+            // Everything the model reasoned, for FI's .fi/thinking.jsonl (thinkingBuf is emptied on each flush).
             let thinkingAll = "";
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
@@ -557,27 +557,7 @@ export class Bridge {
             // refs lazily so a missing class on older builds doesn't
             // crash the extension; fall back to duck-typing on .value.
             const LM = vscode as any;
-            const TextPart = LM.LanguageModelTextPart;
-            const ThinkingPart = LM.LanguageModelThinkingPart;
-            const ToolCallPart = LM.LanguageModelToolCallPart;
-            const partKind = (p: unknown): "text" | "thinking" | "tool" | "unknown" => {
-                if (TextPart && p instanceof TextPart) return "text";
-                if (ThinkingPart && p instanceof ThinkingPart) return "thinking";
-                if (ToolCallPart && p instanceof ToolCallPart) return "tool";
-                // Duck-typing fallback for versions where the classes
-                // aren't exported but the parts still have a usable
-                // shape.
-                const obj = p as any;
-                if (obj && typeof obj.value === "string") {
-                    if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
-                    if (obj.constructor?.name === "LanguageModelTextPart") return "text";
-                    // Heuristic: assume text. Worst case: reasoning leaks
-                    // into the answer; Python's lenient JSON parsers
-                    // and our fenced-block parser tolerate prose.
-                    return "text";
-                }
-                return "unknown";
-            };
+            const partKind = (p: unknown) => partKindOf(LM, p);
 
             try {
                 while (true) {
@@ -648,15 +628,14 @@ export class Bridge {
                 `  ✅ \`${nodeLabel}\` done — ${chunkCount} chunks, ${chars} chars, ` +
                 `${thinkingChars} thinking, ${totalElapsed} s\n\n`,
             );
-            this.send({
+            // The model selected and sent this request, so FI can record it. The model's own reasoning rides along when
+            // there is room (cut to fit; FI keeps it in .fi/thinking.jsonl). Both additions are ignored by an older FI.
+            this.send(lmDoneMessage({
                 type: "lm_done",
                 id: req.id,
                 content: accumulated,
-                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
                 served_model: servedModel(model),
-                // The model's own reasoning, when it sent any (additive: an older FI ignores it).
-                ...(thinkingAll ? { thinking: thinkingAll } : {}),
-            });
+            }, thinkingAll));
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             this.send({

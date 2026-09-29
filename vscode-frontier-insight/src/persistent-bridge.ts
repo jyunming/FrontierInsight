@@ -24,7 +24,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as net from "net";
 import { persistentBridgePath } from "./bridge-path";
-import { BridgeMessage, ChatMessageApi, servedModel, toChatMessages } from "./lm-messages";
+import { BridgeMessage, ChatMessageApi, lmDoneMessage, partKind, servedModel, toChatMessages } from "./lm-messages";
 
 interface LmRequest {
     type: "lm_request";
@@ -389,7 +389,10 @@ export class PersistentBridge {
             // ``lm_error: bridge stalled``; the Python side's
             // ``_TRANSIENT_BRIDGE_MARKERS`` recognises that string and
             // tenacity retries the call.
-            const iter = (res.text as AsyncIterable<string>)[Symbol.asyncIterator]();
+            // ``res.stream`` (not ``res.text``) so the model's reasoning parts arrive too: FI keeps them in
+            // .fi/thinking.jsonl, as it does for the per-quest bridge. Only text parts are the answer.
+            const iter = (res.stream as AsyncIterable<unknown>)[Symbol.asyncIterator]();
+            let thinkingAll = "";
             try {
                 while (true) {
                     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -399,7 +402,7 @@ export class PersistentBridge {
                             INACTIVITY_MS,
                         );
                     });
-                    let result: IteratorResult<string> | { stalled: true };
+                    let result: IteratorResult<unknown> | { stalled: true };
                     try {
                         result = await Promise.race([iter.next(), stallSignal]);
                     } finally {
@@ -419,7 +422,14 @@ export class PersistentBridge {
                         );
                     }
                     if (result.done) break;
-                    const fragment = result.value;
+                    const part = result.value as any;
+                    const kind = partKind(vscode, part);
+                    if (kind === "thinking" && typeof part.value === "string") {
+                        thinkingAll += part.value;
+                        continue;
+                    }
+                    if (kind !== "text" || typeof part.value !== "string") continue;
+                    const fragment: string = part.value;
                     content += fragment;
                     chunkCount++;
                     this.send(socket, { type: "lm_chunk", id: req.id, delta: fragment });
@@ -457,7 +467,7 @@ export class PersistentBridge {
                 // token; accounting must never fail the call that produced a
                 // good answer, so fall through with what we have.
             }
-            this.send(socket, {
+            this.send(socket, lmDoneMessage({
                 type: "lm_done", id: req.id,
                 content,
                 total_tokens: promptTokens + completionTokens,
@@ -468,9 +478,10 @@ export class PersistentBridge {
                 // that includes the platform's own overhead.
                 usage_scope: "sent_only",
                 measured: promptTokens > 0,
-                // The model selected and sent this request, so FI can record it (additive: an older FI ignores it).
+                // The model selected and sent this request, so FI can record it; the model's own reasoning rides
+                // along when there is room (cut to fit). An older FI ignores both.
                 served_model: servedModel(model),
-            });
+            }, thinkingAll));
             cts2.dispose();
         } catch (e) {
             const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);

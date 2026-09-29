@@ -55,6 +55,10 @@ LAST_SERVED: contextvars.ContextVar[dict[str, str] | None] = contextvars.Context
 #: The token counts of the current task's last bridge call, when the extension measured them.
 LAST_BRIDGE_USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("fi_vscode_usage", default=None)
 #: The reasoning text the chat model sent with the current task's last bridge call, when the extension passed it on.
+# One message is one line; a reasoning model's thinking rides on the line that ends its answer, so the reader's line
+# limit (asyncio's default is 64 KiB) has to hold a long one.
+_BRIDGE_LINE_LIMIT = 32 * 1024 * 1024
+
 LAST_BRIDGE_THINKING: contextvars.ContextVar[str | None] = contextvars.ContextVar("fi_vscode_thinking", default=None)
 
 #: Names a chat picker uses for "let the service choose": they name no model, so they prove nothing about which
@@ -148,7 +152,7 @@ class VSCodeBridgeClient:
             return
         try:
             self._reader, self._writer = await asyncio.open_connection(
-                self.host, self.port,
+                self.host, self.port, limit=_BRIDGE_LINE_LIMIT,
             )
         except OSError as e:
             raise BridgeError(
@@ -179,6 +183,7 @@ class VSCodeBridgeClient:
         self._chunks.clear()
         self._served.clear()
         self._usage.clear()
+        self._thinking.clear()
 
     async def chat(
         self,
@@ -508,7 +513,7 @@ async def _open_ipc_connection(
             "(the default on Python 3.8+). Got "
             f"{type(loop).__name__}.",
         )
-    reader = asyncio.StreamReader(loop=loop)
+    reader = asyncio.StreamReader(limit=_BRIDGE_LINE_LIMIT, loop=loop)
     protocol = asyncio.StreamReaderProtocol(reader, loop=loop)
     try:
         transport, _ = await loop.create_pipe_connection(  # type: ignore[attr-defined]
