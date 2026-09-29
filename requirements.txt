@@ -107,6 +107,7 @@ pytest>=8.0
 pytest-asyncio>=0.24
 pytest-mock>=3.14
 pytest-cov>=6.0
+pytest-xdist>=3.5
 pytest-testmon>=2.2
 # The seal and audit-trace property tests generate their inputs; without it they skip.
 hypothesis>=6.100

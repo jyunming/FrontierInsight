@@ -29,6 +29,12 @@ print("RESULT_JSON: " + json.dumps({"first_line": text.splitlines()[0]}))
 """
 
 
+def _top_level() -> set[str]:
+    """Names in the checkout, ignoring what other test workers and coverage write there."""
+    noise = {".pytest_tmp", ".pytest_cache", "__pycache__"}
+    return {p.name for p in REPO.iterdir() if p.name not in noise and not p.name.startswith(".coverage")}
+
+
 def _project(tmp_path: Path) -> Path:
     project = tmp_path / "my_project"
     (project / "example").mkdir(parents=True)
@@ -42,7 +48,7 @@ async def test_a_quest_run_from_another_folder_keeps_everything_relative_to_it(
 ) -> None:
     project = _project(tmp_path)
     monkeypatch.chdir(project)
-    before = {p.name for p in REPO.iterdir()}
+    before = _top_level()
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
@@ -71,7 +77,7 @@ async def test_a_quest_run_from_another_folder_keeps_everything_relative_to_it(
     assert (quest / "inputs" / "examples" / "example" / "setup.in").is_file()
     assert artifacts.raw_state["result_json"] == {"first_line": "temperature 300"}
     assert f"quest: {engine.quest_id}" in dump_state(quest)
-    assert {p.name for p in REPO.iterdir()} == before, "nothing was written into the FI checkout"
+    assert _top_level() == before, "nothing was written into the FI checkout"
 
 
 def test_resume_looks_where_the_relative_output_is_and_says_where(

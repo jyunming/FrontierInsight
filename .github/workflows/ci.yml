@@ -74,7 +74,7 @@ jobs:
       # coverage improves.
       - name: Run pytest (fast tier)
         run: >-
-          pytest -q -m "not slow"
+          pytest -q -m "not slow" -n auto --dist loadfile --durations=25
           --ignore=tests/test_engine_smoke.py
           --ignore=tests/test_self_correction_e2e.py
           --ignore=tests/test_web_e2e.py
