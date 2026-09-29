@@ -113,7 +113,7 @@ The interview makes ONE LLM call after the first 5 questions to suggest topic-tu
 
 ## Write your own quest
 
-Copy `examples/integrator_bakeoff/config.yaml` to `my_quest.yaml` and edit the `topic:` field. Keep everything else as-is until you want to tune.
+Copy `examples/integrator_bakeoff/config.yaml` to `my_quest.yaml` and edit the `topic:` field (root-level `.yaml` files are git-ignored, so it stays personal; to share it, move it into a folder such as `examples/<name>/config.yaml`). Keep everything else as-is until you want to tune.
 
 Minimum viable config:
 
@@ -732,6 +732,6 @@ Their figures are cut out too, each with its caption, into `data/literature/figu
 | Example | What it does | Wall time |
 |---|---|---|
 | [`examples/integrator_bakeoff/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/integrator_bakeoff) | The quickstart. RK4 vs Velocity-Verlet vs forward Euler on a damped harmonic oscillator. | **~3 min** |
-| [`examples/euv_mor_shot_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/euv_mor_shot_noise) | Theoretical LER floor in metal-oxide EUV resists. Uses the literature router. | ~15 min |
+| [`examples/bootstrap_ci_coverage/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bootstrap_ci_coverage) | Coverage of bootstrap and t confidence intervals for small, skewed samples. Searches the literature, so it needs network access. | not timed end to end (its simulation runs in under a minute) |
 | [`examples/bernstein_vazirani_noise/`](https://github.com/jyunming/FrontierInsight/tree/main/examples/bernstein_vazirani_noise) | Bernstein-Vazirani algorithm under depolarizing noise — pure-numpy state-vector simulator validated against closed-form fidelity. | ~20 min |
 

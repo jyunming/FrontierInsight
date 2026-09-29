@@ -93,7 +93,7 @@ def _topic(path: str) -> str:
 @pytest.mark.parametrize("path", [
     "examples/integrator_bakeoff/config.yaml",
     "examples/bernstein_vazirani_noise/config.yaml",
-    "examples/euv_mor_shot_noise/config.yaml",
+    "examples/bootstrap_ci_coverage/config.yaml",
 ])
 def test_the_example_topics_state_four_pages(path: str) -> None:
     assert page_limit_from_text(_topic(path)) == 4
@@ -104,7 +104,7 @@ def test_the_sir_trend_topic_states_four_pages() -> None:
 
 
 def test_no_other_example_topic_states_a_limit() -> None:
-    stated = {"integrator_bakeoff", "bernstein_vazirani_noise", "euv_mor_shot_noise"}
+    stated = {"integrator_bakeoff", "bernstein_vazirani_noise", "bootstrap_ci_coverage"}
     others = [
         p for p in sorted((REPO / "examples").glob("*/*.yaml"))
         if p.parent.name not in stated and "topic" in (yaml.safe_load(p.read_text(encoding="utf-8")) or {})

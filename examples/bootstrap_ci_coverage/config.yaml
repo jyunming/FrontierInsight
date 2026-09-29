@@ -1,0 +1,84 @@
+topic: |
+  TOPIC. How often do bootstrap confidence intervals actually contain the
+  true mean when the sample is small and the data are skewed?
+
+  CONTEXT. A 95% confidence interval should contain the true mean in 95% of
+  repeated experiments. With few observations and a skewed distribution
+  (lognormal, exponential) the usual t-interval and the percentile
+  bootstrap interval are both known to fall short, by different amounts.
+  This is a routine question in any field that reports a mean from a small
+  sample: biology, engineering, medicine, economics.
+
+  SCOPE (SIMULATION ONLY, NO SPECIAL DATA NEEDED).
+    1. Draw samples of size n from a normal, an exponential and a lognormal
+       distribution whose true mean is known. Use a lognormal with sigma = 1
+       (true mean e^0.5). The normal case is a control: the t-interval should
+       cover at 95%.
+    2. For each sample build three 95% intervals for the mean: the t-interval,
+       the percentile bootstrap, and the BCa bootstrap.
+    3. Use 2000 samples per setting and 1000 bootstrap resamples each, and
+       report the coverage (the fraction of intervals that contain the true
+       mean) with its own uncertainty (standard error).
+    4. Sweep n in {5, 10, 20, 50, 100}.
+    5. For each method and distribution, classify the coverage against 93%
+       (within 2 percentage points of 95%) using the standard error, because
+       with 2000 samples the estimate itself moves by about 0.5 percentage
+       points between seeds. "Reaches 93%" means the estimate minus 2
+       standard errors is at least 93%; "does not reach it" means the
+       estimate plus 2 standard errors is below 93%; anything in between is
+       "borderline" and is reported as borderline, not forced to one n. Give
+       the first n at which each method reaches 93%, or say that it does not
+       by n = 100.
+    6. Check the qualitative pattern as well: the normal control's t-interval
+       covers at about 95% at every n, and every method on the lognormal
+       covers below 93% at every n up to 100.
+
+  GOALS.
+    - One Python script using numpy and scipy, with matplotlib (Agg backend).
+    - Two figures: coverage against n for every method and distribution, with
+      the 95% line drawn; and interval width against n.
+    - Write a short paper (at most 4 pages) that cites the standard
+      references on the bootstrap (Efron and Tibshirani) and on BCa
+      intervals, with at least three primary references.
+
+  CONSTRAINTS.
+    - CPU only; under 2 minutes of runtime (a vectorised version takes about
+      20 seconds without BCa and about 40 seconds with it). Vectorise across
+      samples with numpy rather than calling scipy.stats.bootstrap once per
+      sample, and process the samples in chunks of about 100 so memory stays
+      below about 500 MB.
+    - Fix the random seeds and say so in the paper.
+
+title: bootstrap-ci-coverage-small-samples
+
+# What the result is for (explore, research or decision). Left out, a quest is an exploration and its paper
+# is marked preliminary.
+result_use: research
+
+provider:
+  name: ollama
+  model: gpt-oss:120b-cloud
+  base_url: http://127.0.0.1:11434/v1
+
+engine:
+  framework: langgraph
+  max_iterations: 1
+  review_loop: false
+
+execution:
+  sandbox: venv
+  timeout_s: 300
+  python_version: "3.11"
+
+knowledge:
+  enabled: true    # Needed for the literature search (web and scholarly sources); it needs network access, not an Axon install.
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+    - slides
+    - poster
+    - speech
+  paper_format: generic
+  output_dir: ./outputs
