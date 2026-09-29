@@ -413,7 +413,9 @@ full text is stored uncapped on disk, and each
 node's prompt receives the passages most relevant to the question
 (`knowledge.literature_excerpt_chars` / `passage_ranking`).
 
-When a relevant paper is genuinely paywalled (SPIE / IEEE / Elsevier …)
+FI downloads only papers that are free to read; it never fetches a
+paywalled paper itself, even from a network with a subscription. When a
+relevant paper is paywalled (SPIE / IEEE / Elsevier …)
 and only its abstract is reachable, **Supply paywalled papers** (on by
 default; turn it off in the interview for an unattended run) makes the
 quest pause and write a ranked

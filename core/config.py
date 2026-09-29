@@ -1303,21 +1303,19 @@ class KnowledgeConfig(BaseModel):
     # that bear on the paper. Costs one LLM call and up to ten OpenAlex
     # requests per literature pass. Off → no extra candidates.
     foundational_works: bool = True
-    # Pause-for-user-papers gate. When True, the literature node pauses
-    # after retrieval IF any retrieved doc came back as abstract-only
-    # (no full text available — typical for paywalled / Crossref / S2
-    # metadata-only hits). Writes a ``needs/<slug>.json`` stub per
-    # missing paper and creates ``inputs/papers/`` for the user to drop
-    # downloaded PDFs into. On ``fi --resume``, the node walks
-    # ``inputs/papers/``, indexes the files into the literature list,
-    # and proceeds — giving the writer real full text instead of
-    # abstracts.
+    # Pause-for-user-papers gate. FI downloads only papers that are free to
+    # read. A paper behind a paywall is never fetched by FI: when the
+    # literature comes back with abstract-only papers, the node writes a
+    # ``needs/WANTED_PAPERS.md`` list (with a link each) and, when this is on,
+    # pauses so a person can download them and drop the files into
+    # ``inputs/papers/``. On ``fi --resume`` the files are read in, giving
+    # the writer real full text instead of abstracts. With this off
+    # (``pauses.papers: false``, an unattended run) the run goes on with the
+    # abstracts and logs how many papers were left for a person.
     #
     # Default ``True``, matching ``pauses.papers``: this legacy flag is merged
     # into it, and the programmatic merge copies the attribute through, so
-    # the two defaults must agree. Pairs with ``knowledge.try_fetch_full_text``
-    # (also on): the gate fires only for the papers the open-access cascade
-    # could not fetch. Set ``pauses.papers: false`` for an unattended run.
+    # the two defaults must agree.
     pause_for_user_papers: bool = True
     write_back_quests: bool = True
     # Ordered list of external literature sources used by
@@ -1356,22 +1354,22 @@ class KnowledgeConfig(BaseModel):
     # programmatically search, e.g. SPIE, IEEE Xplore).
     seed_source_catalog: bool = True
     # Files (PDF / Markdown / plain text) the user has manually placed
-    # for this quest — e.g. paywalled PDFs they downloaded from SPIE /
-    # IEEE / their institutional library. These are loaded at engine
+    # for this quest — e.g. paywalled PDFs they downloaded themselves from
+    # SPIE / IEEE / their institutional library. These are loaded at engine
     # construction and PINNED to the head of every literature-retrieval
     # result for this quest. If Axon is enabled, they are ALSO ingested
     # permanently as `kind="fi_local_paper"` so future quests find them.
     # Paths may be `~`-prefixed; globs are NOT expanded (pass each file).
     local_papers: list[Path] = Field(default_factory=list)
-    # Phase 2 paywall-access support: when True, after external retrieval
-    # returns Crossref/OpenAlex/etc. hits, FI opportunistically tries to
-    # GET the publisher PDF using whatever network access the host has
-    # (institutional VPN / Shibboleth / EZproxy already authenticated at
-    # the OS level). Login-wall HTML pages are rejected by a
-    # Content-Type + %PDF-magic check, so the quest never hangs on a
-    # paywalled venue. On by default: a legal copy is the difference between
-    # the writer quoting a paper and quoting its abstract. The whole batch
-    # shares ``full_text_fetch_total_s``; set false for abstracts only.
+    # Download the full text of papers that are free to read (arXiv, PubMed
+    # Central, bioRxiv / medRxiv, and any paper Unpaywall, Semantic Scholar
+    # or CORE lists a free copy of). A paper that is not confirmed free is
+    # never fetched from the publisher, not even from a network that has a
+    # subscription (VPN / campus login): download it yourself and put it in
+    # ``inputs/papers/`` or ``knowledge.local_papers``. On by default: a free
+    # copy is the difference between the writer quoting a paper and quoting
+    # its abstract. The whole batch shares ``full_text_fetch_total_s``; set
+    # false for abstracts only.
     try_fetch_full_text: bool = True
     # Per-doc HTTP timeout (landing-page GET, PDF GET). Short is good.
     full_text_fetch_timeout_s: float = Field(default=15.0, gt=0)

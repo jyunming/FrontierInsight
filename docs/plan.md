@@ -93,9 +93,10 @@ for the layered design see [`architecture.md`](architecture.md).
 - **Topic-aware source routing** — the LLM picks 1–5 sources from a
   12-entry catalog when `source_routing: auto`; users extend the
   catalog by ingesting `kind=fi_source_catalog` entries.
-- **Opportunistic full-text fetch** — publisher PDFs over the host's
-  network with login-wall rejection via Content-Type +
-  `%PDF-` magic-bytes check. Paywalled venues never hang a quest.
+- **Free-only full-text fetch** — only papers confirmed free to read are
+  downloaded (login-wall rejection via Content-Type + `%PDF-`
+  magic-bytes check stays as a backstop). Paywalled papers are left for a
+  person via `needs/WANTED_PAPERS.md`.
 - **Structured ingest after accepted quests** — `fi_paper_spine`,
   `fi_quest_paper`, `fi_quest_summary`, `fi_topic_event`,
   `fi_external_ref_spine` × N.

@@ -14,8 +14,11 @@ Two responsibilities:
         verbatim. Adapters run in parallel; results are merged and
         de-duplicated by DOI / arXiv-id / PMID / normalized title.
    When `try_fetch_full_text` is true, external hits are augmented
-   with publisher-PDF text where the host network has access (login
-   walls are rejected by a Content-Type + `%PDF-` magic-bytes check).
+   with full text only when the paper is confirmed free to read
+   (`is_open_access`, or a free copy found by the open-access cascade);
+   a paywalled paper is never requested from the publisher, so no
+   institutional / VPN access is used (login walls that slip through are
+   still rejected by a Content-Type + `%PDF-` magic-bytes check).
 
 2. **Ingest** (`Knowledge.add_quest_artifacts`) for the post-quest
    write-back, gated on `verdict == "accept"` by default. Finished
@@ -728,6 +731,7 @@ def _semantic_scholar_search(
                 "doi": ext.get("DOI", ""), "arxiv_id": ext.get("ArXiv", ""),
                 "url": p.get("url", ""),
                 "pdf_url": (p.get("openAccessPdf") or {}).get("url", ""),
+                "open_access": bool((p.get("openAccessPdf") or {}).get("url")) or None,
             },
         ))
     return out
@@ -811,6 +815,7 @@ def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
                 "url": w.get("downloadUrl") or (w.get("sourceFulltextUrls") or [""])[0],
                 "pdf_url": w.get("downloadUrl") or "",
                 "venue": (w.get("publisher") or ""),
+                "open_access": True,
                 "work_type": w.get("documentType") or "",
             },
         ))
@@ -1040,6 +1045,27 @@ _ACADEMIC_HOST_RE = re.compile(
     r")$",
     re.I,
 )
+
+
+def is_open_access(md: dict | None) -> bool:
+    """True only when a source is confirmed free to download, with no subscription.
+
+    arXiv / PMC / bioRxiv / medRxiv are free by construction, and the search sources (OpenAlex, DOAJ,
+    OpenAIRE, Semantic Scholar's open copy, CORE) mark a hit ``open_access``. Anything else, including a
+    hit whose status is unknown, counts as NOT free: FI never fetches it from the publisher, and leaves it
+    for a person to download (the papers pause and ``needs/WANTED_PAPERS.md``)."""
+    md = md or {}
+    if md.get("open_access") is True:
+        return True
+    if md.get("arxiv_id") or md.get("pmcid"):
+        return True
+    if str(md.get("doi") or "").startswith("10.1101/"):  # bioRxiv / medRxiv
+        return True
+    url = str(md.get("url") or "").lower()
+    return any(
+        host in url for host in
+        ("arxiv.org", "ncbi.nlm.nih.gov/pmc", "biorxiv.org", "medrxiv.org")
+    )
 
 
 def _is_academic_source(url: str) -> bool:
@@ -2301,6 +2327,10 @@ def _fetch_web_page_text(
         api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
         if api_text:
             return api_text
+        if not is_open_access(doc.metadata):
+            # A journal / publisher page that is not confirmed free is not opened from here: no publisher
+            # request, so no institutional login is used. A person downloads it instead.
+            return None
     blocked = False
     try:
         with httpx.Client(
@@ -2576,7 +2606,7 @@ def _fetch_full_text(
     doc: RetrievedDoc, *, timeout_s: float, max_kb: int,
 ) -> str | None:
     """For one external-search hit, try to obtain the full-text PDF
-    using whatever network access the host has. Best-effort: returns
+    of a free (open-access) source, or a free copy of any other. Best-effort: returns
     extracted text on success, None on any failure (login wall, no
     PDF, parse error, missing pypdf). Honors:
 
@@ -2586,6 +2616,13 @@ def _fetch_full_text(
 
     Validation: Content-Type AND %PDF-magic. Login walls fail both.
     """
+    # Only a source confirmed free is fetched from its own address. A paper that is not (or not known to be)
+    # free is never requested from the publisher, so no institutional / VPN login is ever used: it may still
+    # come back through the free-copy lookups below (PMC, Europe PMC, preprint servers, Unpaywall, ...), and
+    # otherwise it is left for a person to download.
+    if not is_open_access(doc.metadata):
+        return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
+
     pdf_url = doc.metadata.get("pdf_url") or ""
     landing = doc.metadata.get("url") or ""
 

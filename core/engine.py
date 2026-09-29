@@ -3347,10 +3347,7 @@ class Engine:
         # dropped PDFs, ``inputs/papers/`` is non-empty and we don't
         # pause again — the resume path picks up the new files and
         # proceeds.
-        if (
-            self.config.pauses.papers
-            and not _papers_dir_has_files(self.quest_root)
-        ):
+        if not _papers_dir_has_files(self.quest_root):
             abstract_only = [d for d in docs if _is_abstract_only(d)]
             # Split the genuinely paywalled from open-access sources we simply
             # failed to fetch. Only the former justify stopping the quest to
@@ -3374,19 +3371,29 @@ class Engine:
                 )
             # Resuming from the papers pause without adding files is the answer "go on without them": those papers
             # are not asked for again. Only the papers not yet declined are asked for.
-            declined_now = _take_papers_declined(self.fi_dir, self.quest_root,
-                                                 getattr(self, "_resumed_from_pause", None))
-            if declined_now:
-                self._audit("papers_declined", count=len(declined_now), papers=sorted(declined_now)[:40])
-                self._log.info("[literature] going on without %d paper(s) you were asked for (none was added to "
-                               "inputs/papers/): they are read from their abstracts only", len(declined_now))
-            needed, already = _papers_to_ask(needed, self.fi_dir)
+            already = 0
+            if self.config.pauses.papers:
+                declined_now = _take_papers_declined(self.fi_dir, self.quest_root,
+                                                     getattr(self, "_resumed_from_pause", None))
+                if declined_now:
+                    self._audit("papers_declined", count=len(declined_now), papers=sorted(declined_now)[:40])
+                    self._log.info("[literature] going on without %d paper(s) you were asked for (none was added to "
+                                   "inputs/papers/): they are read from their abstracts only", len(declined_now))
+                needed, already = _papers_to_ask(needed, self.fi_dir)
             if needed or oa_unfetched:
                 _write_paper_need_stubs(
                     self.quest_root, needed, self._log,
                     query=_lit_query(state), oa_unfetched=oa_unfetched,
                 )
-            if needed:
+            if needed and not self.config.pauses.papers:
+                # Unattended: FI downloads only free papers and never fetches a paywalled one itself.
+                self._log.info(
+                    "[literature] %d paper(s) are behind a paywall, so FI did not download them. They are read "
+                    "from their abstracts; the list with a link each is in needs/WANTED_PAPERS.md if you want to "
+                    "download some by hand.",
+                    len(needed),
+                )
+            if needed and self.config.pauses.papers:
                 self._pause_for_human(
                     kind="papers",
                     interaction="supply",
@@ -18689,31 +18696,16 @@ def _append_design_revision(
 
 
 def _is_open_access(doc: "RetrievedDoc") -> bool:
-    """True when the source is freely downloadable without a subscription.
+    """True when the source is confirmed free to download without a subscription (see
+    ``core.knowledge.is_open_access``).
 
-    arXiv / PMC / bioRxiv / medRxiv are open access by construction, and
-    OpenAlex reports an explicit ``open_access`` flag we preserve on the doc.
-
-    This is deliberately separate from :func:`_is_abstract_only`. That
-    predicate answers "did we end up with only an abstract?", which stays
-    true for an arXiv paper whose full-text fetch failed — the doc really is
-    abstract-only. What changes is what the pause gate does with it: asking a
-    person to hand-download an arXiv PDF is asking them to work around a
-    FETCH failure (blocked network, proxy, TLS interception), not a paywall,
-    and the request reads as nonsense to anyone who knows arXiv is free.
-    """
-    md = doc.metadata or {}
-    if md.get("open_access") is True:
-        return True
-    if md.get("arxiv_id") or md.get("pmcid"):
-        return True
-    if str(md.get("doi") or "").startswith("10.1101/"):  # bioRxiv / medRxiv
-        return True
-    url = str(md.get("url") or "").lower()
-    return any(
-        host in url for host in
-        ("arxiv.org", "ncbi.nlm.nih.gov/pmc", "biorxiv.org", "medrxiv.org")
-    )
+    This is deliberately separate from :func:`_is_abstract_only`. That predicate answers "did we end up with only
+    an abstract?", which stays true for an arXiv paper whose full-text fetch failed. What changes is what the
+    papers gate does with it: asking a person to hand-download an arXiv PDF is asking them to work around a fetch
+    failure (blocked network, proxy), not a paywall. A paper that is not confirmed free is the one a person is
+    asked to download; FI never fetches it from the publisher itself."""
+    from core.knowledge import is_open_access
+    return is_open_access(doc.metadata)
 
 
 def _is_abstract_only(doc: "RetrievedDoc") -> bool:
