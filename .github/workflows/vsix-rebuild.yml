@@ -84,7 +84,11 @@ jobs:
             git commit -m "chore(vsix): auto-rebuild after extension source change [skip vsix]"
             # main may have advanced (a concurrent non-vsix push) between our
             # checkout and here; rebase our single binary commit on top before
-            # pushing so the push fast-forwards instead of failing.
-            git pull --rebase --autostash origin main
+            # pushing so the push fast-forwards instead of failing. The .vsix
+            # is binary and cannot be merged: when an earlier queued run has
+            # already pushed its own rebuild, keep ours (-X theirs means the
+            # commit being replayed); the last run in the queue is built from
+            # the newest source, so main ends up in lockstep.
+            git pull --rebase -X theirs --autostash origin main
             git push
           fi
