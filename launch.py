@@ -1278,8 +1278,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     review.add_argument(
         "--refine", type=str, default=None, metavar="FEEDBACK",
-        help="With --resume: send your notes back to the writing step first; if a point needs a new experiment, "
-             "FI goes back to the design. e.g. --refine \"tighten the methods section\".",
+        help="With --resume: send your notes back to the writing step first. A number the study lacks is added to "
+             "the existing script (which runs again); a request to arrange the figures differently redraws them from "
+             "the saved data without running the experiment again; only a different study goes back to the design. "
+             "e.g. --refine \"tighten the methods section\".",
     )
     p.add_argument(
         "--vscode-bridge-port",

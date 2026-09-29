@@ -522,7 +522,7 @@ async def test_a_refine_the_text_cannot_answer_redesigns_through_the_real_graph(
         if kind == "Review":
             reviews.append(prompt)
         reply = _fake_response_for(prompt)
-        if kind == "Writing" and "starting the line with NEEDS_EXPERIMENT:" in prompt:
+        if kind == "Writing" and "with NEEDS_EXPERIMENT: only when it is a different study" in prompt:
             reply += "\n\n1. NEEDS_EXPERIMENT: run a permutation test for the p-value\n"
         return reply
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)

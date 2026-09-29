@@ -1090,7 +1090,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # quest back to the design, anything else goes on to the claim check.
     assert "write" in g.branches
     write_branch = next(iter(g.branches["write"].values()))
-    assert write_branch.ends == {"check": "claim_check", "redesign": "design"}
+    assert write_branch.ends == {"check": "claim_check", "redesign": "design", "extend": "implement",
+                                 "replot": "replot_layout"}
     assert ("claim_check", "review") in plain_edges
 
     # Conditional branches: review-revise, execute-reflect-retry,

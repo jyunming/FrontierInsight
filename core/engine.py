@@ -146,6 +146,7 @@ STAGE_PROGRESS: dict[str, str] = {
     "design": "Designing the experiment.",
     "implement_outline": "Writing the code.",
     "implement": "Writing the code.",
+    "replot_layout": "Arranging the figures again.",
     "execute": "Running the experiment.",
     "analyze": "Analyzing the results.",
     "cross_check": "Checking the results against the literature.",
@@ -414,6 +415,10 @@ class QuestState(TypedDict, total=False):
     model_call_counts: dict[str, int]
     feedback_rewrite_for: int
     refine_needs_experiment: list[str]
+    # The points of a refine that only need a number the study lacks (``refine_extend``: the existing script is extended
+    # and run again) or the figures arranged again (``refine_layout``: they are redrawn from the saved data).
+    refine_extend: list[str]
+    refine_layout: list[str]
     refine_scope: str
     # Names of pause-points the engine has already paused at on this
     # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
@@ -1786,6 +1791,8 @@ class Engine:
             "write": {
                 "refine_scope": state.get("refine_scope") or "",
                 "needs_experiment": list(state.get("refine_needs_experiment") or []),
+                "extend": list(state.get("refine_extend") or []),
+                "layout": list(state.get("refine_layout") or []),
             },
         }
         return facts.get(source, {})
@@ -1889,6 +1896,7 @@ class Engine:
         g.add_node("evidence_gate", self._audited("evidence_gate", self._node_evidence_gate))
         g.add_node("write", self._audited("write", self._node_write))
         g.add_node("claim_check", self._audited("claim_check", self._node_claim_check))
+        g.add_node("replot_layout", self._audited("replot_layout", self._node_replot_layout))
         g.add_node("review", self._audited("review", self._node_review))
         g.add_node("human_feedback", self._audited("human_feedback", self._node_human_feedback))
         # no-simulation mode: design → auto_collect_data → wait_for_data
@@ -1991,8 +1999,9 @@ class Engine:
         g.add_conditional_edges(
             "write",
             self._audited_route("write", self._route_after_write),
-            {"check": "claim_check", "redesign": "design"},
+            {"check": "claim_check", "redesign": "design", "extend": "implement", "replot": "replot_layout"},
         )
+        g.add_edge("replot_layout", "claim_check")
         g.add_edge("claim_check", "review")
         g.add_conditional_edges(
             "review",
@@ -2319,8 +2328,14 @@ class Engine:
 
     def _route_after_write(self, state: QuestState) -> str:
         """After a draft: back to the design when the writer, answering a person's refine, named points that need a
-        new or different experiment; on to the claim check and the review otherwise."""
-        return "redesign" if state.get("refine_needs_experiment") else "check"
+        new or different experiment; to the code-writing step (the existing script extended) for a number the study
+        lacks; to a redraw of the figures from the saved data for a layout note; on to the claim check and the review
+        otherwise."""
+        if state.get("refine_needs_experiment"):
+            return "redesign"
+        if state.get("refine_extend"):
+            return "extend"
+        return "replot" if state.get("refine_layout") else "check"
 
     # ---- nodes -----------------------------------------------------------
 
@@ -5550,7 +5565,9 @@ class Engine:
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
             return {**_FRESH_SCRIPT, **kept}
-        outline = state.get("implement_outline") or {}
+        extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
+        # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
+        outline = {} if extend else state.get("implement_outline") or {}
         body_prompt = self._prompts.get("implement_body")
         if outline and outline.get("scaffold") and body_prompt is not None:
             self._log.info(
@@ -5602,6 +5619,11 @@ class Engine:
                 "[implement] the review sent the experiment back over %r", rerun_for,
             )
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
+            if self._split_on(state):
+                prompt += _SPLIT_RERUN_NOTE
+        if extend:
+            self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
+            prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk())
             if self._split_on(state):
                 prompt += _SPLIT_RERUN_NOTE
         text = await self._chat(prompt, node="implement")
@@ -6095,6 +6117,10 @@ class Engine:
         if self.config.engine.protocol_check == "off":
             return None
         return self._protocol_block(state)
+
+    def _submit_on_disk(self) -> str:
+        path = self.quest_root / "code" / _trial_runner.SUBMIT_NAME
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
 
     def _scripts_on_disk(self) -> dict[str, str]:
         out: dict[str, str] = {}
@@ -7855,6 +7881,69 @@ class Engine:
             patch["result_json_deterministic"] = False
         return patch
 
+    async def _node_replot_layout(self, state: QuestState) -> QuestState:
+        """A person's refine that only asks for the figures to be arranged or drawn differently: the named figures are
+        drawn again from the numbers the run saved, and the experiment is not run again. A figure the script does not
+        write is left as it was, and so is every figure when the script fails."""
+        notes = [str(p).strip() for p in state.get("refine_layout") or [] if str(p).strip()]
+        done: QuestState = {"refine_layout": []}
+        fig_dir = self.quest_root / "figures"
+        figures = sorted(f.name for f in fig_dir.iterdir() if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES) \
+            if fig_dir.is_dir() else []
+        data = sorted(
+            str(f.relative_to(self.quest_root)).replace("\\", "/")
+            for root in (self.quest_root / "data" / "results", self.quest_root / "data")
+            if root.is_dir() for f in root.rglob("*")
+            if f.is_file() and f.suffix.lower() in self._RUN_DATA_SUFFIXES and "auto_collected" not in f.parts
+            and "literature" not in f.parts
+        )
+        data = list(dict.fromkeys(data))[:80]
+        if not notes or not figures or not data:
+            self._log.warning(
+                "[replot_layout] nothing to redraw from (%s); the figures stay as they are",
+                "no layout note" if not notes else "no figure" if not figures else "no saved numbers",
+            )
+            return done
+        experiment = self.quest_root / "code" / "experiment.py"
+        prompt = self._prompts["replot_layout"].substitute(
+            notes_block="\n".join(f"- {n}" for n in notes),
+            figures_block="\n".join(f"- {f}" for f in figures),
+            data_block="\n".join(f"- {d}" for d in data),
+            experiment_code=experiment.read_text(encoding="utf-8")[:12000] if experiment.is_file() else "(not saved)",
+        )
+        code, _deps = _parse_implement_response(await self._chat(prompt, node="replot_layout"))
+        if not code.strip():
+            self._log.warning("[replot_layout] no script came back; the figures stay as they are")
+            return done
+        script = self.quest_root / "code" / "replot_layout.py"
+        script.write_text(code.rstrip() + "\n", encoding="utf-8")
+        backup = self.fi_dir / "figures_before_layout"
+        shutil.rmtree(backup, ignore_errors=True)
+        shutil.copytree(fig_dir, backup)
+        env: dict[str, str] | None = None
+        try:
+            from .plot_style import write_boot
+
+            env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+                p for p in (str(write_boot(self.fi_dir, self.config.output.paper_style)), os.environ.get("PYTHONPATH", "")) if p)}
+        except Exception as exc:  # styling must never stop a redraw
+            self._log.warning("[replot_layout] plot-style bootstrap skipped: %s", exc)
+        result = await self.executor.execute(
+            [str(self.executor.python_path(self.quest_root)), str(script)],
+            cwd=self.quest_root, timeout_s=min(self.config.execution.timeout_s, 300), env=env,
+        )
+        drawn = [ln.split(":", 1)[1].strip() for ln in (result.stdout or "").splitlines() if ln.startswith("REPLOTTED:")]
+        if result.returncode != 0:
+            self._log.warning("[replot_layout] the redraw failed (rc=%d), the figures are as they were: %s",
+                              result.returncode, (result.stderr or "")[-300:])
+            shutil.rmtree(fig_dir, ignore_errors=True)
+            shutil.copytree(backup, fig_dir)
+        else:
+            self._log.info("[replot_layout] redrew %d figure(s) from the saved numbers, the experiment was not run again: %s",
+                           len(drawn), ", ".join(drawn) or "-")
+        shutil.rmtree(backup, ignore_errors=True)
+        return done
+
     async def _replot_replicate_figures(
         self, figures: list[str], records_dir: Path, seeds: list[int], *,
         python: Any, env: dict[str, str] | None, assertions: list[Any],
@@ -9369,14 +9458,23 @@ class Engine:
         if markdown is None:
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
         needs_experiment: list[str] = []
+        extend: list[str] = []
+        layout: list[str] = []
         if refine_round:
-            markdown, needs_experiment = _take_needs_experiment(markdown)
-            self._log.info(
-                "[write] answered the person's notes%s",
-                (": %d point(s) need a new experiment, so the quest goes back to the design (%s)"
-                 % (len(needs_experiment), "; ".join(p[:80] for p in needs_experiment)))
-                if needs_experiment else " in the text; the experiment stands",
-            )
+            markdown, points = _take_refine_points(markdown)
+            needs_experiment, extend, layout = points["experiment"], points["data"], points["layout"]
+            if needs_experiment:
+                what = ": %d point(s) need a new experiment, so the quest goes back to the design (%s)" % (
+                    len(needs_experiment), "; ".join(p[:80] for p in needs_experiment))
+            elif extend:
+                what = ": %d number(s) are missing, so the existing script is extended and run again (%s)" % (
+                    len(extend), "; ".join(p[:80] for p in extend))
+            elif layout:
+                what = ": the figures are arranged again from the saved data, the experiment is not run again (%s)" % (
+                    "; ".join(p[:80] for p in layout))
+            else:
+                what = " in the text; the experiment stands"
+            self._log.info("[write] answered the person's notes%s", what)
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -9437,10 +9535,15 @@ class Engine:
             "paper_md": str(paper_path), "literature": literature,
             "paper_basis": _paper_basis(state),
             "refine_needs_experiment": needs_experiment,
+            "refine_extend": extend if not needs_experiment else [],
+            # A layout note waits through an extended run (its figures are drawn again after the paper is written).
+            "refine_layout": (layout if not needs_experiment else []) if refine_round
+            else list(state.get("refine_layout") or []),
         }
         if refine_round:
             out["refine_written_for"] = _refine_count(state)
-            out["refine_scope"] = "experiment" if needs_experiment else "paper"
+            out["refine_scope"] = ("experiment" if needs_experiment else "data" if extend
+                                   else "layout" if layout else "paper")
         else:
             out["refine_scope"] = ""
             if any(_hit_name(h) == _UNANSWERED_NOTE_HIT for h in (state.get("review") or {}).get("must_flag_hits") or []):
@@ -13479,6 +13582,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "write", "review",
         "write_patch",      # a revise for flagged passages: edits, not a new paper
         "write_trim",       # a draft a little over its page limit: sentences to take out
+        "replot_layout",    # a refine that only asks for the figures arranged again: redraw from saved data
         "review_moderate",  # review-panel moderator prompt
         "data_load",        # no-simulation mode — synthesize result_json
                             # from user-supplied data
@@ -16945,6 +17049,27 @@ def _rerun_directive(review: dict[str, Any], named: str) -> str:
     ])
 
 
+def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = "") -> str:
+    """What the implement prompt is told when a person's refine asked for a number the study lacks: the scripts that
+    exist are the base, and only what the number needs is changed."""
+    shown = "\n\n".join(f"### code/{name}\n```python\n{code}\n```" for name, code in scripts.items())
+    if submit.strip():
+        shown += f"\n\n### code/{_trial_runner.SUBMIT_NAME}\n```python\n{submit}\n```"
+    return "\n".join([
+        "",
+        "## Extend the scripts that exist",
+        "This study was already run and written up. A person read it and asked for a number it lacks. Do not write a new "
+        "experiment: start from the script(s) below and change as little as you can so that they also produce what is "
+        "asked. Keep the protocol, the design, every setting, the seeds, the RESULT_JSON keys that exist and every figure "
+        "that exists exactly as they are (same file names, same content); only add the measurement, the setting or the "
+        "figure the ask needs, and report it in RESULT_JSON. Return the whole script(s), in the reply format above.",
+        "What the person asked for:",
+        *(f"  - {p}" for p in points),
+        "",
+        shown or "(no script was saved: write it from the design)",
+    ])
+
+
 def _review_items(value: Any) -> list[str]:
     """A review field as its non-empty strings: the model may give a list, one
     string, or nothing."""
@@ -16970,10 +17095,24 @@ def _paper_basis(state: QuestState) -> str:
     return hashlib.sha256(json.dumps(basis, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
-# A line of the writer's reply naming a point that needs an experiment: bare, quoted, bulleted, numbered (``1.`` /
+# A line of the writer's reply naming a point that needs more than text: bare, quoted, bulleted, numbered (``1.`` /
 # ``1)``), bold or in backticks.
-_NEEDS_EXPERIMENT_RE = re.compile(
-    r"^[ \t>*_`-]*(?:\d+[.)][ \t]*)?[*_`]*NEEDS_EXPERIMENT[*_`]*:[*_`]*[ \t]*(.+?)[ \t*_`]*$", re.MULTILINE)
+_REFINE_POINT_RE = re.compile(
+    r"^[ \t>*_`-]*(?:\d+[.)][ \t]*)?[*_`]*NEEDS_(EXPERIMENT|DATA|LAYOUT)[*_`]*:[*_`]*[ \t]*(.+?)[ \t*_`]*$", re.MULTILINE)
+
+
+def _take_refine_points(markdown: str) -> tuple[str, dict[str, list[str]]]:
+    """The paper without its ``NEEDS_EXPERIMENT:`` / ``NEEDS_DATA:`` / ``NEEDS_LAYOUT:`` lines, and the points they
+    name, by kind (``experiment``, ``data``, ``layout``)."""
+    points: dict[str, list[str]] = {"experiment": [], "data": [], "layout": []}
+    for m in _REFINE_POINT_RE.finditer(markdown):
+        if m.group(2).strip():
+            points[m.group(1).lower()].append(m.group(2).strip())
+    if not any(points.values()):
+        return markdown, points
+    cleaned = _REFINE_POINT_RE.sub("", markdown)
+    cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", cleaned).strip())
+    return cleaned.rstrip() + "\n", points
 
 
 def _refine_round(state: QuestState) -> bool:
@@ -16986,17 +17125,6 @@ def _refine_round(state: QuestState) -> bool:
 def _refine_count(state: QuestState) -> int:
     """How many refines the person has sent (each is a round of ``feedback_history``)."""
     return sum(1 for h in state.get("feedback_history") or [] if isinstance(h, dict) and str(h.get("text") or "").strip())
-
-
-def _take_needs_experiment(markdown: str) -> tuple[str, list[str]]:
-    """The paper without its ``NEEDS_EXPERIMENT:`` lines, and the points they name."""
-    points = [m.group(1).strip() for m in _NEEDS_EXPERIMENT_RE.finditer(markdown) if m.group(1).strip()]
-    if not points:
-        return markdown, []
-    cleaned = _NEEDS_EXPERIMENT_RE.sub("", markdown)
-    # A fenced reply followed by the points: with the points gone, the fence is the outer one again.
-    cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", cleaned).strip())
-    return cleaned.rstrip() + "\n", points
 
 
 def _user_feedback_review_block(state: QuestState) -> str:
@@ -17068,10 +17196,14 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
         ]
     if refine_round and rounds:
         lines += [
-            "Answer the user's feedback in the text wherever the text can answer it. If a point can only be answered "
-            "by running a new or different experiment, do not write numbers for it: end your reply with one line per "
-            "such point, starting the line with NEEDS_EXPERIMENT: followed by the point in one sentence (FI removes "
-            "these lines and goes back to the design). Write no such line when the text can answer every point.",
+            "Answer the user's feedback in the text wherever the text can answer it. A point the text cannot answer "
+            "gets one line at the end of your reply (FI removes these lines), and you write no numbers for it. Start the "
+            "line with NEEDS_DATA: when the study only lacks a number or a result (the same study run with one more "
+            "value, one more measure; FI extends the existing script and runs it again); with NEEDS_LAYOUT: when the "
+            "results are there and only the figures should be arranged, resized or redrawn differently (FI redraws them "
+            "from the saved data and does not run the experiment again); with NEEDS_EXPERIMENT: only when it is a "
+            "different study (FI goes back to the design). Follow each with the point in one sentence. Write no such "
+            "line when the text can answer every point.",
         ]
     return "\n".join(lines) or "(none — first draft)"
 
