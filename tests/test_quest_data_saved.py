@@ -59,3 +59,68 @@ def test_a_two_script_quest_stays_two_scripts_when_a_redesign_reads_less_stochas
     assert engine._split_on(plain) is False
     (engine.quest_root / "code" / "simulate.py").write_text("print('sim')\n", encoding="utf-8")
     assert engine._split_on(plain) is True
+
+
+def test_save_run_data_replaces_raw_skips_secrets_and_big_files(tmp_path: Path, monkeypatch) -> None:
+    import time
+
+    cfg = _config(tmp_path)
+    cfg.execution.split_analysis = True
+    engine = Engine(cfg)
+    root = engine.quest_root
+    root.mkdir(parents=True, exist_ok=True)
+    since = time.time()
+    (root / "results.csv").write_text("x\n1\n", encoding="utf-8")
+    (root / "requirements.txt").write_text("numpy\n", encoding="utf-8")
+    (root / "api_token.json").write_text("{}", encoding="utf-8")
+    (root / "big.npy").write_bytes(b"0" * 2048)
+    monkeypatch.setattr(Engine, "_RUN_DATA_MAX_BYTES", 1024)
+    raw = root / "raw"
+    (raw / "seed0").mkdir(parents=True)
+    (raw / "seed0" / "a.csv").write_text("a\n", encoding="utf-8")
+    stale = root / "data" / "results" / "raw" / "old_seed"
+    stale.mkdir(parents=True)
+    (stale / "z.csv").write_text("z\n", encoding="utf-8")
+    saved = engine._save_run_data(since, True)
+    out = root / "data" / "results"
+    assert (out / "results.csv").is_file() and (out / "raw" / "seed0" / "a.csv").is_file()
+    assert not (out / "requirements.txt").exists() and not (out / "api_token.json").exists()
+    assert not (out / "big.npy").exists()
+    assert not (out / "raw" / "old_seed").exists(), "the raw copy is a snapshot of the last run"
+    assert "raw/" in saved
+    (raw / "seed1").mkdir()
+    (raw / "seed1" / "b.csv").write_text("b\n", encoding="utf-8")
+    engine._save_run_data(since, True, root_files=False)
+    assert (out / "raw" / "seed1" / "b.csv").is_file()
+
+
+def test_data_results_is_not_part_of_the_data_a_quest_was_given(tmp_path: Path) -> None:
+    from core.attempt_records import _folder_manifest
+
+    data = tmp_path / "data"
+    (data / "results").mkdir(parents=True)
+    (data / "given.csv").write_text("a\n", encoding="utf-8")
+    before = _folder_manifest(data)
+    (data / "results" / "out.csv").write_text("b\n", encoding="utf-8")
+    assert _folder_manifest(data) == before
+
+
+@pytest.mark.asyncio
+async def test_a_one_script_reply_removes_the_stale_simulation(tmp_path: Path, monkeypatch) -> None:
+    """A quest that has ``simulate.py`` asks for two scripts; when the reply holds one (``split_failure`` is not
+    ``block``) the old simulation must not stay to run beside the new experiment."""
+    async def fake_chat(prompt, **kw):  # noqa: ANN001
+        return "```python\nprint('RESULT_JSON: {}')\n```"
+
+    cfg = _config(tmp_path)
+    cfg.execution.split_failure = "warn"
+    engine = Engine(cfg)
+    monkeypatch.setattr(engine, "_chat", fake_chat)
+    code_dir = engine.quest_root / "code"
+    code_dir.mkdir(parents=True, exist_ok=True)
+    (code_dir / "simulate.py").write_text("print('old sim')\n", encoding="utf-8")
+    state = {"topic": "t", "design": {"hypothesis": "h", "method": "m", "protocol": {}}, "iteration": 1}
+    await engine._node_implement(state)
+    assert not (code_dir / "simulate.py").exists()
+    assert (code_dir / "experiment.py").is_file()
+    assert engine._split_on(state) is False

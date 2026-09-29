@@ -5681,8 +5681,12 @@ class Engine:
                 self._log.info("[implement] wrote %s (%d bytes)", simulate_path, len(simulate_code))
             else:
                 self._log.info("[implement] %s is unchanged; its raw files stay in use", simulate_path.name)
-        elif simulate_path.is_file() and not self._split_on(state):
-            simulate_path.unlink()  # no leftover simulation from an earlier pass beside a one-script quest
+        elif simulate_path.is_file():
+            # This pass wrote ONE script: a simulation left from an earlier pass would run beside it and mix two
+            # iterations. Under ``auto`` a quest with a simulation asks for two scripts every time (``_split_on``), so
+            # this is reached only when the reply held one script, or when ``split_analysis`` is false.
+            simulate_path.unlink()
+            self._log.warning("[implement] removed the earlier %s: this pass wrote one script", simulate_path.name)
         submit_path = self.quest_root / "code" / _trial_runner.SUBMIT_NAME
         if submit_code.strip():
             submit_path.write_text(submit_code, encoding="utf-8")
@@ -7394,7 +7398,8 @@ class Engine:
                 timeout_s=self.config.execution.timeout_s,
                 env=primary_env,
             )
-        self._save_run_data(run_started, split)
+        if result.returncode == 0:
+            await asyncio.to_thread(self._save_run_data, run_started, split)
         # Which of the two scripts failed, for the repair; read now, before a replicate
         # runs through the same runner.
         failed_script = runner.failed_script if split else None
@@ -7693,6 +7698,8 @@ class Engine:
                 "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
                 if unseeded_rng else "it never reads FI_REPLICATE_SEED",
             )
+        if replicates_ran and split and result.returncode == 0:
+            await asyncio.to_thread(self._save_run_data, run_started, split, root_files=False)
         replotted: dict[str, int] = {}
         # A figure drawn as "the mean of the seeds" over replicates that are one
         # run repeated would be a mean of one number, captioned as several.
@@ -8298,7 +8305,7 @@ class Engine:
         from .summarizer import _classify_extension, _read_text
         data_dir = self.quest_root / "data"
         if data_dir.is_dir():
-            _skip_top = {"literature", "auto_collected"}
+            _skip_top = {"literature", "auto_collected", "results"}
             # Collect matching files lazily and STOP after limit*2 — don't
             # materialize + sort the whole data/ tree (could be large). Sort
             # only the small collected set for deterministic prompt order,
@@ -12785,30 +12792,43 @@ class Engine:
         ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",
     })
     _RUN_DATA_MAX_BYTES = 200 * 1024 * 1024
+    _RUN_DATA_SKIP = ("requirements", "constraints", "credential", "secret", "token", "apikey", "api_key", "password")
 
-    def _save_run_data(self, since: float, split: bool) -> list[str]:
-        """Copy what the experiment produced into ``data/results/``, so the numbers behind a paper are in ``data/`` too.
+    def _save_run_data(self, since: float, split: bool, root_files: bool = True) -> list[str]:
+        """Copy what a successful run produced into ``data/results/``, so the numbers behind a paper are in ``data/`` too.
 
         The scripts run from the quest folder, so a table a script writes lands beside ``plan.md``; a two-script quest's
         raw files are in ``raw/``. Both are copied (the originals stay where the scripts and FI's records expect them),
-        raw files only while they are small enough not to double a large quest's disk use. Never raises."""
+        each file and the raw folder only while small enough not to double a large quest's disk use. The raw copy is
+        replaced, not merged, so it never keeps a file an earlier run wrote. ``root_files=False`` refreshes only the raw
+        copy (after the replicate seeds ran, which add raw files but overwrite the root tables). Never raises."""
         saved: list[str] = []
         dest = self.quest_root / "data" / "results"
         try:
-            for path in sorted(self.quest_root.iterdir()):
+            for path in sorted(self.quest_root.iterdir() if root_files else []):
+                lowered = path.name.lower()
                 if (
                     path.is_file() and path.suffix.lower() in self._RUN_DATA_SUFFIXES
-                    and path.stat().st_mtime >= since - 1
+                    and not any(word in lowered for word in self._RUN_DATA_SKIP)
+                    and path.stat().st_mtime >= since - 2
+                    and path.stat().st_size <= self._RUN_DATA_MAX_BYTES
                 ):
                     dest.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(path, dest / path.name)
                     saved.append(path.name)
             if split:
                 raw = _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
-                if raw.is_dir():
-                    files = [p for p in raw.rglob("*") if p.is_file()]
-                    if sum(p.stat().st_size for p in files) <= self._RUN_DATA_MAX_BYTES:
-                        shutil.copytree(raw, dest / "raw", dirs_exist_ok=True)
+                target = dest / "raw"
+                if raw.is_dir() and not raw.resolve().is_relative_to(dest.resolve()):
+                    total = 0
+                    for p in raw.rglob("*"):
+                        if p.is_file():
+                            total += p.stat().st_size
+                            if total > self._RUN_DATA_MAX_BYTES:
+                                break
+                    if total <= self._RUN_DATA_MAX_BYTES:
+                        shutil.rmtree(target, ignore_errors=True)
+                        shutil.copytree(raw, target)
                         saved.append("raw/")
                     else:
                         self._log.info("[execute] the raw files in %s are large; they stay there and are not copied to data/results/", raw)
@@ -12821,9 +12841,10 @@ class Engine:
     def _split_on(self, state: QuestState) -> bool:
         """Whether this quest keeps its simulation and its analysis in two scripts (``execution.split_analysis``).
 
-        ``true`` and ``false`` decide for every quest. ``auto`` decides from the design, so it is the same on every
-        call and after a resume: on for a stochastic study (:func:`core.split_run.design_is_stochastic`), off for a
-        background job, a study with no experiment and a run that only analyses data."""
+        ``true`` and ``false`` decide for every quest. ``auto`` decides from the design: on for a stochastic study
+        (:func:`core.split_run.design_is_stochastic`), off for a study with no experiment and a run that only
+        analyses data. Once a quest has its ``simulate.py`` it stays two-script under ``auto`` (a later redesign that
+        reads less stochastic must not delete the simulation); ``split_analysis: false`` is the way back to one script."""
         mode = self.config.execution.split_analysis
         if mode != "auto":
             return bool(mode)

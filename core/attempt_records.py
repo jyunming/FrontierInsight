@@ -193,7 +193,11 @@ def _folder_manifest(folder: Path, limit: int = _INPUT_FILES_LIMIT, cache: dict 
     aggregate hash, not a per-file list: it says whether the inputs differ, not which one."""
     if not folder.is_dir():
         return None
-    files = sorted(p for p in folder.rglob("*") if p.is_file() and "__pycache__" not in p.parts)
+    files = sorted(
+        p for p in folder.rglob("*")
+        if p.is_file() and "__pycache__" not in p.parts
+        and not (folder.name == "data" and p.relative_to(folder).parts[:1] == ("results",))
+    )
     h = hashlib.sha256()
     total, complete = 0, len(files) <= limit
     for n, path in enumerate(files):
