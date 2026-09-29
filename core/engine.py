@@ -3382,6 +3382,7 @@ class Engine:
                 )
                 # The query that found sources is the one later searches reuse, not the one that found none.
                 query, derived = tried_queries[-1], True
+        self._record_floor_verdicts(docs, filtered, stats, this_iter)
         docs = filtered
         # The original papers and textbooks a keyword search does not reach
         # join the candidates, and the screen judges them like the rest.
@@ -3389,7 +3390,7 @@ class Engine:
         # The floor scores word overlap; the screen asks whether the paper
         # could cite each source for a claim (see _screen_literature).
         n_before_screen = len(docs)
-        docs = await self._screen_literature(rel_topic, docs, work_scope=scope)
+        docs = await self._screen_literature(rel_topic, docs, work_scope=scope, iteration=this_iter)
         self._log.info(
             "[literature] kept %d of %d after the relevance floor and the screen",
             len(docs), n_before_screen,
@@ -5004,8 +5005,47 @@ class Engine:
             )
         return kept
 
+    def _record_source_verdicts(
+        self, stage: str, iteration: int | None, outcome: str, rows: list[dict[str, Any]], *,
+        threshold: float | int | None = None, minimum: int | None = None, call_id: str | None = None,
+    ) -> None:
+        """Keep how the retrieved sources were judged in ``.fi/literature_queries.json`` beside the queries that found
+        them: one entry per pass and stage (``floor``, ``screen``) with each source's score or grade, whether it was
+        kept and why. Best-effort: a record never stops a quest."""
+        if not self.config.knowledge.enabled:
+            return
+        try:
+            _record_query_set(self.fi_dir, {
+                "stage": stage, "iteration": iteration, "outcome": outcome, "threshold": threshold,
+                "minimum": minimum, "call_id": call_id, "sources": rows,
+            }, log=self._log)
+        except Exception as e:  # noqa: BLE001
+            self._log.debug("[literature] could not record the %s verdicts: %r", stage, e)
+
+    def _record_floor_verdicts(self, docs: list, kept: list, stats: dict, iteration: int | None) -> None:
+        """The on-topic score of every retrieved source and whether it cleared the floor."""
+        if not docs:
+            return
+        scores = stats.get("scores")
+        if not stats.get("scored") or not scores or len(scores) != len(docs):
+            self._record_source_verdicts(
+                "floor", iteration, "not_scored" if self.config.knowledge.relevance_min_score > 0 else "off", [])
+            return
+        threshold, minimum = stats["threshold"], stats["minimum"]
+        kept_ids = {id(d) for d in kept}
+        rows = []
+        for d, sc in zip(docs, scores):
+            cleared = sc >= threshold
+            if id(d) in kept_ids:
+                why = (f"score {sc:.2f}, at or above {threshold:.2f}" if cleared
+                       else f"score {sc:.2f} is below {threshold:.2f}; kept to reach the minimum of {minimum} sources")
+            else:
+                why = f"score {sc:.2f} is below {threshold:.2f}"
+            rows.append({**_source_ref(d), "score": round(sc, 4), "kept": id(d) in kept_ids, "why": why})
+        self._record_source_verdicts("floor", iteration, "scored", rows, threshold=threshold, minimum=minimum)
+
     async def _screen_literature(
-        self, topic: str, docs: list, *, work_scope: str = WORK_SCOPE_PAPERS,
+        self, topic: str, docs: list, *, work_scope: str = WORK_SCOPE_PAPERS, iteration: int | None = None,
     ) -> list:
         """Grade every retrieved source 0-3 in one batched call and keep the
         citable ones (rubric in ``agents/literature_screen.md``).
@@ -5020,7 +5060,8 @@ class Engine:
         so a thin retrieval is not emptied (the evidence gate can broaden).
         Fail-open: when the screen is off, the call fails or the reply cannot
         be read, every source is kept, and so is any source left ungraded.
-        Graded sources carry ``screen_grade``.
+        Graded sources carry ``screen_grade``. Every source's grade and the reason it was kept or dropped go to
+        ``.fi/literature_queries.json`` (:meth:`_record_source_verdicts`).
         """
         kn = self.config.knowledge
         # Papers the user supplied are theirs to judge: never shown, never dropped.
@@ -5028,8 +5069,21 @@ class Engine:
             i for i, d in enumerate(docs)
             if (d.metadata or {}).get("source") in ("local_paper", "user_supplied")
         }
-        if not kn.literature_screen or len(own) == len(docs):
+        if not docs:
             return docs
+
+        def _kept_all(outcome: str, why: str, call_id: str | None = None) -> list:
+            self._record_source_verdicts(
+                "screen", iteration, outcome,
+                [{**_source_ref(d), "grade": None, "kept": True,
+                  "why": "your own paper: never screened" if i in own else why} for i, d in enumerate(docs)],
+                call_id=call_id)
+            return docs
+
+        if not kn.literature_screen:
+            return _kept_all("off", "the screen is off (knowledge.literature_screen), so every source is kept")
+        if len(own) == len(docs):
+            return _kept_all("own_only", "your own paper: never screened")
         lines: list[str] = []
         for i, d in enumerate(docs):
             if i in own:
@@ -5061,16 +5115,19 @@ class Engine:
         prompt = self._prompts["literature_screen"].substitute(
             topic=topic[:1200], kind_guidance=guidance, candidates="\n".join(lines),
         )
+        self.__dict__.setdefault("_last_call_id", {}).pop("literature_screen", None)
         try:
             raw = await self._chat(prompt, node="literature_screen")
             parsed = _parse_json_lenient(raw, node="literature_screen")
         except Exception as e:  # noqa: BLE001 — the screen must never cost the corpus
             self._log.info("[literature] screen failed (%r); keeping all %d sources", e, len(docs))
-            return docs
+            return _kept_all("failed", "the screen call failed, so every source is kept",
+                             self.__dict__.get("_last_call_id", {}).get("literature_screen"))
+        call_id = self.__dict__.get("_last_call_id", {}).get("literature_screen")
         grades = _screen_grades(parsed, len(docs))
-        if grades is None:
+        if not grades:
             self._log.info("[literature] screen reply unreadable; keeping all %d sources", len(docs))
-            return docs
+            return _kept_all("unreadable", "the screen's answer could not be read, so every source is kept", call_id)
         # A grade the model gave a user-supplied paper anyway does not count.
         grades = {i: g for i, g in grades.items() if i not in own}
         keep = [
@@ -5084,6 +5141,22 @@ class Engine:
             rest = sorted((i for i in range(len(docs)) if i not in keep),
                           key=lambda i: -grades.get(i, 0))
             keep = sorted(keep + rest[:minimum - len(keep)])
+        kept_set = set(keep)
+        rows = []
+        for i, d in enumerate(docs):
+            need = 1 if (d.metadata or {}).get("source") == "web_search" else 2
+            if i in own:
+                why = "your own paper: never screened"
+            elif i not in grades:
+                why = "the screen gave it no grade, so it is kept"
+            elif grades[i] >= need:
+                why = f"graded {grades[i]}; {need} or higher is kept"
+            elif i in kept_set:
+                why = f"graded {grades[i]}, below {need}; kept to reach the minimum of {minimum} sources"
+            else:
+                why = f"graded {grades[i]}; needs {need} or higher"
+            rows.append({**_source_ref(d), "grade": grades.get(i), "kept": i in kept_set, "why": why})
+        self._record_source_verdicts("screen", iteration, "graded", rows, minimum=minimum, call_id=call_id)
         out = []
         for i in keep:
             md = dict(docs[i].metadata or {})
@@ -5324,6 +5397,9 @@ class Engine:
             stats["scored"] = True
             stats["above_floor"] = len(keep_idx)
             stats["best"] = max(scores) if scores else 0.0
+            stats["scores"] = [float(s) for s in scores]
+            stats["threshold"] = min_score
+            stats["minimum"] = min_keep
         keep_idx.update(order[:max(0, min_keep)])  # never-starve retention
         kept = [d for i, d in enumerate(docs) if i in keep_idx]
         dropped = len(docs) - len(kept)
@@ -19527,9 +19603,16 @@ _QUERY_SET_HASHED = ("stage", "key", "iteration", "queries", "prompt_sha256", "m
 _PERSON_QUERIES = Path("inputs") / "search_queries.txt"
 
 
+#: Extra fields the entries that record how the retrieved sources were judged (``stage`` ``floor`` and ``screen``)
+#: carry; covered by the digest only when present, so the digest of an entry written without them is unchanged.
+_SOURCE_VERDICT_HASHED = ("outcome", "threshold", "minimum", "sources")
+
+
 def _query_set_digest(entry: dict[str, Any]) -> str:
-    """The SHA-256 over an entry's hashed fields (:data:`_QUERY_SET_HASHED`)."""
+    """The SHA-256 over an entry's hashed fields (:data:`_QUERY_SET_HASHED`, and for a source-judgement entry
+    :data:`_SOURCE_VERDICT_HASHED`)."""
     hashed = {k: entry.get(k) for k in _QUERY_SET_HASHED}
+    hashed.update({k: entry[k] for k in _SOURCE_VERDICT_HASHED if k in entry})
     return hashlib.sha256(json.dumps(hashed, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
@@ -19635,6 +19718,12 @@ def _write_query_sets(fi_dir: Path, entries: list[dict[str, Any]]) -> None:
 
 _PAPERS_ASKED = "papers_asked.json"
 _PAPERS_DECLINED = "papers_declined.json"
+
+
+def _source_ref(doc: Any) -> dict[str, str]:
+    """A retrieved source as the verdict records name it: its identity (:func:`_paper_key`) and its title."""
+    md = getattr(doc, "metadata", None) or {}
+    return {"source": _paper_key(doc), "title": " ".join(str(md.get("title") or md.get("url") or "").split())[:200]}
 
 
 def _paper_key(doc: "RetrievedDoc") -> str:
