@@ -17,8 +17,9 @@ from tests.test_engine_smoke import _FAKE_EXPERIMENT_CODE, _classify, _fake_resp
 def test_step_names_are_plain_and_the_node_names_work_too() -> None:
     assert rerun_from.resolve("writing") == "writing" and rerun_from.resolve("write") == "writing"
     assert rerun_from.resolve("Code") == "code" and rerun_from.resolve("execute") == "run"
-    assert rerun_from.resolve("design") is None and rerun_from.resolve("") is None
-    assert rerun_from.choices() == "skills, code, run, analysis, writing, review"
+    assert rerun_from.resolve("design") == "design" and rerun_from.resolve("") is None
+    assert rerun_from.resolve("clarify") is None and rerun_from.resolve("human_feedback") is None
+    assert rerun_from.choices() == "ideas, literature, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
 
 
 def test_the_backup_takes_what_the_step_and_later_ones_made_and_leaves_its_inputs(tmp_path: Path) -> None:
@@ -94,8 +95,10 @@ async def test_a_step_the_quest_never_reached_changes_nothing(tmp_path: Path, mo
     monkeypatch.setitem(rerun_from.STEPS, "run", ("data_load",))
     second = Engine(cfg, resume_quest_id=first.quest_id)
     # The list of steps to run again from, in the CLI and the web, is the quest's own history: no data_load in it.
-    reached = await second.rerun_steps()
+    offered = await second.rerun_steps()
+    reached = [s["name"] for s in offered if s["reached"]]
     assert "run" not in reached and {"code", "analysis", "writing"} <= set(reached)
+    assert [s["name"] for s in offered] == list(rerun_from.STEPS) and not {s["name"]: s for s in offered}["run"]["reached"]
     import yaml
     from fastapi.testclient import TestClient
 
@@ -115,6 +118,7 @@ _ = (_FAKE_EXPERIMENT_CODE, Any)
 class _Snap:
     def __init__(self, nxt: tuple[str, ...], n: int) -> None:
         self.next, self.config = nxt, {"configurable": {"checkpoint_id": str(n)}}
+        self.parent_config = {"configurable": {"checkpoint_id": str(n - 1)}} if n else None
 
 
 class _Graph:
@@ -176,11 +180,11 @@ async def test_the_steps_offered_are_the_ones_the_quest_reached() -> None:
     graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("execute_reflect",),
                     ("execute",), ("analyze",)])
     steps = await rerun_from.reached(graph, {})
-    assert steps == ["skills", "code", "run", "analysis"]
+    assert steps == ["design", "skills", "code", "run", "analysis"]
     text = rerun_from.listing("q-1", steps)
     assert "q-1 can be run again from:" in text and "--resume q-1 --from <step>" in text
     assert all(rerun_from.REDOES[step] in text for step in steps) and "writing" not in text
-    assert "has not reached the skills or code step" in rerun_from.listing("q-1", [])
+    assert "--approve-as <you>" in text and "not reached a step" in rerun_from.listing("q-1", [])
 
 
 def test_from_with_no_step_asks_for_the_list() -> None:

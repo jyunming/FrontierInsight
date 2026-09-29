@@ -16,7 +16,7 @@ commands:
 | `@fi /fleet <yaml> <yaml> ...` | Runs multiple quests in parallel. Each YAML's `provider.node_models` is honored independently. | ~23–28 × N quests |
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
-| `@fi /resume <quest_id> --from <step>` | Does the quest again from `skills`, `code`, `run`, `analysis`, `writing` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. With no step, lists the steps that quest reached. | the calls of that step and the ones after it |
+| `@fi /resume <quest_id> --from <step>` | Does the quest again from `ideas`, `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. With no step, lists the steps that quest reached. | the calls of that step and the ones after it |
 | `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the design) beside the chat to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
@@ -134,7 +134,7 @@ fi --serve                                               # the web UI watches ./
 
 ### Doing a step again
 
-`--resume <quest_id> --from <step>` does a quest again from one of its steps and keeps everything decided before it. What that step and the later ones made is moved to `.fi/previous/<time>/` first, so the old and the new outputs can be compared. `--from` with no step lists the steps that quest reached, which are the only ones it can be done again from; the web quest page's menu beside **Resume** shows the same list, and so does `@fi /resume <quest_id> --from` in VSCode.
+`--resume <quest_id> --from <step>` does a quest again from one of its steps and keeps everything decided before it. What that step and the later ones made is moved to `.fi/previous/<time>/` first, so the old and the new outputs can be compared. `--from` with no step lists the steps that quest reached, which are the only ones it can be done again from, each with one sentence saying what redoing it does; the raw graph names (`ideate`, `cross_check`, `evidence_gate`, `claim_check`, `web_plots`, ...) work as step names too. `figures` exists only for a quest with no simulation. Some parts of the pipeline are not steps: the first question round (`clarify`; that is a new quest), the pauses, the repair of a crashed script (part of `run`) and the human review decision. Beyond this, the web quest page's menu beside **Resume** shows the same list, and so does `@fi /resume <quest_id> --from` in VSCode.
 
 | Step | What doing it again does |
 |---|---|
@@ -144,6 +144,8 @@ fi --serve                                               # the web UI watches ./
 | `analysis` | analyses the same results again, then writes and reviews |
 | `writing` | writes the paper again from the same analysis, then reviews it |
 | `review` | reviews the same paper again (and makes the slides and poster from it again) |
+
+**Changing the ideas, the literature, the plan or the design.** `--from ideas`, `literature`, `plan` or `design` go back to before the experiment was designed, so they replace the plan and the frozen protocol; the old ones are kept in `.fi/previous/<time>/`. FI asks for your name first: add `--approve-as <you>` (without it nothing is changed and the message says so). The name and the replaced protocol's fingerprint go into the audit trail, and the earlier designs stay in `needs/DESIGN_HISTORY.json`, with the new one added after them as a change made after the protocol was frozen. `--from skills` and every step after the design leave the protocol alone and need no name.
 
 **Changing the skills.** Edit the quest's YAML (`engine.skills_exclude`, `engine.skills`, `engine.skills_required`) and run `fi --config quest.yaml --resume <quest_id> --from skills`. From the command line it uses the YAML you pass, not the copy saved in the quest folder. The web page's **Redo from the skills** uses the copy saved in the quest folder, so edit `engine.skills_exclude` (or the other two keys) in `<quest folder>/config.yaml` first, or the pick will not change. A skill the new pick no longer carries is named in the console with the reason (excluded in the YAML, no longer approved or usable, or not chosen this time), and the code is written without it: its name is not asked of pip and is not offered to the code-writing step. If the plan or design text names a skill that was dropped, FI says so and leaves the plan as it is; change the plan with `--revise-plan` if you want. A skill whose own packages still cannot be installed after a second try is dropped the same way, with a line in `.fi/run.log`. `--from code` keeps the skills the quest already picked.
 
@@ -175,7 +177,7 @@ The steps before the skills are the plan. To change it, use `--revise-plan "<wha
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
 | `--interactive` | quest | with `engine.clarify_mode: interactive`, read clarify answers from stdin |
 | `--resume <quest_id>` | quest | re-enter a checkpoint, requires `--config` |
-| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `skills`, `code`, `run`, `analysis`, `writing` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
+| `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `ideas`, `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
 | `--days N` | digest | digest window in days, default 7 |

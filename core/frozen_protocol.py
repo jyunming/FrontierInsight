@@ -101,6 +101,7 @@ def protocol_of(quest_root: Path) -> dict[str, Any] | None:
 
 def freeze(
     quest_root: Path, protocol: dict[str, Any] | None, *, approved_by: str, source: str,
+    version: int = 1, amendments: int = 0,
 ) -> dict[str, Any]:
     """Freeze ``protocol`` (idempotent: an existing record is returned untouched). ``protocol`` may be ``None``: the study
     is then recorded as having run without one, which the evidence level says."""
@@ -110,18 +111,61 @@ def freeze(
     body = protocol if isinstance(protocol, dict) and protocol else None
     record = {
         "schema": FROZEN_SCHEMA,
-        "version": 1,
-        "run_id": "run_1",
+        "version": version,
+        "run_id": f"run_{amendments + 1}",
         "protocol": body,
         "sha256": sha256(body),
         "approved_by": approved_by,
         "approved_at": now(),
         "source": source,
-        "amendments": 0,
+        "amendments": amendments,
     }
     _write(frozen_path(quest_root), record)
-    _write(_needs(quest_root) / "protocol_versions" / "v1.json", record)
+    _write(_needs(quest_root) / "protocol_versions" / f"v{version}.json", record)
     return record
+
+
+def record_replacement(quest_root: Path, *, approved_by: str, step: str) -> dict[str, Any] | None:
+    """A quest that had frozen its protocol is run again from a step up to the design, with a person's approval: the
+    frozen protocol is about to be replaced by a new design's. Recorded as an amendment made after results were seen
+    (it names who approved it and the protocol it replaces), so the evidence level and the paper say so, exactly as for
+    an amendment. The new protocol is filled in when it is frozen (:func:`close_replacement`). ``None`` when nothing
+    was frozen."""
+    frozen = load(quest_root)
+    if frozen is None:
+        return None
+    n = int(frozen.get("amendments", 0) or 0) + 1
+    record = {
+        "schema": AMENDMENT_SCHEMA,
+        "n": n,
+        "from_sha256": frozen.get("sha256"),
+        "from_version": int(frozen.get("version", 1) or 1),
+        "to_sha256": None,
+        "changes": [f"the plan and the protocol were made again from the {step} step, after the protocol had been frozen"],
+        "source": f"run again from the {step} step",
+        "reason": f"run again from the {step} step",
+        "results_seen_before_change": True,
+        "prespecified": False,
+        "approved_by": approved_by,
+        "approved_at": now(),
+        "approved_via": "--approve-as",
+        "previous_run": str(frozen.get("run_id") or "run_1"),
+        "new_run": f"run_{n + 1}",
+        "archived_to": None,
+    }
+    _write(amendment_path(quest_root, n), record)
+    return record
+
+
+def open_replacement(quest_root: Path) -> dict[str, Any] | None:
+    """The newest amendment that :func:`record_replacement` wrote and no new protocol has been frozen for yet."""
+    records = amendments(quest_root)
+    last = records[-1] if records else None
+    return last if last and last.get("approved_via") == "--approve-as" and not last.get("to_sha256") else None
+
+
+def close_replacement(quest_root: Path, record: dict[str, Any], to_sha256: str) -> None:
+    _write(amendment_path(quest_root, int(record["n"])), {**record, "to_sha256": to_sha256})
 
 
 def run_id(quest_root: Path) -> str:

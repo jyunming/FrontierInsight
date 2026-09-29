@@ -103,7 +103,10 @@ def test_resume_happy_path_spawns_subprocess(
     argv3 = mock_subprocess[2]
     assert argv3[argv3.index("--from") + 1] == "writing" and "q3" in argv3
     res4 = client.post("/api/quests/q3/resume?from=design")
-    assert res4.status_code == 400 and "code, run, analysis, writing, review" in res4.text
+    assert res4.status_code == 400 and "--from design --approve-as <your name>" in res4.text
+    assert "python launch.py --config" in res4.text and "--resume q3" in res4.text
+    res5 = client.post("/api/quests/q3/resume?from=nonsense")
+    assert res5.status_code == 400 and "code, run, figures, analysis" in res5.text
     assert len(mock_subprocess) == 3
 
 

@@ -40,12 +40,6 @@
       </a>
       <select id="rerun-from" onchange="showResumeButton(questResumable)" class="hidden w-auto bg-surface-mid cyber-border text-on-surface px-4 py-2 rounded-full font-label-sm text-label-sm" title="Where to go on from. Redoing a step first moves what that step and the later ones made to .fi/previous/.">
         <option value="">Go on from where it stopped</option>
-        <option value="skills" title="Picks the skills again from this quest's saved settings (config.yaml in the quest folder). The pick only changes if you edited engine.skills_exclude, engine.skills or engine.skills_required there.">Redo from the skills (uses the quest's saved settings)</option>
-        <option value="code">Redo from the code</option>
-        <option value="run">Redo from the run</option>
-        <option value="analysis">Redo from the analysis</option>
-        <option value="writing">Redo from the writing</option>
-        <option value="review">Redo from the review</option>
       </select>
       <button id="resume-btn" onclick="resumeQuest()" class="hidden cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume</button>
       <a id="update-link" href="#" class="bg-surface-mid cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Update settings</a>
@@ -1499,14 +1493,17 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       if (!res.ok) { rerunStepsLoaded = false; return; }
       const steps = (await res.json()).steps || [];
       const menu = document.getElementById('rerun-from');
-      for (const opt of menu.options) {
-        if (!opt.value) continue;
-        const step = steps.find((s) => s.step === opt.value);
-        // A step the quest never reached has nothing to be redone from.
-        opt.hidden = !step;
-        if (step) opt.title = 'Redo from here: ' + step.redoes + '.';
+      const chosen = menu.value;
+      while (menu.options.length > 1) menu.remove(1);
+      // Only the steps the quest reached are listed: a step it never reached has nothing to be redone from.
+      for (const step of steps) {
+        const opt = document.createElement('option');
+        opt.value = step.step;
+        opt.textContent = 'Redo from the ' + step.step + (step.needs_approval ? ' (needs your name: command line)' : '');
+        opt.title = 'Redo from here: ' + step.redoes + '.';
+        menu.add(opt);
       }
-      if (menu.selectedOptions[0] && menu.selectedOptions[0].hidden) menu.value = '';
+      menu.value = steps.some((s) => s.step === chosen) ? chosen : '';
     } catch (e) {
       rerunStepsLoaded = false;
     }

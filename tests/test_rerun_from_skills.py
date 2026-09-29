@@ -23,7 +23,7 @@ SKILL = "zzlieflat-charts"
 def test_the_skills_step_is_offered_before_the_code_and_has_its_words() -> None:
     assert rerun_from.resolve("skills") == "skills" and rerun_from.resolve("select_skills") == "skills"
     assert rerun_from.resolve("Skill") == "skills"
-    assert rerun_from.choices() == "skills, code, run, analysis, writing, review"
+    assert rerun_from.choices() == "ideas, literature, plan, design, skills, code, run, figures, analysis, crosscheck, evidence, writing, claims, review"
     assert "again from the quest's current config" in rerun_from.REDOES["skills"]
     assert rerun_from.picks_skills("skills") and not rerun_from.picks_skills("code")
 
@@ -32,14 +32,14 @@ def test_the_skills_step_is_offered_before_the_code_and_has_its_words() -> None:
 async def test_the_skills_step_forks_where_the_code_step_does_and_is_reached_with_it() -> None:
     graph = _Graph([("select_skills",), ("plan",), ("design",), ("implement_outline",), ("implement",),
                     ("execute",), ("analyze",)])
-    assert await rerun_from.reached(graph, {}) == ["skills", "code", "run", "analysis"]
+    assert await rerun_from.reached(graph, {}) == ["plan", "design", "skills", "code", "run", "analysis"]
     assert (await rerun_from.checkpoint_before(graph, {}, "skills"))["configurable"]["checkpoint_id"] == "3"
     # No simulation: the data is collected instead of the code written; the skills were picked before either.
     graph = _Graph([("design",), ("auto_collect_data",), ("wait_for_data",), ("data_load",), ("analyze",)])
-    assert await rerun_from.reached(graph, {}) == ["skills", "run", "analysis"]
+    assert await rerun_from.reached(graph, {}) == ["design", "skills", "run", "analysis"]
     assert (await rerun_from.checkpoint_before(graph, {}, "skills"))["configurable"]["checkpoint_id"] == "1"
     # A quest that stopped before the code has no step to pick the skills again from.
-    assert await rerun_from.reached(_Graph([("select_skills",), ("plan",), ("design",)]), {}) == []
+    assert "skills" not in await rerun_from.reached(_Graph([("select_skills",), ("plan",), ("design",)]), {})
     assert await rerun_from.checkpoint_before(_Graph([("design",)]), {}, "skills") is None
 
 
