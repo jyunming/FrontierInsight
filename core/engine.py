@@ -1171,7 +1171,9 @@ class Engine:
                                 else:
                                     answers = await clarify_callback(questions)
                                 self._clear_clarify_snapshot()
-                                payload = Command(resume=answers)
+                                # An empty dict is read by LangGraph as "no resume value" and re-fires the
+                                # interrupt forever, so an empty answer is wrapped and the node fills defaults.
+                                payload = Command(resume={"clarify_answers": answers or {}})
                                 continue
                             except asyncio.TimeoutError:
                                 self._log.warning(
@@ -2614,7 +2616,9 @@ class Engine:
         elif isinstance(payload, dict):
             answers = payload
         else:
-            # Resumed with a non-dict (or None) — fall through to defaults.
+            answers = None
+        if not isinstance(answers, dict) or not answers:
+            # Resumed with nothing (or a non-dict): the questions' own defaults are the answers.
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
         modes = self._resolve_modes(answers)
         self._log_topic_shape_mismatch(

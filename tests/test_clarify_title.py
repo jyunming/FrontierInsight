@@ -104,3 +104,33 @@ def test_clean_title_is_one_short_unquoted_line() -> None:
 def test_write_prompt_tells_the_writer_to_use_the_chosen_title() -> None:
     text = (Path(__file__).resolve().parents[1] / "agents" / "write.md").read_text(encoding="utf-8")
     assert "## Title\n$title" in text
+
+
+async def test_a_callback_that_answers_nothing_never_loops_the_run(tmp_path: Path, monkeypatch) -> None:
+    """Through the real graph: an empty answer means "use the defaults". LangGraph reads an empty resume as no
+    resume at all, which once re-fired the clarify pause forever (CI hung for hours)."""
+    import asyncio
+
+    from tests.test_engine_smoke import _fake_response_for
+
+    class _Reached(Exception):
+        pass
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001, ANN003
+        return _fake_response_for(messages[-1]["content"])
+
+    async def stop_here(self, state):  # noqa: ANN001
+        raise _Reached
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    monkeypatch.setattr(Engine, "_node_select_skills", stop_here)
+    asked: list = []
+
+    async def callback(questions):  # noqa: ANN001
+        asked.append(questions)
+        return {}
+
+    engine = Engine(_cfg(tmp_path))
+    with pytest.raises(_Reached):
+        await asyncio.wait_for(engine.run(clarify_callback=callback), timeout=90)
+    assert len(asked) == 1, "one question round, then the defaults are used"
