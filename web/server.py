@@ -2607,7 +2607,7 @@ def make_app(
                 if not p.is_file():
                     continue
                 rel = p.relative_to(quest_root)
-                if rel.parts and rel.parts[0] == ".fi":
+                if rel.parts and rel.parts[0] == ".fi" or ".git" in rel.parts:
                     continue
                 items.append({
                     "path": str(rel).replace("\\", "/"),
@@ -2686,7 +2686,7 @@ def make_app(
                         # Skip the SQLite checkpoint — it's binary
                         # state that doesn't compress well + isn't
                         # useful to a recipient who can't replay it.
-                        if rel.parts and rel.parts[0] == ".fi":
+                        if rel.parts and rel.parts[0] in (".fi", "run_output"):  # run_output/ is a re-run of code/, not the result
                             continue
                         zf.write(p, arcname=str(rel))
                 except OSError:

@@ -45,6 +45,11 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "(`provider.node_models.<step>`), then go on.",
         ["Change what the quest asks (the topic or the plan), then go on."],
     ),
+    "code_project": (
+        "You edited files in code/ that FI would otherwise update. Keep your version?",
+        "Go on: your edited files stay as you wrote them, and FI does not touch them.",
+        ["Rename or delete the file you edited, then go on: FI writes its own version again."],
+    ),
     "figures": (
         "Which model should read the figures in the papers?",
         "Choose a model that can read images for `provider.node_models.figures`, then go on.",

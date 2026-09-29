@@ -55,7 +55,7 @@ paper.pdf                 typeset PDF (LaTeX, or a LaTeX-free HTML fallback)
 paper/references.bib      cited papers as BibTeX + CSL-JSON (Zotero / LaTeX ready)
 paper/CLAIMS.md           each claim traced to the experiment, a citation, or marked unsupported
 figures/*.png             every plot the experiment produced
-code/experiment.py        the exact code that ran (re-runnable)
+code/                     the code that ran, as a small project you can run yourself (README.md, run.py, requirements.txt)
 plan.md                   what the literature says, the gap, and the design that ran
 needs/EVIDENCE.json       how much of the result was checked (see below)
 slides.* · poster.* · talk.md    optional deck, poster and speech
