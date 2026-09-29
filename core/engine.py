@@ -2703,12 +2703,14 @@ class Engine:
         # literature step uses turns the topic into the field's terms first
         # (the topic as written when it gives none, as before).
         self.__dict__.setdefault("_last_call_id", {}).pop("ideate_query", None)
+        self.__dict__.setdefault("_last_call_outcome", {}).pop("ideate_query", None)
         seed_queries = await self._derive_literature_queries(
             state["topic"], work_scope=self._work_scope(state), node="ideate_query",
         ) if self.knowledge.enabled else []
         if self.knowledge.enabled:
             if seed_queries:
                 self._log.info("[ideate] seed search query derived from the topic: %r", seed_queries[0])
+            ideate_outcome = self.__dict__.get("_last_call_outcome", {}).get("ideate_query")
             # Kept for a person to see (a failed one too); the literature step derives its own, from the topic AND the
             # chosen direction.
             _record_query_set(self.fi_dir, {
@@ -2716,7 +2718,9 @@ class Engine:
                 "model": (self._chat_provenance("ideate_query") or {}).get("model"),
                 "call_id": self.__dict__.get("_last_call_id", {}).get("ideate_query"),
                 "reason": "the idea step's grounding search (topic only)" + (
-                    "" if seed_queries else "; the derivation gave no query, so the topic was searched as written"),
+                    "" if seed_queries else "; the derivation gave no query "
+                    + ("(its answer held none)" if ideate_outcome == "ok" else "(the call failed)")
+                    + ", so the topic was searched as written"),
                 "revised_by": "fi"}, log=self._log)
         seeded = await self.knowledge.asearch(
             seed_queries[0] if seed_queries else state["topic"], top_k=3,
@@ -3048,10 +3052,18 @@ class Engine:
                 "line)", _LITERATURE_QUERIES, _PERSON_QUERIES.as_posix())
             self._audit("check_result", check="literature_queries", status="edited",
                         summary=f"{len(edited)} saved query set(s) for this pass no longer match their digest")
-        ok_calls = _ok_call_ids(self.fi_dir, "literature_query")
+        ok_calls = _ok_calls(self.fi_dir, "literature_query")
+        prompt_sha = hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest()
+
+        def _backed(e: dict[str, Any]) -> bool:
+            # The entry names an answered call of this same prompt, and no other entry names that call.
+            cid = e.get("call_id")
+            return (cid in ok_calls and ok_calls[cid] == prompt_sha == e.get("prompt_sha256")
+                    and sum(1 for o in saved if o.get("call_id") == cid) == 1)
+
         same = next((e for e in reversed(saved) if e.get("key") == key and _usable_queries(e.get("queries"))
                      and e.get("revised_by") != "person" and _query_set_standing(e) == "verified"
-                     and (e.get("call_id") in ok_calls)), None)
+                     and _backed(e)), None)
         person = _person_queries(self.quest_root) if self.config.knowledge.enabled else None
         if person is not None:
             # A person's own queries: used as given, recorded as their revision (once per version of the file).
@@ -3083,8 +3095,9 @@ class Engine:
             elif any(e.get("key") == key and _query_set_standing(e) == "unverified" for e in saved):
                 reason = "the saved queries for this pass carry no digest (written before FI recorded one)"
             elif any(e.get("key") == key and e.get("revised_by") != "person" and _usable_queries(e.get("queries"))
-                     and e.get("call_id") not in ok_calls for e in saved):
-                reason = "the saved queries for this pass name no answered call in the record of model calls"
+                     and not _backed(e) for e in saved):
+                reason = ("the saved queries for this pass do not match an answered call in the record of model calls "
+                          "(none, another prompt, or a call another entry also names)")
             elif any(e.get("iteration") == this_iter for e in saved):
                 reason = "the topic, the chosen direction, the hypothesis or the model changed"
             elif saved:
@@ -3092,10 +3105,12 @@ class Engine:
             else:
                 reason = "the first search"
             self.__dict__.setdefault("_last_call_id", {}).pop("literature_query", None)
+            self.__dict__.setdefault("_last_call_outcome", {}).pop("literature_query", None)
             queries = await self._derive_literature_queries(
                 state["topic"], title, hypothesis, work_scope=scope,
             )
             call_id = self.__dict__.get("_last_call_id", {}).get("literature_query")
+            call_outcome = self.__dict__.get("_last_call_outcome", {}).get("literature_query")
             query_set = {
                 "stage": "literature", "key": key, "iteration": this_iter, "queries": queries,
                 "prompt_sha256": hashlib.sha256(derive_prompt.encode("utf-8")).hexdigest(),
@@ -3105,7 +3120,7 @@ class Engine:
             }
             if not queries:
                 query_set["reason"] = (f"{reason}; the derivation gave no query "
-                                       + ("(its answer held none)" if call_id else "(the call failed)")
+                                       + ("(its answer held none)" if call_outcome == "ok" else "(the call failed)")
                                        + ", so the search used the topic and the chosen direction as written")
             # Every derivation is kept, a failed one too (its empty list is never reused, so the next run tries again).
             if self.config.knowledge.enabled:
@@ -11346,9 +11361,9 @@ class Engine:
                 outcome=outcome, usage=usage if isinstance(usage, dict) else None,
             )
             _attempts.append_model_call(fi_dir, getattr(self, "quest_id", ""), row)
-            if outcome == "ok":
-                # Which line of the record an answer came from, for a record built on it (the search queries).
-                self.__dict__.setdefault("_last_call_id", {})[node] = row["call_id"]
+            # Which line of the record the latest call of a step is, for a record built on it (the search queries).
+            self.__dict__.setdefault("_last_call_id", {})[node] = row["call_id"]
+            self.__dict__.setdefault("_last_call_outcome", {})[node] = outcome
         except Exception as e:  # noqa: BLE001 -- a record never touches the quest
             _attempts.count_lost(fi_dir, _attempts.MODEL_CALLS_LOST)
             self._log.debug("[attempts] model call not recorded: %r", e)
@@ -18539,10 +18554,15 @@ def _query_set_standing(entry: dict[str, Any]) -> str:
     return "verified" if digest == _query_set_digest(entry) else "edited"
 
 
+def _ok_calls(fi_dir: Path, node: str) -> dict[str, str | None]:
+    """The answered calls of ``node`` in the quest's record of model calls: call id -> the hash of its prompt."""
+    return {str(r.get("call_id")): r.get("prompt_sha256") for r in _attempts.read(fi_dir, _attempts.MODEL_CALLS)
+            if r.get("node") == node and r.get("outcome") == "ok" and r.get("call_id")}
+
+
 def _ok_call_ids(fi_dir: Path, node: str) -> set[str]:
     """The ids of the answered calls of ``node`` in the quest's record of model calls."""
-    return {str(r.get("call_id")) for r in _attempts.read(fi_dir, _attempts.MODEL_CALLS)
-            if r.get("node") == node and r.get("outcome") == "ok" and r.get("call_id")}
+    return set(_ok_calls(fi_dir, node))
 
 
 def _person_queries(quest_root: Path) -> tuple[list[str], str] | None:

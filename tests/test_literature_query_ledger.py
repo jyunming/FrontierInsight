@@ -189,8 +189,7 @@ async def test_a_forged_entry_whose_digest_was_recomputed_is_not_reused(tmp_path
     _write(eng, [forged])  # only the forgery left: derived again rather than trusted
     patch = await eng._node_literature(_state())
     assert "planted query" not in patch["literature_queries"] and calls.count("literature_query") == 2
-    assert patch["literature_query_set"]["reason"] == \
-        "the saved queries for this pass name no answered call in the record of model calls"
+    assert "do not match an answered call in the record of model calls" in patch["literature_query_set"]["reason"]
 
 
 @pytest.mark.asyncio
@@ -226,5 +225,65 @@ async def test_a_failed_derivation_leaves_a_record_the_seal_can_name(tmp_path: P
     (entry,) = _sets(eng)
     assert entry["queries"] == [] and "gave no query" in entry["reason"]
     assert ("(the call failed)" in entry["reason"]) == isinstance(answer, BaseException)
+    # The entry points at the line of the record that call left, a failed one too.
+    from core import attempt_records as ar
+
+    rows = {r["call_id"]: r for r in ar.read(eng.fi_dir, ar.MODEL_CALLS)}
+    assert entry["call_id"] in rows and rows[entry["call_id"]]["node"] == "literature_query"
+    assert (rows[entry["call_id"]]["outcome"] == "ok") != isinstance(answer, BaseException)
     # What the seal would name exists (so a failed call is not a gap), and it names nothing to reuse.
     assert evidence._file_sha256(eng.quest_root / evidence.SEALED_QUERIES)
+
+
+def _forge(entry: dict, **over) -> dict:
+    forged = {k: v for k, v in entry.items() if k != "digest"}
+    forged.update(over)
+    forged["digest"] = _query_set_digest(forged)
+    return forged
+
+
+@pytest.mark.asyncio
+async def test_a_copied_call_id_with_other_queries_is_not_reused(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    calls = _counting(eng)
+    await eng._node_literature(_state())
+    (entry,) = _sets(eng)
+    # One call, two entries: neither is trusted (a call id backs one entry only).
+    _write(eng, [entry, _forge(entry, queries=["planted query"])])
+    patch = await eng._node_literature(_state())
+    assert "planted query" not in patch["literature_queries"] and calls.count("literature_query") == 2
+    assert "another entry also names" in patch["literature_query_set"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_an_entry_whose_prompt_is_not_the_calls_is_not_reused(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    calls = _counting(eng)
+    await eng._node_literature(_state())
+    (entry,) = _sets(eng)
+    _write(eng, [_forge(entry, prompt_sha256="0" * 64)])
+    patch = await eng._node_literature(_state())
+    assert calls.count("literature_query") == 2 and patch["literature_queries"] == FACETS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [RuntimeError("provider down"), "not json", None])
+async def test_the_ideate_step_records_its_query_entry(tmp_path: Path, answer) -> None:
+    eng = _engine(tmp_path)
+    eng.knowledge.enabled = True
+    _counting(eng, answer=answer)
+    try:
+        await eng._node_ideate({"topic": "t"})
+    except Exception:  # noqa: BLE001 -- the ideas call after the seed search is not under test
+        pass
+    (entry,) = [e for e in _sets(eng) if e["stage"] == "ideate"]
+    assert entry["revised_by"] == "fi" and _query_set_standing(entry) == "verified"
+    from core import attempt_records as ar
+
+    rows = {r["call_id"]: r for r in ar.read(eng.fi_dir, ar.MODEL_CALLS)}
+    assert entry["call_id"] in rows and rows[entry["call_id"]]["node"] == "ideate_query"
+    if answer is None:
+        assert entry["queries"] == FACETS[:3] and rows[entry["call_id"]]["outcome"] == "ok"
+    else:
+        assert entry["queries"] == [] and "gave no query" in entry["reason"]
+        assert ("(the call failed)" in entry["reason"]) == isinstance(answer, BaseException)
