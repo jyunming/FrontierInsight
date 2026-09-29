@@ -1,9 +1,9 @@
 {
-  "vsix_sha256": "821652f5886c3daf24ee46c56184ce9536b69b67a7483e808fc6156adecb7bf2",
+  "vsix_sha256": "ad472c95e6be933caa015638dbfd494746e8fb00fcedcbf2610aa1db4404533c",
   "files": {
     "[Content_Types].xml": {
-      "sha256": "d5db7b640ed10be3c4e1b415ee39b6e6db263afcd7b8554d9627249890bc6703",
-      "bytes": 517
+      "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
+      "bytes": 567
     },
     "extension.vsixmanifest": {
       "sha256": "f5c7c1b87a69a162a00694bf907bf6964af06aa555dccdfb7fda06ae07de3eda",
@@ -25,6 +25,14 @@
       "sha256": "8f069ace52c2d9b56a9517160f54ef753ef077b2057154e79460e3cf4c59ef51",
       "bytes": 1037
     },
+    "extension/media/quest_map.css": {
+      "sha256": "e3030972676f85d4e70beec45bc76ab300565adaa5c9e5cabdb7b67c920a9f46",
+      "bytes": 6621
+    },
+    "extension/media/quest_map.js": {
+      "sha256": "c2e54b7981462318b385e163a432d63213f1f45d7eac87e343b9f8c273a6a798",
+      "bytes": 12046
+    },
     "extension/out/axon-endpoint.js": {
       "sha256": "82288d27a7478ea725d8d0a575ec81ece50818839c3fa73f8f97569a7235c5bd",
       "bytes": 20019
@@ -38,8 +46,8 @@
       "bytes": 34920
     },
     "extension/out/extension.js": {
-      "sha256": "78391c3eb96e57e0dd9098a2fa5c63eb9060e494e99cf083ba778bfd0c263d14",
-      "bytes": 102907
+      "sha256": "29f586096d4a49ee43a8a4f1a5f32b64813fca09976929fa410fefc1527351e9",
+      "bytes": 103587
     },
     "extension/out/interview-core.js": {
       "sha256": "d12d03e7c4f43304339ca209266707ec68bdb2e3774cccb8b0f6e1f3f2db3a78",
@@ -60,6 +68,10 @@
     "extension/out/probe.js": {
       "sha256": "83f33fe220bbf749d6d1e1413e8773cf0e0c98718a6726348b6950024b988bd4",
       "bytes": 21679
+    },
+    "extension/out/quest-map.js": {
+      "sha256": "6e1ca6ce4f693eeb2e6c5513c4e9f5ba658600bb7287b46927745875047987d6",
+      "bytes": 8194
     },
     "extension/out/roots-config.js": {
       "sha256": "c818847d5849cf4a207e125d6986238d2ded806ad3abaea1f02448c1fce1f9da",
@@ -86,16 +98,16 @@
       "bytes": 2756
     },
     "extension/out/trace.js": {
-      "sha256": "c3a7ba7e0f744ee9f7ed713942530cc4202f3da882317c6e82e66659d13a3536",
-      "bytes": 11600
+      "sha256": "7085be9be67b1e7d02d424e6d231ae09921e0c12a2466fc43eb46c9a0a3ac849",
+      "bytes": 11631
     },
     "extension/package.json": {
-      "sha256": "33a4b8b3378aa17a8026157ac2289ebe3a09ef4fd1ab75b1be79784b647c8d6f",
-      "bytes": 13780
+      "sha256": "0e96da729285683fcee7c0891ca7f94476bb1daa7fdcbb6c37308918bd4ffbb1",
+      "bytes": 14214
     },
     "extension/readme.md": {
-      "sha256": "4db77c70b33accec0c03aec22c903d8023e8bf4fd3fd6fa2e3090f104e198171",
-      "bytes": 67777
+      "sha256": "5377cb652d5d1d6534a68fafc61e20ec08cf16390002e0f32da73cc38fbb53c1",
+      "bytes": 68302
     }
   }
 }

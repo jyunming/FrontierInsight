@@ -760,7 +760,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--json",
         dest="json_out",
         action="store_true",
-        help="Emit machine-readable JSON instead of a table. Exactly one "
+        help="Emit machine-readable JSON instead of a table (also for --resume <id> --from with no step: the quest "
+             "map's data). Exactly one "
              "JSON document goes to stdout and nothing else, so the web API "
              "and the VSCode chat panel can parse it — they render this same "
              "data rather than reimplementing the gate.",
@@ -1904,12 +1905,21 @@ def _write_launch_record(engine: Engine, cfg: Config, *, resume: bool) -> None:
         return
 
 
-async def _list_rerun_steps(cfg: Config, quest_id: str, *, supervisor: ProxySupervisor) -> int:
-    """``--resume <id> --from`` with no step: the steps this quest reached, each with what running again from it does."""
+async def _list_rerun_steps(cfg: Config, quest_id: str, *, supervisor: ProxySupervisor, as_json: bool = False) -> int:
+    """``--resume <id> --from`` with no step: the steps this quest reached, each with what running again from it does.
+    With ``--json``: the quest map's data instead (what the VS Code "Quest map" panel draws)."""
     from core import rerun_from as _rerun_from
 
     engine = Engine(cfg, supervisor=supervisor, resume_quest_id=quest_id)
-    print(_rerun_from.listing(engine.quest_id, await engine.rerun_steps()))
+    steps = await engine.rerun_steps()
+    if as_json:
+        import json as _json
+
+        finished = (engine.quest_root / "frontier_insight_summary.json").is_file()
+        payload = _rerun_from.map_payload(steps, finished=finished, no_simulation=await engine.rerun_no_simulation())
+        print(_json.dumps({"quest_id": engine.quest_id, **payload}))
+        return 0
+    print(_rerun_from.listing(engine.quest_id, steps))
     return 0
 
 
@@ -2949,7 +2959,7 @@ async def main_async(args: argparse.Namespace) -> int:
                     cfg, args.resume, args.revise_plan, supervisor=supervisor,
                 )
             if _list_steps:
-                return await _list_rerun_steps(cfg, args.resume, supervisor=supervisor)
+                return await _list_rerun_steps(cfg, args.resume, supervisor=supervisor, as_json=args.json_out)
             if args.emit:
                 if not args.resume:
                     print("[FI] --emit requires --resume <quest_id>",

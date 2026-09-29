@@ -10,6 +10,9 @@
 <script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap"/>
+<link rel="stylesheet" href="/static/quest_map.css"/>
+<script defer src="/static/quest_map.js"></script>
 <script defer src="/static/header.js"></script>
 <script defer src="/static/md_lite.js"></script>
 </head>
@@ -157,6 +160,11 @@
       <ul id="todo-list" class="list-disc pl-5 text-on-surface-variant text-body-sm"></ul>
     </div>
   </div>
+
+  <!-- Quest map: every step of the quest in big blocks (quest_map.js, shared with the VS Code panel); the ones the quest reached can be restarted from. -->
+  <section id="quest-map" class="hidden">
+    <div id="quest-map-root"></div>
+  </section>
 
   <!-- The plan (plan.md): written after the literature and before the experiment is designed. -->
   <section id="plan-section" class="hidden bg-surface-mid cyber-border p-6 rounded-xl flex-col gap-4">
@@ -451,8 +459,12 @@
     const menu = document.getElementById('rerun-from');
     menu.classList.toggle('hidden', !(resumable || questAnswerPaused));
     // The menu offers only the steps this quest reached; asked again whenever it is shown after running.
-    if (data.alive) rerunStepsLoaded = false;
-    else if ((resumable || questAnswerPaused) && !rerunStepsLoaded) loadRerunSteps();
+    questAlive = !!data.alive;
+    if (data.alive) {
+      rerunStepsLoaded = false;
+      const mapEl = document.getElementById('quest-map');
+      mapEl.classList.add('hidden'); mapEl.classList.remove('flex');   // a running quest is not restarted from the map
+    } else if ((resumable || questAnswerPaused) && !rerunStepsLoaded) loadRerunSteps();
     // At an answer pause going on is that pause's own form: the empty choice only invites picking a step.
     const firstChoice = questAnswerPaused ? 'Redo from a step…' : 'Go on from where it stopped';
     // Written only when it changes: rewriting an option on every refresh closes an open menu.
@@ -1491,7 +1503,9 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     try {
       const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/rerun-steps`);
       if (!res.ok) { rerunStepsLoaded = false; return; }
-      const steps = (await res.json()).steps || [];
+      const body = await res.json();
+      const steps = body.steps || [];
+      renderQuestMap(body);
       const menu = document.getElementById('rerun-from');
       const chosen = menu.value;
       while (menu.options.length > 1) menu.remove(1);
@@ -1507,6 +1521,37 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     } catch (e) {
       rerunStepsLoaded = false;
     }
+  }
+  // The quest map (quest_map.js): drawn from what the rerun-steps API returns; the button posts the same restart the
+  // Redo menu does.
+  let questAlive = false;
+  let questMap = null;
+  function renderQuestMap(body) {
+    const section = document.getElementById('quest-map');
+    const nodes = body.nodes || [];
+    const any = nodes.some((n) => n.status === 'done' || n.status === 'now');
+    section.classList.toggle('hidden', !any);
+    if (!any || !window.FIQuestMap) return;
+    if (!questMap) {
+      questMap = window.FIQuestMap.mount(document.getElementById('quest-map-root'), {
+        questId,
+        command: (n) => 'python launch.py --config ' + (/\s/.test(questMapConfig) ? '"' + questMapConfig + '"' : (questMapConfig || '<config.yaml>')) +
+          ' --resume ' + questId + ' --from ' + (n.step || n.node) + (n.needs_approval ? ' --approve-as "<your name>"' : ''),
+        restart: mapRestart,
+      });
+    }
+    questMapConfig = body.config_path || '';
+    questMap.update(body);
+    questMap.setBusy(questAlive, 'The quest is running; wait until it stops.');
+  }
+  let questMapConfig = '';
+  async function mapRestart(n) {
+    const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/resume?from=${encodeURIComponent(n.node)}`, { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    rerunStepsLoaded = false;
+    if (!pollHandle) pollHandle = setInterval(refresh, 3000);
+    refresh();
+    return 'Started. The quest is running again from “' + (n.title || n.node) + '”.';
   }
   let questFinishedForRerun = false;
   let questAnswerPaused = false;

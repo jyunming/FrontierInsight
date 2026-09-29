@@ -44,6 +44,7 @@ import {
 import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
+import { openQuestMap } from "./quest-map";
 import { runFollow, runRerunSteps, runTrace, runWhy } from "./trace";
 
 
@@ -169,6 +170,10 @@ export function activate(context: vscode.ExtensionContext): void {
         },
     );
     participant.iconPath = new vscode.ThemeIcon("beaker");
+    context.subscriptions.push(
+        vscode.commands.registerCommand("frontierInsight.questMap", (questId?: string) =>
+            openQuestMap(context, typeof questId === "string" ? questId : undefined)),
+    );
     context.subscriptions.push(participant);
 
     // Probe the Axon sidecar on activation. We don't auto-launch from
@@ -232,6 +237,11 @@ async function handleRequest(
         // exploring and the easiest thing is to walk them through
         // setup rather than dump a help screen at them.
         await runInterviewAndQuest(stream, token, userPickedModel);
+        return;
+    }
+    if (cmd === "map") {
+        await vscode.commands.executeCommand("frontierInsight.questMap", prompt.trim().split(/\s+/)[0] || undefined);
+        stream.markdown("Opened the quest map in its own tab.\n");
         return;
     }
     if (cmd === "resume") {
@@ -403,6 +413,7 @@ function helpText(): string {
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly.",
+        "- `@fi /map <quest_id>` — open the quest map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button (also **FI: Quest map** in the command palette).",
         "- `@fi /watch [<quest_id>]` — for a quest waiting on a background job (HPC): re-check it on a timer and resume it when the job is done.",
         "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
