@@ -4,12 +4,12 @@ topic: |
   TOPIC. How biased and how noisy is the accuracy reported by k-fold cross-validation when the data set is small?
 
   CONTEXT. With few examples, the accuracy a model gets in cross-validation is only an estimate of how it will do on new data, and it depends on how many folds are used.
-  SCOPE. Generate a two-class problem in 2 dimensions from two equal-sized isotropic unit-variance Gaussian clouds whose centres are 1.68 apart, so the best possible (Bayes) accuracy is 0.80; draw it as the reference. For training-set sizes n in {20, 40, 80, 160} compare stratified 5-fold, stratified 10-fold and leave-one-out cross-validation with L2-regularised logistic regression (penalty fixed, so the fit stays finite when the classes separate). Estimate each method's bias against the accuracy of the model trained on all n points, measured on a fresh test set of 100000 points, and its spread over repeated data sets.
+  SCOPE. Generate a two-class problem in 2 dimensions from two equal-sized isotropic unit-variance Gaussian clouds whose centres are 1.68 apart, so the best possible (Bayes) accuracy is 0.80; draw it as the reference and note that no method can reach above it. Use scikit-learn LogisticRegression with C = 1.0 and 200 or more repeated data sets per setting (stated in the paper). For training-set sizes n in {20, 40, 80, 160} compare stratified 5-fold, stratified 10-fold and leave-one-out cross-validation with L2-regularised logistic regression (penalty fixed, so the fit stays finite when the classes separate). Estimate each method's bias against the accuracy of the model trained on all n points, measured on a fresh test set of 100000 points, and its spread over repeated data sets. Leave-one-out fits n models per data set, so cap the cost (for example use n up to 80 for it and say so) to stay under the time limit.
 
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
-    - A short paper of at most 4 pages that cites at least three primary references.
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
   CONSTRAINTS.
     - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
     - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.

@@ -15,8 +15,16 @@ science; none is tied to an industry.
 | `neuron_firing_rate.yaml` | neuroscience | model-neuron firing rate vs closed form |
 | `heat_diffusion.yaml` | earth science | finite-difference heat flow vs the exact solution |
 
-Run one with `python launch.py --config dev/quest-topics/<name>.yaml`. The only thing to set first is the model
-(`provider:` in the file; see `docs/PROVIDERS.md`). Keep new topics field-neutral, simulation only, and under 60
-seconds of CPU; `tests/test_quest_topics.py` checks that each file loads and states a 4-page limit.
+Run one with `python launch.py --config dev/quest-topics/<name>.yaml`. Before the first run, set the model in the
+`provider:` block of the file. The files ship with `openai`, which needs an `OPENAI_API_KEY` environment variable;
+`docs/PROVIDERS.md` lists the other choices and what each one needs. Each run pauses for nothing (no paper or
+review prompts) and does not write its result back to the knowledge store, so repeat runs stay independent.
+
+Checking a run: every topic states its reference answer in the text, and a run should draw it in the figures. The
+paper's own citations are whatever the model found; a run is asked to cite only what it has actually read.
+
+Keep new topics field-neutral, simulation only, and under 60 seconds of CPU. `tests/test_quest_topics.py` checks
+that each file loads, states a 4-page limit, has the SCOPE and GOALS sections and a unique title, and stays
+unattended.
 
 The fixed benchmark topic (a stochastic SIR study) and its grades are in `dev/evaluation/benchmark/`.

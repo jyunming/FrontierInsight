@@ -36,3 +36,12 @@ def test_each_topic_runs_unattended_and_stays_independent(path: Path) -> None:
     assert cfg.pauses.papers is False
     assert cfg.pauses.review == "off"
     assert cfg.knowledge.write_back_quests is False
+
+
+def test_each_topic_has_scope_goals_and_a_unique_title() -> None:
+    titles = []
+    for path in TOPICS:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert "SCOPE." in data["topic"] and "GOALS." in data["topic"], path.stem
+        titles.append(data["title"])
+    assert len(set(titles)) == len(titles)

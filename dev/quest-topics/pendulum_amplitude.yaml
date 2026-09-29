@@ -9,7 +9,7 @@ topic: |
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
-    - A short paper of at most 4 pages that cites at least three primary references.
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
   CONSTRAINTS.
     - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
     - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.

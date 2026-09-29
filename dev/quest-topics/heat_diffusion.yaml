@@ -4,12 +4,12 @@ topic: |
   TOPIC. How accurately do explicit and implicit finite-difference schemes reproduce heat diffusion into a cooling half-space?
 
   CONTEXT. When the surface of a uniform half-space is held at a fixed temperature, the temperature at depth z and time t follows T = T0 + (Ts - T0) * erfc(z / (2*sqrt(kappa*t))) with thermal diffusivity kappa.
-  SCOPE. Solve the one-dimensional diffusion equation with an explicit scheme and an implicit scheme for several grid spacings and time steps, compare with the closed form, and report the error against resolution. Use a domain at least 6 diffusion lengths 2*sqrt(kappa*t) deep, hold the bottom at T0, use backward Euler for the implicit scheme, and measure the largest error over depth at one stated time t, as a percentage of |Ts - T0|. Show the stability limit of the explicit scheme (kappa*dt/dz**2 <= 1/2), and find the coarsest grid that keeps the error under 1 percent, keeping the number of explicit steps modest.
+  SCOPE. Solve the one-dimensional diffusion equation with an explicit scheme and an implicit scheme for several grid spacings and time steps, compare with the closed form, and report the error against resolution. Start from a uniform temperature T0 everywhere at t = 0 and set the surface to Ts for t > 0. Use a domain at least 6 diffusion lengths 2*sqrt(kappa*t) deep, hold the bottom at T0, use backward Euler for the implicit scheme, and measure the largest error over depth at one stated time t, as a percentage of |Ts - T0|. Show the stability limit of the explicit scheme (r = kappa*dt/dz**2 <= 1/2), and find the coarsest grid that keeps the error under 1 percent with r fixed at 0.4 for the explicit scheme (so dt follows from dz), keeping the number of steps modest.
 
   GOALS.
     - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
     - Two or three figures that answer the question directly, each with the reference or theory value drawn.
-    - A short paper of at most 4 pages that cites at least three primary references.
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
   CONSTRAINTS.
     - CPU only; under 60 seconds of runtime; fixed random seeds where the run is random, stated in the paper.
     - Report every number with its uncertainty (for a deterministic result, its numerical error), and say when a result is only a check of the code.
