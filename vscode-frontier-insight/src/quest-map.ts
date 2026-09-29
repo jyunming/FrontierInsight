@@ -106,8 +106,11 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
     }
 
     const media = vscode.Uri.joinPath(context.extensionUri, "media");
+    // Open where the scripts and the paper are shown: the column of the editor in view, else beside the chat.
+    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.window.visibleTextEditors[0]?.viewColumn
+        ?? vscode.ViewColumn.Beside;
     const panel = vscode.window.createWebviewPanel("frontierInsight.questMap", `Quest map: ${questId}`,
-        vscode.ViewColumn.Beside, { enableScripts: true, localResourceRoots: [media] });
+        column, { enableScripts: true, localResourceRoots: [media] });
     panel.webview.html = pageHtml(panel.webview, media, questId);
     const configPath = path.join(outputRoot, questId, "config.yaml");
 
