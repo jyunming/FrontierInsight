@@ -141,7 +141,7 @@ def record_replacement(quest_root: Path, *, approved_by: str, step: str) -> dict
         "from_sha256": frozen.get("sha256"),
         "from_version": int(frozen.get("version", 1) or 1),
         "to_sha256": None,
-        "changes": [f"the plan and the protocol were made again from the {step} step, after results had been seen"],
+        "changes": [f"the plan and the protocol were made again from the {step} step, after the protocol had been frozen"],
         "source": f"run again from the {step} step",
         "reason": f"run again from the {step} step",
         "results_seen_before_change": True,

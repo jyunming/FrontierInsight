@@ -827,7 +827,14 @@ class Engine:
                         forget_papers_asked(self.fi_dir, declined=False)
                         if _rerun_from.picks_skills(from_step):
                             fork_config = await self._repick_skills(graph, fork_config)
-                        where, moved = _rerun_from.back_up(self.quest_root, from_step)
+                        try:
+                            where, moved = _rerun_from.back_up(self.quest_root, from_step)
+                        except OSError as exc:
+                            self._log.warning("[run] --from %s: moving the earlier outputs failed (%s); they were put back", from_step, exc)
+                            print(f"[FI] could not move the earlier outputs of quest {self.quest_id} aside ({exc}); they were put "
+                                  f"back where they were and the quest was not run again. Close whatever holds those files "
+                                  f"and try `--resume {self.quest_id} --from {from_step}` again.")
+                            return self._collect_artifacts({})
                         extra_audit: dict[str, Any] = {}
                         if _rerun_from.needs_approval(from_step):
                             extra_audit = {"approved_by": approved_by, "replaced_protocol_sha256": replaced_sha}

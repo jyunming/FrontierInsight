@@ -191,17 +191,35 @@ def step_info(step: str, *, reached: bool) -> dict[str, Any]:
             "reached": reached, "outputs": outputs_of(step)}
 
 
+async def _current_branch(graph: Any, run_config: dict[str, Any]):
+    """The checkpoints of the quest's present line, newest first. After a run from an earlier step the history also
+    holds the line it left, whose later steps the quest no longer has; only the newest checkpoint and its parents (each
+    one named by ``parent_config``) are the quest as it is."""
+    expected: str | None = None
+    first = True
+    async for snapshot in graph.aget_state_history(run_config):
+        cid = str(((snapshot.config or {}).get("configurable") or {}).get("checkpoint_id") or "")
+        if not first and cid != expected:
+            continue
+        first = False
+        parent = getattr(snapshot, "parent_config", None)
+        expected = str(((parent or {}).get("configurable") or {}).get("checkpoint_id") or "") or None
+        yield snapshot
+        if expected is None:
+            return
+
+
 async def checkpoint_before(graph: Any, run_config: dict[str, Any], step: str) -> dict[str, Any] | None:
     """The config of the checkpoint taken just before ``step`` last began, or ``None`` when the quest never reached it.
 
-    The history is newest first. The newest checkpoint about to run one of the step's nodes is found, then the walk
+    The quest's present line is walked newest first. The newest checkpoint about to run one of the step's nodes is found, then the walk
     goes on to older ones for as long as each is still about to run one of them: a step of several nodes (the outline
     then the script; the data collected, waited for, loaded) is done again from its first node, and never from a node
     of an earlier pass."""
     starts = set(STEPS[step])
     inside = starts | set(_WITHIN.get(step, ()))
     best = None
-    async for snapshot in graph.aget_state_history(run_config):
+    async for snapshot in _current_branch(graph, run_config):
         about_to = set(snapshot.next or ())
         if about_to & starts:
             best = snapshot
@@ -214,7 +232,7 @@ async def reached(graph: Any, run_config: dict[str, Any]) -> list[str]:
     """The steps the quest reached, in their order: the ones ``--from`` can run it again from (a step it never reached
     has no checkpoint before it)."""
     seen: set[str] = set()
-    async for snapshot in graph.aget_state_history(run_config):
+    async for snapshot in _current_branch(graph, run_config):
         seen.update(snapshot.next or ())
     return [step for step, nodes in STEPS.items() if seen & set(nodes)]
 
@@ -261,6 +279,17 @@ def _move(src: Path, target: Path) -> None:
     shutil.move(str(src), str(target))
 
 
+def _restore(quest_root: Path, dest: Path, moved: list[str]) -> None:
+    """Put back what a move that stopped half way had already taken, so a failed backup leaves the files where they were."""
+    for rel in reversed(moved):
+        held = dest / rel
+        if held.exists() and not (quest_root / rel).exists():
+            try:
+                _move(held, quest_root / rel)
+            except OSError:
+                pass
+
+
 def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
     """Move what ``step`` and the steps after it wrote into ``.fi/previous/<time>/``. Returns the folder and what was
     moved (relative paths); ``(None, [])`` when there was nothing to move."""
@@ -278,7 +307,11 @@ def back_up(quest_root: Path, step: str) -> tuple[Path | None, list[str]]:
             if not src.exists() or rel in moved:
                 continue
             target = dest / rel
-            _move(src, target)
+            try:
+                _move(src, target)
+            except OSError:
+                _restore(quest_root, dest, moved)
+                raise
             moved.append(rel)
     # The folders every step expects to find are put back empty.
     for folder in ("figures", "code", "paper"):

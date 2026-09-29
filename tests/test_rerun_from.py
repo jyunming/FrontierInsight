@@ -118,6 +118,7 @@ _ = (_FAKE_EXPERIMENT_CODE, Any)
 class _Snap:
     def __init__(self, nxt: tuple[str, ...], n: int) -> None:
         self.next, self.config = nxt, {"configurable": {"checkpoint_id": str(n)}}
+        self.parent_config = {"configurable": {"checkpoint_id": str(n - 1)}} if n else None
 
 
 class _Graph:

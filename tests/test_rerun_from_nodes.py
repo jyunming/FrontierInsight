@@ -295,3 +295,65 @@ def test_the_console_line_after_a_run_has_its_space(capsys: pytest.CaptureFixtur
 def test_the_web_page_builds_its_rerun_menu_from_the_steps_the_quest_reached() -> None:
     page = (Path(__file__).resolve().parent.parent / "web" / "static" / "quest.html").read_text(encoding="utf-8")
     assert "loadRerunSteps" in page and "needs your name" in page
+
+
+def test_a_run_again_keeps_the_protocol_and_oracle_checks_but_a_code_restart_moves_them(tmp_path: Path) -> None:
+    kept = ["needs/PROTOCOL_CHECK.json", "needs/ORACLE_CHECK.json"]
+    for step, moves in (("run", False), ("code", True)):
+        root = tmp_path / step
+        _lay_out(root)
+        where, _ = rerun_from.back_up(root, step)
+        for rel in kept:
+            assert (root / rel).exists() is not moves, f"{rel} with --from {step}"
+            if moves:
+                assert where is not None and (where / rel).exists()
+
+
+def test_a_backup_that_stops_half_way_puts_back_what_it_had_moved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _lay_out(tmp_path)
+    before = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
+    real, calls = rerun_from._move, {"n": 0}
+
+    def flaky(src: Path, target: Path) -> None:
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise PermissionError("in use")
+        real(src, target)
+
+    monkeypatch.setattr(rerun_from, "_move", flaky)
+    with pytest.raises(PermissionError):
+        rerun_from.back_up(tmp_path, "design")
+    after = {p.relative_to(tmp_path).as_posix() for p in tmp_path.rglob("*") if p.is_file()}
+    assert after == before, "every file is back where it was"
+
+
+@pytest.mark.asyncio
+async def test_after_a_rerun_the_steps_of_the_abandoned_line_are_not_the_quest_s() -> None:
+    """A real LangGraph fork: the quest ran to the end, was run again from the design and stopped before the run. The
+    old line's later steps are not offered, and no checkpoint of that line is a place to run again from."""
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import END, START, StateGraph
+
+    def node(_state: dict) -> dict:
+        return {}
+
+    builder = StateGraph(dict)
+    order = ["ideate", "plan", "design", "execute", "write", "review"]
+    for name in order:
+        builder.add_node(name, node)
+    builder.add_edge(START, order[0])
+    for a, b in zip(order, order[1:]):
+        builder.add_edge(a, b)
+    builder.add_edge(order[-1], END)
+    graph = builder.compile(checkpointer=MemorySaver(), interrupt_before=["execute"])
+    cfg = {"configurable": {"thread_id": "q"}}
+    await graph.ainvoke({}, cfg)
+    await graph.ainvoke(None, cfg)  # the first line goes on to the end
+    assert {"run", "writing", "review"} <= set(await rerun_from.reached(graph, cfg))
+    fork = await rerun_from.checkpoint_before(graph, cfg, "design")
+    fork = await graph.aupdate_state(fork, {}, as_node="plan")
+    await graph.ainvoke(None, fork)  # the new line stops before execute again
+    steps = await rerun_from.reached(graph, cfg)
+    assert "run" in steps and not {"writing", "review"} & set(steps)
+    assert await rerun_from.checkpoint_before(graph, cfg, "writing") is None
+    assert await rerun_from.checkpoint_before(graph, cfg, "review") is None
