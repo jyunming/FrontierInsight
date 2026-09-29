@@ -150,6 +150,18 @@ def model_for_node(node_models: dict[str, str] | None, node: str) -> str | None:
     return None
 
 
+def node_output_limit(limits: dict[str, int] | None, node: str) -> int | None:
+    """``provider.node_max_tokens`` for ``node``: an exact entry, then the part before the first dot (as
+    :func:`model_for_node`), else ``None`` (no limit sent)."""
+    if not limits or not node:
+        return None
+    if node in limits:
+        return limits[node]
+    if "." in node and node.split(".", 1)[0] in limits:
+        return limits[node.split(".", 1)[0]]
+    return None
+
+
 def node_budget(budgets: dict[str, float], node: str, default: float) -> float:
     """The per-node time budget for ``node``: an exact entry wins, then the entry
     for the part before the first dot (``write.patch`` gets ``write``'s budget,
@@ -1067,6 +1079,8 @@ class ResolvedEndpoint:
     # temperature, and request fields a model needs (see ProviderConfig).
     fixed_temperature: float | None = None
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # ``provider.node_max_tokens``: the output limit sent for a step (HTTP providers only), looked up by the call's node.
+    node_max_tokens: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -2540,6 +2554,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
+            _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         # No output AND no exit — genuinely stuck.
         await _kill_and_reap(proc, spec.argv[0])
@@ -2581,6 +2596,7 @@ async def _collect_via_streaming(
                 raise _CliTransientError(
                     f"{spec.argv[0]} stream error: {error_message[:500]}"
                 )
+            _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         stderr_b = b""
         if proc.stderr is not None:
@@ -2601,7 +2617,18 @@ async def _collect_via_streaming(
         raise _CliTransientError(
             f"{spec.argv[0]} stream error: {error_message[:500]}"
         )
+    _raise_if_cut_off(turns, spec)
     return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
+
+
+def _raise_if_cut_off(turns: list[dict[str, Any]], spec: Any) -> None:
+    """A streamed CLI answer whose last turn stopped at the output limit (``stop_reason: max_tokens``) is cut off: the
+    CLI resumes a turn cut that way, so a LAST one cut means it gave up. Never handed on as whole."""
+    if turns and turns[-1].get("stop") == "max_tokens":
+        raise ModelAnswerTruncated(
+            f"the model's answer was cut off at its output limit ({spec.argv[0]}: stop_reason max_tokens): an "
+            "incomplete answer is not used"
+        )
 
 
 def _finalise_stream_content(
@@ -2856,6 +2883,7 @@ def resolve_endpoint(
         reasoning_effort=provider.reasoning_effort or "",
         fixed_temperature=provider.fixed_temperature,
         extra_body=dict(provider.extra_body or {}),
+        node_max_tokens=dict(provider.node_max_tokens or {}),
     )
 
 
@@ -2897,6 +2925,7 @@ async def resolve_endpoint_async(
         reasoning_effort=provider.reasoning_effort or "",
         fixed_temperature=provider.fixed_temperature,
         extra_body=dict(provider.extra_body or {}),
+        node_max_tokens=dict(provider.node_max_tokens or {}),
     )
 
 
@@ -3076,13 +3105,72 @@ CALL_ATTEMPTS: contextvars.ContextVar[list[dict[str, Any]] | None] = contextvars
 CALL_SLOT: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_call_slot", default=None)
 
 
+class _ModelAnswerProblem(RuntimeError):
+    """An answer the model gave that is not used: what the quest's pause says (``node``: the step, ``limit``: the
+    output limit sent, ``usage``: what the call cost, ``provider`` / ``model``: who answered)."""
+
+    fi_outcome = "error"
+
+    def __init__(self, message: str, *, node: str = "", limit: int | None = None, usage: dict[str, Any] | None = None,
+                 provider: str | None = None, model: str | None = None, finish_reason: str | None = None,
+                 refused: bool = False) -> None:
+        super().__init__(message)
+        self.refused = refused  # the model turned down ``limit`` as an output size (HTTP 4xx), rather than cutting off at it
+        self.node, self.limit, self.usage = node, limit, usage
+        self.provider, self.model, self.finish_reason = provider, model, finish_reason
+
+
+class ModelAnswerTruncated(_ModelAnswerProblem):
+    """The model's answer was cut off at its output limit (``finish_reason: length``): an incomplete answer is never
+    handed on as if it were whole. The quest stops for a person (a larger limit or another model for the step)."""
+
+    fi_outcome = "truncated"
+
+
+class ModelAnswerFiltered(_ModelAnswerProblem):
+    """The provider withheld the model's answer with its content filter (``finish_reason: content_filter``). Asking the
+    same provider again gives the same result, so it is not retried; the quest stops for a person."""
+
+    fi_outcome = "content_filtered"
+
+
+def outcome_of(exc: BaseException | None) -> str:
+    """How a failed call is named in the record of calls: a truncated or filtered answer by what happened to it,
+    anything else by its error's class."""
+    if exc is None:
+        return "error"
+    return str(getattr(exc, "fi_outcome", "") or type(exc).__name__)
+
+
+#: Finish reasons that mean the answer ended as the model meant it to.
+_FINISHED_NORMALLY = frozenset({"stop", "end_turn", "eos", "stop_sequence", "tool_calls", "function_call"})
+#: Finish reasons that mean the answer was cut off at the output limit (``max_tokens``: some OpenAI-compatible relays).
+_CUT_OFF = frozenset({"length", "max_tokens"})
+_FILTERED = frozenset({"content_filter"})
+#: A call that set ``max_tokens`` and was cut off at it is asked once more with this many times the limit, capped.
+_TRUNCATION_RETRY_GROWTH = 2
+_TRUNCATION_RETRY_CAP = 65536
+
+
+def _finish_reason(data: Any) -> str | None:
+    try:
+        choice = data["choices"][0]
+    except (KeyError, IndexError, TypeError):
+        return None
+    reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+    return str(reason) if reason else None
+
+
 def _note_failed_attempt(provider: Any, model: Any, exc: BaseException | None, *, fallback: bool = False) -> None:
     attempts = CALL_ATTEMPTS.get()
     if attempts is None:
         return
     slot = CALL_SLOT.get() or {}
     attempts.append({"provider": slot.get("provider") or provider, "model": model,
-                     "error": type(exc).__name__ if exc else "error",
+                     "error": outcome_of(exc),
+                     # What a failed attempt that did answer cost, and why its answer ended (a cut-off answer is paid).
+                     **({"usage": exc.usage} if isinstance(getattr(exc, "usage", None), dict) else {}),
+                     **({"finish_reason": exc.finish_reason} if getattr(exc, "finish_reason", None) else {}),
                      "fallback": bool(fallback or slot.get("fallback")), "exc": exc})
 
 
@@ -3464,6 +3552,8 @@ class LLMClient:
                 self.endpoint.fixed_temperature if self.endpoint.fixed_temperature is not None else temperature
             ),
         }
+        if max_tokens is None:
+            max_tokens = node_output_limit(self.endpoint.node_max_tokens, node)
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
         # ``provider.reasoning_effort`` — absent from the body when unset, so
@@ -3519,55 +3609,119 @@ class LLMClient:
         # POST instead of letting it propagate. Re-run the two
         # cancellation tests in tests/test_provider.py if you touch
         # this retry config.
-        async for attempt in AsyncRetrying(
-            stop=stop_after_attempt(4),
-            # Jittered backoff: a deterministic ``wait_exponential``
-            # synchronises N concurrent quests in a --fleet that all
-            # hit a transient upstream blip simultaneously, so they
-            # all retry at the same wall-clock instant and re-clog
-            # the upstream. Random-exponential spreads them out over
-            # a window so the upstream sees a gentler ramp.
-            wait=wait_random_exponential(multiplier=1, max=20),
-            retry=retry_if_exception(_retry_http_error),
-            before_sleep=self._retry_note(
-                node, f"{self.endpoint.provider_name or 'provider'} over HTTP", 4, model or self.endpoint.model),
-            reraise=True,
-        ):
-            with attempt:
-                # Per-node HTTP read-timeout: heavy nodes (implement/write) get
-                # headroom, cheap nodes keep the tight base that catches a hung
-                # server fast. Miss → base client timeout.
-                http_timeout = node_budget(
-                    self._node_http_timeout_s, node, self._http_timeout_s,
-                )
-                if streams:
-                    data = await _post_streamed(self._http, url, body, headers, http_timeout)
-                else:
-                    r = await self._http.post(
-                        url, json=body, headers=headers, timeout=http_timeout,
+        async def send(request_body: dict[str, Any]) -> dict[str, Any]:
+            data: dict[str, Any] = {}
+            async for attempt in AsyncRetrying(
+                stop=stop_after_attempt(4),
+                # Jittered backoff: a deterministic ``wait_exponential``
+                # synchronises N concurrent quests in a --fleet that all
+                # hit a transient upstream blip simultaneously, so they
+                # all retry at the same wall-clock instant and re-clog
+                # the upstream. Random-exponential spreads them out over
+                # a window so the upstream sees a gentler ramp.
+                wait=wait_random_exponential(multiplier=1, max=20),
+                retry=retry_if_exception(_retry_http_error),
+                before_sleep=self._retry_note(
+                    node, f"{self.endpoint.provider_name or 'provider'} over HTTP", 4, model or self.endpoint.model),
+                reraise=True,
+            ):
+                with attempt:
+                    # Per-node HTTP read-timeout: heavy nodes (implement/write) get
+                    # headroom, cheap nodes keep the tight base that catches a hung
+                    # server fast. Miss → base client timeout.
+                    http_timeout = node_budget(
+                        self._node_http_timeout_s, node, self._http_timeout_s,
                     )
-                    # Raise for any error status; the retry predicate
-                    # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                    # (bad key, quota, content policy, oversized body) surface
-                    # immediately instead of burning the backoff budget.
-                    r.raise_for_status()
-                    data = r.json()
+                    if streams:
+                        data = await _post_streamed(self._http, url, request_body, headers, http_timeout)
+                    else:
+                        r = await self._http.post(
+                            url, json=request_body, headers=headers, timeout=http_timeout,
+                        )
+                        # Raise for any error status; the retry predicate
+                        # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                        # (bad key, quota, content policy, oversized body) surface
+                        # immediately instead of burning the backoff budget.
+                        r.raise_for_status()
+                        data = r.json()
+            return data
+
+        def usage_of(reply: dict[str, Any]) -> dict[str, int] | None:
+            u = reply.get("usage") or {}
+            if not (u and isinstance(u, dict)):
+                return None
+            return {
+                "prompt_tokens": int(u.get("prompt_tokens", 0) or 0),
+                "completion_tokens": int(u.get("completion_tokens", 0) or 0),
+                "total_tokens": int(u.get("total_tokens", 0) or (u.get("prompt_tokens", 0) or 0)
+                                    + (u.get("completion_tokens", 0) or 0)),
+            }
+
+        def problem(kind: type, reply: dict[str, Any], why: str, limit: int | None,
+                    refused: bool = False) -> _ModelAnswerProblem:
+            return kind(why, node=node, limit=limit, usage=usage_of(reply), provider=self.last_provider,
+                        model=reply.get("model") if isinstance(reply.get("model"), str) else (model or self.endpoint.model),
+                        finish_reason=_finish_reason(reply), refused=refused)
+
+        def refused_limit(e: httpx.HTTPStatusError, asked: int, prefix: str) -> _ModelAnswerProblem | None:
+            """A 4xx that is about the output size asked for (not a key, quota or rate problem): named for a person."""
+            resp = getattr(e, "response", None)
+            sc = getattr(resp, "status_code", None)
+            if not (isinstance(sc, int) and sc in (400, 413, 422)):
+                return None
+            try:
+                said = str(getattr(resp, "text", "") or "")[:600]
+            except Exception:  # noqa: BLE001 -- a body that cannot be read only loses the detail
+                said = ""
+            if not re.search(r"max[_ ]?(completion[_ ])?tokens|output|context|too large|exceed|limit", said, re.I):
+                return None
+            return problem(ModelAnswerTruncated, {}, (
+                f"{prefix}the model refused an output limit of {asked} tokens (HTTP {sc}: {' '.join(said.split())[:200]})"),
+                asked, refused=True)
+
+        def cut_off(reply: dict[str, Any], limit: int | None) -> _ModelAnswerProblem:
+            return problem(ModelAnswerTruncated, reply,
+                           "the model's answer was cut off at its output limit"
+                           + (f" ({limit} tokens)" if limit else "") + ": an incomplete answer is not used", limit)
+
+        asked = body.get("max_tokens")
+        try:
+            data = await send(body)
+        except httpx.HTTPStatusError as e:
+            refused = refused_limit(e, asked, "") if isinstance(asked, int) and not isinstance(asked, bool) else None
+            if refused is not None:
+                raise refused from e
+            raise
+        finish = _finish_reason(data)
+        limit = body.get("max_tokens")
+        if finish in _CUT_OFF and isinstance(limit, int) and not isinstance(limit, bool) and limit > 0:
+            # Cut off at the limit this call set: asked once more with room to finish (bounded), never handed on cut.
+            bigger = min(limit * _TRUNCATION_RETRY_GROWTH, _TRUNCATION_RETRY_CAP)
+            if bigger > limit:
+                _log.warning("[%s] the model's answer was cut off at max_tokens=%d; asking once more with %d",
+                             node or "chat", limit, bigger)
+                first = cut_off(data, limit)
+                _note_failed_attempt(self.last_provider, first.model, first)
+                body = {**body, "max_tokens": bigger}
+                try:
+                    data = await send(body)
+                except httpx.HTTPStatusError as e:
+                    sc = getattr(getattr(e, "response", None), "status_code", None)
+                    if isinstance(sc, int) and 400 <= sc < 500 and sc != 429:
+                        # The larger limit is more than this model allows: the answer stays cut off at the first one.
+                        raise problem(ModelAnswerTruncated, {}, (
+                            f"the model's answer was cut off at its output limit ({limit} tokens), and the model "
+                            f"refused a larger one ({bigger} tokens: HTTP {sc})"), bigger, refused=True) from e
+                    raise
+                finish = _finish_reason(data)
         # Capture token usage when the upstream returned
         # one. OpenAI-compatible servers (openai / codex / gemini /
         # ollama recent versions) include ``usage`` at the response
         # top level; older Ollama omits it. Missing → leave
         # last_usage = None so the cost-logger writes "unknown".
-        usage = data.get("usage") or {}
-        if usage and isinstance(usage, dict):
-            self.last_usage = {
-                "prompt_tokens": int(usage.get("prompt_tokens", 0) or 0),
-                "completion_tokens": int(usage.get("completion_tokens", 0) or 0),
-                "total_tokens": int(
-                    usage.get("total_tokens", 0)
-                    or (usage.get("prompt_tokens", 0) or 0)
-                    + (usage.get("completion_tokens", 0) or 0)
-                ),
-            }
+        measured = usage_of(data)
+        if measured is not None:
+            self.last_usage = measured
         # Some providers (notably some Copilot proxies) echo the
         # actual-routed model in the response — record it so the
         # cost chart attributes the call to the model that ran,
@@ -3575,6 +3729,16 @@ class LLMClient:
         if isinstance(data.get("model"), str):
             self.last_model = data["model"]
             LAST_CALL.set({"provider": self.last_provider, "model": data["model"], "reported": True})
+        # Why the answer ended, and what it cost, in this call's own record (and so in the quest's record of its calls).
+        LAST_CALL.set({**(LAST_CALL.get() or {}), "finish_reason": finish, "usage": self.last_usage})
+        if finish in _CUT_OFF:
+            raise cut_off(data, body.get("max_tokens"))
+        if finish in _FILTERED:
+            raise problem(ModelAnswerFiltered, data,
+                          "the provider withheld the model's answer with its content filter; asking it again would "
+                          "give the same result", body.get("max_tokens"))
+        if finish is not None and finish not in _FINISHED_NORMALLY:
+            _log.info("[%s] the model's answer ended with finish_reason %r (taken as finished)", node or "chat", finish)
         text = data["choices"][0]["message"]["content"]
         # Older Ollama versions omit ``usage`` from the response. Fall
         # through to char-based estimation so the cost.jsonl row still
@@ -4069,8 +4233,10 @@ class FallbackLLMClient:
                 failed = LAST_CALL.get() or {}
                 _note_failed_attempt(slot.label, failed.get("model") or getattr(client, "last_model", None), e,
                                      fallback=idx > 0)
-                fatal = _is_fatal_provider_error(e)
-                slot.record_failure(self._threshold, fatal=fatal, now=time.monotonic())
+                if not isinstance(e, _ModelAnswerProblem):
+                    # A cut-off or withheld answer is about this request, not the provider's health: no circuit trip.
+                    fatal = _is_fatal_provider_error(e)
+                    slot.record_failure(self._threshold, fatal=fatal, now=time.monotonic())
                 more = idx < len(self._slots) - 1
                 self._log.warning(
                     "[fallback] provider %s failed (%s)%s; %s",

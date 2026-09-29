@@ -636,6 +636,18 @@ dropdown (e.g. `gemini-3-flash-preview`, whose family is the coarser
 model selected in your Chat picker and the chat prints a warning naming the
 hint, so a quest keeps running on a model you chose.
 
+#### When a model's answer is cut off
+
+If a model's answer stops at its output limit, or the provider's content filter
+withholds it, the quest stops for you (a "model answer" pause on the quest card,
+with the same text as `NEXT_STEP.md`) instead of using half an answer. It names
+the step (`plan`, `implement`, `write`, `review`, ...) and what to change: a
+larger `provider.node_max_tokens.<step>` for an HTTP provider, or another
+`provider.node_models.<step>`; then resume, and only that step runs again.
+Through this extension the model is Copilot's, and the extension sends no output
+limit and gets no reason an answer ended, so a cut-off there cannot be detected;
+`node_max_tokens` applies to quests that use an HTTP provider.
+
 ## Reasoning effort
 
 The interview's advanced list (`@fi /new` → review screen → advanced

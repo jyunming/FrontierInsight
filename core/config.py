@@ -300,6 +300,28 @@ class ProviderConfig(BaseModel):
     # other node — no behavior change until you opt in.
     node_models: dict[str, str] | None = None
 
+    # The most a step's answer may be, in tokens (the output limit sent as ``max_tokens``), per step: the same keys as
+    # ``node_models`` (``write``, ``implement``, ``review_panel`` for every reviewer, ...), an exact key first, then the
+    # part before the first dot. Unset (the default), no limit is sent and the model's own applies, as before. When a
+    # step's answer is cut off at its limit, the quest stops and says which key to raise; with a limit set here the call
+    # is first asked once more with twice it. Sent on HTTP providers only (the CLIs and the VS Code bridge have no such
+    # setting). Example: ``node_max_tokens: {write: 16000, implement: 32000}``.
+    node_max_tokens: dict[str, int] | None = None
+
+    @field_validator("node_max_tokens", mode="before")
+    @classmethod
+    def _positive_output_limits(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("provider.node_max_tokens must map step names to a number of tokens")
+        for step, limit in v.items():
+            if not str(step).strip():
+                raise ValueError("provider.node_max_tokens: a step name cannot be empty")
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError(f"provider.node_max_tokens.{step} must be a whole number of tokens above 0; got {limit!r}")
+        return dict(v)
+
     # Multi-model ensemble per node. Maps an engine node name (one of
     # ``ideate`` / ``analyze`` / ``cross_check``) to a configuration
     # that fires N parallel chat calls (one per model in ``models``)

@@ -38,6 +38,13 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         ["Edit the design block in plan.md and save it, then go on.",
          "Ask for a change in words: `--revise-plan \"<what to change>\"`."],
     ),
+    "model_output": (
+        "A model's answer was cut off at its output limit, or withheld by the provider's filter. How should that "
+        "step answer?",
+        "Give the step a larger output limit (`provider.node_max_tokens.<step>`) or another model "
+        "(`provider.node_models.<step>`), then go on.",
+        ["Change what the quest asks (the topic or the plan), then go on."],
+    ),
     "figures": (
         "Which model should read the figures in the papers?",
         "Choose a model that can read images for `provider.node_models.figures`, then go on.",

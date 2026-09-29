@@ -42,7 +42,7 @@ same PR that adds, splits or renames one.
 - `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; a question asked only for
   some earlier answer carries `ask_if`, checked by `question_applies` (the web page and VS Code mirror it; today only
   `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry.
-- `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call); `quest_run_log` (a failed call made outside the engine still reaches the quest's run.log); `_http_streams` / `_post_streamed` (Moonshot calls are streamed).
+- `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call, and why its answer ended); `ModelAnswerTruncated` / `ModelAnswerFiltered` / `outcome_of` (an answer cut off at its limit or withheld is never returned as whole; `Engine._pause_for_model_output` turns either into a `model_output` pause); `node_output_limit` (`provider.node_max_tokens` per step); `quest_run_log` (a failed call made outside the engine still reaches the quest's run.log); `_http_streams` / `_post_streamed` (Moonshot calls are streamed).
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
 - `core/ensemble.py` — the multi-model fan-out-and-merge primitive a node opts into.
 
