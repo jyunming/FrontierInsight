@@ -5327,6 +5327,11 @@ def _pip_install(packages: list[str]) -> tuple[list[str], dict[str, str]]:
     return installed, failed
 
 
+def _pip_cmd_args(names: "list[str]") -> str:
+    """Names as one shell-safe string: a version floor like statsmodels>=0.14.6 would otherwise be read as a redirect."""
+    return " ".join(repr(n) if any(c in n for c in "<>=~!") else n for n in names)
+
+
 def _pip_names_for_skill(skill: "Any", selftest_output: str = "") -> list[str]:
     """Pip package names this skill needs, best-effort.
 
@@ -5496,7 +5501,7 @@ def _approve_all_skills(
             print(
                 f"{len(quarantined)} skill(s) fail their self-test; their "
                 f"missing packages look like:\n"
-                f"  {sys.executable} -m pip install {' '.join(wanted)}\n"
+                f"  {sys.executable} -m pip install {_pip_cmd_args(wanted)}\n"
                 f"Re-run with --pip-install to have FI do that first.\n"
             )
 
@@ -5698,7 +5703,7 @@ def _approve_skill(
         wanted = _pip_names_for_skill(skill, state.selftest_output or "")
         if wanted:
             print(f"It needs {', '.join(wanted)}. To install into this interpreter: "
-                  f"{sys.executable} -m pip install {' '.join(wanted)}")
+                  f"{sys.executable} -m pip install {_pip_cmd_args(wanted)}")
         return 1
     if state.status is Status.UNTESTED:
         print(f"{name} carries no selftest.py, so it can never be promoted. "

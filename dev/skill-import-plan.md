@@ -176,3 +176,11 @@ The user's directive: **do not import yet — build the layering first.**
 
 Then, and only then: re-scan the real `uncertainty-and-units` by hand, import
 it alone, and **a person approves it** — not the agent.
+
+`uncertainty-and-units`, `statistical-power` and `experimental-design` (K-Dense,
+MIT) were re-scanned by hand (no findings beyond the info-level allowed-tools
+note) and are now in the starter list in `scripts/import_scientist_skills.py`.
+The plan's "import it alone, and a person approves it" gate has NOT been run
+for them: being in the list means the script fetches and imports them
+(untested, unapproved), and a person still approves each one, one at a time or
+in bulk with `--approve-all-skills`.

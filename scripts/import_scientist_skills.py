@@ -15,7 +15,9 @@ Sources (repo -> what it contributes):
   * K-Dense-AI/scientific-agent-skills — Bayesian modeling, astronomy,
     cheminformatics, bioinformatics, materials science, geospatial,
     metabolic modeling, quantum simulation, ontology-term resolution,
-    molecular dynamics. Already behind four skills trusted in this
+    molecular dynamics, and the general method skills (uncertainty and
+    units, statistical power, experimental design). Already behind four
+    skills trusted in this
     library (scikit-learn, get-available-resources,
     iso-standards-readiness, what-if-oracle), so format/quality are a
     known quantity.
@@ -125,6 +127,12 @@ SKILLS: dict[str, tuple[str, str, bool]] = {
     "matplotlib": ("kdense", "skills/matplotlib", False),
     "seaborn": ("kdense", "skills/seaborn", False),
     "scientific-visualization": ("kdense", "skills/scientific-visualization", False),
+    # General-method skills, useful in any field: error bars and unit conversion, sample size and power,
+    # design-of-experiments matrices. Their scripts run offline. uncertainty-and-units says Python 3.12+ upstream
+    # (for its pinned numpy/scipy); the unpinned list also works on 3.11, which FI supports -- do not pin it.
+    "uncertainty-and-units": ("kdense", "skills/uncertainty-and-units", False),
+    "statistical-power": ("kdense", "skills/statistical-power", False),
+    "experimental-design": ("kdense", "skills/experimental-design", False),
     # -- ClawBio/ClawBio (curated subset -- see module docstring) --
     "analyze-fasta": ("clawbio", "skills/analyze-fasta", False),
     "genome-compare": ("clawbio", "skills/genome-compare", False),
@@ -518,7 +526,7 @@ def main() -> int:
         print()
     elif all_pip:
         print("Underlying packages not installed (pass --pip-install, or run yourself):")
-        print(f"  {sys.executable} -m pip install {' '.join(all_pip)}")
+        print(f"  {sys.executable} -m pip install {' '.join(repr(p) if any(c in p for c in '<>=~!') else p for p in all_pip)}")
         print()
 
     # Deliberately a placeholder rather than `git config user.name`. The ledger
