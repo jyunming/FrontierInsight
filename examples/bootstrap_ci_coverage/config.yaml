@@ -1,6 +1,6 @@
 topic: |
   TOPIC. How often do bootstrap confidence intervals actually contain the
-  true value when the sample is small and the data are skewed?
+  true mean when the sample is small and the data are skewed?
 
   CONTEXT. A 95% confidence interval should contain the true mean in 95% of
   repeated experiments. With few observations and a skewed distribution
@@ -11,14 +11,18 @@ topic: |
 
   SCOPE (SIMULATION ONLY, NO SPECIAL DATA NEEDED).
     1. Draw samples of size n from a normal, an exponential and a lognormal
-       distribution whose true mean is known.
+       distribution whose true mean is known. Use a lognormal with sigma = 1
+       (true mean e^0.5). The normal case is a control: the t-interval should
+       cover at 95%.
     2. For each sample build three 95% intervals for the mean: the t-interval,
        the percentile bootstrap, and the BCa bootstrap.
-    3. Repeat many times per setting and report the coverage (the fraction of
-       intervals that contain the true mean) with its own uncertainty.
+    3. Use 2000 samples per setting and 1000 bootstrap resamples each, and
+       report the coverage (the fraction of intervals that contain the true
+       mean) with its own uncertainty (standard error).
     4. Sweep n in {5, 10, 20, 50, 100}.
-    5. State at which n each method reaches coverage within 2 points of 95%
-       for each distribution.
+    5. State the first n at which each method's coverage estimate is at least
+       93% (within 2 percentage points of 95%) for each distribution, or say
+       that it does not reach 93% by n = 100.
 
   GOALS.
     - One Python script using numpy and scipy, with matplotlib (Agg backend).
@@ -29,7 +33,8 @@ topic: |
       intervals, with at least three primary references.
 
   CONSTRAINTS.
-    - CPU only; under 60 seconds of runtime.
+    - CPU only; under 60 seconds of runtime. Vectorise across samples with
+      numpy rather than calling scipy.stats.bootstrap once per sample.
     - Fix the random seeds and say so in the paper.
 
 title: bootstrap-ci-coverage-small-samples
