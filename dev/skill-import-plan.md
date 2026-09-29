@@ -184,3 +184,13 @@ The plan's "import it alone, and a person approves it" gate has NOT been run
 for them: being in the list means the script fetches and imports them
 (untested, unapproved), and a person still approves each one, one at a time or
 in bulk with `--approve-all-skills`.
+
+`numerical-verification` (e-eight/scicomp-skills, MIT, Copyright (c) 2026 Soham Pal) is in the list too. It is one file
+of instructions (about 7,000 characters): no scripts, no credentials, no GPU or conda, no literature search, and nothing
+that overlaps scientific-writing, so it passes the exclusions above; its SKILL.md scans with no findings. The import
+script copies the repository's LICENSE next to it (an import otherwise carries only the skill's own folder). What it adds
+to the curated numerical skills (`convergence-study`, `benchmark-and-mms-planner`, `numerical-stability`,
+`time-stepping`, `uncertainty-and-units`, `scipy`): those say how to run a study or use a tool; this one says which
+independent answer to trust and how to prove a check can fail (a slow twin, invariants, limiting cases, a deliberate
+sabotage of the code). Cost once it is chosen for a quest (the prompt block as built, characters / 4): about 260 tokens where the design
+reads a summary, about 1,900 in each step that gets the full text.
