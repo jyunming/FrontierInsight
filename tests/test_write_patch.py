@@ -381,7 +381,8 @@ def test_a_first_draft_is_written_as_before(tmp_path: Path) -> None:
     assert client.calls[0][1].rstrip().endswith("## Review of the previous draft\n(none — first draft)")
     assert not [m for _l, m in logged if "whole paper again" in m or "editing the earlier draft" in m]
     # A draft that answers no refine says so (refine_scope ""), so the trace never carries a stale scope.
-    assert set(out) == {"paper_md", "literature", "paper_basis", "refine_scope", "refine_needs_experiment"}
+    assert set(out) == {"paper_md", "literature", "paper_basis", "refine_scope", "refine_needs_experiment",
+                       "refine_extend", "refine_layout"}
     assert out["refine_scope"] == "" and not out["refine_needs_experiment"]
 
 

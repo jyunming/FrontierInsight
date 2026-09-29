@@ -16,9 +16,14 @@ from core.engine import (
     _format_review_for_writer,
     _hits_need_only_a_rewrite,
     _refine_round,
-    _take_needs_experiment,
+    _take_refine_points,
     _user_feedback_review_block,
 )
+
+def _take_needs(markdown: str) -> tuple[str, list[str]]:
+    paper, points = _take_refine_points(markdown)
+    return paper, points["experiment"]
+
 
 NOTES = [{"iteration": 1, "text": "The Holm p-value in the discussion is not computed anywhere; remove it."}]
 
@@ -62,21 +67,21 @@ def test_the_writer_is_told_how_to_name_an_experiment_point() -> None:
 
 
 def test_needs_experiment_lines_are_taken_out_of_the_paper() -> None:
-    paper, points = _take_needs_experiment("# P\n\nBody.\n\nNEEDS_EXPERIMENT: rerun the sweep with 30 seeds\n")
+    paper, points = _take_needs("# P\n\nBody.\n\nNEEDS_EXPERIMENT: rerun the sweep with 30 seeds\n")
     assert points == ["rerun the sweep with 30 seeds"] and "NEEDS_EXPERIMENT" not in paper and "Body." in paper
-    assert _take_needs_experiment("# P\n\nBody.\n") == ("# P\n\nBody.\n", [])
+    assert _take_needs("# P\n\nBody.\n") == ("# P\n\nBody.\n", [])
 
 
 def test_needs_experiment_lines_in_other_shapes_are_taken_too() -> None:
     reply = ("# P\n\nBody.\n\n`NEEDS_EXPERIMENT: run a permutation test`\n1. NEEDS_EXPERIMENT: more seeds\n"
              "2) **NEEDS_EXPERIMENT:** a finer grid**\n- NEEDS_EXPERIMENT: a new baseline\n")
-    paper, points = _take_needs_experiment(reply)
+    paper, points = _take_needs(reply)
     assert points == ["run a permutation test", "more seeds", "a finer grid", "a new baseline"]
     assert "NEEDS_EXPERIMENT" not in paper and paper.strip().endswith("Body.")
 
 
 def test_a_fenced_reply_with_points_after_it_loses_its_fence() -> None:
-    paper, points = _take_needs_experiment("```markdown\n# P\n\nBody.\n```\n\nNEEDS_EXPERIMENT: x\n")
+    paper, points = _take_needs("```markdown\n# P\n\nBody.\n```\n\nNEEDS_EXPERIMENT: x\n")
     assert points == ["x"] and paper == "# P\n\nBody.\n"
 
 
@@ -145,7 +150,8 @@ def test_a_refine_the_text_cannot_answer_goes_to_the_design(tmp_path: Path) -> N
     assert "NEEDS_EXPERIMENT" not in Path(out["paper_md"]).read_text(encoding="utf-8")
     assert eng._route_after_write({**_refined(), **out}) == "redesign"  # type: ignore[arg-type]
     facts = eng._route_facts("write", {**_refined(), **out})  # type: ignore[arg-type]
-    assert facts == {"refine_scope": "experiment", "needs_experiment": ["run a permutation test to get the p-value"]}
+    assert facts == {"refine_scope": "experiment", "needs_experiment": ["run a permutation test to get the p-value"],
+                     "extend": [], "layout": []}
 
 
 def test_notes_the_history_does_not_hold_go_to_the_design_rather_than_being_dropped() -> None:
