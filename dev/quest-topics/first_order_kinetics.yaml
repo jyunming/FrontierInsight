@@ -1,0 +1,48 @@
+# General-science test topic (chemistry). A field-neutral simulation with a known answer, so a run can be checked
+# against theory. Run: python launch.py --config dev/quest-topics/first_order_kinetics.yaml
+topic: |
+  TOPIC. How accurately can a reaction rate constant and activation energy be recovered from noisy concentration measurements?
+
+  CONTEXT. A first-order reaction follows c(t) = c0 * exp(-k * t), and the rate constant follows the Arrhenius law k = A * exp(-Ea / (R * T)).
+  SCOPE. Simulate noisy concentration-time data at several temperatures (with known A and Ea), fit k at each temperature by nonlinear least squares, then fit ln k against 1/T to recover Ea and A. Vary the noise level and the number of time points, and report bias, the spread of the estimates, and how often the true value falls inside the reported 95 percent interval.
+
+  GOALS.
+    - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
+    - Two or three figures that answer the question directly, each with the reference or theory value drawn.
+    - A short paper of at most 4 pages that cites at least three primary references.
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
+    - Report every number with its uncertainty, and say when a result is only a check of the code.
+
+title: kinetics-parameter-recovery
+
+result_use: research
+
+# The only thing to set before you run this: which model answers (see docs/PROVIDERS.md).
+provider:
+  name: openai
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  top_k: 5
+
+pauses:
+  papers: false
+  review: "off"
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs

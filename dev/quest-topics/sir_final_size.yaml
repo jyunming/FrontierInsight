@@ -1,0 +1,48 @@
+# General-science test topic (epidemiology). A field-neutral simulation with a known answer, so a run can be checked
+# against theory. Run: python launch.py --config dev/quest-topics/sir_final_size.yaml
+topic: |
+  TOPIC. How well does a stochastic epidemic simulation match the textbook final-size relation, and how does it depart from it in a small population?
+
+  CONTEXT. In the simple SIR epidemic model the fraction of people ever infected, z, satisfies z = 1 - exp(-R0 * z) (R0 is the average number of people one case infects in a fully susceptible population). With few people and random chance, some outbreaks die out early, so the average final size falls below that curve.
+  SCOPE. Simulate a stochastic SIR epidemic (population N, one starting case). For N in {50, 200, 1000} and R0 in {0.8, 1.2, 1.5, 2.0, 3.0}, run many outbreaks and report the mean final fraction infected, the share of outbreaks that die out early, and the analytic z. State how the gap shrinks as N grows.
+
+  GOALS.
+    - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
+    - Two or three figures that answer the question directly, each with the reference or theory value drawn.
+    - A short paper of at most 4 pages that cites at least three primary references.
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
+    - Report every number with its uncertainty, and say when a result is only a check of the code.
+
+title: sir-final-size-vs-r0
+
+result_use: research
+
+# The only thing to set before you run this: which model answers (see docs/PROVIDERS.md).
+provider:
+  name: openai
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  top_k: 5
+
+pauses:
+  papers: false
+  review: "off"
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs

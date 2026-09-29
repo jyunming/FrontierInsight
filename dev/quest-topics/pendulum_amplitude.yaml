@@ -1,0 +1,48 @@
+# General-science test topic (physics). A field-neutral simulation with a known answer, so a run can be checked
+# against theory. Run: python launch.py --config dev/quest-topics/pendulum_amplitude.yaml
+topic: |
+  TOPIC. How large is the error of the small-angle pendulum period formula as the swing gets larger, and how well does a numerical integrator reproduce the exact period?
+
+  CONTEXT. For a pendulum the small-angle period is T0 = 2*pi*sqrt(L/g). The exact period for a swing of amplitude A is T0 * (2/pi) * K(sin(A/2)), where K is the complete elliptic integral of the first kind.
+  SCOPE. Integrate the pendulum equation numerically for amplitudes from 5 to 170 degrees, measure the period, and compare it with the exact value and with T0. Report the relative error of the small-angle formula against amplitude, and the amplitude at which it passes 1 percent and 5 percent. Show that the numerical period converges to the exact one as the step shrinks.
+
+  GOALS.
+    - One Python script using numpy (and scipy where it helps), with matplotlib (Agg backend).
+    - Two or three figures that answer the question directly, each with the reference or theory value drawn.
+    - A short paper of at most 4 pages that cites at least three primary references.
+  CONSTRAINTS.
+    - CPU only; under 60 seconds of runtime; fixed random seeds, stated in the paper.
+    - Report every number with its uncertainty, and say when a result is only a check of the code.
+
+title: pendulum-period-vs-amplitude
+
+result_use: research
+
+# The only thing to set before you run this: which model answers (see docs/PROVIDERS.md).
+provider:
+  name: openai
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  top_k: 5
+
+pauses:
+  papers: false
+  review: "off"
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs
