@@ -440,7 +440,11 @@ def _refresh_generated_selftest(name: str, pip_pkgs: list[str]) -> None:
     if not selftest_is_generated(skill_dir):
         return
     before = (skill_dir / "selftest.py").read_text(encoding="utf-8", errors="replace")
-    generate_selftest(skill_dir, name, overwrite=True, pip_requires=pip_pkgs)
+    try:
+        generate_selftest(skill_dir, name, overwrite=True, pip_requires=pip_pkgs)
+    except ValueError as e:  # a malformed known-value check: keep the old self-test, carry on with the rest
+        print(f"   {name}: its generated self-test was NOT refreshed ({e}).")
+        return
     if (skill_dir / "selftest.py").read_text(encoding="utf-8", errors="replace") != before:
         print(f"   {name}: its generated self-test was refreshed; approve it again.")
 

@@ -21,10 +21,12 @@ and not enough to certify physics.
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 import json
 import pkgutil
+import textwrap
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -459,6 +461,43 @@ GENERATED_MARKER = "FI-GENERATED-SELFTEST"
 PER_SCRIPT_PROBE_TIMEOUT_S = 20
 
 
+def _check_function(fn_name: str, label: str, source: str) -> str:
+    """One known-value check written out as a plain function in the self-test.
+
+    The check's code goes into the file as code, not as a string run through
+    ``exec``: the skill scanner rightly flags ``exec`` as high risk because
+    what it runs is not visible in the file, and a reviewer approving the
+    skill should be able to read exactly what its self-test runs. ``ok``
+    starts ``False`` so a check that never sets it fails instead of passing.
+    """
+    # A source must be a valid block on its own (so no top-level ``return`` or
+    # ``yield``, which would turn the function into something that passes
+    # without checking) and still valid once it is a function body.
+    try:
+        compile(source, f"<check {label}>", "exec")
+    except SyntaxError as e:
+        raise ValueError(f"known-value check {label!r} is not a valid Python block: {e.msg}") from e
+    body = textwrap.indent(source.strip("\n"), "    ")
+    text = (
+        f"def {fn_name}():\n"
+        f"    # {' '.join(label.split())}\n"
+        f"    ok = False\n"
+        f"{body}\n"
+        f"    return ok\n\n\n"
+    )
+    # Indenting a multi-line string literal would silently change the check;
+    # the function's statements must parse to exactly the source's, or the
+    # check is refused rather than written out altered.
+    try:
+        compile(text, f"<check {label}>", "exec")
+        fn_body = ast.parse(text).body[0].body[1:-1]
+    except SyntaxError as e:
+        raise ValueError(f"known-value check {label!r} is not valid inside a function: {e.msg}") from e
+    if [ast.dump(s) for s in fn_body] != [ast.dump(s) for s in ast.parse(source).body]:
+        raise ValueError(f"known-value check {label!r} cannot be indented into a function unchanged")
+    return text
+
+
 def _selftest_source(
     name: str, scripts: list[str], checks: list[tuple[str, str]] | None = None,
 ) -> str:
@@ -477,7 +516,10 @@ def _selftest_source(
     """
     checks = checks or []
     probes = "\n".join(f"    {s!r}," for s in scripts)
-    check_lines = "\n".join(f"    ({label!r}, {src!r})," for label, src in checks)
+    check_defs = "".join(
+        _check_function(f"_check_{i}", label, src) for i, (label, src) in enumerate(checks, 1)
+    )
+    check_lines = "\n".join(f"    ({label!r}, _check_{i})," for i, (label, _) in enumerate(checks, 1))
     parts = []
     if scripts:
         parts.append("every bundled script is present and answers `--help`")
@@ -518,7 +560,8 @@ SCRIPTS = [
 {probes}
 ]
 
-CHECKS = [
+
+{check_defs}CHECKS = [
 {check_lines}
 ]
 
@@ -599,14 +642,13 @@ def main() -> int:
     if not (HERE / "SKILL.md").is_file():
         failures.append("missing: SKILL.md")
 
-    for label, source in CHECKS:
-        scope = {{}}
+    for label, check in CHECKS:
         try:
-            exec(source, scope)
+            ok = check()
         except Exception as e:
             failures.append(f"known-value check '{{label}}' raised {{type(e).__name__}}: {{e}}")
             continue
-        if not bool(scope.get("ok", False)):
+        if not bool(ok):
             failures.append(f"known-value check '{{label}}' gave the wrong answer")
 
     for f in failures:

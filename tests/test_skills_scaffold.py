@@ -584,6 +584,96 @@ def test_a_skill_without_a_check_still_says_it_proves_nothing(tmp_path: Path) ->
     assert "NOTHING beyond" in (d / "selftest.py").read_text(encoding="utf-8")
 
 
+def _high_findings(d: Path) -> list:
+    from core.skills import scan
+
+    text = (d / "selftest.py").read_text(encoding="utf-8")
+    return [f for f in scan._scan_python("selftest.py", text) if f.severity == scan.HIGH]
+
+
+def test_a_generated_selftest_without_checks_has_no_high_scan_finding(tmp_path: Path) -> None:
+    # A generated self-test once carried an exec() loop even with no checks, so FI's own scanner flagged every
+    # freshly imported skill HIGH (EXE001) and bulk approval refused them all.
+    d = _bare_skill(tmp_path, "nochecks")
+    scaffold.generate_selftest(d, "nochecks")
+    assert _high_findings(d) == []
+    assert "exec(" not in (d / "selftest.py").read_text(encoding="utf-8")
+    assert _run_selftest(d).returncode == 0
+
+
+def test_a_generated_selftest_with_real_known_checks_is_visible_code_and_still_checks(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from core.skills.known_checks import KNOWN_CHECKS
+
+    pytest.importorskip("scipy")
+    real = KNOWN_CHECKS["scipy"]  # two real, multi-line sources
+    req = _preset(monkeypatch, "scipyish", list(real))
+    d = _bare_skill(tmp_path, "scipyish")
+    scaffold.generate_selftest(d, "scipyish", pip_requires=req)
+    text = (d / "selftest.py").read_text(encoding="utf-8")
+    assert _high_findings(d) == []
+    assert "exec(" not in text and "eval(" not in text
+    # The check's code is in the file as code a reviewer can read, not as a string.
+    assert "\n    from scipy.special import gamma\n" in text
+    proc = _run_selftest(d)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "2 known-value check(s) passed" in proc.stdout
+
+    wrong = [("gamma(5) is 25", "from scipy.special import gamma\nok = abs(gamma(5) - 25.0) < 1e-9")]
+    req = _preset(monkeypatch, "scipywrong", real[:1] + wrong)
+    d = _bare_skill(tmp_path, "scipywrong")
+    scaffold.generate_selftest(d, "scipywrong", pip_requires=req)
+    assert _high_findings(d) == []
+    proc = _run_selftest(d)
+    assert proc.returncode == 1
+    assert "gamma(5) is 25" in proc.stdout and "gamma(5) is 24" not in proc.stdout
+
+
+def test_multi_line_checks_are_written_as_code_and_still_check(tmp_path: Path, monkeypatch) -> None:
+    # Standard library only, so this runs everywhere (the scipy test above skips without scipy).
+    good = ("sqrt of 16 is 4", "import math\nx = math.sqrt(16)\nok = x == 4.0")
+    bad = ("sqrt of 16 is 5", "import math\nx = math.sqrt(16)\nok = x == 5.0")
+    req = _preset(monkeypatch, "stdlibok", [good])
+    d = _bare_skill(tmp_path, "stdlibok")
+    scaffold.generate_selftest(d, "stdlibok", pip_requires=req)
+    text = (d / "selftest.py").read_text(encoding="utf-8")
+    assert _high_findings(d) == [] and "exec(" not in text
+    assert "\n    x = math.sqrt(16)\n" in text
+    proc = _run_selftest(d)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "1 known-value check(s) passed" in proc.stdout
+
+    req = _preset(monkeypatch, "stdlibbad", [good, bad])
+    d = _bare_skill(tmp_path, "stdlibbad")
+    scaffold.generate_selftest(d, "stdlibbad", pip_requires=req)
+    proc = _run_selftest(d)
+    assert proc.returncode == 1
+    assert "'sqrt of 16 is 5' gave the wrong answer" in proc.stdout
+    assert "sqrt of 16 is 4" not in proc.stdout
+
+
+def test_a_check_that_never_sets_ok_fails(tmp_path: Path, monkeypatch) -> None:
+    req = _preset(monkeypatch, "nook", [("forgot ok", "x = 1")])
+    d = _bare_skill(tmp_path, "nook")
+    scaffold.generate_selftest(d, "nook", pip_requires=req)
+    proc = _run_selftest(d)
+    assert proc.returncode == 1
+    assert "'forgot ok' gave the wrong answer" in proc.stdout
+    assert "raised" not in proc.stdout
+
+
+@pytest.mark.parametrize("src", [
+    "ok = True\nyield 1",          # would make the check a generator, which is truthy without running
+    "return True",                 # not a valid block on its own
+    "from math import *\nok = True",  # not allowed inside a function
+    "global ok\nok = True",        # conflicts with the preset ok = False
+])
+def test_a_check_that_would_pass_without_checking_or_not_compile_is_refused(src: str) -> None:
+    with pytest.raises(ValueError):
+        scaffold._check_function("_c", "bad", src)
+
+
 def test_every_known_check_belongs_to_a_skill_with_a_declared_library() -> None:
     from core.skills.known_checks import KNOWN_CHECKS
     from core.skills.known_requirements import PRESET_PIP_REQUIRES
@@ -592,3 +682,35 @@ def test_every_known_check_belongs_to_a_skill_with_a_declared_library() -> None:
         assert PRESET_PIP_REQUIRES.get(name), f"{name}: no declared library to check"
         for label, source in checks:
             compile(source, f"<{name}: {label}>", "exec")
+            # ...and it goes into a generated self-test as a function body without changing meaning.
+            compile(scaffold._check_function("_c", label, source), f"<{name}: {label}>", "exec")
+            # A check runs next to the self-test's own module names (os, sys, Path, ...); it must import or define
+            # every name it reads, so a missing package is what fails and not a borrowed import.
+            assert _free_names(source) == set(), f"{name}: {label} reads names it never imports or defines"
+
+
+def _free_names(source: str) -> set[str]:
+    import ast
+    import builtins
+
+    tree = ast.parse(source)
+    bound: set[str] = set()
+    loaded: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            (bound if isinstance(node.ctx, ast.Store) else loaded).add(node.id)
+        elif isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+    return loaded - bound - set(dir(builtins))
+
+
+def test_a_check_whose_meaning_would_change_when_indented_is_refused() -> None:
+    src = 'x = """a\nb"""\nok = x == "a\\nb"'
+    with pytest.raises(ValueError):
+        scaffold._check_function("_c", "multi-line string", src)
