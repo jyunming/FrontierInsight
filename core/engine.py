@@ -5587,7 +5587,7 @@ class Engine:
             (state.get("design") or {}).get("dependencies")
         )
         deps = sorted({*deps, *design_deps})
-        left_out = self._dropped_skill_names(state)
+        left_out = self._dropped_tool_names(state)
         if left_out:
             kept = [d for d in deps if _experiment_deps.normalize(_experiment_deps.requirement_name(d) or d) not in left_out]
             for d in deps:
@@ -7036,8 +7036,9 @@ class Engine:
                         if r in {dep for dep, _ in failed_installs}]
         if wanted_again:
             still_failing = await self._install_packages(list(dict.fromkeys(wanted_again)))
-            recovered = {dep for dep, _ in failed_installs} - {dep for dep, _ in still_failing}
+            recovered = set(wanted_again) - {dep for dep, _ in still_failing}
             if recovered:
+                await self._record_environment(stage="after installing the experiment's packages again")
                 self._log.info("[skills] installed on the second try: %s", ", ".join(sorted(recovered)))
             failed_installs = [(dep, why) for dep, why in failed_installs if dep not in recovered]
         failed_names = {dep for dep, _ in failed_installs}
@@ -9840,9 +9841,11 @@ class Engine:
     def _dropped_skills(state: Any) -> list[dict[str, Any]]:
         return [d for d in ((state or {}).get("skill_selection") or {}).get("dropped") or [] if isinstance(d, dict)]
 
-    def _dropped_skill_names(self, state: Any) -> set[str]:
-        """Normalised names of the skills this quest no longer carries (tool or library), so pip is never asked for them."""
-        return {_experiment_deps.normalize(str(d.get("name"))) for d in self._dropped_skills(state) if d.get("name")}
+    def _dropped_tool_names(self, state: Any) -> set[str]:
+        """Normalised names of the dropped skills that are tools (never Python packages). A library skill is often named
+        after its pip package, so its name is not taken out of what pip is asked for."""
+        return {_experiment_deps.normalize(str(d.get("name"))) for d in self._dropped_skills(state)
+                if str(d.get("kind")) == "tool" and d.get("name")}
 
     def _dropped_skills_note(self, state: Any) -> str:
         """Tells the code-writing steps which skills this quest no longer carries, so a name the frozen plan or an

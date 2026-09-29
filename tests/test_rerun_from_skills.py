@@ -309,13 +309,32 @@ async def test_a_skill_whose_name_only_appears_inside_a_longer_name_is_not_repor
     assert "the plan or design names" not in new_log
 
 
-def test_a_dropped_library_skill_is_left_out_of_what_pip_is_asked_for(tmp_path: Path) -> None:
+def test_a_dropped_library_skill_named_like_a_package_is_still_asked_of_pip(tmp_path: Path) -> None:
     engine = Engine(_cfg(tmp_path))
-    state = {"skill_selection": {"dropped": [{"name": "My_Lib-skill", "kind": "library", "why": "x"},
-                                             {"name": "chart-tool", "kind": "tool", "why": "y"},
-                                             {"name": "", "kind": "library"}]}}
-    assert engine._dropped_skill_names(state) == {"my-lib-skill", "chart-tool"}
-    assert engine._dropped_skill_names({}) == set()
+    state = {"skill_selection": {"dropped": [{"name": "matplotlib", "kind": "library", "why": "x"},
+                                             {"name": "Chart_Tool", "kind": "tool", "why": "y"},
+                                             {"name": "", "kind": "tool"}]}}
+    assert engine._dropped_tool_names(state) == {"chart-tool"}
+    assert engine._dropped_tool_names({}) == set()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_package_that_is_not_the_skills_stays_failed_when_the_skills_package_is_tried_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, node_skill: Path,
+) -> None:
+    prov = node_skill / SKILL / "provenance.json"
+    prov.write_text(json.dumps({"kind": "tool", "pip_requires": ["zz-no-such-package-fi-test"]}), encoding="utf-8")
+    for sk in discover():
+        approval.approve(sk.ledger_name, sk.content_hash(), approved_by="test", note="t")
+    calls: list[str] = []
+    _fake(monkeypatch, calls, [], deps=["zz-no-such-other-package-fi-test"])
+    cfg = _cfg_with_skill(tmp_path)
+    cfg.execution.shared_interpreter = False
+    engine = Engine(cfg)
+    await engine.run()
+    state = await _state(engine)
+    assert state["selected_skills"] == [] and state["skill_selection"]["dropped"][0]["name"] == SKILL
+    assert "zz-no-such-other-package-fi-test" in (engine._packages_note or "")
 
 
 def test_two_backups_in_the_same_second_get_their_own_folders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
