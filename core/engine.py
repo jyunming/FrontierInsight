@@ -1999,7 +1999,8 @@ class Engine:
         g.add_conditional_edges(
             "write",
             self._audited_route("write", self._route_after_write),
-            {"check": "claim_check", "redesign": "design", "extend": "implement", "replot": "replot_layout"},
+            {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "auto_collect_data",
+             "replot": "replot_layout"},
         )
         g.add_edge("replot_layout", "claim_check")
         g.add_edge("claim_check", "review")
@@ -2334,7 +2335,8 @@ class Engine:
         if state.get("refine_needs_experiment"):
             return "redesign"
         if state.get("refine_extend"):
-            return "extend"
+            # A quest with no experiment has no script to extend: the missing data is collected again instead.
+            return "collect" if state.get("no_simulation_resolved") else "extend"
         return "replot" if state.get("refine_layout") else "check"
 
     # ---- nodes -----------------------------------------------------------
@@ -5564,7 +5566,7 @@ class Engine:
         await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
-            return {**_FRESH_SCRIPT, **kept}
+            return {**_FRESH_SCRIPT, **kept, "refine_extend": []}
         extend = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
         # A number the person asked to have added extends the script that exists; the scaffold is for a first script.
         outline = {} if extend else state.get("implement_outline") or {}
@@ -5666,6 +5668,20 @@ class Engine:
                 code, deps = _parse_implement_response(text)
         else:
             code, deps = _parse_implement_response(text)
+        if extend and (
+            not code.strip()
+            or (self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file()
+                and not simulate_code.strip())
+        ):
+            # The extension is only worth having if it came back whole. A reply with no script, or one script for a
+            # two-script quest, must not replace the scripts that ran: they stay as they were, and the run says so.
+            self._log.warning(
+                "[implement] the extension did not come back (LLM head: %r); the scripts that exist are kept as they "
+                "are, so the number asked for (%s) is still missing", text[:200] if text else "<empty>",
+                "; ".join(p[:80] for p in extend),
+            )
+            disk = self._scripts_on_disk().get("experiment.py", "")
+            return {**_FRESH_SCRIPT, "code": disk, "deps": list(state.get("deps") or []), "refine_extend": []}
         extracted = bool(code)
         if not code:
             # Empty-code path: log the LLM head so the user can see WHAT
@@ -5727,8 +5743,8 @@ class Engine:
             else:
                 code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         if extracted:
-            code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps)
-        return {**_FRESH_SCRIPT, "code": code, "deps": deps}
+            code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps, extended=bool(extend))
+        return {**_FRESH_SCRIPT, "code": code, "deps": deps, "refine_extend": []}
 
     # ---- the protocol gate ---------------------------------------------------
 
@@ -6141,6 +6157,7 @@ class Engine:
 
     async def _enforce_protocol(
         self, state: QuestState, code_path: Path, simulate_path: Path, code: str, deps: list[str],
+        *, extended: bool = False,
     ) -> tuple[str, list[str]]:
         """Hold the script to the plan's protocol: repair a script that differs, up to
         ``engine.protocol_repair_attempts`` times, and stop the quest (``block``) or warn (``warn``) if it still does.
@@ -6150,6 +6167,20 @@ class Engine:
         ``needs/PROTOCOL_CHECK.json``."""
         protocol = self._protocol_of(state)
         if protocol is None:
+            return code, deps
+        if extended:
+            # A number a person asked for after reading the result goes beyond the frozen protocol on purpose. A repair
+            # would take it out again and a pause would stop the refine, so the differences are recorded, not fought:
+            # the frozen protocol itself stays as it is, and the record shows what the person added.
+            added = [m.message() for m in _protocol.check(protocol, self._scripts_on_disk())]
+            self._protocol_record({
+                "status": "extended_by_person", "attempts": [], "differences": added, "protocol": protocol,
+            })
+            if added:
+                self._log.warning(
+                    "[protocol] the script was extended at a person's request and now goes beyond the frozen protocol "
+                    "(%s); the frozen protocol is unchanged and the difference is recorded", "; ".join(added),
+                )
             return code, deps
         attempts: list[dict[str, Any]] = []
         budget = int(self.config.engine.protocol_repair_attempts)
@@ -7897,7 +7928,7 @@ class Engine:
             if f.is_file() and f.suffix.lower() in self._RUN_DATA_SUFFIXES and "auto_collected" not in f.parts
             and "literature" not in f.parts
         )
-        data = list(dict.fromkeys(data))[:80]
+        data = list(dict.fromkeys(data))
         if not notes or not figures or not data:
             self._log.warning(
                 "[replot_layout] nothing to redraw from (%s); the figures stay as they are",
@@ -7908,7 +7939,7 @@ class Engine:
         prompt = self._prompts["replot_layout"].substitute(
             notes_block="\n".join(f"- {n}" for n in notes),
             figures_block="\n".join(f"- {f}" for f in figures),
-            data_block="\n".join(f"- {d}" for d in data),
+            data_block="\n".join(f"- {d}" for d in data[:200]),
             experiment_code=experiment.read_text(encoding="utf-8")[:12000] if experiment.is_file() else "(not saved)",
         )
         code, _deps = _parse_implement_response(await self._chat(prompt, node="replot_layout"))
@@ -7917,9 +7948,21 @@ class Engine:
             return done
         script = self.quest_root / "code" / "replot_layout.py"
         script.write_text(code.rstrip() + "\n", encoding="utf-8")
-        backup = self.fi_dir / "figures_before_layout"
+        # The script is model-written and can write anywhere: the figures and the saved numbers are put back whenever
+        # it fails, and any saved number it changed is put back even when it does not.
+        backup = self.fi_dir / "layout_backup"
         shutil.rmtree(backup, ignore_errors=True)
-        shutil.copytree(fig_dir, backup)
+        (backup / "figures").mkdir(parents=True)
+        for f in figures:
+            shutil.copy2(fig_dir / f, backup / "figures" / f)
+        for d in data:
+            (backup / d).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.quest_root / d, backup / d)
+
+        def digest(path: Path) -> str:
+            return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+
+        before_fig = {f: digest(fig_dir / f) for f in figures}
         env: dict[str, str] | None = None
         try:
             from .plot_style import write_boot
@@ -7933,12 +7976,20 @@ class Engine:
             cwd=self.quest_root, timeout_s=min(self.config.execution.timeout_s, 300), env=env,
         )
         drawn = [ln.split(":", 1)[1].strip() for ln in (result.stdout or "").splitlines() if ln.startswith("REPLOTTED:")]
-        if result.returncode != 0:
-            self._log.warning("[replot_layout] the redraw failed (rc=%d), the figures are as they were: %s",
+        failed = result.returncode != 0 or bool(getattr(result, "timed_out", False))
+        if failed:
+            self._log.warning("[replot_layout] the redraw failed (rc=%s), the figures are as they were: %s",
                               result.returncode, (result.stderr or "")[-300:])
-            shutil.rmtree(fig_dir, ignore_errors=True)
-            shutil.copytree(backup, fig_dir)
-        else:
+        for f in figures:
+            if failed or (f not in drawn and digest(fig_dir / f) != before_fig[f]):
+                if not failed:
+                    self._log.warning("[replot_layout] %s was changed without being named; it is put back", f)
+                shutil.copy2(backup / "figures" / f, fig_dir / f)
+        for d in data:
+            if digest(self.quest_root / d) != digest(backup / d):
+                self._log.warning("[replot_layout] the script changed the saved numbers in %s; they are put back", d)
+                shutil.copy2(backup / d, self.quest_root / d)
+        if not failed:
             self._log.info("[replot_layout] redrew %d figure(s) from the saved numbers, the experiment was not run again: %s",
                            len(drawn), ", ".join(drawn) or "-")
         shutil.rmtree(backup, ignore_errors=True)
@@ -9463,6 +9514,9 @@ class Engine:
         if refine_round:
             markdown, points = _take_refine_points(markdown)
             needs_experiment, extend, layout = points["experiment"], points["data"], points["layout"]
+            if extend and state.get("survey_mode_resolved"):
+                # A survey has no script and no data to add to: what is missing is found by looking at the literature again.
+                needs_experiment, extend = needs_experiment + extend, []
             if needs_experiment:
                 what = ": %d point(s) need a new experiment, so the quest goes back to the design (%s)" % (
                     len(needs_experiment), "; ".join(p[:80] for p in needs_experiment))
@@ -9537,8 +9591,7 @@ class Engine:
             "refine_needs_experiment": needs_experiment,
             "refine_extend": extend if not needs_experiment else [],
             # A layout note waits through an extended run (its figures are drawn again after the paper is written).
-            "refine_layout": (layout if not needs_experiment else []) if refine_round
-            else list(state.get("refine_layout") or []),
+            "refine_layout": layout if refine_round else list(state.get("refine_layout") or []),
         }
         if refine_round:
             out["refine_written_for"] = _refine_count(state)
