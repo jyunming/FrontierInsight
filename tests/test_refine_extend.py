@@ -237,3 +237,153 @@ def test_the_graph_has_both_routes(tmp_path: Path) -> None:
     edges = {(e.source, e.target) for e in graph.edges}
     assert ("write", "implement") in edges and ("write", "replot_layout") in edges and ("write", "auto_collect_data") in edges
     assert ("replot_layout", "claim_check") in edges
+
+
+def test_an_extension_that_did_not_come_back_is_said_in_the_paper(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    code_dir = eng.quest_root / "code"
+    code_dir.mkdir(parents=True)
+    (code_dir / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        return "no script"
+
+    eng._chat = chat  # type: ignore[method-assign]
+    out = asyncio.run(eng._node_implement({**STATE, "design": {}, "refine_extend": ["the runtime for n=64"]}))  # type: ignore[arg-type]
+    assert out["extend_missed"] == ["the runtime for n=64"]
+    (eng.quest_root / "paper").mkdir(exist_ok=True)
+    seen: list[str] = []
+
+    async def write_chat(prompt: str, *, node: str = "") -> str:
+        seen.append(prompt)
+        return "# P\n\nBody.\n"
+
+    eng._chat = write_chat  # type: ignore[method-assign]
+    asyncio.run(eng._node_write({**STATE, "human_feedback": {}, "feedback_history": [], **out}))  # type: ignore[arg-type]
+    assert "could not be added" in seen[0] and "the runtime for n=64" in seen[0]
+
+
+def test_a_two_script_quest_that_must_keep_both_stops_when_the_extension_returns_one(tmp_path: Path) -> None:
+    import pytest
+
+    eng = _engine(tmp_path)
+    eng.config.execution.split_analysis = True  # type: ignore[assignment]
+    eng.config.execution.split_failure = "block"  # type: ignore[assignment]
+    code_dir = eng.quest_root / "code"
+    code_dir.mkdir(parents=True)
+    (code_dir / "simulate.py").write_text("def run_trial(seed):\n    return {}\n", encoding="utf-8")
+    (code_dir / "experiment.py").write_text("print('old')\n", encoding="utf-8")
+    stopped: list[str] = []
+
+    def pause(**kw: Any) -> None:
+        stopped.append(kw["kind"])
+        raise RuntimeError("paused")
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        return "```python\nprint('one script')\n```"
+
+    eng._chat = chat  # type: ignore[method-assign]
+    eng._pause_for_contract = pause  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="paused"):
+        asyncio.run(eng._node_implement({**STATE, "design": {}, "refine_extend": ["n=64"]}))  # type: ignore[arg-type]
+    assert stopped == ["split"]
+    assert (code_dir / "experiment.py").read_text(encoding="utf-8") == "print('old')\n"
+
+
+def test_collecting_for_a_refine_looks_for_what_was_asked_and_says_when_nothing_came(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng.config.engine.auto_collect_data = True  # type: ignore[assignment]
+    seen: list[str] = []
+
+    async def collect(query: str, *a: Any, **kw: Any) -> int:
+        seen.append(query)
+        return 0
+
+    async def adapters(query: str, *a: Any, **kw: Any) -> int:
+        return 0
+
+    eng._axon_collect_step = collect  # type: ignore[method-assign]
+    eng._run_dataset_adapters = adapters  # type: ignore[method-assign]
+    out = asyncio.run(eng._node_auto_collect_data(  # type: ignore[arg-type]
+        {**STATE, "no_simulation_resolved": True, "refine_extend": ["GDP of Peru in 2019"],
+         "literature": [{"metadata": {"title": "T", "url": "u"}, "text": "x"}]}))
+    assert seen == ["GDP of Peru in 2019"], "searched for the ask even though earlier literature existed"
+    assert out["refine_extend"] == [] and out["extend_missed"] == ["GDP of Peru in 2019"]
+
+
+def test_the_run_manifest_does_not_fight_an_extension(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    assert eng._goes_beyond_protocol_by_request() == []
+    eng._protocol_record({"status": "extended_by_person", "differences": ["R0 grid has 6.0"]})
+    assert eng._goes_beyond_protocol_by_request() == ["R0 grid has 6.0"]
+    eng._protocol_record({"status": "ok"})
+    assert eng._goes_beyond_protocol_by_request() == []
+
+
+def test_a_path_form_in_the_redraw_report_keeps_the_figure(tmp_path: Path) -> None:
+    eng = _replot_quest(tmp_path)
+    _run_replot(eng, "open('figures/fig2.png', 'wb').write(b'new-2')\nprint('REPLOTTED: figures/fig2.png')")
+    assert (eng.quest_root / "figures" / "fig2.png").read_bytes() == b"new-2"
+
+
+def test_files_a_redraw_adds_are_removed_unless_a_named_new_figure(tmp_path: Path) -> None:
+    eng = _replot_quest(tmp_path)
+    root = eng.quest_root
+    script = ("open('figures/fig3.png', 'wb').write(b'new-3')\nopen('figures/stray.png', 'wb').write(b'x')\n"
+              "open('data/results/extra.csv', 'w').write('a')\nprint('REPLOTTED: fig3.png')")
+    _run_replot(eng, script)
+    assert (root / "figures" / "fig3.png").is_file()
+    assert not (root / "figures" / "stray.png").exists() and not (root / "data" / "results" / "extra.csv").exists()
+    failed = _replot_quest(tmp_path / "b")
+    _run_replot(failed, "open('figures/fig3.png', 'wb').write(b'half')\nraise SystemExit(2)")
+    assert not (failed.quest_root / "figures" / "fig3.png").exists()
+
+
+def test_an_exception_during_the_redraw_puts_everything_back(tmp_path: Path) -> None:
+    import pytest
+
+    eng = _replot_quest(tmp_path)
+    root = eng.quest_root
+
+    async def chat(prompt: str, *, node: str = "") -> str:
+        return "```python\nprint('x')\n```"
+
+    async def execute(cmd: list[str], **kw: Any) -> Any:
+        (root / "figures" / "fig2.png").write_bytes(b"half")
+        raise RuntimeError("boom")
+
+    eng._chat = chat  # type: ignore[method-assign]
+    eng.executor = SimpleNamespace(python_path=lambda q: Path(sys.executable), execute=execute)  # type: ignore[assignment]
+    with pytest.raises(RuntimeError):
+        asyncio.run(eng._node_replot_layout({**STATE, "refine_layout": ["x"]}))  # type: ignore[arg-type]
+    assert (root / "figures" / "fig2.png").read_bytes() == b"old-2"
+    assert not (eng.fi_dir / "layout_backup").exists()
+
+
+def test_a_redraw_cut_short_by_a_kill_is_undone_on_the_next_entry(tmp_path: Path) -> None:
+    eng = _replot_quest(tmp_path)
+    root = eng.quest_root
+    import json
+    import shutil
+
+    backup = eng.fi_dir / "layout_backup"
+    (backup / "figures").mkdir(parents=True)
+    shutil.copy2(root / "figures" / "fig2.png", backup / "figures" / "fig2.png")
+    (backup / "listed.json").write_text(json.dumps({"figures": ["fig2.png"], "data": [], "big": []}), encoding="utf-8")
+    (root / "figures" / "fig2.png").write_bytes(b"half-drawn")
+    (root / "figures" / "stray.png").write_bytes(b"x")
+    out, ran = _run_replot(eng, "print('nothing')")
+    assert (root / "figures" / "fig2.png").read_bytes() == b"old-2" and not (root / "figures" / "stray.png").exists()
+
+
+def test_a_needs_experiment_takes_the_extend_points_with_it(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "paper").mkdir(exist_ok=True)
+
+    async def chat(prompt: str, **kw: Any) -> str:
+        return "# P\n\nBody.\n\nNEEDS_DATA: n=64\nNEEDS_EXPERIMENT: a different solver\n"
+
+    eng._chat = chat  # type: ignore[method-assign]
+    out = asyncio.run(eng._node_write(dict(STATE)))  # type: ignore[arg-type]
+    assert out["refine_extend"] == [] and out["refine_needs_experiment"] == ["a different solver", "n=64"]
