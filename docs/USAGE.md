@@ -27,6 +27,22 @@ commands:
 | `@fi /critique <quest_id>` | Adversarial second-pass review of a completed quest. For maximum effect, pick a different Copilot model in the picker from the one that wrote the paper. | **1** |
 | `@fi /help` | Lists the commands. | **0** |
 
+### What runs, in order
+
+In plain words a quest goes through these steps (the quest map in the Web page and in VS Code shows the same steps and lets you run from any of them again):
+
+1. **Ideas** — turns your topic into a research question.
+2. **Literature** — finds and reads the papers the question rests on.
+3. **Plan** — writes `plan.md`: the gap, the method and the numbers to be reported.
+4. **Design** — fixes the experiment: settings, runs per setting, what counts as a pass.
+5. **Write the code** — writes the script or scripts (one, or a simulation plus its analysis, see `execution.split_analysis`).
+6. **Run** — runs them; a crash goes back to a fix-and-run loop first. A topic that needs real data collects and loads it here instead.
+7. **Analyse and check** — computes the findings and compares them with the literature, then checks whether the evidence is enough to write.
+8. **Write the paper** — the paper, then a check that each claim is backed.
+9. **Review** — a reviewer reads it; the quest is done, or goes back.
+
+It can go back at several points, each bounded: a crashed script is fixed and run again; a finding that needs a new experiment returns to the design, and one that needs more reading goes back to the literature first; the evidence check can send it back to the literature once, or to the design once when the run produced no results; a review that asks for changes returns to writing (the text was the problem), to running (a number was the problem) or to the design. Optional steps are left out above: an interview about your topic before the ideas (off by default), and for a topic with no experiment, data collection instead of running code. When you refine a finished quest, a note about layout only redraws the figures, a missing number extends the existing script, and only a design problem redoes the experiment. The model that writes the paper decides which it is, so read the log line that says which one it picked.
+
 ### Per-quest LLM call breakdown
 
 A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; default engine settings — `clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
@@ -303,7 +319,7 @@ execution:
   timeout_s: 600
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
-  split_analysis: auto              # auto (default: on for a stochastic design) | true | false. Keep the simulation (code/simulate.py: run_trial, run by FI, record in raw/) apart from its analysis (code/experiment.py); with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)
+  split_analysis: auto              # auto (default: two scripts when the plan runs each setting 2+ times or names a random process, else one) | true | false. Keep the simulation (code/simulate.py: run_trial, run by FI, record in raw/) apart from its analysis (code/experiment.py); with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)
   raw_dir: ""                       # only with split_analysis: where the raw files go (relative to the quest, or absolute; relative with docker); empty = raw/
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)
