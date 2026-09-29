@@ -105,6 +105,7 @@ same PR that adds, splits or renames one.
 - `core/skills/approval.py` — the human sign-off gate (content-hash pinned).
 - `core/skills/removal.py` — `--remove-skill` / `--restore-skill`: delete a skill in FI's own folder, or hide an external one (`skills_removed_external.json` beside the ledger, honoured by `discover()`).
 - `core/skills/scan.py` — a static review of a skill's contents for the person about to approve it.
+- `dev/own-skills/` — the four skills written for FI (`invariant-guards`, `reference-cross-check`, `numerical-property-tests`, `dimensional-consistency`); the import script reads them from here (`LOCAL_SOURCES`, repo key `fi`), no clone.
 - `core/skills/known_requirements.py` — the pip packages each preset skill needs (`scripts/import_scientist_skills.py`
   reads it) and the versions a skill must not get (`PINS`); the fallback for a skill imported before provenance
   recorded `pip_requires`.

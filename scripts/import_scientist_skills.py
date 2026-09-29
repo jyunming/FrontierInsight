@@ -110,9 +110,17 @@ REPOS: dict[str, str] = {
     "scicomp": "https://github.com/e-eight/scicomp-skills.git",
 }
 
+# Skills written for FI itself live in this repository, not in a clone: the repo key "fi" points at this folder.
+LOCAL_SOURCES: dict[str, Path] = {"fi": REPO_ROOT / "dev" / "own-skills"}
+
 # name -> (repo key, relative path inside that clone, needs --despite-findings). The pip packages each needs are
 # in core/skills/known_requirements.py (PRESET_PIP_REQUIRES), which a quest reads too.
 SKILLS: dict[str, tuple[str, str, bool]] = {
+    # -- written for FI (dev/own-skills) --
+    "invariant-guards": ("fi", "invariant-guards", False),
+    "reference-cross-check": ("fi", "reference-cross-check", False),
+    "numerical-property-tests": ("fi", "numerical-property-tests", False),
+    "dimensional-consistency": ("fi", "dimensional-consistency", False),
     # -- K-Dense-AI/scientific-agent-skills --
     "pymc": ("kdense", "skills/pymc", False),
     "astropy": ("kdense", "skills/astropy", False),
@@ -486,14 +494,14 @@ def main() -> int:
         if rel not in sparse_by_repo[repo_key]:
             sparse_by_repo[repo_key].append(rel)
 
-    needed_repo_keys = {repo_key for repo_key, *_ in SKILLS.values()}
+    needed_repo_keys = {repo_key for repo_key, *_ in SKILLS.values()} - set(LOCAL_SOURCES)
     print(f"Source repos are kept in {cache_dir}")
     print(
         f"{'Using the clones already there' if args.offline else 'Fetching'} "
         f"{len(needed_repo_keys)} source repos ...",
         flush=True,
     )
-    repo_dirs: dict[str, Path] = {}
+    repo_dirs: dict[str, Path] = dict(LOCAL_SOURCES)
     unfetched: dict[str, str] = {}  # repo key -> why there is nothing to import from
     for key, url in REPOS.items():
         # Keyed on OUR internal repo key, not the URL's basename: two

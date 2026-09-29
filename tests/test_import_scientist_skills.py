@@ -240,10 +240,51 @@ def test_repositories_that_cannot_be_fetched_are_named_and_only_their_skills_are
     assert "analyze-fasta: skipped (its source repo clawbio was not fetched)" in out
     assert "pymc" in imported and "analyze-fasta" not in imported
     kdense = sum(1 for repo, *_ in isk.SKILLS.values() if repo == "kdense")
-    assert f"Imported 1/{kdense}" in out and "Not attempted, because their source repo could not be fetched" in out
+    own = sum(1 for repo, *_ in isk.SKILLS.values() if repo == "fi")
+    assert own == 4, "the skills written for FI come from this repository, so no clone can be missing for them"
+    assert f"Imported {1 + own}/{kdense + own}" in out and "Not attempted, because their source repo could not be fetched" in out
     # the closing lines print, as text and not as a syntax error
     assert "Replace <you> with the name of whoever actually reviewed the skills." in out
     assert "Or one at a time:" in out
+
+
+OWN_SKILLS = ("invariant-guards", "reference-cross-check", "numerical-property-tests", "dimensional-consistency")
+OWN_DIR = Path(__file__).resolve().parent.parent / "dev" / "own-skills"
+
+
+def _own_skill_parts(name: str) -> tuple[dict[str, str], str]:
+    text = (OWN_DIR / name / "SKILL.md").read_text(encoding="utf-8")
+    _, front, body = text.split("---", 2)
+    fields = {}
+    for line in front.strip().splitlines():
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields, body
+
+
+def test_the_skills_written_for_fi_are_registered_and_come_from_this_repository(isk) -> None:
+    from core.skills import known_requirements
+
+    for name in OWN_SKILLS:
+        assert isk.SKILLS[name] == ("fi", name, False)
+        assert name in known_requirements.PRESET_PIP_REQUIRES
+    assert isk.LOCAL_SOURCES["fi"] == OWN_DIR and "fi" not in isk.REPOS
+    assert known_requirements.PRESET_PIP_REQUIRES["numerical-property-tests"] == ["hypothesis"]
+
+
+@pytest.mark.parametrize("name", OWN_SKILLS)
+def test_a_skill_written_for_fi_is_short_plain_and_says_when_not_to_use_it(name: str) -> None:
+    fields, body = _own_skill_parts(name)
+    assert fields["name"] == name
+    assert 0 < len(fields["description"]) <= 900
+    budget = 500 if name == "dimensional-consistency" else 1500
+    assert len(body) / 4 < budget, "a skill sent to the model on every use stays small"
+    assert "## When NOT to use" in body
+
+
+def test_the_property_catalogue_is_credited_and_not_copied() -> None:
+    _, body = _own_skill_parts("numerical-property-tests")
+    assert "Trail of Bits" in body and "CC BY-SA" in body and "nothing is copied" in body
 
 
 def test_when_everything_is_there_the_exit_code_is_zero(isk, tmp_path: Path, monkeypatch, capsys) -> None:
