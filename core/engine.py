@@ -422,6 +422,9 @@ class QuestState(TypedDict, total=False):
     # What a refine asked to have added that the run could not add (the extension did not come back, or the collection
     # found nothing new); the paper says so.
     extend_missed: list[str]
+    # The layout notes the redraw could not carry out (a note about the paper's text or the order of its figures, or
+    # nothing to redraw from); the paper says so.
+    layout_missed: list[str]
     refine_scope: str
     # Names of pause-points the engine has already paused at on this
     # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
@@ -2005,7 +2008,11 @@ class Engine:
             {"check": "claim_check", "redesign": "design", "extend": "implement", "collect": "auto_collect_data",
              "replot": "replot_layout"},
         )
-        g.add_edge("replot_layout", "claim_check")
+        g.add_conditional_edges(
+            "replot_layout",
+            self._audited_route("replot_layout", self._route_after_replot),
+            {"check": "claim_check", "write": "write"},
+        )
         g.add_edge("claim_check", "review")
         g.add_conditional_edges(
             "review",
@@ -2341,6 +2348,10 @@ class Engine:
             # A quest with no experiment has no script to extend: the missing data is collected again instead.
             return "collect" if state.get("no_simulation_resolved") else "extend"
         return "replot" if state.get("refine_layout") else "check"
+
+    def _route_after_replot(self, state: QuestState) -> str:
+        """A layout note the redraw could not carry out goes back to the writer once, so the paper says so."""
+        return "write" if state.get("layout_missed") else "check"
 
     # ---- nodes -----------------------------------------------------------
 
@@ -4642,6 +4653,9 @@ class Engine:
                 "[auto_collect] engine.auto_collect_data=False — "
                 "skipping; will pause for user data",
             )
+            asked_off = [str(p).strip() for p in state.get("refine_extend") or [] if str(p).strip()]
+            if asked_off:
+                return {"auto_collected_count": 0, "refine_extend": [], "extend_missed": asked_off}
             return {"auto_collected_count": 0}
 
         # Build the query once and reuse for BOTH Axon and dataset
@@ -5748,7 +5762,7 @@ class Engine:
             self._log.info("[implement] wrote %s (%d bytes)", submit_path, len(submit_code))
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
-        if extracted:  # nothing to seed in the stub written above
+        if extracted and not extend:  # nothing to seed in the stub written above; an extension changes as little as it can
             if simulate_code.strip() and _trial_runner.entries(simulate_path) & {"run_trial", "run_cell"}:
                 pass  # the trial contract: FI hands every trial its seed, there is no seed for the script to read
             elif simulate_code.strip():
@@ -6178,6 +6192,13 @@ class Engine:
         if isinstance(record, dict) and record.get("status") == "extended_by_person":
             return [str(d) for d in record.get("differences") or []]
         return []
+
+    def _protocol_drift_not_asked_for(self, protocol: dict[str, Any]) -> list[str]:
+        """The differences from the frozen protocol that a person's extension did not add: what the scripts differ by
+        now, less what ``PROTOCOL_CHECK.json`` recorded as the person's request. A constant changed by a repair later
+        is still drift."""
+        excused = set(self._goes_beyond_protocol_by_request())
+        return [m.message() for m in _protocol.check(protocol, self._scripts_on_disk()) if m.message() not in excused]
 
     async def _enforce_protocol(
         self, state: QuestState, code_path: Path, simulate_path: Path, code: str, deps: list[str],
@@ -7504,6 +7525,9 @@ class Engine:
             mode = self.config.engine.run_manifest_check
             budget = int(self.config.engine.run_manifest_repair_attempts)
             by_request = self._goes_beyond_protocol_by_request()
+            protocol_now = self._protocol_of(state)
+            if by_request and protocol_now is not None and self._protocol_drift_not_asked_for(protocol_now):
+                by_request = []
             if by_request:
                 # The person asked for what the frozen protocol does not have; a repair would take it out again.
                 manifest_status = "extended_by_person"
@@ -7950,7 +7974,7 @@ class Engine:
         drawn again from the numbers the run saved, and the experiment is not run again. A figure the script does not
         write is left as it was, and so is every figure when the script fails."""
         notes = [str(p).strip() for p in state.get("refine_layout") or [] if str(p).strip()]
-        done: QuestState = {"refine_layout": []}
+        done: QuestState = {"refine_layout": [], "layout_missed": []}
         self._restore_layout_backup()
         fig_dir = self.quest_root / "figures"
         figures = sorted(f.name for f in fig_dir.iterdir() if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES) \
@@ -7968,7 +7992,7 @@ class Engine:
                 "[replot_layout] nothing to redraw from (%s); the figures stay as they are",
                 "no layout note" if not notes else "no figure" if not figures else "no saved numbers",
             )
-            return done
+            return {**done, "layout_missed": notes}
         experiment = self.quest_root / "code" / "experiment.py"
         prompt = self._prompts["replot_layout"].substitute(
             notes_block="\n".join(f"- {n}" for n in notes),
@@ -7979,7 +8003,7 @@ class Engine:
         code, _deps = _parse_implement_response(await self._chat(prompt, node="replot_layout"))
         if not code.strip():
             self._log.warning("[replot_layout] no script came back; the figures stay as they are")
-            return done
+            return {**done, "layout_missed": notes}
         script = self.quest_root / "code" / "replot_layout.py"
         script.write_text(code.rstrip() + "\n", encoding="utf-8")
         # The script is model-written and can write anywhere: the figures and the saved numbers are put back whenever
@@ -8046,6 +8070,9 @@ class Engine:
             if failed or f.startswith("data/") or Path(f).name not in drawn:
                 self._log.warning("[replot_layout] %s was added by the script; it is removed", f)
                 path.unlink(missing_ok=True)
+        not_drawn = [ln.split(":", 1)[1].strip() for ln in (result.stdout or "").splitlines()
+                     if ln.startswith("NOT_DRAWN:") and ln.split(":", 1)[1].strip()]
+        done["layout_missed"] = notes if failed else not_drawn
         if not failed:
             self._log.info("[replot_layout] redrew %d figure(s) from the saved numbers, the experiment was not run again: %s",
                            len(drawn), ", ".join(drawn) or "-")
@@ -9544,6 +9571,14 @@ class Engine:
                 "It could not be added, so the numbers in this paper do not include it. Say so plainly (in the "
                 "limitations), and do not write a value for it."
             ).strip()
+        layout_missed = [str(p) for p in state.get("layout_missed") or [] if str(p).strip()]
+        if layout_missed:
+            evidence_note = (
+                f"{evidence_note}\n\nThe reader asked for this about the figures: {'; '.join(p[:200] for p in layout_missed)}. "
+                "Redrawing the figures could not do it (it needs a change in the paper's text or in the order of its "
+                "figures, or there was nothing to redraw from). If the text can do it, do it in the text; otherwise say "
+                "plainly (in the limitations) that it was not done."
+            ).strip()
         prompt = self._prompts["write"].substitute(
             persona_block=persona_block,
             topic=state["topic"],
@@ -9608,7 +9643,9 @@ class Engine:
         # apply) writes the whole paper.
         refine_round = _refine_round(state)
         # A person's notes are answered by the whole-paper writer, which reads them (the passage editor does not).
-        markdown = None if refine_round else await self._patch_flagged_passages(state, persona_block)
+        # A request the run could not carry out is told to the whole-paper writer, which the passage editor is not.
+        reported = bool(state.get("extend_missed") or state.get("layout_missed"))
+        markdown = None if refine_round or reported else await self._patch_flagged_passages(state, persona_block)
         if markdown is None:
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
         needs_experiment: list[str] = []
@@ -9696,6 +9733,8 @@ class Engine:
             # A layout note waits through an extended run (its figures are drawn again after the paper is written).
             "refine_layout": layout if refine_round else list(state.get("refine_layout") or []),
         }
+        if reported:
+            out["extend_missed"], out["layout_missed"] = [], []
         if refine_round:
             out["refine_written_for"] = _refine_count(state)
             out["refine_scope"] = ("experiment" if needs_experiment else "data" if extend
@@ -10689,10 +10728,10 @@ class Engine:
             # The protocol was checked when the script was written; a repair after a failed run may have changed a
             # constant since. Said here too, where the reviewer reads it.
             protocol = self._protocol_of(state)
-            if protocol is not None and not self._goes_beyond_protocol_by_request():
+            if protocol is not None:
                 found = found + [
-                    f"The script differs from the plan's protocol: {m.message()}"
-                    for m in _protocol.check(protocol, self._scripts_on_disk())
+                    f"The script differs from the plan's protocol: {msg}"
+                    for msg in self._protocol_drift_not_asked_for(protocol)
                 ]
         except Exception as e:  # noqa: BLE001 - never fail a quest over an advisory check
             self._log.warning("[goal_coverage] check failed (%s); skipping", e)
@@ -17254,7 +17293,7 @@ def _paper_basis(state: QuestState) -> str:
 # A line of the writer's reply naming a point that needs more than text: bare, quoted, bulleted, numbered (``1.`` /
 # ``1)``), bold or in backticks.
 _REFINE_POINT_RE = re.compile(
-    r"^[ \t>*_`-]*(?:\d+[.)][ \t]*)?[*_`]*NEEDS_(EXPERIMENT|DATA|LAYOUT)[*_`]*:[*_`]*[ \t]*(.+?)[ \t*_`]*$", re.MULTILINE)
+    r"^[ \t>*_`-]*(?:\d+[.)][ \t]*)?[*_`]*NEEDS_(EXPERIMENT|DATA|LAYOUT)[*_`]*:[*_`]*[ \t]*(.*?)[ \t*_`]*$", re.MULTILINE)
 
 
 def _take_refine_points(markdown: str) -> tuple[str, dict[str, list[str]]]:
@@ -17264,7 +17303,7 @@ def _take_refine_points(markdown: str) -> tuple[str, dict[str, list[str]]]:
     for m in _REFINE_POINT_RE.finditer(markdown):
         if m.group(2).strip():
             points[m.group(1).lower()].append(m.group(2).strip())
-    if not any(points.values()):
+    if not _REFINE_POINT_RE.search(markdown):
         return markdown, points
     cleaned = _REFINE_POINT_RE.sub("", markdown)
     cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", cleaned).strip())
