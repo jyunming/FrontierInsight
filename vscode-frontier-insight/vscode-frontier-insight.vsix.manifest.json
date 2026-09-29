@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "e1eb9d9ede1cb875c5a3de286c39f1214a7660d44039209028587578e8ee002f",
+  "vsix_sha256": "ad472c95e6be933caa015638dbfd494746e8fb00fcedcbf2610aa1db4404533c",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -70,8 +70,8 @@
       "bytes": 21679
     },
     "extension/out/quest-map.js": {
-      "sha256": "01213a9e5fb4e4aa25e17982ede943f21f519bdc92fdbf5c65ea5a8100a1154a",
-      "bytes": 7951
+      "sha256": "6e1ca6ce4f693eeb2e6c5513c4e9f5ba658600bb7287b46927745875047987d6",
+      "bytes": 8194
     },
     "extension/out/roots-config.js": {
       "sha256": "c818847d5849cf4a207e125d6986238d2ded806ad3abaea1f02448c1fce1f9da",
