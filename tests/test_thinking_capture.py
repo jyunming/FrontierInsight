@@ -363,6 +363,41 @@ async def test_a_call_that_left_no_record_does_not_lend_its_id_to_the_next_claim
 
 
 @pytest.mark.asyncio
+async def test_a_failed_attempts_id_is_not_the_answers_when_the_answers_own_record_fails(smoke_config, monkeypatch) -> None:  # noqa: ANN001, F811
+    from core import provider as prov
+
+    engine = _engine(smoke_config, "reasoning of the answer")
+
+    async def call() -> str:
+        prov.CALL_ATTEMPTS.get().append({"provider": "p", "model": "m", "error": "timeout", "fallback": False})
+        return "answer"
+
+    real = engine._record_model_call
+    seen: list[str | None] = []
+
+    def flaky(node, messages, response, **kw):  # noqa: ANN001, ANN202
+        if response is None:  # the failed attempt is recorded; the answer's own record is lost
+            seen.append(real(node, messages, response, **kw))
+            return seen[-1]
+        seen.append(None)
+        return None
+
+    monkeypatch.setattr(engine, "_record_model_call", flaky)
+    from core import thinking_capture as _t
+
+    async def with_thinking() -> str:
+        _t.note_thinking("reasoning of the answer")
+        return await call()
+
+    await engine._recorded_call("design", "prompt", with_thinking)
+    failed_id = seen[0]
+    assert failed_id
+    assert engine._last_call_id.get("design") is None
+    (line,) = ar.read(engine.fi_dir, tc.THINKING_FILE)
+    assert line["call_id"] is None and line["call_id"] != failed_id
+
+
+@pytest.mark.asyncio
 async def test_no_model_asked_for_means_no_requested_model_in_the_claim(smoke_config) -> None:  # noqa: ANN001, F811
     smoke_config.provider.model = None
     smoke_config.provider.node_models = {}
@@ -436,7 +471,7 @@ async def test_a_real_bridge_call_reaches_the_file(smoke_config) -> None:  # noq
 # --- the extension's message builder (compiled TypeScript, run under node) --------------------------------------------
 
 _NODE_DONE = """
-const { lmDoneMessage, LM_DONE_MAX_BYTES } = require(%s);
+const { lmDoneMessage, LM_DONE_MAX_BYTES, ThinkingCollector, partKind } = require(%s);
 const bytes = (m) => Buffer.byteLength(JSON.stringify(m), "utf8") + 1;
 const base = { type: "lm_done", id: 1, content: "Answer" };
 const huge = lmDoneMessage(base, "t".repeat(2000000));
@@ -448,19 +483,51 @@ process.stdout.write(JSON.stringify({
   cjkBytes: bytes(lmDoneMessage(base, "\\u63a8".repeat(100000))),
   bigAnswer: "thinking" in lmDoneMessage({ ...base, content: "a".repeat(LM_DONE_MAX_BYTES) }, "reasoning"),
   max: LM_DONE_MAX_BYTES,
+  kept: (() => { const c = new ThinkingCollector(); for (let i = 0; i < 50; i++) c.add("z".repeat(100000)); return [c.text.length, c.total]; })(),
+  streamed: (() => {
+    const c = new ThinkingCollector();
+    for (let i = 0; i < 50; i++) c.add("z".repeat(100000));
+    const m = lmDoneMessage(base, c.text, undefined, c.total);
+    return [bytes(m), m.thinking.split("\\n").pop()];
+  })(),
+  unknownPart: [partKind({}, { value: "x" }), partKind({}, { value: "x" }, "text")],
 }));
 """
+
+
+def _compile_lm_messages(tmp_path: Path) -> Path:
+    """Compile the current lm-messages.ts into tmp_path (never the git-ignored out/, which may be stale)."""
+    import shutil
+    import subprocess
+
+    ext = Path(__file__).resolve().parent.parent / "vscode-frontier-insight"
+    node = shutil.which("node")
+    tsc = ext / "node_modules" / "typescript" / "bin" / "tsc"
+    if node is None or not tsc.exists():
+        pytest.skip("node or the extension's typescript (npm install in vscode-frontier-insight) is missing")
+    outdir = tmp_path / "compiled"
+    run = subprocess.run(
+        [node, str(tsc), str(ext / "src" / "lm-messages.ts"), "--outDir", str(outdir), "--module", "commonjs",
+         "--target", "es2020", "--skipLibCheck", "--types", "node", "--typeRoots", str(ext / "node_modules" / "@types")],
+        capture_output=True, text=True, timeout=120, cwd=str(ext))
+    assert run.returncode == 0, run.stdout + run.stderr
+    return outdir / "lm-messages.js"
+
+
+def test_both_bridges_build_their_lm_done_through_lm_done_message() -> None:
+    src = Path(__file__).resolve().parent.parent / "vscode-frontier-insight" / "src"
+    for name in ("bridge.ts", "persistent-bridge.ts"):
+        text = (src / name).read_text(encoding="utf-8")
+        assert "lmDoneMessage(" in text and "ThinkingCollector" in text, name
+        assert "thinking:" not in text.replace("thinkingAll", ""), f"{name} builds a thinking field by hand"
 
 
 def test_the_extension_cuts_the_thinking_so_an_lm_done_line_stays_small(tmp_path: Path) -> None:
     import shutil
     import subprocess
 
-    ext = Path(__file__).resolve().parent.parent / "vscode-frontier-insight"
-    compiled = ext / "out" / "lm-messages.js"
+    compiled = _compile_lm_messages(tmp_path)
     node = shutil.which("node")
-    if node is None or not compiled.exists():
-        pytest.skip("node or the compiled extension (npm run compile) is missing")
     driver = tmp_path / "driver.js"
     driver.write_text(_NODE_DONE % json.dumps(str(compiled).replace("\\", "/")), encoding="utf-8")
     run = subprocess.run([node, str(driver)], capture_output=True, text=True, timeout=30)
@@ -470,3 +537,6 @@ def test_the_extension_cuts_the_thinking_so_an_lm_done_line_stays_small(tmp_path
     assert out["hugeBytes"] <= out["max"] and out["cjkBytes"] <= out["max"] < 65536
     assert out["hugeTail"].endswith("more characters not sent]")
     assert out["bigAnswer"] is False
+    assert out["kept"][0] <= out["max"] and out["kept"][1] == 5_000_000  # only what can be sent is held; all counted
+    assert out["streamed"][0] <= out["max"] and out["streamed"][1].endswith("more characters not sent]")
+    assert out["unknownPart"] == ["unknown", "text"]  # an unnamed part is not taken for the answer unless asked

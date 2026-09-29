@@ -54,11 +54,11 @@ class BridgeError(RuntimeError):
 LAST_SERVED: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar("fi_vscode_served", default=None)
 #: The token counts of the current task's last bridge call, when the extension measured them.
 LAST_BRIDGE_USAGE: contextvars.ContextVar[dict | None] = contextvars.ContextVar("fi_vscode_usage", default=None)
-#: The reasoning text the chat model sent with the current task's last bridge call, when the extension passed it on.
 # One message is one line; a reasoning model's thinking rides on the line that ends its answer, so the reader's line
 # limit (asyncio's default is 64 KiB) has to hold a long one.
 _BRIDGE_LINE_LIMIT = 32 * 1024 * 1024
 
+#: The reasoning text the chat model sent with the current task's last bridge call, when the extension passed it on.
 LAST_BRIDGE_THINKING: contextvars.ContextVar[str | None] = contextvars.ContextVar("fi_vscode_thinking", default=None)
 
 #: Names a chat picker uses for "let the service choose": they name no model, so they prove nothing about which
@@ -495,7 +495,7 @@ async def _open_ipc_connection(
 
     if not sys.platform.startswith("win"):
         try:
-            return await asyncio.open_unix_connection(socket_path)
+            return await asyncio.open_unix_connection(socket_path, limit=_BRIDGE_LINE_LIMIT)
         except OSError as e:
             raise BridgeError(
                 f"could not connect to VSCode persistent bridge at "

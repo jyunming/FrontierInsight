@@ -21,7 +21,9 @@
 import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
-import { BridgeMessage, ChatMessageApi, lmDoneMessage, partKind as partKindOf, servedModel, toChatMessages } from "./lm-messages";
+import {
+    BridgeMessage, ChatMessageApi, ThinkingCollector, lmDoneMessage, partKind as partKindOf, servedModel, toChatMessages,
+} from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
 // in the chat panel — strip / escape markdown that would
@@ -516,7 +518,7 @@ export class Bridge {
             // many small fragments.
             let thinkingBuf = "";
             // Everything the model reasoned, for FI's .fi/thinking.jsonl (thinkingBuf is emptied on each flush).
-            let thinkingAll = "";
+            const thinkingAll = new ThinkingCollector();
             const startMs = Date.now();
             const iter = response.stream[Symbol.asyncIterator]();
             const nodeLabel = req.node || "(unnamed-node)";
@@ -557,7 +559,7 @@ export class Bridge {
             // refs lazily so a missing class on older builds doesn't
             // crash the extension; fall back to duck-typing on .value.
             const LM = vscode as any;
-            const partKind = (p: unknown) => partKindOf(LM, p);
+            const partKind = (p: unknown) => partKindOf(LM, p, "text");
 
             try {
                 while (true) {
@@ -608,7 +610,7 @@ export class Bridge {
                         // It is not sent as a chunk (reasoning isn't
                         // the answer); the whole text rides on lm_done.
                         thinkingBuf += value;
-                        thinkingAll += value;
+                        thinkingAll.add(value);
                     } else if (kind === "tool") {
                         // FI doesn't request tool calls; the model
                         // shouldn't emit any. Log if it happens so we
@@ -635,7 +637,7 @@ export class Bridge {
                 id: req.id,
                 content: accumulated,
                 served_model: servedModel(model),
-            }, thinkingAll));
+            }, thinkingAll.text, undefined, thinkingAll.total));
         } catch (e) {
             const msg = e instanceof Error ? e.message : String(e);
             this.send({

@@ -24,7 +24,9 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as net from "net";
 import { persistentBridgePath } from "./bridge-path";
-import { BridgeMessage, ChatMessageApi, lmDoneMessage, partKind, servedModel, toChatMessages } from "./lm-messages";
+import {
+    BridgeMessage, ChatMessageApi, ThinkingCollector, lmDoneMessage, partKind, servedModel, toChatMessages,
+} from "./lm-messages";
 
 interface LmRequest {
     type: "lm_request";
@@ -390,9 +392,9 @@ export class PersistentBridge {
             // ``_TRANSIENT_BRIDGE_MARKERS`` recognises that string and
             // tenacity retries the call.
             // ``res.stream`` (not ``res.text``) so the model's reasoning parts arrive too: FI keeps them in
-            // .fi/thinking.jsonl, as it does for the per-quest bridge. Only text parts are the answer.
+            // .fi/thinking.jsonl, as it does for the per-quest bridge. Only parts that are known to be text are the answer.
             const iter = (res.stream as AsyncIterable<unknown>)[Symbol.asyncIterator]();
-            let thinkingAll = "";
+            const thinkingAll = new ThinkingCollector();
             try {
                 while (true) {
                     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -425,7 +427,7 @@ export class PersistentBridge {
                     const part = result.value as any;
                     const kind = partKind(vscode, part);
                     if (kind === "thinking" && typeof part.value === "string") {
-                        thinkingAll += part.value;
+                        thinkingAll.add(part.value);
                         continue;
                     }
                     if (kind !== "text" || typeof part.value !== "string") continue;
@@ -481,7 +483,7 @@ export class PersistentBridge {
                 // The model selected and sent this request, so FI can record it; the model's own reasoning rides
                 // along when there is room (cut to fit). An older FI ignores both.
                 served_model: servedModel(model),
-            }, thinkingAll));
+            }, thinkingAll.text, undefined, thinkingAll.total));
             cts2.dispose();
         } catch (e) {
             const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);

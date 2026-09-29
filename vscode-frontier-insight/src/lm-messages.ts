@@ -96,7 +96,11 @@ export function servedModel(model: ServedModel | undefined | null): ServedModel 
 }
 
 /** What one part of a streamed response is. The vscode API is passed in so this runs under plain node. */
-export function partKind(api: any, p: unknown): "text" | "thinking" | "tool" | "unknown" {
+export function partKind(
+    api: any,
+    p: unknown,
+    unknownStringAs: "text" | "unknown" = "unknown",
+): "text" | "thinking" | "tool" | "unknown" {
     const TextPart = api?.LanguageModelTextPart;
     const ThinkingPart = api?.LanguageModelThinkingPart;
     const ToolCallPart = api?.LanguageModelToolCallPart;
@@ -108,8 +112,8 @@ export function partKind(api: any, p: unknown): "text" | "thinking" | "tool" | "
     if (obj && typeof obj.value === "string") {
         if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
         if (obj.constructor?.name === "LanguageModelTextPart") return "text";
-        // Assume text: at worst reasoning leaks into the answer, which FI's lenient parsers tolerate.
-        return "text";
+        // A part that names itself as neither is not taken for the answer unless the caller says to.
+        return unknownStringAs;
     }
     return "unknown";
 }
@@ -118,16 +122,32 @@ export function partKind(api: any, p: unknown): "text" | "thinking" | "tool" | "
 // longer one, so the whole `lm_done` line stays under this.
 export const LM_DONE_MAX_BYTES = 48 * 1024;
 
+/** The reasoning of one answer as it streams in: only what could ever be sent is kept, the rest is only counted. */
+export class ThinkingCollector {
+    text = "";
+    total = 0;
+    add(fragment: string, keepChars: number = LM_DONE_MAX_BYTES): void {
+        this.total += fragment.length;
+        if (this.text.length < keepChars) this.text += fragment.slice(0, keepChars - this.text.length);
+    }
+}
+
 /**
  * The `lm_done` message for an answer, carrying the model's reasoning (`thinking`) when there is room for it: the
  * reasoning is cut to what fits and says how much was left out. The answer itself is never cut here.
+ * `total` is how many characters the model produced when `thinking` holds only the start of them.
  */
-export function lmDoneMessage<T extends object>(base: T, thinking: string, maxBytes: number = LM_DONE_MAX_BYTES): T {
+export function lmDoneMessage<T extends object>(
+    base: T,
+    thinking: string,
+    maxBytes: number = LM_DONE_MAX_BYTES,
+    total: number = thinking.length,
+): T {
     if (!thinking) return base;
     const size = (t: string) => Buffer.byteLength(JSON.stringify({ ...base, thinking: t }), "utf8") + 1;
-    if (size(thinking) <= maxBytes) return { ...base, thinking };
+    if (total === thinking.length && size(thinking) <= maxBytes) return { ...base, thinking };
     const withNote = (keep: number) =>
-        thinking.slice(0, keep) + `\n[${thinking.length - keep} more characters not sent]`;
+        thinking.slice(0, keep) + `\n[${total - keep} more characters not sent]`;
     if (size(withNote(0)) > maxBytes) return base; // the answer leaves no room
     let lo = 0;
     let hi = thinking.length;
