@@ -11,8 +11,8 @@ Fast code is easy to get subtly wrong (a transposed index, a dropped factor, a c
 1. **Write the reference first.** The plainest version that is clearly correct: explicit loops, a dense matrix, a textbook formula, or a standard library routine. It only has to run on small inputs.
 2. **Prefer the strongest reference available:** a closed-form answer; an independent algorithm; an established library function; the same algorithm written differently (weakest, and say so).
 3. **Compare on small random inputs.** Draw several inputs from the physically valid range, run both versions, and compare with a relative tolerance, never `==`. Take the tolerance from the arithmetic (machine epsilon times the problem size, times a condition number where one applies) and write why.
-4. **Prove the check can fail.** Once, on purpose, change a sign or a constant in a scratch copy of the fast version and confirm the comparison goes red. A check that has never failed is not known to work. Never do this in the delivered script.
-5. **Report the outcome as data.** In the `RESULT_JSON` line give: which reference was used, how independent it is, the largest difference, the tolerance, and `ok`.
+4. **Prove the check can fail.** In the same script, also compare the reference against a deliberately perturbed fast version (one constant times 1.01) and require that comparison to fail. A check that has never failed is not known to work. Print `detects_perturbation: true` or `false`.
+5. **Print the outcome:** which reference was used, how independent it is, the largest difference, the tolerance, and `ok`. In a split experiment, where the trial function returns only numbers, return the largest difference as a numeric key and print the rest where the results are combined.
 
 ## Mistakes to avoid
 

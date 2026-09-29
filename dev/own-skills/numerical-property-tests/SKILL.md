@@ -8,7 +8,7 @@ One worked example shows the code works for that example. A property says what m
 
 ## Requirements
 
-`pip install hypothesis numpy`. Property tests are ordinary pytest functions.
+`pip install hypothesis` (numpy is already there). A `@given` function can be called directly from the experiment script, no pytest needed.
 
 ## Steps
 
@@ -22,7 +22,7 @@ One worked example shows the code works for that example. A property says what m
    - *round trip*: a transform followed by its inverse returns the input.
 3. **Compare with `rtol` and `atol`**, never `==`, and write why the tolerance is what it is.
 4. **Test the edges on purpose** with `@example(...)`: zero, the smallest and largest valid values, nearly equal values, a nearly singular matrix.
-5. **Keep it cheap.** `@settings(max_examples=50, deadline=None)` keeps the check inside the run's time budget.
+5. **Keep it cheap and repeatable.** `@settings(max_examples=50, deadline=None, derandomize=True, database=None)` keeps the check inside the run's time budget, tests the same inputs every run, and leaves no `.hypothesis` folder behind.
 6. **Print the smallest failing case.** Hypothesis shrinks a failure to a minimal input; show it so it can be reproduced.
 
 ## Mistakes to avoid
