@@ -150,6 +150,7 @@ function card(s) {
         ${s.status === "trusted"
           ? `<button onclick="revoke('${esc(s.name)}')" class="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-surface-container-highest text-label-md">Revoke</button>`
           : `<button onclick="approve('${esc(s.name)}', false)" class="px-3 py-1.5 rounded-lg bg-primary/20 hover:bg-primary/30 text-label-md">Approve…</button>`}
+        <button onclick="removeSkill('${esc(s.name)}')" class="px-3 py-1.5 rounded-lg bg-surface-container-high hover:bg-red-500/30 text-label-md">Remove</button>
       </div>
     </div>
     <div id="scan-${esc(s.name)}" class="mt-4 hidden"></div>
@@ -248,6 +249,14 @@ async function approveAll() {
   if (note) note.textContent = "";
   if (!r.ok) { alert(d.detail || d.message || "Bulk approval failed."); return; }
   alert(`${d.approved_count} skill(s) now trusted.\n\n` + (d.report || ""));
+  load(false);
+}
+
+async function removeSkill(name) {
+  if (!confirm(`Remove "${name}" from FI completely? A skill in FI's own folder is deleted from disk; one installed by another tool is only hidden from FI (its files stay).`)) return;
+  const r = await fetch(withConfig(`/api/skills/${encodeURIComponent(name)}/remove`), {method: "POST"});
+  const d = await r.json().catch(() => ({}));
+  alert(d.message || (r.ok ? "Removed." : "Could not remove."));
   load(false);
 }
 

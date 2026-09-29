@@ -476,6 +476,31 @@ export async function runRevokeSkill(
     );
 }
 
+/** `@fi /remove-skill <name> [--config <quest.yaml>]` — delete FI's own skill, or hide one another tool installed. */
+export async function runRemoveSkill(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const { rest, config, error } = splitSkillArgs(promptArgs);
+    if (error) {
+        stream.markdown(error + "\n");
+        return;
+    }
+    const name = rest.split(/\s+/)[0] || "";
+    if (!name) {
+        stream.markdown("Which skill? Example: `@fi /remove-skill <name>`\n");
+        return;
+    }
+    const env = resolveRepo(stream);
+    if (!env || token.isCancellationRequested) return;
+
+    const res = await runLaunch(env, ["--remove-skill", name, ...configArgs(config)]);
+    stream.markdown(
+        `\`\`\`\n${(res.stdout || res.stderr).trim().slice(-600)}\n\`\`\`\n`,
+    );
+}
+
 /** `@fi /import-skill` — file picker into the same importer the CLI uses. */
 export async function runImportSkill(
     promptArgs: string,

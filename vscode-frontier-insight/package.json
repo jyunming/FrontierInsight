@@ -142,6 +142,10 @@
             "description": "Withdraw approval for a skill, returning it to proposed. Add --config <quest.yaml> to reach a skill that lives in a folder only that quest names."
           },
           {
+            "name": "remove-skill",
+            "description": "Remove a skill from FI completely: deleted if it lives in FI's own folder, hidden (files untouched) if another tool installed it."
+          },
+          {
             "name": "import-skill",
             "description": "Import a skill written for another agent (Agent Skills layout). Opens a picker when given no path."
           },

@@ -97,6 +97,7 @@ same PR that adds, splits or renames one.
 - `core/skills/registry.py` — discovery, self-tests, what may load.
 - `core/skills/selection.py` — which skills a quest's catalogue carries (`layers.py` = general vs. domain layer).
 - `core/skills/approval.py` — the human sign-off gate (content-hash pinned).
+- `core/skills/removal.py` — `--remove-skill` / `--restore-skill`: delete a skill in FI's own folder, or hide an external one (`skills_removed_external.json` beside the ledger, honoured by `discover()`).
 - `core/skills/scan.py` — a static review of a skill's contents for the person about to approve it.
 - `core/skills/known_requirements.py` — the pip packages each preset skill needs (`scripts/import_scientist_skills.py`
   reads it) and the versions a skill must not get (`PINS`); the fallback for a skill imported before provenance
