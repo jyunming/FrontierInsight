@@ -1952,6 +1952,7 @@ class _FakeResp:
         )
         self._json = json_data
         self.headers = headers or {}
+        self.is_redirect = False
 
     def json(self):
         if self._json is None:

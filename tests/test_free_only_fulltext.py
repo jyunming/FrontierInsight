@@ -474,6 +474,13 @@ def test_scholarly_hosts_seen_in_the_wild_are_not_fetched(url, monkeypatch, spy)
     "https://www.example-news.com/article/climate-report-released",
     "https://blog.example.org/content/how-we-built-it",
     "https://www.bbc.com/news/articles/c1234abcd",
+    "https://www.nationalgeographic.com/science/article/cave-art-found",
+    "https://www.reuters.com/science/article/mars-rover-lands",
+    "https://www.gov.uk/government/abs/foo",
+    "https://spectrum.ieee.org/some-chip-story",
+    "https://cen.acs.org/articles/98/i1/story.html",
+    "https://www.endocrine.org/news-and-advocacy/news-room/2020/story",
+    "https://www.physiology.org/news/story",
 ])
 def test_news_style_article_paths_are_not_taken_for_scholarly(url) -> None:
     assert kn._looks_scholarly({"url": url}) is False and not kn._is_academic_source(url)
@@ -537,7 +544,8 @@ def test_a_doi_resolver_is_never_a_free_location_for_any_source() -> None:
     ({"doi": "10.1101/sqb.2020.85.1"}, False),
     ({"url": "https://zenodo.org/records/1"}, True),
     ({"url": "https://osf.io/abcde"}, True),
-    ({"url": "https://europepmc.org/article/MED/1"}, True),
+    ({"url": "https://europepmc.org/article/MED/1"}, False),
+    ({"url": "https://europepmc.org/article/MED/1", "open_access": True, "free_url": "https://europepmc.org/articles/PMC1"}, True),
     ({"url": "https://www.ncbi.nlm.nih.gov/pmcfoo"}, False),
     ({"url": "https://arxiv.org./abs/1"}, True),
 ])
@@ -578,3 +586,175 @@ async def test_the_papers_readme_follows_the_current_run(tmp_path: Path, monkeyp
     await eng._node_literature(_state())
     text = readme.read_text(encoding="utf-8")
     assert "nothing to resume" not in text and "--resume" in text
+
+
+# --- round 4: headless redirect hops, OA-cascade redirects, PDF/content-type backstop, news pages, europepmc ---
+
+def _serve(handler_cls):
+    import threading
+    from http.server import ThreadingHTTPServer
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def test_a_real_browser_never_sends_a_request_to_a_refused_redirect_target() -> None:
+    pytest.importorskip("playwright.sync_api")
+    from http.server import BaseHTTPRequestHandler
+    hits: list[str] = []
+
+    class B(BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<html><body>publisher article</body></html>")
+
+        def log_message(self, *a):
+            pass
+
+    srv_b = _serve(B)
+    target = f"http://localhost:{srv_b.server_port}/doi/10.1234/x"
+
+    class A(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(302)
+            self.send_header("location", target)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    srv_a = _serve(A)
+    start = f"http://127.0.0.1:{srv_a.server_port}/go"
+    try:
+        try:
+            html = kn._playwright_fetch_html(start, timeout_s=15, allow=lambda u: kn._redirect_allowed(u, start))
+        except Exception as e:  # no browser installed on this machine
+            pytest.skip(f"headless browser unavailable: {e}")
+        assert html is None or "publisher article" not in html
+        assert hits == []
+    finally:
+        srv_a.shutdown()
+        srv_b.shutdown()
+
+
+def _pdf_like(monkeypatch):
+    monkeypatch.setattr(kn, "_pdf_bytes_to_text", lambda b, cap=0: "word " * 400)
+
+
+def test_unpaywall_does_not_follow_a_repository_link_into_a_publisher(monkeypatch) -> None:
+    def handler(req):
+        if req.url.host == "api.unpaywall.org":
+            return httpx.Response(200, json={"oa_locations": [{"url": "https://hdl.example/1", "host_type": "repository"}]})
+        if req.url.host == "hdl.example":
+            return httpx.Response(302, headers={"location": "https://www.sciencedirect.com/science/article/pii/S1"})
+        return httpx.Response(200, headers={"content-type": "text/html"}, text="<html>" + "paper " * 500 + "</html>")
+
+    asked = _mock_client(monkeypatch, handler)
+    assert kn._unpaywall_fulltext("10.1/x", timeout_s=5, cap=10000) is None
+    assert not any("sciencedirect" in u for u in asked)
+
+
+def test_semantic_scholar_pdf_link_that_redirects_to_a_publisher_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(kn.httpx, "get", lambda *a, **k: httpx.Response(
+        200, json={"openAccessPdf": {"url": "https://repo.example/x.pdf"}}, request=httpx.Request("GET", a[0])))
+
+    def handler(req):
+        if req.url.host == "repo.example":
+            return httpx.Response(302, headers={"location": "https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber=1"})
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4 x")
+
+    asked = _mock_client(monkeypatch, handler)
+    _pdf_like(monkeypatch)
+    assert kn._s2_oa_pdf("10.1/x", timeout_s=5, cap=10000) is None
+    assert not any("ieee" in u for u in asked)
+
+
+def test_the_arxiv_and_biorxiv_routes_recheck_every_redirect(monkeypatch) -> None:
+    def handler(req):
+        return httpx.Response(302, headers={"location": "https://www.sciencedirect.com/science/article/pii/S1"})
+
+    asked = _mock_client(monkeypatch, handler)
+    assert kn._preprint_fulltext({"doi": "https://doi.org/10.1101/068312"}, timeout_s=5, cap=1000) is None
+    assert asked and all("sciencedirect" not in u for u in asked)
+
+
+def test_the_oa_text_helper_rejects_a_paywall_stub_and_a_publisher_landing_page() -> None:
+    stub = httpx.Response(200, headers={"content-type": "text/html"},
+                          text="<html><body>Buy this article for $35. Subscribe to read the full text. "
+                               + "x " * 300 + "</body></html>",
+                          request=httpx.Request("GET", "https://repo.example/a"))
+    assert kn._pdf_or_html_text(stub, cap=10000, origin="https://repo.example/a") is None
+    landed = httpx.Response(200, headers={"content-type": "text/html"},
+                            text='<html><head><meta name="citation_doi" content="10.1/x"></head><body>' + "text " * 500 + "</body></html>",
+                            request=httpx.Request("GET", "https://www.sciencedirect.com/x"))
+    assert kn._pdf_or_html_text(landed, cap=10000, origin="https://hdl.example/1") is None
+
+
+def test_a_pdf_from_an_unlisted_site_that_names_a_doi_is_discarded(monkeypatch) -> None:
+    monkeypatch.setattr(kn, "_pdf_bytes_to_text", lambda b, cap=0: "Journal of X. https://doi.org/10.5555/abc.123 " + "word " * 400)
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4 x")
+
+    _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://unlisted.example/files/view/8812.pdf"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False) is None
+    assert doc.metadata["scholarly_page"] is True
+
+
+def test_a_same_host_redirect_to_an_article_address_is_discarded(monkeypatch) -> None:
+    _pdf_like(monkeypatch)
+
+    def handler(req):
+        if req.url.path == "/landing":
+            return httpx.Response(302, headers={"location": "/doi/pdf/10.5555/abc"})
+        return httpx.Response(200, headers={"content-type": "application/pdf"}, content=b"%PDF-1.4 x")
+
+    _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://unlisted.example/landing"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False) is None
+    assert doc.metadata["scholarly_page"] is True
+
+
+@pytest.mark.parametrize("ctype", ["text/plain", "", "application/octet-stream"])
+def test_a_journal_page_cannot_hide_behind_its_content_type(ctype, monkeypatch) -> None:
+    page = ('<html><head><meta name="citation_doi" content="10.1/x"></head><body>'
+            + "paywalled article text " * 200 + "</body></html>")
+
+    def handler(req):
+        return httpx.Response(200, headers={"content-type": ctype} if ctype else {}, content=page.encode())
+
+    _mock_client(monkeypatch, handler)
+    doc = RetrievedDoc(content="s", metadata={"url": "https://unlisted-publisher.example/read/77"})
+    assert kn._fetch_web_page_text(doc, timeout_s=5, max_kb=64, headless=False) is None
+    assert doc.metadata["scholarly_page"] is True
+
+
+@pytest.mark.parametrize("tag", [
+    '<meta name="citation_doi" content="10.1/x">',
+    "<meta property='citation_doi' content='10.1/x'>",
+    '<meta content="10.1/x" name="citation_doi">',
+    "<meta name=citation_doi content=10.1/x>",
+    '<meta name="prism.doi" content="10.1/x">',
+    '<meta content="10.1234/x" name="dc.identifier">',
+    '<script type="application/ld+json">{"@type": ["Article", "MedicalScholarlyArticle"]}</script>',
+])
+def test_the_metadata_check_reads_the_common_spellings(tag) -> None:
+    assert kn._has_scholarly_meta(f"<html><head>{tag}</head></html>") is True
+
+
+def test_the_metadata_check_ignores_an_ordinary_page() -> None:
+    assert kn._has_scholarly_meta('<html><head><meta name="description" content="hello"></head></html>') is False
+
+
+@pytest.mark.parametrize("doi,expected", [
+    ("10.1101/068312", True),
+    ("https://doi.org/10.1101/2020.01.01.123456", True),
+    ("10.1101/gad.123456", False),
+])
+def test_biorxiv_doi_shapes(doi, expected) -> None:
+    assert bool(kn._BIORXIV_DOI_RE.match(doi)) is expected
+    assert is_open_access({"doi": doi}) is expected
