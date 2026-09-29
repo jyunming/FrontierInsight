@@ -143,13 +143,17 @@ def test_rerun_steps_api_returns_the_map(tmp_path: Path, monkeypatch: pytest.Mon
     async def fake_steps(self) -> list[dict]:
         return _steps({"ideas", "literature", "plan", "design", "code"})
 
+    async def no_values(self) -> dict:
+        return {}
+
     monkeypatch.setattr(Engine, "rerun_steps", fake_steps)
+    monkeypatch.setattr(Engine, "_checkpoint_values", no_values)
     body = TestClient(make_app(cfg.output.output_dir)).get("/api/quests/qmap1/rerun-steps").json()
     assert [b["id"] for b in body["blocks"]] == list(rerun_from.MAP_BLOCKS) and body["config_path"].endswith("config.yaml")
     assert all(b["name"] and b["desc"] for b in body["blocks"]) and body["finished"] is False
     nodes = {n["node"]: n for n in body["nodes"]}
     assert len(nodes) == len(rerun_from.NODES)
-    assert nodes["implement"]["clickable"] and not nodes["analyze"]["clickable"]
+    assert nodes["implement_outline"]["clickable"] and not nodes["analyze"]["clickable"]
     assert nodes["design"]["needs_approval"] and not nodes["implement"]["needs_approval"]
     assert nodes["implement"]["title"] == "Write the code" and nodes["implement_outline"]["status"] == "now"
     assert nodes["design"]["status"] == "done" and nodes["analyze"]["status"] == "todo"
@@ -197,3 +201,53 @@ def test_the_vs_code_panel_loads_the_shared_map_and_restarts_through_chat() -> N
     assert "quest_map.js" in ts and "--json" in ts and "workbench.action.chat.open" in ts
     pkg = (ext / "package.json").read_text(encoding="utf-8")
     assert "frontierInsight.questMap" in pkg and "FI: Quest map" in pkg and "copy-quest-map.js" in pkg
+
+
+def test_a_node_the_quest_has_not_reached_is_not_clickable_even_when_its_step_was() -> None:
+    """``implement_outline`` and ``implement`` share the ``code`` step: with the quest stopped at the outline, the second is
+    not reached, so it is neither clickable nor offered a restart it would describe as 'nothing to redo'."""
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature", "plan", "design", "skills", "code"}))}
+    assert nodes["implement_outline"]["status"] == "now" and nodes["implement_outline"]["clickable"]
+    assert nodes["implement"]["status"] == "todo" and not nodes["implement"]["clickable"]
+
+
+def test_the_map_redoes_the_whole_step_from_its_first_node() -> None:
+    """The JS starts the 'redone' list at the first node of the clicked node's step."""
+    script = (Path(__file__).resolve().parent.parent / "web" / "static" / "quest_map.js").read_text(encoding="utf-8")
+    assert "x.step === n.step" in script and "Yes, restart now" in script
+
+
+@pytest.mark.parametrize("flag", ["no_simulation", "survey_mode", "analyze_local_first"])
+async def test_the_config_can_put_a_quest_on_the_data_path(tmp_path: Path, flag: str) -> None:
+    cfg = _cfg(tmp_path)
+    setattr(cfg.engine, flag, True)
+    assert await Engine(cfg).rerun_no_simulation() is True
+
+
+@pytest.mark.parametrize("key,expected", [("no_simulation_resolved", True), ("survey_mode_resolved", True), ("other", False)])
+async def test_clarify_can_put_a_quest_on_the_data_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, expected: bool) -> None:
+    async def values(self) -> dict:
+        return {key: True}
+
+    monkeypatch.setattr(Engine, "_checkpoint_values", values)
+    assert await Engine(_cfg(tmp_path)).rerun_no_simulation() is expected
+
+
+def test_the_rerun_steps_api_uses_the_data_path_clarify_chose(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _cfg(tmp_path)
+    quest_root = cfg.output.output_dir / "qmap3"
+    (quest_root / ".fi").mkdir(parents=True)
+    (quest_root / ".fi" / "state.sqlite").write_bytes(b"")
+    (quest_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")), encoding="utf-8")
+
+    async def fake_steps(self) -> list[dict]:
+        return _steps({"ideas", "literature", "plan", "design", "skills", "run"})
+
+    async def values(self) -> dict:
+        return {"no_simulation_resolved": True}
+
+    monkeypatch.setattr(Engine, "rerun_steps", fake_steps)
+    monkeypatch.setattr(Engine, "_checkpoint_values", values)
+    body = TestClient(make_app(cfg.output.output_dir)).get("/api/quests/qmap3/rerun-steps").json()
+    blocks = {b["id"]: b for b in body["blocks"]}
+    assert blocks["run"]["off"] and not blocks["data"]["off"]

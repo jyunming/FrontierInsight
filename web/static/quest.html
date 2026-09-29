@@ -1535,8 +1535,8 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     if (!questMap) {
       questMap = window.FIQuestMap.mount(document.getElementById('quest-map-root'), {
         questId,
-        command: (n) => 'python launch.py --config ' + (questMapConfig || '<config.yaml>') + ' --resume ' + questId +
-          ' --from ' + n.node + (n.needs_approval ? ' --approve-as "<your name>"' : ''),
+        command: (n) => 'python launch.py --config ' + (/\s/.test(questMapConfig) ? '"' + questMapConfig + '"' : (questMapConfig || '<config.yaml>')) +
+          ' --resume ' + questId + ' --from ' + (n.step || n.node) + (n.needs_approval ? ' --approve-as "<your name>"' : ''),
         restart: mapRestart,
       });
     }

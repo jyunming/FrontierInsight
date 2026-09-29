@@ -30,6 +30,7 @@
     var busy = false;
     var busyWhy = '';
     var status = '';
+    var armed = '';
     var initialised = false;
     var theme = '';
     try { theme = localStorage.getItem('fi-qmap-theme') || ''; } catch (e) { theme = ''; }
@@ -72,7 +73,7 @@
       if (!n || !n.clickable) return out;
       var hit = false;
       data.nodes.forEach(function (x) {
-        if (x.node === n.node) hit = true;
+        if (x.step === n.step) hit = true;
         if (hit && (x.status === 'done' || x.status === 'now')) out[x.node] = true;
       });
       return out;
@@ -118,7 +119,7 @@
           var t = el('span', 'qm-t');
           t.append(el('span', 'qm-dot'), n.title || n.node);
           btn.append(t, el('span', 'qm-k', n.node));
-          btn.onclick = function () { sel = n.node; open[n.block] = true; render(); };
+          btn.onclick = function () { sel = n.node; armed = ''; open[n.block] = true; render(); };
           nodes.appendChild(btn);
         });
         blockNodes(b).filter(function (n) { return n.loop; }).forEach(function (n) {
@@ -174,7 +175,7 @@
       if (n.hint) panel.appendChild(row('Tune', n.hint));
       panel.appendChild(impactBox(n, redo));
       var acts = el('div', 'qm-acts');
-      var go = el('button', 'qm-btn qm-primary', 'Restart from here');
+      var go = el('button', 'qm-btn qm-primary', armed === n.node ? 'Yes, restart now' : 'Restart from here');
       go.type = 'button';
       var reason = '';
       if (!n.clickable) reason = 'This step cannot be restarted from.';
@@ -183,6 +184,13 @@
       go.disabled = !!reason || !opts.restart;
       if (reason) go.title = reason;
       go.onclick = function () {
+        if (armed !== n.node) {
+          armed = n.node;
+          status = 'This moves what “' + n.title + '” and the later steps made to .fi/previous/ and runs them again. Press the button again to go ahead.';
+          renderPanel(redo);
+          return;
+        }
+        armed = '';
         status = 'Starting…';
         renderStatus();
         Promise.resolve().then(function () { return opts.restart(n); }).then(function (msg) {

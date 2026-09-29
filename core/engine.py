@@ -1835,19 +1835,48 @@ class Engine:
         reached = await self._reached_steps()
         return [_rerun_from.step_info(step, reached=step in reached) for step in _rerun_from.STEPS]
 
-    async def _reached_steps(self) -> list[str]:
+    async def rerun_no_simulation(self) -> bool:
+        """Whether this quest takes the no-simulation path: what the clarify node resolved into the checkpoint, or what
+        the config says (a survey or a local-data analysis has no experiment either). No model call, nothing written."""
+        cfg = self.config
+        if cfg.engine.no_simulation or cfg.engine.survey_mode or cfg.engine.analyze_local_first:
+            return True
+        values = await self._checkpoint_values()
+        return bool(values.get("no_simulation_resolved") or values.get("survey_mode_resolved"))
+
+    async def _checkpoint_values(self) -> dict[str, Any]:
+        graph_and_close = await self._open_readonly_graph()
+        if graph_and_close is None:
+            return {}
+        graph, conn = graph_and_close
+        try:
+            snap = await graph.aget_state({"configurable": {"thread_id": self.quest_id}})
+            return dict(snap.values or {})
+        finally:
+            await conn.close()
+
+    async def _open_readonly_graph(self) -> tuple[Any, Any] | None:
         import aiosqlite
 
         path = self.fi_dir / "state.sqlite"
         if not path.is_file():
-            return []
+            return None
         # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
         # own setup would write to its database.
-        async with aiosqlite.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as conn:
-            saver = AsyncSqliteSaver(conn)
-            saver.is_setup = True
-            graph = self._build_graph().compile(checkpointer=saver)
+        conn = await aiosqlite.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        saver = AsyncSqliteSaver(conn)
+        saver.is_setup = True
+        return self._build_graph().compile(checkpointer=saver), conn
+
+    async def _reached_steps(self) -> list[str]:
+        opened = await self._open_readonly_graph()
+        if opened is None:
+            return []
+        graph, conn = opened
+        try:
             return await _rerun_from.reached(graph, {"configurable": {"thread_id": self.quest_id}})
+        finally:
+            await conn.close()
 
     # ---- graph topology --------------------------------------------------
 

@@ -1124,11 +1124,12 @@ def make_app(
         cfg = Config.from_yaml(yaml_path)
         cfg.output.output_dir = quest_root.parent
         try:
-            steps = await Engine(cfg, resume_quest_id=quest_id).rerun_steps()
+            engine = Engine(cfg, resume_quest_id=quest_id)
+            steps = await engine.rerun_steps()
+            no_sim = await engine.rerun_no_simulation()
         finally:
             # The Engine opened the quest's log files for this process; nothing is logged, so they are closed now.
             _close_quest_logger(quest_id)
-        no_sim = bool(cfg.engine.no_simulation)
         finished = (quest_root / "frontier_insight_summary.json").is_file()
         return JSONResponse({
             "quest_id": quest_id,

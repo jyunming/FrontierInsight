@@ -7,6 +7,7 @@
  * read from the quest's checkpoint. Restart sends the same `@fi /resume <id> --from <step>` to chat that a person would
  * type, so the resume runs exactly as it does there (with the model picker and progress in chat).
  */
+import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
@@ -39,10 +40,7 @@ async function pickQuest(outputRoot: string): Promise<string | undefined> {
 }
 
 function nonce(): string {
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let out = "";
-    for (let i = 0; i < 32; i++) out += chars[Math.floor(Math.random() * chars.length)];
-    return out;
+    return crypto.randomBytes(24).toString("base64").replace(/[^A-Za-z0-9]/g, "A");
 }
 
 function pageHtml(webview: vscode.Webview, media: vscode.Uri, questId: string): string {
@@ -60,13 +58,13 @@ function pageHtml(webview: vscode.Webview, media: vscode.Uri, questId: string): 
 <script nonce="${n}">
 (function () {
   var vscode = acquireVsCodeApi();
-  var questId = ${JSON.stringify(questId)};
+  var questId = ${JSON.stringify(questId).replace(/</g, "\\u003c")};
   var configPath = '';
   var root = document.getElementById('root');
   var map = window.FIQuestMap.mount(root, {
     questId: questId,
     command: function (n) {
-      var cmd = 'python launch.py --config ' + configPath + ' --resume ' + questId + ' --from ' + (n.step || n.node);
+      var cmd = 'python launch.py --config ' + (/\s/.test(configPath) ? '"' + configPath + '"' : configPath) + ' --resume ' + questId + ' --from ' + (n.step || n.node);
       return n.needs_approval ? cmd + ' --approve-as "<your name>"' : cmd;
     },
     restart: function (n) {
@@ -102,6 +100,10 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
     const outputRoot = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(roots.workDir, outputDirSetting);
     const questId = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest(outputRoot));
     if (!questId) return;
+    if (!/^[A-Za-z0-9_\-.]+$/.test(questId)) {
+        void vscode.window.showErrorMessage(`"${questId}" is not a quest id (letters, digits, - _ . only).`);
+        return;
+    }
 
     const media = vscode.Uri.joinPath(context.extensionUri, "media");
     const panel = vscode.window.createWebviewPanel("frontierInsight.questMap", `Quest map: ${questId}`,

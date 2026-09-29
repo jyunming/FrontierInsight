@@ -300,8 +300,8 @@ def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulati
     """Every graph node as a map shows it, in graph order: name, plain title, block, sentence, reads, writes, loop note,
     the step a restart from it means (or ``""``), whether it can be clicked, and its status: ``done``, ``now`` (where the
     quest stopped), ``todo`` or ``off`` (the other path). ``steps`` is what ``Engine.rerun_steps()`` returns. A node is
-    clickable only when it names a step that has its backup list and sentence, the quest reached that step, and the node
-    is on the quest's path."""
+    clickable only when it names a step that has its backup list and sentence, the quest reached that step, the node
+    is on the quest's path, and the quest got as far as the node itself (two nodes can share one step)."""
     by_step = {s["name"]: s for s in steps}
     off_blocks = {b["id"] for b in map_blocks(no_simulation=no_simulation) if b["off"]}
     on_path = [n for n in NODES if NODES[n]["block"] not in off_blocks]
@@ -325,7 +325,7 @@ def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulati
                     "reads": meta["reads"], "writes": meta["writes"], "loop": meta.get("loop", ""),
                     "hint": NODE_HINTS.get(node, ""), "status": "off" if off else status[node],
                     "step": step if info else "",
-                    "clickable": bool(info and info["reached"] and not off),
+                    "clickable": bool(info and info["reached"] and not off and status[node] != "todo"),
                     "needs_approval": bool(info and info["needs_approval"]),
                     "redoes": info["sentence"] if info else "",
                     "outputs": info["outputs"] if info else []})
