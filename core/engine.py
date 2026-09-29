@@ -3384,13 +3384,14 @@ class Engine:
                 _write_paper_need_stubs(
                     self.quest_root, needed, self._log,
                     query=_lit_query(state), oa_unfetched=oa_unfetched,
+                    paused=bool(needed and self.config.pauses.papers),
                 )
             if needed and not self.config.pauses.papers:
                 # Unattended: FI downloads only free papers and never fetches a paywalled one itself.
                 self._log.info(
-                    "[literature] %d paper(s) are behind a paywall, so FI did not download them. They are read "
-                    "from their abstracts; the list with a link each is in needs/WANTED_PAPERS.md if you want to "
-                    "download some by hand.",
+                    "[literature] %d paper(s) are not confirmed free to read, so FI did not download them. They "
+                    "are read from their abstracts; the list with a link each is in needs/WANTED_PAPERS.md if you "
+                    "want to download some by hand.",
                     len(needed),
                 )
             if needed and self.config.pauses.papers:
@@ -3423,6 +3424,13 @@ class Engine:
                 # ``_ingest_user_dropped_papers`` picks up the new
                 # files, and the gate's else-branch falls through.
                 return {}
+        else:
+            left = sum(1 for d in docs if _is_abstract_only(d) and not _is_open_access(d))
+            if left:
+                self._log.info(
+                    "[literature] %d paper(s) are not confirmed free to read and FI did not download them; "
+                    "inputs/papers/ already has files, so no new list was written.", left,
+                )
 
         # Download the retrieved sources to disk for EVERY quest (sim and
         # no-sim alike) so the collected web/academic literature is always
@@ -18448,20 +18456,13 @@ _PAPERS_README = """\
 # Papers needed
 
 This quest's literature search returned only abstracts for a handful
-of papers — full text wasn't available from the open-web sources FI
-tries (arXiv / OpenAlex / Crossref / Semantic Scholar / ...).
+of papers: they are not confirmed free to read, and FI downloads only
+papers that are free.
 
 See **``../needs/WANTED_PAPERS.md``** for the ranked list (most relevant
 first) with a download link for each. **Drop the PDFs into THIS directory**
-(or anywhere under it — FI walks recursively). Then re-run:
-
-```
-fi --resume {quest_id}
-```
-
-The literature node will pick up the new files, extract their text,
-and merge them into the existing literature list — the design /
-write nodes then see real full text instead of bare abstracts.
+(or anywhere under it — FI walks recursively).
+{after}
 
 Accepted formats: ``.pdf`` / ``.md`` / ``.txt``. Other formats are
 ignored. The README itself never counts as a paper.
@@ -19100,9 +19101,24 @@ def _rank_papers_by_relevance(
     return [docs[i] for i in sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)]
 
 
+def _papers_next_step(quest_id: str, paused: bool) -> str:
+    """What to do after adding papers: resume when the quest is waiting for them, otherwise say the quest
+    did not stop, so there is nothing to resume."""
+    if paused:
+        return (
+            "Then continue the quest:\n\n```\nfi --resume " + quest_id + "\n```\n\n"
+            "The literature step picks up the new files, extracts their text and merges them into the "
+            "literature list, so the design and writing steps see real full text instead of bare abstracts."
+        )
+    return (
+        "This quest did not stop for these papers, so there is nothing to resume: it went on with their "
+        "abstracts. Files placed here are read whenever this quest's literature step runs again."
+    )
+
+
 def _write_wanted_papers_md(
     quest_root: Path, ranked: list["RetrievedDoc"], *, topic: str,
-    oa_unfetched: list["RetrievedDoc"] | None = None,
+    oa_unfetched: list["RetrievedDoc"] | None = None, paused: bool = True,
 ) -> None:
     """Write a single human-friendly, RANKED ``needs/WANTED_PAPERS.md`` —
     most relevant first, each with a download link, what it's about, and the
@@ -19119,10 +19135,10 @@ def _write_wanted_papers_md(
     if ranked:
         lines += [
             "The agent found these papers relevant but could only get the "
-            "abstract; no open-access full text was reachable. Download the ones "
-            "that matter — **most relevant first** — drop the PDFs into "
-            "`inputs/papers/`, then re-run the quest. You don't have to get them "
-            "all; even the top few sharpen the research.",
+            "abstract: they are not confirmed free to read, and FI downloads only "
+            "papers that are free. Download the ones that matter — **most relevant "
+            "first** — and drop the PDFs into `inputs/papers/`. You don't have to "
+            "get them all; even the top few sharpen the research.",
             "",
         ]
     for i, doc in enumerate(ranked, 1):
@@ -19141,8 +19157,8 @@ def _write_wanted_papers_md(
         if gist:
             lines.append(f"- **What it's about:** {gist}")
         lines.append(
-            "- **Status:** full text not retrieved (likely paywalled / "
-            "subscription) — manual download needed"
+            "- **Status:** not confirmed free to read, so FI did not download it — "
+            "manual download needed"
         )
         lines.append("")
     if oa_unfetched:
@@ -19178,8 +19194,9 @@ def _write_wanted_papers_md(
                 lines.append(f"- **What it's about:** {gist}")
             lines.append("")
     lines.append(
-        "Drop the PDFs into `inputs/papers/` (any subfolder works), then "
-        f"`fi --resume {quest_root.name}`."
+        "Drop the PDFs into `inputs/papers/` (any subfolder works)."
+        + (f" Then `fi --resume {quest_root.name}`." if paused else
+           " This quest did not stop for them, so there is nothing to resume: it went on with their abstracts.")
     )
     try:
         (quest_root / "needs" / "WANTED_PAPERS.md").write_text(
@@ -19196,6 +19213,7 @@ def _write_paper_need_stubs(
     *,
     query: str = "",
     oa_unfetched: list["RetrievedDoc"] | None = None,
+    paused: bool = True,
 ) -> None:
     """Per missing paper, write ``<quest_root>/needs/<slug>.json`` with the
     metadata FI knows (title, authors, DOI, URL, source) so the user can
@@ -19211,12 +19229,13 @@ def _write_paper_need_stubs(
     oa_ranked = _rank_papers_by_relevance(list(oa_unfetched or []), query)
     _write_wanted_papers_md(
         quest_root, needed, topic=query or quest_root.name, oa_unfetched=oa_ranked,
+        paused=paused,
     )
     readme = papers_dir / "README.md"
     if not readme.exists():
         try:
             readme.write_text(
-                _PAPERS_README.format(quest_id=quest_root.name),
+                _PAPERS_README.format(after=_papers_next_step(quest_root.name, paused)),
                 encoding="utf-8",
             )
         except OSError as e:

@@ -1362,10 +1362,11 @@ class KnowledgeConfig(BaseModel):
     # Paths may be `~`-prefixed; globs are NOT expanded (pass each file).
     local_papers: list[Path] = Field(default_factory=list)
     # Download the full text of papers that are free to read (arXiv, PubMed
-    # Central, bioRxiv / medRxiv, and any paper Unpaywall, Semantic Scholar
-    # or CORE lists a free copy of). A paper that is not confirmed free is
-    # never fetched from the publisher, not even from a network that has a
-    # subscription (VPN / campus login): download it yourself and put it in
+    # Central, bioRxiv / medRxiv, fully open-access publishers, and any paper
+    # OpenAlex, OpenAIRE, DOAJ, Unpaywall, Semantic Scholar or CORE lists a
+    # free copy of; only that free copy is requested). A paper that is not
+    # confirmed free is not fetched from the publisher, not even from a
+    # network that has a subscription (VPN / campus login): download it yourself and put it in
     # ``inputs/papers/`` or ``knowledge.local_papers``. On by default: a free
     # copy is the difference between the writer quoting a paper and quoting
     # its abstract. The whole batch shares ``full_text_fetch_total_s``; set

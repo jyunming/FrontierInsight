@@ -15,8 +15,9 @@ Two responsibilities:
         de-duplicated by DOI / arXiv-id / PMID / normalized title.
    When `try_fetch_full_text` is true, external hits are augmented
    with full text only when the paper is confirmed free to read
-   (`is_open_access`, or a free copy found by the open-access cascade);
-   a paywalled paper is never requested from the publisher, so no
+   (`is_open_access`, or a free copy found by the open-access cascade),
+   and then only from the free copy its source named; a paper not
+   confirmed free is never requested from the publisher, so no
    institutional / VPN access is used (login walls that slip through are
    still rejected by a Content-Type + `%PDF-` magic-bytes check).
 
@@ -366,6 +367,7 @@ def _arxiv_search(
                 "pdf_url": loc.get("pdf_url") or (
                     f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else ""),
                 "venue": "arXiv", "open_access": True,
+                "free_url": f"https://arxiv.org/pdf/{arxiv_id}" if arxiv_id else "",
             },
         ))
     return out
@@ -397,6 +399,7 @@ def _openalex_work_doc(w: dict, **extra: Any) -> RetrievedDoc:
     # OpenAlex returns an inverted index for abstracts; reconstruct.
     abstract = _openalex_reconstruct_abstract(w.get("abstract_inverted_index"))
     location = w.get("primary_location") or {}
+    best = w.get("best_oa_location") or {}
     return RetrievedDoc(
         content=f"{title}\n\n{abstract}".strip(),
         metadata={
@@ -407,6 +410,7 @@ def _openalex_work_doc(w: dict, **extra: Any) -> RetrievedDoc:
             "url": w.get("id") or "", "pdf_url": location.get("pdf_url") or "",
             "cited_by": w.get("cited_by_count"),
             "open_access": (w.get("open_access") or {}).get("is_oa"),
+            "free_url": best.get("pdf_url") or "",
             "work_type": w.get("type") or "",
             **extra,
         },
@@ -732,6 +736,7 @@ def _semantic_scholar_search(
                 "url": p.get("url", ""),
                 "pdf_url": (p.get("openAccessPdf") or {}).get("url", ""),
                 "open_access": bool((p.get("openAccessPdf") or {}).get("url")) or None,
+                "free_url": (p.get("openAccessPdf") or {}).get("url", ""),
             },
         ))
     return out
@@ -815,7 +820,8 @@ def _core_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
                 "url": w.get("downloadUrl") or (w.get("sourceFulltextUrls") or [""])[0],
                 "pdf_url": w.get("downloadUrl") or "",
                 "venue": (w.get("publisher") or ""),
-                "open_access": True,
+                "open_access": bool(w.get("downloadUrl")) or None,
+                "free_url": w.get("downloadUrl") or "",
                 "work_type": w.get("documentType") or "",
             },
         ))
@@ -891,7 +897,12 @@ def _openaire_search(
                     for p in (r.get("pids") or [])}
             urls = [u for i in instances for u in (i.get("urls") or []) if u]
             date = str(r.get("publicationDate") or "")
-            access = str((r.get("bestAccessRight") or {}).get("label") or "")
+            free_url = next(
+                (u for i in instances
+                 if str((i.get("accessRight") or {}).get("label") or "").upper().startswith("OPEN")
+                 for u in (i.get("urls") or []) if u and not _host_in(u, ("doi.org", "dx.doi.org"))),
+                "",
+            )
             out.append(RetrievedDoc(
                 content=f"{title}\n\n{abstract}".strip(),
                 metadata={
@@ -904,7 +915,8 @@ def _openaire_search(
                             else (urls[0] if urls else "")),
                     "venue": str((r.get("container") or {}).get("name") or r.get("publisher") or ""),
                     "publisher": str(r.get("publisher") or ""),
-                    "open_access": access.upper().startswith("OPEN"),
+                    "open_access": bool(free_url) or None,
+                    "free_url": free_url,
                     "work_type": next((t for t in types if t in allowed), ""),
                 },
             ))
@@ -952,6 +964,7 @@ def _doaj_search(query: str, top_k: int, *, timeout_s: float = 10.0) -> list[Ret
                     "venue": str(journal.get("title") or ""),
                     "publisher": str(journal.get("publisher") or ""),
                     "open_access": True,
+                    "free_url": fulltext,
                     "work_type": "journal-article",
                 },
             ))
@@ -1041,19 +1054,60 @@ _ACADEMIC_HOST_RE = re.compile(
     r"cell\.com|pnas\.org|ssrn\.com|researchgate\.net|semanticscholar\.org|"
     r"academic\.oup\.com|spiedigitallibrary\.org|spie\.org|"
     r"dl\.acm\.org|ieeexplore\.ieee\.org|onlinelibrary\.wiley\.com|"
-    r"iopscience\.iop\.org|aip\.org|aps\.org|rsc\.org|acs\.org"
+    r"iopscience\.iop\.org|aip\.org|aps\.org|rsc\.org|acs\.org|"
+    r"science\.org|annualreviews\.org|degruyter\.com|emerald\.com|worldscientific\.com|"
+    r"thieme-connect\.com|karger\.com|liebertpub\.com|jamanetwork\.com|nejm\.org|"
+    r"thelancet\.com|optica\.org|asme\.org|ascelibrary\.org|lww\.com|ahajournals\.org|"
+    r"biomedcentral\.com|springeropen\.com|hindawi\.com|elifesciences\.org|peerj\.com|"
+    r"copernicus\.org|f1000research\.com"
     r")$",
     re.I,
 )
 
 
+# Publishers whose every article is free to read (fully open access), so a page on one of them needs no
+# per-paper check. A hybrid publisher (Springer, Elsevier, Wiley, ...) is not on this list: only a paper its
+# source marks free counts there.
+_OPEN_ACCESS_PUBLISHER_HOSTS = (
+    "mdpi.com", "plos.org", "frontiersin.org", "biomedcentral.com", "springeropen.com", "hindawi.com",
+    "elifesciences.org", "peerj.com", "copernicus.org", "f1000research.com",
+)
+_FREE_HOSTS = ("arxiv.org", "biorxiv.org", "medrxiv.org", "pmc.ncbi.nlm.nih.gov") + _OPEN_ACCESS_PUBLISHER_HOSTS
+# A URL path that names an article on a scholarly site, for hits that carry no DOI.
+_SCHOLARLY_PATH_RE = re.compile(
+    r"/(?:doi|abs|fulltext|pii|journals?|article/piis?)(?:/|$)", re.I,
+)
+_DOI_IN_URL_RE = re.compile(r"10\.\d{4,9}/\S+")
+
+
+def _host_in(url: str, hosts: tuple[str, ...]) -> bool:
+    host = _url_host(url).lower()
+    return any(host == h or host.endswith("." + h) for h in hosts)
+
+
+def _is_free_host_url(url: str) -> bool:
+    """True when ``url`` is on a server whose papers are all free to read: arXiv, PMC (its ``/pmc/`` pages),
+    bioRxiv / medRxiv, or a fully open-access publisher. Read from the parsed host, never from the text of the
+    URL, so ``...?ref=arxiv.org`` on a publisher page does not count."""
+    from urllib.parse import urlparse
+    if _host_in(url, _FREE_HOSTS):
+        return True
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in ("ncbi.nlm.nih.gov", "www.ncbi.nlm.nih.gov") and parsed.path.lower().startswith("/pmc")
+
+
 def is_open_access(md: dict | None) -> bool:
     """True only when a source is confirmed free to download, with no subscription.
 
-    arXiv / PMC / bioRxiv / medRxiv are free by construction, and the search sources (OpenAlex, DOAJ,
-    OpenAIRE, Semantic Scholar's open copy, CORE) mark a hit ``open_access``. Anything else, including a
-    hit whose status is unknown, counts as NOT free: FI never fetches it from the publisher, and leaves it
-    for a person to download (the papers pause and ``needs/WANTED_PAPERS.md``)."""
+    arXiv / PMC / bioRxiv / medRxiv and fully open-access publishers (MDPI, PLOS, Frontiers, ...) are free by
+    construction, and the search sources (OpenAlex, DOAJ, OpenAIRE, Semantic Scholar's open copy, CORE) mark a
+    hit ``open_access`` only when they name a free copy. Anything else, including a hit whose status is unknown,
+    counts as NOT free: FI never fetches it from the publisher, and leaves it for a person to download (the
+    papers pause and ``needs/WANTED_PAPERS.md``)."""
     md = md or {}
     if md.get("open_access") is True:
         return True
@@ -1061,11 +1115,35 @@ def is_open_access(md: dict | None) -> bool:
         return True
     if str(md.get("doi") or "").startswith("10.1101/"):  # bioRxiv / medRxiv
         return True
-    url = str(md.get("url") or "").lower()
-    return any(
-        host in url for host in
-        ("arxiv.org", "ncbi.nlm.nih.gov/pmc", "biorxiv.org", "medrxiv.org")
-    )
+    return _is_free_host_url(str(md.get("url") or ""))
+
+
+def _free_locations(md: dict | None) -> list[str]:
+    """The addresses FI may request for a paper that is free: the free copy its source named (``free_url``)
+    and the paper's own address when that sits on a free server. Never a DOI resolver or a publisher page that
+    the source did not name as free."""
+    md = md or {}
+    out: list[str] = []
+    for key in ("free_url", "url", "pdf_url"):
+        u = str(md.get(key) or "")
+        if u and u not in out and (key == "free_url" or _is_free_host_url(u)):
+            out.append(u)
+    return out
+
+
+def _looks_scholarly(md: dict | None) -> bool:
+    """True for a web hit that looks like a journal article whatever its host: it carries a DOI, a DOI in its
+    URL, or an article-style path. Such a page is read only when it is confirmed free."""
+    md = md or {}
+    url = str(md.get("url") or "")
+    if md.get("doi") or _DOI_IN_URL_RE.search(url):
+        return True
+    from urllib.parse import urlparse
+    try:
+        path = urlparse(url).path
+    except Exception:
+        return False
+    return bool(_SCHOLARLY_PATH_RE.search(path))
 
 
 def _is_academic_source(url: str) -> bool:
@@ -1713,7 +1791,7 @@ def _is_paywall_or_stub(html: str, text: str) -> bool:
 #
 # This serialises THE RENDER ONLY. Everything else in a full-text batch —
 # the direct HTTP fetch, the open-access API cascade (Europe PMC, PMC BioC,
-# OpenAlex, arXiv, Unpaywall), publisher PDF downloads — stays parallel.
+# OpenAlex, arXiv, Unpaywall), and the downloads of free copies — stays parallel.
 _HEADLESS_RENDER_LOCK = threading.Lock()
 
 
@@ -2322,15 +2400,21 @@ def _fetch_web_page_text(
     # Academic sources (PMC, preprints, DOIs, major publishers): the OA
     # cascade gives cleaner full text than the publisher HTML (a wall or
     # boilerplate-laden page), so try it FIRST and only scrape on a miss.
-    academic = _is_academic_source(url)
+    academic = _is_academic_source(url) or _looks_scholarly(doc.metadata)
     if academic:
         api_text = _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
         if api_text:
             return api_text
         if not is_open_access(doc.metadata):
-            # A journal / publisher page that is not confirmed free is not opened from here: no publisher
-            # request, so no institutional login is used. A person downloads it instead.
+            # A journal article page that is not confirmed free is neither fetched nor rendered from here: no
+            # publisher request, so no institutional login is used. A person downloads it instead. This is
+            # decided by what the page looks like (a known scholarly host, a DOI, an article path), not by a
+            # list of publishers to avoid.
             return None
+        free = _free_locations(doc.metadata)
+        if not free:
+            return None  # marked free, but no free address to open (the DOI / publisher page is not one)
+        url = free[0]
     blocked = False
     try:
         with httpx.Client(
@@ -2532,8 +2616,8 @@ def _load_local_papers(paths: list[Path]) -> list[RetrievedDoc]:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: full-text fetch from publisher URLs (requires host network
-# access to the paywalled content; gracefully skips login walls).
+# Full-text fetch: only from a free copy of a paper (never from a paywalled
+# publisher page); login walls and HTML stubs are skipped.
 # ---------------------------------------------------------------------------
 
 
@@ -2605,64 +2689,59 @@ def _fetch_pdf_bytes(url: str, *, timeout_s: float) -> bytes | None:
 def _fetch_full_text(
     doc: RetrievedDoc, *, timeout_s: float, max_kb: int,
 ) -> str | None:
-    """For one external-search hit, try to obtain the full-text PDF
-    of a free (open-access) source, or a free copy of any other. Best-effort: returns
-    extracted text on success, None on any failure (login wall, no
-    PDF, parse error, missing pypdf). Honors:
+    """For one external-search hit, try to obtain the full text of a free (open-access) copy. Best-effort:
+    returns extracted text on success, None on any failure (login wall, no PDF, parse error, missing pypdf).
 
-      1. doc.metadata["pdf_url"] (direct PDF URL) — preferred.
-      2. doc.metadata["url"] (landing page) — GET to scrape for the
-         citation_pdf_url <meta> tag, then GET that.
+    Only a free location is requested (``_free_locations``): the copy the source named as free, or an address
+    on a free server. A paper that is not (or not known to be) free, and a free paper's DOI / publisher page,
+    are never requested, so no institutional / VPN login is used; they may still come back through the
+    free-copy lookups (PMC, Europe PMC, preprint servers, Unpaywall, ...), and otherwise a person downloads
+    them.
 
-    Validation: Content-Type AND %PDF-magic. Login walls fail both.
+    For each free location: GET it as a PDF (Content-Type AND %PDF- magic; login walls fail both); when it is a
+    page instead, scrape its ``citation_pdf_url`` and GET that.
     """
-    # Only a source confirmed free is fetched from its own address. A paper that is not (or not known to be)
-    # free is never requested from the publisher, so no institutional / VPN login is ever used: it may still
-    # come back through the free-copy lookups below (PMC, Europe PMC, preprint servers, Unpaywall, ...), and
-    # otherwise it is left for a person to download.
+    cap = max_kb * 1024
     if not is_open_access(doc.metadata):
-        return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
-
-    pdf_url = doc.metadata.get("pdf_url") or ""
-    landing = doc.metadata.get("url") or ""
+        return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
 
     pdf_bytes: bytes | None = None
-    if pdf_url:
-        pdf_bytes = _fetch_pdf_bytes(pdf_url, timeout_s=timeout_s)
-    if pdf_bytes is None and landing:
-        # Scrape the landing page for a citation_pdf_url.
-        try:
-            with httpx.Client(
-                timeout=timeout_s, follow_redirects=True,
-                headers={"User-Agent": "FrontierInsight/1.0"},
-            ) as c:
-                page = _gate.request(landing, lambda: c.get(landing))
-                _sf.record_response(
-                    _sf.source_for_url(landing, "publisher_page"), page, url=landing,
-                )
-                if page is not None and page.status_code < 400:
-                    candidate = _find_pdf_url_in_html(page.content)
-                    if candidate:
-                        # Resolve relative URLs against the landing page.
-                        if not candidate.startswith(("http://", "https://")):
-                            from urllib.parse import urljoin
-                            candidate = urljoin(str(page.url), candidate)
-                        pdf_bytes = _fetch_pdf_bytes(candidate, timeout_s=timeout_s)
-        except Exception as e:
-            _log.info("full-text landing-page %s failed: %s", landing, e)
-            _sf.record_exception(
-                _sf.source_for_url(landing, "publisher_page"), e, url=landing,
-            )
+    for loc in _free_locations(doc.metadata):
+        pdf_bytes = _fetch_pdf_bytes(loc, timeout_s=timeout_s)
+        if pdf_bytes is None:
+            pdf_bytes = _pdf_from_free_page(loc, timeout_s=timeout_s)
+        if pdf_bytes:
+            extracted = _pdf_bytes_to_text(pdf_bytes, cap=cap)
+            if extracted and len(extracted) >= _MIN_FULL_TEXT_CHARS:
+                return extracted
 
-    if pdf_bytes:
-        extracted = _pdf_bytes_to_text(pdf_bytes, cap=max_kb * 1024)
-        if extracted and len(extracted) >= _MIN_FULL_TEXT_CHARS:
-            return extracted
+    # No free copy at a named location, or it did not parse: the open-access cascade
+    # (PMC BioC / Europe PMC / preprint / Unpaywall / ...) recovers clean full text by PMCID / DOI / arXiv-id.
+    return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=cap)
 
-    # No direct publisher PDF or parse failed — fall back to the open-access cascade
-    # (PMC BioC / Europe PMC / preprint / Unpaywall / …) which recovers
-    # clean full text by PMCID / DOI / arXiv-id.
-    return _fetch_via_open_apis(doc, timeout_s=timeout_s, cap=max_kb * 1024)
+
+def _pdf_from_free_page(landing: str, *, timeout_s: float) -> bytes | None:
+    """Scrape a free copy's own page for its ``citation_pdf_url`` and GET that PDF."""
+    try:
+        with httpx.Client(
+            timeout=timeout_s, follow_redirects=True,
+            headers={"User-Agent": "FrontierInsight/1.0"},
+        ) as c:
+            page = _gate.request(landing, lambda: c.get(landing))
+            _sf.record_response(_sf.source_for_url(landing, "free_page"), page, url=landing)
+            if page is None or page.status_code >= 400:
+                return None
+            candidate = _find_pdf_url_in_html(page.content)
+            if not candidate:
+                return None
+            if not candidate.startswith(("http://", "https://")):
+                from urllib.parse import urljoin
+                candidate = urljoin(str(page.url), candidate)
+            return _fetch_pdf_bytes(candidate, timeout_s=timeout_s)
+    except Exception as e:
+        _log.info("free-copy page %s failed: %s", landing, e)
+        _sf.record_exception(_sf.source_for_url(landing, "free_page"), e, url=landing)
+        return None
 
 
 async def _ocr_scanned(
