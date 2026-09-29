@@ -1128,11 +1128,14 @@ def make_app(
         finally:
             # The Engine opened the quest's log files for this process; nothing is logged, so they are closed now.
             _close_quest_logger(quest_id)
+        no_sim = bool(cfg.engine.no_simulation)
+        finished = (quest_root / "frontier_insight_summary.json").is_file()
         return JSONResponse({
             "quest_id": quest_id,
             "config_path": str(yaml_path),
-            "blocks": list(_rerun_from.GROUPS),
-            "nodes": _rerun_from.node_map(steps),
+            "blocks": _rerun_from.map_blocks(no_simulation=no_sim),
+            "finished": finished,
+            "nodes": _rerun_from.node_map(steps, finished=finished, no_simulation=no_sim),
             "steps": [{"step": s["name"], "redoes": s["sentence"], "group": s["group"],
                        "needs_approval": s["needs_approval"], "outputs": s["outputs"]}
                       for s in steps if s["reached"]],

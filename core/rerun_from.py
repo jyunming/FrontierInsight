@@ -191,46 +191,141 @@ def step_info(step: str, *, reached: bool) -> dict[str, Any]:
             "reached": reached, "outputs": outputs_of(step)}
 
 
-# The graph's nodes in the order the quest runs them, each with its block on the map and one plain sentence. Every node
-# is shown; only the ones that resolve to a step (see ``resolve``) and were reached can be restarted from.
-NODES: dict[str, tuple[str, str]] = {
-    "clarify": ("Ideas & literature", "Checks the setup and asks what is unclear."),
-    "ideate": ("Ideas & literature", "Chooses the research angle to take."),
-    "literature": ("Ideas & literature", "Searches the literature."),
-    "pause_after_literature": ("Skills & plan", "Waits for you to add papers the search could not get in full."),
-    "select_skills": ("Skills & plan", "Chooses which tools (skills) the experiment may use."),
-    "plan": ("Skills & plan", "Writes the plan and waits for you to read it."),
-    "design": ("Design", "Designs the experiment and freezes the protocol it will be judged by."),
-    "implement_outline": ("Code", "Sketches the experiment's code."),
-    "implement": ("Code", "Writes the experiment's code."),
-    "execute": ("Run", "Runs the experiment."),
-    "execute_reflect": ("Run", "Repairs a script that crashed, then runs it again."),
-    "auto_collect_data": ("Run", "Looks for data (a quest with no simulation)."),
-    "wait_for_data": ("Run", "Waits for you to add data (a quest with no simulation)."),
-    "data_load": ("Run", "Loads the data (a quest with no simulation)."),
-    "web_plots": ("Run", "Plans the plots from the loaded data (a quest with no simulation)."),
-    "web_figures": ("Run", "Draws the figures from the loaded data (a quest with no simulation)."),
-    "analyze": ("Analysis", "Analyses the results."),
-    "cross_check": ("Analysis", "Checks the analysis against the literature and the design."),
-    "evidence_gate": ("Analysis", "Weighs how strong the evidence for the results is."),
-    "write": ("Writing", "Writes the paper."),
-    "claim_check": ("Writing", "Checks every claim in the paper against the results."),
-    "review": ("Review", "Reviews the paper."),
-    "human_feedback": ("Review", "Waits for your decision on the paper."),
+# The blocks of the quest map, in the order the quest runs them: key -> (plain name, one line, on the real-data path
+# instead of the simulation path). The key of a block is what a node names in ``NODES``.
+MAP_BLOCKS: dict[str, tuple[str, str, bool]] = {
+    "setup": ("Understand the question", "Check the setup and pick an angle.", False),
+    "lit": ("Read the literature", "Search papers and pause for any you must download.", False),
+    "plan": ("Plan the work", "Choose tools, write the plan, design the experiment.", False),
+    "run": ("Build and run the experiment", "Write the code, run it, repair it if it crashes.", False),
+    "data": ("Or: use real data", "For questions with no simulation: collect and load data.", True),
+    "judge": ("Judge the result", "Analyze, check against papers, decide if it is strong enough.", False),
+    "write": ("Write and review", "Write the paper, check every claim, review it.", False),
+}
+
+# The graph's nodes in the order the quest runs them. Each has its block on the map (a key of ``MAP_BLOCKS``), a plain
+# title, one sentence of what it does, what it reads and writes, and, when the graph can send the quest back from it, a
+# note about that loop. Every node is shown; only the ones that resolve to a step (see ``resolve``) and were reached can
+# be restarted from. The node's own name is shown small beside its title, so a person can match it to the log.
+NODES: dict[str, dict[str, str]] = {
+    "clarify": {"block": "setup", "title": "Check the setup",
+                "sentence": "Reads your topic and settings, asks about anything unclear.",
+                "reads": "topic, config.yaml", "writes": "clarified topic"},
+    "ideate": {"block": "setup", "title": "Pick an angle",
+               "sentence": "Chooses the research angle, using what earlier quests learned.",
+               "reads": "topic, earlier quests", "writes": "chosen angle"},
+    "literature": {"block": "lit", "title": "Search papers",
+                   "sentence": "Finds papers. Only free ones are downloaded automatically.",
+                   "reads": "angle", "writes": "literature notes, papers needed by hand"},
+    "pause_after_literature": {"block": "lit", "title": "Wait for papers",
+                               "sentence": "Stops so you can add paywalled papers. Skipped when none are needed.",
+                               "reads": "needs/WANTED_PAPERS.md", "writes": "inputs/papers/"},
+    "select_skills": {"block": "plan", "title": "Choose tools",
+                      "sentence": "Picks which tools (skills) the code may use.",
+                      "reads": "literature, approved tools", "writes": "chosen tools"},
+    "plan": {"block": "plan", "title": "Write the plan",
+             "sentence": "Writes plan.md. This is what you read and approve before compute is spent.",
+             "reads": "angle, literature", "writes": "plan.md"},
+    "design": {"block": "plan", "title": "Design the experiment",
+               "sentence": "Fixes the method, the settings and the pass/fail checks before any run.",
+               "reads": "plan", "writes": "frozen protocol"},
+    "implement_outline": {"block": "run", "title": "Outline the code",
+                          "sentence": "Sketches the structure of the experiment's script.",
+                          "reads": "design", "writes": "outline"},
+    "implement": {"block": "run", "title": "Write the code",
+                  "sentence": "Writes the experiment's script.",
+                  "reads": "outline, chosen tools", "writes": "code/"},
+    "execute": {"block": "run", "title": "Run it",
+                "sentence": "Runs the script in the quest's own environment.",
+                "reads": "code/", "writes": "results, figures/"},
+    "execute_reflect": {"block": "run", "title": "Repair a crash",
+                        "sentence": "If the run crashed, reads the error and fixes the script, then runs it again.",
+                        "reads": "error log", "writes": "fixed code",
+                        "loop": "crash: back to Run it (its own retry budget)"},
+    "auto_collect_data": {"block": "data", "title": "Find data",
+                          "sentence": "Looks for public datasets.",
+                          "reads": "plan", "writes": "data/auto_collected/"},
+    "wait_for_data": {"block": "data", "title": "Wait for your data",
+                      "sentence": "Stops so you can add data by hand.",
+                      "reads": "needs/", "writes": "inputs/"},
+    "data_load": {"block": "data", "title": "Load the data",
+                  "sentence": "Reads the files into the analysis.",
+                  "reads": "data files", "writes": "tables"},
+    "web_plots": {"block": "data", "title": "Plan the plots",
+                  "sentence": "Plans the plots from the loaded data.",
+                  "reads": "tables", "writes": "code/web_plots.py"},
+    "web_figures": {"block": "data", "title": "Draw the figures",
+                    "sentence": "Draws the figures from the loaded data.",
+                    "reads": "tables", "writes": "figures/"},
+    "analyze": {"block": "judge", "title": "Analyze",
+                "sentence": "Turns the results into findings and says what to do next.",
+                "reads": "results", "writes": "findings",
+                "loop": "weak result: back to Design (shares the redo budget with the review)"},
+    "cross_check": {"block": "judge", "title": "Compare with papers",
+                    "sentence": "Checks the findings against the literature and the design.",
+                    "reads": "findings, literature", "writes": "cross-check"},
+    "evidence_gate": {"block": "judge", "title": "Evidence check",
+                      "sentence": "Weighs how strong the evidence for each result is.",
+                      "reads": "findings", "writes": "evidence level"},
+    "write": {"block": "write", "title": "Write the paper",
+              "sentence": "Drafts paper.md and the outputs made from it.",
+              "reads": "findings", "writes": "paper.md"},
+    "claim_check": {"block": "write", "title": "Check every claim",
+                    "sentence": "Ties each sentence of the paper to a result.",
+                    "reads": "paper.md", "writes": "claim ledger"},
+    "review": {"block": "write", "title": "Review",
+               "sentence": "Reviews the paper. May send it back to Design.",
+               "reads": "paper.md", "writes": "review",
+               "loop": "revise: back to Design"},
+    "human_feedback": {"block": "write", "title": "Your feedback",
+                       "sentence": "Stops for your decision on the paper when the review pauses are on.",
+                       "reads": "review", "writes": "your notes"},
+}
+# A node that shows a setting a person can change in config.yaml before the restart.
+NODE_HINTS: dict[str, str] = {
+    "select_skills": "To keep a tool out, add it to engine.skills_exclude in this quest's config.yaml, then restart "
+                     "from the skills step.",
 }
 
 
-def node_map(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every graph node as a map shows it, in graph order: name, block, sentence, the step a restart from it means (or
-    ``""``), and whether it can be clicked. ``steps`` is what ``Engine.rerun_steps()`` returns. A node is clickable only
-    when it names a step that has its backup list and sentence and the quest reached that step."""
+def map_blocks(*, no_simulation: bool = False) -> list[dict[str, Any]]:
+    """The blocks a map shows, in order: id, plain name, one line, and whether the quest does not take that path (the
+    real-data blocks on a simulation quest, the simulation ones when the quest has no simulation)."""
+    return [{"id": key, "name": name, "desc": desc,
+             "off": (key == "run") if no_simulation else off}
+            for key, (name, desc, off) in MAP_BLOCKS.items()]
+
+
+def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulation: bool = False) -> list[dict[str, Any]]:
+    """Every graph node as a map shows it, in graph order: name, plain title, block, sentence, reads, writes, loop note,
+    the step a restart from it means (or ``""``), whether it can be clicked, and its status: ``done``, ``now`` (where the
+    quest stopped), ``todo`` or ``off`` (the other path). ``steps`` is what ``Engine.rerun_steps()`` returns. A node is
+    clickable only when it names a step that has its backup list and sentence, the quest reached that step, and the node
+    is on the quest's path."""
     by_step = {s["name"]: s for s in steps}
+    off_blocks = {b["id"] for b in map_blocks(no_simulation=no_simulation) if b["off"]}
+    on_path = [n for n in NODES if NODES[n]["block"] not in off_blocks]
+    reached_steps = [s["name"] for s in steps if s["reached"]]
+    stop_step = reached_steps[-1] if reached_steps else ""
+    stop_idx = next((i for i, n in enumerate(on_path) if stop_step and resolve(n) == stop_step), -1)
+    status: dict[str, str] = {}
+    for i, node in enumerate(on_path):
+        if finished and stop_idx >= 0:
+            status[node] = "done"
+        elif stop_idx < 0:
+            status[node] = "todo"
+        else:
+            status[node] = "done" if i < stop_idx else "now" if i == stop_idx else "todo"
     out = []
-    for node, (block, sentence) in NODES.items():
+    for node, meta in NODES.items():
         step = resolve(node) or ""
         info = by_step.get(step) if step in OUTPUTS and step in REDOES else None
-        out.append({"node": node, "block": block, "sentence": sentence, "step": step if info else "",
-                    "clickable": bool(info and info["reached"]),
+        off = node not in on_path
+        out.append({"node": node, "title": meta["title"], "block": meta["block"], "sentence": meta["sentence"],
+                    "reads": meta["reads"], "writes": meta["writes"], "loop": meta.get("loop", ""),
+                    "hint": NODE_HINTS.get(node, ""), "status": "off" if off else status[node],
+                    "step": step if info else "",
+                    "clickable": bool(info and info["reached"] and not off),
                     "needs_approval": bool(info and info["needs_approval"]),
                     "redoes": info["sentence"] if info else "",
                     "outputs": info["outputs"] if info else []})
