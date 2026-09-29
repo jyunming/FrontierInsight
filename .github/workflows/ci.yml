@@ -1,22 +1,14 @@
 name: CI
 
-# Runs the fast pytest tier on every PR and on push to main. The slow
-# tier (e2e tests that build a real venv per tmp_path, knowledge-
-# writeback flow, real `tenacity` waits, plus anything tagged
-# `@pytest.mark.slow`) runs only on push to main where wall-clock
-# budget is less tight.
+# Runs on every PR only; a push to main is not tested again, because the PR already ran the same code. The fast
+# pytest tier is on both OSes. The slow tier (e2e tests that build a real venv per tmp_path, knowledge-
+# writeback flow, real `tenacity` waits, plus anything tagged `@pytest.mark.slow`) runs on ubuntu.
 #
 # Extension-only PRs (touching just `vscode-frontier-insight/**`) get
 # their own TypeScript-compile job so they aren't merged blind — the
 # `vsix-rebuild.yml` workflow only runs post-merge.
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "outputs/**"
   pull_request:
     # Deliberately NOT filtered to `branches: [main]`. A stacked PR (one
     # whose base is another feature branch) would otherwise run no checks
@@ -28,9 +20,7 @@ on:
       - "outputs/**"
 
 # Cancel a PR's in-flight CI when a new commit is pushed to the same PR — no
-# point spending minutes on a superseded diff. Main-branch runs are NOT
-# cancelled (each push to main is a distinct gating run we want to complete),
-# because the group keys on the ref and cancel-in-progress is gated to PRs.
+# point spending minutes on a superseded diff.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -94,8 +84,7 @@ jobs:
 
   # ---- Python pytest (slow tier) -----------------------------------
   slow:
-    # Runs on both PRs and pushes to main so the slow tier gates the
-    # merge. A post-merge-only gate misses regressions that only fail
+    # Runs on every PR so the slow tier gates the merge. A post-merge-only gate misses regressions that only fail
     # in the slow tier (e.g. mode-reducer mismatches, or the rc=5
     # "no slow-tagged tests" exit). The wall-clock cost is +5-10 min
     # per PR, accepted to keep main green by construction.
@@ -140,7 +129,7 @@ jobs:
   # ---- VSCode extension compile + package (PRs touching extension only) ------
   extension:
     name: vscode extension compile
-    # Run on any PR or main push that touches the extension. Catches
+    # Run on any PR that touches the extension. Catches
     # TypeScript syntax / type errors before merge — without this,
     # extension-only PRs were merged blind (vsix-rebuild.yml runs
     # only post-merge on main).
