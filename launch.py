@@ -1164,7 +1164,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--interactive",
         action="store_true",
-        help="When `engine.clarify_mode: interactive` is set in the YAML, "
+        help="Talk the topic over first: "
              "pause at the clarify node and read answers from stdin. "
              "Single-quest mode only — fleet runs are headless.",
     )

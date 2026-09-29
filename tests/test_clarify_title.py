@@ -1,0 +1,106 @@
+"""The quest talks the topic over first by default, and gets a readable title from that talk."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
+from core.config import Config, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
+from core.engine import Engine, _clean_title
+
+_QUESTIONS = {
+    "want_to_see": {"question": "What do you want to see?", "default": "a plot of error against step size"},
+    "title": {
+        "question": "What should this study be called?",
+        "options": ['"Step size and error in Verlet integration"', "Verlet vs Euler accuracy", "Integrator accuracy"],
+        "default": "",
+    },
+    "simulatability": {"question": "Can Python answer it?", "default": "yes", "reason": "pure numerics"},
+}
+_RAW = "verlet euler integrator step size error comparison energy drift"
+
+
+def _cfg(tmp_path: Path, **kw) -> Config:
+    return Config(
+        topic=_RAW,
+        provider=ProviderConfig(name="openai"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "out"),
+        **kw,
+    )
+
+
+def _engine(tmp_path: Path, answerable: bool, **kw) -> Engine:
+    eng = Engine(_cfg(tmp_path, **kw))
+    eng._clarify_answerable = answerable
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=json.dumps(_QUESTIONS))})()
+    return eng
+
+
+def test_unset_clarify_means_neither_off_nor_a_fixed_choice(tmp_path: Path) -> None:
+    assert _cfg(tmp_path).pauses.clarify is None
+
+
+@pytest.mark.asyncio
+async def test_with_someone_to_answer_the_quest_asks_first(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, answerable=True)
+    with pytest.raises(Exception) as exc:  # the interrupt raised outside a running graph
+        await eng._node_clarify({"topic": _RAW})
+    assert "interrupt" in repr(exc.value).lower() or "runnable" in repr(exc.value).lower()
+    eng._client.chat.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_headless_run_answers_for_itself_and_does_not_wait(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, answerable=False)
+    patch = await eng._node_clarify({"topic": _RAW})
+    assert patch["clarify_done"] is True
+    assert patch["clarify_answers"]["want_to_see"] == "a plot of error against step size"
+
+
+@pytest.mark.asyncio
+async def test_agent_picked_title_replaces_the_raw_topic(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, answerable=False)
+    patch = await eng._node_clarify({"topic": _RAW, "title": "verlet-euler"})
+    assert patch["title"] == "Step size and error in Verlet integration"
+    assert patch["title_confirmed"] is True
+    assert "Suggestions:" in patch["clarify_questions"]["title"]["question"]
+    assert "options" not in patch["clarify_questions"]["title"]
+
+
+@pytest.mark.asyncio
+async def test_a_title_set_in_the_yaml_always_wins(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, answerable=False, title="My own title")
+    patch = await eng._node_clarify({"topic": _RAW})
+    assert "title" not in patch
+
+
+@pytest.mark.asyncio
+async def test_explicit_off_still_skips_the_discussion(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, answerable=True, pauses={"clarify": "off"})
+    patch = await eng._node_clarify({"topic": _RAW})
+    assert patch["clarify_done"] is True
+    eng._client.chat.assert_not_awaited()
+    assert "title" not in patch
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_chosen_title(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, answerable=False)
+    patch = await eng._node_clarify({"topic": _RAW, "title": "Chosen", "title_confirmed": True, "clarify_done": True})
+    assert patch == {}
+
+
+def test_clean_title_is_one_short_unquoted_line() -> None:
+    assert _clean_title('  "A\n  title"  ') == "A title"
+    assert _clean_title(None) == ""
+    assert len(_clean_title("x" * 300)) == 120
+
+
+def test_write_prompt_tells_the_writer_to_use_the_chosen_title() -> None:
+    text = (Path(__file__).resolve().parents[1] / "agents" / "write.md").read_text(encoding="utf-8")
+    assert "## Title\n$title" in text

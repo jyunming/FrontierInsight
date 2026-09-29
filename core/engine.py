@@ -239,6 +239,7 @@ class QuestState(TypedDict, total=False):
     clarify_questions: dict[str, Any]
     clarify_answers: dict[str, Any]
     clarify_done: bool
+    title_confirmed: bool
     ideas: list[dict[str, Any]]
     chosen_idea: dict[str, Any]
     # Ideate self-reflection result. Optional; describes what
@@ -589,6 +590,7 @@ class Engine:
         # for every downstream consumer.
         self.quest_root: Path = (config.output.output_dir / self.quest_id).resolve()
         self.fi_dir: Path = self.quest_root / ".fi"
+        self._clarify_answerable = False
         self.supervisor = supervisor or ProxySupervisor()
         self.executor = make_executor(
             config.execution.sandbox,
@@ -694,6 +696,8 @@ class Engine:
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        self._clarify_answerable = (
+            clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
         import time as _time
         # This run's quest line in .fi/attempts.jsonl is not written yet (a failure after it keeps it).
         self._quest_recorded = False
@@ -2385,6 +2389,22 @@ class Engine:
     # ---- nodes -----------------------------------------------------------
 
     async def _node_clarify(self, state: QuestState) -> QuestState:
+        """Pre-flight clarification, then the quest's title.
+
+        The title the user approved in the discussion (or the agent's own pick in ``auto``) replaces the raw
+        topic as the quest's display title; a ``title`` set in the YAML always wins.
+        """
+        patch = await self._node_clarify_questions(state)
+        answers = patch.get("clarify_answers") if isinstance(patch, dict) else None
+        if self.config.title or not isinstance(answers, dict):
+            return patch
+        title = _clean_title(answers.get("title"))
+        if title:
+            patch = {**patch, "title": title, "title_confirmed": True}
+            self._log.info("[clarify] quest title: %s", title)
+        return patch
+
+    async def _node_clarify_questions(self, state: QuestState) -> QuestState:
         """Pre-flight clarification.
 
         Three modes, controlled by `engine.clarify_mode`:
@@ -2404,6 +2424,9 @@ class Engine:
         (e.g. resuming after a kill), the node passes through.
         """
         mode = self.config.pauses.clarify
+        if mode is None:
+            # Not set in the YAML: talk it over when someone is there to answer, else answer for yourself.
+            mode = "ask" if self._clarify_answerable else "auto"
         if state.get("clarify_done"):
             return {}
         if mode == "off":
@@ -2501,6 +2524,7 @@ class Engine:
             # alone so the downstream nodes get *something*.
             self._log.warning("[clarify] LLM returned no parseable questions; using minimal defaults")
             questions = _default_clarify_questions(state["topic"])
+        _spell_out_title_options(questions)
 
         if mode == "auto":
             agent_answers = {
@@ -9611,7 +9635,10 @@ class Engine:
         prompt = self._prompts["write"].substitute(
             persona_block=persona_block,
             topic=state["topic"],
-            title=state.get("title", "Untitled"),
+            title=(
+                f"The user chose this title; use it as the paper's title: {state.get('title')}"
+                if state.get("title_confirmed") and state.get("title")
+                else f"Filename slug (you author the paper's title): {state.get('title', 'Untitled')}"),
             design_block=json.dumps(state.get("design") or {}, indent=2),
             analysis_block=json.dumps(state.get("analysis") or {}, indent=2),
             # Write node is the ONE place audience filtering applies:
@@ -15519,6 +15546,7 @@ def cited_references(
 
 
 _CLARIFY_LABELS = {
+    "want_to_see": "What the user wants to see",
     "comparative_baseline": "Comparative baseline",
     "empirical_vs_theoretical": "Empirical / theoretical",
     "success_metric": "Success metric",
@@ -15546,6 +15574,29 @@ def _format_clarify(state: QuestState) -> str:
             value = ", ".join(str(v) for v in value) or "(empty)"
         lines.append(f"- **{label}**: {value}")
     return "\n".join(lines) or "(no answers recorded)"
+
+
+def _clean_title(value: Any) -> str:
+    """A title the user or agent gave, tidied: one line, no wrapping quotes, at most 120 characters."""
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split()).strip("\"'`“”‘’ ")
+    return text[:120].rstrip()
+
+
+def _spell_out_title_options(questions: dict[str, Any]) -> None:
+    """Put the suggested titles into the title question's own words, so every interface (terminal, web, VS Code)
+    shows them without knowing about a separate options field; the first suggestion is the default."""
+    slot = questions.get("title")
+    if not isinstance(slot, dict):
+        return
+    options = [t for t in (_clean_title(o) for o in (slot.pop("options", None) or [])) if t][:5]
+    if options and not _clean_title(slot.get("default")):
+        slot["default"] = options[0]
+    if options:
+        slot["question"] = (
+            f"{slot.get('question') or 'What should this study be called?'} "
+            f"Suggestions: {' | '.join(options)} (or type your own)")
 
 
 def _default_clarify_questions(topic: str) -> dict[str, Any]:

@@ -49,7 +49,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 
 | Node | Calls | Notes |
 |---|---|---|
-| `clarify` | 0–1 | Only when `engine.clarify_mode != off`. |
+| `clarify` | 0–1 | One call unless `pauses.clarify: off`. It asks what you want to see and proposes titles. |
 | `ideate` | 1 | |
 | `ideate_reflect` | 0–1 | Optional self-reflection that can swap the chosen idea. Skipped when `ideate_tournament` is on. |
 | `ideate_tournament` | 0 or C(N,2) | Off by default. When on with the default 3 ideas, fires 3 parallel pairwise comparisons (~one round-trip wall-clock) and picks the highest-win-count idea. |
@@ -194,7 +194,7 @@ The steps before the skills are the plan. To change it, use `--revise-plan "<wha
 | `--memory-cap-mb N` | fleet | throttle new quest starts when RSS exceeds N MB |
 | `--profile` | quest | dump per-quest viztracer trace if viztracer installed |
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
-| `--interactive` | quest | with `engine.clarify_mode: interactive`, read clarify answers from stdin |
+| `--interactive` | quest | talk the topic over first: read the clarify answers (what you want to see, the title, ...) from stdin. Without it a headless run lets the agent answer for itself |
 | `--resume <quest_id>` | quest | re-enter a checkpoint, requires `--config` |
 | `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `ideas`, `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |

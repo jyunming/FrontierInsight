@@ -149,7 +149,7 @@ $persona_block
 ## Topic
 $topic
 
-## Filename slug — NOT the paper title (you author the title; see "Output format" above)
+## Title
 $title
 
 ## Design

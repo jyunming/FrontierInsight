@@ -7,6 +7,15 @@ downstream prompt (`ideate`, `design`, `implement`, `analyze`, `write`).
 
 ```
 {
+  "want_to_see": {
+    "question": "<one plain sentence asking what the user most wants to SEE at the end: which result, comparison or figure would make this quest worth it>",
+    "default": "<your best guess of the single most useful result or figure, in the user's own domain words>"
+  },
+  "title": {
+    "question": "What should this study be called?",
+    "options": ["<a short, plain title a scientist would put on a paper>", "<a second, different angle>", "<a third>"],
+    "default": "<the best of the three options>"
+  },
   "comparative_baseline": {
     "question": "<one sentence asking what existing method / dataset / regime this study should be compared against>",
     "default": "<your best guess answer, derived from the topic alone>"
@@ -100,6 +109,11 @@ downstream prompt (`ideate`, `design`, `implement`, `analyze`, `write`).
 ```
 
 # Constraints
+- The topic may be thin, a keyword list, or awkwardly worded. Do not copy it into the title: write titles a
+  reader would find natural (under 90 characters, no trailing period, no quotation marks, no file-name style
+  words). The three title options must differ from each other, not be rewordings of one title.
+- `want_to_see` comes first because it is what the user will judge the quest by: name a concrete result, not a
+  general aim.
 - ALWAYS supply a non-empty `default` for every field. The default is
   what the agent will use if the user does not override it — so the
   default must already be a workable starting point.
