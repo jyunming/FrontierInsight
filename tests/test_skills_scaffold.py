@@ -494,3 +494,70 @@ def test_generation_ignores_the_compatibility_prose(tmp_path: Path) -> None:
     text = (d / "selftest.py").read_text(encoding="utf-8")
     for leaked in ("3.99", "CUDA", "API key", "conda"):
         assert leaked not in text, f"{leaked!r} leaked in from the prose"
+
+
+def _bare_skill(root: Path, name: str) -> Path:
+    d = root / name
+    d.mkdir()
+    (d / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+    return d
+
+
+def _run_selftest(d: Path):
+    import subprocess
+
+    return subprocess.run(
+        [sys.executable, str(d / "selftest.py")], capture_output=True, text=True, timeout=120
+    )
+
+
+def test_a_scriptless_skill_with_a_known_value_check_runs_it(tmp_path: Path) -> None:
+    pytest.importorskip("scipy")
+    d = _bare_skill(tmp_path, "scipy")
+    scaffold.generate_selftest(d, "scipy")
+    text = (d / "selftest.py").read_text(encoding="utf-8")
+    assert "NOTHING beyond" not in text
+    proc = _run_selftest(d)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "2 known-value check(s) passed" in proc.stdout
+
+
+def test_a_wrong_known_value_fails_the_selftest(tmp_path: Path, monkeypatch) -> None:
+    from core.skills import known_checks
+
+    monkeypatch.setitem(known_checks.KNOWN_CHECKS, "wrongskill", [("one is two", "ok = 1 == 2")])
+    d = _bare_skill(tmp_path, "wrongskill")
+    scaffold.generate_selftest(d, "wrongskill")
+    proc = _run_selftest(d)
+    assert proc.returncode == 1
+    assert "one is two" in proc.stdout
+
+
+def test_a_missing_library_fails_the_known_value_check(tmp_path: Path, monkeypatch) -> None:
+    from core.skills import known_checks
+
+    monkeypatch.setitem(
+        known_checks.KNOWN_CHECKS, "gone",
+        [("needs a package", "import no_such_package_xyz\nok = True")],
+    )
+    d = _bare_skill(tmp_path, "gone")
+    scaffold.generate_selftest(d, "gone")
+    proc = _run_selftest(d)
+    assert proc.returncode == 1
+    assert "ModuleNotFoundError" in proc.stdout
+
+
+def test_a_skill_without_a_check_still_says_it_proves_nothing(tmp_path: Path) -> None:
+    d = _bare_skill(tmp_path, "no-such-skill-entry")
+    scaffold.generate_selftest(d, "no-such-skill-entry")
+    assert "NOTHING beyond" in (d / "selftest.py").read_text(encoding="utf-8")
+
+
+def test_every_known_check_belongs_to_a_skill_with_a_declared_library() -> None:
+    from core.skills.known_checks import KNOWN_CHECKS
+    from core.skills.known_requirements import PRESET_PIP_REQUIRES
+
+    for name, checks in KNOWN_CHECKS.items():
+        assert PRESET_PIP_REQUIRES.get(name), f"{name}: no declared library to check"
+        for label, source in checks:
+            compile(source, f"<{name}: {label}>", "exec")

@@ -459,7 +459,9 @@ GENERATED_MARKER = "FI-GENERATED-SELFTEST"
 PER_SCRIPT_PROBE_TIMEOUT_S = 20
 
 
-def _selftest_source(name: str, scripts: list[str]) -> str:
+def _selftest_source(
+    name: str, scripts: list[str], checks: list[tuple[str, str]] | None = None,
+) -> str:
     """Body of a generated self-test, built from structured facts only.
 
     Deliberately not derived from the skill's ``compatibility:`` prose. Parsing
@@ -473,13 +475,19 @@ def _selftest_source(name: str, scripts: list[str]) -> str:
     own contributor contract already requires. That is a real check of "the
     tooling is present and runnable" with no per-skill knowledge at all.
     """
+    checks = checks or []
     probes = "\n".join(f"    {s!r}," for s in scripts)
-    proves = (
-        "every bundled script is present and answers `--help`"
-        if scripts else
-        "NOTHING beyond the skill's files existing"
-    )
-    extra = "" if scripts else '''
+    check_lines = "\n".join(f"    ({label!r}, {src!r})," for label, src in checks)
+    parts = []
+    if scripts:
+        parts.append("every bundled script is present and answers `--help`")
+    if checks:
+        parts.append(
+            "the library it relies on answers " + str(len(checks))
+            + " known-value check(s), so a missing or broken install fails"
+        )
+    proves = " and ".join(parts) or "NOTHING beyond the skill's files existing"
+    extra = "" if (scripts or checks) else '''
     print()
     print("!! This skill bundles no scripts, so a generated test cannot probe")
     print("!! anything. Passing here says the files are on disk and no more.")
@@ -508,6 +516,10 @@ HERE = Path(__file__).resolve().parent
 
 SCRIPTS = [
 {probes}
+]
+
+CHECKS = [
+{check_lines}
 ]
 
 
@@ -587,12 +599,22 @@ def main() -> int:
     if not (HERE / "SKILL.md").is_file():
         failures.append("missing: SKILL.md")
 
+    for label, source in CHECKS:
+        scope = {{}}
+        try:
+            exec(source, scope)
+        except Exception as e:
+            failures.append(f"known-value check '{{label}}' raised {{type(e).__name__}}: {{e}}")
+            continue
+        if not bool(scope.get("ok", False)):
+            failures.append(f"known-value check '{{label}}' gave the wrong answer")
+
     for f in failures:
         print("FAIL", f)
     if failures:
         return 1
 
-    print(f"ok: {{len(SCRIPTS)}} script(s) present and loadable")
+    print(f"ok: {{len(SCRIPTS)}} script(s) present and loadable, {{len(CHECKS)}} known-value check(s) passed")
     if unprobed:
         print(f"note: {{len(unprobed)}} did not answer --help (positional args, "
               f"package-internal submodules, or long-running demos); they "
@@ -630,8 +652,11 @@ def generate_selftest(skill_dir: Path, name: str = "", *, overwrite: bool = Fals
         )
         if scripts_dir.is_dir() else []
     )
+    from core.skills.known_checks import KNOWN_CHECKS
+
+    checks = KNOWN_CHECKS.get(name or skill_dir.name, [])
     target.write_text(
-        _selftest_source(name or skill_dir.name, scripts), encoding="utf-8"
+        _selftest_source(name or skill_dir.name, scripts, checks), encoding="utf-8"
     )
     return target
 
