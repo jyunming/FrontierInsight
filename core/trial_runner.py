@@ -1066,6 +1066,29 @@ def _missing_exact(values: list[Any], counts: Counter) -> int:
     return missing
 
 
+#: Fewest reported values a selection of the trials is looked for in: a single value is the extreme of any list.
+_SELECTION_MIN_VALUES = 3
+
+
+def _is_extreme_selection(values: list[Any], per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
+                          grid: dict[str, list[Any]]) -> bool:
+    """Whether ``values`` are exactly the largest (or exactly the smallest) values of ``name`` among the trials of
+    ``cells``, as they are or divided by a size setting, while the trials returned more values than that: the signature
+    of the best results picked out of every setting."""
+    numbers = [float(x) for x in values if isinstance(x, (int, float)) and not isinstance(x, bool)
+               and math.isfinite(float(x))]
+    if len(numbers) < _SELECTION_MIN_VALUES:
+        return False
+    for form in _derived_counts(per_cell, cells, name, grid):
+        pool = sorted(float(k) for k, n in form.items() for _ in range(max(int(n), 0)))
+        if len(pool) <= len(numbers):
+            continue
+        for part in (pool[-len(numbers):], pool[:len(numbers)]):
+            if not _missing_exact(numbers, Counter(_exact_key(v) for v in part)):
+                return True
+    return False
+
+
 def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, dict[str, Counter]],
                          result_json: Any) -> list[str]:
     """The values of each mean over a subset of the trials (a metric with ``given``) that FI's trials never produced in
@@ -1157,6 +1180,13 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                         given = given_of.get(metric, "")
                         count = node.get(f"{given}_count")
                         exact = members(given, own or all_cells) if cells else None
+                        if cells and exact is None and _is_extreme_selection(v, per_cell, own or all_cells, metric, grid):
+                            out.append(
+                                f"at `{path or 'the top level'}`, the {len(v)} values of `{metric}` are the largest (or "
+                                f"smallest) of FI's trials of those settings, and FI cannot count the subset (`{given}`) "
+                                "itself, so they cannot be told from the best results picked out of the run. "
+                                + _rm.PARTIAL.format(given=given)
+                            )
                         if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
                                 and float(count) != exact:
                             out.append(
