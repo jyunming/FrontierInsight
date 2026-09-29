@@ -18,7 +18,7 @@ def test_step_names_are_plain_and_the_node_names_work_too() -> None:
     assert rerun_from.resolve("writing") == "writing" and rerun_from.resolve("write") == "writing"
     assert rerun_from.resolve("Code") == "code" and rerun_from.resolve("execute") == "run"
     assert rerun_from.resolve("design") is None and rerun_from.resolve("") is None
-    assert rerun_from.choices() == "code, run, analysis, writing, review"
+    assert rerun_from.choices() == "skills, code, run, analysis, writing, review"
 
 
 def test_the_backup_takes_what_the_step_and_later_ones_made_and_leaves_its_inputs(tmp_path: Path) -> None:
@@ -176,11 +176,11 @@ async def test_the_steps_offered_are_the_ones_the_quest_reached() -> None:
     graph = _Graph([("design",), ("implement_outline",), ("implement",), ("execute",), ("execute_reflect",),
                     ("execute",), ("analyze",)])
     steps = await rerun_from.reached(graph, {})
-    assert steps == ["code", "run", "analysis"]
+    assert steps == ["skills", "code", "run", "analysis"]
     text = rerun_from.listing("q-1", steps)
     assert "q-1 can be run again from:" in text and "--resume q-1 --from <step>" in text
     assert all(rerun_from.REDOES[step] in text for step in steps) and "writing" not in text
-    assert "has not reached the code step" in rerun_from.listing("q-1", [])
+    assert "has not reached the skills or code step" in rerun_from.listing("q-1", [])
 
 
 def test_from_with_no_step_asks_for_the_list() -> None:

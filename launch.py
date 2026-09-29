@@ -660,7 +660,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         nargs="?",
         const=_LIST_STEPS,
         default="",
-        help="With --resume or --rerun: the step to run again from — code, run, analysis, writing or review; "
+        help="With --resume or --rerun: the step to run again from — skills, code, run, analysis, writing or review; "
              "what that step and the later ones made is first moved to .fi/previous/<time>/. Given with no step, "
              "lists the steps this quest reached, which are the ones it can be run again from. With --teach-skill: "
              "the importable module the skill wraps, e.g. `ambit`.",

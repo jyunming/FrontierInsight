@@ -683,7 +683,7 @@ async function runResume(
 }
 
 // The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
-const RERUN_STEPS = ["code", "run", "analysis", "writing", "review"];
+const RERUN_STEPS = ["skills", "code", "run", "analysis", "writing", "review"];
 
 function parsePathsFromPrompt(prompt: string): string[] {
     // Split on whitespace OUTSIDE of double-quoted spans so users

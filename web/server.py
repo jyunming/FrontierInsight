@@ -1144,7 +1144,7 @@ def make_app(
         runs back to the human-review gate, so a done quest can be pushed
         further.
 
-        ``from=<step>`` (code, run, analysis, writing, review) runs the quest again from that step: ``--from <step>``,
+        ``from=<step>`` (skills, code, run, analysis, writing, review) runs the quest again from that step: ``--from <step>``,
         which first moves what that step and the later ones made to ``.fi/previous/<time>/``."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
