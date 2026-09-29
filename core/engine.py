@@ -5690,6 +5690,17 @@ class Engine:
         except OSError:
             pass  # a record that cannot be written must never stop a quest
 
+    def _given_row_findings(self, protocol: dict[str, Any], ledger: list[dict[str, Any]] | None,
+                            result_json: Any) -> tuple[list[str], list[str]]:
+        """Under ``rigor_profile: research``, a mean over a subset of the trials checked trial by trial against FI's
+        own record (``core/trial_runner.py::given_rows_problems``): ``(the analysis's to fix, the simulation's)``.
+        Outside research, nothing."""
+        if self.config.rigor_profile != "research":
+            return [], []
+        ok_trials = sum(1 for r in ledger or [] if isinstance(r, dict) and r.get("status") == "ok")
+        return _trial_runner.given_rows_problems(
+            protocol, _trial_runner.recorded_rows_by_cell(self.quest_root), result_json, ok_trials=ok_trials)
+
     def _run_manifest_problems(self, state: QuestState, split: bool, result: Any) -> tuple[str, list[str]]:
         """``(status, differences)`` of the finished first run: what its manifest says against the frozen protocol.
         Statuses other than ``ok`` and ``differs`` say why nothing was compared."""
@@ -5720,8 +5731,13 @@ class Engine:
             recorded = _trial_runner.pooled(per_cell)
             not_run = (_trial_runner.reported_values_not_run(recorded, result_json)
                        + _trial_runner.given_values_not_run(protocol, per_cell, result_json))
+            # Research: a mean over a subset of the trials is recomputed from FI's own rows, trial by trial (the
+            # subset's membership and value of the same trial), not from two separate pools of values.
+            row_analysis, row_sim = self._given_row_findings(protocol, ledger, result_json)
+            not_run = not_run + row_analysis
             found = (row_problems + altered
-                     + _run_manifest.problems(protocol, manifest, result_json=result_json, trial_mode=True) + not_run)
+                     + _run_manifest.problems(protocol, manifest, result_json=result_json, trial_mode=True) + not_run
+                     + row_sim)
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
             # again).
@@ -6478,6 +6494,7 @@ class Engine:
                 values, why = await _trial_runner.run_oracle(
                     self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
                     timeout_s=timeout, env=env,
+                    thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                 )
                 reported = {"checks": [{"name": k, "value": v} for k, v in values.items()]} if values is not None else None
                 returncode, timed_out = (0 if values is not None else 1), "ran out of time" in why
@@ -13934,6 +13951,13 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 - The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
   (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
   reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
+- When a protocol metric is a mean over the trials a proportion counts (`"given": "p_outbreak"`), the dict also holds,
+  under that proportion's own id, 1 (this trial is in the subset) or 0 (it is not) for EVERY trial, and the value being
+  averaged under that mean metric's own id (mean id `final_size_given_outbreak`:
+  `{"p_outbreak": 1.0, "final_size_given_outbreak": 812.0}`): FI picks the subset trial by trial from its own record and
+  looks only at those two names.
+  A cut-off that decides it (what counts as a major outbreak) is read from the protocol's thresholds,
+  `json.loads(os.environ["FI_THRESHOLDS"])`, never written into the script as a number of its own.
 - When the protocol lists oracles: `def oracle() -> dict` computes, with the SAME simulation code, the values the
   protocol's oracles name (the cases with a known answer), returned as a dict keyed by the oracle names; this replaces
   the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
