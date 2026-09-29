@@ -1066,6 +1066,38 @@ def _missing_exact(values: list[Any], counts: Counter) -> int:
     return missing
 
 
+#: Fewest reported values a selection of the trials is looked for in: a single value is the extreme of any list.
+_SELECTION_MIN_VALUES = 3
+
+#: Fewest ways to choose the reported values out of a setting's trials for "they are exactly the largest" to be worth
+#: saying: an honest subset of 3 of 20 trials is the top 3 once in 570 draws, so a small setting is not judged.
+_SELECTION_MIN_CHOICES = 20000
+
+
+def _extreme_selection(values: list[Any], per_cell: dict[str, dict[str, Counter]], cells: list[str], name: str,
+                       grid: dict[str, list[Any]], thresholds: list[float]) -> str | None:
+    """``"largest"`` or ``"smallest"`` when ``values`` are exactly the largest (or the smallest) values of ``name`` among the trials of ``cells``, as they are or divided by a size setting, while the trials returned more values than
+    that: the signature of the best results picked out of every setting. Not when a threshold the protocol fixes
+    separates them from the rest of the trials: that is what a mean over the trials beyond a cut-off looks like."""
+    numbers = [float(x) for x in values if isinstance(x, (int, float)) and not isinstance(x, bool)
+               and math.isfinite(float(x))]
+    k = len(numbers)
+    if k < _SELECTION_MIN_VALUES:
+        return None
+    for form in _derived_counts(per_cell, cells, name, grid):
+        pool = sorted(float(v) for v, n in form.items() for _ in range(max(int(n), 0)))
+        if len(pool) <= k or math.comb(len(pool), k) < _SELECTION_MIN_CHOICES:
+            continue
+        for label, part, edge in (("largest", pool[-k:], (pool[-k - 1], pool[-k])),
+                                  ("smallest", pool[:k], (pool[k - 1], pool[k]))):
+            if _missing_exact(numbers, Counter(_exact_key(v) for v in part)):
+                continue
+            if any(min(edge) <= t <= max(edge) for t in thresholds):
+                continue
+            return label
+    return None
+
+
 def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, dict[str, Counter]],
                          result_json: Any) -> list[str]:
     """The values of each mean over a subset of the trials (a metric with ``given``) that FI's trials never produced in
@@ -1121,6 +1153,8 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                 seen = True
         return total if seen else None
 
+    cutoffs = [float(v) for v in (protocol.get("thresholds") or {}).values()
+               if isinstance(v, (int, float)) and not isinstance(v, bool)] if isinstance(protocol.get("thresholds"), dict) else []
     ok_trials = {key: max((sum(c.values()) for c in by_name.values()), default=0) for key, by_name in per_cell.items()}
     everything = sum(ok_trials.values())
     for metric in means:
@@ -1157,6 +1191,19 @@ def given_values_not_run(protocol: dict[str, Any] | None, per_cell: dict[str, di
                         given = given_of.get(metric, "")
                         count = node.get(f"{given}_count")
                         exact = members(given, own or all_cells) if cells else None
+                        side = (_extreme_selection(v, per_cell, own or all_cells, metric, grid, cutoffs)
+                                if cells and exact is None else None)
+                        n_given = sum(1 for x in v if isinstance(x, (int, float)) and not isinstance(x, bool)
+                                      and math.isfinite(float(x)))
+                        if side:
+                            out.append(
+                                f"at `{path or 'the top level'}`, your {n_given} values of `{metric}` are exactly the "
+                                f"{n_given} {side} values of the trials of those settings. That is what the trials beyond "
+                                f"a cut-off look like, and also what the best {n_given} picked by hand look like, and FI "
+                                f"can tell them apart only if each trial records whether it is in the subset: have "
+                                f"run_trial return `{given}` as 1 or 0 for each trial. A cut-off the protocol fixes "
+                                "(`thresholds`) that falls between them and the other trials is accepted as it is."
+                            )
                         if exact is not None and isinstance(count, (int, float)) and not isinstance(count, bool) \
                                 and float(count) != exact:
                             out.append(
