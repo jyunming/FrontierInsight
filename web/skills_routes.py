@@ -279,3 +279,26 @@ def register_skills_routes(app: FastAPI) -> None:
             approval.revoke, skill.ledger_name if skill else name,
         )
         return JSONResponse({"revoked": bool(removed), "name": name})
+
+    @app.post("/api/skills/{name}/remove")
+    async def remove_skill_route(name: str, config: str = "") -> JSONResponse:
+        from core.skills import discover
+        from core.skills.removal import remove_skill
+
+        folders = await _folders(config)
+        found = await asyncio.to_thread(discover, external_dirs=_dirs(folders))
+        skill = next((s for s in found if s.name == name), None)
+        if skill is None:
+            return JSONResponse({"removed": False, "name": name, "message": "No such skill."}, status_code=404)
+        result = await asyncio.to_thread(remove_skill, skill)
+        return JSONResponse(
+            {"removed": result.ok, "name": name, "message": result.message, "hidden": result.hidden},
+            status_code=200 if result.ok else 400,
+        )
+
+    @app.post("/api/skills/{name}/restore")
+    async def restore_skill_route(name: str) -> JSONResponse:
+        from core.skills.removal import restore_external
+
+        restored = await asyncio.to_thread(restore_external, name)
+        return JSONResponse({"restored": bool(restored), "name": name})

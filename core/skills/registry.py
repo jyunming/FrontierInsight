@@ -358,8 +358,13 @@ def discover(
     seen |= {s.name for s in eps}
     ext: list[Skill] = []
     if external if external is not None else skills_dir is None:
+        from core.skills.removal import hidden_external
+
+        hidden = hidden_external()
         for d in external_skill_dirs(external_dirs):
             for s in _from_filesystem(d, source=EXTERNAL_SOURCE):
+                if s.name in hidden:
+                    continue
                 if s.name in seen:
                     _log.info(
                         "skills: external %s (%s) is shadowed by another skill of "

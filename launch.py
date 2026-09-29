@@ -218,6 +218,7 @@ except ImportError as _missing_dependency:
 #: refusing it (they start no quest, so the YAML is not a quest to run here).
 _SKILL_MODES_READING_CONFIG = frozenset({
     "skills", "why_skills", "scan_skill", "approve_skill", "revoke_skill",
+    "remove_skill", "restore_skill",
 })
 
 
@@ -384,7 +385,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--config",
         type=Path,
         help="YAML config for a single quest. Beside --skills, --why-skills, "
-             "--scan-skill, --approve-skill or --revoke-skill it starts no "
+             "--scan-skill, --approve-skill, --revoke-skill, --remove-skill or "
+             "--restore-skill it starts no "
              "quest: those commands also read the folders of other agents' "
              "skills this quest names (engine.skills_dirs, "
              "engine.skills_scan_known_dirs), so a skill that lives only there "
@@ -722,6 +724,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Withdraw approval for a skill, returning it to proposed. Add "
              "--config <quest.yaml> for a skill that lives only in a folder "
              "that quest names (engine.skills_dirs).",
+    )
+    mode.add_argument(
+        "--remove-skill",
+        metavar="NAME",
+        default="",
+        help="Remove a skill from FI completely: a skill in FI's own folder is "
+             "deleted (with its approval); one another agent installed is hidden "
+             "from FI and its files are left alone (--restore-skill brings it "
+             "back). Unlike --revoke-skill it does not leave the skill as "
+             "proposed. Add --config <quest.yaml> for a skill that lives only in "
+             "a folder that quest names.",
+    )
+    mode.add_argument(
+        "--restore-skill",
+        metavar="NAME",
+        default="",
+        help="Show a skill again that --remove-skill hid (one another agent "
+             "installed). A deleted skill is not brought back.",
     )
     mode.add_argument(
         "--scan-skill",
@@ -2706,6 +2726,7 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.config is not None and (
             args.skills or args.why_skills or args.scan_skill
             or args.approve_skill or args.revoke_skill
+            or args.remove_skill or args.restore_skill
         ):
             try:
                 folders = _SkillFolders.load(args.config)
@@ -2753,6 +2774,12 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.revoke_skill:
             return _revoke_skill(args.revoke_skill, folders=folders)
+
+        if args.remove_skill:
+            return _remove_skill(args.remove_skill, folders=folders)
+
+        if args.restore_skill:
+            return _restore_skill(args.restore_skill)
 
         if args.scan_skill:
             return _scan_skill(args.scan_skill, args.json_out, folders=folders)
@@ -5781,6 +5808,32 @@ def _revoke_skill(name: str, *, folders: "_SkillFolders | None" = None) -> int:
         print(f"Revoked approval for {name}; it returns to 'proposed'.")
         return 0
     print(f"No approval on record for {name!r}.")
+    return 1
+
+
+def _remove_skill(name: str, *, folders: "_SkillFolders | None" = None) -> int:
+    """Remove a skill from FI: delete FI's own, hide one another agent installed."""
+    from core.skills import discover
+    from core.skills.removal import remove_skill
+
+    skill = next(
+        (s for s in discover(external_dirs=_dirs_of(folders)) if s.name == name), None,
+    )
+    if skill is None:
+        print(f"No skill named {name!r}. Run `python launch.py --skills` to see the names.")
+        return 1
+    result = remove_skill(skill)
+    print(result.message)
+    return 0 if result.ok else 1
+
+
+def _restore_skill(name: str) -> int:
+    from core.skills.removal import restore_external
+
+    if restore_external(name):
+        print(f"Skill {name} is shown to FI again; it returns to 'proposed'.")
+        return 0
+    print(f"Skill {name!r} was not hidden. A deleted skill cannot be restored.")
     return 1
 
 

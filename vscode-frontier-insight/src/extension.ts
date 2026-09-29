@@ -26,6 +26,7 @@ import {
     runImportSkill,
     runListSkills,
     runRevokeSkill,
+    runRemoveSkill,
     runScanSkill,
     runTeachSkill,
 } from "./skills";
@@ -334,6 +335,10 @@ async function handleRequest(
         await runRevokeSkill(prompt, stream, token);
         return;
     }
+    if (cmd === "remove-skill") {
+        await runRemoveSkill(prompt, stream, token);
+        return;
+    }
     if (cmd === "import-skill") {
         await runImportSkill(prompt, stream, token);
         return;
@@ -412,6 +417,7 @@ function helpText(): string {
         "- `@fi /approve-amendment <quest_id>` — approve the change to a quest's frozen protocol that it stopped to ask about. Shows what changes and why, asks who is approving, and records it; resuming the quest without approving keeps the frozen protocol. If the results had already been seen, the run is archived and the paper says the change was post-hoc.",
         "- `@fi /approve-all-skills` — approve every skill that passes its gates at once, optionally pip-installing what quarantined skills are missing first. Still asks who is approving; a failing self-test is still refused.",
         "- `@fi /revoke-skill <name> [--config <quest.yaml>]` — withdraw approval, returning the skill to proposed.",
+        "- `@fi /remove-skill <name> [--config <quest.yaml>]` — remove a skill from FI: deleted if it is in FI's own folder, hidden if another tool installed it.",
         "- `@fi /import-skill [path]` — import a skill written for another agent (Agent Skills layout). Opens a picker with no path, then asks for optional domain tags.",
         "- `@fi /teach-skill <name> <module>` — draft a skill from an installed library, reading its real signatures by introspection.",
         "- `@fi /axon-status` — check whether the Axon sidecar (`python -m axon.api`) is reachable. Its port is discovered automatically; override it with the `frontierInsight.axonUrl` setting. CLI / web launches auto-start it; VSCode users keep their own. Use this to confirm the sidecar is hot before kicking off a quest.",
