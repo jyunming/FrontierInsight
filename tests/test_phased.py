@@ -43,15 +43,17 @@ def test_enough_rows_are_split_and_exploration_sees_only_its_part(tmp_path: Path
     record, lines = phased.prepare(tmp_path, "q1")
     assert record["strategy"] == phased.HELD_BACK
     (info,) = record["files"]
-    assert (info["rows"], info["explore_rows"], info["held_back_rows"]) == (100, 70, 30)
+    assert info["rows"] == 100 and info["explore_rows"] + info["held_back_rows"] == 100
+    assert 15 <= info["held_back_rows"] <= 45, "about 30% held back"
+    n_held, n_explore = info["held_back_rows"], info["explore_rows"]
     explore = (tmp_path / "inputs" / "data" / "d.csv").read_bytes()
     held = (tmp_path / ".fi" / "phased" / "held_back" / "d.csv").read_bytes()
     assert explore.startswith(b"x,y\n") and held.startswith(b"x,y\n")
-    assert len(_data_rows(explore)) == 70 and len(_data_rows(held)) == 30
+    assert len(_data_rows(explore)) == n_explore and len(_data_rows(held)) == n_held
     assert not set(_data_rows(explore)) & set(_data_rows(held)), "no row is in both parts"
     assert sorted(_data_rows(explore) + _data_rows(held)) == sorted(_data_rows(original))
     assert (tmp_path / ".fi" / "phased" / "original" / "d.csv").read_bytes() == original
-    assert any("held back 30 of 100 rows of inputs/data/d.csv" in line for line in lines)
+    assert any(f"held back {n_held} of 100 rows of inputs/data/d.csv" in line for line in lines)
     # Idempotent: the part exploration sees is not split again.
     again, more = phased.prepare(tmp_path, "q1")
     assert more == [] and again["files"] == record["files"]
@@ -338,8 +340,11 @@ async def test_on_with_enough_data_the_confirm_run_sees_only_the_held_back_rows(
     artifacts = await engine.run()
     record = phased.load(engine.quest_root)
     assert record["strategy"] == phased.HELD_BACK and record["stage"] == phased.CONFIRMED
-    assert [s["rows"] for s in _seen(engine)] == [70, 70, 30, 30]
-    assert artifacts.raw_state["result_json"]["rows"] == 30, "the paper is written from the confirm run"
+    (info,) = record["files"]
+    n_explore, n_held = info["explore_rows"], info["held_back_rows"]
+    assert n_explore + n_held == 100 and n_held > 0
+    assert [s["rows"] for s in _seen(engine)] == [n_explore, n_explore, n_held, n_held]
+    assert artifacts.raw_state["result_json"]["rows"] == n_held, "the paper is written from the confirm run"
     assert (engine.quest_root / "inputs" / "data" / "d.csv").read_bytes() == original, "the whole file is back"
     paper = artifacts.paper_md.read_text(encoding="utf-8")
     assert "held back at random before exploration began" in paper
@@ -355,6 +360,7 @@ def test_in_the_confirm_stage_a_redesign_is_not_followed(tmp_path: Path) -> None
     phased.enter_confirm(engine.quest_root, explore_result={"a": 1}, frozen_sha256=None, stride=1, replicates=1,
                          explore_runs=1)
     assert engine._route_after_cross_check(state) == "write"
+    phased.seed_env(engine.quest_root, _env(0, 0))  # the confirm run was made
     gate = {"evidence_assessment": {"route": "redesign"}, "result_json": {"a": 2}, "exec_result": {"returncode": 0}}
     assert engine._route_after_evidence_gate(gate) == "write"
     assert phased.status(phased.load(engine.quest_root)) == phased.CONFIRMED
@@ -379,3 +385,96 @@ def test_changing_the_protocol_after_the_confirm_stage_began_is_an_amendment(tmp
     engine._hold_design_to_frozen({"iteration": 1}, {"protocol": changed,
                                                      "protocol_amendment": {"protocol": changed, "reason": "more"}})
     assert asked and asked[0]["changes"], "a change after the freeze goes through an amendment"
+
+
+# ---- a start cut short, a stop, and a quest that goes on ----------------------------------------------------------
+
+
+def _held(tmp_path: Path) -> bytes:
+    return (tmp_path / ".fi" / "phased" / "held_back" / "d.csv").read_bytes()
+
+
+def _inputs(tmp_path: Path) -> bytes:
+    return (tmp_path / "inputs" / "data" / "d.csv").read_bytes()
+
+
+def test_a_start_cut_short_before_the_record_was_written_keeps_the_whole_file(tmp_path: Path) -> None:
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    phased.prepare(tmp_path, "q1")
+    explore, held = _inputs(tmp_path), _held(tmp_path)
+    phased.record_path(tmp_path).unlink()  # the files were written, the record was not
+    record, _ = phased.prepare(tmp_path, "q1")
+    assert (tmp_path / ".fi" / "phased" / "original" / "d.csv").read_bytes() == original, "the whole file is not lost"
+    assert _inputs(tmp_path) == explore and _held(tmp_path) == held
+    assert record["files"][0]["original_sha256"] == phased._sha(original)
+
+
+def test_a_stop_while_the_confirm_stage_began_never_hands_the_held_back_rows_to_exploration(tmp_path: Path) -> None:
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    phased.prepare(tmp_path, "q1")
+    explore, held = _inputs(tmp_path), _held(tmp_path)
+    # Held-back rows copied in, but the stage not yet saved: the next start takes it for what it is, not as new data.
+    (tmp_path / "inputs" / "data" / "d.csv").write_bytes(held)
+    record, _ = phased.prepare(tmp_path, "q1")
+    assert record["stage"] == phased.EXPLORE and _inputs(tmp_path) == explore and _held(tmp_path) == held
+    assert (tmp_path / ".fi" / "phased" / "original" / "d.csv").read_bytes() == original
+    # The stage saved, the held-back rows not yet copied in: the next start gives the confirm run the held-back rows.
+    phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1,
+                         explore_runs=1)
+    (tmp_path / "inputs" / "data" / "d.csv").write_bytes(explore)
+    phased.prepare(tmp_path, "q1")
+    assert _inputs(tmp_path) == held
+
+
+def test_outside_a_run_the_whole_file_is_back_and_the_next_start_holds_the_same_rows_back(tmp_path: Path) -> None:
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    phased.prepare(tmp_path, "q1")
+    explore, held = _inputs(tmp_path), _held(tmp_path)
+    phased.restore_inputs(tmp_path)
+    assert _inputs(tmp_path) == original
+    _record, lines = phased.prepare(tmp_path, "q1")
+    assert _inputs(tmp_path) == explore and _held(tmp_path) == held and lines == []
+    # Rows added while the quest was paused: every row exploration saw stays on exploration's side.
+    phased.restore_inputs(tmp_path)
+    with (tmp_path / "inputs" / "data" / "d.csv").open("ab") as f:
+        f.write("".join(f"{i},{i * i}\n" for i in range(100, 130)).encode())
+    phased.prepare(tmp_path, "q1")
+    assert set(_data_rows(explore)) <= set(_data_rows(_inputs(tmp_path)))
+    assert set(_data_rows(held)) <= set(_data_rows(_held(tmp_path)))
+    # In the confirm stage a stop also puts the whole file back, and the next start the held-back rows again.
+    phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1,
+                         explore_runs=1)
+    held_now = _held(tmp_path)
+    assert _inputs(tmp_path) == held_now
+    phased.restore_inputs(tmp_path)
+    assert _data_rows(_inputs(tmp_path))[-1] == "129,16641"
+    phased.prepare(tmp_path, "q1")
+    assert _inputs(tmp_path) == held_now
+
+
+def test_turned_on_after_the_experiment_ran_holds_nothing_back(tmp_path: Path) -> None:
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    record, lines = phased.prepare(tmp_path, "q1", already_ran=True)
+    assert record["strategy"] == phased.FRESH_SEEDS and record["files"] == []
+    assert _inputs(tmp_path) == original and any("already run" in line for line in lines)
+    assert phased.prepare(tmp_path, "q1")[0]["files"] == [], "stays so on the next start"
+    phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=1, replicates=1, explore_runs=1)
+    phased.record_confirm(tmp_path, {"a": 2})
+    assert "already run before explore-then-confirm was turned on" in phased.summary(phased.load(tmp_path))
+
+
+def test_the_gate_run_again_before_the_confirm_run_sends_the_quest_to_it(tmp_path: Path) -> None:
+    """A stop after the confirm stage began but before the gate's step was saved: the gate runs again with exploration's
+    result in hand, and must send the quest to the confirm run, not record exploration's result as confirmed."""
+    from core.engine import Engine
+
+    engine = Engine(_config(tmp_path / "out", phased_on=True))
+    phased.prepare(engine.quest_root, engine.quest_id)
+    phased.enter_confirm(engine.quest_root, explore_result={"a": 1}, frozen_sha256=None, stride=1, replicates=1,
+                         explore_runs=1)
+    gate = {"evidence_assessment": {"route": "write"}, "result_json": {"a": 1}, "exec_result": {"returncode": 0}}
+    assert engine._route_after_evidence_gate(gate) == "confirm"
+    assert phased.load(engine.quest_root)["stage"] == phased.CONFIRM
+    phased.seed_env(engine.quest_root, _env(0, 0))  # the confirm run starts
+    assert engine._route_after_evidence_gate({**gate, "result_json": {"a": 2}}) == "write"
+    assert phased.status(phased.load(engine.quest_root)) == phased.CONFIRMED

@@ -1534,6 +1534,10 @@ class Engine:
                 _source_failures.current_quest.reset(_quest_ctx)
             except ValueError:
                 pass
+            # Explore, then confirm: outside a running quest inputs/data/ holds the person's whole files (the next
+            # start holds the same rows back again).
+            if _phased.enabled(self.config):
+                self._phased_restore_inputs()
             _close_quest_logger(self.quest_id)
 
     def _emit_source_failure_summary(self, *, started_at: float) -> None:
@@ -2346,13 +2350,24 @@ class Engine:
 
     def _phased_prepare(self) -> None:
         """At every start: the exploration stage begins, or takes in the data supplied since (a part held back)."""
+        # Turned on after the experiment already ran: every row was seen, so nothing can be held back.
+        already_ran = _phased.load(self.quest_root) is None and self.audit.path.is_file() and any(
+            e.get("kind") == "node_completed" and e.get("node") == "execute" for e in _audit_log.read(self.audit.path))
         try:
-            _record, lines = _phased.prepare(self.quest_root, self.quest_id)
+            _record, lines = _phased.prepare(self.quest_root, self.quest_id, already_ran=already_ran)
         except OSError as e:
-            self._log.warning("[phased] the supplied data could not be held back (%r); the confirm run will use new "
-                              "random seeds only", e)
+            self._log.warning("[phased] the two stages could not be set up (%r); this quest's numbers stay "
+                              "exploratory", e)
             return
         self._phased_log(lines)
+
+    def _phased_restore_inputs(self) -> None:
+        """When a run stops (finished, paused or failed): the person's whole files back in inputs/data/."""
+        try:
+            _phased.restore_inputs(self.quest_root)
+        except OSError as e:
+            self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
+                              "kept in .fi/phased/original/", e)
 
     def _phased_confirming(self) -> bool:
         return _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.CONFIRM
@@ -2363,6 +2378,15 @@ class Engine:
         stage the confirm run's result is recorded and the quest writes it up, never going back to change the design
         (that would choose on data meant only for confirming)."""
         current = _phased.stage(self.quest_root)
+        if current is None:
+            self._log.warning("[phased] the record of the two stages is missing or cannot be read; nothing is "
+                              "confirmed, so the paper is written from exploration and says its numbers are exploratory")
+            return route
+        if current == _phased.CONFIRM and not _phased.confirm_run_started(self.quest_root):
+            # The confirm stage began but its run has not (a stop before this step was saved): run it now, rather
+            # than take the exploration result in hand for the confirm result.
+            self._log.info("[phased] confirm stage: the confirm run has not been made yet; running it now")
+            return "confirm"
         if current == _phased.CONFIRM and route != "write":
             self._log.info("[phased] confirm stage: the frozen design is run once, so the evidence gate's %s is not "
                            "followed; the confirm result is written up as it is", route)
