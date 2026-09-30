@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "554bd2b2b202a73c145bc3050aab5a8507757fce44cac45e0e3da0d22e46b5fb",
+  "vsix_sha256": "7873ab3bbad79e5bb8261429674174d44ce781d66eac99a52f2909b86338b668",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -110,8 +110,8 @@
       "bytes": 14965
     },
     "extension/readme.md": {
-      "sha256": "4023a13dd4278952280b057b4fff387d60f0e774e8f9c62357fabc2ac2bfd103",
-      "bytes": 77067
+      "sha256": "2335549916e64e9ddd95e3a253bbda951aeab75f971203e6d6abac02056ca9e1",
+      "bytes": 77147
     }
   }
 }
