@@ -13,7 +13,7 @@ A picture of every step of a quest, in seven blocks: understand the question, re
 
 A paused quest is not shown as finished. A quest counts as finished only when nothing is left to run and there is no pause, `NEXT_STEP.md` or failure note.
 
-Click a reached step to see what restarting there keeps and redoes, and restart from it ([[Doing a step again]]).
+Click a reached step to see what restarting there keeps and redoes, and restart from it ([[doing-a-step-again|Doing a step again]]).
 
 ## Interfaces
 
@@ -21,4 +21,4 @@ Click a reached step to see what restarting there keeps and redoes, and restart 
 - VS Code: `FI: Quest map` or `@fi /map <id>`. It opens next to your other tabs, never in a new split; opening it again for the same quest brings that tab back. It does not refresh by itself while a quest runs. Restart sends the `/resume … --from` command to the chat.
 - CLI: no drawing. `--from` with no step prints the list; `--from --json` prints the map's data.
 
-Related: [[Renaming a quest]], [[Pauses]].
+Related: [[renaming-a-quest|Renaming a quest]], [[pauses|Pauses]].

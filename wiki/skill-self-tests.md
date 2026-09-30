@@ -17,7 +17,7 @@ A skill imported without a test of its own gets a generated `selftest.py`. It ru
 
 ## The starter list
 
-79 skills: 75 from 11 public skill collections, and 4 written for FI (`dev/own-skills/`) on simulation correctness: invariant guards, a cross-check against a slow obvious reference, property tests, and dimensional consistency. `numerical-verification` (MIT licence) is included too. They connect to [[How FI judges correctness]]: they help the model write code that can pass its oracles honestly.
+79 skills: 75 from 11 public skill collections, and 4 written for FI (`dev/own-skills/`) on simulation correctness: invariant guards, a cross-check against a slow obvious reference, property tests, and dimensional consistency. `numerical-verification` (MIT licence) is included too. They connect to [[how-fi-judges-correctness|How FI judges correctness]]: they help the model write code that can pass its oracles honestly.
 
 ## Removing a skill
 

@@ -11,4 +11,4 @@ It is the model's own account of its reasoning, **not evidence**: it is not part
 
 `output.save_thinking: false` turns it off (default on). No interface displays it; open the file in the quest folder.
 
-Related: [[Literature screening record]], [[Waiting out provider outages]].
+Related: [[literature-screening-record|Literature screening record]], [[provider-outages|Waiting out provider outages]].

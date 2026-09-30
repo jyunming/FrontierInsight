@@ -2,15 +2,21 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-09-30 — index rebuilt; links by file name
+
+`index.md` rebuilt with the repository's own `scripts/wiki_sync_index.py` (English output; `--check` reports a stale
+index or a broken link). Title-only links were rewritten as `[[slug|Page Title]]` so they resolve by file name, which
+is how the index, Obsidian and link checkers resolve them.
+
 ## 2026-09-30 — first compile: changes merged 2026-09-29 to 2026-09-30
 
 Compiled by hand (the `llm-wiki` skill was not available) from the code on `origin/main` at `8338c30`, checked against the source, not the commit messages. `wiki/raw/` was not used; `index.md` was not rebuilt (no `sync_index.py` in this repository).
 
 Pages created (17):
-- Correctness: [[How FI judges correctness]], [[Oracle provenance]], [[The model behind the numbers]], [[Scoring criteria]], [[Engine-callable simulations]], [[Skill self-tests]]
-- Study design and running: [[Study types]], [[Explore then confirm]], [[The code project and run data]]
-- Changing a quest: [[Refine]], [[Doing a step again]], [[Quest map]], [[Renaming a quest]]
-- Pauses and plumbing: [[Pauses]], [[Waiting out provider outages]], [[Literature screening record]], [[Model reasoning trace]]
+- Correctness: [[how-fi-judges-correctness|How FI judges correctness]], [[oracle-provenance|Oracle provenance]], [[model-behind-the-numbers|The model behind the numbers]], [[scoring-criteria|Scoring criteria]], [[engine-callable-simulations|Engine-callable simulations]], [[skill-self-tests|Skill self-tests]]
+- Study design and running: [[study-types|Study types]], [[explore-then-confirm|Explore then confirm]], [[code-project-and-run-data|The code project and run data]]
+- Changing a quest: [[refine|Refine]], [[doing-a-step-again|Doing a step again]], [[quest-map|Quest map]], [[renaming-a-quest|Renaming a quest]]
+- Pauses and plumbing: [[pauses|Pauses]], [[provider-outages|Waiting out provider outages]], [[literature-screening-record|Literature screening record]], [[model-reasoning-trace|Model reasoning trace]]
 
 Sources: core/oracle_check.py, core/trial_runner.py, core/evidence.py, core/criteria.py, core/optimisation_plan.py, core/phased.py, core/code_project.py, core/plan.py, core/rerun_from.py, core/quest_title.py, core/number_provenance.py, core/data_shape.py, core/thinking_capture.py, core/provider.py, core/skills/, core/engine.py, core/config.py, launch.py, web/, vscode-frontier-insight/src/. Audit: docs/audits/docs-sync-2026-09-30.md.
 

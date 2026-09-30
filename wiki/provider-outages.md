@@ -15,4 +15,4 @@ While FI waits it gives back its slot in the concurrent-call limit, so other que
 
 There is no setting for this. For a longer outage, configure `provider.fallback`. It behaves the same from the CLI, the web page and VS Code, because it is part of the connection. CLI providers (4 tries, 30–90 s apart on a capacity error) and the VS Code chat model (6 tries) have their own retry rules.
 
-Related: [[Model reasoning trace]] (what the model returned on the call that finally answered), [[Pauses]].
+Related: [[model-reasoning-trace|Model reasoning trace]] (what the model returned on the call that finally answered), [[pauses|Pauses]].

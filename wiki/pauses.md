@@ -12,13 +12,13 @@ A pause is FI stopping because it needs a person. It is not a failure. Every pau
 | Setup questions | `pauses.clarify` (unset: ask if someone can answer, else FI answers itself) | the question's scope, before any work |
 | Papers | `pauses.papers` (true) | paywalled papers to download |
 | Plan | `pauses.plan` (off; `ask` under the research profile) | read or change `plan.md` |
-| Review | `pauses.review` (ask) | accept, reject or [[Refine]] the result |
+| Review | `pauses.review` (ask) | accept, reject or [[refine\|Refine]] the result |
 
-Some checks also stop the quest, such as a failing [[How FI judges correctness|oracle]], a best-design plan whose search cannot start ([[Study types]]) or a missing equation label under the research profile.
+Some checks also stop the quest, such as a failing [[how-fi-judges-correctness|oracle]], a best-design plan whose search cannot start ([[study-types|Study types]]) or a missing equation label under the research profile.
 
 ## Setup questions (clarify)
 
-Before any work, one model call writes the setup questions, each with a suggested answer: what you want to see, the title (three suggestions, or your own), the baseline to compare with, theory or experiment, whether it can be simulated, how success is measured, budget, outputs, depth, venue and the shape of the topic. When the topic leaves it open, it also asks whether this is a measurement or a search for the best design ([[Study types]]).
+Before any work, one model call writes the setup questions, each with a suggested answer: what you want to see, the title (three suggestions, or your own), the baseline to compare with, theory or experiment, whether it can be simulated, how success is measured, budget, outputs, depth, venue and the shape of the topic. When the topic leaves it open, it also asks whether this is a measurement or a search for the best design ([[study-types|Study types]]).
 
 - `off`: skipped. `auto`: FI uses its own suggestions. `ask`: the quest waits for your answers.
 - Unset (what the interview writes): it asks if someone can answer; otherwise FI uses its suggestions.
@@ -45,4 +45,4 @@ A decision is accept, reject, or refine *with* notes. Anything else (a closed pr
 - CLI: `--resume <id> --revise-plan "<change>"` changes the plan only; `--resume <id>` runs it.
 - Web: the Plan panel. VS Code: `@fi /plan <id> [<change>]`.
 
-Related: [[Quest map]] (a paused quest shows where it stopped), [[The model behind the numbers]], [[Waiting out provider outages]] (a provider outage is waited out, not turned into a pause).
+Related: [[quest-map|Quest map]] (a paused quest shows where it stopped), [[model-behind-the-numbers|The model behind the numbers]], [[provider-outages|Waiting out provider outages]] (a provider outage is waited out, not turned into a pause).

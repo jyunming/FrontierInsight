@@ -13,7 +13,7 @@ One of six kinds: a special or limiting case with a known answer, an invariant (
 
 - a `check` (what is compared with what, on which small case),
 - a numeric `expected` value and `tolerance` (absolute, or relative with `tolerance_mode: relative`). Without them FI cannot judge the check,
-- a `reference`: where the expected value comes from (see [[Oracle provenance]]),
+- a `reference`: where the expected value comes from (see [[oracle-provenance|Oracle provenance]]),
 - optionally a `case` (the settings of one small run) and a `measure` (the number that run returns), so FI can run the check itself,
 - optionally an `order`: the claimed order of accuracy.
 
@@ -27,7 +27,7 @@ One of six kinds: a special or limiting case with a known answer, an invariant (
 
 Before the pilot and the main run:
 
-1. For a simulation FI can call (one with a `run_trial` or `run_cell` function, which the default two scripts give; see [[Engine-callable simulations]]) FI runs the simulation on each oracle's `case` in its own process, with the environment a real trial gets (never `FI_ORACLE`), so the simulation cannot tell it is being checked. That value is recorded as measured by FI.
+1. For a simulation FI can call (one with a `run_trial` or `run_cell` function, which the default two scripts give; see [[engine-callable-simulations|Engine-callable simulations]]) FI runs the simulation on each oracle's `case` in its own process, with the environment a real trial gets (never `FI_ORACLE`), so the simulation cannot tell it is being checked. That value is recorded as measured by FI.
 2. An oracle without a case, and every oracle in a one-script quest (`execution.split_analysis: false`), is answered by the script itself (its `oracle()` function, or a run with `FI_ORACLE=1`). That value is recorded as measured by the script.
 3. A missing value, a value outside the tolerance, a crash or a timeout is a problem. With `engine.oracle_check: block` (the default, and always under the research profile) the quest stops before the main run. With `warn` it logs and continues; with `off` there is no check.
 
@@ -43,8 +43,8 @@ The evidence level says how strongly a result is backed. A result reaches **inde
 
 - the check ran and passed, judged by FI,
 - every declared oracle passed with a value FI measured itself (a check that judged no value is not evidence, and a value the script reported about itself never counts),
-- every expected value has a checkable source ([[Oracle provenance]]),
-- every equation that produces the numbers is labelled in the code ([[Engine-callable simulations]]).
+- every expected value has a checkable source ([[oracle-provenance|Oracle provenance]]),
+- every equation that produces the numbers is labelled in the code ([[engine-callable-simulations|Engine-callable simulations]]).
 
 For a random simulation a case is one trial, so only checks one trial shows exactly can be run by FI. A probability or a mean stays the script's own answer and keeps the quest below this level.
 
@@ -56,4 +56,4 @@ If the plan had no usable oracle, FI rewrites the plan to add one. Such oracles 
 
 FI cannot tell a strong check from a weak one. Expected values come from the plan, written by the same model. FI checks that a source is named, not that the derivation is right.
 
-Related: [[The model behind the numbers]], [[Scoring criteria]], [[Skill self-tests]].
+Related: [[model-behind-the-numbers|The model behind the numbers]], [[scoring-criteria|Scoring criteria]], [[skill-self-tests|Skill self-tests]].

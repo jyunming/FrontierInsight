@@ -1,0 +1,23 @@
+name: Wiki check
+
+# The main CI skips PRs that change only Markdown, and every wiki page is Markdown. This small job runs when the
+# wiki or its index script changes and fails when wiki/index.md is out of date or a wiki link points to a missing
+# page. Fix: run `python scripts/wiki_sync_index.py` and commit wiki/index.md.
+
+on:
+  pull_request:
+    paths:
+      - "wiki/**"
+      - "scripts/wiki_sync_index.py"
+
+jobs:
+  wiki:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Wiki index is current and links resolve
+        run: python scripts/wiki_sync_index.py --check

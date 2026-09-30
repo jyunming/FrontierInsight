@@ -13,12 +13,12 @@ Steps, in order: ideas, literature, plan, design, skills, code, run, figures (qu
 - **skills** picks the skills again from the current YAML (`engine.skills`, `skills_exclude`, `skills_required`) and leaves plan and protocol alone.
 - Later steps just re-run from there.
 
-For a small change to a finished paper, [[Refine]] is usually cheaper.
+For a small change to a finished paper, [[refine|Refine]] is usually cheaper.
 
 ## Interfaces
 
 - CLI: `fi --config q.yaml --resume <id> --from <step> [--approve-as <you>]`. `--from` alone lists the steps reached, with what each would redo.
-- Web: the menu beside Resume on the quest page (it reads "Redo" at a pause), or click a step on the [[Quest map]].
+- Web: the menu beside Resume on the quest page (it reads "Redo" at a pause), or click a step on the [[quest-map|Quest map]].
 - VS Code: `@fi /resume <id> --from <step>`; `--from` alone lists the steps.
 
 Gap: the web page and VS Code refuse ideas, literature, plan and design, because those need your name as approver; they show the terminal command instead.
