@@ -244,8 +244,9 @@ def test_run_sync_path_translation_substring_caveat() -> None:
     exe._run_sync(client, ["python", arg], cwd, 30, {})
 
     translated = client.containers.create.call_args.kwargs["command"]
-    # Current behaviour: substring is rewritten verbatim.
-    assert translated[1] == "prefix-/work-suffix"
+    # The folder name does not end at "-suffix", so this is some other path
+    # (e.g. a sibling folder) and is left alone.
+    assert translated[1] == arg
 
 
 def test_run_sync_timeout_kills_container_and_marks_timed_out() -> None:
@@ -817,13 +818,49 @@ def test_host_environment_is_made_to_fit_the_container(tmp_path: Path) -> None:
     assert kw["command"] == ["python", "/work/code/experiment.py"]
 
 
-def test_windows_path_under_the_quest_folder_uses_forward_slashes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_windows_path_under_the_quest_folder_uses_forward_slashes() -> None:
     from core.execution import _to_container
 
-    monkeypatch.setattr("core.execution.os.sep", "\\")
-    assert _to_container(r"C:\q\abc\code\experiment.py", r"C:\q\abc") == "/work/code/experiment.py"
-    assert _to_container(r"C:\q\abc", r"C:\q\abc") == "/work"
-    assert _to_container(r"x=C:\q\abc", r"C:\q\abc") == "x=/work"
+    root = r"C:\q\abc"
+    assert _to_container(r"C:\q\abc\code\experiment.py", root, windows=True) == "/work/code/experiment.py"
+    assert _to_container(r"C:\q\abc\my code\e x.py", root, windows=True) == "/work/my code/e x.py"
+    assert _to_container(root, root, windows=True) == "/work"
+    assert _to_container(r"x=C:\q\abc", root, windows=True) == "x=/work"
+    assert _to_container(r"--out=C:\q\abc\figs\a.png", root, windows=True) == "--out=/work/figs/a.png"
+    assert _to_container(r"c:/Q/ABC/code/e.py", root, windows=True) == "/work/code/e.py"
+    assert _to_container(r"a;C:\q\abc\x;b", root, windows=True) == "a;/work/x;b"
+    # A sibling folder whose name only starts the same is not the quest.
+    assert _to_container(r"C:\q\abcd\x", root, windows=True) == r"C:\q\abcd\x"
+    assert _to_container(r"C:\q\abc-old", root, windows=True) == r"C:\q\abc-old"
+
+
+def test_linux_path_translation_stops_at_the_folder_name() -> None:
+    from core.execution import _to_container
+
+    root = "/q/abc"
+    assert _to_container("/q/abc/code/e.py", root, windows=False) == "/work/code/e.py"
+    assert _to_container("/q/abc", root, windows=False) == "/work"
+    assert _to_container("/q/abcd/x", root, windows=False) == "/q/abcd/x"
+    assert _to_container("/q/abc-old", root, windows=False) == "/q/abc-old"
+    assert _to_container("--out=/q/abc/f.png", root, windows=False) == "--out=/work/f.png"
+    # Backslashes are ordinary file-name characters on Linux: left alone.
+    assert _to_container("/q/abc/a\\b", root, windows=False) == "/work/a\\b"
+
+
+def test_host_python_and_system_paths_are_not_passed_in() -> None:
+    exe = DockerExecutor()
+    exe._user = ""
+    client = _client_with(_make_fake_container(exit_code=0))
+    env = {
+        "PYTHONHOME": "C:\\Python311", "Path": "C:\\Windows", "LD_PRELOAD": "/x.so",
+        "PYTHONPYCACHEPREFIX": "C:\\cache", "TEMP": "C:\\Temp", "FI_REPLICATE_SEED": "3",
+        "PYTHONPATH": "/home/me/site" + __import__("os").pathsep + "/usr/lib/python3/dist-packages",
+    }
+    exe._run_sync(client, ["python", "-V"], Path.cwd(), 30, env)
+    out = client.containers.create.call_args.kwargs["environment"]
+    for gone in ("PYTHONHOME", "Path", "LD_PRELOAD", "PYTHONPYCACHEPREFIX", "TEMP", "PYTHONPATH"):
+        assert gone not in out, gone
+    assert out["FI_REPLICATE_SEED"] == "3"
 
 
 def test_engine_passes_the_configured_limits_and_its_log(tmp_path: Path) -> None:

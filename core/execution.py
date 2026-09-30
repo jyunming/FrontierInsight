@@ -586,17 +586,41 @@ def _owner_of(path: Path) -> tuple[int, int]:
     return st.st_uid, st.st_gid
 
 
-_WINDOWS_PATH = re.compile(r"^[A-Za-z]:[\\/]")
+# Host variables that mean nothing in the container, or break its Python
+# (PYTHONHOME stops it starting; a Windows PYTHONPYCACHEPREFIX becomes a
+# folder in the quest; LD_PRELOAD prints an error on every run).
+_HOST_ONLY_VARS = frozenset({
+    "PATH", "HOME", "PWD", "OLDPWD", "TMPDIR", "TEMP", "TMP",
+    "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONPYCACHEPREFIX", "PYTHONEXECUTABLE",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "VIRTUAL_ENV", "CONDA_PREFIX",
+})
+# Where a path in a value ends: the separators of a list or an option.
+_PATH_END = r"""(?=$|[;,=\s"'])"""
 
 
-def _to_container(value: str, host_root: str) -> str:
-    """``value`` with the host quest folder as /work. A value that starts with
-    it is a path: on a Windows host the rest of it uses backslashes, which a
-    Linux container reads as part of a file name, so they become slashes."""
-    if value.startswith(host_root):
-        rest = value[len(host_root):]
-        return "/work" + (rest.replace("\\", "/") if os.sep == "\\" else rest)
-    return value.replace(host_root, "/work")
+def _to_container(value: str, host_root: str, *, windows: bool | None = None) -> str:
+    """``value`` with the host quest folder as /work, only where the folder
+    name ends (``/q/abc`` is not in ``/q/abcd``). On a Windows host the folder
+    matches in either slash and any letter case, and the rest of the path is
+    written with slashes: a Linux container reads a backslash as part of a
+    file name."""
+    if windows is None:
+        windows = os.sep == "\\"
+    if not windows:
+        root = host_root.rstrip("/") or "/"
+        return re.sub(re.escape(root) + r"(?=$|/|[:;,=\s\"'])", "/work", value)
+    parts = [p for p in re.split(r"[\\/]+", host_root) if p]
+    root_rx = r"[\\/]+".join(re.escape(p) for p in parts)
+    # The whole value is one path under the folder (a command argument, which
+    # may hold spaces): all of the rest is the path.
+    whole = re.match(root_rx + r"(?P<rest>[\\/].*)?$", value, re.IGNORECASE | re.DOTALL)
+    if whole:
+        return "/work" + (whole.group("rest") or "").replace("\\", "/")
+    return re.sub(
+        root_rx + r"""(?P<rest>[\\/][^;,=\s"']*)?""" + _PATH_END,
+        lambda m: "/work" + (m.group("rest") or "").replace("\\", "/"),
+        value, flags=re.IGNORECASE,
+    )
 
 
 def _who(user: str) -> str:
@@ -772,8 +796,9 @@ class DockerExecutor:
         of its own, which nobody sees)."""
         info = self._daemon_info(client)
         cpus = self._cpus(client)
+        cpu_capped = "nano_cpus" in self._create_kwargs(client, user)
         applied = [f"at most {self.limits.memory_label} of memory"] if info.get("MemoryLimit") is not False else []
-        if "nano_cpus" in self._create_kwargs(client, user):
+        if cpu_capped:
             applied.append(f"{cpus:g} CPUs")
         if info.get("PidsLimit") is not False:
             applied.append(f"{self.limits.max_processes} processes and threads")
@@ -782,7 +807,7 @@ class DockerExecutor:
         if cpus < self.limits.cpus:
             self._say(logging.WARNING, "[docker] execution.docker_cpus is %g but Docker has only %g CPUs; using %g",
                       self.limits.cpus, cpus, cpus)
-        if "nano_cpus" not in self._create_kwargs(client, user):
+        if not cpu_capped:
             self._say(logging.WARNING, "[docker] this Docker cannot limit CPU use, so execution.docker_cpus only sets "
                       "how many threads numerical libraries start")
         if info.get("MemoryLimit") is False:
@@ -829,7 +854,7 @@ class DockerExecutor:
                 if close is not None:
                     close()
         if found:
-            more = " (and maybe more)" if len(found) >= 3 else ""
+            more = " (and maybe more)" if len(found) >= 3 or seen > 2000 else ""
             self._say(logging.WARNING, "[docker] %s%s in the quest folder belong to root (written when experiments "
                       "still ran as root), and experiments now run as user %s, which cannot change them. Run "
                       "`sudo chown -R %s %s` once to give them back.", ", ".join(found), more, user, user, host_root)
@@ -839,11 +864,12 @@ class DockerExecutor:
     ) -> dict[str, str]:
         """The container's environment, from the host-side ``env``.
 
-        The engine hands over the host's whole environment. The host's PATH
-        and HOME mean nothing in the container (a Windows PATH even hides the
-        image's python), so they go; a value naming a path in the quest folder
-        is translated to /work, and PYTHONPATH keeps only entries that exist in
-        the container, joined the Linux way.
+        The engine hands over the host's whole environment. The host's system
+        and Python paths (``_HOST_ONLY_VARS``) mean nothing in the container or
+        break its Python (a Windows PATH even hides the image's python), so they
+        go; a value naming a path in the quest folder is translated to /work,
+        and PYTHONPATH keeps only what FI puts there for the container (paths
+        under /work and /fi-skills), joined the Linux way.
 
         Numerical libraries start one thread per core they see, and a CPU cap
         does not change what they see (every core of the host), so on a large
@@ -851,19 +877,18 @@ class DockerExecutor:
         gets the cap, unless it already asks for no more than that. A non-root
         id has no home directory in a stock image: it gets /tmp, so libraries
         that keep a cache or config there (matplotlib) work."""
-        out = {k: v for k, v in env.items() if k not in ("PATH", "HOME")}
-        if host_root is not None:
-            root = str(host_root)
-            for k, v in list(out.items()):
-                if k == "PYTHONPATH":
-                    parts = [_to_container(p, root) for p in v.split(os.pathsep) if p]
-                    kept = [p for p in parts if p.startswith("/") and not _WINDOWS_PATH.match(p)]
-                    if kept:
-                        out[k] = ":".join(kept)
-                    else:
-                        out.pop(k)
-                elif root in v:
-                    out[k] = _to_container(v, root)
+        out = {k: v for k, v in env.items() if k.upper() not in _HOST_ONLY_VARS and isinstance(v, str)}
+        root = str(host_root) if host_root is not None else None
+        for k, v in list(out.items()):
+            if k == "PYTHONPATH":
+                parts = [_to_container(p, root) if root else p for p in v.split(os.pathsep) if p]
+                kept = [p for p in parts if p == "/work" or p.startswith(("/work/", "/fi-skills/"))]
+                if kept:
+                    out[k] = ":".join(kept)
+                else:
+                    out.pop(k)
+            elif root:
+                out[k] = _to_container(v, root)
         cap = max(1, math.ceil(self._cpus(client)))
         for k in _THREAD_VARS:
             v = str(out.get(k, "")).strip()

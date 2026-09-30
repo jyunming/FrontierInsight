@@ -1087,7 +1087,7 @@ class ExecutionConfig(BaseModel):
     python_version: str = "3.11"
     docker_image: str = "python:3.11-slim"
     # (docker only) What one experiment container may use. Memory is a hard cap
-    # (swap included): a run that needs more is stopped, and run.log says so and
+    # (swap included, where Docker can limit it): a run that needs more is stopped, and run.log says so and
     # names this key. CPUs is a share of the machine (0.5 = half a core, 4 = four
     # cores); a run over it is slowed, not stopped, and numerical libraries are
     # told to start that many threads (OMP_NUM_THREADS and the like, unless already
