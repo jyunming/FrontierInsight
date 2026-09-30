@@ -925,6 +925,11 @@ def test_runs_that_differed_by_seed_go_to_the_confirm_run_whatever_the_code_look
     route, _record, _frozen = _gate_after(tmp_path, {"experiment.py": fixed_looking},
                                           {"result_json_replicates": [{"_seed": 0, "a": 1}, {"_seed": 1, "a": 2}]})
     assert route == "confirm"
+    # An earlier script's seeds left on the state are not this run's.
+    route, record, _frozen = _gate_after(tmp_path, {"experiment.py": fixed_looking},
+                                         {"result_json_replicates": [{"_seed": 0, "a": 7}, {"_seed": 1, "a": 8}]},
+                                         label="stale")
+    assert route == "write" and phased.status(record) == "not_confirmable"
 
 
 def test_a_seed_read_in_a_package_imported_relatively_is_found(tmp_path: Path) -> None:

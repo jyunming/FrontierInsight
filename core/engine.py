@@ -2482,8 +2482,13 @@ class Engine:
         if state.get("result_json_replicate_seed_ignored"):
             return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
                     "same numbers, so a run on new seeds would repeat exploration's run")
-        if len(state.get("result_json_replicates") or []) > 1:
-            return ""  # runs on different seeds already gave different numbers: new seeds change the result
+        replicates = list(state.get("result_json_replicates") or [])
+        this_pass = bool(replicates) and isinstance(replicates[0], dict) and \
+            {k: v for k, v in replicates[0].items() if k != "_seed"} == (state.get("result_json") or {})
+        if len(replicates) > 1 and this_pass:
+            # Runs on different seeds already gave different numbers (the list is this pass's: its seed 0 is the result
+            # in hand, not an earlier script's left on the state): new seeds change the result.
+            return ""
         # The seed read in the script or a module it imports from code/ (a multi-module project reads it in a helper);
         # FI's own helpers there (run.py sets a default seed) do not count.
         modules = _own_modules(script)
