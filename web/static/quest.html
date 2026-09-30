@@ -221,6 +221,7 @@
       <select id="trace-node" class="bg-surface-low border border-white/10 rounded px-2 py-1 font-code-md text-code-md text-on-surface"><option value="">all</option></select>
       <span id="trace-count" class="text-on-surface-variant text-body-sm"></span>
       <button id="why-btn" onclick="loadWhy()" title="Why it stopped, why the review asked for a revision, why the evidence is at its level; with a node chosen, why that step decided what it did." class="cyber-border text-on-surface px-4 py-1 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Why?</button>
+      <button id="reasons-btn" onclick="loadWhy('reasons')" title="The reasons the model gave at every step, and whether each step returned a reasoning summary (the model's own account, not something FI checked)." class="cyber-border text-on-surface px-4 py-1 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Model's reasons</button>
     </div>
     <pre id="why-text" class="hidden whitespace-pre-wrap bg-surface-low rounded p-3 mb-3 font-code-md text-code-md text-on-surface-variant"></pre>
     <ol id="trace-list" class="flex flex-col gap-1 font-code-md text-code-md"></ol>
@@ -1161,10 +1162,11 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   // Loaded when the panel is opened, and again when the filters change. The wording of each line comes from the server, so
   // this page, `launch.py --trace` and the chat say the same thing.
   let traceNodesKey = '';
-  // Why? (core/why.py): the same answer as `launch.py --why` and `@fi /why`, for the node chosen above (or overall).
-  async function loadWhy() {
+  // Why? (core/why.py): the same answer as `launch.py --why` and `@fi /why`, for the node chosen above (or overall);
+  // "Model's reasons" asks for every step's (`--why <quest> reasons`).
+  async function loadWhy(topic) {
     const box = document.getElementById('why-text');
-    const about = document.getElementById('trace-node').value;
+    const about = typeof topic === 'string' ? topic : document.getElementById('trace-node').value;
     const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/why?about=${encodeURIComponent(about)}`);
     box.classList.remove('hidden');
     box.textContent = res.ok ? (await res.json()).text : `Could not answer (${res.status}).`;

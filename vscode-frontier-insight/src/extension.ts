@@ -34,6 +34,7 @@ import {
 } from "./skills";
 import { Bridge } from "./bridge";
 import { splitRevisePlan, unknownResumeFlags } from "./resume-args";
+import { chatModelArgs, servedModel } from "./lm-messages";
 import { forgetFoundFi, rootsForCommand, workFolderForCommand } from "./roots-config";
 import type { Roots } from "./roots";
 import { PersistentBridge } from "./persistent-bridge";
@@ -818,7 +819,8 @@ async function runResume(
               `📝 Using config: \`${relYaml}\`\n\n`
             : `🔁 Resuming quest \`${chosenId}\`\n\n` +
               `📝 Using config: \`${relYaml}\`\n\n` +
-              `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor})\n\n` +
+              `🤖 Model: \`${userPickedModel.family}\` (vendor: ${userPickedModel.vendor}): the chat panel's model is ` +
+              `used for this run (the quest's run.log names the model that answers the first call)\n\n` +
               `▶️ Re-entering the LangGraph from the last checkpointed node…\n\n`,
     );
     await runQuest(
@@ -1208,13 +1210,11 @@ async function runInterviewAndQuest(
     const answers = await runInterview(stream, userPickedModel);
     if (!answers) return;  // user hit Esc somewhere
 
-    // Snapshot the active Copilot model into provider.model so the
-    // quest stays on a consistent LLM even if the user changes
-    // Copilot model later. The interview produces ``provider_model: ""``
-    // as a placeholder; we overwrite here. ``family`` (e.g.
-    // ``claude-opus-4-7`` / ``gpt-4o``) is the stable identifier
-    // the bridge keys on.
-    answers.provider_model = userPickedModel.family || "";
+    // Snapshot the active chat model into provider.model (a start or resume from the chat later uses the model the
+    // chat panel then has; a terminal or web run uses this one). The interview produces ``provider_model: ""`` as a
+    // placeholder; we overwrite here with the model's id (what the bridge matches first and what VS Code reports as the model that answered), so a later start or
+    // resume from this chat, which passes the same id, is not taken for a change of model. "Auto" names no model.
+    answers.provider_model = servedModel(userPickedModel)?.id ?? "";
 
     // Resolve repo path the same way runQuest does.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
@@ -1485,7 +1485,9 @@ async function runQuest(
     // transport (launch.py:_apply_vscode_bridge_override). Every YAML
     // the /new interview writes pins vscode_extension, so on the
     // common path every LLM call does come back through this bridge.
-    const args: string[] = [];
+    // The model picked in this chat panel wins over the config's provider.model for a quest started or resumed here
+    // (launch.py says so in run.log when it replaces one); a terminal or web run keeps the config's.
+    const args: string[] = [...chatModelArgs(userPickedModel)];
     if (fleet) {
         args.push("--fleet", ...paths);
     } else {

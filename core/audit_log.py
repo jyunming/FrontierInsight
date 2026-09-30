@@ -52,6 +52,8 @@ KINDS = (
     "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
     "title_changed",      # a person changed the quest's title (core/quest_title.py): old, new, the paper's hash before and
                           # after; the only event a seal may be followed by (core/evidence.py chains the paper's hash)
+    "model_changed",      # the quest's model changed: the chat panel's model replaced the config's, or the calls of this
+                          # run were answered by another model than the earlier ones (before, after, source)
 )
 
 
@@ -372,7 +374,7 @@ DETAILS = ("summary", "checks", "debug")
 # What each detail level shows. ``summary``: the shape of the run and every decision. ``checks``: plus each check's verdict,
 # the artifacts and the model's stated reasons. ``debug``: everything, including each node's start.
 _SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair",
-                  "quest_finalized", "title_changed"}
+                  "quest_finalized", "title_changed", "model_changed"}
 _CHECK_KINDS = _SUMMARY_KINDS | {"check_result", "artifact_created", "model_claim"}
 
 
@@ -431,6 +433,9 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         return f"quest {'resumed' if e.get('resumed') else 'started'}"
     if kind == "title_changed":
         return f"title changed to \"{e.get('new', '')}\"" + (f" (was \"{e['old']}\")" if e.get("old") else "")
+    if kind == "model_changed":
+        return (f"{where}the model changed from {e.get('before') or 'none named'} to {e.get('after', '')}"
+                + (f" ({e['source']})" if e.get("source") else ""))
     if kind == "quest_finalized":
         lost = e.get("write_errors") or 0
         return (f"quest finished: {e.get('events_before')} events recorded"

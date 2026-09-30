@@ -121,7 +121,7 @@ async function launchContext(stream: vscode.ChatResponseStream): Promise<LaunchC
 }
 
 /**
- * `@fi /why <quest_id> [stop|review|evidence|<step>]` (or `--node <step>`) — why the quest did what it did, from what it
+ * `@fi /why <quest_id> [stop|review|evidence|reasons|<step>]` (or `--node <step>`) — why the quest did what it did, from what it
  * recorded (core/why.py). The same answer as `python launch.py --why` and the web quest page's Why?.
  */
 export async function runWhy(
@@ -135,7 +135,8 @@ export async function runWhy(
     if (!parsed.questId) {
         stream.markdown(
             "Which quest? Example: `@fi /why 1790003131-my-quest` (why it stopped, why the review asked for a revision, " +
-                "why the evidence is at its level), or add a step: `@fi /why 1790003131-my-quest execute`.\n",
+                "why the evidence is at its level), add a step: `@fi /why 1790003131-my-quest execute`, or ask for " +
+                "the reasons the model gave at every step: `@fi /why 1790003131-my-quest reasons`.\n",
         );
         return;
     }

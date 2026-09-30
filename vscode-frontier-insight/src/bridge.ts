@@ -6,11 +6,12 @@
  * Wire protocol (mirrors core/vscode_bridge.py on the Python side):
  *
  *   Python → extension:
- *     {type:"lm_request", id, node, messages, model_hint, temperature}
+ *     {type:"lm_request", id, node, messages, model_hint, temperature, ask_thinking?}
  *
  *   Extension → Python:
  *     {type:"lm_chunk",  id, delta}
- *     {type:"lm_done",   id, content, total_tokens, served_model?: {id, vendor, family, version, name}}
+ *     {type:"lm_done",   id, content, total_tokens, served_model?: {id, vendor, family, version, name},
+ *                        thinking?, thinking_declined?}
  *     {type:"lm_error",  id, error}
  *
  * One bridge instance is created per `@fi /start` invocation. It
@@ -22,7 +23,8 @@ import * as vscode from "vscode";
 import * as net from "net";
 import { ChildProcess } from "child_process";
 import {
-    BridgeMessage, ChatMessageApi, ThinkingCollector, lmDoneMessage, partKind as partKindOf, servedModel, toChatMessages,
+    BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, looksTransient,
+    partKind as partKindOf, servedModel, thinkingText, toChatMessages,
 } from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
@@ -55,6 +57,8 @@ interface LmRequest {
     messages: BridgeMessage[];
     model_hint: string;
     temperature: number;
+    /** Ask the model for its reasoning (Copilot's `_enableThinking`); absent (an older FI) counts as yes. */
+    ask_thinking?: boolean;
 }
 
 interface ClarifyRequest {
@@ -104,6 +108,9 @@ export interface BridgeOptions {
 }
 
 export class Bridge {
+    // Which models refused the request for their reasoning, so they are not asked again while this bridge runs.
+    private readonly thinkingRequests = new ThinkingRequests((m) => this.isTransient(m) || looksTransient(m));
+    private readonly declineShown = new Set<string>();
     private server: net.Server | null = null;
     private socket: net.Socket | null = null;
     private buffer = "";
@@ -448,6 +455,10 @@ export class Bridge {
      * via a chat-panel note so they can correct the YAML.
      */
     private async handleLmRequest(req: LmRequest): Promise<void> {
+        // For the error path: whether this request asked for the model's reasoning, and whether any part arrived.
+        let modelKey = "";
+        let askedForThinking = false;
+        let partsSeen = 0;
         try {
             const model = await this.pickModel(req.model_hint);
             if (!model) {
@@ -475,11 +486,23 @@ export class Bridge {
             // implement-node call kills a 5-minute quest. The HTTP and
             // CLI transports on the Python side already retry; the
             // bridge needs the same.
-            const response = await this.sendWithRetry(
+            modelKey = model.id;
+            const wantThinking = req.ask_thinking !== false;
+            const { response, asked } = await this.sendWithRetry(
                 model,
                 chatMessages,
                 req.node,
+                wantThinking,
             );
+            askedForThinking = asked;
+            const declined = wantThinking && !asked ? this.thinkingRequests.declinedReason(modelKey) : undefined;
+            if (declined && !this.declineShown.has(modelKey)) {
+                this.declineShown.add(modelKey);
+                this.opts.progress.markdown(
+                    `  ℹ️ \`${escapeMd(modelKey)}\` did not accept FI's request for its reasoning; ` +
+                    `its answers are used as usual, without it\n\n`,
+                );
+            }
 
             // Stream the response text back as `lm_chunk` events,
             // then a final `lm_done`.
@@ -598,9 +621,12 @@ export class Bridge {
                         );
                     }
                     if (result.done) break;
+                    if (partsSeen++ === 0) this.thinkingRequests.firstPart(modelKey, askedForThinking);
                     const part = result.value;
                     const kind = partKind(part);
                     const value = (part as any)?.value;
+                    // A thinking part's value may be a list of strings; it is joined into one.
+                    const thought = kind === "thinking" ? thinkingText(value) : undefined;
                     if (kind === "text" && typeof value === "string") {
                         accumulated += value;
                         chars += value.length;
@@ -610,14 +636,14 @@ export class Bridge {
                             id: req.id,
                             delta: value,
                         });
-                    } else if (kind === "thinking" && typeof value === "string") {
-                        thinkingChars += value.length;
+                    } else if (thought !== undefined) {
+                        thinkingChars += thought.length;
                         // Buffer thinking fragments; the heartbeat
                         // flushes them at most once per HEARTBEAT_MS.
                         // It is not sent as a chunk (reasoning isn't
                         // the answer); the whole text rides on lm_done.
-                        thinkingBuf += value;
-                        thinkingAll.add(value);
+                        thinkingBuf += thought;
+                        thinkingAll.add(thought);
                     } else if (kind === "tool") {
                         // FI doesn't request tool calls; the model
                         // shouldn't emit any. Log if it happens so we
@@ -639,14 +665,22 @@ export class Bridge {
             );
             // The model selected and sent this request, so FI can record it. The model's own reasoning rides along when
             // there is room (cut to fit; FI keeps it in .fi/thinking.jsonl). Both additions are ignored by an older FI.
+            // `thinking_declined`: this model refused the request for its reasoning, so it was asked without it (FI says
+            // so once in run.log).
             this.send(lmDoneMessage({
                 type: "lm_done",
                 id: req.id,
                 content: accumulated,
                 served_model: servedModel(model),
+                ...(declined ? { thinking_declined: declined } : {}),
             }, thinkingAll.text, undefined, thinkingAll.total));
         } catch (e) {
-            const msg = e instanceof Error ? e.message : String(e);
+            const raw = e instanceof Error ? e.message : String(e);
+            // A stream that failed before any part, on a request that asked for the reasoning: the next request goes without it, and
+            // the error says so in words FI retries on.
+            const msg = this.thinkingRequests.streamFailed(
+                modelKey, askedForThinking, partsSeen, raw, this.opts.cancellationToken.isCancellationRequested,
+            );
             this.send({
                 type: "lm_error",
                 id: req.id,
@@ -693,12 +727,20 @@ export class Bridge {
         model: vscode.LanguageModelChat,
         messages: vscode.LanguageModelChatMessage[],
         nodeName: string,
-    ): Promise<vscode.LanguageModelChatResponse> {
+        askThinking: boolean,
+    ): Promise<{ response: vscode.LanguageModelChatResponse; asked: boolean }> {
         const MAX_ATTEMPTS = 4;
         let lastErr: Error | undefined;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                return await model.sendRequest(messages, {}, this.opts.cancellationToken);
+                // With Copilot's `_enableThinking` model option when asked (lm-messages.ts ThinkingRequests); a model
+                // that refuses it is asked again once without it.
+                return await this.thinkingRequests.send(
+                    model.id, askThinking,
+                    (options) => model.sendRequest(messages, options as vscode.LanguageModelChatRequestOptions,
+                                                   this.opts.cancellationToken),
+                    () => this.opts.cancellationToken.isCancellationRequested,
+                );
             } catch (e) {
                 const err = e instanceof Error ? e : new Error(String(e));
                 lastErr = err;

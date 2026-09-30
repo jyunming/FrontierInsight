@@ -86,8 +86,16 @@ def _value(cfg: Any, path: str) -> Any:
 
 
 def settings_of(cfg: Any) -> dict[str, Any]:
-    """The recorded settings of a loaded Config (after the rigor profile has filled in what it sets)."""
-    return {path: _value(cfg, path) for path, _label in SETTINGS}
+    """The recorded settings of a loaded Config (after the rigor profile has filled in what it sets). The model picked
+    in the VS Code chat panel for one run (``provider.extra['chat_panel_model']``, set by ``launch.py
+    --vscode-chat-model``) is that run's choice, said in run.log and recorded in the trace, not a change to the
+    config's settings: the config's own model is what is compared."""
+    settings = {path: _value(cfg, path) for path, _label in SETTINGS}
+    extra = getattr(getattr(cfg, "provider", None), "extra", None)
+    change = extra.get("chat_panel_model") if isinstance(extra, dict) else None
+    if isinstance(change, dict) and "before" in change:
+        settings["provider.model"] = change.get("before") or None
+    return settings
 
 
 def _show(value: Any) -> str:

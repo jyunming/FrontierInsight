@@ -735,8 +735,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar=("QUEST", "ABOUT"),
         default=None,
         help="Why a quest did what it did, from what it recorded (no model is asked): why it stopped, why the review "
-             "asked for a revision, why the evidence is at its level. Add what to ask about: stop, review, evidence, or "
-             "a step's name (design, execute, write, ...) for why that step decided what it did.",
+             "asked for a revision, why the evidence is at its level. Add what to ask about: stop, review, evidence, "
+             "reasons (the reasons the model gave at every step), or a step's name (design, execute, write, ...) for "
+             "why that step decided what it did. A model's reasons are its own account, not something FI checked.",
     )
     mode.add_argument(
         "--rename",
@@ -1368,6 +1369,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "similar for headless Copilot usage.",
     )
     p.add_argument(
+        "--vscode-chat-model",
+        type=str,
+        default="",
+        help="The model picked in the VS Code chat panel. The extension passes it when a quest is started or resumed "
+             "from the chat; for a quest on the vscode_extension provider it replaces provider.model from the config "
+             "for this run (said in run.log and recorded in the quest's trace). A run started from a terminal or the "
+             "web page has no chat panel and uses the config's provider.model.",
+    )
+    p.add_argument(
+        "--vscode-chat-model-family",
+        type=str,
+        default="",
+        help="The family of the model picked in the VS Code chat panel (passed with --vscode-chat-model): a config "
+             "that names the same model by its family is not taken for a change of model.",
+    )
+    p.add_argument(
         "--vscode-bridge-socket",
         type=str,
         default="",
@@ -1582,6 +1599,28 @@ def _apply_vscode_bridge_override(cfg: Config, port: int) -> None:
         return
     cfg.provider.name = "vscode_extension"
     cfg.provider.extra = {**(cfg.provider.extra or {}), "bridge_port": port}
+
+
+def _apply_vscode_chat_model(cfg: Config, chat_model: str, chat_family: str = "") -> str:
+    """The model picked in the VS Code chat panel wins for a quest started or resumed from the chat
+    (``--vscode-chat-model``, which only the extension passes): for a ``vscode_extension`` quest it replaces
+    ``provider.model`` for this run, and ``provider.extra['chat_panel_model']`` keeps what it replaced so the engine says
+    so in run.log and records it in the trace. A step's own model (``provider.node_models``) is left as it is. Returns
+    the plain line to show when the model changed, else ``""``. Runs started from a terminal or the web page pass no
+    chat model and keep the config's."""
+    from core.engine import Engine
+
+    chat_model = (chat_model or "").strip()
+    if not chat_model or cfg.provider.name != "vscode_extension":
+        return ""
+    before = (cfg.provider.model or "").strip()
+    if before.lower() in {chat_model.lower(), (chat_family or "").strip().lower()} - {""}:
+        # The same model under its id or its family (an older interview wrote the family, the chat passes the id):
+        # no change, and the config's name stays so the quest's recorded settings still match.
+        return ""
+    cfg.provider.model = chat_model
+    cfg.provider.extra = {**(cfg.provider.extra or {}), Engine.CHAT_MODEL_KEY: {"before": before, "after": chat_model}}
+    return f"the chat panel's model {chat_model} replaces {before or 'no model'} from config.yaml"
 
 
 def _apply_vscode_bridge_socket_override(cfg: Config, socket_path: str) -> None:
@@ -3236,6 +3275,8 @@ async def main_async(args: argparse.Namespace) -> int:
                     os.chdir(started_in)
             _apply_vscode_bridge_override(cfg, args.vscode_bridge_port)
             _apply_vscode_bridge_socket_override(cfg, args.vscode_bridge_socket)
+            if (changed := _apply_vscode_chat_model(cfg, args.vscode_chat_model, args.vscode_chat_model_family)):
+                print(f"[FI] {changed}")
             if args.resume:
                 resume_err = _validate_resume_quest_id(
                     args.resume, cfg.output.output_dir,
@@ -3290,9 +3331,11 @@ async def main_async(args: argparse.Namespace) -> int:
             return 0
 
         configs = [(p.resolve(), Config.from_yaml(p)) for p in args.fleet]
-        for _, c in configs:
+        for path, c in configs:
             _apply_vscode_bridge_override(c, args.vscode_bridge_port)
             _apply_vscode_bridge_socket_override(c, args.vscode_bridge_socket)
+            if (changed := _apply_vscode_chat_model(c, args.vscode_chat_model, args.vscode_chat_model_family)):
+                print(f"[FI] {path.name}: {changed}")
         return await run_fleet(
             configs,
             supervisor=supervisor,

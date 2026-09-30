@@ -256,6 +256,7 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--portfolio` | none | all-time cross-quest synthesis (no time window) | **1** (or 0 if no quests on disk) |
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
 | `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
+| `--why <quest_id> [stop\|review\|evidence\|reasons\|<step>]` | quest_id, then what to ask | why the quest stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or (`reasons`) the reasons the model gave at every step. A step's answer also says whether `.fi/thinking.jsonl` holds the model's reasoning for it and how many characters (the text stays in the file). A reason the model wrote, and a reasoning summary it returned, are its own account of itself, not its hidden reasoning. Web: **Why?** and **Model's reasons** on the quest page; VS Code: `@fi /why`. See [docs/trace.md](trace.md) | 0 |
 | `--install-tectonic` | none | downloads tectonic to `tools/` for no-admin LaTeX | **0** (network download only) |
 
 | Flag | Mode | What it does |
@@ -453,7 +454,7 @@ output:
   paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   save_model_calls: false           # keep every prompt and answer, whole, in .fi/io/ (one file per call); see docs/trace.md
-  save_thinking: true               # keep the reasoning a model returns, when its connection gives it, in .fi/thinking.jsonl (for reading; never evidence); false keeps none. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
+  save_thinking: true               # keep the reasoning a model returns, when its connection gives it, in .fi/thinking.jsonl (for reading; never evidence); false keeps none, and on the VS Code connection stops asking Copilot for Claude's thinking (asked by default through Copilot's undocumented `_enableThinking` option; Opus returns a summary). `--why <quest> <step>` says whether the file holds that step's reasoning and how long it is. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
   require_pdf: false                # strict mode for paper_pdf — see below
   html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
   paper_style: latex                # paper.pdf look: latex (Computer Modern article, default) | briefing (FI brand look, HTML-rendered)

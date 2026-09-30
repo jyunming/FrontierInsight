@@ -829,8 +829,9 @@ async def test_a_model_the_extension_names_is_reported() -> None:
     client = _bridge_client(port)
     try:
         await client.chat([{"role": "user", "content": "hi"}])
+        # The family rides along so the engine can tell a config naming the family from a different model.
         assert {k: v for k, v in LAST_CALL.get().items() if k != "usage"} == {"provider": client.last_provider, "model": "gpt-4.1", "reported": True,
-                                   "vendor": "copilot"}
+                                   "vendor": "copilot", "family": "gpt-4.1"}
         assert client.last_model == "gpt-4.1"
     finally:
         await client.aclose()

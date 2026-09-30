@@ -36,6 +36,7 @@ Respond with a single JSON object, no prose, no markdown fence:
   "weaknesses": ["<bullet>", ...],
   "suggestions": ["<actionable change — particularly any that would raise rigor_score or depth_score>", ...],
   "blocking": "<one sentence — only if verdict is 'revise'; otherwise empty string>",
+  "why": "<one short sentence: the main reason for your verdict, accept or revise>",
   "must_flag_hits": ["<short identifier of any non-negotiable failure detected: 'unsupported_claim' when the Claim grounding block lists unsupported claims, 'figure_caption' when the Figures block lists captions that describe what their figure does not show, plus any methodology failure your persona's MUST-FLAG checks detected, e.g. 'circular_evaluation', 'single_point_eval', 'weak_baseline_no_rerun', 'pseudo_units' — empty list when none apply>"]
 }
 

@@ -95,6 +95,17 @@ export function servedModel(model: ServedModel | undefined | null): ServedModel 
     return out;
 }
 
+/** The launch arguments that hand FI the model picked in the chat panel, which wins over the config's `provider.model`
+ * for a quest started or resumed from the chat (`launch.py --vscode-chat-model`). A router alias ("auto") names no
+ * model, so nothing is passed and the config's model stays. */
+export function chatModelArgs(model: ServedModel | undefined | null): string[] {
+    const named = servedModel(model);
+    if (!named?.id) return [];
+    // The family too, so a config that names the same model by its family is not taken for a change of model.
+    const family = named.family && named.family !== named.id ? ["--vscode-chat-model-family", named.family] : [];
+    return ["--vscode-chat-model", named.id, ...family];
+}
+
 /** What one part of a streamed response is. The vscode API is passed in so this runs under plain node. */
 export function partKind(
     api: any,
@@ -109,6 +120,10 @@ export function partKind(
     if (ToolCallPart && p instanceof ToolCallPart) return "tool";
     // Versions that do not export the classes still give the parts a usable shape.
     const obj = p as any;
+    if (obj && Array.isArray(obj.value)) {
+        // Only a thinking part's value may be a list of strings (a summary in several parts).
+        return obj.constructor?.name === "LanguageModelThinkingPart" ? "thinking" : "unknown";
+    }
     if (obj && typeof obj.value === "string") {
         if (obj.constructor?.name === "LanguageModelThinkingPart") return "thinking";
         if (obj.constructor?.name === "LanguageModelTextPart") return "text";
@@ -116,6 +131,137 @@ export function partKind(
         return unknownStringAs;
     }
     return "unknown";
+}
+
+/** A thinking part's text. The (proposed) API types its `value` as a string or a list of strings; a list is joined.
+ * Anything else is not text (`undefined`). */
+export function thinkingText(value: unknown): string | undefined {
+    if (typeof value === "string") return value;
+    if (Array.isArray(value) && value.every((v) => typeof v === "string")) return value.join("");
+    return undefined;
+}
+
+/**
+ * Asking the chat model for its reasoning.
+ *
+ * Copilot turns on a Claude model's extended thinking only when the request carries the model option
+ * `_enableThinking: true`, and then streams a summary of the reasoning (not the full text) as thinking parts. The option
+ * is Copilot's own, undocumented and internal: it may be renamed or stop working in any Copilot release. FI asks by
+ * default (Python sends `ask_thinking: false` when the quest keeps no reasoning, `output.save_thinking: false`); a model
+ * that refuses the option is asked again once without it, and not asked again for as long as the bridge runs.
+ */
+export const THINKING_REQUEST_OPTIONS = { modelOptions: { _enableThinking: true } };
+/** Words FI's Python side retries on (core/provider.py `_TRANSIENT_BRIDGE_MARKERS`): the stream failed after the model
+ * was asked for its reasoning, so the call is made again without asking. */
+export const THINKING_DECLINED_MARKER = "the model did not accept the request for its reasoning";
+
+const TRANSIENT_MARKERS = [
+    "net::err_http2", "net::err_connection", "net::err_network", "err_http2_protocol_error", "econnreset", "etimedout",
+    "socket hang up", "503", "504", "502", "network connection", "firewall rules and network",
+    "temporarily unavailable", "rate limit", "request failed", "stalled", "cancel",
+];
+
+/** An error that is about the connection (worth the same request again), not about what was asked. */
+export function looksTransient(message: string): boolean {
+    const m = message.toLowerCase();
+    return TRANSIENT_MARKERS.some((marker) => m.includes(marker));
+}
+
+function errorText(e: unknown): string {
+    return e instanceof Error ? e.message : String(e);
+}
+
+// A `vscode.LanguageModelError` with one of these codes is about access (consent, a blocked request, a missing model),
+// never about the option, so it is not read as a refusal of it.
+const ACCESS_ERROR_CODES = ["NoPermissions", "Blocked", "NotFound"];
+
+export class ThinkingRequests {
+    // Models that refused the option: asked without it from then on.
+    private readonly declined = new Map<string, string>();
+    // Models whose answer failed before its first part after being asked: asked without it next time, and taken as a
+    // refusal only if that request then goes through.
+    private readonly tentative = new Map<string, string>();
+
+    constructor(private readonly isTransient: (message: string) => boolean = looksTransient) {}
+
+    /** Why `modelKey` refused the request for its reasoning, when it did. */
+    declinedReason(modelKey: string): string | undefined {
+        return this.declined.get(modelKey);
+    }
+
+    private notARefusal(e: unknown, message: string, isCancelled: () => boolean): boolean {
+        const code = (e as { code?: unknown } | null)?.code;
+        return isCancelled() || this.isTransient(message)
+            || (typeof code === "string" && ACCESS_ERROR_CODES.includes(code));
+    }
+
+    /** Send one request, asking for the model's reasoning when `ask` and the model has not refused it before. When the
+     * request with the option fails (anything but a connection error, a cancel or an access error), it is sent once
+     * more without it; only if that one goes through is the failure taken as the model refusing the option (then it
+     * is not asked again). If it fails too, the first error is raised and nothing is remembered: the failure was not
+     * about the option (a quota, a prompt too long). */
+    async send<R>(
+        modelKey: string,
+        ask: boolean,
+        send: (options: object) => PromiseLike<R>,
+        isCancelled: () => boolean = () => false,
+    ): Promise<{ response: R; asked: boolean }> {
+        if (!ask || this.declined.has(modelKey)) {
+            return { response: await send({}), asked: false };
+        }
+        if (this.tentative.has(modelKey)) {
+            // Asked without the option after an answer failed before its first part: a refusal only once this answer's
+            // first part arrives (`firstPart`); failing without the option too, it was not about the option.
+            try {
+                return { response: await send({}), asked: false };
+            } catch (e) {
+                this.tentative.delete(modelKey);
+                throw e;
+            }
+        }
+        try {
+            return { response: await send(THINKING_REQUEST_OPTIONS), asked: true };
+        } catch (e) {
+            const message = errorText(e);
+            if (this.notARefusal(e, message, isCancelled)) throw e;
+            let response: R;
+            try {
+                response = await send({});
+            } catch {
+                throw e;
+            }
+            this.declined.set(modelKey, message.slice(0, 300));
+            return { response, asked: false };
+        }
+    }
+
+    /** A stream that failed before any part arrived, on a request that asked for the reasoning: the model may have
+     * refused the option only once it began to answer. The next request to it goes without the option (a refusal is
+     * recorded only when that answer's first part arrives, {@link firstPart}), and the error returned names
+     * {@link THINKING_DECLINED_MARKER}, so FI makes the call again. Any other failure is returned as it was. */
+    streamFailed(modelKey: string, asked: boolean, partsSeen: number, message: string, cancelled = false): string {
+        if (!asked) {
+            // The same failure without the option: it was not the option (a request that did not ask for the
+            // reasoning at all, `ask` false, leaves a pending mark as it is).
+            if (partsSeen === 0 && this.tentative.has(modelKey) && !cancelled && !this.isTransient(message)) {
+                this.tentative.delete(modelKey);
+            }
+            return message;
+        }
+        if (partsSeen > 0 || cancelled || this.isTransient(message)) return message;
+        this.tentative.set(modelKey, message.slice(0, 300));
+        return `${THINKING_DECLINED_MARKER} (${message.slice(0, 300)}); asking again without it`;
+    }
+
+    /** The first part of an answer arrived. On a request made without the option after an answer that asked for the
+     * reasoning failed before its first part, that failure was the model refusing the option: it is not asked again. */
+    firstPart(modelKey: string, asked: boolean): void {
+        const pending = this.tentative.get(modelKey);
+        if (!asked && pending !== undefined) {
+            this.declined.set(modelKey, pending);
+            this.tentative.delete(modelKey);
+        }
+    }
 }
 
 // One message is one line, and an FI that has not raised its reader's 64 KiB line limit drops the connection on a
