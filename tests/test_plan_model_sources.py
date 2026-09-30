@@ -493,3 +493,45 @@ def test_a_quest_frozen_before_the_sources_were_kept_is_judged_only_on_empty_ref
     frozen_protocol.freeze(eng.quest_root, protocol, approved_by="t", source="plan.md")
     gaps = eng._oracle_source_gaps({"literature": []}, protocol)
     assert len(gaps) == 1 and "'b'" in gaps[0] and "empty" in gaps[0]
+
+
+def test_a_derivation_that_starts_with_from_or_in_but_writes_a_relation_is_a_derivation() -> None:
+    for ref in ("derivation: from y' = -y, y(1) = e^-1 = 0.3679", "derivation: In the limit h -> 0, error = C h^4",
+                "derivation: Per unit mass, E = v^2/2 = 0.5", "derivation: Re 2000 flow, u = 1 m/s gives Cd = 0.4",
+                "derivation: with the June 2020 data, N = 120 + 30 = 150"):
+        assert _gaps(ref) == [], ref
+
+
+def test_a_recalled_value_written_as_a_derivation_is_not_one() -> None:
+    for ref in ("derivation: value 1.637e-08 from Butcher's textbook",
+                "derivation: recalled from Hairer's book; value is 1.637e-08",
+                "derivation: e = 1.637e-08, as the handbook gives it"):
+        assert _gaps(ref) != [], ref
+
+
+def test_a_second_label_right_after_the_first_is_read_too() -> None:
+    (gap,) = _gaps("[1][7]")
+    assert "[7]" in gap
+
+
+def test_a_research_stop_about_another_check_does_not_count_as_showing_the_checks_fi_added(tmp_path: Path) -> None:
+    eng, seen = _engine(tmp_path, _protocol(), research=True)
+    eng.quest_root.mkdir(parents=True, exist_ok=True)
+    plan.plan_path(eng.quest_root).write_text("x", encoding="utf-8")
+    eng._oracles_added_write({"oracles": ["added one"], "shown": False})
+    protocol = {"oracles": [{**GOOD_ORACLE, "reference": ""}, {**GOOD_ORACLE, "name": "added one"}]}
+    with pytest.raises(Paused):
+        eng._check_plan_sources({"literature": _literature()}, stop=True, protocol=protocol)
+    assert eng._oracles_added_read()["shown"] is False
+    protocol = {"oracles": [{**GOOD_ORACLE, "name": "added one", "reference": ""}]}
+    with pytest.raises(Paused):
+        eng._check_plan_sources({"literature": _literature()}, stop=True, protocol=protocol)
+    assert eng._oracles_added_read()["shown"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_of_existing_data_is_not_checked(tmp_path: Path) -> None:
+    eng, seen = _engine(tmp_path, _protocol(oracles=[{**GOOD_ORACLE, "reference": ""}]), research=True)
+    eng.config.engine.analyze_local_first = True
+    assert eng._check_plan_sources({"literature": _literature()}, stop=True, protocol=_protocol(
+        oracles=[{**GOOD_ORACLE, "reference": ""}])) == []

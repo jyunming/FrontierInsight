@@ -4150,8 +4150,10 @@ class Engine:
         # record carries the gap instead.
         if gaps and stop and self.config.rigor_profile == "research" and _plan.plan_path(self.quest_root).is_file():
             added = self._oracles_added_read()
-            if added and not added.get("shown"):
-                # This stop shows the plan, the checks the engine added included: the stop for them is not made again.
+            if (added and not added.get("shown") and added.get("oracles")
+                    and all(any(repr(str(n)) in why for why in gaps) for n in added["oracles"])):
+                # This stop names every check the engine added (each lacks a source), so the person reads them here:
+                # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
                 self._oracles_added_write({**added, "shown": True})
             self._pause_for_plan(unsourced=gaps)
         elif gaps and not self.__dict__.get("_said_unsourced"):
@@ -15463,7 +15465,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 

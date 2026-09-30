@@ -203,18 +203,25 @@ def sources_block(sources: list[dict[str, str]]) -> list[str]:
 
 
 # A citation label, alone or in a group or range: [2], [1, 3], [1-3], [W1]. Not an index such as y[10].
-_LABEL_RE = re.compile(r"(?<![\w\]\)])\[\s*(W?\d+(?:\s*[,–\-]\s*W?\d+)*)\s*\]", re.IGNORECASE)
+_LABEL_RE = re.compile(r"(?<![\w\)])\[\s*(W?\d+(?:\s*[,–\-]\s*W?\d+)*)\s*\]", re.IGNORECASE)
 # A DOI up to whitespace; parentheses inside it are kept (10.1016/0021-9991(76)90041-3), and a closing bracket or
 # punctuation that ends the sentence is not.
 _DOI_RE = re.compile(r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)?\b10\.\d{4,9}/\S+", re.IGNORECASE)
 _DERIVATION_RE = re.compile(r"^\s*(?:derivation|derived)\b[\s:.\-–—]*", re.IGNORECASE)
 # A source named by author and year (Butcher 2008, Hairer et al. (1993)): a source, not a derivation.
 _AUTHOR_YEAR_RE = re.compile(
-    r"\b[A-Z][A-Za-zÀ-ſ'\-]+(?: et al\.?| (?:and|&) [A-Z][A-Za-zÀ-ſ'\-]+)?,? \(?(?:1[6-9]\d\d|20\d\d)\)?")
-# Steps that only point elsewhere ("from the textbook", "see Butcher") are not steps.
+    r"\b(?!(?:January|February|March|April|May|June|July|August|September|October|November|December)\b)"
+    r"[A-Z][a-zÀ-ſ'\-]{2,}(?: et al\.?| (?:and|&) [A-Z][a-zÀ-ſ'\-]{2,})?,? \(?(?:1[6-9]\d\d|20\d\d)\b\)?")
+# Words that say a value was taken from somewhere rather than worked out.
+_RECALLED_RE = re.compile(
+    r"\b(?:text ?book|handbook|recalled|from memory|well[- ]known value|known value|the literature)\b"
+    r"|\b[A-Z][a-z]+[’']s (?:book|text|table|paper|monograph)\b",
+    re.IGNORECASE,
+)
+# Steps that only point elsewhere ("from Butcher 2008", "see the handbook") are not steps.
 _POINTER_RE = re.compile(r"^(?:from|see|in|as in|according to|following|per|cf\.?)\b", re.IGNORECASE)
-# A step of a derivation has something to compute with: a relation, an operator or a number.
-_MATH_RE = re.compile(r"[=<>≈≤≥+*/^]|\d")
+# A step of a derivation states a relation (y(1) = exp(-1) = 0.3679); a number alone can be the recalled value.
+_MATH_RE = re.compile(r"[=<>≈≤≥→]")
 # What a second implementation says about the code it does not share with the simulation: a negation about code.
 _NOT_SHARED_RE = re.compile(
     r"shares? no (?:code|function|module|routine|part)|(?:does not|doesn[’']t|do not|don[’']t) share\b"
@@ -289,12 +296,14 @@ def _derivation_steps(text: str) -> str | None:
 def _steps_problem(steps: str, sources: list[dict[str, str]]) -> str | None:
     """Why the steps of a derivation are not steps a reader can follow (too short, only a pointer elsewhere, nothing to
     compute with, or a source the quest did not retrieve), or ``None``."""
-    if len(steps) < _MIN_STEPS or _POINTER_RE.match(steps) or not _MATH_RE.search(steps):
-        return "does not write its steps"
+    if len(steps) < _MIN_STEPS or not _MATH_RE.search(steps):
+        return "does not write its steps (a relation such as y(1) = exp(-1) = 0.3679)"
     found, missing = _cites(steps, sources)
     if missing:
         return f"rests on {', '.join(missing)}, which this quest did not retrieve"
-    named = [m.group(0).strip() for m in _AUTHOR_YEAR_RE.finditer(steps)]
+    named = [m.group(0).strip().rstrip(")") for m in _AUTHOR_YEAR_RE.finditer(steps)]
+    if not found and (_RECALLED_RE.search(steps) or (_POINTER_RE.match(steps) and named)):
+        return "takes its value from a source this quest did not retrieve, not from steps written out"
     if named and not found:
         return f"rests on {', '.join(dict.fromkeys(named))}, which is not a source this quest retrieved"
     return None

@@ -347,7 +347,7 @@ async def test_a_one_script_quest_whose_oracle_value_the_script_printed_is_not_i
         if kind == "Experiment Design":
             body = json.loads(_FAKE_RESPONSES["design"])
             body["protocol"] = {"oracles": [{"name": "closed form", "check": "x", "expected": 1.0, "tolerance": 0.05,
-                                             "reference": "derivation: the smoke case's exact value is 1 by construction"}]}
+                                             "reference": "derivation: the smoke case's exact value = 1 by construction"}]}
             return json.dumps(body)
         if kind == "Implementation":
             return json.dumps({"code": ok_script, "deps": ["matplotlib"]})
