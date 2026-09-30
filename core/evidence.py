@@ -76,7 +76,9 @@ INFO: dict[str, dict[str, Any]] = {
         ),
         "known_blind_spots": [
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
-            "simulator that agrees with it.",
+            "simulator that agrees with it. The engine checks that each one says where it comes from (a derivation with "
+            "its steps, a source this quest retrieved, an equation of the plan's model, or a second implementation that "
+            "shares no code), not that the derivation or the reading of the source is right.",
             "A tolerance looser than the gap between the claimed method and a cruder one passes both; the record warns when the "
             "case names an order, and does not when it does not.",
         ],
@@ -262,12 +264,14 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
+    oracle_source_gaps: list[str] | None = None,
 ) -> dict[str, Any]:
     """The quest's evidence status, the ladder with what each level guarantees, and the gaps below the next level.
 
     ``state`` is the final (or paused) state; ``precision_missed`` names the probabilities whose pooled interval did not
     reach the protocol's target; ``statistics_gaps`` says what keeps the statistics from being adequate
-    (:func:`core.metric_spec.coverage_gaps`); ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
+    (:func:`core.metric_spec.coverage_gaps`); ``oracle_source_gaps`` names each oracle whose expected value has no
+    source a reader can check (:func:`core.oracle_check.source_gaps`), a gap below ``independently_validated``; ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
     ``run_manifest_check`` and ``rigor_profile`` as the run had them (a check that was turned off is a gap, not a pass), and
     ``evidence_gate`` / ``claim_check`` / ``design_audit`` as ``off`` or ``not_applicable`` when the run had them so."""
     settings = settings or {}
@@ -407,6 +411,12 @@ def assess(
             f"the oracle check did not measure {', '.join(repr(n) for n in unmeasured)}: FI never ran the simulation on "
             f"{'its case' if one else 'their cases'} and compared the {'value' if one else 'values'} "
             "(run the experiment again so FI checks them)"
+        )
+    if protocol is not None:
+        # An expected value nobody can trace (no reference, or a source this quest did not retrieve) is the plan's word
+        # only: a check that agrees with it shows the script agrees with the plan, not that either is right.
+        valid_gaps.extend(
+            f"{g}, so the value the check expects cannot be checked by a reader" for g in oracle_source_gaps or []
         )
     validated = matched and not valid_gaps
 

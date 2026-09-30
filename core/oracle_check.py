@@ -9,7 +9,8 @@ known, or a second implementation.
 
 The plan's protocol therefore declares its **oracles** (``protocol.oracles``: a ``name``, a ``check`` that says what is
 compared with what, a numeric ``expected`` and ``tolerance`` that the check is judged by, optionally a ``tolerance_mode``
-(``absolute``, the default, or ``relative``), a ``kind`` and the ``reference`` the expected value comes from), and the script is
+(``absolute``, the default, or ``relative``), a ``kind`` (one of :data:`KINDS`) and the ``reference`` the expected value
+comes from, which the engine reads: :func:`source_gaps`), and the script is
 written to *measure* them. When the environment variable ``FI_ORACLE`` is ``1`` the script does not run its sweep: it computes
 the value of each declared check on a small fast case, prints one line
 
@@ -130,6 +131,221 @@ def loose_tolerance(oracle: dict[str, Any]) -> str | None:
         f"({_fmt(limit / scale)}) is above {_fmt(middle)}: a first-order method would pass it too"
     )
 
+# --- what kind of check, and where its expected value comes from ---------------------------------------------------
+#
+# A check is only as good as its expected value, and the plan (a model) writes that value. A real quest expected an RK4
+# error of 1.637e-08 where the true one is 3.33241e-07, and nothing said where the number came from, so nobody could
+# tell whether the simulation or the check was wrong. Each oracle therefore names its kind (one of six) and a
+# ``reference`` the engine reads: a derivation with its steps written, a source this quest retrieved (by the [n] the
+# plan's literature uses, its title or its DOI), an equation of the plan's model (E1, E2...) whose own source counts, or,
+# for a second implementation, what code it does not share. A reference to anything else (a source recalled from
+# memory) is not a source a reader can check.
+
+#: The six kinds of check against a known answer, and how the plan says each in words.
+KINDS: dict[str, str] = {
+    "special_case": "a special or limiting case with a known answer",
+    "invariant": "a conserved quantity or other invariant",
+    "symmetry": "a symmetry or scaling law",
+    "second_implementation": "an independent second implementation",
+    "convergence_rate": "a convergence rate",
+    "published_value": "a published benchmark value",
+}
+# The names used before these six (the plan asked for them), and other words a model writes for one of the six.
+_KIND_WORDS = {
+    "closed_form": "special_case", "limiting_case": "special_case", "exact_small_case": "special_case",
+    "exact_solution": "special_case", "analytic": "special_case", "analytical": "special_case", "limit": "special_case",
+    "known_case": "special_case", "small_case": "special_case",
+    "conservation": "invariant", "conservation_law": "invariant", "conserved_quantity": "invariant",
+    "scaling": "symmetry", "symmetry_scaling": "symmetry", "scaling_law": "symmetry",
+    "independent_implementation": "second_implementation", "second_method": "second_implementation",
+    "convergence": "convergence_rate", "convergence_order": "convergence_rate", "order_of_accuracy": "convergence_rate",
+    "benchmark": "published_value", "published_benchmark": "published_value", "benchmark_value": "published_value",
+    "literature_value": "published_value",
+}
+
+
+def kind_of(oracle: dict[str, Any]) -> str | None:
+    """The oracle's kind as one of :data:`KINDS` (an older or looser name read as the kind it means); ``None`` when it
+    names none of them. The plan keeps what was written: only what the engine reads is mapped."""
+    word = re.sub(r"[\s\-/]+", "_", str(oracle.get("kind") or "").strip().lower()).strip("_")
+    if not word:
+        return None
+    return word if word in KINDS else _KIND_WORDS.get(word)
+
+
+def retrieved_sources(labelled: list[tuple[str, dict[str, Any]]]) -> list[dict[str, str]]:
+    """The quest's retrieved sources as the checks below match them: ``(label, metadata)`` pairs, the labels the plan's
+    literature list and the paper use ([1], [W1]), become ``{label, title, doi, url}``."""
+    out = []
+    for label, meta in labelled:
+        out.append({
+            "label": str(label), "title": " ".join(str(meta.get("title") or "").split()),
+            "doi": str(meta.get("doi") or "").strip().lower(), "url": str(meta.get("url") or "").strip().lower(),
+        })
+    return out
+
+
+_LABEL_RE = re.compile(r"\[(W?\d+)\]", re.IGNORECASE)
+_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s,;\]\)]+", re.IGNORECASE)
+_EQ_RE = re.compile(r"\bE(\d+)\b")
+_DERIVATION_RE = re.compile(r"^\s*(?:derivation|derived)\b[\s:.\-–—]*", re.IGNORECASE)
+# What a second implementation says about the code it does not share with the simulation.
+_NOT_SHARED_RE = re.compile(
+    r"shares? no\b|not share|no (?:shared|common) code|no code (?:in common|shared)|independent(?:ly)? of|"
+    r"separate(?:ly)? (?:from|of|written)|without (?:using|calling|reusing|sharing)|does not (?:use|call|reuse)|"
+    r"doesn't (?:use|call|reuse)|written from scratch|different (?:library|code|solver|method|algorithm)",
+    re.IGNORECASE,
+)
+# A derivation shorter than this names one; it does not write its steps.
+_MIN_STEPS = 20
+
+
+def _words(text: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _cites(text: str, sources: list[dict[str, str]]) -> tuple[list[str], list[str]]:
+    """``(what text cites that the quest retrieved, what it cites that it did not)``: a [n] label, a DOI, or the title of
+    a retrieved source (three words or more) written into it."""
+    labels = {s["label"].upper(): s for s in sources}
+    found, missing = [], []
+    for label in _LABEL_RE.findall(text):
+        (found if label.upper() in labels else missing).append(f"[{label.upper()}]")
+    dois = {s["doi"] for s in sources if s.get("doi")}
+    for doi in _DOI_RE.findall(text):
+        doi = doi.lower().rstrip(".")
+        (found if doi in dois else missing).append(doi)
+    flat = f" {_words(text)} "
+    for s in sources:
+        title = _words(s.get("title") or "")
+        if len(title.split()) >= 3 and f" {title} " in flat:
+            found.append(f"[{s['label']}]")
+    return list(dict.fromkeys(found)), list(dict.fromkeys(missing))
+
+
+def _equations(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    model = protocol.get("model") if isinstance(protocol, dict) else None
+    items = model.get("equations") if isinstance(model, dict) else None
+    return {str(e.get("id")).strip().upper(): e for e in items or [] if isinstance(e, dict) and str(e.get("id") or "").strip()}
+
+
+def _derivation_steps(text: str) -> str | None:
+    """The steps after a leading "derivation" (``None`` when the text does not start with one)."""
+    match = _DERIVATION_RE.match(text)
+    return text[match.end():].strip() if match else None
+
+
+def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str | None:
+    """Why an equation of the model has no source a reader can check, or ``None`` when it has one."""
+    eid = str(eq.get("id") or "?").strip()
+    source = " ".join(str(eq.get("source") or "").split())
+    if not source:
+        return (f"equation {eid} names no source: give the [n] of a source this quest retrieved, or `derivation` with "
+                "the steps written in `derivation`")
+    steps = _derivation_steps(source)
+    if steps is not None:
+        steps = " ".join(f"{steps} {eq.get('derivation') or ''}".split())
+        if len(steps) < _MIN_STEPS:
+            return f"equation {eid} is marked as a derivation, but its steps are not written (`derivation`)"
+        return None
+    found, missing = _cites(source, sources)
+    if missing:
+        return f"equation {eid} cites {', '.join(missing)}, which this quest did not retrieve"
+    if found:
+        return None
+    return (f"equation {eid} cites a source this quest did not retrieve (“{source[:80]}”): a source recalled "
+            "from memory does not count; cite a retrieved source by its [n], or write the derivation")
+
+
+def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
+                      sources: list[dict[str, str]]) -> str | None:
+    """Why the oracle's expected value has no source a reader can check, or ``None`` when it has one."""
+    name = str(oracle.get("name") or "?").strip()
+    ref = " ".join(str(oracle.get("reference") or "").split())
+    if not ref:
+        return (f"the check {name!r} does not say where its expected value comes from (its `reference` is empty)")
+    steps = _derivation_steps(ref)
+    if steps is not None:
+        if len(steps) < _MIN_STEPS:
+            return f"the check {name!r} names a derivation for its expected value, but does not write its steps"
+        return None
+    found, missing = _cites(ref, sources)
+    if missing:
+        return (f"the check {name!r} takes its expected value from {', '.join(missing)}, which this quest did not "
+                "retrieve")
+    equations = _equations(protocol)
+    cited = [f"E{n}" for n in dict.fromkeys(_EQ_RE.findall(ref))]
+    unknown = [e for e in cited if e not in equations]
+    if unknown:
+        return (f"the check {name!r} rests on equation {', '.join(unknown)}, which the model behind the numbers does not "
+                "list")
+    for eid in cited:
+        why = equation_problem(equations[eid], sources)
+        if why:
+            return f"the check {name!r} rests on equation {eid}, and {why}"
+    if cited or found:
+        return None
+    if kind_of(oracle) == "second_implementation" or re.search(r"(second|independent) (implementation|solver|method)", ref, re.I):
+        if _NOT_SHARED_RE.search(ref):
+            return None
+        return (f"the check {name!r} compares with a second implementation but does not say what code it does not share "
+                "with the simulation (write, for example, “shares no code with the simulation: it uses "
+                "scipy's solve_ivp”)")
+    return (f"the check {name!r} takes its expected value from a source this quest did not retrieve (“{ref[:80]}”)")
+
+
+#: How an expected value may be sourced, for the sentences a person reads when one is not.
+SOURCE_FORMS = (
+    "give its `reference` as `derivation: <the steps>`, a source from the plan's literature list by its number ([2]), an "
+    "equation of the model behind the numbers (E1), or, for a second implementation, what code it does not share"
+)
+
+
+def source_gaps(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> list[str]:
+    """One sentence per declared oracle whose expected value has no source a reader can check (empty when each has one)."""
+    return [why for why in (reference_problem(o, protocol, sources) for o in declared(protocol)) if why]
+
+
+def model_notes(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> list[str]:
+    """What the plan's *Checks already made* says about the model behind the numbers and the kinds of its checks: no
+    model, no equations, an equation with no role or no source a reader can check, a check whose kind is none of the six."""
+    if not isinstance(protocol, dict):
+        return []
+    notes: list[str] = []
+    model = protocol.get("model")
+    if not isinstance(model, dict):
+        notes.append(
+            "The plan does not say what model produces the numbers (`model` in the protocol: what it is, what it assumes, "
+            "where it holds, and its equations, each with its source). Without it nobody can tell whether a wrong number "
+            "comes from the model or from the code."
+        )
+    else:
+        if not str(model.get("summary") or "").strip():
+            notes.append("The model behind the numbers does not say, in a sentence, what model produces them (`summary`).")
+        equations = [e for e in model.get("equations") or [] if isinstance(e, dict)]
+        if not equations:
+            notes.append("The model behind the numbers lists no equation: write its core equations, each with its source.")
+        for eq in equations:
+            eid = str(eq.get("id") or "?")
+            if str(eq.get("role") or "") not in ("generates", "analyses"):
+                notes.append(
+                    f"Equation {eid} does not say its role: `generates` (it produces the data, in the simulation code) or "
+                    "`analyses` (it is used on the results, in the analysis code)."
+                )
+            why = equation_problem(eq, sources)
+            if why:
+                notes.append(why[0].upper() + why[1:] + ".")
+    for oracle in declared(protocol):
+        if kind_of(oracle) is None:
+            written = str(oracle.get("kind") or "").strip()
+            notes.append(
+                f"The check {str(oracle['name']).strip()!r} "
+                + (f"has the kind {written!r}, which is none of the six" if written else "does not say its kind")
+                + ": " + ", ".join(KINDS.values()) + "."
+            )
+    return notes
+
+
 def unjudgeable(oracles: list[dict[str, Any]]) -> list[str]:
     """The declared oracles the engine cannot judge, one sentence each: they fix no numeric ``expected`` and ``tolerance``."""
     out: list[str] = []
@@ -233,7 +449,8 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
     if not oracles:
         return [
             "the protocol declares no oracle, so nothing independent of the script's own numbers checks that they are right "
-            "(add `oracles` to the protocol: a closed form, a limiting case, an invariant, an exact small case)"
+            "(add `oracles` to the protocol: a special or limiting case with a known answer, an invariant, a symmetry or "
+            "scaling law, a convergence rate, a published benchmark value, or a second implementation)"
         ]
     if timed_out:
         return ["the script did not finish the oracle checks in time (run with FI_ORACLE=1: each check must be small and fast)"]

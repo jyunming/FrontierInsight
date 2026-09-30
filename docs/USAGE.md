@@ -17,7 +17,7 @@ commands:
 | `@fi /resume` | Shows a picker of every quest with a checkpoint; pick one to re-enter from the last completed node. | depends on how many nodes the prior run completed; usually 3–10 to finish from a partial run |
 | `@fi /resume <quest_id>` | Resumes that specific quest directly. | same — 3–10 to finish |
 | `@fi /resume <quest_id> --from <step>` | Does the quest again from `ideas`, `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review`; what that step and the later ones made is kept in `.fi/previous/<time>/`. With no step, lists the steps that quest reached. | the calls of that step and the ones after it |
-| `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the design) beside the chat to read and edit. | **0** |
+| `@fi /plan <quest_id>` | Opens the quest's `plan.md` (what the literature says, the gap, the model behind the numbers, the design) beside the chat to read and edit. | **0** |
 | `@fi /plan <quest_id> <what to change>` | Has the model rewrite `plan.md` as you ask; the old version is kept. Then `@fi /resume <quest_id>` runs it. | **1** |
 | `@fi /summarize <folder> [kind]` | Walks a folder of mixed content (papers, code, study notes, logs) and writes a structured markdown summary. Optional `kind` ∈ `{auto, literature, code, study, execution, mixed}` — defaults to `auto`. | **1** (single LLM call, content cap'd) |
 | `@fi /proposal <topic>` | Pre-quest planning doc. Writes both a markdown proposal and a companion YAML under `outputs/_drafts/`. Use to scope a research question BEFORE committing compute to a full quest. | **1** |
@@ -33,7 +33,7 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 
 1. **Ideas** — turns your topic into a research question.
 2. **Literature** — finds and reads the papers the question rests on.
-3. **Plan** — writes `plan.md`: the gap, the method and the numbers to be reported.
+3. **Plan** — writes `plan.md`: the gap, the model behind the numbers (what model produces them, its equations and where each comes from), the method and the numbers to be reported.
 4. **Design** — fixes the experiment: settings, runs per setting, what counts as a pass.
 5. **Write the code** — writes the script or scripts (one, or a simulation plus its analysis, see `execution.split_analysis`).
 6. **Run** — runs them; a crash goes back to a fix-and-run loop first. A topic that needs real data collects and loads it here instead.

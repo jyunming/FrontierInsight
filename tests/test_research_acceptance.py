@@ -30,8 +30,10 @@ METRIC = {"id": "final_size", "kind": "mean", "estimand": "mean final epidemic s
 RESEARCH_PROTOCOL = {
     **PROTOCOL,
     "oracles": [{
-        "name": "no_spread", "check": "with R0 = 0 nobody is infected", "expected": 0.0, "tolerance": 0.01,
-        "case": {"R0": 0.0}, "measure": "outbreak",
+        "name": "no_spread", "kind": "special_case", "check": "with R0 = 0 nobody is infected", "expected": 0.0,
+        "tolerance": 0.01, "case": {"R0": 0.0}, "measure": "outbreak",
+        "reference": "derivation: with R0 = 0 the infection rate beta = R0 * gamma is 0, so no susceptible is ever "
+                     "infected and the outbreak indicator is 0 in every run",
     }],
     "metrics": [METRIC],
     "contrasts": [{"metric": "final_size", "a": "R0=0.9", "b": "R0=3.0"}],
