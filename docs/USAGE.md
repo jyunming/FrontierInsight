@@ -754,15 +754,14 @@ precedence — first match wins, decision is logged to `run.log` as
    agent's default + reason and can override; with `pauses.clarify:
    auto` the default is accepted but the reason is still logged.
    An answer in your own words counts by its first word: *"yes, but
-   more than 100 lines"* is `yes`.
-3. When that answer is missing, blank, or does not start with yes /
-   no / uncertain: `simulatability` in `engine.clarify_overrides` (what
-   the setup questions wrote into your YAML;
-   `source=yaml_clarify_overrides`).
-4. Legacy fallback: when the new `simulatability` slot is absent
-   (older clarify prompts) the existing `empirical_vs_theoretical:
+   more than 100 lines"* is `yes` (*"no idea"* is not a `no`).
+3. Legacy fallback: when that answer is missing, blank, or does not
+   start with yes / no / uncertain, an `empirical_vs_theoretical:
    empirical` answer still triggers no-simulation
    (`source=clarify_empirical_legacy`).
+4. Otherwise `simulatability` in `engine.clarify_overrides` (what the
+   setup questions wrote into your YAML), also when clarify is off
+   (`source=yaml_clarify_overrides`).
 5. Otherwise: simulate (`source=default`).
 
 ### Survey mode (a history / overview — no experiment AND no dataset)

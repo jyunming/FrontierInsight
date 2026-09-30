@@ -249,12 +249,37 @@ def _rate_limit_sleep(seconds: float) -> None:
 
 
 def _retry_after_s(response: Any) -> float | None:
-    """The seconds a 429 answer's ``Retry-After`` asks for, when it gives a number of seconds."""
+    """The seconds a 429 answer's ``Retry-After`` asks for (a number of seconds or an HTTP date); None without one."""
     raw = str((getattr(response, "headers", None) or {}).get("retry-after") or "").strip()
-    try:
-        return max(0.0, float(raw)) if raw else None
-    except ValueError:
+    if not raw:
         return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+        try:
+            when = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when is None:
+            return None
+        import datetime as _dt
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_dt.timezone.utc)
+        seconds = (when - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
+    return max(0.0, seconds)
+
+
+def _budget_spent(response: Any) -> bool:
+    """A 429 that says the allowance is used up (``X-RateLimit-Remaining: 0``, as OpenAlex sends once its daily budget
+    is spent), not that the server is busy: asking again seconds later only spends more requests."""
+    raw = str((getattr(response, "headers", None) or {}).get("x-ratelimit-remaining") or "").strip()
+    try:
+        return raw != "" and float(raw) <= 0
+    except ValueError:
+        return False
 
 
 def _http_get_json(
@@ -263,7 +288,8 @@ def _http_get_json(
 ) -> dict | None:
     """GET ``url`` and parse its JSON; ``None`` on any failure, which is recorded against ``source``. A "too many
     requests" answer is asked again after a short wait (:data:`_RATE_LIMIT_WAITS_S`), unless the source asks for a
-    longer one than :data:`_RATE_LIMIT_MAX_WAIT_S`; only the last failure is recorded."""
+    longer one than :data:`_RATE_LIMIT_MAX_WAIT_S` or says its allowance is used up; only the last failure is
+    recorded."""
     waits = list(_RATE_LIMIT_WAITS_S)
     while True:
         try:
@@ -272,9 +298,9 @@ def _http_get_json(
                 if getattr(r, "status_code", None) == 429 and waits:
                     asked = _retry_after_s(r)
                     planned = waits.pop(0)
-                    if asked is None or asked <= _RATE_LIMIT_MAX_WAIT_S:
+                    if (asked is None or asked <= _RATE_LIMIT_MAX_WAIT_S) and not _budget_spent(r):
                         wait = planned if asked is None else max(asked, 0.5)
-                        _log.info("http GET %s: too many requests, asking again in %.0fs", url, wait)
+                        _log.info("http GET %s: too many requests, asking again in %.1fs", url, wait)
                         _rate_limit_sleep(wait)
                         continue
                 r.raise_for_status()

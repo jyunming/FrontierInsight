@@ -2677,8 +2677,9 @@ class Engine:
             return {}
         if mode == "off":
             self._log.info("[clarify] mode=off; skipping")
-            # When clarify is skipped, only the YAML flag can switch on
-            # no_simulation — there's no clarify answer to inspect.
+            # When clarify is skipped, only the YAML can switch on
+            # no_simulation — ``engine.no_simulation`` or a pinned
+            # ``clarify_overrides.simulatability``; there's no clarify answer.
             return {
                 "clarify_done": True,
                 **self._resolve_modes({}),
@@ -2839,6 +2840,10 @@ class Engine:
                 **modes,
             }
 
+        # Kept as the model wrote them, before the pinned answers below are filled in: a resume after
+        # ``--update`` changed a pin shows the new one. Removed when the quest finishes (not here: the node's
+        # result is saved only after it returns, and a crash in between would ask the model again).
+        self._keep_asked_clarify_questions(state["topic"], questions)
         # Interactive: pre-fill any user-pinned answers as the
         # default for each question's interrupt payload, so the human
         # sees the interview / --update value already in the slot and
@@ -2854,7 +2859,6 @@ class Engine:
         # (interrupt() returns the answer), so writing it here would re-create
         # the file the run loop just consumed and falsely re-show the form.
         # Interactive: pause the graph until the caller resumes with answers.
-        self._keep_asked_clarify_questions(state["topic"], questions)
         payload = self._pause_for_human(
             kind="clarify",
             interaction="answer",
@@ -2879,7 +2883,6 @@ class Engine:
         if not isinstance(answers, dict) or not answers:
             # Resumed with nothing (or a non-dict): the questions' own defaults are the answers.
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
-        self._drop_asked_clarify_questions()
         modes = self._resolve_modes(answers)
         self._log_topic_shape_mismatch(
             answers, no_simulation_resolved=modes["no_simulation_resolved"])
@@ -2972,20 +2975,20 @@ class Engine:
               implemented in this method — happens in the review prompt).
             An answer in the person's own words counts by its first word
             ("yes, but more than 100 lines" is "yes").
-        2b. The YAML's ``engine.clarify_overrides.simulatability`` (what the
-           interview wrote), when the clarify answer is missing, empty or
-           does not start with yes / no / uncertain.
         3. **Legacy fallback** — ``empirical_vs_theoretical == "empirical"``
            → True. Kept for back-compat with quests started before the
            ``simulatability`` slot existed (resumes from old
            checkpoints, hand-written YAML answers, etc.). New quests
            should always have the simulatability slot populated.
+        4. The YAML's ``engine.clarify_overrides.simulatability`` (what the
+           interview wrote), when the clarify answer is missing, empty or
+           does not start with yes / no / uncertain. Also with clarify off.
 
         Every resolution is logged at INFO level with the reason
         (when available) so the user can see exactly why the engine
         took whichever path it took — log line format:
         ``[clarify] simulatability resolved: NO_SIMULATION|SIMULATE
-        (source=yaml|clarify_simulatability|clarify_empirical_legacy|default,
+        (source=yaml|clarify_simulatability|clarify_empirical_legacy|yaml_clarify_overrides|default,
         reason='<quote>')``.
         """
         answers = answers or {}
@@ -3036,21 +3039,9 @@ class Engine:
             if decision:
                 self._log.warning(
                     "[clarify] the answer to \"can a simulation answer this?\" was %r, which does not start with "
-                    "one of {yes, no, uncertain}; using the setting in the YAML if there is one, else the "
-                    "empirical_vs_theoretical legacy check.", decision,
+                    "one of {yes, no, uncertain}; using the empirical_vs_theoretical legacy check, else the "
+                    "setting in the YAML.", decision,
                 )
-
-        # The YAML's own answer (engine.clarify_overrides.simulatability, which the interview writes): used when the
-        # clarify answer left the question open -- the person cleared the slot or wrote something with no yes / no
-        # in front, or their answer did not include this slot at all.
-        pinned = (getattr(self.config.engine, "clarify_overrides", None) or {}).get("simulatability")
-        pinned_decision = _leading_simulatability_word(_simulatability_answer(pinned)[0])
-        if pinned_decision:
-            self._log.info(
-                "[clarify] simulatability resolved: %s (source=yaml_clarify_overrides, decision=%s)",
-                "NO_SIMULATION" if pinned_decision == "no" else "SIMULATE", pinned_decision,
-            )
-            return pinned_decision == "no"
 
         # Legacy fallback for quests scoped before the simulatability
         # slot was added.
@@ -3063,6 +3054,19 @@ class Engine:
                 "simulatability slot missing')",
             )
             return True
+
+        # The YAML's own answer (engine.clarify_overrides.simulatability, which the interview writes): used when the
+        # clarify answer left the question open (the person cleared the slot, wrote something with no yes / no in
+        # front, or their answer did not include it) and the legacy check above did not decide. After that check, so
+        # the interview's own "yes" (written for every quest not set to no-simulation) never outranks a topic judgment.
+        pinned = (getattr(self.config.engine, "clarify_overrides", None) or {}).get("simulatability")
+        pinned_decision = _leading_simulatability_word(_simulatability_answer(pinned)[0])
+        if pinned_decision:
+            self._log.info(
+                "[clarify] simulatability resolved: %s (source=yaml_clarify_overrides, decision=%s)",
+                "NO_SIMULATION" if pinned_decision == "no" else "SIMULATE", pinned_decision,
+            )
+            return pinned_decision == "no"
 
         self._log.info(
             "[clarify] simulatability resolved: SIMULATE "
@@ -3743,16 +3747,21 @@ class Engine:
         # abstract had come back.
         not_fetched = [e for e in merged
                        if ((e.get("metadata") or {}).get("content_quality") or "snippet_only") == "snippet_only"]
-        with_abstract = sum(1 for e in not_fetched if _search_record_has_abstract(e.get("content") or ""))
+        scholarly = [e for e in not_fetched if _is_scholarly_record(e.get("metadata") or {})]
+        with_abstract = sum(1 for e in scholarly if _search_record_has_abstract(e.get("content") or ""))
         self._log.info(
             "[literature] full-text coverage: %d/%d sources have real full text (%d by OCR of a scanned PDF); "
-            "%d have the abstract only (from the search, nothing downloaded), %d only a title or a one-line snippet, "
-            "%d a download that held little more than the abstract, %d a preview or table of contents",
+            "%d papers have the abstract only (from the search, nothing downloaded), %d only a title or a one-line "
+            "snippet, %d a download that held little more than the abstract, %d a preview or table of contents, "
+            "%d web pages or notes from earlier quests",
             full_n, len(merged), sum(1 for e in merged if (e.get("metadata") or {}).get("full_text_ocr")),
-            with_abstract, len(not_fetched) - with_abstract,
+            with_abstract, len(scholarly) - with_abstract,
             qualities.get("abstract_only", 0), qualities.get("preview_only", 0),
+            len(not_fetched) - len(scholarly),
         )
-        why = _literature_text_gaps(merged, _sf_snapshot(self.quest_id))
+        why = _literature_text_gaps(
+            merged, _sf_snapshot(self.quest_id),
+            downloads_on=bool(self.config.knowledge.enabled and self.config.knowledge.try_fetch_full_text))
         if why:
             self._log.info("[literature] why the full text is missing: %s", why)
 
@@ -13884,12 +13893,6 @@ class Engine:
             # Not kept: the resume asks the model again, as before.
             self._log.debug("[clarify] could not keep the asked questions: %r", e)
 
-    def _drop_asked_clarify_questions(self) -> None:
-        try:
-            (self.fi_dir / self._CLARIFY_ASKED).unlink(missing_ok=True)
-        except OSError:
-            pass
-
     async def _await_with_heartbeat(
         self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0,
     ) -> Any:
@@ -17143,12 +17146,17 @@ def _simulatability_answer(sim: Any) -> tuple[str, str]:
     return str(sim).strip().lower(), reason
 
 
-_SIMULATABILITY_LEAD = re.compile(r"^\W*(yes|no|uncertain)\b", re.IGNORECASE)
+_SIMULATABILITY_LEAD = re.compile(
+    r"^\W*(yes|no|uncertain)\b"
+    # "No idea", "no clue", "no preference" are not a "no".
+    r"(?!\s+(?:idea|clue|opinion|preference|strong|comment|answer|sure|way\s+to\s+tell)\b)",
+    re.IGNORECASE,
+)
 
 
 def _leading_simulatability_word(text: str) -> str:
     """``yes`` / ``no`` / ``uncertain`` when ``text`` starts with that word ("Yes, but more than 100 lines" is "yes";
-    "not sure" is none of them), else ``""``."""
+    "not sure" and "no idea" are none of them), else ``""``."""
     m = _SIMULATABILITY_LEAD.match(str(text or ""))
     return m.group(1).lower() if m else ""
 
@@ -21014,31 +21022,32 @@ def _sf_snapshot(quest_id: str) -> dict[str, Any]:
         return {}
 
 
-#: The scholarly search sources (``core.knowledge._SOURCE_REGISTRY``); any other source in the failure ledger is a
-#: download (a free copy, a publisher PDF, a web page).
-_SEARCH_SOURCE_NAMES = frozenset({
-    "openalex", "arxiv", "crossref", "semantic_scholar", "pubmed", "core", "openaire", "doaj", "google_scholar",
-})
+#: Failure-ledger sources that are not about the literature: web search engines and figure images.
+_NOT_LITERATURE_FAILURES = frozenset({"duckduckgo", "brave", "wikimedia_commons", "image"})
 _FAILURE_WORDS = {
-    "http_429": "too many requests", "http_4xx": "refused", "http_5xx": "server error", "timeout": "timed out",
-    "network": "unreachable", "parse": "unreadable answer",
+    "http_429": "too many requests", "http_4xx": "refused", "http_5xx": "server error", "http_other": "failed",
+    "timeout": "timed out", "network": "unreachable", "parse": "unreadable answer", "error": "failed",
+    "paused_skip": "skipped while arXiv asked FI to wait", "throttled_skip": "skipped, arXiv's queue was too long",
+    "ocr_budget": "OCR time ran out", "fetch_crashed": "crashed", "budget_abandoned": "download time ran out",
 }
 
 
-def _literature_text_gaps(entries: list[dict[str, Any]], snap: dict[str, Any]) -> str:
-    """One plain line on why the kept sources lack their full text: how many are not free to read, how many are free
-    with no download link, how many free downloads failed (and where), which searches were refused or timed out, and
-    whether the OpenAlex key is missing. ``""`` when every scholarly source has its full text."""
+def _literature_text_gaps(
+    entries: list[dict[str, Any]], snap: dict[str, Any], *, downloads_on: bool = True,
+) -> str:
+    """One plain line on why the kept sources lack their full text: how many are not marked free to read, how many
+    are free with no download link, how many are free but FI did not get their text, the requests that failed (by
+    source, with their hosts), and a missing key. ``""`` when every scholarly source has its full text."""
     from core.knowledge import has_free_route, is_open_access
 
     paywalled = free_no_link = free_failed = 0
+    openalex_used = False
     for e in entries:
         md = e.get("metadata") or {}
+        openalex_used = openalex_used or md.get("source") in ("openalex", "arxiv")
         if (md.get("content_quality") or "snippet_only") == "full_text":
             continue
-        kind = str(md.get("kind") or "")
-        if (md.get("source") in ("local_paper", "user_supplied", "web_search")
-                or kind in _FI_INTERNAL_KINDS or kind.startswith("fi_")):
+        if not _is_scholarly_record(md):
             continue
         if not is_open_access(md):
             paywalled += 1
@@ -21046,44 +21055,49 @@ def _literature_text_gaps(entries: list[dict[str, Any]], snap: dict[str, Any]) -
             free_no_link += 1
         else:
             free_failed += 1
+    if not (paywalled or free_no_link or free_failed):
+        return ""
     parts: list[str] = []
     if paywalled:
-        parts.append(f"{paywalled} are not confirmed free to read (the publisher charges for them), so FI did not "
+        parts.append(f"{paywalled} are not marked free to read (most likely behind a subscription), so FI did not "
                      "download them and a person has to")
     if free_no_link:
         parts.append(f"{free_no_link} are marked free to read but the index gave no download link, only the "
                      "publisher's DOI page, which FI does not fetch")
-    examples = list(snap.get("examples") or [])
     if free_failed:
-        where: list[str] = []
-        for ex in examples:
-            if ex.get("source") in _SEARCH_SOURCE_NAMES or not ex.get("host"):
-                continue
-            word = _FAILURE_WORDS.get(str(ex.get("kind")), str(ex.get("kind") or "failed"))
-            if ex.get("status") and str(ex.get("kind", "")).startswith("http_"):
-                word += f" (HTTP {ex['status']})"
-            item = f"{ex['host']} {word}"
-            if item not in where:
-                where.append(item)
-        parts.append(f"{free_failed} are free to read but the download failed"
-                     + (f" ({', '.join(where[:4])})" if where else ""))
-    searches: list[str] = []
-    for source, kinds in (snap.get("by_source") or {}).items():
-        if source not in _SEARCH_SOURCE_NAMES:
+        parts.append(f"{free_failed} are free to read but FI did not get their text"
+                     + ("" if downloads_on else " (downloading is off: knowledge.try_fetch_full_text)"))
+    by_source = snap.get("by_source") or {}
+    hosts: dict[str, list[str]] = {}
+    for ex in snap.get("examples") or []:
+        host = str(ex.get("host") or "")
+        if host and host not in hosts.setdefault(str(ex.get("source")), []):
+            hosts[str(ex.get("source"))].append(host)
+    failed: list[str] = []
+    for source, kinds in by_source.items():
+        if source in _NOT_LITERATURE_FAILURES:
             continue
-        said = ", ".join(f"{n} {_FAILURE_WORDS.get(k, k)}" for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
-        searches.append(f"{source} ({said})")
-    if searches:
-        line = "searches that failed, so fewer records and free links to choose from: " + "; ".join(searches)
-        refused = {s for s, kinds in (snap.get("by_source") or {}).items() if "http_429" in kinds}
-        if "semantic_scholar" in refused and not os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip():
+        said = ", ".join(f"{n} {_FAILURE_WORDS.get(k, 'failed')}"
+                         for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
+        at = hosts.get(source) or []
+        failed.append(f"{source} {said}" + (f" at {', '.join(at[:3])}" if at else ""))
+    if failed:
+        line = "requests that failed while searching and downloading: " + "; ".join(failed)
+        if ("http_429" in (by_source.get("semantic_scholar") or {})
+                and not os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip()):
             line += " (no SEMANTIC_SCHOLAR_API_KEY is set; without one Semantic Scholar shares a busy public limit)"
         parts.append(line)
-    if not os.environ.get("OPENALEX_API_KEY", "").strip():
+    if (openalex_used or "openalex" in by_source) and not os.environ.get("OPENALEX_API_KEY", "").strip():
         parts.append("no OPENALEX_API_KEY is set, so OpenAlex allows only about 100 searches a day (docs/INSTALL.md)")
-    if not (paywalled or free_no_link or free_failed):
-        return ""
     return "; ".join(parts)
+
+
+def _is_scholarly_record(md: dict[str, Any]) -> bool:
+    """A record from a scholarly index (a paper or a book), not a web page, a file the person gave, or FI's own notes
+    from earlier quests."""
+    kind = str(md.get("kind") or "")
+    return not (md.get("source") in ("local_paper", "user_supplied", "web_search")
+                or kind in _FI_INTERNAL_KINDS or kind.startswith("fi_"))
 
 
 def _literature_entry(

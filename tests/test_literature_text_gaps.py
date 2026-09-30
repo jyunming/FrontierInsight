@@ -114,9 +114,10 @@ def test_the_log_says_why_the_text_is_missing(client, tmp_path: Path, monkeypatc
                   url="https://api.semanticscholar.org/graph/v1/paper/search")
     _in_quest(sf.record_failure, "crossref", "http_429", status=429, url="https://api.crossref.org/works")
     why = _literature_text_gaps(entries, sf.snapshot("q-lit"))
-    assert "1 are not confirmed free to read" in why
+    assert "1 are not marked free to read (most likely behind a subscription)" in why
     assert "1 are marked free to read but the index gave no download link" in why
-    assert "semantic_scholar (4 too many requests)" in why and "crossref (1 too many requests)" in why
+    assert "semantic_scholar 4 too many requests at api.semanticscholar.org" in why
+    assert "crossref 1 too many requests at api.crossref.org" in why
     assert "no SEMANTIC_SCHOLAR_API_KEY is set" in why
     assert "no OPENALEX_API_KEY is set" in why
 
@@ -127,9 +128,22 @@ def test_a_failed_free_download_names_the_host(client, tmp_path: Path, monkeypat
         "source": "openalex", "title": "T", "open_access": True, "free_url": "https://www.mdpi.com/x.pdf"})
     _in_quest(sf.record_failure, "oa_copy", "http_4xx", status=403, url="https://www.mdpi.com/x.pdf")
     _in_quest(sf.record_failure, "oa_copy", "timeout", url="https://www.osti.gov/biblio/1")
+    _in_quest(sf.record_failure, "duckduckgo", "http_429", status=429, url="https://html.duckduckgo.com/html")
     why = _literature_text_gaps([entry], sf.snapshot("q-lit"))
-    assert "1 are free to read but the download failed (www.mdpi.com refused (HTTP 403), www.osti.gov timed out)" in why
+    assert "1 are free to read but FI did not get their text;" in why
+    assert "oa_copy 1 refused, 1 timed out at www.mdpi.com, www.osti.gov" in why
+    assert "duckduckgo" not in why, "a web search engine's failure is not about the papers"
     assert "OPENALEX_API_KEY" not in why
+    off = _literature_text_gaps([entry], sf.snapshot("q-lit"), downloads_on=False)
+    assert "downloading is off: knowledge.try_fetch_full_text" in off
+
+
+def test_the_openalex_key_is_mentioned_only_when_openalex_was_used(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("OPENALEX_API_KEY", raising=False)
+    crossref_only = _literature_entry(tmp_path, "T\n\n" + _ABSTRACT, {"source": "crossref", "title": "T"})
+    assert "OPENALEX_API_KEY" not in _literature_text_gaps([crossref_only], {})
+    openalex = _literature_entry(tmp_path, "T\n\n" + _ABSTRACT, {"source": "openalex", "title": "T"})
+    assert "no OPENALEX_API_KEY is set" in _literature_text_gaps([openalex], {})
 
 
 def test_nothing_to_explain_when_every_source_has_its_text(tmp_path: Path) -> None:
@@ -159,6 +173,36 @@ def test_a_search_out_of_its_daily_budget_is_not_waited_for(client, monkeypatch)
     assert sf.snapshot("q-lit")["by_source"] == {"openalex": {"http_429": 1}}
 
 
+def test_a_spent_allowance_is_not_asked_again(client, monkeypatch) -> None:
+    waited: list[float] = []
+    monkeypatch.setattr(kn, "_rate_limit_sleep", waited.append)
+    client.answers = [(429, {}, {"X-RateLimit-Remaining": "0"})]
+    assert _in_quest(kn._http_get_json, "https://api.openalex.org/works", {}, 5.0, source="openalex") is None
+    assert client.calls == 1 and waited == []
+
+
+def test_retry_after_forms(client, monkeypatch) -> None:
+    from email.utils import format_datetime
+    import datetime as dt
+
+    waited: list[float] = []
+    monkeypatch.setattr(kn, "_rate_limit_sleep", waited.append)
+    later = format_datetime(dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=2), usegmt=True)
+    client.answers = [(429, {}, {"Retry-After": later})]
+    assert _in_quest(kn._http_get_json, "https://api.crossref.org/works", {}, 5.0, source="crossref") is None
+    assert client.calls == 1 and waited == [], "an HTTP-date two hours away is not waited for"
+    client.calls = 0
+    client.answers = [(429, {}, {"Retry-After": "0"}), (200, {"ok": 1}, {})]
+    assert _in_quest(kn._http_get_json, "https://api.crossref.org/works", {}, 5.0, source="crossref") == {"ok": 1}
+    assert waited == [0.5]
+
+
+def test_other_errors_are_not_retried(client) -> None:
+    client.answers = [(503, {}, {})]
+    assert _in_quest(kn._http_get_json, "https://api.crossref.org/works", {}, 5.0, source="crossref") is None
+    assert client.calls == 1
+
+
 def test_retries_run_out(client, monkeypatch) -> None:
     client.answers = [(429, {}, {})] * (len(kn._RATE_LIMIT_WAITS_S) + 1)
     assert _in_quest(kn._http_get_json, "https://api.crossref.org/works", {}, 5.0, source="crossref") is None
@@ -181,11 +225,12 @@ def test_the_env_file_in_fis_folder_is_read_when_run_from_elsewhere(tmp_path: Pa
     for name in ("OPENALEX_API_KEY", "FI_TEST_BOTH", "FI_TEST_REAL"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("FI_TEST_REAL", "real")
+    (work / ".env").write_text("FI_TEST_BOTH=from-work\nOPENALEX_API_KEY=\n", encoding="utf-8")
     (fi / ".env").write_text("OPENALEX_API_KEY=from-fi\nFI_TEST_BOTH=from-fi\nFI_TEST_REAL=from-fi\n", encoding="utf-8")
     try:
         launch._load_dotenvs()
         import os
-        assert os.environ["OPENALEX_API_KEY"] == "from-fi"
+        assert os.environ["OPENALEX_API_KEY"] == "from-fi", "a blank line in the working folder's .env sets nothing"
         assert os.environ["FI_TEST_BOTH"] == "from-work", "the working folder's .env wins over FI's"
         assert os.environ["FI_TEST_REAL"] == "real", "a real environment variable wins over both"
     finally:

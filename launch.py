@@ -6092,7 +6092,9 @@ def _load_dotenv(path: str = ".env") -> None:
             if key.startswith("export "):
                 key = key[len("export "):].strip()
             val = val.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            # A blank line (``OPENALEX_API_KEY=``) sets nothing, so a later ``.env`` that has the key still counts;
+            # a variable already set to something non-blank wins.
+            if key and val and not os.environ.get(key, "").strip():
                 os.environ[key] = val
     except OSError:
         return

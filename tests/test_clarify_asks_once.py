@@ -89,7 +89,6 @@ async def test_answering_in_process_asks_the_model_once(tmp_path: Path, model) -
     assert shown[0]["title"]["suggestions"][1] == "Call 1 title B"
     assert model["state"]["title"] == "Call 1 title B"
     assert model["state"]["clarify_questions"]["title"]["suggestions"][0] == "Call 1 title A"
-    assert not (engine.fi_dir / Engine._CLARIFY_ASKED).exists(), "kept only while the questions wait"
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "no second model call" in log
 
@@ -98,13 +97,16 @@ async def test_answering_after_a_pause_asks_the_model_once(tmp_path: Path, model
     """The quest stops at the questions (no one there to answer); the answers are written into
     ``.fi/clarify_answer.json`` (the web page or by hand) and a resume in a new process takes them."""
     monkeypatch.delenv("FI_WEB_ANSWERS", raising=False)
-    cfg = _cfg(tmp_path)
+    cfg = _cfg(tmp_path, engine=EngineConfig(clarify_overrides={"budget": "one afternoon"}))
     first = Engine(cfg)
     await asyncio.wait_for(first.run(), timeout=90)
     assert "state" not in model, "an unanswered 'ask' stops and waits"
     asked = json.loads((first.fi_dir / "clarify_questions.json").read_text(encoding="utf-8"))
     assert asked["title"]["suggestions"][2] == "Call 1 title C"
-    assert (first.fi_dir / Engine._CLARIFY_ASKED).is_file()
+    assert asked["budget"]["default"] == "one afternoon", "the form shows the YAML's pinned answer"
+    kept = json.loads((first.fi_dir / Engine._CLARIFY_ASKED).read_text(encoding="utf-8"))["questions"]
+    assert kept["budget"]["default"] == "seconds on CPU", (
+        "kept as the model wrote them, so a pin changed by --update while the quest waits is the one shown next")
 
     (first.fi_dir / "clarify_answer.json").write_text(json.dumps({"title": "3"}), encoding="utf-8")
     resumed = Engine(cfg, resume_quest_id=first.quest_id)
@@ -113,7 +115,6 @@ async def test_answering_after_a_pause_asks_the_model_once(tmp_path: Path, model
                                timeout=90)
     assert model["clarify_calls"] == 1
     assert model["state"]["title"] == "Call 1 title C"
-    assert not (resumed.fi_dir / Engine._CLARIFY_ASKED).exists()
 
 
 async def test_questions_kept_for_another_topic_are_not_reused(tmp_path: Path, model) -> None:
@@ -161,9 +162,16 @@ def test_an_answer_in_the_persons_own_words_counts_by_its_first_word(tmp_path: P
 
 
 def test_not_sure_is_not_read_as_no(tmp_path: Path) -> None:
-    no_sim, lines = _resolve(_engine(tmp_path), {"simulatability": "not sure"})
-    assert no_sim is False
-    assert any("does not start with" in m for m in lines)
+    for answer in ("not sure", "No idea", "no clue really", "No preference."):
+        no_sim, lines = _resolve(_engine(tmp_path), {"simulatability": answer})
+        assert no_sim is False, answer
+        assert any("does not start with" in m for m in lines), answer
+    assert _resolve(_engine(tmp_path), {"simulatability": "No."})[0] is True
+
+
+def test_with_clarify_off_a_pinned_no_is_honoured(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, clarify_overrides={"simulatability": "no"})
+    assert engine._resolve_modes({})["no_simulation_resolved"] is True
 
 
 def test_the_yaml_answer_is_used_when_the_clarify_answer_leaves_it_open(tmp_path: Path) -> None:
@@ -176,9 +184,11 @@ def test_the_yaml_answer_is_used_when_the_clarify_answer_leaves_it_open(tmp_path
         assert any("source=yaml_clarify_overrides" in m for m in lines), (answers, lines)
     # PyYAML reads an unquoted `no` as False.
     assert _resolve(_engine(tmp_path, clarify_overrides={"simulatability": False}), {})[0] is True
-    # The YAML's "yes" wins over the legacy empirical check when the person's answer says nothing usable.
+    # The interview writes "yes" for every quest not set to no-simulation: it never outranks the topic judgment of
+    # the legacy empirical check.
     pinned_yes = _engine(tmp_path, clarify_overrides={"simulatability": "yes"})
-    assert _resolve(pinned_yes, {"simulatability": "hmm", "empirical_vs_theoretical": "empirical"})[0] is False
+    assert _resolve(pinned_yes, {"simulatability": "hmm", "empirical_vs_theoretical": "empirical"})[0] is True
+    assert _resolve(pinned_yes, {"simulatability": "hmm", "empirical_vs_theoretical": "theoretical"})[0] is False
     # The person's own yes / no still wins over the YAML.
     assert _resolve(pinned_yes, {"simulatability": "no"})[0] is True
 
