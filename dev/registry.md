@@ -224,6 +224,12 @@ same PR that adds, splits or renames one.
 - `vscode-frontier-insight/src/bridge.ts`, `persistent-bridge.ts` — the `vscode.lm.*` bridge a spawned `launch.py`
   talks to over a local socket; `lm_done` carries `served_model` (`lm-messages.ts` `servedModel`), which
   `core/vscode_bridge.py` hands to the call's own `LAST_SERVED` and `core/provider.py` records as `LAST_CALL`.
+- `vscode-frontier-insight/src/roots.ts`, `roots-config.ts` — where FI is and which folder a command works in:
+  `locateFi` (setting → an open folder with `launch.py` + `core/engine.py` → the configured Python's
+  `find_spec("launch")`, never importing it → the folder picked once, kept in `~/.frontier-insight/fi_location.json`
+  → one folder picker), `chooseWorkFolder` (several folders open: the named YAML's folder → the active editor's →
+  the first that is not FI's checkout), and `rootsForCommand`, which every command awaits (a found folder is kept
+  for the window's session; a cancelled picker asks again on the next command).
 - `vscode-frontier-insight/src/interview-core.ts`, `interview.ts` — the VS Code interview (mirrors `core/interview.py`
   question-for-question; keep both in sync when the question set changes).
 - `vscode-frontier-insight/scripts/normalize-vsix.js` — run by `npm run package` after vsce: sorts the zip entries,
@@ -235,7 +241,8 @@ same PR that adds, splits or renames one.
 
 - `core/platform.py` — `--doctor`'s machine-capability detection.
 - `core/bridge_path.py`, `vscode-frontier-insight/src/bridge-path.ts` — the canonical persistent-bridge socket path,
-  kept identical on both sides.
+  kept identical on both sides. A second VS Code window open at the same time binds `<path>-<pid>` instead
+  (`persistent-bridge.ts` `listen`), and its `/update` / `/generate` terminals are handed that address.
 
 ## Prompts (`agents/*.md`)
 

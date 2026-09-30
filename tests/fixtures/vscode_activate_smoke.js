@@ -18,6 +18,7 @@ const deep = () =>
 
 const participants = [];
 const opened = [];
+let out_picker_calls = 0;
 const vscodeMock = new Proxy(
   {
     __esModule: true,
@@ -34,6 +35,14 @@ const vscodeMock = new Proxy(
       showWarningMessage: async () => undefined,
       showErrorMessage: async () => undefined,
       showQuickPick: async (items) => items[0],
+      // The "Where is FrontierInsight?" folder picker: answers `arg.picked`, or is cancelled.
+      showOpenDialog: async () => {
+        out_picker_calls += 1;
+        return arg.picked ? [{ fsPath: arg.picked }] : undefined;
+      },
+      activeTextEditor: undefined,
+      // One empty editor group: where plan.md and the quest map open.
+      tabGroups: { all: [], activeTabGroup: { viewColumn: 1, activeTab: undefined, tabs: [] } },
       showTextDocument: async (doc) => {
         opened.push(doc.path);
       },
@@ -68,7 +77,7 @@ Module._load = function (request, ...rest) {
   const context = { subscriptions: [] };
   ext.activate(context);
   const out = { participant: participants[0] && participants[0].id, subscriptions: context.subscriptions.length, replies: {} };
-  for (const cmd of arg.commands) {
+  const send = async (cmd) => {
     const said = [];
     const stream = new Proxy({ markdown: (m) => said.push(String(m)) }, { get: (t, p) => (p in t ? t[p] : noop) });
     await participants[0].fn(
@@ -78,8 +87,15 @@ Module._load = function (request, ...rest) {
       { isCancellationRequested: false, onCancellationRequested: noop },
     );
     out.replies[cmd] = said.join(" ");
+  };
+  if (arg.concurrent) {
+    // All at once, as when several chat commands are sent before the first is answered.
+    await Promise.all(arg.commands.map(send));
+  } else {
+    for (const cmd of arg.commands) await send(cmd);
   }
   out.opened = opened;
+  out.pickerCalls = out_picker_calls;
   ext.deactivate();
   process.stdout.write(JSON.stringify(out));
   process.exit(0);

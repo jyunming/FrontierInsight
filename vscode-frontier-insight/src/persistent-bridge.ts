@@ -73,6 +73,29 @@ export class PersistentBridge {
      * exit so the unlink dance is POSIX-only.
      */
     async listen(): Promise<string> {
+        try {
+            return await this.bindAt(persistentBridgePath());
+        } catch (err) {
+            // Another VS Code window (a second study folder open at the same
+            // time) already holds the per-user address. This window takes one
+            // of its own, so the `/update` and `/generate` it starts use this
+            // window's models and keep working when the other window closes.
+            const own = persistentBridgePath(String(process.pid));
+            this.outputChannel.appendLine(
+                `[fi] the shared bridge address is taken (${err instanceof Error ? err.message : String(err)}); ` +
+                `this window uses its own: ${own}`,
+            );
+            return await this.bindAt(own);
+        }
+    }
+
+    /** The address this window's bridge is listening on, or undefined when it is not listening. */
+    get boundPath(): string | undefined {
+        return this.ownsSocket ? this.path : undefined;
+    }
+
+    private async bindAt(address: string): Promise<string> {
+        this.path = address;
         if (process.platform !== "win32") {
             // POSIX: clear stale socket from a previous crash, but
             // ONLY if it's stale. ``stat.isSocket()`` returns true for
@@ -96,11 +119,8 @@ export class PersistentBridge {
             //      maliciously) must NOT be deleted.
             const liveness = await this.probeSocket(this.path);
             if (liveness === "live") {
-                const msg =
-                    `Another VSCode window already owns the FI bridge socket at ${this.path}. ` +
-                    `Close the other window or use a different VSCODE per-user identity.`;
-                this.outputChannel.appendLine(`[fi] ${msg}`);
-                throw new Error(msg);
+                // Never taken over: ``listen()`` binds this window an address of its own instead.
+                throw new Error(`another VS Code window is listening at ${this.path}`);
             }
             if (liveness === "foreign") {
                 const msg =
@@ -132,9 +152,14 @@ export class PersistentBridge {
             }
         }
         return new Promise((resolve, reject) => {
-            this.server = net.createServer((socket) => this.onClient(socket));
-            this.server.on("error", reject);
-            this.server.listen(this.path, () => {
+            const server = net.createServer((socket) => this.onClient(socket));
+            this.server = server;
+            server.on("error", (e) => {
+                // Windows: a pipe another window holds fails here (EADDRINUSE).
+                if (!this.ownsSocket && this.server === server) this.server = null;
+                reject(e);
+            });
+            server.listen(this.path, () => {
                 this.ownsSocket = true;
                 this.outputChannel.appendLine(
                     `[fi] persistent bridge listening at ${this.path}`,

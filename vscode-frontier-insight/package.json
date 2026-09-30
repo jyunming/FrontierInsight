@@ -190,12 +190,12 @@
         "frontierInsight.repoPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to the FrontierInsight folder (the one containing launch.py). Leave empty when the open workspace IS that folder; otherwise set it, and quests run in your workspace folder instead."
+          "description": "Leave empty: FrontierInsight is found by itself (the open folder when it is the FrontierInsight folder, else the Python above when FI is pip-installed in it, else the folder you picked once, remembered in ~/.frontier-insight/fi_location.json). Set it only to force one FrontierInsight folder (the one containing launch.py). Quests run in your open folder (or frontierInsight.workingDir), not here."
         },
         "frontierInsight.workingDir": {
           "type": "string",
           "default": "",
-          "description": "The folder quests run in: your YAML, example files and the relative outputs/ all mean this folder. Defaults to the open workspace folder (or the FrontierInsight folder when that is the workspace). Relative values are resolved against the workspace."
+          "description": "The folder quests run in: your YAML, example files and the relative outputs/ all mean this folder. Defaults to the open folder (or the FrontierInsight folder when that is the one open). With several folders open: the folder holding the YAML the command names, else the folder of the file you are editing, else the first that is not the FrontierInsight folder. Relative values are resolved against that folder."
         },
         "frontierInsight.outputDir": {
           "type": "string",

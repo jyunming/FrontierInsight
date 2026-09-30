@@ -11,7 +11,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { rootsFromConfig } from "./roots-config";
+import { rootsForCommand } from "./roots-config";
 import { runLaunch } from "./trace";
 
 async function pickQuest(outputRoot: string): Promise<string | undefined> {
@@ -121,7 +121,7 @@ const openMaps = new Map<string, { panel: vscode.WebviewPanel; refresh: () => Pr
 
 export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?: string): Promise<void> {
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         void vscode.window.showErrorMessage(roots.error);
         return;

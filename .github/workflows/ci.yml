@@ -156,6 +156,24 @@ jobs:
       - name: Compile TypeScript
         run: npm run compile
 
+      # The tests that drive the compiled extension in Node (finding FI, the work folder, activation). The pytest
+      # tiers have no compiled out/, so there they skip; here a skip is a failure.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Run the tests that drive the compiled extension
+        working-directory: .
+        shell: bash
+        run: |
+          set -eo pipefail
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+          python -m pytest -q -rs -p no:cacheprovider tests/test_vscode_roots.py tests/test_vscode_activation.py | tee "$RUNNER_TEMP/ext-tests.txt"
+          if grep -qE "[0-9]+ (skipped|error|errors|failed)" "$RUNNER_TEMP/ext-tests.txt"; then
+            echo "::error::extension tests were skipped or failed"; exit 1
+          fi
+
       # Package (vsce + the normalizer, so a broken normalizer fails here, before merge) and compare the files packed
       # inside with the committed manifest. A difference is a notice: after a merge, main's rebuild workflow builds the
       # .vsix from the sources and commits it (it also runs when a commit changes the .vsix or its manifest directly).

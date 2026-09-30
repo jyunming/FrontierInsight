@@ -10,7 +10,7 @@
 import { spawn } from "child_process";
 import * as path from "path";
 import * as vscode from "vscode";
-import { rootsFromConfig } from "./roots-config";
+import { rootsForCommand } from "./roots-config";
 import { parseTraceArgs } from "./trace-args";
 
 interface RunResult {
@@ -59,7 +59,7 @@ export async function runTrace(
         return;
     }
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error + "\n");
         return;
@@ -104,9 +104,9 @@ interface LaunchContext {
     outputRoot: string;
 }
 
-function launchContext(stream: vscode.ChatResponseStream): LaunchContext | undefined {
+async function launchContext(stream: vscode.ChatResponseStream): Promise<LaunchContext | undefined> {
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error + "\n");
         return undefined;
@@ -139,7 +139,7 @@ export async function runWhy(
         );
         return;
     }
-    const ctx = launchContext(stream);
+    const ctx = await launchContext(stream);
     if (!ctx || token.isCancellationRequested) return;
     stream.progress(`Reading why ${parsed.questId} did what it did…`);
     const args = ["--why", parsed.questId, ...(about ? [about] : []), "--output-root", ctx.outputRoot];
@@ -169,7 +169,7 @@ export async function runRename(
     const typed = words.slice(1).join(" ");
     const quoted = /^(?:"(.*)"|'(.*)'|“(.*)”)$/.exec(typed);
     const title = quoted ? (quoted[1] ?? quoted[2] ?? quoted[3] ?? "") : typed;
-    const ctx = launchContext(stream);
+    const ctx = await launchContext(stream);
     if (!ctx || token.isCancellationRequested) return;
     stream.progress(`Renaming ${words[0]}…`);
     const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, [
@@ -191,7 +191,7 @@ export async function runRerunSteps(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const ctx = launchContext(stream);
+    const ctx = await launchContext(stream);
     if (!ctx || token.isCancellationRequested) return;
     stream.progress(`Reading which steps ${questId} reached…`);
     const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, ["--resume", questId, "--from", "--output-root", ctx.outputRoot]);
@@ -220,7 +220,7 @@ export async function runFollow(
         stream.markdown("Which quest? Example: `@fi /follow 1790003131-my-quest` (add `--detail checks` for more).\n");
         return;
     }
-    const ctx = launchContext(stream);
+    const ctx = await launchContext(stream);
     if (!ctx) return;
     // The plain step-by-step view unless more was asked for.
     const detail = /--detail/.test(promptArgs) ? parsed.detail : "summary";
