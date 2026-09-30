@@ -672,7 +672,7 @@ async function runResume(
             );
             try {
                 const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
-                await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn() });
+                await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn(doc.uri) });
             } catch {
                 stream.markdown(`(Could not open it in the editor; open \`${planPath}\` yourself.)\n`);
             }
@@ -1236,7 +1236,7 @@ async function runQuest(
         );
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
-            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn() });
+            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn(doc.uri) });
         } catch { /* the message above names the command that opens it */ }
     } else if (exitCode === 0) {
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
