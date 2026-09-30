@@ -281,7 +281,8 @@ _PHASED_GAPS = {
     "confirm_failed": "the confirm run of the frozen design produced no result, so nothing is confirmed",
     "confirm_reused": ("the frozen design was changed or run again after its confirm results were seen, so the numbers "
                        "are no longer from one untouched confirm run"),
-    "compromised": "the data held back for the confirm run could not be kept apart from exploration, so nothing is confirmed",
+    "compromised": ("the confirm run could not be kept apart from exploration (its held-back data, its new seeds or its "
+                    "result), so nothing is confirmed"),
 }
 
 

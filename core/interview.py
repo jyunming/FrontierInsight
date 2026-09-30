@@ -301,6 +301,17 @@ PAUSE_FOR_PLAN_CHOICES: tuple[Choice, ...] = (
 )
 
 
+# engine.phased (core/phased.py). Mirrored in vscode-frontier-insight/src/interview.ts.
+PHASED_CHOICES: tuple[Choice, ...] = (
+    Choice(False, "No (default)",
+           "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs."),
+    Choice(True, "Yes: explore first, then confirm once",
+           "The model may try designs and look at results first. Then the design is frozen and run once more on data "
+           "or seeds it never saw: a part of your data file held back before it starts (a CSV/TSV in inputs/data/ "
+           "with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready."),
+)
+
+
 RESULT_USE_CHOICES: tuple[Choice, ...] = (
     Choice("research", "Research (default)",
            "Checked the way a study must be before its result can be trusted: the plan waits for you to read it, "
@@ -747,6 +758,18 @@ QUESTIONS: tuple[Question, ...] = (
         choices=PAUSE_FOR_PLAN_CHOICES,
         default=False,
         mid_quest_editable=True,
+        tier=3,
+    ),
+    Question(
+        id="phased",
+        label="Confirm the result on data it never saw",
+        prompt="Let the model try designs and look at results first, then freeze the design and run it once more on data or seeds it never saw? Only that last run's numbers can be publication-ready.",
+        kind="single",
+        choices=PHASED_CHOICES,
+        default=False,
+        # Fixed for the quest: which data is held back is decided before anything runs, and turning it off midway would
+        # leave the held-back part of the data where the confirm run reads it.
+        mid_quest_editable=False,
         tier=3,
     ),
     Question(
@@ -1522,6 +1545,9 @@ class InterviewAnswers:
     supply_papers: bool = True
     # Stop once plan.md is written, to read and edit it → ``pauses.plan``.
     pause_for_plan: bool = False
+    # Explore first, then confirm once on data or seeds never seen → ``engine.phased`` (core/phased.py); off writes
+    # nothing. Must stay in sync with vscode-frontier-insight/src/interview-core.ts.
+    phased: bool = False
     # ``rigor_profile`` at the top of the config: "default" (writes nothing) or "research". Must stay in sync with
     # vscode-frontier-insight/src/interview-core.ts. When ``result_use`` is set it decides this (see
     # ``rigor_profile_for``); left blank (a caller from before the question existed) this field is used as given.
@@ -1830,6 +1856,8 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         # Only one model: the quest runs, and its result says the review was one model's view. Not written when a
         # per-node override puts a reviewer on another model after all.
         lines.append(f"{indent}one_model_review: true")
+    if getattr(answers, "phased", False):
+        lines.append(f"{indent}phased: true")
 
     # A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface.
     if answers.result_use == "explore":

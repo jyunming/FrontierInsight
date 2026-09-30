@@ -41,6 +41,7 @@ SETTINGS: tuple[tuple[str, str], ...] = (
     ("engine.ideate_reflect", "self-critique of the ideas"),
     ("engine.enable_analyze_reroute", "redesign after the analysis"),
     ("engine.evidence_gate", "the evidence check before writing"),
+    ("engine.phased", "exploring first, then confirming once on data or seeds never seen"),
     ("engine.max_iterations", "how many times the design may be revised"),
     ("engine.execute_replicates", "how many independent runs (seeds) the experiment makes"),
     ("engine.oracle_repair_attempts", "how many repairs a failed reference check allows"),

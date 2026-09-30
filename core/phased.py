@@ -18,9 +18,17 @@ What the confirm run is given, decided before exploration runs anything (:func:`
   seed base exploration never used, and the report says it was confirmed on new random seeds and why no data was held
   back.
 
-The whole files the person supplied are kept in ``.fi/phased/original/`` and put back in ``inputs/data/`` as soon as
-the confirm run's result is recorded, and whenever a run stops (finished, paused or failed); the next start holds the
-same rows back again. Outside a running quest ``inputs/data/`` holds the person's whole files.
+The whole files the person supplied, and the part held back, are kept OUTSIDE the quest folder, in
+``<output_dir>/_held_back/<quest_id>/{original,held_back}/`` (:func:`store_dir`): the experiment runs in the quest folder
+(a container sees only that folder, at ``/work``), so a script that walks it cannot find the held-back rows. The whole
+files are put back in ``inputs/data/`` as soon as the confirm run's result is recorded, and whenever a run stops
+(finished, paused or failed); the next start holds the same rows back again. Outside a running quest ``inputs/data/``
+holds the person's whole files. Once exploration has run, only rows that were held back before can be held back again
+(a renamed or re-exported file cannot move a row exploration saw into the confirm part).
+
+The confirm run is made once, and it is the confirm run's own result that is recorded: any second run on the confirm
+data or seeds, a result that is not the one the confirm run produced, a held-back part that could not be put in place,
+or an experiment that does not take the seed it is given (new-seeds confirm) leaves nothing confirmed.
 
 This record (``.fi/phased.json``) is apart from the attempt records and the shadow recommendations
 (``core/attempt_records.py``, ``core/attempt_memory.py``): it reads neither, and neither decides anything here.
@@ -38,7 +46,9 @@ from typing import Any
 
 SCHEMA = "fi.phased/v1"
 RECORD = "phased.json"  # under .fi/
-DIR = "phased"  # .fi/phased/{original,held_back}/
+DIR = "phased"  # where the kept files were before they moved out of the quest folder: .fi/phased/{original,held_back}/
+#: The folder beside the quests (in the output folder) that keeps each quest's whole files and held-back part.
+STORE = "_held_back"
 
 EXPLORE = "explore"
 CONFIRM = "confirm"
@@ -142,66 +152,132 @@ def _why_not_splittable(rel: str, raw: bytes) -> str | None:
     return None
 
 
-def _held_back_row(quest_id: str, rel: str, row: str) -> bool:
-    """Whether one row is held back for the confirm run. Decided by the row's own text (with the quest and the file),
-    not by its place in the file: a row keeps its side when the person adds rows, edits other rows, or the quest starts
-    again, so a row exploration has seen never moves into the held-back part later."""
-    digest = hashlib.sha256(f"{quest_id}\0{rel}\0{row}".encode("utf-8")).digest()
+def _held_back_row(quest_id: str, row: str) -> bool:
+    """Whether one row is held back for the confirm run. Decided by the row's own text (with the quest), not by its
+    place in the file or the file's name: a row keeps its side when the person adds rows, edits other rows, renames the
+    file, or the quest starts again, so a row exploration has seen never moves into the held-back part later."""
+    digest = hashlib.sha256(f"{quest_id}\0{row}".encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big") / 2**64 < HOLD_BACK_FRACTION
 
 
-def _split(rel: str, raw: bytes, quest_id: str) -> tuple[bytes, bytes, dict[str, Any]]:
+def _split(rel: str, raw: bytes, quest_id: str, allowed: set[str] | None = None) -> tuple[bytes, bytes, dict[str, Any]]:
+    """Exploration's part, the held-back part and what the record keeps of them. ``allowed``: once exploration has run,
+    the rows held back before it ran; only those can be held back (any other row may have been seen)."""
     header, rows, newline = _rows(raw)  # type: ignore[misc] -- checked by _why_not_splittable
-    held_rows = [r for r in rows if _held_back_row(quest_id, rel, r)]
-    explore_rows = [r for r in rows if not _held_back_row(quest_id, rel, r)]
+    held = [(r in allowed) if allowed is not None else _held_back_row(quest_id, r) for r in rows]
+    held_rows = [r for r, h in zip(rows, held) if h]
+    explore_rows = [r for r, h in zip(rows, held) if not h]
     explore, back = _join(header, explore_rows, newline), _join(header, held_rows, newline)
     info = {"file": rel, "rows": len(rows), "explore_rows": len(explore_rows), "held_back_rows": len(held_rows),
             "original_sha256": _sha(raw), "explore_sha256": _sha(explore), "held_back_sha256": _sha(back)}
     return explore, back, info
 
 
+def store_dir(quest_root: Path) -> Path:
+    """Where this quest's whole files and held-back part are kept: beside the quest folder, never inside it
+    (``<output_dir>/_held_back/<quest_id>/``). The experiment runs in the quest folder and a container is given only
+    that folder, so exploration's code cannot read the held-back rows by walking it."""
+    root = Path(quest_root)
+    return root.parent / STORE / root.name
+
+
 def _originals(quest_root: Path) -> Path:
-    return Path(quest_root) / ".fi" / DIR / "original"
+    return store_dir(quest_root) / "original"
 
 
 def _held_back(quest_root: Path) -> Path:
-    return Path(quest_root) / ".fi" / DIR / "held_back"
+    return store_dir(quest_root) / "held_back"
 
 
-def _put(quest_root: Path, files: list[dict[str, Any]], folder: Path, want: str) -> None:
+def _write(path: Path, data: bytes) -> None:
+    """Write through a temporary file, so a stop in the middle never leaves a file cut short."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.fi-tmp")
+    tmp.write_bytes(data)
+    tmp.replace(path)
+
+
+def _move_out_of_quest(quest_root: Path) -> None:
+    """A quest started before the kept files moved out of the quest folder: move them to :func:`store_dir`. Raises
+    ``OSError`` when they cannot be moved (the held-back rows would stay where exploration's code can read them)."""
+    old = Path(quest_root) / ".fi" / DIR
+    if not old.is_dir():
+        return
+    for sub in ("original", "held_back"):
+        for src in sorted(p for p in (old / sub).rglob("*") if p.is_file()) if (old / sub).is_dir() else []:
+            dst = store_dir(quest_root) / sub / src.relative_to(old / sub)
+            if not dst.is_file():
+                _write(dst, src.read_bytes())
+    shutil.rmtree(old)
+
+
+def _put(quest_root: Path, files: list[dict[str, Any]], folder: Path, want: str) -> list[str]:
     """Make ``inputs/data/<file>`` hold ``folder/<file>`` for every file whose on-disk content is one of the three
-    recorded parts (whole, exploration's, held back) but not ``want`` of them; a file the person changed is left alone."""
+    recorded parts (whole, exploration's, held back) but not ``want`` of them. Returns the files it could not make
+    hold ``want``: the person changed the file (it is left alone) or the kept part is missing. A file the person
+    deleted is not brought back by a restore, and is not counted."""
+    missed: list[str] = []
     for info in files:
         src = folder / info["file"]
         dst = Path(quest_root) / "inputs" / "data" / info["file"]
-        if not src.is_file():
-            continue
         current = _sha(dst.read_bytes()) if dst.is_file() else None
-        if current is None and want == "original_sha256":
-            continue  # the person deleted it: a restore does not bring it back
         if current == info.get(want):
             continue
-        if current is not None and current not in (info.get("original_sha256"), info.get("explore_sha256"),
-                                                   info.get("held_back_sha256")):
+        if current is None and want == "original_sha256":
+            continue  # the person deleted it: a restore does not bring it back
+        if not src.is_file() or (current is not None and current not in (
+                info.get("original_sha256"), info.get("explore_sha256"), info.get("held_back_sha256"))):
+            missed.append(str(info["file"]))
             continue
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dst)
+        _write(dst, src.read_bytes())
+    return missed
 
 
-def _restore(quest_root: Path, files: list[dict[str, Any]]) -> None:
-    _put(quest_root, files, _originals(quest_root), "original_sha256")
+def _restore(quest_root: Path, files: list[dict[str, Any]]) -> list[str]:
+    return _put(quest_root, files, _originals(quest_root), "original_sha256")
 
 
-def restore_inputs(quest_root: Path) -> None:
+def _not_restored(quest_root: Path, missed: list[str]) -> list[str]:
+    return [f"inputs/data/{rel} was changed while the quest had a part of it in place, so it was left as it is; the "
+            f"whole file you supplied is kept in {_originals(quest_root) / rel}" for rel in missed]
+
+
+def restore_inputs(quest_root: Path) -> list[str]:
     """Put the whole files the person supplied back in ``inputs/data/`` (called when a run stops: finished, paused or
     failed). The next start holds the same rows back again (:func:`prepare`), so outside a running quest
-    ``inputs/data/`` always holds the person's whole files."""
+    ``inputs/data/`` always holds the person's whole files. Returns plain lines for run.log about a file it could not
+    put back."""
+    _move_out_of_quest(quest_root)
     record = load(quest_root)
     if record and record.get("files"):
-        _restore(quest_root, record["files"])
+        return _not_restored(quest_root, _restore(quest_root, record["files"]))
+    return []
 
 
-def _as_supplied(quest_root: Path, rel: str, raw: bytes, info: dict[str, Any] | None, quest_id: str) -> bytes:
+def turned_off(quest_root: Path) -> list[str]:
+    """A start with ``engine.phased`` off on a quest that has a record: the whole files go back in ``inputs/data/``,
+    and, since a run while it is off can see every row, exploration's data can no longer be kept apart. Still exploring:
+    nothing is held back when it is turned on again (new seeds). In the confirm stage: nothing can be confirmed."""
+    record = load(quest_root)
+    if record is None:
+        return []
+    _move_out_of_quest(quest_root)
+    lines = _not_restored(quest_root, _restore(quest_root, record.get("files") or []))
+    if record.get("stage") == EXPLORE and not record.get("late_start") and not record.get("compromised"):
+        why = "explore-then-confirm was turned off while exploring, so the experiment may have run on all of the data"
+        record.update(late_start=True, strategy=FRESH_SEEDS, why_no_data=why, files=[])
+        _save(quest_root, record)
+        lines.append(f"explore-then-confirm is off: the whole data files are in inputs/data/; if it is turned on again, "
+                     f"the confirm run will use new random seeds ({why})")
+    elif record.get("stage") == CONFIRM and not record.get("compromised"):
+        mark_compromised(quest_root, "explore-then-confirm was turned off during the confirm stage")
+        lines.append("explore-then-confirm was turned off during the confirm stage: nothing in this quest can be "
+                     "confirmed any more, and its numbers stay exploratory")
+    return lines
+
+
+def _as_supplied(quest_root: Path, rel: str, raw: bytes, info: dict[str, Any] | None, quest_id: str,
+                 allowed: set[str] | None = None) -> bytes:
     """The whole file behind what ``inputs/data/<rel>`` holds now: the kept original when the file on disk is one of
     its recorded parts, or the part of an interrupted start (the original was kept but the record not yet written)."""
     kept = _originals(quest_root) / rel
@@ -213,10 +289,25 @@ def _as_supplied(quest_root: Path, rel: str, raw: bytes, info: dict[str, Any] | 
     if info is None:
         original = kept.read_bytes()
         if _why_not_splittable(rel, original) is None:
-            _explore, _back, parts = _split(rel, original, quest_id)
+            _explore, _back, parts = _split(rel, original, quest_id, allowed)
             if current in (parts["explore_sha256"], parts["held_back_sha256"]):
                 return original
     return raw
+
+
+def _held_back_before(quest_root: Path, record: dict[str, Any]) -> set[str] | None:
+    """Once exploration has run on held-back data: the rows held back so far (only they can be held back again).
+    ``None`` while exploration has not run, when any row may still be held back."""
+    ran = bool(record.get("explore_seed_bases")) or int(record.get("explore_runs") or 0) > 0
+    if not ran or record.get("strategy") != HELD_BACK:
+        return None
+    rows: set[str] = set()
+    for info in record.get("files") or []:
+        part = _held_back(quest_root) / info["file"]
+        parsed = _rows(part.read_bytes()) if part.is_file() else None
+        if parsed:
+            rows.update(parsed[1])
+    return rows
 
 
 def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tuple[dict[str, Any], list[str]]:
@@ -225,6 +316,7 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
     ``already_ran``: runs were made before this record existed (the setting was turned on mid-quest), so no data is
     unseen and nothing is held back. Returns the record and plain lines for run.log about anything it did."""
     quest_root = Path(quest_root)
+    _move_out_of_quest(quest_root)
     record = load(quest_root)
     lines: list[str] = []
     if record is None:
@@ -240,10 +332,19 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
             _save(quest_root, record)
             return record, lines
     if record.get("stage") == CONFIRM:
-        _put(quest_root, record.get("files") or [], _held_back(quest_root), "held_back_sha256")
+        if record.get("compromised"):
+            return record, lines
+        missed = _put(quest_root, record.get("files") or [], _held_back(quest_root), "held_back_sha256")
+        if missed:
+            why = ("the held-back part could not be put in place of inputs/data/" + ", inputs/data/".join(missed)
+                   + " (the file was changed since, or the kept part is missing)")
+            mark_compromised(quest_root, why)
+            lines.append(f"{why}: the confirm run would not see only the held-back rows, so nothing in this quest can "
+                         "be confirmed and its numbers stay exploratory")
+            record = load(quest_root) or record
         return record, lines
     if record.get("stage") != EXPLORE:
-        _restore(quest_root, record.get("files") or [])
+        lines += _not_restored(quest_root, _restore(quest_root, record.get("files") or []))
         return record, lines
     if record.get("late_start") or record.get("compromised"):
         return record, lines
@@ -252,17 +353,20 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
         # (a file that became splittable since, a blocking file removed, is not new data).
         return record, lines
     split = {info["file"]: info for info in record.get("files") or []}
+    allowed = _held_back_before(quest_root, record)
     files = _data_files(quest_root)
     # What each file holds as the person supplied it: the whole file kept aside for one already split and unchanged.
     supplied: dict[str, bytes] = {}
     for path in files:
         rel = path.relative_to(quest_root / "inputs" / "data").as_posix()
-        supplied[rel] = _as_supplied(quest_root, rel, path.read_bytes(), split.get(rel), quest_id)
+        supplied[rel] = _as_supplied(quest_root, rel, path.read_bytes(), split.get(rel), quest_id, allowed)
     reasons = [why for rel, raw in supplied.items() if (why := _why_not_splittable(rel, raw))]
     if not reasons:
-        reasons = [f"{rel} would have only {n} rows held back, fewer than the {MIN_HELD_BACK_ROWS} a confirm run needs"
+        reasons = [(f"{rel} now holds only {n} of the rows held back before exploration ran (the file was changed "
+                    f"since), fewer than the {MIN_HELD_BACK_ROWS} a confirm run needs") if allowed is not None else
+                   f"{rel} would have only {n} rows held back, fewer than the {MIN_HELD_BACK_ROWS} a confirm run needs"
                    for rel, raw in supplied.items()
-                   if (n := _split(rel, raw, quest_id)[2]["held_back_rows"]) < MIN_HELD_BACK_ROWS]
+                   if (n := _split(rel, raw, quest_id, allowed)[2]["held_back_rows"]) < MIN_HELD_BACK_ROWS]
     if len(supplied) > 1:
         # Rows of different files may belong together (the same patients, x and y by row order): held back file by file
         # they would land on different sides, and exploration would see a held-back record through the other file.
@@ -276,9 +380,10 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
                    else ["no data was supplied in inputs/data/"])
     if reasons:
         if split:
-            _restore(quest_root, list(split.values()))
-            lines.append("the supplied data is no longer held back (" + "; ".join(reasons) + "): the whole files are "
-                         "back in inputs/data/")
+            missed = _restore(quest_root, list(split.values()))
+            lines.append("the supplied data is no longer held back (" + "; ".join(reasons) + ")"
+                         + ("" if missed else ": the whole files are back in inputs/data/"))
+            lines += _not_restored(quest_root, missed)
         changed = record.get("strategy") != FRESH_SEEDS or record.get("why_no_data") != "; ".join(reasons)
         record.update(strategy=FRESH_SEEDS, why_no_data="; ".join(reasons), files=[])
         if changed:
@@ -289,7 +394,7 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
     out: list[dict[str, Any]] = []
     for rel, raw in supplied.items():
         known = split.get(rel)
-        explore, back, info = _split(rel, raw, quest_id)
+        explore, back, info = _split(rel, raw, quest_id, allowed)
         # The whole file and the held-back part are kept before exploration's part replaces the file, so a start cut
         # short anywhere in between is finished by the next one (_as_supplied); what is already right is not rewritten.
         kept = _originals(quest_root) / rel
@@ -301,13 +406,12 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
         for dst, data in ((kept, raw), (_held_back(quest_root) / rel, back),
                           (quest_root / "inputs" / "data" / rel, explore)):
             if not dst.is_file() or dst.read_bytes() != data:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                dst.write_bytes(data)
+                _write(dst, data)
         out.append(info)
         if not known or known.get("original_sha256") != info["original_sha256"]:
             lines.append(f"held back {info['held_back_rows']} of {info['rows']} rows of inputs/data/{rel} for the "
-                         f"confirm run; exploration sees the other {info['explore_rows']} (the whole file is kept in "
-                         f".fi/{DIR}/original/{rel})")
+                         f"confirm run; exploration sees the other {info['explore_rows']} (the whole file and the "
+                         f"held-back part are kept outside the quest folder, in {store_dir(quest_root)})")
     record.update(strategy=HELD_BACK, why_no_data="", files=out)
     _save(quest_root, record)
     return record, lines
@@ -359,11 +463,33 @@ def seed_env(quest_root: Path, env: dict[str, str]) -> dict[str, str]:
         # Every run on the confirm data or seeds is counted: the evidence gate records a confirm result only after one
         # (``confirm_run_started``), so a gate run again on a resume cannot take exploration's result for it; and more
         # than one (a repair of the confirm run, a re-run after its result was seen) means the confirm data was looked
-        # at more than once (``status``).
-        record["confirm_executions"] = int(record.get("confirm_executions") or 0) + 1
-        _save(quest_root, record)
+        # at more than once (``status``). A run that only checks on the confirm run's own background job (it was
+        # pending when the quest stopped: :func:`note_job_pending`) is the same run, not a second one.
+        if record.pop("confirm_job_pending", False):
+            _save(quest_root, record)
+        else:
+            record["confirm_executions"] = int(record.get("confirm_executions") or 0) + 1
+            _save(quest_root, record)
     stride = int(record.get("seed_stride") or 1)
     return {**env, "FI_REPLICATE_SEED": str(int(base) + index * stride)}
+
+
+def note_job_pending(quest_root: Path) -> None:
+    """The confirm run submitted a background job and the quest waits for it: the run that checks on it after a resume
+    is this confirm run going on, not a second run on the confirm data (:func:`seed_env`)."""
+    record = load(quest_root)
+    if record is not None and record.get("stage") == CONFIRM and not record.get("confirm_job_pending"):
+        record["confirm_job_pending"] = True
+        _save(quest_root, record)
+
+
+def note_confirm_result(quest_root: Path, result: Any) -> None:
+    """What the confirm run produced (the experiment step's result, in the confirm stage): the result the evidence gate
+    records must be this one (:func:`record_confirm`), not one a rerun from an earlier step brought back."""
+    record = load(quest_root)
+    if record is not None and record.get("stage") == CONFIRM:
+        record["confirm_run_result_sha256"] = _result_digest(result) if result else None
+        _save(quest_root, record)
 
 
 # ---- the boundary and the confirm result --------------------------------------------------------------------------
@@ -398,12 +524,18 @@ def enter_confirm(quest_root: Path, *, explore_result: Any, frozen_sha256: str |
                      f"({record.get('why_no_data') or 'no reason recorded'})")
     record.update(stage=CONFIRM, confirm_started_at=_now(), confirm_seed_base=base, seed_stride=max(1, int(stride)),
                   frozen_sha256=frozen_sha256, explore_runs=max(int(explore_runs), int(record.get("explore_runs") or 0)),
-                  explore_result_sha256=_result_digest(explore_result) if explore_result is not None else None,
-                  explore_result=explore_result, confirm_executions=0)
+                  explore_result_sha256=_result_digest(explore_result) if explore_result else None,
+                  explore_result=explore_result, confirm_executions=0, confirm_run_result_sha256=None)
     # The stage is saved before the held-back part replaces exploration's: a start after a stop in between gives the
     # run the held-back part (``prepare`` in the confirm stage), never exploration's part again as new data.
     _save(quest_root, record)
-    _put(quest_root, record.get("files") or [], _held_back(quest_root), "held_back_sha256")
+    missed = _put(quest_root, record.get("files") or [], _held_back(quest_root), "held_back_sha256")
+    if missed:
+        why = ("the held-back part could not be put in place of inputs/data/" + ", inputs/data/".join(missed)
+               + " (the file was changed during exploration, or the kept part is missing)")
+        mark_compromised(quest_root, why)
+        lines.append(f"{why}: nothing in this quest can be confirmed, so its numbers stay exploratory")
+        record = load(quest_root) or record
     return record, lines
 
 
@@ -426,9 +558,20 @@ def record_confirm(quest_root: Path, result: Any) -> tuple[dict[str, Any] | None
     digest = _result_digest(result) if result else None
     runs = int(record.get("confirm_executions") or 0)
     if record.get("stage") == CONFIRM:
+        # The result in hand must be the one the confirm run produced (``note_confirm_result``). A rerun from an earlier
+        # step (``--from evidence``) can bring back exploration's result after the confirm run started; with no note
+        # (the confirm run stopped before its result, or a record from before the note), exploration's own result is
+        # recognised by its digest.
+        produced = record.get("confirm_run_result_sha256")
+        replayed = digest is not None and (
+            digest != produced if produced else digest == record.get("explore_result_sha256"))
         record.update(stage=CONFIRMED, confirmed_at=_now(), confirm_result_sha256=digest, confirm_runs=1,
                       results_seen_in_confirm=1 if digest else 0, confirm_executions_recorded=runs)
-        if digest is None:
+        if replayed:
+            record["compromised"] = ("the result that reached the paper is not the one the confirm run produced (a run "
+                                     "from an earlier step brought back exploration's result)")
+            lines.append(f"confirm stage: {record['compromised']}, so nothing in this quest is confirmed")
+        elif digest is None:
             lines.append("confirm stage: the confirm run produced no result, so nothing in this quest is confirmed")
         elif runs > 1:
             lines.append(f"confirm stage: the confirm run was changed and run again on the confirm data or seeds ({runs} "
@@ -436,10 +579,11 @@ def record_confirm(quest_root: Path, result: Any) -> tuple[dict[str, Any] | None
         else:
             lines.append("confirm stage: the confirm run's result is recorded; the paper reports these numbers as "
                          "confirmed and exploration's numbers as exploratory")
-        if record.get("files"):
-            lines.append("the whole data files are back in inputs/data/")
         _save(quest_root, record)
-        _restore(quest_root, record.get("files") or [])
+        missed = _restore(quest_root, record.get("files") or [])
+        if record.get("files") and not missed:
+            lines.append("the whole data files are back in inputs/data/")
+        lines += _not_restored(quest_root, missed)
         return record, lines
     seen = int(record.get("confirm_executions_recorded") or 0)
     if runs <= seen and (digest is None or digest == record.get("confirm_result_sha256")):
@@ -456,12 +600,18 @@ def record_confirm(quest_root: Path, result: Any) -> tuple[dict[str, Any] | None
 
 
 def mark_compromised(quest_root: Path, why: str) -> None:
-    """The held-back rows could not be kept apart from exploration (a file could not be written): nothing in this quest
-    can be confirmed any more. Best effort: when the record cannot be written either, it is missing or unchanged, and
-    a missing record keeps the numbers exploratory too."""
+    """The confirm run could not be kept apart from exploration (a file could not be written or put in place, the
+    result in hand is not the confirm run's, the experiment does not take the seed it is given): nothing in this quest
+    can be confirmed any more. With no record yet (a first start that failed), a record saying so is written, so the
+    next start does not hold rows back that exploration may have seen. Best effort: when the record cannot be written
+    either, it is missing or unchanged, and a missing record keeps the numbers exploratory too."""
     record = load(quest_root)
-    if record is None or record.get("compromised"):
+    if record is not None and record.get("compromised"):
         return
+    if record is None:
+        record = {"schema": SCHEMA, "stage": EXPLORE, "started_at": _now(), "strategy": FRESH_SEEDS,
+                  "why_no_data": "", "files": [], "explore_seed_bases": [], "confirm_seed_base": None,
+                  "explore_runs": 0, "confirm_runs": 0, "confirm_executions": 0, "results_seen_in_confirm": 0}
     record["compromised"] = why
     try:
         _save(quest_root, record)
@@ -471,8 +621,8 @@ def mark_compromised(quest_root: Path, why: str) -> None:
 
 def status(record: dict[str, Any] | None) -> str:
     """``explore`` (no confirm run yet), ``confirming``, ``confirmed``, ``confirm_failed`` (it produced no result),
-    ``confirm_reused`` (the confirm data or seeds were run on more than once) or ``compromised`` (the held-back rows
-    could not be kept apart from exploration)."""
+    ``confirm_reused`` (the confirm data or seeds were run on more than once) or ``compromised`` (the confirm run could
+    not be kept apart from exploration: its held-back data, its new seeds or its result)."""
     if not record:
         return EXPLORE
     if record.get("compromised"):
@@ -529,8 +679,8 @@ def summary(record: dict[str, Any] | None) -> str:
                 "the confirm results had been seen, so the numbers are no longer from one untouched confirm run. Treat "
                 "them as exploratory.")
     if state == "compromised":
-        return ("The data held back for confirming the results could not be kept apart from exploration, so nothing "
-                "here is confirmed. Treat the numbers as exploratory.")
+        return ("The confirm run could not be kept apart from exploration (its held-back data, its new seeds or its "
+                "result), so nothing here is confirmed. Treat the numbers as exploratory.")
     return (f"The design was tried, and could be changed, in an exploration stage, then frozen and run once more {how}. "
             "The numbers reported as results are that confirm run's; exploration's numbers are exploratory and are not "
             "reported as findings.")

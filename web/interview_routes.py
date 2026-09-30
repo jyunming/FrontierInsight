@@ -346,6 +346,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             web_research=new_answers.web_research,
             supply_papers=new_answers.supply_papers,
             pause_for_plan=new_answers.pause_for_plan,
+            phased=current.phased,  # fixed for the quest; not editable mid-quest
             rigor_profile=current.rigor_profile,  # chosen when the quest was created; not editable mid-quest
             result_use=current.result_use,
             ensemble_profile=new_answers.ensemble_profile,
@@ -519,6 +520,10 @@ def _parse_answers(body: dict[str, Any], *, new_quest: bool = True) -> Interview
         raise TypeError(
             f"pause_for_plan must be bool, got {type(pause_for_plan).__name__}"
         )
+    # phased: explore first, then confirm once on unseen data or seeds (engine.phased). Missing (an older client) is off.
+    phased = body.get("phased", False)
+    if not isinstance(phased, bool):
+        raise TypeError(f"phased must be bool, got {type(phased).__name__}")
     # rigor_profile: "default" (or missing, from an older client) writes nothing; "research" turns the profile on.
     rigor_profile = body.get("rigor_profile") or "default"
     if rigor_profile not in ("default", "research"):
@@ -623,6 +628,7 @@ def _parse_answers(body: dict[str, Any], *, new_quest: bool = True) -> Interview
         web_research=web_research,
         supply_papers=supply_papers,
         pause_for_plan=pause_for_plan,
+        phased=phased,
         rigor_profile=rigor_profile,
         result_use=result_use,
         second_reviewer_model=second_reviewer_model,

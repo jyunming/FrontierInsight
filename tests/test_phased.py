@@ -47,12 +47,12 @@ def test_enough_rows_are_split_and_exploration_sees_only_its_part(tmp_path: Path
     assert 15 <= info["held_back_rows"] <= 45, "about 30% held back"
     n_held, n_explore = info["held_back_rows"], info["explore_rows"]
     explore = (tmp_path / "inputs" / "data" / "d.csv").read_bytes()
-    held = (tmp_path / ".fi" / "phased" / "held_back" / "d.csv").read_bytes()
+    held = (phased.store_dir(tmp_path) / "held_back" / "d.csv").read_bytes()
     assert explore.startswith(b"x,y\n") and held.startswith(b"x,y\n")
     assert len(_data_rows(explore)) == n_explore and len(_data_rows(held)) == n_held
     assert not set(_data_rows(explore)) & set(_data_rows(held)), "no row is in both parts"
     assert sorted(_data_rows(explore) + _data_rows(held)) == sorted(_data_rows(original))
-    assert (tmp_path / ".fi" / "phased" / "original" / "d.csv").read_bytes() == original
+    assert (phased.store_dir(tmp_path) / "original" / "d.csv").read_bytes() == original
     assert any(f"held back {n_held} of 100 rows of inputs/data/d.csv" in line for line in lines)
     # Idempotent: the part exploration sees is not split again.
     again, more = phased.prepare(tmp_path, "q1")
@@ -116,7 +116,7 @@ def test_the_confirm_run_gets_a_seed_base_exploration_never_used(tmp_path: Path)
 def test_the_confirm_run_sees_only_the_held_back_part_and_the_whole_file_comes_back(tmp_path: Path) -> None:
     original = _csv(tmp_path / "inputs" / "data" / "d.csv", 50)
     phased.prepare(tmp_path, "q1")
-    held = (tmp_path / ".fi" / "phased" / "held_back" / "d.csv").read_bytes()
+    held = (phased.store_dir(tmp_path) / "held_back" / "d.csv").read_bytes()
     record, lines = phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=10,
                                          replicates=1, explore_runs=1)
     assert (tmp_path / "inputs" / "data" / "d.csv").read_bytes() == held
@@ -254,7 +254,8 @@ async def test_off_the_quest_never_touches_the_phased_code(tmp_path: Path, monke
 
     _fake(monkeypatch)
     for name in ("prepare", "seed_env", "enter_confirm", "record_confirm", "evidence_settings", "write_note",
-                 "mark_paper", "load"):
+                 "mark_paper", "load", "turned_off", "restore_inputs", "note_job_pending", "note_confirm_result",
+                 "mark_compromised"):
         def boom(*a, _name=name, **k):  # noqa: ANN001, ANN002, ANN003
             raise AssertionError(f"core.phased.{_name} called with engine.phased off")
         monkeypatch.setattr(phased, name, boom)
@@ -266,6 +267,7 @@ async def test_off_the_quest_never_touches_the_phased_code(tmp_path: Path, monke
         artifacts = await engine.run()
         assert (engine.quest_root / "inputs" / "data" / "d.csv").read_bytes() == data
         assert not (engine.fi_dir / phased.RECORD).exists() and not (engine.fi_dir / phased.DIR).exists()
+        assert not phased.store_dir(engine.quest_root).exists()
         assert [s["seed"] for s in _seen(engine)] == [0, 1_000_000] and {s["rows"] for s in _seen(engine)} == {100}
         paper = artifacts.paper_md.read_text(encoding="utf-8")
         assert "fi:phased" not in paper and "Exploratory and confirmed" not in paper
@@ -391,7 +393,7 @@ def test_changing_the_protocol_after_the_confirm_stage_began_is_an_amendment(tmp
 
 
 def _held(tmp_path: Path) -> bytes:
-    return (tmp_path / ".fi" / "phased" / "held_back" / "d.csv").read_bytes()
+    return (phased.store_dir(tmp_path) / "held_back" / "d.csv").read_bytes()
 
 
 def _inputs(tmp_path: Path) -> bytes:
@@ -404,7 +406,7 @@ def test_a_start_cut_short_before_the_record_was_written_keeps_the_whole_file(tm
     explore, held = _inputs(tmp_path), _held(tmp_path)
     phased.record_path(tmp_path).unlink()  # the files were written, the record was not
     record, _ = phased.prepare(tmp_path, "q1")
-    assert (tmp_path / ".fi" / "phased" / "original" / "d.csv").read_bytes() == original, "the whole file is not lost"
+    assert (phased.store_dir(tmp_path) / "original" / "d.csv").read_bytes() == original, "the whole file is not lost"
     assert _inputs(tmp_path) == explore and _held(tmp_path) == held
     assert record["files"][0]["original_sha256"] == phased._sha(original)
 
@@ -417,7 +419,7 @@ def test_a_stop_while_the_confirm_stage_began_never_hands_the_held_back_rows_to_
     (tmp_path / "inputs" / "data" / "d.csv").write_bytes(held)
     record, _ = phased.prepare(tmp_path, "q1")
     assert record["stage"] == phased.EXPLORE and _inputs(tmp_path) == explore and _held(tmp_path) == held
-    assert (tmp_path / ".fi" / "phased" / "original" / "d.csv").read_bytes() == original
+    assert (phased.store_dir(tmp_path) / "original" / "d.csv").read_bytes() == original
     # The stage saved, the held-back rows not yet copied in: the next start gives the confirm run the held-back rows.
     phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1,
                          explore_runs=1)
@@ -560,7 +562,7 @@ def test_a_part_edited_after_a_hard_stop_never_loses_the_kept_whole_file(tmp_pat
         f.write("".join(f"{i},{i + 1}\n" for i in range(1000, 1080)).encode())
     record, _ = phased.prepare(tmp_path, "q1")
     assert record["strategy"] == phased.HELD_BACK, "enough new rows to hold some back"
-    kept = list((tmp_path / ".fi" / "phased" / "original").glob("d.csv.replaced-*"))
+    kept = list((phased.store_dir(tmp_path) / "original").glob("d.csv.replaced-*"))
     assert len(kept) == 1 and kept[0].read_bytes() == original
 
 
@@ -574,3 +576,325 @@ def test_held_back_rows_that_could_not_be_kept_apart_mean_nothing_is_confirmed(t
     gaps = _ready_gaps(tmp_path, {"phased": "compromised", "phased_strategy": "fresh_seeds"})
     assert any("could not be kept apart" in g for g in gaps)
     assert "nothing here is confirmed" in phased.summary(record)
+
+
+# ---- follow-ups: held-back rows out of reach, one confirm run, background jobs -----------------------------------
+
+_GLOBBING_SCRIPT = """\
+import glob, sys
+seen = set()
+for path in glob.glob('**/*', recursive=True) + glob.glob('.*/**/*', recursive=True):
+    try:
+        with open(path, encoding='utf-8') as f:
+            seen.update(line.strip() for line in f)
+    except (OSError, UnicodeDecodeError):
+        pass
+sys.stdout.write('\\n'.join(sorted(seen)))
+"""
+
+
+def _quest(tmp_path: Path, rows: int = 200) -> tuple[Path, bytes]:
+    root = tmp_path / "out" / "q1"
+    return root, _csv(root / "inputs" / "data" / "d.csv", rows)
+
+
+def test_an_exploration_script_globbing_the_quest_folder_never_finds_a_held_back_row(tmp_path: Path) -> None:
+    import subprocess
+    import sys
+
+    root, original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    # The held-back rows: the supplied rows exploration's part does not hold (wherever FI keeps them).
+    held = set(_data_rows(original)) - set(_data_rows((root / "inputs" / "data" / "d.csv").read_bytes()))
+    assert len(held) >= phased.MIN_HELD_BACK_ROWS
+    # The experiment runs in the quest folder (a container sees only it, at /work): what can a script there read?
+    out = subprocess.run([sys.executable, "-c", _GLOBBING_SCRIPT], cwd=root, capture_output=True, text=True,
+                         check=True).stdout
+    seen = set(out.splitlines())
+    assert _data_rows((root / "inputs" / "data" / "d.csv").read_bytes())[0] in seen, "the script did read the folder"
+    assert not held & seen, "a held-back row is readable from the quest folder"
+
+
+def test_a_quest_that_kept_its_files_inside_the_quest_folder_has_them_moved_out(tmp_path: Path) -> None:
+    root, original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    store = phased.store_dir(root)
+    # The layout before the move: .fi/phased/{original,held_back}/ inside the quest folder.
+    old = root / ".fi" / phased.DIR
+    for sub in ("original", "held_back"):
+        (old / sub).mkdir(parents=True)
+        (store / sub / "d.csv").replace(old / sub / "d.csv")
+    held = (old / "held_back" / "d.csv").read_bytes()
+    phased.prepare(root, "q1")
+    assert not old.exists()
+    assert (store / "held_back" / "d.csv").read_bytes() == held
+    assert (store / "original" / "d.csv").read_bytes() == original
+
+
+def test_a_renamed_file_keeps_every_row_exploration_saw_on_exploration_s_side(tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    explored = set(_data_rows((root / "inputs" / "data" / "d.csv").read_bytes()))
+    held = set(_data_rows((phased.store_dir(root) / "held_back" / "d.csv").read_bytes()))
+    phased.seed_env(root, _env(0, 0))  # exploration ran on its part
+    phased.restore_inputs(root)
+    (root / "inputs" / "data" / "d.csv").replace(root / "inputs" / "data" / "d_v2.csv")
+    record, _ = phased.prepare(root, "q1")
+    assert record["strategy"] == phased.HELD_BACK
+    now_held = set(_data_rows((phased.store_dir(root) / "held_back" / "d_v2.csv").read_bytes()))
+    assert now_held == held and not now_held & explored
+
+
+def test_a_file_re_exported_after_exploration_ran_holds_nothing_back(tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    phased.seed_env(root, _env(0, 0))
+    phased.restore_inputs(root)
+    # The same rows written another way (1 -> 1.0): every row's text changed, so a new split would hold back rows
+    # exploration saw.
+    (root / "inputs" / "data" / "d.csv").write_bytes(
+        ("x,y\n" + "".join(f"{i}.0,{i * i}.0\n" for i in range(200))).encode())
+    record, lines = phased.prepare(root, "q1")
+    assert record["strategy"] == phased.FRESH_SEEDS and "changed since" in record["why_no_data"]
+    assert any("new random seeds" in line for line in lines)
+
+
+def test_rows_added_after_exploration_ran_go_to_exploration_not_to_the_confirm_part(tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    held = (phased.store_dir(root) / "held_back" / "d.csv").read_bytes()
+    phased.seed_env(root, _env(0, 0))
+    phased.restore_inputs(root)
+    with (root / "inputs" / "data" / "d.csv").open("ab") as f:
+        f.write("".join(f"{i},{i * i}\n" for i in range(200, 260)).encode())
+    phased.prepare(root, "q1")
+    assert (phased.store_dir(root) / "held_back" / "d.csv").read_bytes() == held
+    assert "259,67081" in _data_rows((root / "inputs" / "data" / "d.csv").read_bytes())
+
+
+def test_a_rerun_that_brings_back_exploration_s_result_is_not_recorded_as_confirmed(tmp_path: Path) -> None:
+    """``--from evidence`` after the confirm run started replays the newest checkpoint before the gate: exploration's."""
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1, explore_runs=1)
+    phased.seed_env(root, _env(0, 0))  # the confirm run started, and stopped before its result
+    record, lines = phased.record_confirm(root, {"a": 1})
+    assert phased.status(record) == "compromised" and any("not the one the confirm run produced" in x for x in lines)
+
+
+def test_only_the_result_the_confirm_run_produced_is_recorded_as_confirmed(tmp_path: Path) -> None:
+    for got, want in (({"a": 2}, phased.CONFIRMED), ({"a": 3}, "compromised")):
+        root = tmp_path / str(got["a"]) / "q1"
+        _csv(root / "inputs" / "data" / "d.csv", 200)
+        phased.prepare(root, "q1")
+        phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1,
+                             explore_runs=1)
+        phased.seed_env(root, _env(0, 0))
+        phased.note_confirm_result(root, {"a": 2})
+        assert phased.status(phased.record_confirm(root, got)[0]) == want
+
+
+def test_a_changed_file_in_the_confirm_stage_means_nothing_is_confirmed(tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1, explore_runs=1)
+    phased.restore_inputs(root)  # a stop before the confirm run: the whole file is back
+    with (root / "inputs" / "data" / "d.csv").open("ab") as f:
+        f.write(b"999,998001\n")  # saved again in a spreadsheet, say
+    record, lines = phased.prepare(root, "q1")
+    assert phased.status(record) == "compromised" and any("could not be put in place" in x for x in lines)
+
+
+def test_a_part_edited_during_exploration_means_the_confirm_run_cannot_be_given_the_held_back_rows(
+        tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    with (root / "inputs" / "data" / "d.csv").open("ab") as f:
+        f.write(b"999,998001\n")
+    record, lines = phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1,
+                                         explore_runs=1)
+    assert phased.status(record) == "compromised" and any("could not be put in place" in x for x in lines)
+
+
+def test_a_file_that_cannot_be_put_back_is_named_not_said_to_be_back(tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    with (root / "inputs" / "data" / "d.csv").open("ab") as f:
+        f.write(b"999,998001\n")
+    lines = phased.restore_inputs(root)
+    assert lines and "was changed" in lines[0] and str(phased.store_dir(root)) in lines[0]
+
+
+def test_a_first_start_that_failed_leaves_a_record_that_nothing_is_confirmed(tmp_path: Path) -> None:
+    phased.mark_compromised(tmp_path, "a data file could not be written at a start")
+    record = phased.load(tmp_path)
+    assert phased.status(record) == "compromised"
+    assert phased.prepare(tmp_path, "q1")[0]["compromised"], "the next start holds nothing back"
+
+
+def test_turned_off_while_exploring_puts_the_whole_file_back_and_holds_nothing_back_later(tmp_path: Path) -> None:
+    root, original = _quest(tmp_path)
+    phased.prepare(root, "q1")  # a hard stop: exploration's part is still in inputs/data/
+    lines = phased.turned_off(root)
+    assert (root / "inputs" / "data" / "d.csv").read_bytes() == original and lines
+    record, _ = phased.prepare(root, "q1")  # turned on again
+    assert record["strategy"] == phased.FRESH_SEEDS and record["late_start"]
+    assert (root / "inputs" / "data" / "d.csv").read_bytes() == original
+
+
+def test_turned_off_during_the_confirm_stage_means_nothing_is_confirmed(tmp_path: Path) -> None:
+    root, original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1, explore_runs=1)
+    phased.turned_off(root)
+    assert (root / "inputs" / "data" / "d.csv").read_bytes() == original
+    assert phased.status(phased.load(root)) == "compromised"
+
+
+def test_a_paused_experiment_step_counts_as_having_run_before_it_was_turned_on(tmp_path: Path) -> None:
+    from core.engine import Engine
+
+    engine = Engine(_config(tmp_path / "out", phased_on=True))
+    _csv(engine.quest_root / "inputs" / "data" / "d.csv", 200)
+    engine.audit.append("node_started", node="execute")
+    engine.audit.append("node_paused", node="execute", pause="results")  # a background job read the whole file
+    engine._phased_prepare()
+    record = phased.load(engine.quest_root)
+    assert record["late_start"] and record["files"] == []
+
+
+def test_checking_on_the_confirm_run_s_own_background_job_is_not_a_second_run(tmp_path: Path) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1, explore_runs=1)
+    phased.seed_env(root, _env(0, 0))  # the confirm run submits its job
+    phased.note_job_pending(root)  # ... which is pending: the quest waits
+    phased.seed_env(root, _env(0, 0))  # a resume checks on it: still pending
+    phased.note_job_pending(root)
+    phased.seed_env(root, _env(0, 0))  # done
+    phased.note_confirm_result(root, {"a": 2})
+    record, _ = phased.record_confirm(root, {"a": 2})
+    assert record["confirm_executions"] == 1 and phased.status(record) == phased.CONFIRMED
+
+
+def _bg_config(root: Path):
+    cfg = _config(root, phased_on=True)
+    cfg.execution.background_jobs = True
+    return cfg
+
+
+def test_a_background_job_s_confirm_run_submits_a_new_job(tmp_path: Path) -> None:
+    from core.engine import Engine
+
+    engine = Engine(_bg_config(tmp_path / "out"))
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True)
+    (code / "experiment.py").write_text("import os\nseed = int(os.environ.get('FI_REPLICATE_SEED', '0'))\n",
+                                        encoding="utf-8")
+    job = engine.quest_root / "job" / "state.json"
+    job.parent.mkdir(parents=True)
+    job.write_text('{"id": "explore-job"}', encoding="utf-8")
+    phased.prepare(engine.quest_root, engine.quest_id)
+    engine._runs_code = lambda state: True  # type: ignore[method-assign]
+    gate = {"evidence_assessment": {"route": "write"}, "result_json": {"a": 1}, "exec_result": {"returncode": 0}}
+    assert engine._route_after_evidence_gate(gate) == "confirm"
+    assert not job.exists(), "exploration's job is not reported again as the confirm run's"
+    assert (job.parent / "state.explore.json").read_text(encoding="utf-8") == '{"id": "explore-job"}'
+
+
+def test_the_background_job_prompt_passes_the_seed_on() -> None:
+    from core.engine import _JOB_PROTOCOL
+
+    assert "Ignore FI_PILOT and FI_REPLICATE_SEED" not in _JOB_PROTOCOL
+    assert "FI_REPLICATE_SEED" in _JOB_PROTOCOL and "pass it to the job" in _JOB_PROTOCOL
+
+
+def test_a_confirm_run_on_new_seeds_that_cannot_take_the_seed_is_not_confirmed(tmp_path: Path) -> None:
+    from core.engine import Engine
+
+    engine = Engine(_bg_config(tmp_path / "out"))
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True)
+    (code / "experiment.py").write_text("import random\nrandom.seed(42)\nprint(random.random())\n", encoding="utf-8")
+    phased.prepare(engine.quest_root, engine.quest_id)
+    engine._runs_code = lambda state: True  # type: ignore[method-assign]
+    gate = {"evidence_assessment": {"route": "write"}, "result_json": {"a": 1}, "exec_result": {"returncode": 0}}
+    assert engine._route_after_evidence_gate(gate) == "write"
+    record = phased.load(engine.quest_root)
+    assert phased.status(record) == "compromised" and "FI_REPLICATE_SEED" in record["compromised"]
+
+
+@pytest.mark.asyncio
+async def test_the_cluster_job_array_of_the_confirm_run_draws_seeds_exploration_never_used(tmp_path: Path) -> None:
+    from core import trial_runner
+    from core.execution import ExecutionResult
+
+    root, _original = _quest(tmp_path)
+    code = root / "code"
+    code.mkdir(parents=True)
+    (code / "simulate.py").write_text("def run_trial(cell, trial_id, seed):\n    return {'v': 1.0}\n", encoding="utf-8")
+    (code / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    (code / "submit.py").write_text("print('submit')\n", encoding="utf-8")
+
+    class Cluster:
+        async def execute(self, cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001, ANN201
+            (root / "job").mkdir(exist_ok=True)
+            (root / "job" / "state.json").write_text('{"id": "j"}', encoding="utf-8")
+            pending = '{"fi_job": {"status": "pending", "id": "j", "note": "queued", "poll_s": 60}}'
+            return ExecutionResult(returncode=0, stdout=f"RESULT_JSON: {pending}", stderr="", duration_s=0.1)
+
+    def seeds() -> set[int]:
+        plan = json.loads((root / trial_runner.CLUSTER_RECORD).read_text(encoding="utf-8"))["plan"]
+        return {t["seed"] for task in plan for t in task["trials"]}
+
+    protocol = {"grid": {"n": [1, 2, 3]}, "runs_per_setting": 4}
+
+    async def submit(env: dict[str, str]) -> None:
+        runner = trial_runner.TrialsRunner(Cluster(), quest_root=root, protocol=protocol, deterministic=False,
+                                           simulate=code / "simulate.py", analysis=code / "experiment.py",
+                                           submit=code / "submit.py")
+        await runner.execute(["python", str(code / "experiment.py")], cwd=root, timeout_s=10, env=env)
+
+    phased.prepare(root, "q1")
+    await submit(phased.seed_env(root, _env(0, 0)))
+    explored = seeds()
+    phased.enter_confirm(root, explore_result={"a": 1}, frozen_sha256=None, stride=1_000_000, replicates=1,
+                         explore_runs=1)
+    await submit(phased.seed_env(root, _env(0, 0)))
+    confirmed = seeds()
+    assert len(confirmed) == 12 and not confirmed & explored
+    assert (root / "job" / "state.previous.json").is_file(), "exploration's job is set aside, a new one submitted"
+
+
+# ---- a setting that changes what a result means: approved, and asked on every interface -------------------------
+
+
+def test_explore_then_confirm_is_an_approved_setting_a_hand_edit_cannot_flip(tmp_path: Path) -> None:
+    from core import plan_settings
+
+    root = tmp_path / "q"
+    root.mkdir()
+    (root / "config.yaml").write_text(f"{plan_settings.INTERVIEW_MARK} FI\nengine:\n  phased: true\n", encoding="utf-8")
+    plan_settings.record(root / ".fi", _config(tmp_path / "out", phased_on=True), root)
+    changed = plan_settings.check(root, root / ".fi", _config(tmp_path / "out", phased_on=False))
+    assert any("`engine.phased`" in line and "approved on, now off" in line for line in changed), changed
+
+
+def test_the_interview_writes_explore_then_confirm_and_keeps_it_on_update(tmp_path: Path) -> None:
+    from core.config import Config
+    from core.interview import QUESTIONS, InterviewAnswers, answers_to_yaml
+    from core.interview_update import load_current_answers
+
+    (question,) = [q for q in QUESTIONS if q.id == "phased"]
+    assert question.mid_quest_editable is False and {"cli", "serve", "vscode"} <= set(question.frontends)
+    answers = InterviewAnswers(topic="t", title="t", output_kinds=["paper_md"], paper_format="generic",
+                               no_simulation=False, study_depth="journal-length", comparative_baseline="",
+                               success_metric="", budget="", clarify_mode="auto", review_panel=[],
+                               knowledge_enabled=False, provider="openai", provider_model="gpt-4o", phased=True)
+    root = tmp_path / "q"
+    root.mkdir()
+    (root / "config.yaml").write_text(answers_to_yaml(answers), encoding="utf-8")
+    assert Config.from_yaml(root / "config.yaml").engine.phased is True
+    assert load_current_answers(root)[0].phased is True
+    answers.phased = False
+    assert "phased" not in answers_to_yaml(answers)

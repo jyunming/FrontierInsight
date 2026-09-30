@@ -203,6 +203,7 @@ def test_tier3_covers_the_advanced_fields() -> None:
     assert set(ids) == {
         "supply_papers",
         "pause_for_plan",
+        "phased",
         "comparative_baseline",
         "success_metric",
         "budget",

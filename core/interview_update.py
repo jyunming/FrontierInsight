@@ -241,6 +241,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         # pause runs with it on, so --update must not write it back as off.
         supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
         pause_for_plan=(pauses.get("plan") == "ask"),
+        phased=engine.get("phased") is True,
         rigor_profile=("research" if str(raw.get("rigor_profile") or "").strip().lower() == "research" else "default"),
         result_use=_result_use_of(raw, engine),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
@@ -673,6 +674,7 @@ async def run_update_flow(
         web_research=bool(new_partial.get("web_research", current.web_research)),
         supply_papers=bool(new_partial.get("supply_papers", current.supply_papers)),
         pause_for_plan=bool(new_partial.get("pause_for_plan", current.pause_for_plan)),
+        phased=current.phased,  # frozen: fixed for the quest (which data is held back is decided before it runs)
         rigor_profile=str(new_partial.get("rigor_profile", current.rigor_profile) or "default"),
         result_use=current.result_use,  # fixed for the quest, like the rigor profile it sets
         ensemble_profile=str(new_partial.get(

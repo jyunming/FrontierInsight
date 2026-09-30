@@ -643,3 +643,20 @@ def test_submit_carries_the_plan_pause_and_refuses_a_non_bool(tmp_path: Path) ->
 
     body["pause_for_plan"] = "yes"
     assert client.post("/api/interview/submit", json=body).status_code == 400
+
+
+def test_submit_explore_then_confirm_writes_engine_phased(tmp_path: Path) -> None:
+    """The web interview offers explore-then-confirm (engine.phased) like the CLI and VS Code; a non-bool is refused."""
+    from core.config import Config
+
+    client = _client(tmp_path)
+    body = {**_ok_answers_payload(), "phased": True}
+    res = client.post("/api/interview/submit", json=body)
+    assert res.status_code == 200, res.text
+    assert Config.from_yaml(Path(res.json()["yaml_path"])).engine.phased is True
+    res = client.post("/api/interview/submit", json=_ok_answers_payload())
+    assert Config.from_yaml(Path(res.json()["yaml_path"])).engine.phased is False
+    assert client.post("/api/interview/submit", json={**body, "phased": "yes"}).status_code == 400
+    schema = client.get("/api/interview/schema").json()
+    (question,) = [q for q in schema["questions"] if q["id"] == "phased"]
+    assert "serve" in question["frontends"] and question["mid_quest_editable"] is False
