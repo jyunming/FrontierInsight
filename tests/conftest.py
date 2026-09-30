@@ -58,6 +58,31 @@ def _no_real_network(request, monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle_async)
 
 
+def pytest_collection_modifyitems(config, items):
+    """``FI_TEST_SHARD=k/n`` keeps only the test files whose path hashes to shard ``k`` of ``n``.
+
+    CI splits the fast tier across parallel jobs this way; together the ``n`` shards run every test exactly once.
+    Whole files stay together (as with ``--dist loadfile``). The hash is ``zlib.crc32`` of the file's path relative
+    to the repo with ``/`` separators, so every xdist worker and both OSes pick the same files. Unset: no-op.
+    """
+    import os
+    import zlib
+
+    spec = os.environ.get("FI_TEST_SHARD", "").strip()
+    if not spec:
+        return
+    k, n = (int(x) for x in spec.split("/"))
+    if not 0 <= k < n:
+        raise pytest.UsageError(f"FI_TEST_SHARD={spec!r}: expected k/n with 0 <= k < n")
+    keep, drop = [], []
+    for item in items:
+        rel = Path(str(item.path)).resolve().relative_to(ROOT).as_posix()
+        (keep if zlib.crc32(rel.encode()) % n == k else drop).append(item)
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+        items[:] = keep
+
+
 def pytest_terminal_summary(terminalreporter):
     if not _NETWORK_LEAKS:
         return
