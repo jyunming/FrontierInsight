@@ -17147,9 +17147,8 @@ def _simulatability_answer(sim: Any) -> tuple[str, str]:
 
 
 _SIMULATABILITY_LEAD = re.compile(
-    r"^\W*(yes|no|uncertain)\b"
     # "No idea", "no clue", "no preference" are not a "no".
-    r"(?!\s+(?:idea|clue|opinion|preference|strong|comment|answer|sure|way\s+to\s+tell)\b)",
+    r"^\W*(yes|uncertain|no(?!\s+(?:idea|clue|opinion|preference|comment|answer|way\s+to\s+tell)\b))\b",
     re.IGNORECASE,
 )
 
@@ -21024,6 +21023,12 @@ def _sf_snapshot(quest_id: str) -> dict[str, Any]:
 
 #: Failure-ledger sources that are not about the literature: web search engines and figure images.
 _NOT_LITERATURE_FAILURES = frozenset({"duckduckgo", "brave", "wikimedia_commons", "image"})
+#: The failure ledger's names for download steps, in words (a search source keeps its own name: openalex, crossref).
+_FAILURE_SOURCE_WORDS = {
+    "oa_copy": "free copies", "free_page": "free-copy pages", "publisher_pdf": "publisher PDFs",
+    "full_text": "full-text step", "web_page": "web pages", "unpaywall": "Unpaywall", "europepmc": "Europe PMC",
+    "pmc": "PubMed Central",
+}
 _FAILURE_WORDS = {
     "http_429": "too many requests", "http_4xx": "refused", "http_5xx": "server error", "http_other": "failed",
     "timeout": "timed out", "network": "unreachable", "parse": "unreadable answer", "error": "failed",
@@ -21080,7 +21085,7 @@ def _literature_text_gaps(
         said = ", ".join(f"{n} {_FAILURE_WORDS.get(k, 'failed')}"
                          for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
         at = hosts.get(source) or []
-        failed.append(f"{source} {said}" + (f" at {', '.join(at[:3])}" if at else ""))
+        failed.append(f"{_FAILURE_SOURCE_WORDS.get(source, source)} {said}" + (f" at {', '.join(at[:3])}" if at else ""))
     if failed:
         line = "requests that failed while searching and downloading: " + "; ".join(failed)
         if ("http_429" in (by_source.get("semantic_scholar") or {})

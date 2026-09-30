@@ -298,7 +298,10 @@ def _http_get_json(
                 if getattr(r, "status_code", None) == 429 and waits:
                     asked = _retry_after_s(r)
                     planned = waits.pop(0)
-                    if (asked is None or asked <= _RATE_LIMIT_MAX_WAIT_S) and not _budget_spent(r):
+                    # A short Retry-After is the server's own word that a retry will do; without one, an allowance
+                    # reported as used up means asking again only spends more requests.
+                    if (asked is not None and asked <= _RATE_LIMIT_MAX_WAIT_S) or (
+                            asked is None and not _budget_spent(r)):
                         wait = planned if asked is None else max(asked, 0.5)
                         _log.info("http GET %s: too many requests, asking again in %.1fs", url, wait)
                         _rate_limit_sleep(wait)

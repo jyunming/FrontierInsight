@@ -131,7 +131,7 @@ def test_a_failed_free_download_names_the_host(client, tmp_path: Path, monkeypat
     _in_quest(sf.record_failure, "duckduckgo", "http_429", status=429, url="https://html.duckduckgo.com/html")
     why = _literature_text_gaps([entry], sf.snapshot("q-lit"))
     assert "1 are free to read but FI did not get their text;" in why
-    assert "oa_copy 1 refused, 1 timed out at www.mdpi.com, www.osti.gov" in why
+    assert "free copies 1 refused, 1 timed out at www.mdpi.com, www.osti.gov" in why
     assert "duckduckgo" not in why, "a web search engine's failure is not about the papers"
     assert "OPENALEX_API_KEY" not in why
     off = _literature_text_gaps([entry], sf.snapshot("q-lit"), downloads_on=False)
@@ -179,6 +179,11 @@ def test_a_spent_allowance_is_not_asked_again(client, monkeypatch) -> None:
     client.answers = [(429, {}, {"X-RateLimit-Remaining": "0"})]
     assert _in_quest(kn._http_get_json, "https://api.openalex.org/works", {}, 5.0, source="openalex") is None
     assert client.calls == 1 and waited == []
+    # A short Retry-After is the server saying a retry will do, whatever the counter says.
+    client.calls = 0
+    client.answers = [(429, {}, {"X-RateLimit-Remaining": "0", "Retry-After": "1"}), (200, {"ok": 1}, {})]
+    assert _in_quest(kn._http_get_json, "https://api.openalex.org/works", {}, 5.0, source="openalex") == {"ok": 1}
+    assert waited == [1.0]
 
 
 def test_retry_after_forms(client, monkeypatch) -> None:

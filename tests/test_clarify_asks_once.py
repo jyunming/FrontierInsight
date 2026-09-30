@@ -167,6 +167,9 @@ def test_not_sure_is_not_read_as_no(tmp_path: Path) -> None:
         assert no_sim is False, answer
         assert any("does not start with" in m for m in lines), answer
     assert _resolve(_engine(tmp_path), {"simulatability": "No."})[0] is True
+    assert _resolve(_engine(tmp_path), {"simulatability": "no strong need to simulate, it is a survey"})[0] is True
+    no_sim, lines = _resolve(_engine(tmp_path), {"simulatability": "Yes sure, a small script"})
+    assert no_sim is False and any("decision=yes" in m for m in lines)
 
 
 def test_with_clarify_off_a_pinned_no_is_honoured(tmp_path: Path) -> None:

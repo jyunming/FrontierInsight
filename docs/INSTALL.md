@@ -253,7 +253,7 @@ allowance is used up, as OpenAlex does once its daily budget is spent). After
 the literature step, `run.log` says why sources came back without their full
 text: how many are not marked free to read, how many are free but gave no
 download link, how many free ones FI did not get, which requests failed and
-where, and whether `OPENALEX_API_KEY` is unset.
+where, and, when OpenAlex was searched, whether `OPENALEX_API_KEY` is unset.
 
 **CORE, OpenAIRE and DOAJ** — the open-access sources FI uses for humanities
 and social-science topics — need no key. A free CORE key
