@@ -8921,6 +8921,35 @@ class Engine:
         )
         for dep, why in dropped:
             self._log.info("[execute] not asking pip for %r: it %s", dep, why)
+        # The list is what the model said it would use; the scripts are what runs. A listed package no script uses is
+        # not installed, and a well-known one a script imports unlisted is (core/experiment_deps.py:plan_installs).
+        # After a run that failed on an import, everything listed is installed: a package the code needs only through
+        # another library is then not left out a second time.
+        prior = state.get("exec_result") or {}
+        import_failed = bool(re.search(r"ModuleNotFoundError|ImportError|No module named",
+                                       f"{prior.get('stderr_tail') or ''}\n{prior.get('stdout_tail') or ''}"))
+        py = self.executor.python_path(self.quest_root)
+        plan = await asyncio.to_thread(
+            _experiment_deps.plan_installs, install_list, _experiment_deps.code_sources(self.quest_root / "code"),
+            local=_experiment_deps.local_module_names(self.quest_root / "code"),
+            python=py if self.config.execution.sandbox == "venv" else None,
+            keep=[s.name for s in skills], keep_listed=import_failed,
+            skill_files=_experiment_deps.skill_sources(skills),
+        )
+        install_list = plan.install
+        if plan.all_because and install_list:
+            self._log.info("[execute] installing every package the model listed: %s", plan.all_because)
+        elif import_failed and install_list:
+            self._log.info("[execute] installing every package the model listed: the last run failed on an import")
+        for asked, new in plan.renamed:
+            self._log.info("[execute] the model listed %s, which is what the code imports; installing the package %s",
+                           asked, new)
+        for dep in plan.unused:
+            self._log.info("[execute] the model listed %s but the code does not import it; not installed", dep)
+            dropped.append((dep, "the code does not import it, so it was not installed; if the code needs it, "
+                                 "import it in the script"))
+        for module, pip in plan.added:
+            self._log.info("[execute] the code imports %s but the model did not list it; installing %s", module, pip)
         if not getattr(self.config.execution, "shared_interpreter", False) or self.config.execution.sandbox == "docker":
             # A quest's own environment (a clean venv, a container) gets the skills' packages. On FI's shared
             # interpreter they are already there from the skill's approval, and a quest does not change it.
@@ -9078,7 +9107,12 @@ class Engine:
         #   - Docker sandbox: each execute() spawns a fresh container,
         #     so a warmup call is one full container spin-up wasted.
         #   - No deps: nothing was just pip-installed to race against.
-        warmup_modules = _deps_to_warmup_modules(deps)
+        # Only names that are known are imported (the package-name table, or the environment's own record of what
+        # each installed package provides): a guessed name that is not a module only printed a frightening traceback.
+        warmup_modules = ""
+        if self.config.execution.sandbox == "venv" and deps:
+            after = await asyncio.to_thread(_experiment_deps.env_packages, py, deps)
+            warmup_modules = _deps_to_warmup_modules(deps, after.dists if after else {})
         if self.config.execution.sandbox == "venv" and warmup_modules:
             warmup_code = f"import sys; import {warmup_modules}"
             warmup = await self.executor.execute(
@@ -9101,10 +9135,11 @@ class Engine:
                     timeout_s=60,
                 )
             if warmup.returncode != 0:
+                last = next((ln.strip() for ln in reversed((warmup.stderr or "").splitlines()) if ln.strip()), "")
                 self._log.warning(
-                    "[execute] venv warmup failed rc=%d stderr_tail=%s; "
-                    "proceeding to real script anyway",
-                    warmup.returncode, warmup.stderr[-200:],
+                    "[execute] a test import of the installed packages (%s) failed (exit code %d): %s; "
+                    "running the experiment anyway",
+                    warmup_modules, warmup.returncode, last[:200] or "no message",
                 )
 
         self._warn_if_plan_diverges()
@@ -21044,47 +21079,11 @@ def _is_degenerate_result(rj: dict[str, Any]) -> bool:
     return all(abs(n) <= 1e-12 for n in nums)
 
 
-_PKG_TO_MODULE = {
-    # pip package name -> import name when they differ. Conservative —
-    # only fills in cases we've observed our `implement` node produce.
-    "scikit-learn": "sklearn",
-    "pillow": "PIL",
-    "opencv-python": "cv2",
-    "beautifulsoup4": "bs4",
-    "pyyaml": "yaml",
-}
-
-
-# PEP 508 splits the package name from version specifiers / extras /
-# markers on the first occurrence of any of these. We strip on this set
-# rather than just `>=`/`==`/`<` so deps like `numpy!=1.26.0`,
-# `pandas~=2.0`, `urllib3<2;python_version<"3.10"` all yield a clean name.
-_DEP_NAME_BOUNDARY = re.compile(r"[\s;<>=!~\[]")
-# A valid Python module identifier (or dotted import path). After
-# pip→module remapping + dash→underscore substitution, the final token
-# MUST match this; anything else gets dropped rather than splatted
-# into `-c "import ..."` where it would SyntaxError.
-_PY_MODULE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
-
-
-def _deps_to_warmup_modules(deps: list[str]) -> str:
-    """Convert a pip-style deps list into a comma-separated module list
-    safe for `python -c "import a, b, c"`. Strips version pins / extras
-    / environment markers (PEP 508), remaps known name-mismatched
-    packages, and validates each token against `_PY_MODULE_RE` so a
-    malformed dep can never produce invalid import syntax."""
-    out: list[str] = []
-    for d in deps:
-        head = _DEP_NAME_BOUNDARY.split(d, 1)[0].strip()
-        if not head or "/" in head:
-            continue  # blank or URL/path dep
-        module = _PKG_TO_MODULE.get(head.lower(), head.replace("-", "_"))
-        if not _PY_MODULE_RE.match(module):
-            # Anything that didn't reduce to a clean identifier gets
-            # dropped silently rather than risk a SyntaxError in `-c`.
-            continue
-        out.append(module)
-    return ", ".join(out)
+def _deps_to_warmup_modules(deps: list[str], installed: dict[str, list[str] | None] | None = None) -> str:
+    """The modules to import in the test import after installing, as ``a, b, c`` for ``python -c "import ..."``.
+    Only names that are known (core/experiment_deps.py: the package-name table, or ``installed``, the environment's
+    record of what each package provides); an unknown package is left out rather than imported under a guess."""
+    return ", ".join(_experiment_deps.warmup_modules(deps, installed))
 
 
 _UNSANCTIONED_PROXY_PROVIDERS = frozenset({

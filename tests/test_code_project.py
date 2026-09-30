@@ -94,6 +94,35 @@ def test_requirements_add_imported_packages_the_list_lacks(tmp_path):
     assert lines == ["numpy>=1.24", "scikit-learn"]
 
 
+def test_requirements_use_the_shared_name_table_and_read_sub_folders(tmp_path):
+    root = _quest(tmp_path, two=False)
+    (root / "code" / "experiment.py").write_text(
+        "import cv2\nfrom google.protobuf import message\nimport ruamel.yaml\n", encoding="utf-8")
+    (root / "code" / "lib").mkdir()
+    (root / "code" / "lib" / "filters.py").write_text("from skimage import filters\n", encoding="utf-8")
+    (root / "code" / "mypkg").mkdir()
+    (root / "code" / "mypkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "code" / "mypkg" / "optuna.py").write_text("import optuna\n", encoding="utf-8")
+    code_project.refresh(root, deps=["opencv-python-headless"], protocol=None)
+    # cv2 is the listed headless build, not a second opencv-python; google.protobuf is protobuf, not "google";
+    # ruamel.yaml is its own dotted name, not "ruamel"; mypkg/optuna.py wraps the optuna library, it is not it.
+    assert (root / "code" / "requirements.txt").read_text().split() == [
+        "opencv-python-headless", "protobuf", "ruamel.yaml", "optuna", "scikit-image"]
+
+
+def test_a_script_in_a_sub_folder_imports_its_neighbours_not_packages(tmp_path):
+    root = _quest(tmp_path, two=False)
+    (root / "code" / "experiment.py").write_text("import numpy\nimport optuna\n", encoding="utf-8")
+    (root / "code" / "tools").mkdir()
+    (root / "code" / "tools" / "cli.py").write_text("import helpers\n", encoding="utf-8")
+    (root / "code" / "tools" / "helpers.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "code" / "utils").mkdir()
+    (root / "code" / "utils" / "optuna.py").write_text("x = 1\n", encoding="utf-8")
+    code_project.refresh(root, deps=["numpy"], protocol=None)
+    # tools/cli.py's helpers is tools/helpers.py; utils/optuna.py does not hide the library experiment.py imports.
+    assert (root / "code" / "requirements.txt").read_text().split() == ["numpy", "optuna"]
+
+
 def test_requirements_start_from_the_installed_list_and_still_add_what_the_scripts_import(tmp_path):
     root = _quest(tmp_path, two=False)
     (root / "code" / "experiment.py").write_text("import numpy\nimport scipy\n", encoding="utf-8")

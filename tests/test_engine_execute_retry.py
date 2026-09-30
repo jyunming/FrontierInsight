@@ -349,17 +349,42 @@ def test_deps_to_warmup_modules_drops_invalid_identifier_tokens() -> None:
     silently rather than break the warmup."""
     from core.engine import _deps_to_warmup_modules
 
+    # What the environment says each installed package provides (core/experiment_deps.py:env_packages).
+    env = {n: [n] for n in ("numpy", "pandas", "urllib3", "requests", "matplotlib")}
     # Common pip operators all reduce to the bare module name.
-    assert _deps_to_warmup_modules(["numpy!=1.26.0"]) == "numpy"
-    assert _deps_to_warmup_modules(["pandas~=2.0"]) == "pandas"
-    assert _deps_to_warmup_modules(['urllib3<2;python_version<"3.10"']) == "urllib3"
-    assert _deps_to_warmup_modules(["requests[security]>=2.28"]) == "requests"
+    assert _deps_to_warmup_modules(["numpy!=1.26.0"], env) == "numpy"
+    assert _deps_to_warmup_modules(["pandas~=2.0"], env) == "pandas"
+    assert _deps_to_warmup_modules(['urllib3<2;python_version<"3.10"'], env) == "urllib3"
+    assert _deps_to_warmup_modules(["requests[security]>=2.28"], env) == "requests"
     # Path / URL deps are dropped (no module name to import).
-    assert _deps_to_warmup_modules(["/tmp/local.whl"]) == ""
-    assert _deps_to_warmup_modules(["git+https://github.com/x/y"]) == ""
-    # Known mismatches still get remapped.
+    assert _deps_to_warmup_modules(["/tmp/local.whl"], env) == ""
+    assert _deps_to_warmup_modules(["git+https://github.com/x/y"], env) == ""
+    # Known mismatches still get remapped, with or without the environment's answer.
     assert _deps_to_warmup_modules(["scikit-learn>=1.3"]) == "sklearn"
     assert _deps_to_warmup_modules(["pillow"]) == "PIL"
     # Mix of valid + malformed: valid names pass, garbage drops.
-    out = _deps_to_warmup_modules(["matplotlib", "$&garbage", "numpy"])
+    out = _deps_to_warmup_modules(["matplotlib", "$&garbage", "numpy"], env)
     assert out == "matplotlib, numpy"
+
+
+def test_warmup_imports_the_real_module_names_never_a_guess() -> None:
+    """The live failure (a user's quest on another machine): the warmup imported ``scikit_image`` for scikit-image
+    and printed a ModuleNotFoundError traceback that looked like a broken Python environment."""
+    from core.engine import _deps_to_warmup_modules
+
+    deps = ["scikit-image", "Pillow", "opencv-python-headless", "some-unknown-pkg"]
+    # Nothing known about some-unknown-pkg (not installed, not in the table): left out, not imported as a guess.
+    assert _deps_to_warmup_modules(deps, {"some-unknown-pkg": None}) == "skimage, PIL, cv2"
+    assert _deps_to_warmup_modules(deps) == "skimage, PIL, cv2"
+    # Installed: its own record says which module it provides.
+    assert _deps_to_warmup_modules(deps, {"some-unknown-pkg": ["unknown_mod"]}) == "skimage, PIL, cv2, unknown_mod"
+    # Several top-level modules and none named after the package: which to import is uncertain, so none.
+    assert _deps_to_warmup_modules(["pywin32"], {"pywin32": ["win32api", "win32con"]}) == ""
+
+
+def test_the_old_package_name_tables_are_gone() -> None:
+    import core.code_project as code_project
+    import core.engine as engine
+
+    assert not hasattr(engine, "_PKG_TO_MODULE")
+    assert not hasattr(code_project, "_PIP_NAME")
