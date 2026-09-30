@@ -96,6 +96,8 @@ jobs:
           path: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
           if-no-files-found: error
           retention-days: 1
+          # "Re-run failed jobs" uploads the same name again.
+          overwrite: true
 
   # ---- Fast-tier coverage floor, per OS ------------------------------
   # Coverage floor guards against a change that silently deletes tested
@@ -112,7 +114,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # `shards` must match the fast job's matrix for that OS; the join below refuses a different count.
+        include:
+          - { os: ubuntu-latest, shards: 2 }
+          - { os: windows-latest, shards: 3 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -133,6 +138,10 @@ jobs:
       - name: Join the shards and apply the coverage floor
         shell: bash
         run: |
+          found=$(ls covdata | wc -l)
+          if [ "$found" -ne "${{ matrix.shards }}" ]; then
+            echo "::error::expected ${{ matrix.shards }} shards' coverage data, found $found"; ls covdata; exit 1
+          fi
           python -m coverage combine covdata/*
           python -m coverage report --show-missing --skip-covered --fail-under=65
 
