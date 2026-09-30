@@ -41,6 +41,8 @@ const vscodeMock = new Proxy(
         return arg.picked ? [{ fsPath: arg.picked }] : undefined;
       },
       activeTextEditor: undefined,
+      // One empty editor group: where plan.md and the quest map open.
+      tabGroups: { all: [], activeTabGroup: { viewColumn: 1, activeTab: undefined, tabs: [] } },
       showTextDocument: async (doc) => {
         opened.push(doc.path);
       },
