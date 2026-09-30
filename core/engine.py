@@ -4238,7 +4238,12 @@ class Engine:
                 self._pause_for_plan(no_criteria=no_criteria)
             return {}
 
-        prompt = self._design_prompt(state) + _PLAN_DIRECTIVE + _STUDY_TYPE_DIRECTIVE + self._study_type_note(state)
+        # The rules for a search for the best design only when the topic or the person's answer points that way: a
+        # topic with no word of looking for the best is planned as a measurement, as before, without their cost.
+        seek = (_optim.may_seek_best(state.get("topic") or self.config.topic)
+                or self._study_type_asked(state) == "find_best_design")
+        prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
+                  + self._study_type_note(state))
         text = await self._chat(prompt, node="plan")
         obj = _parse_json_lenient(text) or {}
         extra = obj.pop("plan", None) if isinstance(obj, dict) else None
@@ -4251,8 +4256,10 @@ class Engine:
             # sees it here, so without this the raw block would reach the persisted file (and a person reading it
             # under ``pauses.plan: ask``) instead of the audit trace.
             design = self._pop_rationale_into_claims("plan", design)
+        # A draft's study_type that cannot be read, or that contradicts its own block, is put right with a note.
+        study_repairs = _optim.repair_study_type(design)
         normalized, why = _plan.normalize_design(design)
-        repaired_notes: list[str] = []
+        repaired_notes: list[str] = list(study_repairs)
         if normalized is None and "`protocol" in (why or "") and isinstance(design, dict):
             # The protocol is the part a model writes freest. Keep the design, drop the keys that cannot be checked, and
             # say so in the plan, rather than losing the plan for one of them.
@@ -4398,6 +4405,16 @@ class Engine:
         """The kind of study the person named at the clarify step (``measure`` / ``find_best_design``), or ``None``."""
         return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
 
+    def _asks_for_best_design(self, state: QuestState) -> str:
+        """Why this quest is a search for the best design whatever a design without its own ``study_type`` says: the
+        person answered so (``answer``), or the topic plainly asks to find the best design (``topic``); else ``""``."""
+        if self._study_type_asked(state) == "find_best_design":
+            return "answer"
+        if (self._study_type_asked(state) is None
+                and _optim.classify_topic(state.get("topic") or self.config.topic) == "find_best_design"):
+            return "topic"
+        return ""
+
     def _study_type_note(self, state: QuestState) -> str:
         """For the plan prompt: the person's own answer on the kind of study, which the plan follows."""
         asked = self._study_type_asked(state)
@@ -4422,11 +4439,14 @@ class Engine:
                          "Write the block again, or set `study_type: measure` and give a `grid`.")
         asked = self._study_type_asked(state)
         kind = _optim.study_type_of(design)
-        if asked == "find_best_design" and kind != "find_best_design":
+        why = self._asks_for_best_design(state)
+        if why and kind != "find_best_design" and (why == "answer" or design.get("study_type") is None):
             design["study_type"] = "find_best_design"
-            notes.append("You answered that this study should find the best design, but the draft is a measurement over "
-                         "chosen settings; the plan says `study_type: find_best_design`. Give it an `optimisation` block, "
-                         "or set `study_type: measure` if a measurement is what you want.")
+            said = ("You answered that this study should find the best design" if why == "answer"
+                    else "The topic asks to find the best design")
+            notes.append(f"{said}, but the draft is a measurement over chosen settings; the plan says "
+                         "`study_type: find_best_design`. Give it an `optimisation` block, or set `study_type: measure` "
+                         "if a measurement is what you want.")
         elif asked == "measure" and kind != "measure":
             notes.append("You answered that this study should measure how the result changes, but the draft searches for "
                          "the best design; replace its `optimisation` block with a `grid` and set `study_type: measure` "
@@ -4441,7 +4461,9 @@ class Engine:
         if not self._runs_code(state):
             return
         explicit = isinstance(design, dict) and design.get("study_type") is not None
-        asked = self._study_type_asked(state) == "find_best_design" and not explicit
+        # The person's answer, or a topic that plainly asks for the best design, counts for a design that says nothing
+        # of its own (one drafted at this step, say); a design that says `measure` is a choice someone made and runs.
+        asked = bool(self._asks_for_best_design(state)) and not explicit and not _optim.has_block(design)
         if _optim.study_type_of(design) != "find_best_design" and not asked:
             return
         path = _plan.plan_path(self.quest_root)
@@ -4453,7 +4475,9 @@ class Engine:
             goal = (f" (make {objective['quantity']} as {'low' if objective['direction'] == 'minimise' else 'high'} as "
                     f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
         missing = _optim.missing_parts(design) if not asked else [
-            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+            ("you answered that this study should find the best design" if self._asks_for_best_design(state) == "answer"
+             else "the topic asks to find the best design")
+            + ", but the design is a measurement over chosen settings"]
         where = (f"In `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”," if path.is_file()
                  else "This quest has no plan.md (its plan could not be written); in the quest's topic,")
         steps = [
@@ -16146,7 +16170,7 @@ A search for the best design has NO top-level `grid`: its protocol has an `optim
   "evaluation_budget": {"starts": <whole number of starting points>, "per_start": <whole number of evaluations each>, "seconds_per_evaluation": <your estimate of one evaluation, or leave out>},
   "search_method": "<bounded_local | global_then_local | exhaustive | scipy:<function> | optuna:<sampler>>",
   "grid": {"<design variable>": [<a coarse scan run before the search, plotted; leave out when not wanted>]},
-  "improvement_tolerance": {"value": <number>, "mode": "<absolute | relative>"},
+  "improvement_tolerance": {"value": <number, in the objective's unit; a fraction when relative, 0.05 = 5%>, "mode": "<absolute | relative>"},
   "target": <the value of the objective the person hopes to reach, only when the topic names one>
 }
 

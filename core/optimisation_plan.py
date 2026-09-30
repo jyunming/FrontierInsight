@@ -85,6 +85,23 @@ def normalize_study_type(value: Any) -> tuple[str | None, str | None]:
     return canonical, None
 
 
+def repair_study_type(design: Any) -> list[str]:
+    """Put a model's draft ``study_type`` right in place (a draft, not a person's edit, which is refused instead): one that
+    cannot be read is left out, and ``measure`` beside an ``optimisation`` block becomes ``find_best_design`` (the block
+    asks for a search, and a search is never run as a sweep). A sentence per change."""
+    if not isinstance(design, dict) or design.get("study_type") is None:
+        return []
+    canonical, _why = normalize_study_type(design["study_type"])
+    if canonical is None:
+        written = design.pop("study_type")
+        return [f"the plan's `study_type` ({written!r}) was left out: it must be `measure` or `find_best_design`"]
+    if canonical == "measure" and has_block(design):
+        design["study_type"] = "find_best_design"
+        return ["the draft said `study_type: measure` but wrote an `optimisation` block (a search for the best design); "
+                "the plan says `find_best_design`. Set `study_type: measure` and give a `grid` if a measurement is meant."]
+    return []
+
+
 def has_block(design: Any) -> bool:
     protocol = design.get("protocol") if isinstance(design, dict) else None
     return isinstance(protocol, dict) and isinstance(protocol.get("optimisation"), dict)
@@ -165,6 +182,8 @@ def _limit(value: Any) -> tuple[str, float] | None:
     if match is None:
         return None
     number = float(match.group(2))
+    if not math.isfinite(number):
+        return None  # "<= 1e999" would be written back as "<= inf", which cannot be read again
     return _OPS[match.group(1)], number
 
 
@@ -292,7 +311,8 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
     if not isinstance(baseline, dict) or not isinstance(baseline.get("values"), dict):
         return None, (f"{_P}.baseline` must give the design to beat: `values` (one per design variable) and `source` "
                       "(where it comes from)")
-    values = baseline["values"]
+    values = {_text(k): v for k, v in baseline["values"].items()}  # a name is read with its spaces collapsed
+    out["baseline"] = {**baseline, "values": values}
     missing = [name for name in variables if name not in values]
     if missing:
         return None, f"{_P}.baseline.values` has no value for `{missing[0]}` (the baseline gives every design variable)"
@@ -362,6 +382,9 @@ def normalize(block: Any) -> tuple[dict[str, Any] | None, str | None]:
                 return None, f"{_P}.improvement_tolerance.value` must be a number of at least 0"
             if mode not in ("absolute", "relative"):
                 return None, f"{_P}.improvement_tolerance.mode` must be `absolute` or `relative`"
+            if mode == "relative" and value > 1:
+                return None, (f"{_P}.improvement_tolerance.value` is a fraction when `mode` is relative (0.05 means 5%); "
+                              f"{_fmt(value)} would mean more than 100%")
             if tolerance.get("mode") is not None:
                 out["improvement_tolerance"] = {**tolerance, "mode": mode}
         elif not _number(tolerance) or tolerance < 0:
@@ -420,7 +443,7 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 drop = int(entry.group(1)) - 1
             elif named:
                 same = [i for i, v in enumerate(items) if isinstance(v, dict) and _text(v.get("name")) == named.group(1)]
-                if "twice" in why:
+                if f"{_P}.design_variables` names `" in why:
                     drop = same[-1] if same else None
                 else:
                     drop = next((i for i in same if _variable(items[i], i + 1)[0] is None), None)
@@ -429,6 +452,9 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
             gone = items[drop]
             name = _text(gone.get("name")) if isinstance(gone, dict) else ""
             out["design_variables"] = items[:drop] + items[drop + 1:]
+            if f"{_P}.design_variables` names `" in why:
+                notes.append(f"the design variable {name} was listed twice; the second entry was left out")
+                continue
             if name and isinstance(out.get("baseline"), dict) and isinstance(out["baseline"].get("values"), dict):
                 out["baseline"] = {**out["baseline"], "values": {k: v for k, v in out["baseline"]["values"].items()
                                                                  if str(k) != name}}
@@ -438,6 +464,13 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     del out["grid"]
             notes.append(f"a design variable ({name or f'entry {drop + 1}'}) was left out of the optimisation because it "
                          f"could not be read ({why}); put it right in the plan if the search should change it")
+            continue
+        if key == "fixed" and isinstance(out.get("fixed"), dict) and "also a design variable" in why:
+            clash = [k for k in out["fixed"] if _text(k) in {_text(v.get("name")) for v in out.get("design_variables") or []
+                                                              if isinstance(v, dict)}]
+            out["fixed"] = {k: v for k, v in out["fixed"].items() if k not in clash}
+            notes.append(f"{', '.join(map(str, clash))} is a design variable the search may change, so it is not held "
+                         "fixed; the other fixed conditions are kept")
             continue
         if key == "baseline":
             extra = re.search(r"names `([^`]+)`, which is not a design variable", why)
@@ -567,7 +600,7 @@ def improvement_rule(block: dict[str, Any]) -> tuple[str, str]:
     tolerance = block.get("improvement_tolerance")
     if isinstance(tolerance, dict) and _number(tolerance.get("value")):
         if str(tolerance.get("mode") or "absolute") == "relative":
-            return f"better than the baseline by more than {_fmt(tolerance['value'] * 100)}%", "plan"
+            return f"better than the baseline by more than {_fmt(round(tolerance['value'] * 100, 6))}%", "plan"
         return f"better than the baseline by more than {_fmt(tolerance['value'])}{' ' + unit if unit else ''}", "plan"
     if _number(tolerance):
         return f"better than the baseline by more than {_fmt(tolerance)}{' ' + unit if unit else ''}", "plan"
@@ -628,7 +661,8 @@ def plan_lines(design: Any) -> list[str]:
                 "grid. To look for the best design instead, set `study_type: find_best_design` and give an "
                 "`optimisation` block in the design below.", ""]
     lines = [f"## {HEADING}", "",
-             "> Shown from the design block below (`study_type` and `protocol.optimisation`); edit it there. This version "
+             "> Shown from the design block below (`study_type` and `protocol.optimisation`) as it was when the plan was "
+             "written; edit the block, not this section (after an edit, only the block counts). This version "
              "of FI can write and check this plan but cannot yet run the search for the best design: the quest stops "
              "before anything runs, and NEXT_STEP.md says what you can do.", "",
              "**Kind of study:** find the best design (`study_type: find_best_design`), not a measurement over "
@@ -709,10 +743,11 @@ def plan_lines(design: Any) -> list[str]:
         lines.append("- search: no evaluation budget is written (`evaluation_budget`: `starts` and `per_start`); the "
                      "search cannot start without one")
     else:
-        runs = f" × {count['runs_per_evaluation']} runs each" if count["runs_per_evaluation"] > 1 else ""
-        lines.append(f"- search: {count['starts']} starting points × {count['per_start']} = "
-                     f"{count['starts'] * count['per_start']} evaluations{runs} at most (a limit, not a target)"
-                     + (f" = {count['search']}" if runs else ""))
+        starts, per_start = int(count["starts"]), int(count["per_start"])
+        runs = (f" × {count['runs_per_evaluation']} runs each = {count['search']} runs"
+                if count["runs_per_evaluation"] > 1 else "")
+        lines.append(f"- search: {starts} starting points × {per_start} = {starts * per_start} evaluations{runs}, "
+                     "at most (a limit, not a target)")
     check_runs = f", × {count['check_runs']} fresh runs each" if count["check_runs"] > 1 else ""
     lines.append(f"- check: ({count['candidates']} best designs + the baseline) × {count['levels']} finer "
                  f"level{'s' if count['levels'] != 1 else ''} + 2 × {count['continuous']} nudges around the best design"
@@ -730,10 +765,18 @@ def plan_lines(design: Any) -> list[str]:
 
 # --- the question at the clarify step -------------------------------------------------------------------------------
 
+# Words of looking for the best that are enough to ask the person (narrow: "maximum likelihood", "minimum spanning tree"
+# or "best response" are not a search for a design) ...
 _SEEK = re.compile(
-    r"\b(optim(?:al|um|ums|a|i[sz]e[sd]?|i[sz]ing|i[sz]ation)|best|minimi[sz]e[sd]?|minimi[sz]ing|maximi[sz]e[sd]?|"
-    r"maximi[sz]ing|minimum|maximum|lowest|highest|smallest|largest|lightest|cheapest|fastest)\b|"
-    r"最佳|最好|最優|最优|最適|最小化|最大化|最低|最高|最輕|最轻|優化|优化",
+    r"\b(optim(?:al|um|ums|a|i[sz]e[sd]?|i[sz]ing|i[sz]ation)|best(?!\s+(?:response|practice|practices|known|fit)\b)|"
+    r"minimi[sz]e[sd]?|minimi[sz]ing|maximi[sz]e[sd]?|maximi[sz]ing)\b|"
+    r"最佳|最優|最优|最適|最小化|最大化|優化|优化",
+    re.IGNORECASE,
+)
+# ... and the broader set that is enough to tell the plan how to write a search, should it be one (the plan decides).
+_SEEK_BROAD = re.compile(
+    _SEEK.pattern + r"|\b(minimum|maximum|lowest|highest|smallest|largest|lightest|cheapest|fastest|coolest)\b|"
+    r"最好|最低|最高|最輕|最轻",
     re.IGNORECASE,
 )
 _FIND = re.compile(
@@ -757,11 +800,17 @@ def classify_topic(topic: str) -> str:
     to find, choose or design the best (or to optimise something) and has no word of measuring (how does, effect of, as a
     function of, compare ...) is a search for the best design. Anything else is ambiguous, and the person is asked."""
     text = topic or ""
-    if not _SEEK.search(text):
-        return "measure"
     if _FIND.search(text) and not _MEASURE.search(text):
         return "find_best_design"
+    if not _SEEK.search(text):
+        return "measure"
     return "ambiguous"
+
+
+def may_seek_best(topic: str) -> bool:
+    """Whether the topic has any word of looking for the best (broader than :func:`classify_topic`'s): the plan prompt
+    then carries the rules for writing a search for the best design. A topic with none of them is planned as before."""
+    return classify_topic(topic) != "measure" or bool(_SEEK_BROAD.search(topic or ""))
 
 
 LET_THE_PLAN_DECIDE = "let the plan decide"
@@ -787,6 +836,8 @@ def resolve_answer(value: Any) -> str | None:
     text = " ".join(str(value or "").strip().lower().split())
     if not text or text == LET_THE_PLAN_DECIDE:
         return None
+    if re.search(r"(?<!\d)1(?!\d)", text) and re.search(r"(?<!\d)2(?!\d)", text):
+        return None  # "1 or 2": no choice made
     if text in ("1", "(1)", "1.") or text.startswith("1 ") or text.startswith("(1)"):
         return "measure"
     if text in ("2", "(2)", "2.") or text.startswith("2 ") or text.startswith("(2)"):
@@ -794,11 +845,11 @@ def resolve_answer(value: Any) -> str | None:
     canonical, _why = normalize_study_type(text)
     if canonical:
         return canonical
-    if re.search(r"\b(best|optim|minimi|maximi)|最佳|最好|最優|最优", text):
-        return "find_best_design"
-    if re.search(r"\b(measure|how|change|sweep|scan)|量測|测量|變化|变化", text):
-        return "measure"
-    return None
+    best = re.search(r"\b(best|optim|minimi|maximi)|最佳|最好|最優|最优", text)
+    measure = re.search(r"\b(measure|how|change|sweep|scan)|量測|测量|變化|变化", text)
+    if bool(best) == bool(measure):
+        return None  # both, or neither: the plan decides rather than a guess
+    return "find_best_design" if best else "measure"
 
 
 def answer_label(value: Any) -> str:

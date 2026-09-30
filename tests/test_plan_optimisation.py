@@ -251,6 +251,9 @@ def test_the_freeze_covers_the_block_and_a_bigger_budget_shows_as_a_change(tmp_p
     ("Best controller gain for low overshoot", "ambiguous"),
     ("How does the optimal fin spacing depend on air speed?", "ambiguous"),
     ("找出讓散熱片溫度最低的鰭片間距", "find_best_design"),
+    ("Maximum likelihood estimation of SIR parameters", "measure"),
+    ("Minimum spanning tree runtime on random graphs", "measure"),
+    ("Nash equilibrium best response dynamics in auctions", "measure"),
     ("控制器增益如何影響超調量，最佳值在哪裡", "ambiguous"),
 ])
 def test_the_topic_decides_whether_the_person_is_asked(topic: str, kind: str) -> None:
@@ -265,6 +268,7 @@ def test_the_topic_decides_whether_the_person_is_asked(topic: str, kind: str) ->
 @pytest.mark.parametrize("answer, kind", [
     ("2", "find_best_design"), ("1", "measure"), (op.LET_THE_PLAN_DECIDE, None), ("", None),
     ("find the best design", "find_best_design"), ("measure", "measure"), ("I want the best one", "find_best_design"),
+    ("1 or 2", None), ("measure how the best gain changes", None),
 ])
 def test_an_answer_is_read_as_a_number_or_in_words(answer: str, kind: str | None) -> None:
     assert op.resolve_answer(answer) == kind
@@ -305,7 +309,7 @@ _NO_OBJECTIONS = json.dumps({"objections_addressed": []})
 @pytest.mark.asyncio
 async def test_a_search_plan_is_written_and_the_quest_stops_before_anything_runs_every_time(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [json.dumps({**HEAT_SINK, "plan": EXTRA}), _NO_OBJECTIONS])
-    await eng._node_plan({"topic": "heat sink", "iteration": 0})
+    await eng._node_plan({"topic": "Find the fin spacing that minimises the base temperature", "iteration": 0})
     prompt = eng._client.chat.await_args_list[0].args[0][0]["content"]
     assert "A measurement, or a search for the best design?" in prompt
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
@@ -398,3 +402,92 @@ async def test_a_whole_run_with_a_search_plan_stops_at_the_design_and_writes_no_
     assert f"## {op.HEADING}" in (root / "plan.md").read_text(encoding="utf-8")
     assert not list(root.glob("**/simulate.py")) and not list(root.glob("**/experiment.py"))
     assert "[implement]" not in (root / ".fi" / "run.log").read_text(encoding="utf-8")
+
+
+# --- after the external review ---------------------------------------------------------------------------------------
+
+
+def test_repair_keeps_what_one_bad_entry_does_not_touch() -> None:
+    twice = copy.deepcopy(HEAT_SINK["protocol"])
+    twice["optimisation"]["design_variables"].append({"name": "fin_spacing", "low": 1.0, "high": 6.0})
+    fixed, notes = plan.repair_protocol(twice)
+    block = fixed["optimisation"]
+    assert [v["name"] for v in block["design_variables"]] == ["fin_spacing", "fin_thickness", "fin_count"]
+    assert block["baseline"]["values"]["fin_spacing"] == 3.0 and "listed twice" in " ".join(notes)
+
+    clash = copy.deepcopy(HEAT_SINK["protocol"])
+    clash["optimisation"]["fixed"] = {"fin_count": 12, "heat_load_W": 40}
+    fixed, notes = plan.repair_protocol(clash)
+    assert fixed["optimisation"]["fixed"] == {"heat_load_W": 40} and "fin_count" in " ".join(notes)
+
+
+def test_an_infinite_limit_and_a_relative_threshold_over_one_are_refused_and_a_fraction_reads_as_a_percent() -> None:
+    assert "cannot be read" in plan.normalize_design(_design(constraints=[{"quantity": "m", "limit": "<= 1e999"}]))[1]
+    assert "fraction" in plan.normalize_design(_design(improvement_tolerance={"value": 5, "mode": "relative"}))[1]
+    block = op.normalize({**BLOCK, "improvement_tolerance": {"value": 0.07, "mode": "relative"}})[0]
+    assert op.improvement_rule(block)[0] == "better than the baseline by more than 7%"
+
+
+def test_a_baseline_name_is_read_with_its_spaces_collapsed() -> None:
+    block = copy.deepcopy(BLOCK)
+    block["design_variables"][0]["name"] = "fin  spacing"
+    block["baseline"]["values"] = {"fin  spacing": 3.0, "fin_thickness": 1.0, "fin_count": 15}
+    fixed, why = op.normalize(block)
+    assert why is None and op.normalize(fixed)[0] == fixed
+
+
+def test_a_drafts_study_type_is_put_right_rather_than_losing_the_plan() -> None:
+    contradicted = copy.deepcopy(HEAT_SINK)
+    contradicted["study_type"] = "measure"
+    assert "find_best_design" in op.repair_study_type(contradicted)[0] and contradicted["study_type"] == "find_best_design"
+    unknown = copy.deepcopy(HEAT_SINK)
+    unknown["study_type"] = "minimize"
+    assert op.repair_study_type(unknown) and "study_type" not in unknown
+
+
+@pytest.mark.asyncio
+async def test_a_topic_that_asks_for_the_best_design_is_not_run_as_a_sweep_when_the_draft_forgets(tmp_path: Path) -> None:
+    topic = "Find the fin spacing and thickness that minimise the base temperature of a heat sink"
+    sweep = {**{k: v for k, v in HEAT_SINK.items() if k not in ("protocol", "study_type")},
+             "protocol": {"grid": {"fin_spacing": [2.0, 3.0]}, "oracles": HEAT_SINK["protocol"]["oracles"]}}
+    eng = _engine(tmp_path, [json.dumps({**sweep, "plan": EXTRA}), _NO_OBJECTIONS])
+    await eng._node_plan({"topic": topic, "iteration": 0})
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    assert plan.parse(text).design["study_type"] == "find_best_design"
+    assert "The topic asks to find the best design" in text
+    seen = _stop_at_pause(eng)
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": topic, "iteration": 0})
+    # A design drafted at the design step, with no plan and no study_type, stops too.
+    drafted = _engine(tmp_path / "drafted", [json.dumps(sweep), _NO_OBJECTIONS])
+    seen = _stop_at_pause(drafted)
+    with pytest.raises(Paused):
+        await drafted._node_design({"topic": topic, "iteration": 0})
+    assert "the topic asks to find the best design" in " ".join(seen[0]["steps"])
+
+
+@pytest.mark.asyncio
+async def test_a_measurement_topic_is_planned_as_before_without_the_search_rules(tmp_path: Path) -> None:
+    measure = {**{k: v for k, v in HEAT_SINK.items() if k not in ("protocol", "study_type")},
+               "protocol": {"grid": {"fin_spacing": [2.0, 3.0]}}}
+    eng = _engine(tmp_path, [json.dumps({**measure, "plan": EXTRA}), _NO_OBJECTIONS])
+    await eng._node_plan({"topic": "How does fin spacing change the base temperature?", "iteration": 0})
+    assert "A measurement, or a search for the best design?" not in eng._client.chat.await_args_list[0].args[0][0]["content"]
+    text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    assert "study_type" not in plan.parse(text).design and op.HEADING not in text
+
+
+@pytest.mark.asyncio
+async def test_an_answer_does_not_hide_what_a_plan_with_a_block_is_missing(tmp_path: Path) -> None:
+    no_budget = copy.deepcopy(HEAT_SINK)
+    del no_budget["study_type"]
+    del no_budget["protocol"]["optimisation"]["evaluation_budget"]
+    eng = _engine(tmp_path, [_NO_OBJECTIONS])
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("fins", EXTRA, no_budget), encoding="utf-8")
+    seen = _stop_at_pause(eng)
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": "fins", "iteration": 0, "clarify_answers": {"study_type": "2"}})
+    steps = " ".join(seen[0]["steps"])
+    assert "no evaluation budget" in steps and "the design is a measurement over chosen settings" not in steps
