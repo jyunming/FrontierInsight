@@ -1437,6 +1437,14 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
         gc.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
         '</div>');
     }
+    // A figure request of the last refine that two tries at redrawing could not apply (the figures are as they were).
+    const nr = snap.layout_not_redrawn || [];
+    if (nr.length) {
+      summary.insertAdjacentHTML('afterbegin',
+        '<div class="text-error font-label-sm">Your figure request was NOT applied: ' +
+        nr.map(n => escapeHtml(n)).join('; ') +
+        '. The figures are as they were (the error is in .fi/run.log). Refine again to retry.</div>');
+    }
     const suggestions = snap.suggestions || [];
     document.getElementById('human-review-suggestions').innerHTML = suggestions.length
       ? '<b>Suggestions:</b><ul class="list-disc list-inside">' +

@@ -433,6 +433,9 @@ class QuestState(TypedDict, total=False):
     # The layout notes the redraw could not carry out (a note about the paper's text or the order of its figures, or
     # nothing to redraw from); the paper says so.
     layout_missed: list[str]
+    # The layout notes whose redraw failed on both tries (the figures are as they were): the review gate tells the
+    # person their request was not applied, and clears this once they answer.
+    layout_not_redrawn: list[str]
     refine_scope: str
     # Names of pause-points the engine has already paused at on this
     # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
@@ -8476,9 +8479,11 @@ class Engine:
     async def _node_replot_layout(self, state: QuestState) -> QuestState:
         """A person's refine that only asks for the figures to be arranged or drawn differently: the named figures are
         drawn again from the numbers the run saved, and the experiment is not run again. A figure the script does not
-        write is left as it was, and so is every figure when the script fails."""
+        write is left as it was, and so is every figure when the script fails. The model is shown what each saved file
+        holds (``core.data_shape``); a script that fails, or changes no figure, is written once more with its error, and
+        when that fails too the person is told at the review that their request was not applied."""
         notes = [str(p).strip() for p in state.get("refine_layout") or [] if str(p).strip()]
-        done: QuestState = {"refine_layout": [], "layout_missed": []}
+        done: QuestState = {"refine_layout": [], "layout_missed": [], "layout_not_redrawn": []}
         self._restore_layout_backup()
         fig_dir = self.quest_root / "figures"
         figures = sorted(f.name for f in fig_dir.iterdir() if f.is_file() and f.suffix.lower() in _FIGURE_SUFFIXES) \
@@ -8497,19 +8502,14 @@ class Engine:
                 "no layout note" if not notes else "no figure" if not figures else "no saved numbers",
             )
             return {**done, "layout_missed": notes}
+        from .data_shape import describe_data_files
+
         experiment = self.quest_root / "code" / "experiment.py"
-        prompt = self._prompts["replot_layout"].substitute(
-            notes_block="\n".join(f"- {n}" for n in notes),
-            figures_block="\n".join(f"- {f}" for f in figures),
-            data_block="\n".join(f"- {d}" for d in data[:200]),
-            experiment_code=experiment.read_text(encoding="utf-8")[:12000] if experiment.is_file() else "(not saved)",
-        )
-        code, _deps = _parse_implement_response(await self._chat(prompt, node="replot_layout"))
-        if not code.strip():
-            self._log.warning("[replot_layout] no script came back; the figures stay as they are")
-            return {**done, "layout_missed": notes}
+        # What is inside each saved file (array keys, columns, JSON keys), so the script uses the real names and does
+        # not guess them; a guessed key was what failed a real redraw.
+        data_block = await asyncio.to_thread(describe_data_files, self.quest_root, data[:200])
+        experiment_code = experiment.read_text(encoding="utf-8")[:12000] if experiment.is_file() else "(not saved)"
         script = self.quest_root / "code" / "replot_layout.py"
-        script.write_text(code.rstrip() + "\n", encoding="utf-8")
         # The script is model-written and can write anywhere: the figures and the saved numbers are put back whenever
         # it fails, and any saved number it changed is put back even when it does not.
         backup = self.fi_dir / "layout_backup"
@@ -8528,56 +8528,121 @@ class Engine:
         (backup / "listed.json").write_text(json.dumps({"figures": figures, "data": data, "big": big}), encoding="utf-8")
 
         def digest(path: Path) -> str:
-            return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
+            if not path.is_file():
+                return ""
+            with path.open("rb") as fh:  # in chunks: a saved-number file can be larger than memory allows
+                return hashlib.file_digest(fh, "sha256").hexdigest()
 
         before_fig = {f: digest(fig_dir / f) for f in figures}
         before_big = {d: digest(self.quest_root / d) for d in big}
-        env: dict[str, str] | None = None
+        # A PDF saved again with nothing changed has the same bytes only with a fixed creation date; without it, a
+        # redraw that changed nothing would look like one that did.
+        env: dict[str, str] = {**os.environ, "SOURCE_DATE_EPOCH": "0"}
         try:
             from .plot_style import write_boot
 
-            env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+            env = {**env, "PYTHONPATH": os.pathsep.join(
                 p for p in (str(write_boot(self.fi_dir, self.config.output.paper_style)), os.environ.get("PYTHONPATH", "")) if p)}
         except Exception as exc:  # styling must never stop a redraw
             self._log.warning("[replot_layout] plot-style bootstrap skipped: %s", exc)
-        try:
-            result = await self.executor.execute(
-                [str(self.executor.python_path(self.quest_root)), str(script)],
-                cwd=self.quest_root, timeout_s=min(self.config.execution.timeout_s, 300), env=env,
+        # Two tries: a script that fails (or runs and changes no figure) is shown its error and written once more. The
+        # figures and saved numbers are put back after a failed try, so the second starts from the same files.
+        failure_block = ""
+        failed, drawn, not_drawn = True, [], []
+        for attempt in (1, 2):
+            prompt = self._prompts["replot_layout"].substitute(
+                notes_block="\n".join(f"- {n}" for n in notes),
+                figures_block="\n".join(f"- {f}" for f in figures),
+                data_block=data_block,
+                failure_block=failure_block,
+                experiment_code=experiment_code,
             )
-        except BaseException:
-            self._restore_layout_backup()
-            raise
-        # ``REPLOTTED: fig2.png`` and ``REPLOTTED: figures/fig2.png`` name the same figure.
-        drawn = [Path(ln.split(":", 1)[1].strip().replace("\\", "/")).name
-                 for ln in (result.stdout or "").splitlines() if ln.startswith("REPLOTTED:")]
-        failed = result.returncode != 0 or bool(getattr(result, "timed_out", False))
-        if failed:
-            self._log.warning("[replot_layout] the redraw failed (rc=%s), the figures are as they were: %s",
-                              result.returncode, (result.stderr or "")[-300:])
-        for f in figures:
-            if failed or (f not in drawn and digest(fig_dir / f) != before_fig[f]):
-                if not failed:
-                    self._log.warning("[replot_layout] %s was changed without being named; it is put back", f)
-                shutil.copy2(backup / "figures" / f, fig_dir / f)
-        for d in data:
-            if d in before_big:
-                if digest(self.quest_root / d) != before_big[d]:
-                    self._log.warning("[replot_layout] the script changed %s, which is too large to have been backed up", d)
+            try:
+                reply = await self._chat(prompt, node="replot_layout")
+            except BaseException:
+                # Nothing has run on this try, and a failed earlier try was put back (all but a data file too large to
+                # back up, which is reported where it changed): there is nothing left to restore.
+                shutil.rmtree(backup, ignore_errors=True)
+                raise
+            code, _deps = _parse_implement_response(reply)
+            if not code.strip():
+                self._log.warning("[replot_layout] no script came back (try %d of 2)", attempt)
+                failure_block = ("\n## Your previous reply had no script\nReply with exactly one fenced Python block.\n")
                 continue
-            if digest(self.quest_root / d) != digest(backup / d):
-                self._log.warning("[replot_layout] the script changed the saved numbers in %s; they are put back", d)
-                shutil.copy2(backup / d, self.quest_root / d)
-        # A file the script added: a new figure stays only when it is named and the script worked; a new data file never.
-        for f in self._files_added_since(figures, data, fig_dir):
-            path = self.quest_root / f
-            if failed or f.startswith("data/") or Path(f).name not in drawn:
-                self._log.warning("[replot_layout] %s was added by the script; it is removed", f)
-                path.unlink(missing_ok=True)
-        not_drawn = [ln.split(":", 1)[1].strip() for ln in (result.stdout or "").splitlines()
-                     if ln.startswith("NOT_DRAWN:") and ln.split(":", 1)[1].strip()]
-        done["layout_missed"] = notes if failed else not_drawn
-        if not failed:
+            script.write_text(code.rstrip() + "\n", encoding="utf-8")
+            try:
+                result = await self.executor.execute(
+                    [str(self.executor.python_path(self.quest_root)), str(script)],
+                    cwd=self.quest_root, timeout_s=min(self.config.execution.timeout_s, 300), env=env,
+                )
+            except BaseException:
+                self._restore_layout_backup()
+                raise
+            # ``REPLOTTED: fig2.png`` and ``REPLOTTED: figures/fig2.png`` name the same figure.
+            drawn = [Path(ln.split(":", 1)[1].strip().replace("\\", "/")).name
+                     for ln in (result.stdout or "").splitlines() if ln.startswith("REPLOTTED:")]
+            not_drawn = [ln.split(":", 1)[1].strip() for ln in (result.stdout or "").splitlines()
+                         if ln.startswith("NOT_DRAWN:") and ln.split(":", 1)[1].strip()]
+            timed_out = bool(getattr(result, "timed_out", False))
+            failed = result.returncode != 0 or timed_out
+            stderr_tail = (result.stderr or "")[-1500:].strip()
+            if failed:
+                self._log.warning("[replot_layout] the redraw failed (try %d of 2, %s); the figures are as they were: %s",
+                                  attempt, "it ran too long" if timed_out else f"rc={result.returncode}",
+                                  stderr_tail[-300:])
+            for f in figures:
+                if failed or (f not in drawn and digest(fig_dir / f) != before_fig[f]):
+                    if not failed:
+                        self._log.warning("[replot_layout] %s was changed without being named; it is put back", f)
+                    shutil.copy2(backup / "figures" / f, fig_dir / f)
+            for d in data:
+                if d in before_big:
+                    if digest(self.quest_root / d) != before_big[d]:
+                        self._log.warning("[replot_layout] the script changed %s, which is too large to have been backed up", d)
+                    continue
+                if digest(self.quest_root / d) != digest(backup / d):
+                    self._log.warning("[replot_layout] the script changed the saved numbers in %s; they are put back", d)
+                    shutil.copy2(backup / d, self.quest_root / d)
+            # A file the script added: a new figure stays only when it is named and the script worked; a new data file
+            # never.
+            for f in self._files_added_since(figures, data, fig_dir):
+                path = self.quest_root / f
+                if failed or f.startswith("data/") or Path(f).name not in drawn:
+                    self._log.warning("[replot_layout] %s was added by the script; it is removed", f)
+                    path.unlink(missing_ok=True)
+            if failed:
+                what = "ran too long and was stopped" if timed_out else f"stopped with an error (exit code {result.returncode})"
+            elif (len(not_drawn) < len(notes) and all(digest(fig_dir / f) == before_fig[f] for f in figures)
+                  and not self._files_added_since(figures, data, fig_dir)):
+                # It ran, but drew nothing new, and not every note was one it said it cannot draw: a request was not
+                # carried out. (A limit: figures cannot be matched to notes, so any changed figure counts as done.)
+                failed = True
+                what = "ran without an error but changed no figure"
+                self._log.warning("[replot_layout] the redraw %s (try %d of 2)", what, attempt)
+                failure_block = (
+                    f"\n## Your previous script failed\nIt {what}. Write the script again: save each figure the notes "
+                    "are about over its file in `figures/`, and print `REPLOTTED: <file name>` for it; a note that is "
+                    "not about how a figure is drawn gets a `NOT_DRAWN:` line instead.\n"
+                )
+                continue
+            else:
+                break
+            failure_block = (
+                f"\n## Your previous script failed\nIt {what}."
+                + (f" The last lines of its error output:\n```\n{stderr_tail}\n```\n" if stderr_tail else "\n")
+                + "Write the script again. Use only the file names and the keys, columns and field names listed above; "
+                  "do not guess a name.\n"
+            )
+        if failed:
+            done["layout_missed"] = notes
+            # A note the script said is about the text (NOT_DRAWN) goes to the writer, not onto the "not applied" line.
+            declared = {n.casefold() for n in not_drawn}
+            done["layout_not_redrawn"] = [n for n in notes if n.casefold() not in declared] or notes
+            self._log.warning(
+                "[replot_layout] your figure request was NOT applied: two tries at redrawing did not work, so the "
+                "figures are as they were (%s)", "; ".join(n[:120] for n in notes))
+        else:
+            done["layout_missed"] = not_drawn
             self._log.info("[replot_layout] redrew %d figure(s) from the saved numbers, the experiment was not run again: %s",
                            len(drawn), ", ".join(drawn) or "-")
         shutil.rmtree(backup, ignore_errors=True)
@@ -12387,6 +12452,10 @@ class Engine:
             # reviewer can see what was asked for last time.
             "feedback_history": list(state.get("feedback_history") or []),
         }
+        # A figure request of the person's last refine that the redraw could not carry out (it failed twice).
+        not_redrawn = [str(n) for n in state.get("layout_not_redrawn") or [] if str(n).strip()]
+        if not_redrawn:
+            snapshot["layout_not_redrawn"] = not_redrawn
         # Best-effort disk snapshot so a web UI / VSCode chat can render
         # the gate state without re-loading the LangGraph checkpoint.
         try:
@@ -12406,6 +12475,9 @@ class Engine:
                 f"review the result yourself: no reviewer gave a verdict (review status {review.get('status')})"
             ),
             steps=[
+                *([f"Your figure request was NOT applied: {'; '.join(n[:200] for n in not_redrawn)}. Two tries at "
+                   "redrawing the figures did not work, so they are as they were (the error is in .fi/run.log). Refine again to "
+                   "retry, or say it another way."] if not_redrawn else []),
                 "Accept, reject, or refine the paper in the panel "
                 "(Web / VSCode), or at the CLI prompt.",
                 "Headless run? "
@@ -12440,6 +12512,8 @@ class Engine:
 
         update: QuestState = {
             "human_feedback": {"action": action, "feedback": feedback},
+            # Told at this review; the next review tells only what the next refine could not do.
+            "layout_not_redrawn": [],
         }
         # When the user refines, bump iteration so the loop budget is
         # consumed and the design node sees an explicit "we're in a
@@ -17465,6 +17539,8 @@ def _auto_accepts(snapshot: dict[str, Any]) -> bool:
         snapshot.get("verdict") == "accept"
         and not (snapshot.get("must_flag_hits") or [])
         and snapshot.get("review_status", "ok") == "ok"
+        # A figure request the redraw could not apply is told to the person, not accepted for them.
+        and not (snapshot.get("layout_not_redrawn") or [])
     )
 
 
