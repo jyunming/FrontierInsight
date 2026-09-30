@@ -244,8 +244,9 @@ working, FI does not wait out the outage but moves on to it after the four
 quick attempts.
 
 These waits are built in; no setting changes them. The CLI providers and the
-VS Code extension keep their own retries (four attempts, and 30–90 seconds
-apart when a CLI reports that its model's server has no capacity). The same
+VS Code extension keep their own retries: a CLI makes four attempts (30–90
+seconds apart when it reports that its model's server has no capacity), and
+the VS Code connection six, at most a minute apart. The same
 applies whichever interface started the quest: the command line, the web page
 or VS Code with a YAML that names one of these providers.
 
