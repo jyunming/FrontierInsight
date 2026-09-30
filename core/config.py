@@ -193,6 +193,8 @@ class ProviderConfig(BaseModel):
             "plan": 600.0,
             "plan_revise": 600.0,
             "design_self_critique": 600.0,
+            # The second reading of the plan's checks: a referee's reasoning, like the methodology audit.
+            "oracle_review": 600.0,
             "analyze": 300.0,
         }
     )
@@ -240,6 +242,7 @@ class ProviderConfig(BaseModel):
             "plan": 900.0,
             "plan_revise": 900.0,
             "design_self_critique": 900.0,
+            "oracle_review": 900.0,
             # web_plots writes a short matplotlib script — it should be
             # quick. A tight ceiling kills a stuck codex_cli call fast
             # instead of letting it dribble output past the default budget.

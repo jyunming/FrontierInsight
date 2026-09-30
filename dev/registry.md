@@ -67,7 +67,8 @@ same PR that adds, splits or renames one.
 - `core/oracle_review.py` — a second opinion on the plan's checks (`agents/oracle_review.md`, node `oracle_review`):
   `prompt_parts`, `parse` (strict: only declared checks and equations), `findings`, `request`, `plan_lines`. Called by
   `Engine._review_oracles` from `_hold_oracle_forms` (one call; its findings share the one `plan_revise` request with
-  the form requests). The reviewer model is `provider.node_models.oracle_review`; the VS Code node picker lists it
+  the form requests; `.fi/oracle_review.json` keeps the answer and how far the look got, so a resume asks nothing
+  again, and `core/rerun_from.py` moves it aside with the plan). The reviewer model is `provider.node_models.oracle_review`; the VS Code node picker lists it
   (`OTHER_NODES` in `vscode-frontier-insight/src/interview-core.ts`).
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the

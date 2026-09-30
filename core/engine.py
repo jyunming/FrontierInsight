@@ -4330,7 +4330,8 @@ class Engine:
                 removed = [n for n in before if n not in after]
                 if read_already and (changed or removed):
                     self._note_engine_change(changed, removed, reason=(
-                        "FI put the checks in their kinds' numeric form after you read the plan: "
+                        "After you read the plan, FI looked at its checks once (each in its kind's numeric form, and "
+                        "read by a second model as a referee would), and the plan changed them: "
                         + "; ".join(_forms.describe_changes(before, after)) + "."))
                 parsed = _plan.parse(path.read_text(encoding="utf-8"))
                 if parsed.design is None:
@@ -8260,79 +8261,134 @@ class Engine:
         _plan.record_version(self.quest_root, kept, by="engine", note="the plan's changes to its checks")
         return ""
 
-    async def _review_oracles(self, state: QuestState) -> tuple[dict[str, Any], list[str], list[str]]:
-        """A second opinion on the plan's checks (core/oracle_review.py): one call, node ``oracle_review``. Returns
-        ``(record, findings for the plan, lines for plan.md)``; nothing when the plan declares no check. The reviewer is
-        the model named for ``oracle_review`` in ``provider.node_models``; without one it is the planner's own model, and
-        plan.md and run.log say so (under ``rigor_profile: research``, with how to name another)."""
+    def _oracle_review_path(self) -> Path:
+        return self.fi_dir / "oracle_review.json"
+
+    def _oracle_review_read(self) -> dict[str, Any]:
+        """What the second reading of the checks left on disk (its answer, and how far the look got), or ``{}``."""
+        try:
+            record = json.loads(self._oracle_review_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return record if isinstance(record, dict) else {}
+
+    def _oracle_review_write(self, record: dict[str, Any]) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            self._oracle_review_path().write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[oracle] couldn't record the second reading of the checks: %r", e)
+
+    async def _review_oracles(self, state: QuestState) -> dict[str, Any]:
+        """A second opinion on the plan's checks (core/oracle_review.py): one call, node ``oracle_review``, on the
+        checks as plan.md now states them. Returns its record (``findings`` for the plan, ``lines`` for plan.md, the
+        verdicts), kept in ``.fi/oracle_review.json`` as soon as it is had, so a resume never asks again; ``{}`` when
+        the plan declares no check. The reviewer is the model named for ``oracle_review`` in ``provider.node_models``
+        (the model that actually answered is the one named); when it is, or may be, the planner's own model, plan.md
+        and run.log say so (under ``rigor_profile: research``, with how to name another). A second opinion that could
+        not be had (a failed call, an answer the provider withheld or cut off, one that names none of the checks) is
+        said, and never stops the quest."""
+        kept = self._oracle_review_read()
+        if kept.get("lines"):
+            return kept
         design, _why = _plan.load_design(self.quest_root)
         protocol = design.get("protocol") if isinstance(design, dict) else None
         if not _oracle.declared(protocol if isinstance(protocol, dict) else None):
-            return {}, [], []
-        default = self.config.provider.model or "(the provider's default model)"
-        planner = self._model_for_node("plan") or default
-        reviewer = self._model_for_node(_review.NODE) or default
-        same = reviewer == planner
-        research = self.config.rigor_profile == "research"
-        if same:
-            (self._log.warning if research else self._log.info)(
-                "[oracle] the checks are read a second time by the model that wrote the plan (%s)%s", planner,
-                "; for a second opinion from another model set provider.node_models.oracle_review" if research else "")
-        model_text, oracles_text = _review.prompt_parts(protocol)
+            return {}
+        model_text, oracles_text, partial = _review.prompt_parts(protocol)
         prompt = self._prompts["oracle_review"].substitute(
             topic=" ".join(str(state.get("topic") or self.config.topic or "").split())[:1500],
             model=model_text, oracles=oracles_text)
         review, error = None, ""
         try:
             reply = await self._chat(prompt, node=_review.NODE)
-        except _ModelAnswerProblem:
-            raise
-        except Exception as e:  # noqa: BLE001 -- a second opinion that could not be had never stops a quest
-            error = f"the call failed ({str(e)[:160] or type(e).__name__})"
-        else:
-            review = _review.parse(_parse_json_lenient(reply, node=_review.NODE), protocol)
+            review = _review.parse(_parse_json_lenient(reply, node=_review.NODE), protocol, partial=partial)
             if review is None:
                 error = "it named none of the plan's checks"
+        except _ModelAnswerProblem as e:
+            error = f"the provider withheld or cut off its answer ({str(e)[:160] or type(e).__name__})"
+        except Exception as e:  # noqa: BLE001 -- a second opinion that could not be had never stops a quest
+            error = f"the call failed ({str(e)[:160] or type(e).__name__})"
+        # Who read the checks: the model that answered when the connection said, else the one asked for. The planner:
+        # the model that answered the plan step in this run, else the one asked for.
+        answered, planned = self._chat_provenance(_review.NODE), self._chat_provenance("plan")
+        reviewer_asked = self._model_for_node(_review.NODE) or self.config.provider.model or ""
+        planner_asked = self._model_for_node("plan") or self.config.provider.model or ""
+        reviewer = str(answered.get("model") or reviewer_asked)
+        planner = str(planned.get("model") or planner_asked)
+        if reviewer and planner:
+            same: bool | None = reviewer == planner
+        elif not self._model_for_node(_review.NODE) and not self._model_for_node("plan"):
+            same = True  # both on the provider's own default
+        else:
+            same = None
+        research = self.config.rigor_profile == "research"
+        if same is not False:
+            (self._log.warning if research else self._log.info)(
+                "[oracle] the checks were read a second time by %s the model that wrote the plan (%s)%s",
+                "" if same else "what may be", planner or "the provider's default",
+                "; for a second opinion from another model set provider.node_models.oracle_review" if research else "")
         found = _review.findings(review) if review is not None else []
         for f in found:
             self._log.info("[oracle] the second reader of the checks: %s", f)
         if error:
             self._log.warning("[oracle] the second reading of the checks could not be used: %s", error)
-        record = {"reviewer": reviewer, "planner": planner, "same_model": same, "findings": found,
-                  **({"summary": review.summary} if review is not None and review.summary else {}),
-                  **({"error": error} if error else {})}
-        return record, found, _review.plan_lines(review, reviewer=reviewer, planner=planner, same_model=same,
-                                                 research=research, error=error)
+        default = "the provider's default model"
+        record = {
+            "reviewer": reviewer or default, "planner": planner or default, "same_model": same,
+            "reported": bool(answered.get("reported")), "findings": found,
+            "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
+                                        same_model=same, research=research,
+                                        reported=bool(answered.get("reported")) or not answered, error=error),
+            **({"verdicts": review.checks, "add": review.add, "summary": review.summary} if review is not None else {}),
+            **({"error": error} if error else {}),
+        }
+        self._oracle_review_write(record)
+        return record
 
     async def _hold_oracle_forms(self, path: Path, *, fi_runs: bool = True,
                                  state: QuestState | None = None) -> dict[str, Any]:
         """Hold plan.md's checks to their kinds' forms and have them read by a second model (see
-        :meth:`_guide_oracles`); both go back to the plan in ONE request. What was rewritten, found, asked and left."""
+        :meth:`_guide_oracles`); both go back to the plan in ONE request. Each part is done at most once, a resume
+        included (``.fi/oracle_review.json`` records how far it got). What was rewritten, found, asked and left."""
         text, rewrites, requests = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
         left: list[str] = []
         for r in rewrites:
             self._log.info("[oracle] %s", r)
-        review, findings, review_lines = await self._review_oracles(state or {})
-        if rewrites or requests or review_lines:
+        if rewrites:
+            path.write_text(text, encoding="utf-8")  # the reviewer reads the checks as FI rewrote them
+        review = await self._review_oracles(state or {})
+        findings = [str(f) for f in review.get("findings") or []]
+        progress = self._oracle_review_read()
+        if (rewrites or requests or review.get("lines")) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
             # never leaves them unexplained.
-            path.write_text(text, encoding="utf-8")
             self._write_plan_section(path, [
                 "> What FI did to the checks before anything ran. Each kind of check has one numeric form: the worst "
                 "violation, expecting 0, for an invariant, a symmetry or a second implementation; the quantity itself "
-                "for the others. A second model read the checks as a referee would.", "",
-                *[f"- {r}" for r in rewrites], *review_lines],
+                "for the others. The checks were also read by a model as a referee would.", "",
+                *[f"- {r}" for r in rewrites], *[str(line) for line in review.get("lines") or []]],
                 note="checks against known answers written in their kind's numeric form, and read a second time")
-        if requests or findings:
+            progress = {**progress, "written": True}
+            self._oracle_review_write(progress)
+        if (requests or findings) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
+            # Recorded before the request: it is made at most once, even if this run stops while it is out.
+            self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
-            failed = await self._revise_checks_only("\n\n".join(
-                part for part in (_forms.request(requests) if requests else "",
-                                  _review.request(findings) if findings else "") if part))
+            parts = [_forms.request(requests) if requests else "", _review.request(findings) if findings else ""]
+            if requests and findings:
+                parts.insert(0, "Two things about the checks against known answers, below. The first must be done; "
+                                "the second is a reader's findings, to follow where they are right.")
+            failed = await self._revise_checks_only("\n\n".join(p for p in parts if p))
             if failed:
                 self._log.warning("[oracle] %s", failed)
-            changes = _forms.describe_changes(before, self._planned_oracles())
+            after = self._planned_oracles()
+            changes = _forms.describe_changes(before, after)
+            if len(after) < len(before):
+                self._log.warning("[oracle] the plan has fewer checks against known answers after it was asked (%d, was %d)",
+                                  len(after), len(before))
             text, again, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
             if again:
                 path.write_text(text, encoding="utf-8")
@@ -8347,7 +8403,8 @@ class Engine:
                 *[f"- {r}" for r in again],
                 *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
             ], note="the checks against known answers looked at")
-        return {"rewritten": rewrites, "asked": requests, "left": left, **({"review": review} if review else {})}
+        return {"rewritten": rewrites, "asked": requests, "left": left,
+                **({"review": {k: v for k, v in review.items() if k != "lines"}} if review else {})}
 
     def _dry_run_path(self) -> Path:
         return self.fi_dir / "oracle_dry_run.json"

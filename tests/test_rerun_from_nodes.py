@@ -26,7 +26,7 @@ MOVES = {
     "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json", "code", "paper.md"],
     "literature": ["data/literature", "plan.md", "needs/FROZEN_PROTOCOL.json", "results.json", "slides.pdf"],
     "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", "needs/FROZEN_PROTOCOL.json",
-             "needs/receipts/design_audit.json", "code", "paper", ".fi/oracle_guidance.json", ".fi/oracle_dry_run.json"],
+             "needs/receipts/design_audit.json", "code", "paper", ".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_dry_run.json"],
     "design": ["needs/FROZEN_PROTOCOL.json", ".fi/oracle_dry_run.json",
                "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json", "needs/DESIGN_CRITIQUE.json",
                "needs/receipts", "needs/ORACLE_CHECK.json", "code", "figures", "raw", "results.json", "paper"],

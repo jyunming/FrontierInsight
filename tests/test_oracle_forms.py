@@ -510,7 +510,7 @@ async def test_a_plan_read_at_the_old_plan_stop_shows_what_the_look_changed_befo
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert _oracle_in_plan(engine)["expected"] == 0
     added = engine._oracles_added_read()
-    assert added["oracles"] == ["power_conservation"] and added["shown"] is False and "after you read" in added["reason"]
+    assert added["oracles"] == ["power_conservation"] and added["shown"] is False and "after you read" in added["reason"].lower()
 
 
 def test_a_formula_that_takes_nothing_from_the_simulation_is_not_a_measurement(tmp_path: Path) -> None:
