@@ -4,7 +4,9 @@
 - **pwd:** `/home/user/FrontierInsight`
 - **branch:** `feat/multi-module-default`, from `origin/main` at `8338c30`
 - **Python:** 3.11.15, fresh `.venv` (pip/setuptools/wheel upgraded, `pip install -r requirements.txt`, `pip install -e .`)
-- **status:** done: code, tests and docs pushed; not merged, no PR.
+- **status:** drafted in the cloud session (this machine), then completed locally on Windows: a design review, fixes
+  from it and from an external review, and the local test runs (see *Completed locally* below). The PR is opened from
+  `feat/multi-module-default-local`, which supersedes `feat/multi-module-default`.
 
 ## Design summary
 
@@ -21,7 +23,8 @@ laid out as a small research tool:
 | `code/run.py` | FI (existing, `core/code_project.py`) | the sweep over every setting and the one command that runs it all (the CLI entry) |
 
 The package name comes from the quest title (`package_name`), is kept in `.fi/code_layout.json` so a rename does not
-move it, and never shadows the stdlib or the scripts beside it.
+move it, and never shadows the stdlib, an installed or common library, or the scripts beside it. A package the reply
+wrote under a name of its own, and that simulate.py imports, is kept under that name.
 
 **The engine's entry stays stable.** FI still imports and calls `code/simulate.py` through the same
 `run_cell`/`run_trial`/`oracle` contract: `core/trial_runner.py`'s harness already puts `simulate.py`'s folder on
@@ -31,24 +34,41 @@ changed equation re-runs the trials instead of reusing ones computed with the ol
 (`Engine._simulation_sources`) reads the package too, so a label in `model.py` counts.
 
 **Cost cap, at plan time.** `code_layout.estimate` works out, from the plan's protocol, what the layout adds over two
-scripts: 4 files, lines of code (the model's part: 20 + 5 per `generates` equation; FI's part: tests 45 + 4 per
-check, METHODS 12 + 1 per equation), and requests to the model (at most one extra per code-writing pass, i.e.
-`1 + engine.max_iterations`, made only when a reply leaves the package out). `plan.md` gets a section *How the code will
-be laid out* saying this in plain words, and run.log a matching line. New keys under `execution`:
+scripts: 4 files and lines of code (the model's part: 20 + 5 per `generates` equation; FI's part: tests 45 + 4 per
+check, METHODS 12 + 1 per equation). The extra requests to the model are a budget for the whole quest, not a
+prediction: a reply that leaves the package out is asked for again while the budget lasts (counted in
+`.fi/code_layout.json`), then the quest keeps the code it has and says so. (The cloud draft estimated requests as
+`1 + engine.max_iterations`, which tied the default cap to an unrelated knob: raising `max_iterations` to 3 turned the
+layout off.) `plan.md` gets a section *How the code will be laid out* saying this in plain words, and run.log a
+matching line. New keys under `execution`:
 
 - `code_package: true` (default): the layout is on; `false` keeps two scripts.
-- `code_package_max_extra_lines: 400`, `code_package_max_extra_calls: 3`: over either, the quest keeps two scripts and
-  plan.md and run.log say so, with the numbers and the key to raise.
+- `code_package_max_extra_lines: 400`: over it, the quest keeps two scripts and plan.md and run.log say so, with the
+  numbers and the key to raise.
+- `code_package_max_extra_calls: 3`: at most this many extra requests in the whole quest.
 
 **Check after implement.** Before anything runs (next to the equation-label check in `_node_execute`),
 `Engine._check_code_layout` checks: the package exists and holds a function, `simulate.py` imports it, a unit test
-exists, `METHODS.md` exists, every `generates` equation is labelled on a function of the package. A missing part is a
-plain warning in run.log; under `rigor_profile: research` the quest stops through the existing contract pause
-(`kind: split`, `contract_stage`; no new pause name), and a resume reads the folder again.
+exists (when the plan has a check with a number), `METHODS.md` exists, every `generates` equation is labelled on a
+function of the package, the package makes no random numbers the per-trial seed cannot reach, and `experiment.py`
+does not import it. A missing part is a plain warning in run.log; under `rigor_profile: research` the quest stops
+(pause kind `code_layout`, with its own to-do card; the cloud draft reused the `split` card, whose advice was wrong
+for this stop), and a resume reads the folder again. The check runs again after an oracle repair that changed the
+simulation or the package.
 
 **Unchanged paths.** `execution.split_analysis: false`, the no-simulation path, a survey and `--analyze` have no layout
-decision (`_code_layout` returns `None`), no plan.md section, no prompt change and no check. A reply that does not hold
-the package is asked for once more; if it still does not, the quest keeps two scripts this time and says so.
+decision (`_code_layout` returns `None`), no plan.md section, no prompt change and no check. Neither has a quest whose
+code was written before it decided a layout (begun before this existed, then resumed or refined), and an extension of
+code kept as two scripts is not asked to restructure it.
+
+**Wherever simulate.py is rewritten, the package goes with it** (added locally). A refine that extends the study is
+shown the package and told to give it back unchanged unless the new number needs an equation changed; a package file
+given back with names missing is not written. The repair of a crashed simulation and the repair for a failed oracle
+check are shown the package and may return `package_files` (a fix in the package alone keeps simulate.py); the oracle
+gate's undo of a repair also undoes its package change; a missing label is asked for in `model.py`; a later pass that
+writes simulate.py again without the package is asked again, and otherwise says the earlier package is kept.
+`requirements.txt` reads the package's imports; the older contract's raw-file reuse (`split_run.simulation_sha`) and
+the attempt record's code hashes know the package.
 
 ## Files changed
 

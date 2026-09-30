@@ -85,30 +85,43 @@ def test_the_package_name_comes_from_the_title_and_never_shadows_a_name_in_use()
     assert cl.package_name("SIR outbreaks: how R0 sets the final size") == "sir_outbreaks_how_r0_sets_the"
     assert cl.package_name("") == cl.package_name("json") == cl.package_name("simulate") == "study_model"
     assert cl.package_name("3 body problem") == "study_3_body_problem"
+    # A library the code imports is never hidden by a package of the same name beside simulate.py.
+    assert cl.package_name("numpy") == cl.package_name("scipy") == cl.package_name("torch") == "study_model"
+    assert cl.package_name("pytest") == "study_model", "an installed library"
 
 
 def test_the_estimate_grows_with_the_equations_and_checks_and_the_cap_decides_the_shape() -> None:
-    small = cl.estimate(PROTOCOL, max_iterations=2)
-    assert small["extra_files"] == 4 and small["extra_calls"] == 3 and small["equations"] == 1 and small["checks"] == 1
+    small = cl.estimate(PROTOCOL)
+    assert small["extra_files"] == 4 and small["equations"] == 1 and small["checks"] == 1
     many = {**PROTOCOL, "model": {"equations": [{"id": f"E{i}", "role": "generates"} for i in range(1, 21)]}}
-    assert cl.estimate(many, max_iterations=2)["extra_lines"] > small["extra_lines"]
+    assert cl.estimate(many)["extra_lines"] > small["extra_lines"]
 
-    kept = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, max_iterations=2, package=PKG)
-    assert kept["shape"] == cl.PACKAGE and kept["reason"] == ""
-    over = cl.decide(PROTOCOL, enabled=True, max_extra_lines=10, max_extra_calls=3, max_iterations=2, package=PKG)
+    kept = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, package=PKG)
+    assert kept["shape"] == cl.PACKAGE and kept["reason"] == "" and kept["limits"]["extra_calls"] == 3
+    over = cl.decide(PROTOCOL, enabled=True, max_extra_lines=10, max_extra_calls=3, package=PKG)
     assert over["shape"] == cl.SINGLE and "execution.code_package_max_extra_lines" in over["reason"]
-    calls = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, max_iterations=5, package=PKG)
-    assert calls["shape"] == cl.SINGLE and "6 more requests" in calls["reason"]
-    off = cl.decide(PROTOCOL, enabled=False, max_extra_lines=400, max_extra_calls=3, max_iterations=2, package=PKG)
+    # The request limit is a budget spent while the code is written, not a reason to leave the layout out.
+    assert cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=0, package=PKG)["shape"] == cl.PACKAGE
+    off = cl.decide(PROTOCOL, enabled=False, max_extra_lines=400, max_extra_calls=3, package=PKG)
     assert off["shape"] == cl.SINGLE and "code_package is off" in off["reason"]
 
 
+def test_the_request_budget_is_counted_across_the_quest(tmp_path: Path) -> None:
+    assert cl.calls_left(tmp_path, 2) == 2
+    cl.spend_call(tmp_path)
+    cl.save(tmp_path, {"shape": cl.PACKAGE, "package": PKG})  # a later decision keeps the count
+    assert cl.calls_left(tmp_path, 2) == 1 and cl.load(tmp_path)["package"] == PKG
+    cl.spend_call(tmp_path)
+    assert cl.calls_left(tmp_path, 2) == 0 and cl.calls_left(tmp_path, 5) == 3
+
+
 def test_the_plan_says_in_plain_words_what_the_layout_costs_or_why_it_was_left_out() -> None:
-    kept = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, max_iterations=2, package=PKG)
+    kept = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, package=PKG)
     text = "\n".join(cl.plan_lines(kept))
     assert f"## {cl.HEADING}" in text and f"code/{PKG}/" in text and "tests/test_oracles.py" in text
-    assert "more lines of code" in text and "more requests to the model" in text and "METHODS.md" in text
-    over = cl.decide(PROTOCOL, enabled=True, max_extra_lines=10, max_extra_calls=3, max_iterations=2, package=PKG)
+    assert "more lines of code" in text and "at most 3 more requests to the model in the whole quest" in text
+    assert "METHODS.md" in text
+    over = cl.decide(PROTOCOL, enabled=True, max_extra_lines=10, max_extra_calls=3, package=PKG)
     text = "\n".join(cl.plan_lines(over))
     assert "keep two scripts" in text and "Raise the limit" in text
     assert cl.plan_lines(None) == []
@@ -241,13 +254,19 @@ def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Pa
     monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
     stops: list[dict[str, Any]] = []
     monkeypatch.setattr(engine, "_pause_for_human", lambda **kw: stops.append(kw))
+    # Code written before the quest decided a layout (a quest begun before it existed, resumed): left as it was.
+    assert engine._code_layout({"design": {"protocol": PROTOCOL}}) is None
+    assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == [] and stops == []
+    cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": PKG})  # this quest decided the layout at plan time
     problems = engine._check_code_layout({"design": {"protocol": PROTOCOL}})
     assert problems and stops == []
     assert "package code/engine_callable/ is missing" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     monkeypatch.setattr(engine.config, "rigor_profile", "research")
     engine._check_code_layout({"design": {"protocol": PROTOCOL}})
-    assert len(stops) == 1 and stops[0]["kind"] == "split" and stops[0]["payload"]["contract_stage"]
+    assert len(stops) == 1 and stops[0]["kind"] == "code_layout" and stops[0]["payload"]["contract_stage"]
     assert any("execution.code_package: false" in s for s in stops[0]["steps"])
+    from core import todo
+    assert "package of their own" in todo.advice("code_layout")[0], "the to-do card speaks of this stop"
     # The person adds the missing parts and resumes: the folder is read again and nothing stops.
     _write_tool(code)
     assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == [] and len(stops) == 1
@@ -361,6 +380,7 @@ def _engine_with_tool(tmp_path: Path) -> tuple[Engine, Path, dict[str, Any]]:
     code = engine.quest_root / "code"
     _write_tool(code)
     (code / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": PKG})  # decided at plan time
     return engine, code, {"design": {"protocol": PROTOCOL}}
 
 
@@ -441,3 +461,134 @@ def test_what_the_package_imports_is_in_requirements(tmp_path: Path) -> None:
     lines = code_project.requirements_for(code, ["numpy"])
     assert "scipy" in lines and "numpy" in lines
     assert not {PKG, "model", "helpers", "simulate"} & set(lines), lines
+
+
+# --- a later pass, an older quest, a name of the reply's own, the request budget -------------------------------------
+
+
+def _decided(engine: Engine, **extra: Any) -> None:
+    cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": PKG, **extra})
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_without_the_package_is_asked_again_and_says_the_old_one_is_kept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    _decided(engine)
+    asked: list[str] = []
+
+    async def no_package(prompt, **kw):  # noqa: ANN001
+        asked.append(prompt)
+        return _reply(SIM_PKG.replace("1.0 / dt", "2.0 / dt"))
+
+    monkeypatch.setattr(engine, "_chat", no_package)
+    new_sim = SIM_PKG.replace("1.0 / dt", "2.0 / dt")  # the simulation is written again, the package left out
+    scripts = {"simulate": new_sim, "analysis": ANALYSIS}
+    _s, _t, files = await engine._code_package_reply(state, "prompt", _reply(new_sim), scripts, extend=False)
+    assert files == {} and len(asked) == 1 and "did not hold the package" in asked[0]
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "the package from before is kept" in log
+    # Given back unchanged (a rerun that keeps the simulation): nothing to ask.
+    _s, _t, files = await engine._code_package_reply(state, "prompt", _reply(SIM_PKG), {"simulate": SIM_PKG,
+                                                                                         "analysis": ANALYSIS},
+                                                     extend=False)
+    assert len(asked) == 1
+    # The budget: once the limit of extra requests is spent, the model is not asked again.
+    engine.config.execution.code_package_max_extra_calls = 1
+    _s, _t, files = await engine._code_package_reply(state, "prompt", _reply(new_sim), scripts, extend=False)
+    assert len(asked) == 1 and "not asking again" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_an_older_quest_or_an_extension_of_two_scripts_is_not_restructured(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True)
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    state = {"design": {"protocol": PROTOCOL}, "refine_extend": ["the error at dt = 0.05"]}
+    assert f"{PKG}/model.py" not in engine._split_block(state), "an older quest: no layout"
+    _decided(engine)  # a quest that decided the layout but kept two scripts (the package never came)
+    assert f"{PKG}/model.py" not in engine._split_block(state), "an extension does not ask for a package"
+    assert f"{PKG}/model.py" in engine._split_block({"design": {"protocol": PROTOCOL}})
+    _s, _t, files = await engine._code_package_reply(state, "p", _package_reply(), {"simulate": SIM_PKG,
+                                                                                     "analysis": ANALYSIS}, extend=True)
+    assert files == {} and not (code / PKG).exists()
+
+
+@pytest.mark.asyncio
+async def test_a_package_under_a_name_of_the_replys_own_is_kept(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    (engine.quest_root / "code").mkdir(parents=True)
+    state = {"design": {"protocol": PROTOCOL}}
+    reply = _package_reply().replace(f"{PKG}/", "rk4tool/").replace(f"from {PKG} import", "from rk4tool import")
+    scripts = {"simulate": SIM_PKG.replace(f"from {PKG} import", "from rk4tool import"), "analysis": ANALYSIS}
+    _s, _t, files = await engine._code_package_reply(state, "p", reply, scripts, extend=False)
+    assert set(files) == {"rk4tool/__init__.py", "rk4tool/model.py"}
+    assert cl.load(engine.quest_root)["package"] == "rk4tool", "used from then on"
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_fixes_only_the_package_is_applied(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    _decided(engine)
+    fixed = MODEL_PY.replace("return -y", "return -1.0 * y")
+    sim_before = (code / "simulate.py").read_text(encoding="utf-8")
+
+    async def package_only(prompt, **kw):  # noqa: ANN001
+        assert f"### code/{PKG}/model.py" in prompt, "the repair is shown the package"
+        return json.dumps({"code": "", "package_files": {f"{PKG}/model.py": fixed}, "patch_summary": "E1 sign"})
+
+    monkeypatch.setattr(engine, "_chat", package_only)
+    new, failed, outcome = await engine._repair_script_for_oracle(state, code / "simulate.py", [ORACLE],
+                                                                  ["rk4 error at dt 0.1: off"], passing=[])
+    assert outcome == "applied" and not failed and new == sim_before
+    assert (code / PKG / "model.py").read_text(encoding="utf-8") == fixed
+    assert (code / "simulate.py").read_text(encoding="utf-8") == sim_before
+
+
+def test_the_package_is_checked_for_randomness_and_the_analysis_for_importing_it(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    _write_tool(code, model_py=MODEL_PY + "\nimport numpy as np\n_RNG = np.random.default_rng(0)\n")
+    (code / "experiment.py").write_text(f"from {PKG} import model\n" + ANALYSIS, encoding="utf-8")
+    problems = " | ".join(cl.check(code, PROTOCOL, PKG))
+    assert "makes random numbers when it is loaded" in problems
+    assert "experiment.py imports the model's package" in problems
+    assert cl.module_level_randomness("import random\n\ndef f(seed):\n    return random.Random(seed).random()\n") == []
+
+
+def test_the_generated_tests_take_any_check_name_and_the_scripts_names_are_not_package_files(tmp_path: Path) -> None:
+    odd = {**ORACLE, "name": 'ends with "quote" and \\ backslash'}
+    text = cl.oracle_tests({**PROTOCOL, "oracles": [odd]})
+    compile(text, "test_oracles.py", "exec")
+    from core.engine import _PY_FENCE_RE
+
+    assert cl.reply_files(f"```python\n# file: {PKG}/simulate.py\nx = 1\n```\n", _PY_FENCE_RE, PKG) == {}
+
+
+def test_a_change_to_the_package_makes_the_older_contracts_raw_files_stale(tmp_path: Path) -> None:
+    from core import split_run
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    assert split_run.simulation_sha(code / "simulate.py") == split_run.sha256_of(code / "simulate.py"), "no package"
+    _write_tool(code)
+    before = split_run.simulation_sha(code / "simulate.py")
+    (code / PKG / "model.py").write_text(MODEL_PY.replace("-y", "-(y)"), encoding="utf-8")
+    assert split_run.simulation_sha(code / "simulate.py") != before
+
+
+def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:
+    import hashlib
+
+    from core import attempt_records
+
+    quest = tmp_path / "q"
+    code = quest / "code"
+    _write_tool(code)
+    record = {name: hashlib.sha256((code / name).read_bytes()).hexdigest() for name in (cl.METHODS_NAME, cl.TEST_PATH)}
+    (quest / ".fi").mkdir(parents=True)
+    (quest / ".fi" / "code_project.json").write_text(json.dumps(record), encoding="utf-8")
+    hashes = attempt_records.script_hashes(quest)
+    assert cl.METHODS_NAME not in hashes and cl.TEST_PATH not in hashes and f"{PKG}/model.py" in hashes

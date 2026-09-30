@@ -395,7 +395,7 @@ execution:
   split_analysis: auto              # auto (default: two scripts for every quest that runs a simulation, deterministic or random) | true | false. Keep the simulation (code/simulate.py: run_cell for a deterministic study, run_trial for a random one, run by FI, record in raw/) apart from its analysis (code/experiment.py), so FI can run each oracle's case itself; false keeps one script and the result then cannot reach independently_validated; with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)
   code_package: true                # default: with two scripts, the code is a small research tool (the model's equations in code/<package>/, tests/test_oracles.py and METHODS.md written by FI); false keeps two scripts
   code_package_max_extra_lines: 400 # over this many extra lines of code (estimated at plan time) the quest keeps two scripts and says so in plan.md and run.log
-  code_package_max_extra_calls: 3   # over this many extra requests to the model (at most one each time the code is written) the same
+  code_package_max_extra_calls: 3   # at most this many extra requests to the model in the whole quest (only when a reply leaves the package out); once spent, the quest keeps the code it has and says so
   raw_dir: ""                       # only with split_analysis: where the raw files go (relative to the quest, or absolute; relative with docker); empty = raw/
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)

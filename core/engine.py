@@ -1069,7 +1069,8 @@ class Engine:
                                     "[FI] paused for the %s (%s): read %s, fix what it names, then run `fi --resume %s`",
                                     "equation labels in the simulation"
                                     if (intr_value.get("pause") or {}).get("kind") == "equation_labels"
-                                    else "layout of code/" if intr_value.get("layout")
+                                    else "package of equations, unit tests and equation list in code/"
+                                    if intr_value.get("layout")
                                     else "two-script contract",
                                     "; ".join(intr_value.get("problems") or [])[:200],
                                     self.quest_root / "NEXT_STEP.md", self.quest_id,
@@ -6915,7 +6916,11 @@ class Engine:
                 simulate_code, code = scripts["simulate"], scripts["analysis"]
                 submit_code = scripts.get("submit", "")
                 deps = _parse_split_deps(text)
-                broken = _run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code})
+                broken = list(_run_manifest.split_lint({_split_run.SIMULATE_NAME: simulate_code, "experiment.py": code}))
+                model_package = next(iter(package_files), "").split("/")[0] or self._package_in_use(state)
+                if model_package and _code_layout.imports(code, model_package):
+                    broken.append(f"experiment.py imports the model's package {model_package}: the analysis must read "
+                                  "only FI's record of the trials")
                 if broken:
                     self._split_contract_broken(broken, what="the two scripts break the two-script contract")
             else:
@@ -7907,8 +7912,9 @@ class Engine:
     def _label_sentences(main: Path, missing: list[str]) -> list[str]:
         if not missing:
             return []
+        where = f"code/{main.parent.name}/{main.name}" if main.parent.name != "code" else f"code/{main.name}"
         return _oracle.label_gaps({"model": {"equations": [{"id": m, "role": "generates"} for m in missing]}}, "",
-                                  f"code/{main.name}")
+                                  where)
 
     async def _label_equations(self, state: QuestState) -> Path | None:
         """Right after the code is written: when the simulation does not mark every ``generates`` equation of the plan,
@@ -7917,9 +7923,18 @@ class Engine:
         still missing. Returns the script it rewrote, or ``None``."""
         try:
             main, missing = self._unlabelled(state, self._protocol_block(state))
+            target = self._label_target(state, main)
+            if target != main:
+                # With the model's package the labels belong on its functions (a label in simulate.py does not say
+                # which function computes the equation): what is missing is read there, as the layout check reads it.
+                package = target.parent.name
+                sources = {rel: text for rel, text in _code_layout.package_sources(self.quest_root / "code").items()
+                           if rel.startswith(f"{package}/")}
+                missing = [row["id"] for row in _code_layout.equation_map(self._protocol_block(state), sources)
+                           if not row["function"]]
             if not missing:
                 return None
-            main = self._label_target(state, main)
+            main = target
             before = main.read_text(encoding="utf-8")
             view = _oracle.model_view((self._protocol_block(state) or {}).get("model")) or {}
             equations = [e for e in view.get("equations") or []
@@ -7949,20 +7964,23 @@ class Engine:
             return None
 
     def _code_layout(self, state: QuestState, protocol: Any = None) -> dict[str, Any] | None:
-        """How this quest's code is laid out (:mod:`core.code_layout`): the research-tool layout or two scripts, with what
-        the layout costs. ``None`` for a quest that keeps no simulation of its own in two scripts (the no-simulation path,
-        a survey, ``split_analysis: false``), which is left exactly as it was."""
+        """How this quest's code is laid out (:mod:`core.code_layout`): a small research tool or two scripts, with what
+        that costs. ``None`` for a quest that keeps no simulation of its own in two scripts (the no-simulation path, a
+        survey, ``split_analysis: false``), and for code written before this quest decided a layout (a quest begun
+        before the layout existed, resumed or refined): those are left exactly as they were."""
         if not self._runs_code(state) or not self._split_on(state):
+            return None
+        record = _code_layout.load(self.quest_root)
+        if record is None and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
             return None
         if protocol is None:
             protocol = self._protocol_block(state)
         ex = self.config.execution
-        package = str((_code_layout.load(self.quest_root) or {}).get("package") or "") or _code_layout.package_name(
+        package = str((record or {}).get("package") or "") or _code_layout.package_name(
             str(self.config.title or self.config.topic or ""))
         return _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
                                    max_extra_lines=ex.code_package_max_extra_lines,
-                                   max_extra_calls=ex.code_package_max_extra_calls,
-                                   max_iterations=self.config.engine.max_iterations, package=package)
+                                   max_extra_calls=ex.code_package_max_extra_calls, package=package)
 
     def _plan_code_layout(self, state: QuestState) -> list[str]:
         """At plan time: decide the layout of the code from the plan, say it in run.log and return plan.md's lines."""
@@ -7978,10 +7996,29 @@ class Engine:
             self._log.warning("[plan] could not work out how the code will be laid out: %r", e)
             return []
 
+    def _adopt_reply_package(self, text: str, scripts: dict[str, str], package: str) -> tuple[str, dict[str, str]] | None:
+        """The reply wrote the model's package under a name of its own (``sir/model.py`` where FI chose
+        ``sir_outbreaks``) and simulate.py imports that name: ``(that name, its files)``, so the code that was written
+        is the code that runs. ``None`` when there is no such package, or FI's own is already on disk."""
+        if (self.quest_root / "code" / package).is_dir():
+            return None
+        for name in _code_layout.packages_in_reply(text, _PY_FENCE_RE):
+            if name == package or not _code_layout.usable_name(name):
+                continue
+            if not _code_layout.imports(scripts.get("simulate") or "", name):
+                continue
+            files = _code_layout.reply_files(text, _PY_FENCE_RE, name)
+            if _code_layout.complete(files, name):
+                self._log.info("[implement] the reply wrote the model's package as code/%s/ (not code/%s/) and "
+                               "simulate.py uses it: that name is kept", name, package)
+                return name, files
+        return None
+
     async def _code_package_reply(self, state: QuestState, prompt: str, text: str, scripts: dict[str, str], *,
                                   extend: bool) -> tuple[dict[str, str], str, dict[str, str]]:
-        """``(scripts, reply, package files)`` for a two-script reply: the model's package in it, asked for once more when
-        the reply left it out and ``code/`` has none yet. A reply that still has none keeps two scripts, and says so."""
+        """``(scripts, reply, package files)`` for a two-script reply: the model's package in it, asked for again when the
+        reply left it out (while ``execution.code_package_max_extra_calls`` allows). A reply that still has none keeps
+        the code it has, and says so."""
         layout = self._code_layout(state)
         if layout is None:
             return scripts, text, {}
@@ -7990,13 +8027,22 @@ class Engine:
             _code_layout.save(self.quest_root, layout)
             return scripts, text, {}
         package = layout["package"]
+        code = self.quest_root / "code"
+        on_disk = (code / package / _code_layout.MODEL_NAME).is_file()
+        if extend and not on_disk:
+            # An extension changes as little as it can: code kept as two scripts is not restructured for it.
+            return scripts, text, {}
         files = _code_layout.reply_files(text, _PY_FENCE_RE, package)
-        on_disk = (self.quest_root / "code" / package / _code_layout.MODEL_NAME).is_file()
+        if not _code_layout.complete(files, package) and not extend:
+            adopted = self._adopt_reply_package(text, scripts, package)
+            if adopted:
+                package, files = adopted
+                layout = {**layout, "package": package}
         if extend:
-            # An extension changes as little as it can: a package file given back without functions it has now is a part
-            # of the file (the new function alone), and writing it would lose the rest. The package is then kept.
+            # A package file given back without names it has now is a part of the file (the new function alone), and
+            # writing it would lose the rest: the package is then kept, and the run says why.
             for rel in list(files):
-                old_path = self.quest_root / "code" / rel
+                old_path = code / rel
                 old = old_path.read_text(encoding="utf-8") if old_path.is_file() else ""
                 dropped = _code_layout.dropped_functions(old, files[rel]) if old else []
                 if dropped:
@@ -8004,19 +8050,42 @@ class Engine:
                                       "it is", rel, ", ".join(dropped))
                     files = {}
                     break
-        if not _code_layout.complete(files, package) and not on_disk and not extend:
-            self._log.warning("[implement] the reply left out the model's package (code/%s/); asking once more", package)
-            again = await self._chat(prompt + _code_layout.reminder(package), node="implement")
-            again_scripts = _split_run.parse_split_response(again, _PY_FENCE_RE)
-            again_files = _code_layout.reply_files(again, _PY_FENCE_RE, package)
-            if again_scripts is not None and _code_layout.complete(again_files, package):
-                scripts, text, files = again_scripts, again, again_files
+        previous = (code / _split_run.SIMULATE_NAME).read_text(encoding="utf-8") if (
+            code / _split_run.SIMULATE_NAME).is_file() else ""
+        sim_changed = not _split_run.same_script(previous, scripts.get("simulate") or "")
+        limit = self.config.execution.code_package_max_extra_calls
+        if not _code_layout.complete(files, package) and not extend and (not on_disk or sim_changed):
+            if _code_layout.calls_left(self.quest_root, limit) > 0:
+                self._log.warning("[implement] the reply left out the model's package (code/%s/); asking once more",
+                                  package)
+                _code_layout.spend_call(self.quest_root)
+                try:
+                    again = await self._chat(prompt + _code_layout.reminder(package), node="implement")
+                except Exception as e:  # noqa: BLE001 -- the package is asked for as a help; the code that came stays
+                    self._log.warning("[implement] asking again for the model's package failed: %r", e)
+                    again = ""
+                again_scripts = _split_run.parse_split_response(again, _PY_FENCE_RE)
+                again_files = _code_layout.reply_files(again, _PY_FENCE_RE, package)
+                if again_scripts is not None and _code_layout.complete(again_files, package):
+                    scripts, text, files = again_scripts, again, again_files
+            else:
+                self._log.info("[implement] the reply left out the model's package; not asking again: the %d extra "
+                               "requests allowed (execution.code_package_max_extra_calls) are spent", limit)
         fell_back = ""
-        if not _code_layout.complete(files, package) and not on_disk:
-            asked = "" if extend else ", also when asked again"
-            fell_back = f"the reply left out the model's package{asked}"
-            self._log.warning("[implement] the reply left out the model's package (code/%s/)%s: the code keeps two "
-                              "scripts (simulate.py and experiment.py) this time", package, asked)
+        if not _code_layout.complete(files, package):
+            if not on_disk:
+                fell_back = "the reply left out the model's package"
+                if _code_layout.imports(scripts.get("simulate") or "", package):
+                    self._log.warning(
+                        "[implement] the reply left out the model's package (code/%s/) but simulate.py imports it: the "
+                        "first run will fail on the missing package and be sent for repair", package)
+                else:
+                    self._log.warning("[implement] the reply left out the model's package (code/%s/): the code keeps "
+                                      "two scripts (simulate.py and experiment.py) this time", package)
+            elif sim_changed and not extend:
+                self._log.warning(
+                    "[implement] simulate.py was written again but the model's package (code/%s/) was not: the package "
+                    "from before is kept, so check that it still computes the plan's model", package)
         else:
             self._log.info("[implement] %s", _code_layout.summary(layout))
         _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
@@ -8053,13 +8122,26 @@ class Engine:
         shown = self._package_shown(state)
         if not shown or not isinstance(parsed, dict):
             return []
-        files = _code_layout.repair_files(parsed.get("package_files"), shown[0])
+        files, dropped = _code_layout.repair_files(parsed.get("package_files"), shown[0])
+        if dropped:
+            self._log.warning("[%s] the repair's package files not used: %s", node, "; ".join(dropped))
         if not files:
             return []
-        wrote = _code_layout.write_package(self.quest_root / "code", files, same=_split_run.same_script)
+        try:
+            wrote = _code_layout.write_package(self.quest_root / "code", files, same=_split_run.same_script)
+        except OSError as e:
+            self._log.warning("[%s] could not write the repair's package files: %r", node, e)
+            return []
         if wrote:
             self._log.info("[%s] the repair rewrote the model's package: %s", node, ", ".join(f"code/{w}" for w in wrote))
         return wrote
+
+    def _package_repair_files(self, state: QuestState, parsed: Any) -> dict[str, str]:
+        """The usable package files a repair reply holds (nothing is written)."""
+        shown = self._package_shown(state)
+        if not shown or not isinstance(parsed, dict):
+            return {}
+        return _code_layout.repair_files(parsed.get("package_files"), shown[0])[0]
 
     def _package_snapshot(self) -> dict[str, str]:
         return _code_layout.package_sources(self.quest_root / "code")
@@ -8067,15 +8149,18 @@ class Engine:
     def _restore_package(self, before: dict[str, str]) -> None:
         """Put the model's package back as ``before`` held it (a repair that is undone takes its package change with it)."""
         code = self.quest_root / "code"
-        for rel, text in _code_layout.package_sources(code).items():
-            if rel not in before:
-                (code / rel).unlink(missing_ok=True)
-            elif text != before[rel]:
-                (code / rel).write_text(before[rel], encoding="utf-8")
-        for rel, text in before.items():
-            if not (code / rel).is_file():
-                (code / rel).parent.mkdir(parents=True, exist_ok=True)
-                (code / rel).write_text(text, encoding="utf-8")
+        try:
+            for rel, text in _code_layout.package_sources(code).items():
+                if rel not in before:
+                    (code / rel).unlink(missing_ok=True)
+                elif text != before[rel]:
+                    (code / rel).write_text(before[rel], encoding="utf-8")
+            for rel, text in before.items():
+                if not (code / rel).is_file():
+                    (code / rel).parent.mkdir(parents=True, exist_ok=True)
+                    (code / rel).write_text(text, encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[oracle] could not put the model's package back as it was: %r", e)
 
     def _check_code_layout(self, state: QuestState) -> list[str]:
         """After the code is written, before anything runs: say in run.log what the research-tool layout of ``code/`` is
@@ -8092,20 +8177,29 @@ class Engine:
             if fell_back and not research:
                 return []  # said when the code was written: this quest keeps two scripts
             problems = _code_layout.check(code, self._protocol_block(state), package)
+            # A generator built without a seed in the package ignores the seed FI gives each trial.
+            for rel, text in sorted(_code_layout.package_sources(code).items()):
+                if rel.startswith(f"{package}/"):
+                    unseeded = unseeded_rng_calls(text)
+                    if unseeded:
+                        problems.append(f"code/{rel} builds a random generator without a seed ("
+                                        + "; ".join(f"line {line}: {expr}" for line, expr in unseeded[:3])
+                                        + "), so the seed FI gives each trial does not reach it")
         except Exception as e:  # noqa: BLE001 -- a check of the folder must never stop a quest by crashing
             self._log.warning("[implement] could not check the layout of code/: %r", e)
             return []
         for why in problems:
-            self._log.warning("[implement] code/ as a research tool: %s", why)
+            self._log.warning("[implement] code/ as a small research tool: %s", why)
         if problems and research:
             self._pause_for_human(
-                kind="split",
+                kind="code_layout",
                 interaction="supply",
-                headline="the code in code/ is missing part of its research-tool layout",
+                headline="the code in code/ is missing its package of equations, its unit tests or its equation list",
                 steps=[
                     f"{problems[0][0].upper()}{problems[0][1:]}." + (f" Also: {'; '.join(problems[1:])}." if problems[1:] else ""),
-                    f"Add what is missing in code/ (the model's equations in code/{package}/, each function labelled with "
-                    "its equation, used by simulate.py), or set `execution.code_package: false` to keep two scripts.",
+                    f"Fix it in code/ (the model's equations in code/{package}/, each function labelled with its "
+                    "equation, used by simulate.py), or set `execution.code_package: false` in the quest's YAML to "
+                    "keep two scripts.",
                     "Then resume: the folder is read again before anything runs.",
                 ],
                 payload={"contract_stage": True, "layout": True, "quest_id": self.quest_id, "problems": problems},
@@ -8119,7 +8213,7 @@ class Engine:
         is seen."""
         try:
             main, missing = self._unlabelled(state, self._protocol_block(state))
-            gaps = self._label_sentences(main, missing)
+            gaps = self._label_sentences(self._label_target(state, main), missing)  # named where the label belongs
         except Exception as e:  # noqa: BLE001 -- a check of the script must never stop a quest by crashing
             self._log.warning("[implement] could not check where the simulation implements the plan's equations: %r", e)
             return []
@@ -9727,6 +9821,12 @@ class Engine:
             return None, False, "set_aside_disputed"
         new_code = parsed.get("code")
         if not (isinstance(new_code, str) and new_code.strip()):
+            if (path.name == _split_run.SIMULATE_NAME and self._package_repair_files(state, parsed)
+                    and self._apply_package_repair(state, parsed, node="oracle")):
+                # The fault was in the model's package: that is fixed, simulate.py stays as it is.
+                self._log.info("[oracle] %s is kept as it is: the repair fixed the model's package (%s)", path.name,
+                               str(parsed.get("patch_summary") or "no summary")[:160])
+                return code, False, "applied"
             if parsed and not parsed.get("code"):
                 return None, False, "no_code"  # an answer with nothing to change
             new_code, _deps = _parse_implement_response(text)
@@ -10327,9 +10427,13 @@ class Engine:
         self._check_equation_labels(state)
         self._check_code_layout(state)
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
+        package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
-        if seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate:
-            self._check_equation_labels(state)  # an oracle repair rewrote the simulation: its labels are read again
+        if (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (
+                self._package_snapshot() != package_before_gate):
+            # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
+            self._check_equation_labels(state)
+            self._check_code_layout(state)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -11526,6 +11630,9 @@ class Engine:
             }
 
         new_code = parsed.get("code") or ""
+        if not new_code.strip() and repair_simulation and self._package_repair_files(state, parsed):
+            # The fix is in the model's package alone: simulate.py stays as it is.
+            new_code = script_code
         if not new_code.strip():
             self._log.warning(
                 "[execute_reflect] LLM returned no `code` field; proceeding without repair"
@@ -11567,12 +11674,18 @@ class Engine:
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
         code_path.write_text(new_code, encoding="utf-8")
+        package_fixed: dict[str, str] = {}
         if repair_simulation:
-            self._apply_package_repair(state, parsed, node="execute_reflect")
+            code_dir = self.quest_root / "code"
+            package_fixed = {rel: _attempts._sha((code_dir / rel).read_bytes())
+                             for rel in self._apply_package_repair(state, parsed, node="execute_reflect")
+                             if (code_dir / rel).is_file()}
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": iters + 1,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
             "summary": patch_summary[:300],
+            # A fix in the model's package: the files it rewrote, by their new hash.
+            **({"package_files": package_fixed} if package_fixed else {}),
         }) or getattr(self, "_last_ledger_id", None)
 
         patch: QuestState = {
@@ -16420,7 +16533,9 @@ class Engine:
         block = (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
                  + (_SEARCH_PROTOCOL if search else ""))
         layout = self._code_layout(state)
-        if layout and layout["shape"] == _code_layout.PACKAGE:
+        # An extension of code kept as two scripts is not asked to restructure it into a package.
+        extending_two_scripts = bool(state.get("refine_extend")) and not self._package_in_use(state)
+        if layout and layout["shape"] == _code_layout.PACKAGE and not extending_two_scripts:
             block += _code_layout.prompt_block(layout["package"], _oracle.generating_equations(self._protocol_block(state)))
         return block
 

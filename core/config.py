@@ -1129,8 +1129,11 @@ class ExecutionConfig(BaseModel):
     # one setting with it (still the file FI calls), the plan's checks as unit tests (``code/tests/test_oracles.py``) and
     # ``code/METHODS.md`` saying which function computes each equation; FI writes the tests and METHODS.md itself.
     # What it adds is estimated at plan time and shown in plan.md; when it would need more than
-    # ``code_package_max_extra_lines`` more lines of code or ``code_package_max_extra_calls`` more requests to the model,
-    # the quest keeps two scripts and says so in plan.md and run.log. ``false`` keeps two scripts for every quest.
+    # ``code_package_max_extra_lines`` more lines of code, the quest keeps two scripts and says so in plan.md and run.log.
+    # ``code_package_max_extra_calls`` is how many more requests to the model the layout may make in the whole quest (a
+    # reply that leaves the package out is asked for again); once they are spent the quest keeps the code it has and says
+    # so. ``false`` keeps two scripts for every quest. A quest whose code was written before it decided a layout (begun
+    # before this existed) keeps its code as it is.
     # Only for a quest that keeps two scripts (``split_analysis``). The layout is in core/code_layout.py.
     code_package: bool = True
     code_package_max_extra_lines: int = Field(default=400, ge=0)

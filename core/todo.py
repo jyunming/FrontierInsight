@@ -98,6 +98,12 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "makes no more changes to it.",
         ["Change the simulation yourself first (code/ is yours to edit), then go on: your version is run in full."],
     ),
+    "code_layout": (
+        "The model's equations are not yet in a package of their own in code/ (or its unit tests or equation list are "
+        "missing). Fix it yourself, or keep two scripts?",
+        "Fix what is listed in code/, then go on: the folder is read again before anything runs.",
+        ["Keep two scripts: set `execution.code_package: false` in the quest's YAML, then go on."],
+    ),
     "equation_labels": (
         "The simulation does not say where it implements each equation of the plan. Label it?",
         "Add a comment with each missing equation's id (`# E1`) above the code that computes it, then go on.",
@@ -200,6 +206,12 @@ _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
         (False, True),
         "This quest is set up for research, so the simulation must say where it implements each equation of the plan: "
         "add the labels and resume.",
+    ),
+    "code_layout": dict.fromkeys(
+        (False, True),
+        "This quest is set up for research, so its code keeps the model's equations apart, with unit tests and an "
+        "equation list: fix what is listed in code/ and resume, or set `execution.code_package: false` to keep two "
+        "scripts.",
     ),
 }
 _RESEARCH_INSTEAD_ANY = {

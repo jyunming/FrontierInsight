@@ -300,7 +300,11 @@ same PR that adds, splits or renames one.
   out*, via `plan.render(code_layout=...)`). Engine hooks: `Engine._code_layout` (None off the two-script path),
   `_plan_code_layout` (in `_node_plan`), `_code_package_reply` (in `_node_implement`: reads the package from the reply,
   asks once more, else keeps two scripts and says so), `_package_in_use`, `_check_code_layout` (in `_node_execute`
-  beside `_check_equation_labels`: `check`, a warning, a stop only under research through the `split` contract pause).
+  beside `_check_equation_labels` and again after an oracle repair: `check` plus `unseeded_rng_calls` over the package, a warning, a stop only under research through the `code_layout` pause, `todo._ADVICE["code_layout"]`).
+  `_code_layout` is `None` for code written before the quest decided a layout (no `.fi/code_layout.json` beside an
+  existing simulate.py). The request limit is a quest-wide budget (`calls_left` / `spend_call`, counted in the record);
+  `_adopt_reply_package` keeps a package the reply named itself when simulate.py imports it; `split_run.simulation_sha`
+  and `attempt_records.script_hashes` (FI-written METHODS.md / tests left out) know the package.
   `trial_runner._run_key` and `Engine._simulation_sources` read the package as part of the simulation.
   Where simulate.py is rewritten the package goes with it: `Engine._package_shown` (shown by `_extend_directive`; an
   extension's package file missing functions it had is not written, `dropped_functions`), `_package_repair_note` /

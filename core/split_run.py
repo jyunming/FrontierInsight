@@ -92,6 +92,21 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def simulation_sha(simulate: Path) -> str:
+    """The hash that decides whether raw files are still this simulation's: ``simulate.py``'s own, and, when the model's
+    equations are in a package beside it (core/code_layout.py), that package's files with it, so a changed equation runs
+    the simulation again. Without a package it is ``simulate.py``'s hash, as before."""
+    from . import code_layout as _code_layout
+
+    package = _code_layout.package_sources(Path(simulate).parent)
+    if not package:
+        return sha256_of(simulate)
+    digest = hashlib.sha256(Path(simulate).read_bytes())
+    for rel, body in sorted(package.items()):
+        digest.update(f"\n{rel}\n{body}".encode("utf-8"))
+    return digest.hexdigest()
+
+
 def _files_of(raw_dir: Path) -> list[Path]:
     if not raw_dir.is_dir():
         return []
@@ -244,7 +259,7 @@ class SplitRunner:
         label = "the first run" if index == 0 else f"replicate {index} (seed {seed})"
 
         sim: ExecutionResult | None = None
-        simulate_sha = sha256_of(self.simulate)
+        simulate_sha = simulation_sha(self.simulate)
         why = stale_reason(raw_dir, simulate_sha=simulate_sha, seed=seed)
         if why is None:
             self.reused += 1

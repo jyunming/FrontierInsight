@@ -73,7 +73,7 @@ _INPUT_FILES_LIMIT = 2000
 STOP_OUTCOMES = {
     "oracle": "oracle_failure",
     "manifest": "protocol_mismatch", "protocol": "protocol_mismatch", "equation_labels": "protocol_mismatch",
-    "split": "process_error", "numeric": "process_error", "replicate_seed_unrepairable": "process_error",
+    "split": "process_error", "code_layout": "process_error", "numeric": "process_error", "replicate_seed_unrepairable": "process_error",
 }
 
 #: Above this size a file is identified by its size and its first and last MiB, not read whole.
@@ -223,8 +223,9 @@ def _folder_manifest(folder: Path, limit: int = _INPUT_FILES_LIMIT, cache: dict 
 
 def _generated_project_files(quest_root: Path) -> set[str]:
     """The README, requirements, run.py and fi_search.py (FI's own search for the best design) FI wrote into ``code/``
-    (core/code_project.py) and a person has not edited: they describe or repeat what FI did, they are not the code an
-    attempt ran."""
+    (core/code_project.py), and the equation list and unit tests it writes for code laid out as a small research tool
+    (core/code_layout.py), that a person has not edited: they describe, check or repeat what FI did, they are not the
+    code an attempt ran. By path relative to ``code/``."""
     try:
         record = json.loads((quest_root / ".fi" / "code_project.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -232,7 +233,7 @@ def _generated_project_files(quest_root: Path) -> set[str]:
     if not isinstance(record, dict):
         return set()
     out: set[str] = set()
-    for name in ("README.md", "requirements.txt", "run.py", "fi_search.py"):
+    for name in ("README.md", "requirements.txt", "run.py", "fi_search.py", "METHODS.md", "tests/test_oracles.py"):
         try:
             text = (quest_root / "code" / name).read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):
@@ -253,7 +254,7 @@ def script_hashes(quest_root: Path, cache: dict | None = None) -> dict[str, str]
     generated = _generated_project_files(quest_root)
     if code.is_dir():
         for path in sorted(p for p in code.rglob("*") if p.is_file() and "__pycache__" not in p.parts and ".git" not in p.parts):
-            if path.parent == code and (path.name in generated or path.name == "CHANGELOG.md"):
+            if path.relative_to(code).as_posix() in generated or (path.parent == code and path.name == "CHANGELOG.md"):
                 continue
             digest, _ = _digest(path, cache, whole=True)
             if digest:

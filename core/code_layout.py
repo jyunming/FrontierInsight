@@ -75,16 +75,38 @@ def package_name(title: str) -> str:
         name = joined
     if name and name[0].isdigit():
         name = f"study_{name}"
-    stdlib = getattr(sys, "stdlib_module_names", frozenset())
-    if not name or not name.isidentifier() or keyword.iskeyword(name) or name in _TAKEN or name in stdlib:
+    if not usable_name(name):
         return "study_model"
     return name
 
 
-def estimate(protocol: dict[str, Any] | None, *, max_iterations: int) -> dict[str, int]:
-    """How much more the package layout costs than two scripts, from the plan: files, lines of code (the model's part and
-    FI's part) and requests to the model. The requests are an upper bound: one per time the code is written (the first
-    time and once per revision, ``engine.max_iterations``), made only when a reply leaves the package out."""
+# Libraries a scientist's code commonly imports: a package of the same name beside simulate.py would hide them.
+_LIBRARIES = {"numpy", "scipy", "pandas", "matplotlib", "sympy", "numba", "torch", "jax", "mesa", "networkx",
+              "sklearn", "statsmodels", "seaborn", "tensorflow", "keras", "xarray", "astropy", "pymc", "simpy",
+              "numpyro", "emcee", "lmfit", "pint", "tqdm", "yaml", "PIL", "cv2", "skimage"}
+
+
+def usable_name(name: str) -> bool:
+    """A package name that hides nothing: an identifier, not a keyword, not one of the scripts beside it, not a module of
+    Python itself or an installed or common library (``code/`` is first on the import path when the code runs)."""
+    stdlib = getattr(sys, "stdlib_module_names", frozenset())
+    if (not name or not name.isidentifier() or keyword.iskeyword(name) or name in _TAKEN or name in stdlib
+            or name in _LIBRARIES):
+        return False
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec(name) is not None:
+            return False
+    except (ImportError, ValueError, AttributeError):
+        pass
+    return True
+
+
+def estimate(protocol: dict[str, Any] | None) -> dict[str, int]:
+    """How much more the package layout costs than two scripts, from the plan: files and lines of code (the model's part
+    and FI's part). The extra requests to the model are not estimated: they are made only when a reply leaves the
+    package out, and never more than ``execution.code_package_max_extra_calls`` in the whole quest (:func:`spend_call`)."""
     equations = len(_oracle.generating_equations(protocol))
     checks = len([o for o in _oracle.declared(protocol) if _oracle.limit_of(o)[1] is not None])
     by_model = _MODEL_BASE_LINES + _MODEL_LINES_PER_EQUATION * equations
@@ -94,44 +116,54 @@ def estimate(protocol: dict[str, Any] | None, *, max_iterations: int) -> dict[st
         "extra_lines": by_model + by_fi,
         "extra_lines_by_model": by_model,
         "extra_lines_by_fi": by_fi,
-        "extra_calls": 1 + max(0, int(max_iterations or 0)),
         "equations": equations,
         "checks": checks,
     }
 
 
 def decide(protocol: dict[str, Any] | None, *, enabled: bool, max_extra_lines: int, max_extra_calls: int,
-           max_iterations: int, package: str) -> dict[str, Any]:
+           package: str) -> dict[str, Any]:
     """The shape of this quest's code: ``package`` (the default) or ``single`` (two scripts alone), with the estimate and,
-    for ``single``, why, in plain words."""
-    cost = estimate(protocol, max_iterations=max_iterations)
+    for ``single``, why, in plain words. The line limit decides at plan time; the request limit is a budget spent while
+    the code is written (once it is spent, the quest keeps the code it has and says so)."""
+    cost = estimate(protocol)
     decision: dict[str, Any] = {"shape": PACKAGE, "package": package, "estimate": cost,
                                 "limits": {"extra_lines": int(max_extra_lines), "extra_calls": int(max_extra_calls)},
                                 "reason": ""}
     if not enabled:
         decision.update(shape=SINGLE, reason="execution.code_package is off")
         return decision
-    over = []
     if cost["extra_lines"] > max_extra_lines:
-        over.append(f"about {cost['extra_lines']} more lines of code, over the limit of {max_extra_lines} "
-                    "(execution.code_package_max_extra_lines)")
-    if cost["extra_calls"] > max_extra_calls:
-        over.append(f"up to {cost['extra_calls']} more requests to the model, over the limit of {max_extra_calls} "
-                    "(execution.code_package_max_extra_calls)")
-    if over:
-        decision.update(shape=SINGLE, reason="the package layout would need " + " and ".join(over))
+        decision.update(shape=SINGLE, reason=(
+            f"it would add about {cost['extra_lines']} lines of code, over the limit of {max_extra_lines} "
+            "(execution.code_package_max_extra_lines)"))
     return decision
+
+
+def calls_left(quest_root: Path, limit: int) -> int:
+    """How many more requests the layout may still make in this quest (``execution.code_package_max_extra_calls``)."""
+    spent = int((load(quest_root) or {}).get("extra_calls_spent") or 0)
+    return max(0, int(limit) - spent)
+
+
+def spend_call(quest_root: Path) -> None:
+    """Count one extra request the layout made (kept in ``.fi/code_layout.json``, so a resume goes on counting)."""
+    record = load(quest_root) or {}
+    record["extra_calls_spent"] = int(record.get("extra_calls_spent") or 0) + 1
+    save(quest_root, record)
 
 
 def summary(decision: dict[str, Any]) -> str:
     """One sentence for run.log."""
     cost = decision.get("estimate") or {}
+    limits = decision.get("limits") or {}
     pkg = decision.get("package") or "the package"
     if decision.get("shape") == PACKAGE:
         return (f"the code is laid out as a small research tool (the model's equations in code/{pkg}/, unit tests, "
-                f"an equation list): about {cost.get('extra_lines')} more lines of code than two scripts and at most "
-                f"{cost.get('extra_calls')} more requests to the model")
-    return (f"the code keeps two scripts (simulate.py and experiment.py) instead of the research-tool layout: "
+                f"an equation list): about {cost.get('extra_lines')} more lines of code than two scripts, and at most "
+                f"{limits.get('extra_calls')} more requests to the model in the whole quest (only if a reply leaves the "
+                "package out)")
+    return (f"the code keeps two scripts (simulate.py and experiment.py) instead of a small research tool: "
             f"{decision.get('reason') or 'it is off'}")
 
 
@@ -144,9 +176,7 @@ def plan_lines(decision: dict[str, Any] | None) -> list[str]:
     pkg = decision.get("package") or "the package"
     lines = [f"## {HEADING}", ""]
     what = (f"about {cost.get('extra_files')} more files and about {cost.get('extra_lines')} more lines of code than two "
-            f"scripts ({cost.get('extra_lines_by_model')} written by the model, {cost.get('extra_lines_by_fi')} by FI), "
-            f"and at most {cost.get('extra_calls')} more requests to the model (one each time the code is written, "
-            "only if a reply leaves the package out)")
+            f"scripts ({cost.get('extra_lines_by_model')} written by the model, {cost.get('extra_lines_by_fi')} by FI)")
     if decision.get("shape") == PACKAGE:
         lines += [
             f"The code in `code/` will be a small research tool: the model's equations in the package `code/{pkg}/` "
@@ -154,18 +184,21 @@ def plan_lines(decision: dict[str, Any] | None) -> list[str]:
             "`experiment.py` for the analysis, `tests/test_oracles.py` with this plan's checks as unit tests, "
             "`METHODS.md` saying which function computes each equation, and `run.py` to run the whole study.",
             "",
-            f"This costs {what}. The limit is {limits.get('extra_lines')} lines and {limits.get('extra_calls')} "
-            "requests (`execution.code_package_max_extra_lines`, `execution.code_package_max_extra_calls`).",
+            f"This costs {what}; the limit is {limits.get('extra_lines')} lines "
+            "(`execution.code_package_max_extra_lines`). When a reply leaves the package out, the model is asked again: "
+            f"at most {limits.get('extra_calls')} more requests to the model in the whole quest "
+            "(`execution.code_package_max_extra_calls`), after which the quest keeps the code it has and says so. "
+            "The package's text is also shown to the model each later time the simulation is changed or repaired.",
             "",
         ]
     else:
         lines += [
-            f"The code will keep two scripts, `simulate.py` and `experiment.py`, not the research-tool layout: "
+            f"The code will keep two scripts, `simulate.py` and `experiment.py`, not a small research tool: "
             f"{decision.get('reason') or 'it is off'}.",
             "",
         ]
         if "limit" in str(decision.get("reason") or ""):
-            lines += [f"The research-tool layout would cost {what}. Raise the limit to get it.", ""]
+            lines += [f"A small research tool would cost {what}. Raise the limit to get it.", ""]
     return lines
 
 
@@ -178,7 +211,11 @@ def load(quest_root: Path) -> dict[str, Any] | None:
 
 
 def save(quest_root: Path, decision: dict[str, Any]) -> None:
+    """Keep the decision; the count of extra requests already made carries over (it is a budget for the whole quest)."""
     path = Path(quest_root) / RECORD
+    old = load(quest_root) or {}
+    if "extra_calls_spent" in old and "extra_calls_spent" not in decision:
+        decision = {**decision, "extra_calls_spent": old["extra_calls_spent"]}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(decision, indent=1), encoding="utf-8")
@@ -198,11 +235,13 @@ fenced Python block whose first line is `# file: <path>`:
 - `# file: {package}/__init__.py`: one line saying what the package computes (it may import the model's functions).
 - `# file: {package}/{MODEL_NAME}`: the model's equations and nothing else: one function per equation (or per small group),
   every parameter an argument. No scenario values in the package (no grid values, sizes, seeds, thresholds or file paths)
-  and no loop over settings. Put each equation's id in a comment (`# E1`) on or above the function that computes it:
-  {labels}.
+  and no loop over settings, no random generator created at module level (a function that draws random numbers takes
+  the generator or the seed as an argument). Put each equation's id in a comment (`# E1`) on or above the function that
+  computes it: {labels}. With the package, these labels go in the package, not in simulate.py.
 - simulate.py keeps run_trial / run_cell (and oracle) exactly as the contract above says: it reads the setting from
   `cell` and computes it by calling the package (`from {package} import model`). The scenario is in simulate.py, the
   mathematics in the package.
+- experiment.py does not import the package: it reads only FI's record of the trials, as the contract above says.
 Do not write tests, a README or a command-line entry: FI writes the unit tests from the plan's checks
 (`tests/{TEST_NAME}`), the equation list (`{METHODS_NAME}`) and `run.py` itself.
 """
@@ -242,21 +281,54 @@ def _package_rel(path: str, package: str) -> str | None:
     parts = rel.split("/")
     if len(parts) != 2 or parts[0] != package or not parts[1].endswith(".py") or not parts[1][:-3].isidentifier():
         return None
+    if parts[1] in _SCRIPT_NAMES:  # a block named like a script FI runs would be taken for that script too
+        return None
     return rel
 
 
-def repair_files(value: Any, package: str) -> dict[str, str]:
-    """The package files a repair reply gives back (its JSON ``package_files``: ``{"<package>/model.py": text}``); only
-    Python files directly inside the package that parse are taken."""
+_SCRIPT_NAMES = {"simulate.py", "experiment.py", "submit.py", "run.py"}
+
+
+def packages_in_reply(text: str, fence: re.Pattern[str]) -> list[str]:
+    """The package names a reply wrote a ``<name>/model.py`` block for (in the order they appear)."""
+    names: list[str] = []
+    for match in fence.finditer(text or ""):
+        lines = match.group(1).strip("\n").splitlines()
+        first = next((line for line in lines if line.strip()), "")
+        marker = _FILE_MARKER.match(first)
+        if not marker:
+            continue
+        rel = marker.group(1).replace("\\", "/").strip("/")
+        rel = rel[len("code/"):] if rel.startswith("code/") else rel
+        parts = rel.split("/")
+        if len(parts) == 2 and parts[1] == MODEL_NAME and parts[0] not in names:
+            names.append(parts[0])
+    return names
+
+
+def imports(source: str, package: str) -> bool:
+    """Whether ``source`` imports ``package`` (absolutely)."""
+    return _imports(source, package)
+
+
+def repair_files(value: Any, package: str) -> tuple[dict[str, str], list[str]]:
+    """The package files a repair reply gives back (its JSON ``package_files``: ``{"<package>/model.py": text}``) and the
+    ones left out, each with why; only Python files directly inside the package that parse are taken."""
     out: dict[str, str] = {}
+    dropped: list[str] = []
     if not isinstance(value, dict):
-        return out
+        return out, dropped
     for path, text in value.items():
         rel = _package_rel(str(path), package)
-        if rel is None or not isinstance(text, str) or not text.strip() or not _parses(text):
-            continue
-        out[rel] = text.strip("\n") + "\n"
-    return out
+        if rel is None:
+            dropped.append(f"{path} (not a file of code/{package}/)")
+        elif not isinstance(text, str) or not text.strip():
+            dropped.append(f"{path} (empty)")
+        elif not _parses(text):
+            dropped.append(f"{path} (not valid Python)")
+        else:
+            out[rel] = text.strip("\n") + "\n"
+    return out, dropped
 
 
 def _top_functions(source: str) -> set[str]:
@@ -264,12 +336,21 @@ def _top_functions(source: str) -> set[str]:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return set()
-    return {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                names.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+        elif isinstance(node, ast.ImportFrom):
+            names.update(a.asname or a.name for a in node.names if a.name != "*")
+    return names
 
 
 def dropped_functions(old: str, new: str) -> list[str]:
-    """The functions (and classes) ``old`` defines at its top level that ``new`` no longer does: a file given back with
-    some of them missing is a part of the file, not the whole of it."""
+    """The names ``old`` defines at its top level (functions, classes, constants, names it imports from a module) that
+    ``new`` no longer does: a file given back with some of them missing is a part of the file, not the whole of it."""
     return sorted(_top_functions(old) - _top_functions(new))
 
 
@@ -285,9 +366,10 @@ def repair_note(package: str, sources: dict[str, str]) -> str:
     return (
         f"\nTHE MODEL'S PACKAGE: simulate.py computes with the package code/{package}/, which holds the model's equations. "
         "Its files are below. If the fault is in an equation, fix it there: add to your JSON "
-        f"`\"package_files\": {{\"{package}/{MODEL_NAME}\": \"<the whole corrected file>\"}}` beside `code` (which is "
-        "still the whole of simulate.py). Keep the equations in the package (do not copy them into simulate.py) and keep "
-        "every equation label (`# E1`). Leave `package_files` out when the package is right.\n\n"
+        f"`\"package_files\": {{\"{package}/{MODEL_NAME}\": \"<the whole corrected file>\"}}` beside `code` (the whole "
+        "of simulate.py; when only the package needed a fix, give simulate.py back unchanged). Keep the equations in the "
+        "package (do not copy them into simulate.py) and keep every equation label (`# E1`). Leave `package_files` out "
+        "when the package is right.\n\n"
         + sources_block(sources) + "\n"
     )
 
@@ -486,7 +568,9 @@ def _seed(case):
 
 def _measure(check):
     if check["case"] is None:
-        return simulate.oracle()[check["name"]]
+        found = simulate.oracle()
+        want = check["name"].strip().lower()
+        return next(v for k, v in found.items() if str(k).strip().lower() == want)
     case = dict(check["case"])
     if hasattr(simulate, "run_trial"):
         return simulate.run_trial(case, 0, _seed(case))[check["measure"]]
@@ -522,7 +606,7 @@ def oracle_tests(protocol: dict[str, Any] | None) -> str | None:
                                thresholds=json.dumps(thresholds if isinstance(thresholds, dict) else {}, sort_keys=True),
                                checks=json.dumps(checks, default=str))
     for i, (name, check) in enumerate(zip(names, checks)):
-        text += f"\n\ndef {name}():\n    \"\"\"{check['name']}\"\"\"\n    _check({i})\n"
+        text += f"\n\ndef {name}():\n    {check['name']!r}\n    _check({i})\n"  # the check's name, as a literal
     text += ("\n\nif __name__ == \"__main__\":\n    failed = 0\n    for name, fn in [" +
              ", ".join(f"({n!r}, {n})" for n in names) + "]:\n"
              "        try:\n            fn()\n            print(\"ok  \", name)\n"
@@ -590,6 +674,19 @@ def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list
         problems.append(f"there are no unit tests in code/{TESTS_DIR}/ for the plan's checks")
     if not (code_dir / METHODS_NAME).is_file():
         problems.append(f"code/{METHODS_NAME}, which says which function computes each equation, is missing")
+    try:
+        analysis = (code_dir / "experiment.py").read_text(encoding="utf-8")
+    except OSError:
+        analysis = ""
+    if _imports(analysis, package):
+        problems.append(f"code/experiment.py imports the model's package code/{package}/: the analysis must read only "
+                        "FI's record of the trials, not compute them again")
+    for rel, text in sorted(sources.items()):
+        made = module_level_randomness(text)
+        if made:
+            problems.append(f"code/{rel} makes random numbers when it is loaded (line {', '.join(map(str, made))}), so "
+                            "the seed FI gives each trial does not reach them: take the generator or the seed as an "
+                            "argument instead")
     unmapped = [row["id"] for row in equation_map(protocol, sources) if not row["function"]]
     if unmapped:
         problems.append(f"equation{'s' if len(unmapped) > 1 else ''} {', '.join(unmapped)} of the model "
@@ -597,6 +694,32 @@ def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list
                         f"(a comment such as `# {unmapped[0]}` on or above it), so {METHODS_NAME} cannot say where "
                         f"{'they are' if len(unmapped) > 1 else 'it is'} computed")
     return problems
+
+
+_RNG_MAKERS = {"default_rng", "RandomState", "Generator", "seed", "Random", "PRNGKey", "manual_seed", "SeedSequence"}
+_RNG_OWNERS = {"random", "np.random", "numpy.random", "jax.random", "torch", "rng"}
+
+
+def module_level_randomness(source: str) -> list[int]:
+    """Lines of ``source`` that make or seed a random generator when the module is imported (outside every function):
+    such a generator is not the one FI's per-trial seed reaches."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return []
+    lines: list[int] = []
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
+            continue
+        for node in ast.walk(stmt):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            owner = ast.unparse(func.value) if isinstance(func, ast.Attribute) else ""
+            if name in _RNG_MAKERS and (owner in _RNG_OWNERS or (not owner and name in {"default_rng", "RandomState"})):
+                lines.append(node.lineno)
+    return sorted(set(lines))
 
 
 def _parses(text: str) -> bool:
