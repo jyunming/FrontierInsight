@@ -8907,7 +8907,8 @@ class Engine:
         _improve.clear_own_dir(self.quest_root, "raw")
         folder = _improve.own_dir(self.quest_root, "raw")
         if folder is None:
-            raise OSError("the loop's copy of the trial record is reached through a link that could not be removed")
+            raise OSError(f"the loop's copy of the trial record ({self.quest_root / _improve.SNAPSHOTS / 'raw'}) is "
+                          "reached through a link that could not be removed")
         folder.mkdir(parents=True, exist_ok=True)
         kept: dict[str, bool] = {}
         for i, path in enumerate(self._improve_raw_files()):
@@ -8919,10 +8920,10 @@ class Engine:
     def _improve_put_back_raw(self, saved: dict[Path, bytes | None] | None = None) -> None:
         """FI's record of the last full run's trials back in place: from ``saved`` (the bytes held in memory while the
         loop ran, which no round's run can reach) or, for a loop cut short, from the copy on disk."""
-        folder = _improve.own_dir(self.quest_root, "raw", clear_links=saved is not None)
-        if folder is None:
-            return  # reached through a link: nothing is read from it
         if saved is None:
+            folder = _improve.own_dir(self.quest_root, "raw", clear_links=False)
+            if folder is None:
+                return  # reached through a link: nothing is read from it
             try:
                 kept = json.loads((folder / "kept.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -9131,8 +9132,11 @@ class Engine:
                     _improve.put_back(root, saved)
                     _improve.restore(root, best["files"])
                     # The loop's own copies, from memory: the run may have changed them too.
-                    _improve.save_snapshot(root, "original", original)
-                    _improve.save_snapshot(root, "best", best["files"])
+                    try:
+                        _improve.save_snapshot(root, "original", original)
+                        _improve.save_snapshot(root, "best", best["files"])
+                    except OSError as e:  # the loop stops here all the same; a resume then never uses those copies
+                        self._log.warning("[improve] could not write the loop's copies back: %s", e)
                     entry.update(outcome="aborted", reason="its run changed " + shown)
                     own = [t for t in touched if t.startswith("FI's own")]
                     self._log.warning(

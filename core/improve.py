@@ -176,13 +176,14 @@ def forget_bytecode(quest_root: Path) -> None:
 
 def own_dir(quest_root: Path, name: str, *, clear_links: bool = True) -> Path | None:
     """``.fi/improve/<name>``, the loop's own copy, reached without going through a link: a link (or junction) in place of
-    ``.fi``, ``.fi/improve`` or the copy itself is removed (only the link, never what it points at), or, with
+    ``.fi/improve`` or the copy itself is removed (only the link, never what it points at), or, with
     ``clear_links=False``, makes this ``None``. ``None`` too when a link cannot be removed: nothing is then read or
-    written there."""
+    written there. ``.fi`` itself is the quest's own folder wherever it is kept (a person may keep it on another disk
+    through a link), so a link there is left as it is."""
     root = Path(quest_root)
     path = root / SNAPSHOTS / name
-    step = root
-    for part in path.relative_to(root).parts:
+    step = root / SNAPSHOTS.parts[0]
+    for part in path.relative_to(step).parts:
         step = step / part
         if _is_link(step):
             if not clear_links:
@@ -209,7 +210,8 @@ def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
 
     folder = own_dir(quest_root, name)
     if folder is None:
-        raise OSError(f"the loop's copy {name!r} is reached through a link that could not be removed")
+        raise OSError(f"the loop's copy {Path(quest_root) / SNAPSHOTS / name} is reached through a link that could not "
+                      "be removed")
     folder.mkdir(parents=True, exist_ok=True)
     for old in list(folder.iterdir()):
         if _is_link(old):
