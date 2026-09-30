@@ -1921,6 +1921,69 @@ def _is_paywall_or_stub(html: str, text: str) -> bool:
 _HEADLESS_RENDER_LOCK = threading.Lock()
 
 
+# What Playwright says when a route is answered after its page, context, browser or driver
+# connection is already gone (the render finished or timed out while a request was in flight).
+# The driver-connection case is raised as a plain ``Exception``, so the message is what identifies it.
+_PLAYWRIGHT_CLOSED_MARKERS = (
+    "connection closed while reading from the driver",
+    "target page, context or browser has been closed",
+    "target closed",
+    "browser has been closed",
+)
+
+
+def _is_playwright_closed_error(exc: BaseException) -> bool:
+    """True when ``exc`` only says the page / browser / driver closed under a route handler."""
+    try:
+        from playwright._impl._errors import TargetClosedError  # type: ignore[import-not-found]
+    except Exception:
+        TargetClosedError = None  # type: ignore[assignment]
+    if TargetClosedError is not None and isinstance(exc, TargetClosedError):
+        return True
+    msg = str(exc).lower()
+    return any(m in msg for m in _PLAYWRIGHT_CLOSED_MARKERS)
+
+
+def _route_call(route, action: str, **kwargs) -> None:
+    """Answer ``route`` with ``action``; ignore the error when the page has already closed.
+
+    A route handler runs inside Playwright's event dispatcher, which prints any error it raises as a
+    full traceback — a person watching the console would read a closed page as FI crashing.
+    Any other error is raised as before."""
+    try:
+        getattr(route, action)(**kwargs)
+    except Exception as exc:  # noqa: BLE001 — narrowed just below
+        if not _is_playwright_closed_error(exc):
+            raise
+        _log.debug("playwright: route.%s skipped, page already closed (%s)", action, exc)
+
+
+def _make_navigation_guard(allow):
+    """The route handler that asks ``allow(url)`` about every page navigation, a redirect included."""
+    def _guard(route, request):
+        # Chromium follows a server redirect inside its network stack without asking the
+        # route again, so the hop is fetched here without following it: a redirect to a
+        # refused address is aborted BEFORE any request reaches that server.
+        if not request.is_navigation_request():
+            _route_call(route, "continue_")
+        elif not allow(request.url):
+            _route_call(route, "abort")
+        else:
+            try:
+                resp = route.fetch(max_redirects=0)
+            except Exception:
+                _route_call(route, "abort")
+                return
+            loc = resp.headers.get("location")
+            if 300 <= resp.status < 400 and loc:
+                from urllib.parse import urljoin
+                if not allow(urljoin(request.url, loc)):
+                    _route_call(route, "abort")
+                    return
+            _route_call(route, "fulfill", response=resp)
+    return _guard
+
+
 def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | None:
     """Render ``url`` in a headless Chromium via Playwright and return its
     HTML. This executes JavaScript and clears most anti-bot challenges
@@ -1983,28 +2046,7 @@ def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | N
                     )
                     page = ctx.new_page()
                     if allow is not None:
-                        def _guard(route, request):
-                            # Chromium follows a server redirect inside its network stack without asking the
-                            # route again, so the hop is fetched here without following it: a redirect to a
-                            # refused address is aborted BEFORE any request reaches that server.
-                            if not request.is_navigation_request():
-                                route.continue_()
-                            elif not allow(request.url):
-                                route.abort()
-                            else:
-                                try:
-                                    resp = route.fetch(max_redirects=0)
-                                except Exception:
-                                    route.abort()
-                                    return
-                                loc = resp.headers.get("location")
-                                if 300 <= resp.status < 400 and loc:
-                                    from urllib.parse import urljoin
-                                    if not allow(urljoin(request.url, loc)):
-                                        route.abort()
-                                        return
-                                route.fulfill(response=resp)
-                        page.route("**/*", _guard)
+                        page.route("**/*", _make_navigation_guard(allow))
                     nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
                     if allow is not None and not allow(page.url):
                         return None
