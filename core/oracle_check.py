@@ -288,8 +288,9 @@ def _equations(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
 
 
 def _label_texts(source: str) -> list[str]:
-    """The comments and docstrings of a Python source: where a label such as ``# E1`` is written. Code and other string
-    literals are not labels (``E1`` as a variable name, or inside a formula string, says nothing about where E1 is)."""
+    """The comments and the function and class docstrings of a Python source: where a label such as ``# E1`` is written.
+    Code and other string literals are not labels (``E1`` as a variable name, or inside a formula string, says nothing
+    about where E1 is), and neither is the module's docstring, which marks no code."""
     import ast
     import io
     import tokenize
@@ -304,8 +305,8 @@ def _label_texts(source: str) -> list[str]:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return texts
-    for node in [tree, *ast.walk(tree)]:
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             doc = ast.get_docstring(node, clean=False)
             if doc:
                 texts.append(doc)
@@ -326,19 +327,35 @@ def generating_equations(protocol: dict[str, Any] | None) -> list[str]:
     return out
 
 
-def unlabelled_equations(protocol: dict[str, Any] | None, source: str) -> list[str]:
-    """The ``generates`` equations of the plan whose id no comment or docstring of the simulation's ``source`` carries
-    (a label such as ``# E1`` on or above the code that implements it). Only the labelled mapping is read, not the
-    mathematics: a label says where to look, not that the code there is right. Ids match in any case."""
+_LABEL_RANGE_RE = re.compile(r"(?<![\w.])([A-Za-z]+)(\d+)\s*(?:-|–|—|\.\.|to)\s*\1?(\d+)(?!\w|\.\d)", re.IGNORECASE)
+
+
+def _labelled_in(eid: str, texts: str) -> bool:
+    """Whether ``eid`` is named in ``texts``, alone (``# E1``) or inside a range (``# E1-E3``, ``# E1 to 3``)."""
+    if re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", texts, re.IGNORECASE):
+        return True
+    parts = re.fullmatch(r"([A-Za-z]+)(\d+)", eid)
+    if not parts:
+        return False
+    prefix, number = parts.group(1).lower(), int(parts.group(2))
+    return any(m.group(1).lower() == prefix and int(m.group(2)) <= number <= int(m.group(3))
+               for m in _LABEL_RANGE_RE.finditer(texts))
+
+
+def unlabelled_equations(protocol: dict[str, Any] | None, source: str | dict[str, str]) -> list[str]:
+    """The ``generates`` equations of the plan whose id no comment or function docstring of the simulation carries (a
+    label such as ``# E1`` on or above the code that implements it, or a range ``# E1-E3``). ``source`` is the
+    simulation's text, or ``{file name: text}`` for a simulation with helper modules. Only the labelled mapping is
+    read, not the mathematics: a label says where to look, not that the code there is right. Ids match in any case."""
     wanted = generating_equations(protocol)
     if not wanted:
         return []
-    texts = "\n".join(_label_texts(source or ""))
-    return [eid for eid in wanted
-            if not re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", texts, re.IGNORECASE)]
+    sources = source.values() if isinstance(source, dict) else [source]
+    texts = "\n".join(t for s in sources for t in _label_texts(s or ""))
+    return [eid for eid in wanted if not _labelled_in(eid, texts)]
 
 
-def label_gaps(protocol: dict[str, Any] | None, source: str, script: str) -> list[str]:
+def label_gaps(protocol: dict[str, Any] | None, source: str | dict[str, str], script: str) -> list[str]:
     """One sentence for the equations of the plan the simulation (``script``, its file name) does not say it implements
     (empty when every ``generates`` equation is labelled, or the plan lists none)."""
     missing = unlabelled_equations(protocol, source)

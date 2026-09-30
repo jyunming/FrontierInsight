@@ -12,6 +12,7 @@ Produce a corrected `experiment.py` that runs to completion on the available CPU
 - Changing the success metric so the broken result looks "good enough."
 - Hard-coding the expected output value.
 - Clamping, capping or clipping a result into the range the design declared (or replacing it with the bound or any other constant) so it passes the range check. A capped number states something false and is rejected. If the method genuinely diverges or a value is undefined, that is a finding: emit `null` for that value and a flag saying why (e.g. `"diverged": true`).
+- Removing the comments that mark where each equation of the plan's model is computed (`# E1`): keep every one of them where it is.
 
 If the experiment is genuinely impossible to run in this environment — missing system library, unavailable hardware, a fundamental algorithmic flaw in the design — return a `give_up_reason` instead of code. The pipeline will pass through to analyze with the failure recorded.
 

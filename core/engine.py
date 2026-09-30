@@ -1027,7 +1027,7 @@ class Engine:
                             if intr_value.get("contract_stage"):
                                 self._log.info(
                                     "[FI] paused for the %s (%s): read %s, fix what it names, then run `fi --resume %s`",
-                                    "plan's equations in the simulation"
+                                    "equation labels (the simulation does not mark where it computes each equation of the plan)"
                                     if (intr_value.get("pause") or {}).get("kind") == "equation_labels"
                                     else "two-script contract",
                                     "; ".join(intr_value.get("problems") or [])[:200],
@@ -6099,7 +6099,7 @@ class Engine:
                 "[implement] the review sent the experiment back over %r", rerun_for,
             )
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
-            if self._split_on(state):
+            if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
                 prompt += _SPLIT_RERUN_NOTE
             kept_asks = [str(p) for p in (state.get("extend_check") or {}).get("asked") or [] if str(p).strip()]
             if kept_asks and not extend:
@@ -6110,7 +6110,7 @@ class Engine:
         if extend:
             self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
             prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk())
-            if self._split_on(state):
+            if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
                 prompt += _SPLIT_RERUN_NOTE
         text = await self._chat(prompt, node="implement")
         # Two scripts (execution.split_analysis): the simulation, and the analysis, which
@@ -6229,6 +6229,9 @@ class Engine:
                 code, deps = await self._repair_ignored_replicate_seed(state, code_path, code, deps)
         if extracted:
             code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps, extended=bool(extend))
+            # The labels of the plan's equations (`# E1`): asked for once more when the reply left one out.
+            if await self._label_equations(state) == code_path:
+                code = code_path.read_text(encoding="utf-8")  # a one-script quest: the labelled script is the one that runs
         if extend:
             note = "added what a refine asked for: " + "; ".join(extend)[:200]
         elif int(state.get("iteration", 0) or 0) > 0:
@@ -6441,8 +6444,9 @@ class Engine:
         if protocol is None or not _run_manifest.checkable(protocol):
             return "not_applicable", []
         if not split:
-            # The simulation is not a script of its own, so it writes no manifest. A stochastic study is asked to keep
-            # two scripts; a deterministic one (an ODE sweep) has no per-trial outcomes to keep and needs none.
+            # One script (split_analysis: false, a reply that held one, or a quest begun before every simulation got its
+            # own script): no manifest. That is a gap for a stochastic study; a deterministic one (an ODE sweep) has no
+            # per-trial outcomes to record.
             return ("single_script" if _split_run.design_is_stochastic(state.get("design")) else "not_applicable"), []
         if result.returncode != 0:
             return "not_run", []
@@ -7004,39 +7008,93 @@ class Engine:
             gaps.append(str(frozen["sources_problem"]))
         return gaps
 
-    def _simulation_script(self) -> Path:
-        """The script that computes the data: ``simulate.py`` when the quest keeps two scripts, else ``experiment.py``."""
-        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
-        return simulate if simulate.is_file() else self.quest_root / "code" / "experiment.py"
+    def _simulation_sources(self, state: QuestState) -> tuple[Path, dict[str, str]]:
+        """The script that computes the data and the text of it and of its helper modules in ``code/``: ``simulate.py``
+        when the quest runs two scripts, else ``experiment.py`` (a ``simulate.py`` left beside a one-script quest is not
+        what runs). The analysis, the cluster's submit script and FI's own ``run.py`` are not the simulation."""
+        code = self.quest_root / "code"
+        simulate = code / _split_run.SIMULATE_NAME
+        split = self._split_on(state) and simulate.is_file()
+        main = simulate if split else code / "experiment.py"
+        skip = {"experiment.py" if split else _split_run.SIMULATE_NAME, _trial_runner.SUBMIT_NAME, "run.py"}
+        texts: dict[str, str] = {}
+        for path in [main, *sorted(p for p in code.glob("*.py") if p != main and p.name not in skip)]:
+            try:
+                texts[path.name] = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+        return main, (texts if main.name in texts else {})
+
+    def _unlabelled(self, state: QuestState, protocol: Any) -> tuple[Path, list[str]]:
+        """``(the simulation script, the plan's generates equations it does not mark)``; nothing is missing for a quest
+        that runs no experiment, a plan with no such equation, or a quest with no script yet."""
+        if not isinstance(protocol, dict) or not self._runs_code(state) or not _oracle.generating_equations(protocol):
+            return self.quest_root / "code" / "experiment.py", []
+        main, texts = self._simulation_sources(state)
+        return main, (_oracle.unlabelled_equations(protocol, texts) if texts else [])
 
     def _equation_label_gaps(self, state: QuestState, protocol: Any) -> list[str]:
-        """The plan's ``generates`` equations the simulation script does not mark (``# E1`` on or above the code that
-        implements it), as one sentence; empty for a quest that runs no experiment, a plan with no such equation, or a
-        quest with no script yet. Only the labelled mapping is read, never the mathematics."""
-        if not isinstance(protocol, dict) or not self._runs_code(state) or not _oracle.generating_equations(protocol):
+        """The plan's ``generates`` equations the simulation does not mark (``# E1`` on or above the code that
+        implements it), as one sentence. Only the labelled mapping is read, never the mathematics."""
+        return self._label_sentences(*self._unlabelled(state, protocol))
+
+    @staticmethod
+    def _label_sentences(main: Path, missing: list[str]) -> list[str]:
+        if not missing:
             return []
-        script = self._simulation_script()
+        return _oracle.label_gaps({"model": {"equations": [{"id": m, "role": "generates"} for m in missing]}}, "",
+                                  f"code/{main.name}")
+
+    async def _label_equations(self, state: QuestState) -> Path | None:
+        """Right after the code is written: when the simulation does not mark every ``generates`` equation of the plan,
+        ask the model once to add the labels, and keep its answer only when it changed nothing but comments and
+        docstrings (the code compiles to the same tree). Never stops a quest; the check before the run says what is
+        still missing. Returns the script it rewrote, or ``None``."""
         try:
-            source = script.read_text(encoding="utf-8")
-        except OSError:
-            return []
-        return _oracle.label_gaps(protocol, source, f"code/{script.name}")
+            main, missing = self._unlabelled(state, self._protocol_block(state))
+            if not missing:
+                return None
+            before = main.read_text(encoding="utf-8")
+            equations = [e for e in ((self._protocol_block(state) or {}).get("model") or {}).get("equations") or []
+                         if isinstance(e, dict) and str(e.get("id") or "").strip() in missing]
+            listed = "\n".join(f"- {e.get('id')}: {e.get('formula') or ''}" for e in equations) or "\n".join(
+                f"- {m}" for m in missing)
+            prompt = (
+                f"# Label the equations in {main.name}\n\n"
+                f"The plan's model says the simulation computes its data with these equations:\n{listed}\n\n"
+                f"Return {main.name} with a comment carrying each equation's id (`# {missing[0]}`) on or above the code "
+                "that computes it. Change nothing else: no code, no names, no values; only add comments. Reply with "
+                "the whole script in one fenced Python block.\n\n"
+                f"```python\n{before}\n```\n"
+            )
+            text = await self._chat(prompt, node="implement")
+            after, _deps = _parse_implement_response(text)
+            if not after.strip() or ast.dump(ast.parse(before)) != ast.dump(ast.parse(after)):
+                self._log.warning("[implement] the request to label the equations %s changed more than comments; "
+                                  "%s is kept as it was", ", ".join(missing), main.name)
+                return None
+            main.write_text(after, encoding="utf-8")
+            self._log.info("[implement] added the equation labels to %s (%s)", main.name, ", ".join(missing))
+            return main
+        except Exception as e:  # noqa: BLE001 -- a convenience; the check before the run is what counts
+            self._log.warning("[implement] could not ask for the equation labels: %r", e)
+            return None
 
     def _check_equation_labels(self, state: QuestState) -> list[str]:
         """Say, in run.log, which equations of the plan's model the simulation does not mark where it implements them;
-        under ``rigor_profile: research`` stop until it does. Checked before every run (a repair rewrites the script);
-        on a resume the script on disk is read again, so a label a person added is seen."""
+        under ``rigor_profile: research`` stop until it does. Checked before every run and again after the oracle
+        repairs (a repair rewrites the script); on a resume the script on disk is read again, so a label a person added
+        is seen."""
         try:
-            gaps = self._equation_label_gaps(state, self._protocol_block(state))
+            main, missing = self._unlabelled(state, self._protocol_block(state))
+            gaps = self._label_sentences(main, missing)
         except Exception as e:  # noqa: BLE001 -- a check of the script must never stop a quest by crashing
             self._log.warning("[implement] could not check where the simulation implements the plan's equations: %r", e)
             return []
         for why in gaps:
             self._log.warning("[implement] %s", why)
         if gaps and self.config.rigor_profile == "research":
-            missing = _oracle.unlabelled_equations(self._protocol_block(state),
-                                                   self._simulation_script().read_text(encoding="utf-8"))
-            script = f"code/{self._simulation_script().name}"
+            script = f"code/{main.name}"
             self._pause_for_human(
                 kind="equation_labels",
                 interaction="supply",
@@ -7302,8 +7360,12 @@ class Engine:
         oracles still do not pass, ``block`` stops the quest before its main sweep and ``warn`` records it and goes on.
         Every attempt is in ``needs/ORACLE_CHECK.json``."""
         # A background job's one script cannot be run here for a check; a job array's oracle() can (it is a function).
+        # Decided by the layout the quest really has: a quest that asks for two scripts can still have one (a reply
+        # that held one, or a quest begun before every simulation got its own script), and running a one-script job's
+        # driver here would submit the job.
         if self.config.engine.oracle_check == "off" or (
-            self.config.execution.background_jobs and not self._split_on(state)
+            self.config.execution.background_jobs
+            and not (self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file())
         ):
             self._oracle_record_clear()
             return None
@@ -7596,7 +7658,8 @@ class Engine:
             "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
             "`tolerance_mode` (`absolute`, the default, or `relative`) and a `reference` saying where the expected value comes "
             f"from: {_REFERENCE_FORMS}" " Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
-            "`measure` (the name of the number that run returns), so the engine can run the simulation on it itself; when the "
+            "`measure` (the name of the number that run returns), so the engine can run the simulation on it itself (for a "
+            "random simulation that run is one trial, so a case suits a check one trial shows exactly); when the "
             "check claims an order of accuracy, give `order` too. The engine judges the measurement against these numbers. "
             "Change nothing else."
             )
@@ -8254,7 +8317,10 @@ class Engine:
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
+        before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
+        if seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate:
+            self._check_equation_labels(state)  # an oracle repair rewrote the simulation: its labels are read again
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -15922,7 +15988,7 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
-`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`, for a deterministic simulation as much as for a random one: FI calls the simulation's own function (run_cell, or run_trial) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A check without a `case` is the script's own word and does not count as independent validation. A run whose checks do not pass never reaches the main sweep.
+`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`: FI calls the simulation's own function (run_cell for a deterministic simulation, run_trial for a random one) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A deterministic simulation's oracles always get a case. For a random simulation a case is ONE trial with one seed, so give a case to a check one trial shows exactly (an invariant every trial keeps, a setting whose outcome is certain, such as no outbreak at R0 = 0); a check that needs many trials (a probability, a mean) has no case and is answered by the script's own oracle(). A check without a `case` is the script's own word and does not count as independent validation. A run whose checks do not pass never reaches the main sweep.
 
 Mistakes that stop a run, each seen in real quests:
 - `grid` holds only the settings the simulation runs separately; each grid cell is simulated and its trials are counted. A value used only to classify or summarise the same runs afterwards (a cut-off, a threshold) is not a grid axis: put it in `thresholds`.
@@ -15949,7 +16015,8 @@ measured by anything you write for the check: FI calls run_trial (or run_cell) i
 the dict it returns, so the simulation function must return that number, computed by the real simulation. Only an oracle
 without a `case` is measured by `def oracle() -> dict` in simulate.py, which must compute, with the same simulation code,
 each such check and return them as a dict keyed by the check's name, e.g. `{"closed_form_limit": 0.4987}`. There is no
-FI_ORACLE variable and no ORACLE_JSON line. When you fix the script, return the whole of simulate.py; when the only thing
+FI_ORACLE variable and no ORACLE_JSON line. Keep every comment that marks where an equation of the plan's model is
+computed (`# E1`). When you fix the script, return the whole of simulate.py; when the only thing
 wrong is a check itself, return its `oracle_change` and leave `code` empty, as said above.
 """
 
@@ -15958,7 +16025,7 @@ The experiment is two scripts. Give simulate.py back exactly as it is unless the
 """
 
 _SPLIT_REFLECT_SIMULATE = """\
-SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI calls its run_trial(cell, trial_id, seed) (or run_cell(cell)) once per trial and keeps the record itself; no trial succeeded, so experiment.py did not run. Fix simulate.py and return the whole of it: the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, no files and no RESULT_JSON.
+SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI calls its run_trial(cell, trial_id, seed) (or run_cell(cell)) once per trial and keeps the record itself; no trial succeeded, so experiment.py did not run. Fix simulate.py and return the whole of it: the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, no files and no RESULT_JSON. Keep every comment that marks where an equation of the plan's model is computed (`# E1`).
 """
 
 _SPLIT_REFLECT_ANALYSIS = """\

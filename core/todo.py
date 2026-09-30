@@ -95,7 +95,8 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
     "equation_labels": (
         "The simulation does not say where it implements each equation of the plan. Label it?",
         "Add a comment with each missing equation's id (`# E1`) above the code that computes it, then go on.",
-        [],
+        ["If the equation does not produce the data (it is used on the results), change its role to `analyses` in the "
+         "plan while it is not yet frozen: `--revise-plan \"...\"`."],
     ),
     "protocol": (
         "The experiment does not follow the plan. Fix the script, or change the plan?",

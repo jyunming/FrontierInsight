@@ -42,7 +42,10 @@ same PR that adds, splits or renames one.
   (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`). Also owns the equation
   labels: `generating_equations` (the model's `generates` ids), `unlabelled_equations` (those no comment or docstring
   of the simulation carries, `# E1`; read with `tokenize`/`ast`, never the code) and `label_gaps` (the sentence).
-  `Engine._check_equation_labels` (in `_node_execute`, before the oracle gate) warns, and under `rigor_profile:
+  `Engine._label_equations` (end of `_node_implement`) asks once for missing labels and keeps the answer only when the
+  syntax tree is unchanged; `Engine._simulation_sources` picks the simulation and its helper modules;
+  `Engine._check_equation_labels` (in `_node_execute`, before the oracle gate and again when a repair in the gate
+  rewrote the simulation) warns, and under `rigor_profile:
   research` stops (`equation_labels` pause); `Engine._equation_label_gaps` (called by `_write_evidence`) passes them to
   `evidence.assess(equation_label_gaps=...)`, a gap below `independently_validated`.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of

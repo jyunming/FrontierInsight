@@ -163,6 +163,13 @@ def test_a_generates_equation_is_found_by_its_label_in_a_comment_or_a_docstring(
     # A name or a string in the code is not a label; nor is a longer id.
     assert oc.unlabelled_equations(protocol, "E1 = 3\nlabel = 'E1'\n# E12 and E1.5\n") == ["E1"]
     assert oc.unlabelled_equations({"model": {"summary": "x"}}, "") == [], "no equations, nothing to label"
+    three = {"model": {"equations": [{"id": f"E{i}", "role": "generates"} for i in (1, 2, 3)]}}
+    assert oc.unlabelled_equations(three, "def f():  # E1-E3\n    pass\n") == [], "a range labels each id in it"
+    assert oc.unlabelled_equations(three, "def f():  # E1 to 2\n    pass\n") == ["E3"]
+    assert oc.unlabelled_equations(three, '"""Implements E1, E2 and E3."""\nx = 1\n') == ["E1", "E2", "E3"], \
+        "the module docstring marks no code"
+    assert oc.unlabelled_equations(protocol, {"simulate.py": "x = 1\n", "model.py": "def f(y):  # E1\n    return -y\n"}) == [], \
+        "a label in a helper module counts"
     gaps = oc.label_gaps(protocol, UNLABELLED, "code/simulate.py")
     assert len(gaps) == 1 and "code/simulate.py" in gaps[0] and "E1" in gaps[0] and "`# E1`" in gaps[0]
 
@@ -194,6 +201,68 @@ def test_under_research_a_missing_label_stops_before_the_run(tmp_path: Path, mon
     # A person adds the label and resumes: the script on disk is read again and nothing stops.
     (engine.quest_root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
     assert engine._check_equation_labels({}) == [] and len(stops) == 1
+
+
+def test_a_simulate_py_left_beside_a_one_script_quest_is_not_what_is_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path, split_analysis=False)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")  # labelled, but not what runs
+    (code / "experiment.py").write_text(ONE_SCRIPT, encoding="utf-8")
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    gaps = engine._equation_label_gaps({}, PROTOCOL)
+    assert len(gaps) == 1 and "code/experiment.py" in gaps[0]
+
+
+@pytest.mark.asyncio
+async def test_missing_labels_are_asked_for_once_and_kept_only_when_the_code_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    sim = code / "simulate.py"
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    asked: list[str] = []
+
+    async def changes_the_code(prompt, **kw):  # noqa: ANN001
+        asked.append(prompt)
+        return "```python\n" + UNLABELLED.replace("return -y", "return -2 * y  # E1") + "\n```"
+
+    sim.write_text(UNLABELLED, encoding="utf-8")
+    monkeypatch.setattr(engine, "_chat", changes_the_code)
+    assert await engine._label_equations({}) is None and sim.read_text(encoding="utf-8") == UNLABELLED
+    assert len(asked) == 1 and "E1" in asked[0] and "y' = -y" in asked[0]
+
+    async def only_comments(prompt, **kw):  # noqa: ANN001
+        return "```python\n" + SIMULATE + "\n```"
+
+    monkeypatch.setattr(engine, "_chat", only_comments)
+    assert await engine._label_equations({}) == sim and oc.unlabelled_equations(PROTOCOL, sim.read_text(encoding="utf-8")) == []
+
+    async def never(prompt, **kw):  # noqa: ANN001
+        raise AssertionError("labels already there: nothing to ask")
+
+    monkeypatch.setattr(engine, "_chat", never)
+    assert await engine._label_equations({}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_cluster_quest_that_still_has_one_script_does_not_run_its_driver_for_the_oracles(tmp_path: Path) -> None:
+    """Under auto a cluster quest asks for two scripts, but one begun before (or whose reply held one) has only its job
+    driver: running it for the oracle pre-check would submit the job."""
+    engine = _engine(tmp_path, background_jobs=True)
+    (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / "code" / "experiment.py").write_text(ONE_SCRIPT, encoding="utf-8")
+
+    class NoRun:
+        async def execute(self, *a, **kw):  # noqa: ANN002, ANN003
+            raise AssertionError("the job driver must not run for the oracle pre-check")
+
+    engine.executor = NoRun()
+    assert engine._split_on({"design": {"protocol": PROTOCOL}}) is True
+    assert await engine._oracle_gate({"design": {"protocol": PROTOCOL}}, "python", None,
+                                     engine.quest_root / "code" / "experiment.py") is None
 
 
 # --- through the real graph --------------------------------------------------------------------------------------------

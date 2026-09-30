@@ -384,8 +384,9 @@ def assess(
                 f"the value of {', '.join(scripted)} was reported by the script itself, not measured by FI running the simulation: "
                 "a script that prints the expected answer without simulating would pass. For FI to measure it, the simulation "
                 "needs its own script that FI calls on the oracle's case itself (the default, `execution.split_analysis: "
-                "auto`; this quest ran as one script because `split_analysis` is false or the code-writing step returned one "
-                "script; the simulation script defines `run_cell`, or `run_trial` for a study with randomness), and the "
+                "auto`; this quest ran as one script because `split_analysis` is false, the code-writing step returned one "
+                "script, or the code was written before every simulation got its own script; the simulation script "
+                "defines `run_cell`, or `run_trial` for a study with randomness), and the "
                 "oracle needs a `case` and a `measure`"
             )
     elif protocol is not None and (unpassed := _oracle_check.not_passed(_oracle_check.last_judged(oracle_record))):
