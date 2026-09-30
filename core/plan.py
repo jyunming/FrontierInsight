@@ -17,7 +17,9 @@ The file has two kinds of section:
 * **the design**, a fenced YAML block under the heading *The design (used as written)*: the hypothesis,
   variables, method, expected outcome, planned figures, dependencies and result bounds. That block is the
   design, exactly. The design step reads it from the file, so what a person edits is what runs, and nothing
-  re-derives it from prose.
+  re-derives it from prose. Its ``study_type`` says whether the study measures over settings chosen in advance or
+  searches for the best design; a search's ``protocol.optimisation`` block is read by :mod:`core.optimisation_plan`,
+  which also writes the *What is being optimised* section.
 
 The file is the source of truth. A quest that pauses for the plan (``pauses.plan: ask``) stops once it is
 written; the person edits it, or asks for a change (``--revise-plan``), and resumes. A block that cannot be
@@ -108,6 +110,19 @@ def normalize_design(design: Any) -> tuple[dict[str, Any] | None, str | None]:
         out["protocol"], why = normalize_protocol(protocol)
         if out["protocol"] is None:
             return None, why
+    if out.get("study_type") is not None:
+        # Measure, or find the best design (core/optimisation_plan.py). A plan that says find_best_design without its
+        # optimisation block is readable (the quest stops before anything runs and says what is missing); one that says
+        # measure beside an optimisation block contradicts itself, and is refused rather than run as a sweep.
+        from . import optimisation_plan
+
+        study_type, why = optimisation_plan.normalize_study_type(out["study_type"])
+        if study_type is None:
+            return None, why
+        if study_type == "measure" and optimisation_plan.has_block(out):
+            return None, ("`study_type` is measure, but the protocol has an `optimisation` block (a search for the best "
+                          "design): set `study_type: find_best_design`, or replace the block with a `grid`")
+        out["study_type"] = study_type
     assertions = out.get("result_assertions")
     if assertions is None:
         out["result_assertions"] = []
@@ -222,6 +237,18 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         if fixed_criteria is None:
             return None, why
         out["criteria"] = fixed_criteria
+    if out.get("optimisation") is not None:
+        # A search for the best design (core/optimisation_plan.py). A coarse scan before the search is the block's own
+        # `grid`: a protocol is either a sweep or a search, never both.
+        from . import optimisation_plan
+
+        if out.get("grid") is not None:
+            return None, ("`protocol.optimisation` and a top-level `protocol.grid` cannot both be given: a search for the "
+                          "best design puts a coarse scan run before it in `optimisation.grid`")
+        block, why = optimisation_plan.normalize(out["optimisation"])
+        if block is None:
+            return None, why
+        out["optimisation"] = block
     if "model" in out:
         model, why = normalize_model(out.pop("model"))
         if model is None:
@@ -400,6 +427,28 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 continue
             del out[key]
             continue
+        if key == "optimisation":
+            # One part of a search for the best design that cannot be read is left out, not the block.
+            from . import optimisation_plan
+
+            if out.get("grid") is not None and "top-level `protocol.grid`" in (why or ""):
+                block = out["optimisation"]
+                if isinstance(block, dict) and block.get("grid") is None:
+                    out["optimisation"] = {**block, "grid": out["grid"]}
+                    notes.append("the sweep in `protocol.grid` was moved into `protocol.optimisation.grid`: a search for "
+                                 "the best design runs it as a coarse scan first, then searches from its best point")
+                else:
+                    notes.append("`protocol.grid` was left out: a search for the best design has no separate sweep (its "
+                                 "coarse scan is `protocol.optimisation.grid`)")
+                del out["grid"]
+                continue
+            fixed_block, block_notes = optimisation_plan.repair(out["optimisation"])
+            notes.extend(block_notes)
+            if fixed_block is not None:
+                out["optimisation"] = fixed_block
+                continue
+            del out[key]
+            continue
         if key == "model":
             # One equation that cannot be read is left out, not the model it is part of.
             fixed_model, model_notes = repair_model(out["model"])
@@ -549,6 +598,8 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
            sources: list[dict[str, str]] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
     that is used as written."""
+    from . import optimisation_plan
+
     extra = extra if isinstance(extra, dict) else {}
     block = yaml.safe_dump(design, sort_keys=False, allow_unicode=True, default_flow_style=False, width=100).rstrip()
     in_short = str(extra.get("in_short") or "").strip() or "(not written)"
@@ -575,6 +626,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         gap,
         "",
+        *optimisation_plan.plan_lines(design),
         *_model_lines(design.get("protocol") if isinstance(design, dict) else None),
         *_criteria_lines(design.get("protocol") if isinstance(design, dict) else None),
         "## Success criteria",

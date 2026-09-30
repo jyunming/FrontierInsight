@@ -58,6 +58,17 @@ same PR that adds, splits or renames one.
   `agents/plan_criteria.md`) runs in `_node_plan` when the draft names none; `Engine._record_criteria` runs at the end of
   every `_node_execute` (oracle values from `oracle_check.last_judged`, trial values through
   `trial_runner.recorded_series`, the commit through `code_project.head`).
+- `core/optimisation_plan.py` — the kind of study (`study_type`: `measure` or `find_best_design`; `study_type_of`
+  reads a design with an `optimisation` block as a search whatever it says) and the plan's `protocol.optimisation`
+  block for a search for the best design: `normalize` / `repair` (hooked into `core/plan.py`'s `normalize_protocol`
+  and `repair_protocol`), what FI does with what the plan left out, computed at use and never written into the block
+  (`check_levels`: the plan's finer check values or the fixed rule; `effective_method`; `improvement_rule`), the
+  evaluation count worked out at plan time (`budget`), the *What is being optimised* section of plan.md
+  (`plan_lines`), the topic's numbers in the block (`numbers`, read by `protocol_check.plan_notes`), and the one
+  clarify question for an ambiguous topic (`classify_topic`, `add_study_type_question`, `resolve_answer`; added in
+  `Engine._node_clarify_questions`, the plan prompt's `_STUDY_TYPE_DIRECTIVE` and `Engine._settle_study_type`). The
+  search itself is not built: `Engine._stop_for_best_design_search` (in `_node_design`) stops every such quest before
+  anything is implemented or run.
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
 - `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).

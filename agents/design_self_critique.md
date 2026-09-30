@@ -7,6 +7,7 @@ Apply this checklist to the draft design and report every item that applies. Be 
 Mandatory checklist — if any apply, you MUST patch them:
 
 1. **Circular evaluation** — does the optimization target (loss, scoring rule, correction model, simulator) share its model / distribution / data with the evaluation metric? If yes, the comparative claim is a training-set report and the design must either (a) introduce an independent evaluator or (b) drop the comparative claim and reframe as a mechanism demonstration.
+   **For a search for the best design (`study_type: find_best_design`)** sharing the physical model is the point (the best fin spacing is sought IN that model), so do not ask for an independent model. Ask instead: are the search settings and the check settings really different (`protocol.optimisation.numerical_settings`: the check recomputes the best designs and the baseline at finer values, and with new seeds when there is randomness), and is the claim confined to the model ("better within model M")? The shared approximation, not the shared model, is what an optimiser exploits: a coarse mesh that happens to underestimate the temperature at one spacing.
 
 2. **Single-point evaluation where a sweep is the field norm** — is the design reporting one configuration / one dose / one seed / one budget where the field expects a sweep? If yes, the design must add a sweep across the natural axis OR scope the claim to that one point and remove generalising language.
 
@@ -30,6 +31,14 @@ Mandatory checklist — if any apply, you MUST patch them:
 
 12. **Failed runs** — what happens to a run that fails, diverges or returns a NaN: is it dropped, counted, or repaired, and is the number of such runs reported? Silent exclusion changes the estimand.
 
+Three more, only for a search for the best design (`study_type: find_best_design`, with `protocol.optimisation`):
+
+13. **The baseline** — is `optimisation.baseline` a real design that meets every constraint, with a value for every design variable inside its range, and does it say where it comes from? A baseline made up to be easy to beat makes the improvement meaningless. Fix it, and make one oracle check the baseline design.
+
+14. **The ranges** — does every design variable's range have a physical meaning (a spacing above zero, a thickness a workshop can make) and lie where the model holds (`model.holds_for`)? A search pushes the design to the edges of its ranges, which is where a model stops holding. Narrow the range, or say in `model.holds_for` why it holds there.
+
+15. **Finer check settings** — is every `check` value of `optimisation.numerical_settings` really finer than its `search` value (smaller for a mesh size or a time step, larger for a count of elements; each level at least 1.1 times finer)? A check at the same or a coarser setting cannot tell a real improvement from a numerical error. Fix the values, or leave `check` out and FI uses half, then a quarter, of the search value. And is the one objective the right one: a second goal belongs in `constraints`, not in the objective.
+
 After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged and an empty `objections_addressed` array.
 
 # Output format
@@ -38,13 +47,14 @@ Respond with a single JSON object, no prose, no markdown fence:
 
 {
   "objections_addressed": [
-    {"check": "circular_evaluation | single_point | weak_baseline | pseudo_units | stratum_collapse | precision | estimand | threshold_sensitivity | rng_independence | numerical_convergence | oracle | failed_runs | other",
+    {"check": "circular_evaluation | single_point | weak_baseline | pseudo_units | stratum_collapse | precision | estimand | threshold_sensitivity | rng_independence | numerical_convergence | oracle | failed_runs | optimisation_baseline | optimisation_ranges | finer_check | other",
      "objection": "<one specific sentence quoting what's wrong>",
      "fix": "<one specific sentence describing the change made>"},
     ...
   ],
   "amended_design": {
     "hypothesis": "...",
+    "study_type": "<only when the draft has it: measure | find_best_design>",
     "variables": {"independent": [...], "dependent": [...], "controls": [...]},
     "method": "...",
     "expected_outcome": "...",
@@ -53,7 +63,7 @@ Respond with a single JSON object, no prose, no markdown fence:
   }
 }
 
-(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`), the amended design keeps it and amends it in place: a fix to checks 6 to 12 belongs there. Never drop a key the draft has.)
+(If the draft design carries a `protocol` (its `grid`, `runs_per_setting`, `thresholds`, `seed_policy`, `ci_method`, `acceptance`, `oracles`, `model`, `optimisation`), the amended design keeps it and amends it in place: a fix to checks 6 to 15 belongs there. Keep `study_type` as the draft has it. Never drop a key the draft has.)
 
 ---
 
