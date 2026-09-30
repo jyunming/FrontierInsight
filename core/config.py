@@ -1089,12 +1089,14 @@ class ExecutionConfig(BaseModel):
     # (docker only) What one experiment container may use. Memory is a hard cap
     # (swap included): a run that needs more is stopped, and run.log says so and
     # names this key. CPUs is a share of the machine (0.5 = half a core, 4 = four
-    # cores); a run over it is slowed, not stopped. Processes counts processes and
-    # threads together; it stops a runaway fork from taking the machine down, and
-    # is high enough for a numerical library's per-core threads times a small
-    # multiprocessing pool.
-    docker_memory_gb: float = Field(default=4.0, gt=0)
-    docker_cpus: float = Field(default=2.0, gt=0)
+    # cores); a run over it is slowed, not stopped, and numerical libraries are
+    # told to start that many threads (OMP_NUM_THREADS and the like, unless already
+    # set). Processes counts processes and threads together: one more cannot be
+    # started (the run usually fails, and says so), which keeps a runaway fork
+    # from taking the machine down.
+    # (Docker refuses less than about 6 MB of memory or 0.01 CPU.)
+    docker_memory_gb: float = Field(default=4.0, ge=0.01)
+    docker_cpus: float = Field(default=2.0, ge=0.01)
     docker_max_processes: int = Field(default=1024, gt=0)
     # Example files or folders the experiment should start from: a simulation
     # setup, an input deck, a config, a script, a document — any file type. They

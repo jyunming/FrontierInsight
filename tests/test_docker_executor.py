@@ -472,27 +472,26 @@ def test_process_limit_hit_says_so_in_plain_words() -> None:
     logger.warning.assert_called()
 
 
-def test_resolve_user_on_windows_host_uses_fixed_non_root(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_user_candidates_on_windows_host_fixed_non_root_then_root(monkeypatch: pytest.MonkeyPatch) -> None:
     """Docker Desktop on Windows/macOS: the bind mount maps ownership, so any
     fixed non-root id can write the quest folder."""
     monkeypatch.setattr("core.execution.sys.platform", "win32")
     exe = DockerExecutor()
     client = MagicMock()
     client.info.return_value = {"OperatingSystem": "Docker Desktop", "SecurityOptions": []}
-    assert exe._guess_user(client, Path.cwd()) == "1000:1000"
+    assert exe._user_candidates(client, Path.cwd()) == ["1000:1000", ""]
 
 
-def test_resolve_user_on_linux_uses_quest_folder_owner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_user_candidates_on_linux_quest_folder_owner_first(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("core.execution.sys.platform", "linux")
-    fake_stat = MagicMock(st_uid=1234, st_gid=5678)
-    monkeypatch.setattr("core.execution._owner_of", lambda p: (fake_stat.st_uid, fake_stat.st_gid))
+    monkeypatch.setattr("core.execution._owner_of", lambda p: (1234, 5678))
     exe = DockerExecutor()
     client = MagicMock()
     client.info.return_value = {"OperatingSystem": "Ubuntu 24.04", "SecurityOptions": ["name=seccomp"]}
-    assert exe._guess_user(client, tmp_path) == "1234:5678"
+    assert exe._user_candidates(client, tmp_path) == ["1234:5678", ""]
 
 
-def test_resolve_user_rootless_docker_runs_as_container_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_user_candidates_rootless_docker_only_container_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Rootless Docker: the container's root IS the unprivileged host user;
     any other id maps to a sub-id that cannot write the quest folder."""
     monkeypatch.setattr("core.execution.sys.platform", "linux")
@@ -503,21 +502,24 @@ def test_resolve_user_rootless_docker_runs_as_container_root(monkeypatch: pytest
         "OperatingSystem": "Ubuntu 24.04",
         "SecurityOptions": ["name=seccomp,profile=builtin", "name=rootless", "name=cgroupns"],
     }
-    assert exe._guess_user(client, tmp_path) == ""
+    assert exe._user_candidates(client, tmp_path) == [""]
 
 
-def test_resolve_user_docker_desktop_on_linux_runs_as_container_root(
+def test_user_candidates_docker_desktop_on_linux_tries_the_owner_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    """Docker Desktop reports the same name under WSL integration (real
+    ownership kept, the owner can write) and on Linux (owner mapped to root):
+    the owner goes first and the write check decides."""
     monkeypatch.setattr("core.execution.sys.platform", "linux")
     monkeypatch.setattr("core.execution._owner_of", lambda p: (1000, 1000))
     exe = DockerExecutor()
     client = MagicMock()
     client.info.return_value = {"OperatingSystem": "Docker Desktop", "SecurityOptions": []}
-    assert exe._guess_user(client, tmp_path) == ""
+    assert exe._user_candidates(client, tmp_path) == ["1000:1000", ""]
 
 
-def test_resolve_user_root_owned_folder_on_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_user_candidates_root_owned_folder_on_linux(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """FI itself running as root: only root can write the folder, so the
     container runs as root, with every privilege still dropped."""
     monkeypatch.setattr("core.execution.sys.platform", "linux")
@@ -525,7 +527,7 @@ def test_resolve_user_root_owned_folder_on_linux(monkeypatch: pytest.MonkeyPatch
     exe = DockerExecutor()
     client = MagicMock()
     client.info.return_value = {"OperatingSystem": "Ubuntu 24.04", "SecurityOptions": []}
-    assert exe._guess_user(client, tmp_path) == ""
+    assert exe._user_candidates(client, tmp_path) == [""]
 
 
 def test_root_user_does_not_override_home() -> None:
@@ -534,7 +536,8 @@ def test_root_user_does_not_override_home() -> None:
     client = _client_with(_make_fake_container(exit_code=0))
     exe._run_sync(client, ["python", "-V"], Path.cwd(), 30, {"A": "b"})
     kw = client.containers.create.call_args.kwargs
-    assert kw["environment"] == {"A": "b"}
+    assert kw["environment"]["A"] == "b"
+    assert "HOME" not in kw["environment"]
     # docker-py treats user=None/"" as the image default; cap_drop still applies.
     assert not kw.get("user")
     assert kw["cap_drop"] == ["ALL"]
@@ -548,7 +551,7 @@ async def test_setup_probes_the_user_and_falls_back_to_root(
     cannot, experiments run as the container's root and run.log says why."""
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
-    monkeypatch.setattr(exe, "_guess_user", lambda client, root: "1000:1000")
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
     probe = _make_fake_container(exit_code=1, stderr=b"PermissionError: [Errno 13]")
     client = _client_with(probe)
     exe._client = client
@@ -566,8 +569,9 @@ async def test_setup_probes_the_user_and_falls_back_to_root(
     assert second.kwargs["user"] is None
     assert second.kwargs["cap_drop"] == ["ALL"]
     assert probe.remove.call_count == 2
+    # Neither can write: run.log says the results cannot be saved.
     warned = " ".join(str(a) for c in logger.warning.call_args_list for a in c.args)
-    assert "root" in warned
+    assert "no user can write the quest folder" in warned
 
 
 @pytest.mark.asyncio
@@ -576,7 +580,7 @@ async def test_setup_root_fallback_that_works_warns_once(
 ) -> None:
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
-    monkeypatch.setattr(exe, "_guess_user", lambda client, root: "1000:1000")
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
     fails, works = _make_fake_container(exit_code=1), _make_fake_container(exit_code=0)
     client = MagicMock()
     client.containers.create.side_effect = [fails, works]
@@ -592,7 +596,7 @@ async def test_setup_root_fallback_that_works_warns_once(
 async def test_setup_probe_success_keeps_non_root(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
-    monkeypatch.setattr(exe, "_guess_user", lambda client, root: "1000:1000")
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
     client = _client_with(_make_fake_container(exit_code=0))
     exe._client = client
 
@@ -602,6 +606,158 @@ async def test_setup_probe_success_keeps_non_root(monkeypatch: pytest.MonkeyPatc
     assert exe._user == "1000:1000"
     assert client.containers.create.call_count == 1
     logger.warning.assert_not_called()
+
+
+def test_numerical_libraries_are_told_the_cpu_limit() -> None:
+    """A CPU cap does not change the core count libraries see; each one is
+    told the cap, unless the environment already says."""
+    from core.execution import DockerLimits
+
+    exe = DockerExecutor(limits=DockerLimits(cpus=2.5))
+    exe._user = "1000:1000"
+    client = _client_with(_make_fake_container(exit_code=0))
+    exe._run_sync(client, ["python", "-V"], Path.cwd(), 30, {"MKL_NUM_THREADS": "1"})
+    env = client.containers.create.call_args.kwargs["environment"]
+    assert env["OMP_NUM_THREADS"] == "3"
+    assert env["OPENBLAS_NUM_THREADS"] == "3"
+    assert env["NUMEXPR_NUM_THREADS"] == "3"
+    assert env["PYTHON_CPU_COUNT"] == "3"
+    assert env["MKL_NUM_THREADS"] == "1"  # the caller's own choice stays
+
+
+def test_limits_docker_cannot_apply_are_left_out() -> None:
+    """Without the kernel's CPU quota Docker refuses nano_cpus outright; the
+    container must still start, with the other limits."""
+    exe = DockerExecutor()
+    exe._user = "1000:1000"
+    client = _client_with(_make_fake_container(exit_code=0))
+    client.info.return_value = {"CpuCfsQuota": False, "SwapLimit": False, "SecurityOptions": []}
+    exe._run_sync(client, ["python", "-V"], Path.cwd(), 30, {})
+    kw = client.containers.create.call_args.kwargs
+    assert "nano_cpus" not in kw
+    assert "memswap_limit" not in kw
+    assert kw["mem_limit"] == "4g"
+    assert kw["pids_limit"] == 1024
+
+
+def test_oom_of_one_process_in_a_run_that_still_exited_zero() -> None:
+    exe = DockerExecutor()
+    exe._user = "1000:1000"
+    client = _client_with(_oom_container(oom=True, exit_code=0))
+    result = exe._run_sync(client, ["python", "pool.py"], Path.cwd(), 30, {})
+    last = result.stderr.strip().splitlines()[-1]
+    assert last.startswith("[FI] ")
+    assert "one of its processes" in last
+    assert "execution.docker_memory_gb" in last
+
+
+def test_process_limit_words_far_above_the_error_are_not_blamed() -> None:
+    exe = DockerExecutor()
+    exe._user = "1000:1000"
+    stderr = ("OpenBLAS warning: pthread_create failed, retrying\n" + "x\n" * 30 + "ValueError: bad shape\n").encode()
+    client = _client_with(_make_fake_container(exit_code=1, stderr=stderr))
+    result = exe._run_sync(client, ["python", "x.py"], Path.cwd(), 30, {})
+    assert "[FI]" not in result.stderr
+
+
+def test_config_rejects_limits_docker_refuses() -> None:
+    from pydantic import ValidationError
+
+    from core.config import ExecutionConfig
+
+    with pytest.raises(ValidationError):
+        ExecutionConfig(docker_memory_gb=0.001)
+    with pytest.raises(ValidationError):
+        ExecutionConfig(docker_cpus=0.001)
+    assert ExecutionConfig(docker_cpus=0.5).docker_cpus == 0.5
+
+
+@pytest.mark.asyncio
+async def test_setup_write_check_error_keeps_the_first_choice(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    logger = MagicMock()
+    exe = DockerExecutor(log=logger)
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    client = MagicMock()
+    client.containers.create.side_effect = RuntimeError("image has no python")
+    exe._client = client
+
+    await exe.setup(tmp_path)
+
+    assert exe._user == "1000:1000"
+    assert client.containers.create.call_count == 1
+    warned = " ".join(str(a) for c in logger.warning.call_args_list for a in c.args)
+    assert "image has no python" in warned
+
+
+@pytest.mark.asyncio
+async def test_setup_says_when_the_cpu_limit_is_lowered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from core.execution import DockerLimits
+
+    logger = MagicMock()
+    exe = DockerExecutor(limits=DockerLimits(cpus=8), log=logger)
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    client = _client_with(_make_fake_container(exit_code=0))
+    client.info.return_value = {"NCPU": 4, "SecurityOptions": []}
+    exe._client = client
+
+    await exe.setup(tmp_path)
+
+    warned = " ".join(str(a) for c in logger.warning.call_args_list for a in c.args)
+    assert "execution.docker_cpus" in warned
+    assert client.containers.create.call_args.kwargs["nano_cpus"] == 4_000_000_000
+
+
+def test_root_owned_folders_left_by_an_older_run_are_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / "raw" / "seed0").mkdir(parents=True)
+    (tmp_path / "code").mkdir()
+    real_scandir = __import__("os").scandir
+
+    class _Entry:
+        def __init__(self, e: Any) -> None:
+            self._e, self.path, self.name = e, e.path, e.name
+
+        def is_dir(self, follow_symlinks: bool = True) -> bool:
+            return self._e.is_dir(follow_symlinks=follow_symlinks)
+
+        def stat(self, follow_symlinks: bool = True) -> Any:
+            return MagicMock(st_uid=0 if self.name == "seed0" else 1000)
+
+    monkeypatch.setattr("core.execution.os.scandir", lambda p: [_Entry(e) for e in real_scandir(p)])
+    logger = MagicMock()
+    exe = DockerExecutor(log=logger)
+    exe._warn_root_owned(tmp_path, "1000:1000")
+    warned = " ".join(str(a) for c in logger.warning.call_args_list for a in c.args)
+    assert "seed0" in warned
+    assert "chown -R 1000:1000" in " ".join(
+        str(c.args[0]) % c.args[1:] for c in logger.warning.call_args_list
+    )
+
+
+def test_engine_passes_the_configured_limits_and_its_log(tmp_path: Path) -> None:
+    from core.config import (
+        Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig,
+    )
+    from core.engine import Engine
+
+    cfg = Config(
+        topic="docker limits", title="docker-limits",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(),
+        execution=ExecutionConfig(sandbox="docker", docker_memory_gb=8, docker_cpus=1, docker_max_processes=99),
+        knowledge=KnowledgeConfig(enabled=False),
+        output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    engine = Engine(cfg)
+    try:
+        assert isinstance(engine.executor, DockerExecutor)
+        assert (engine.executor.limits.memory_gb, engine.executor.limits.cpus,
+                engine.executor.limits.max_processes) == (8, 1, 99)
+        assert engine.executor._qlog is engine._log
+    finally:
+        from core.engine import _close_quest_logger
+        _close_quest_logger(engine.quest_id)
 
 
 @pytest.mark.asyncio

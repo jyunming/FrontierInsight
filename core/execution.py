@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import re
 import shutil
@@ -554,11 +555,12 @@ class DockerLimits:
 
     @property
     def memory_label(self) -> str:
+        # "GB" as a person says it; Docker is given GiB (x 1024), a little more.
         return f"{self.memory_gb:g} GB"
 
 
 # The id experiments run as under Docker Desktop on Windows / macOS (see
-# DockerExecutor._guess_user). Any fixed non-root id works there.
+# DockerExecutor._user_candidates). Any fixed non-root id works there.
 _DESKTOP_USER = "1000:1000"
 # What a script prints when it cannot start one more process or thread: the
 # process-count limit (pids cgroup) makes fork/clone/pthread_create fail with
@@ -566,6 +568,11 @@ _DESKTOP_USER = "1000:1000"
 _PROCESS_LIMIT_RE = re.compile(
     r"can't start new thread|pthread_create|fork: (?:retry: )?Resource temporarily unavailable"
     r"|BlockingIOError: \[Errno 11\] Resource temporarily unavailable"
+)
+# How many threads numerical libraries start (OpenMP, OpenBLAS, MKL, numexpr),
+# and os.cpu_count() / multiprocessing's default pool size on Python 3.13+.
+_THREAD_VARS = (
+    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "PYTHON_CPU_COUNT",
 )
 # Creates and removes one file in the quest folder: can this user write there?
 _WRITE_CHECK = (
@@ -577,6 +584,10 @@ _WRITE_CHECK = (
 def _owner_of(path: Path) -> tuple[int, int]:
     st = os.stat(path)
     return st.st_uid, st.st_gid
+
+
+def _who(user: str) -> str:
+    return f"user {user} (not root)" if user else "the container's root user"
 
 
 class DockerExecutor:
@@ -633,52 +644,62 @@ class DockerExecutor:
             return min(self.limits.cpus, float(ncpu))
         return self.limits.cpus
 
-    def _guess_user(self, client: object, host_root: Path) -> str:
-        """Which user experiments run as, before ``setup`` checks it can write.
+    def _user_candidates(self, client: object, host_root: Path) -> list[str]:
+        """The users experiments may run as, best first; ``setup`` takes the
+        first that can write the quest folder ("" = the container's root).
 
-        The container user must be able to write the mounted quest folder, and
-        who can depends on the host:
+        Who can write the mounted quest folder depends on the host:
 
         * Windows / macOS (Docker Desktop and the like): the folder reaches the
           Linux VM through a file-sharing layer that writes as the host user
           whatever id the container uses, so a fixed non-root id works.
-        * Rootless Docker, and Docker Desktop for Linux: the container's root is
-          mapped to the unprivileged host user, and any other container id maps
-          to a sub-id that cannot write the host user's files. Root inside the
-          container is already not root on the host, so run as that ("").
-        * Native Docker on Linux: the owner of the quest folder (normally the
-          person running FI), so what the experiment writes stays theirs. A
-          folder owned by root (FI itself run as root) leaves only root.
+        * Rootless Docker: the container's root is mapped to the unprivileged
+          host user, and any other container id to a sub-id that cannot write
+          the host user's files. Root inside is already not root on the host.
+        * Linux otherwise (native Docker, Docker Desktop's WSL integration,
+          Docker Desktop for Linux): the owner of the quest folder (normally the
+          person running FI), so what the experiment writes stays theirs; where
+          the host maps that owner to the container's root instead (Docker
+          Desktop for Linux), the write check fails and root is next. A folder
+          owned by root (FI itself run as root) leaves only root.
 
-        Whatever this returns, every capability is still dropped and
-        privileges cannot be gained.
+        The container's root is always the last resort. Whoever runs, every
+        capability is dropped and privileges cannot be gained.
         """
         if not sys.platform.startswith("linux"):
-            return _DESKTOP_USER
+            return [_DESKTOP_USER, ""]
         info = self._daemon_info(client)
         security = " ".join(str(s) for s in (info.get("SecurityOptions") or []))
-        if "name=rootless" in security or "docker desktop" in str(info.get("OperatingSystem") or "").lower():
-            return ""
+        if "name=rootless" in security:
+            return [""]
         try:
             uid, gid = _owner_of(host_root)
         except OSError:
-            return ""
-        return "" if uid == 0 else f"{uid}:{gid}"
+            return [""]
+        return [""] if uid == 0 else [f"{uid}:{gid}", ""]
 
     def _create_kwargs(self, client: object, user: str) -> dict[str, object]:
         """The isolation every container gets, experiment or write check."""
-        return {
+        info = self._daemon_info(client)
+        kw: dict[str, object] = {
             "network_disabled": True,  # no network from the experiment by default
             "mem_limit": self.limits.mem_limit,
-            # Swap equal to memory: over the cap the run is stopped (and said
-            # so) instead of swapping itself slowly to a halt.
-            "memswap_limit": self.limits.mem_limit,
-            "nano_cpus": int(round(self._cpus(client) * 1e9)),
             "pids_limit": int(self.limits.max_processes),
             "cap_drop": ["ALL"],
             "security_opt": ["no-new-privileges:true"],
             "user": user or None,  # None = the image's default
         }
+        # Swap equal to memory: over the cap the run is stopped (and said so)
+        # instead of swapping itself slowly to a halt. Left out where the
+        # kernel cannot limit swap (Docker would only warn and drop it).
+        if info.get("SwapLimit") is not False:
+            kw["memswap_limit"] = self.limits.mem_limit
+        # A CPU cap needs the kernel's CFS quota; without it (e.g. rootless
+        # Docker whose cpu controller is not delegated) Docker refuses the
+        # container outright, so the cap is left out and setup() says so.
+        if info.get("CpuCfsQuota") is not False:
+            kw["nano_cpus"] = int(round(self._cpus(client) * 1e9))
+        return kw
 
     def _write_check(self, client: object, host_root: Path, user: str) -> bool:
         container = client.containers.create(  # type: ignore[attr-defined]
@@ -686,7 +707,7 @@ class DockerExecutor:
             command=["python", "-c", _WRITE_CHECK],
             working_dir="/work",
             volumes={str(host_root): {"bind": "/work", "mode": "rw"}},
-            environment=self._env_for(user, {}),
+            environment=self._env_for(client, user, {}),
             detach=True,
             **self._create_kwargs(client, user),
         )
@@ -701,49 +722,93 @@ class DockerExecutor:
                 pass
 
     def _resolve_user(self, client: object, host_root: Path) -> None:
-        """Decide the container user once: the guess, checked by writing a file
-        in the quest folder; the container's root when the guess cannot."""
-        guess = self._guess_user(client, host_root)
-        who = f"user {guess} (not root)" if guess else "the container's root user"
-        try:
-            ok = self._write_check(client, host_root, guess)
-        except Exception as exc:  # noqa: BLE001 -- the run itself will say what is wrong
-            self._user = guess
-            self._say(logging.WARNING, "[docker] could not check that %s can write the quest folder (%s); "
-                      "experiments run as %s", who, exc, who)
-            return
-        if not ok and guess:
+        """Decide the container user once: the first candidate that can write a
+        file in the quest folder."""
+        candidates = self._user_candidates(client, host_root)
+        chosen, ok = candidates[-1], False
+        for user in candidates:
             try:
-                ok = self._write_check(client, host_root, "")
-            except Exception:  # noqa: BLE001
-                ok = False
-            self._user = ""
-            self._say(logging.WARNING, "[docker] experiments cannot write the quest folder as user %s on this "
-                      "Docker setup, so they run as the container's root user, still with no network, no added "
-                      "privileges and the same limits", guess)
-            who = "the container's root user"
-        else:
-            self._user = guess
+                ok = self._write_check(client, host_root, user)
+            except Exception as exc:  # noqa: BLE001 -- the run itself will say what is wrong
+                chosen = candidates[0]
+                self._say(logging.WARNING, "[docker] could not check who can write the quest folder (%s); "
+                          "experiments run as %s", exc, _who(chosen))
+                ok = True  # unknown, not known to fail
+                break
+            if ok:
+                chosen = user
+                break
+        self._user = chosen
         if not ok:
-            self._say(logging.WARNING, "[docker] %s cannot write the quest folder %s either: experiments will not "
-                      "be able to save their results. Check that Docker can share that folder.", who, host_root)
+            self._say(logging.WARNING, "[docker] no user can write the quest folder %s from the container, so "
+                      "experiments will not be able to save their results. Check that Docker is allowed to share "
+                      "that folder.", host_root)
+        elif chosen != candidates[0]:
+            self._say(logging.WARNING, "[docker] experiments cannot write the quest folder as user %s on this Docker "
+                      "setup, so they run as the container's root user, still with no network, no added privileges "
+                      "and the same limits", candidates[0])
+        if chosen and sys.platform.startswith("linux"):
+            self._warn_root_owned(host_root, chosen)
+        cpus = self._cpus(client)
+        info = self._daemon_info(client)
         self._say(logging.INFO, "[docker] experiments run as %s, with at most %s of memory, %g CPUs and %d "
-                  "processes (execution.docker_memory_gb / docker_cpus / docker_max_processes)",
-                  who, self.limits.memory_label, self._cpus(client), self.limits.max_processes)
-        if self._cpus(client) < self.limits.cpus:
-            self._say(logging.WARNING, "[docker] execution.docker_cpus is %g but Docker has only %g CPUs; "
-                      "using %g", self.limits.cpus, self._cpus(client), self._cpus(client))
+                  "processes and threads (execution.docker_memory_gb / docker_cpus / docker_max_processes)",
+                  _who(chosen), self.limits.memory_label, cpus, self.limits.max_processes)
+        if cpus < self.limits.cpus:
+            self._say(logging.WARNING, "[docker] execution.docker_cpus is %g but Docker has only %g CPUs; using %g",
+                      self.limits.cpus, cpus, cpus)
+        if info.get("CpuCfsQuota") is False:
+            self._say(logging.WARNING, "[docker] this Docker cannot limit CPU use, so execution.docker_cpus is not "
+                      "applied (the other limits are)")
 
-    @staticmethod
-    def _env_for(user: str, env: dict[str, str]) -> dict[str, str]:
-        """A non-root id has no home directory in a stock image (and the host's
-        HOME means nothing inside it): give it /tmp, so libraries that keep a
-        cache or config there (matplotlib) work."""
-        if not user:
-            return env
-        out = {**env, "HOME": "/tmp"}
-        if not any(out.get(k) for k in ("LOGNAME", "USER", "LNAME", "USERNAME")):
-            out["USER"] = "fi"
+    def _warn_root_owned(self, host_root: Path, user: str) -> None:
+        """A quest first run before experiments stopped running as root can hold
+        folders root owns, which the quest's own user cannot write: say which,
+        and how to take them back. Looks two levels down, at most 2000 entries."""
+        found: list[str] = []
+        seen = 0
+        stack: list[tuple[Path, int]] = [(host_root, 0)]
+        while stack and seen < 2000 and len(found) < 3:
+            folder, depth = stack.pop()
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for e in entries:
+                seen += 1
+                try:
+                    st = e.stat(follow_symlinks=False)
+                except OSError:
+                    continue
+                if st.st_uid == 0:
+                    found.append(e.path)
+                    if len(found) >= 3:
+                        break
+                elif depth < 1 and e.is_dir(follow_symlinks=False):
+                    stack.append((Path(e.path), depth + 1))
+        if found:
+            self._say(logging.WARNING, "[docker] %s in the quest folder belong to root (written when experiments "
+                      "still ran as root), and experiments now run as user %s, which cannot change them. Run "
+                      "`sudo chown -R %s %s` once to give them back.", ", ".join(found), user, user, host_root)
+
+    def _env_for(self, client: object, user: str, env: dict[str, str]) -> dict[str, str]:
+        """The container's environment on top of ``env``.
+
+        Numerical libraries start one thread per core they see, and a CPU cap
+        does not change what they see (every core of the host), so on a large
+        machine they would crowd into the cap and hit the process limit: they
+        are told the cap, unless ``env`` already says. A non-root id has no
+        home directory in a stock image (and the host's HOME means nothing
+        inside it): it gets /tmp, so libraries that keep a cache or config
+        there (matplotlib) work."""
+        out = dict(env)
+        threads = str(max(1, math.ceil(self._cpus(client))))
+        for k in _THREAD_VARS:
+            out.setdefault(k, threads)
+        if user:
+            out["HOME"] = "/tmp"
+            if not any(out.get(k) for k in ("LOGNAME", "USER", "LNAME", "USERNAME")):
+                out["USER"] = "fi"
         return out
 
     @property
@@ -868,16 +933,15 @@ class DockerExecutor:
         for a in cmd:
             translated.append(a.replace(str(host_root), "/work"))
 
-        if self._user is None:
-            # setup() was not called: go with the guess, unchecked.
-            self._user = self._guess_user(client, host_root)
-        user = self._user
+        # setup() decides the user; without it, the best candidate, unchecked
+        # (and not kept, so a later setup() still checks).
+        user = self._user if self._user is not None else self._user_candidates(client, host_root)[0]
         container = client.containers.create(  # type: ignore[attr-defined]
             self.image,
             command=translated,
             working_dir="/work",
             volumes=self._volumes(host_root),
-            environment=self._env_for(user, env),
+            environment=self._env_for(client, user, env),
             detach=True,
             **self._create_kwargs(client, user),
         )
@@ -931,7 +995,9 @@ class DockerExecutor:
             return (f"the experiment was stopped by a kill signal (exit code 137), most often because it used "
                     f"more than the {mem} memory limit; if it needs more, raise execution.docker_memory_gb "
                     f"(now {self.limits.memory_gb:g})")
-        if rc != 0 and _PROCESS_LIMIT_RE.search(stderr or ""):
+        # Only near the end, where the error that stopped the run is: a thread
+        # warning earlier on, followed by an unrelated error, is not this.
+        if rc != 0 and _PROCESS_LIMIT_RE.search("\n".join((stderr or "").splitlines()[-20:])):
             n = self.limits.max_processes
             return (f"the experiment could not start another process or thread, most likely because it reached "
                     f"the limit of {n} processes and threads at once; raise execution.docker_max_processes "
