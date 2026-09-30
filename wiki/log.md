@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-09-30 — the model's decisions made visible
+
+Updated by hand: [[model-reasoning-trace|Model reasoning trace]] (Copilot asked for Claude's thinking by default, Codex reasoning items, `--why` shows the reasoning note and `reasons`, stated reasons from every choosing step). Sources: core/thinking_capture.py, core/why.py, core/engine.py (`_audit_stated_reasons`, `_note_served_model`), core/provider.py, vscode-frontier-insight/src/lm-messages.ts.
+
 ## 2026-09-30 — index rebuilt; links by file name
 
 `index.md` rebuilt with the repository's own `scripts/wiki_sync_index.py` (English output; `--check` reports a stale

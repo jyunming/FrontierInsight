@@ -86,8 +86,16 @@ def _value(cfg: Any, path: str) -> Any:
 
 
 def settings_of(cfg: Any) -> dict[str, Any]:
-    """The recorded settings of a loaded Config (after the rigor profile has filled in what it sets)."""
-    return {path: _value(cfg, path) for path, _label in SETTINGS}
+    """The recorded settings of a loaded Config (after the rigor profile has filled in what it sets). The model picked
+    in the VS Code chat panel for one run (``provider.extra['chat_panel_model']``, set by ``launch.py
+    --vscode-chat-model``) is that run's choice, said in run.log and recorded in the trace, not a change to the
+    config's settings: the config's own model is what is compared."""
+    settings = {path: _value(cfg, path) for path, _label in SETTINGS}
+    extra = getattr(getattr(cfg, "provider", None), "extra", None)
+    change = extra.get("chat_panel_model") if isinstance(extra, dict) else None
+    if isinstance(change, dict) and "before" in change:
+        settings["provider.model"] = change.get("before") or None
+    return settings
 
 
 def _show(value: Any) -> str:
@@ -263,17 +271,23 @@ def model_disclosure(events: list[dict[str, Any]]) -> str:
     """What the paper must say when more than one model produced the quest (a ``model_changed`` event in its trace),
     or an empty string when the model never changed."""
     changes = [e for e in events if e.get("kind") == "model_changed" and not e.get("before_any_step")]
-    if not changes:
+    bullets: list[str] = []
+    for e in changes:
+        for c in e.get("changes") or []:
+            # config.yaml's new model did not run: the chat panel's model did, and has its own event.
+            if isinstance(c, dict) and not (e.get("run_uses") and c.get("setting") == "provider.model"):
+                bullets.append(f"- {c.get('label') or c.get('setting')}: {_show(c.get('from'))} for the steps before "
+                               f"the change, {_show(c.get('to'))} after it")
+        if not e.get("changes") and e.get("after"):
+            # The chat panel's model, or the model that answered the calls, as the engine recorded it.
+            bullets.append(f"- the model: {_show(e.get('before'))} for the steps before the change, "
+                           f"{_show(e.get('after'))} after it")
+    if not bullets:
         return ""
     lines = ["More than one model produced this study: its model was changed while the quest was under way. State "
              "this in the methods, in these terms (which model made each step is in the quest's record of its model "
              "calls):"]
-    for e in changes:
-        for c in e.get("changes") or []:
-            if isinstance(c, dict):
-                lines.append(f"- {c.get('label') or c.get('setting')}: {_show(c.get('from'))} for the steps before "
-                             f"the change, {_show(c.get('to'))} after it")
-    return "\n".join(lines)
+    return "\n".join(lines + list(dict.fromkeys(bullets)))
 
 
 def model_change_lines(changes: list[dict[str, Any]], node_models: dict[str, Any] | None = None, *,

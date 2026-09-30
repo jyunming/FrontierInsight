@@ -1800,14 +1800,29 @@ class Engine:
         if node == "review" and isinstance(out.get("review"), dict):
             review = out["review"]
             prov = self._chat_provenance("review")
+            # The reviewer's one-sentence reason for its verdict: recorded here, then dropped from the state (as the
+            # design's rationale is), so the later prompts that read the review do not carry it.
+            why = review.get("why")
+            if "why" in review:
+                review = {k: v for k, v in review.items() if k != "why"}
+                out = {**out, "review": review}
             if review.get("verdict"):
                 self._audit(
                     "model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_verdict",
                     claim=str(review.get("verdict")) + (f": {review['blocking']}" if review.get("blocking") else ""),
+                    **({"reason": str(why).strip()} if isinstance(why, str) and why.strip() else {}),
                     **prov,
                 )
             for w in review.get("weaknesses") or []:
                 self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic="review_weakness", claim=w, **prov)
+            # A review panel's moderator says why the panel's verdict stands, given how the reviewers disagreed.
+            if isinstance(review.get("rationale"), str):
+                self._claim(node, "review_moderator", "review_moderator", review["rationale"],
+                            decision=str(review.get("verdict") or ""))
+        try:
+            self._audit_stated_reasons(node, out)
+        except Exception as e:  # noqa: BLE001 -- the trace is a record; an answer of an odd shape must never stop a quest
+            self._log.debug("[audit] reasons not recorded for %s: %r", node, e)
         if node == "evidence_gate" and isinstance(out.get("evidence_assessment"), dict):
             assessment = out["evidence_assessment"]
             # A rule-decided verdict (``core.engine._evidence_gate_rule``) never called a model — recording it as a
@@ -1834,6 +1849,117 @@ class Engine:
                 )
         return out
 
+    def _claim(self, node: str, key: str, topic: str, claim: Any, **fields: Any) -> None:
+        """One ``model_claim`` under ``node``: ``claim`` (the model's own words, cut to a readable length) with the
+        provenance of the call it came from (``key``, the ``_chat`` node key). Nothing is recorded for an empty claim
+        or when no model call was made under ``key`` (a rule, a person, or a path that asked no model)."""
+        text = " ".join(str(claim or "").split())
+        prov = self._chat_provenance(key)
+        if not text or not prov:
+            return
+        # Only a call made during this run of the step: a reason carried over in the state from an earlier run is not
+        # recorded again under a call that did not write it.
+        # (``_chat`` stores a new record for each answered call, so the same record as at the step's start means no
+        # call under ``key`` answered during this run; a failed call leaves the old record in place.)
+        before = self.__dict__.get("_chat_at_node_start")
+        if isinstance(before, dict) and self._last_chat.get(key) is before.get(key):
+            return
+        extra = {k: (" ".join(str(v).split())[:600] if isinstance(v, str) else v) for k, v in fields.items()
+                 if v not in (None, "", [], {})}
+        self._audit("model_claim", node=node, provenance=_audit_log.MODEL_CLAIM, topic=topic, claim=text[:1200],
+                    **extra, **prov)
+
+    def _audit_stated_reasons(self, node: str, out: dict[str, Any]) -> None:
+        """The reasons a model already wrote in its answer at the steps that choose between options, as ``model_claim``
+        events (no extra call, no extra tokens): the idea it chose (and, when they ran, what the pairwise comparison
+        and the self-critique said), the skills it picked or declined, how each finding sits against the literature,
+        what a repair of the script changed and why (or why it gave up), and the reasons of the setup questions'
+        answers it chose. Each carries the provenance of the call that wrote it. A reason is the model's own account,
+        not evidence."""
+        if node == "ideate":
+            chosen = out.get("chosen_idea") if isinstance(out.get("chosen_idea"), dict) else {}
+            ideas = [i for i in out.get("ideas") or [] if isinstance(i, dict)]
+            options = [str(i.get("title") or "") for i in ideas if i.get("title")]
+            tournament = out.get("ideate_tournament") if isinstance(out.get("ideate_tournament"), dict) else {}
+            critique = out.get("ideate_critique") if isinstance(out.get("ideate_critique"), dict) else {}
+            first = str(chosen.get("rationale") or "")
+            decision = chosen.get("title")
+            if tournament:
+                first = first.split("[tournament]", 1)[0]  # the tournament's reasons follow, under their own call
+                if tournament.get("outcome") == "swapped":
+                    decision = "its first pick (the pairwise comparison then chose another idea)"
+            elif critique.get("swap_to") or critique.get("refined_rationale"):
+                first = ""  # the self-critique replaced it; its own words are recorded under its call below
+            self._claim(node, "ideate", "idea_chosen", first, decision=decision,
+                        options=options if len(options) > 1 else None)
+            winner = tournament.get("winner_idx")
+            for m in tournament.get("matches") or []:
+                if not isinstance(m, dict):
+                    continue
+                won = m.get("a_idx") if m.get("winner") == "A" else m.get("b_idx") if m.get("winner") == "B" else None
+                if winner is not None and won == winner:
+                    self._claim(node, "ideate_tournament", "idea_compared", m.get("reason"),
+                                decision=chosen.get("title"), margin=m.get("margin"))
+            if critique:
+                self._claim(node, "ideate_reflect", "idea_reconsidered",
+                            critique.get("refined_rationale") or critique.get("strongest_objection"),
+                            decision=(f"switched to {critique['swap_to']}" if critique.get("swap_to")
+                                      else "kept the first choice"))
+        elif node == "select_skills":
+            record = out.get("skill_selection") if isinstance(out.get("skill_selection"), dict) else {}
+            forced = set(record.get("forced") or [])  # required by the config: the engine's decision, not the model's
+            for name, why in (record.get("reasons") or {}).items():
+                if name not in forced:
+                    self._claim(node, "select_skills", "skill_chosen", why, decision=f"use {name}")
+            for name, why in (record.get("declined") or {}).items():
+                self._claim(node, "select_skills", "skill_declined", why, decision=f"do not use {name}")
+        elif node == "cross_check":
+            for entry in out.get("cross_check") or []:
+                if not isinstance(entry, dict):
+                    continue
+                key = "cross_check_verify" if "first_pass" in entry else "cross_check"
+                finding = str(entry.get("finding") or "")[:200]
+                candidates = entry.get("candidates") or []
+                verdicts = [b for b in ("supporting", "conflicting") if entry.get(b)]
+                self._claim(node, key, "literature_verdict", entry.get("summary"), finding=finding,
+                            decision=", ".join(verdicts) or "neutral")
+                for bucket in ("supporting", "conflicting"):
+                    for item in entry.get(bucket) or []:
+                        if not isinstance(item, dict):
+                            continue
+                        idx = item.get("index")
+                        title = (candidates[idx - 1].get("title") if isinstance(idx, int) and 0 < idx <= len(candidates)
+                                 and isinstance(candidates[idx - 1], dict) else "") or f"source {idx}"
+                        self._claim(node, key, f"literature_{bucket}", item.get("why"), finding=finding,
+                                    decision=f"{bucket}: {title}")
+        elif node == "execute_reflect":
+            # The engine's own placeholders are in parentheses ("(no summary)", "(LLM produced no patched code)"):
+            # never recorded as the model's words. A give-up the run-record check turned into a stop is only in the
+            # history, as "(gave up: <the model's reason>)".
+            give_up = str(out.get("exec_give_up_reason") or "")
+            attempt = out.get("exec_reflect_iter")
+            entry = next((h for h in out.get("exec_reflect_history") or []
+                          if isinstance(h, dict) and h.get("iter") == attempt), None)
+            summary = str((entry or {}).get("patch_summary") or "")
+            if give_up and not give_up.startswith("("):
+                self._claim(node, "execute_reflect", "repair", give_up, decision="gave up")
+            elif summary.startswith("(gave up: "):
+                body = summary[len("(gave up: "):]
+                self._claim(node, "execute_reflect", "repair", body[:-1] if body.endswith(")") else body,
+                            decision="gave up")
+            elif summary and not summary.startswith("(") and not give_up:
+                self._claim(node, "execute_reflect", "repair", summary,
+                            decision=f"repaired the script (attempt {attempt})")
+        elif node == "clarify":
+            questions = out.get("clarify_questions") if isinstance(out.get("clarify_questions"), dict) else {}
+            answers = out.get("clarify_answers") if isinstance(out.get("clarify_answers"), dict) else {}
+            for slot, q in questions.items():
+                if not isinstance(q, dict) or not isinstance(q.get("reason"), str):
+                    continue
+                answered = answers.get(slot)
+                self._claim(node, "clarify", f"setup/{slot}", q["reason"], decision=str(q.get("default") or ""),
+                            **({"answer_used": str(answered)} if answered not in (None, "") and str(answered) != str(q.get("default")) else {}))
+
     def _progress(self, text: str) -> None:
         """One line for whoever is watching the quest, not debugging it: the CLI console, VS Code's chat, and the web
         page's live log show only lines logged this way (``core/engine.py:STAGE_PROGRESS``, ``_ProgressOnly``); a repeat
@@ -1859,6 +1985,7 @@ class Engine:
             resumed = self.audit.paused_node == name
             self._audit_node, self._audit_pause = name, ""
             self._audit("node_started", node=name, iteration=state.get("iteration", 0), **({"resumed": True} if resumed else {}))
+            self.__dict__["_chat_at_node_start"] = dict(self._last_chat)
             self._progress_stage(name)
             began = time.monotonic()
             try:
@@ -1879,7 +2006,10 @@ class Engine:
             except Exception as e:  # noqa: BLE001 -- recorded, then raised again unchanged
                 self._audit("node_failed", node=name, error=f"{type(e).__name__}: {e}")
                 raise
-            out = self._audit_claims(name, out)
+            try:
+                out = self._audit_claims(name, out)
+            except Exception as e:  # noqa: BLE001 -- the trace is a record; an odd answer never fails a finished step
+                self._log.debug("[audit] claims not recorded for %s: %r", name, e)
             self._audit_artifacts(name)
             self._audit(
                 "node_completed", node=name, duration_s=round(time.monotonic() - began, 2),
@@ -5073,13 +5203,129 @@ class Engine:
                     pass
         return filled if filled is not None else protocol
 
+    # The key in ``provider.extra`` launch.py sets when the model picked in the VS Code chat panel replaced the config's
+    # ``provider.model`` for this run: ``{"before": <the config's>, "after": <the chat panel's>}``.
+    CHAT_MODEL_KEY = "chat_panel_model"
+
+    @staticmethod
+    def same_model(name: str, served: str, family: str = "") -> bool:
+        """Whether a model name a config (or a person) gave means the model a connection reported: the same id, its
+        family, or the id with a date added (``gpt-5.6-luna`` for ``gpt-5.6-luna-2026-09``) or ``-preview`` / ``-latest``. Not the other way
+        round, and not one name merely inside another (``gpt-5`` is not ``gpt-5-mini``)."""
+        n, s, f = (str(x or "").strip().lower() for x in (name, served, family))
+        if not n or not s:
+            return False
+        return n in (s, f) or re.fullmatch(re.escape(n) + r"(?:[-_.@](?:\d{4}[\d.-]*|\d{2}-\d{2}|preview|latest))+", s) is not None
+
+    def _earlier_main_model(self) -> str | None:
+        """The model that answered the latest earlier call made on the quest's main model (not a step's own model,
+        not a fallback provider), as the connection reported it; ``None`` when there is none."""
+        earlier = None
+        try:
+            for row in _attempts.read(self.fi_dir, _attempts.MODEL_CALLS):
+                if (row.get("outcome") == "ok" and row.get("reported") and row.get("served_model")
+                        and not row.get("fallback") and not self._model_for_node(str(row.get("node") or ""))):
+                    earlier = str(row["served_model"])
+        except Exception:  # noqa: BLE001 -- a note, never in the way of the quest
+            earlier = None
+        return earlier
+
+    def _say_model_change(self) -> None:
+        """When the chat panel's model replaced the config's for this run (``launch.py --vscode-chat-model``): one plain
+        run.log line, and a ``model_changed`` event in the trace when it is not the model the quest's earlier calls
+        already used (a quest resumed from the chat again on the same model has not changed model). Once per run. Also
+        takes note of that earlier model, so the first call of this run can say whether the model changed partway."""
+        if self.__dict__.get("_model_change_said"):
+            return
+        self.__dict__["_model_change_said"] = True
+        earlier = self._earlier_main_model()
+        self.__dict__["_earlier_served_model"] = earlier
+        change = (self.config.provider.extra or {}).get(self.CHAT_MODEL_KEY)
+        if isinstance(change, dict) and change.get("after") and change.get("after") != change.get("before"):
+            before = str(change.get("before") or "") or "no model"
+            self._log.warning("[model] the chat panel's model %s replaces %s from config.yaml", change["after"], before)
+            # A change of config.yaml's model is recorded apart (_take_model_change compares the config's own model,
+            # never the chat panel's): this is the change this run makes. Nothing made yet (a new quest started from
+            # the chat): the event says so, so the paper is not told two models produced the quest.
+            # With no earlier call naming its model (the picker on Auto, say), the trace's latest change says which
+            # model the quest was last moved to: resumed again on that one, nothing changed.
+            last = earlier or self._last_model_in_trace()
+            if not (last and self.same_model(str(change["after"]), last)):
+                taken = self.__dict__.get("_model_change_taken")
+                # Before this run: the model the earlier calls named, else the one config.yaml had before its change,
+                # else config.yaml's (never a model config.yaml names now but this run does not use, when it changed).
+                was = earlier or (taken[0] if isinstance(taken, tuple) else None) or change.get("before") or None
+                self._audit("model_changed", before=was, after=change["after"],
+                            source="the model picked in the VS Code chat panel",
+                            before_any_step=not self._made_anything())
+                self.__dict__["_chat_change_audited"] = True
+
+    def _last_model_in_trace(self) -> str | None:
+        """The model the quest's latest ``model_changed`` event (before this run's) moved it to: the chat panel's or the
+        served model (``after``), else the model config.yaml's change left running (``run_uses``); ``None`` when none."""
+        last = None
+        before_run = self.__dict__.get("_model_events_before_run")  # this run's own config.yaml change is not earlier
+        try:
+            earlier = [e for e in _audit_log.read(self.audit.path) if e.get("kind") == "model_changed"]
+            for e in earlier[:before_run] if isinstance(before_run, int) else earlier:
+                main = next((c.get("to") for c in e.get("changes") or []
+                             if isinstance(c, dict) and c.get("setting") == "provider.model"), None)
+                last = e.get("after") or e.get("run_uses") or main or last
+        except Exception:  # noqa: BLE001 -- a note, never in the way of the quest
+            return None
+        return str(last) if last else None
+
+    def _note_served_model(self, node: str, served: dict[str, Any]) -> None:
+        """Once per run, on the first answered call that used the quest's main model on its own provider (not a fallback):
+        which model actually answered, as the connection named it; a plain warning when that is not the model the
+        config names, and when it is not the model that answered this quest's earlier calls (the results before and
+        after were then made by different models, which the trace records, once)."""
+        if self.__dict__.get("_served_model_said") or self._model_for_node(node) or served.get("fallback"):
+            return
+        model = str(served.get("model") or "")
+        if not served.get("reported") or not model:
+            return
+        self.__dict__["_served_model_said"] = True
+        family = str(served.get("family") or "")
+        vendor = f" (vendor: {served['vendor']})" if served.get("vendor") else ""
+        self._log.info("[model] the first call of this run (%s) was answered by %s%s, as the connection reports it",
+                       node, model, vendor)
+        from .vscode_bridge import is_router_alias
+
+        asked = str(self.config.provider.model or "").strip()
+        if asked and not is_router_alias({"id": asked}) and not self.same_model(asked, model, family):
+            self._log.warning("[model] the config names %s; %s served %s", asked,
+                              "VS Code" if self.config.provider.name == "vscode_extension" else "the connection", model)
+        earlier = self.__dict__.get("_earlier_served_model")
+        if earlier and earlier.strip().lower() != model.strip().lower():
+            self._log.warning("[model] this quest's earlier results were made by %s and its results from here on by %s: "
+                              "the quest's results were made by different models", earlier, model)
+            change = (self.config.provider.extra or {}).get(self.CHAT_MODEL_KEY)
+            taken = self.__dict__.get("_model_change_taken")
+            already = ((self.__dict__.get("_chat_change_audited") and isinstance(change, dict)
+                        and self.same_model(str(change.get("after") or ""), model, family))
+                       # config.yaml's own model change from the earlier model to this one, with no chat panel model.
+                       or (isinstance(taken, tuple) and not isinstance(change, dict)
+                           and self.same_model(taken[1], model, family) and self.same_model(taken[0], earlier)))
+            # The chat panel's change, or config.yaml's change to this model, is in the trace already, from the start
+            # of this run.
+            if not already:
+                self._audit("model_changed", before=earlier, after=model, source="the model that answered the calls",
+                            node=node)
+
     async def _connect_llm(self) -> None:
         """Resolve the provider and build the LLM client (with its fallback chain), as a quest run does."""
         endpoint = await resolve_endpoint_async(self.config.provider, self.supervisor)
+        # Where the calls go and which model the config asks for; the model that actually answers is named on the first
+        # call (``_note_served_model``), since a connection may serve another one.
+        where = endpoint.base_url or {
+            "vscode_bridge": "the VS Code chat models", "cli": "the local command-line tool",
+        }.get(getattr(endpoint, "transport", ""), "(no address)")
         self._log.info(
-            "provider %s -> %s (%s)",
-            self.config.provider.name, endpoint.base_url, endpoint.model,
+            "provider %s -> %s (model asked for: %s)",
+            self.config.provider.name, where, endpoint.model,
         )
+        self._say_model_change()
         # A connection that names the model that answered each call (an HTTP API, the claude CLI): a call on it whose
         # model went unnamed is a gap in the quest's record of its calls (core/attempt_records.py::model_call_gaps).
         self._reports_model = (getattr(endpoint, "transport", "") == "http"
@@ -5294,17 +5540,43 @@ class Engine:
             self._log.warning("[model] could not record the model change: %r", e)
             return
         # Nothing made on the old model yet (its first start failed before any step, say): nothing to disclose.
-        try:
-            cost = self.fi_dir / "cost.jsonl"
-            made = (cost.is_file() and cost.stat().st_size > 0) or any(
-                e.get("kind") == "node_completed" for e in _audit_log.read(self.audit.path))
-        except Exception:  # noqa: BLE001 -- when unsure, say it as a change
-            made = True
+        made = self._made_anything()
         lines = _plan_settings.model_change_lines(changes, self.config.provider.node_models, made=made)
-        self._audit("model_changed", changes=changes, before_any_step=not made)
+        chat = (self.config.provider.extra or {}).get(self.CHAT_MODEL_KEY)
+        chat_after = chat.get("after") if isinstance(chat, dict) else None
+        try:
+            self.__dict__["_model_events_before_run"] = sum(
+                1 for e in _audit_log.read(self.audit.path) if e.get("kind") == "model_changed")
+        except Exception:  # noqa: BLE001
+            pass
+        # With the chat panel's model on this run, config.yaml's new model is not what runs: the paper is told of the
+        # chat panel's model instead (_say_model_change), not of one that never ran.
+        self._audit("model_changed", changes=changes, before_any_step=not made,
+                    **({"run_uses": chat_after} if chat_after else {}))
+        main = next((c for c in changes if c.get("setting") == "provider.model"), None)
+        if main is not None:
+            # The first call confirming this very change is not recorded again (_note_served_model).
+            self.__dict__["_model_change_taken"] = (str(main.get("from") or ""), str(main.get("to") or ""))
+        if chat_after and main is not None:
+            # config.yaml's model changed, but this run uses the chat panel's (_say_model_change records that): one
+            # sentence, not "from here on B" followed by "not B".
+            said = f"the model changes from {main.get('from') or 'none'} to "
+            lines = [f"config.yaml's model changes from {main.get('from') or 'none'} to {main.get('to') or 'none'}; "
+                     f"this run uses the chat panel's model {chat_after}" if line.startswith(said) else line
+                     for line in lines]
         for line in lines:
             self._log.info("[model] %s", line)
             print(f"[FI] model: {line}")
+
+    def _made_anything(self) -> bool:
+        """Whether anything was made on the quest's earlier model: a call in ``cost.jsonl`` or a completed step in the
+        trace. When unsure, yes (a change is then disclosed rather than hidden)."""
+        try:
+            cost = self.fi_dir / "cost.jsonl"
+            return (cost.is_file() and cost.stat().st_size > 0) or any(
+                e.get("kind") == "node_completed" for e in _audit_log.read(self.audit.path))
+        except Exception:  # noqa: BLE001 -- when unsure, say it as a change
+            return True
 
     def _stop_for_changed_settings(self, changed: list[str]) -> QuestArtifacts:
         """Stop before anything runs because a setting that decides how strictly the quest is checked differs from
@@ -13038,7 +13310,9 @@ class Engine:
         needs_experiment: list[str] = []
         extend: list[str] = []
         layout: list[str] = []
+        route_why = ""
         if refine_round:
+            markdown, route_why = _take_refine_why(markdown)
             markdown, points = _take_refine_points(markdown)
             needs_experiment, extend, layout = points["experiment"], points["data"], points["layout"]
             if extend and (needs_experiment or state.get("survey_mode_resolved")):
@@ -13056,6 +13330,10 @@ class Engine:
             else:
                 what = " in the text; the experiment stands"
             self._log.info("[write] answered the person's notes%s", what)
+            # The writer's own reason for the route its answer takes (asked for in the same reply, no extra call).
+            route = ("a new experiment" if needs_experiment else "more data" if extend
+                     else "a new figure layout" if layout else "text only")
+            self._claim("write", "write", "refine_route", route_why, decision=route)
         unreported: list[str] = []
         reasked = False
         if not refine_round:
@@ -15431,7 +15709,9 @@ class Engine:
             node or "", messages,
             lambda: self._client.chat(messages, temperature=temp, model=self._model_for_node(node), node=node or ""),
         )
-        self._log_chat_cost(node=node or "", messages=messages, response=response)
+        # The model that answered THIS call (not the client's shared latest, which a call made meanwhile can change).
+        self._log_chat_cost(node=node or "", messages=messages, response=response, model=served.get("model") or None,
+                            usage=served.get("usage") if isinstance(served.get("usage"), dict) else None)
         if node:
             # Who answered THIS call (core/provider.py::LAST_CALL, the task's own), so a fallback that actually served
             # it is recorded truthfully and calls made at the same time do not overwrite each other. The client's
@@ -15474,7 +15754,7 @@ class Engine:
         _LAST_CALL.set(None)
         # This call's own id: one left by an earlier call of the node must not be read if this call's record fails.
         self.__dict__.setdefault("_last_call_id", {}).pop(node, None)
-        holder, holder_token = _thinking.open_holder()
+        holder, holder_token = _thinking.open_holder(want=self._keeps_thinking())
         try:
             try:
                 response = await call()
@@ -15502,6 +15782,11 @@ class Engine:
             final_id = self._record_model_call(node, messages, response, served=served, usage=served.get("usage"),
                                                requested_model=requested_model)
             self._save_thinking(node, holder, requested_model, served, outcome="ok", call_id=final_id)
+            if not requested_model:
+                try:
+                    self._note_served_model(node, served)
+                except Exception:  # noqa: BLE001 -- a note never touches the quest (nor a stand-in engine's call)
+                    pass
             if final_id:
                 served["call_id"] = final_id  # this call's own id, not the node's shared latest (a same-node call may run at once)
             return response, served
@@ -15509,7 +15794,31 @@ class Engine:
             _thinking.close_holder(holder_token)
             _CALL_ATTEMPTS.reset(token)
 
-    def _save_thinking(self, node: str, holder: dict[str, str], requested_model: str | None,
+    def _keeps_thinking(self) -> bool:
+        """``output.save_thinking``: whether a model's reasoning is kept, and so whether a connection that has to ask
+        for it (the VS Code bridge) asks."""
+        try:
+            return bool(self.config.output.save_thinking)
+        except AttributeError:  # a stand-in config
+            return False
+
+    def _say_once_about_thinking(self, node: str, holder: dict[str, Any], served: dict[str, Any], outcome: str,
+                                 text: str) -> None:
+        """Plain run.log lines about a call's reasoning, each said once: the model refused the request for its
+        reasoning (once per model), or this step's connection returned none (once per step)."""
+        said = self.__dict__.setdefault("_thinking_said", set())
+        declined = str(holder.get("declined") or "")
+        model = str(served.get("model") or served.get("provider") or "the model")
+        if declined and ("declined", model) not in said:
+            said.add(("declined", model))
+            self._log.info("[thinking] %s did not accept FI's request for its reasoning, so FI asked again without it "
+                           "(%s); its answers are used as usual", model, declined[:200])
+        if outcome == "ok" and not text.strip() and ("none", node) not in said:
+            said.add(("none", node))
+            self._log.info("[thinking] %s: this model/connection returned no reasoning for this step (only its answer "
+                           "and any reasons it wrote in it are kept)", node)
+
+    def _save_thinking(self, node: str, holder: dict[str, Any], requested_model: str | None,
                        served: dict[str, Any], *, outcome: str, call_id: str | None = None) -> None:
         """One line in ``.fi/thinking.jsonl`` for a call whose connection handed back the model's reasoning: the text
         (credentials and the home folder removed), which call it belongs to (``call_id``, the line of
@@ -15518,7 +15827,13 @@ class Engine:
         not evidence, and never in the way of the quest."""
         text = holder.get("text") or ""
         fi_dir = getattr(self, "fi_dir", None)
-        if not text.strip() or fi_dir is None or not self.config.output.save_thinking:
+        if fi_dir is None or not self._keeps_thinking():
+            return
+        try:
+            self._say_once_about_thinking(node, holder, served, outcome, text)
+        except Exception:  # noqa: BLE001 -- a log line never touches the quest (nor a stand-in engine's call)
+            pass
+        if not text.strip():
             return
         try:
             path = fi_dir / _thinking.THINKING_FILE
@@ -15813,7 +16128,8 @@ class Engine:
             lambda: self._client.chat(messages, temperature=temperature, model=self._model_for_node(node),
                                       node=node or ""),
         )
-        self._log_chat_cost(node=node or "", messages=messages, response=response)
+        self._log_chat_cost(node=node or "", messages=messages, response=response, model=_served.get("model") or None,
+                            usage=_served.get("usage") if isinstance(_served.get("usage"), dict) else None)
         return response
 
     def _clear_clarify_snapshot(self) -> None:
@@ -21291,6 +21607,20 @@ def _take_refine_points(markdown: str) -> tuple[str, dict[str, list[str]]]:
     return cleaned.rstrip() + "\n", points
 
 
+# The writer's one-sentence reason for how it answered a person's refine (text only, more data, a new layout or a new
+# experiment), on a line of its own; decorated the same ways a NEEDS_ line may be.
+_REFINE_WHY_RE = re.compile(r"^[ \t>*_`-]*[*_`]*REFINE_WHY[*_`]*:[*_`]*[ \t]*(.*?)[ \t*_`]*$", re.MULTILINE)
+
+
+def _take_refine_why(markdown: str) -> tuple[str, str]:
+    """The paper without its ``REFINE_WHY:`` line(s), and the reason they give (the last non-empty one)."""
+    reasons = [m.group(1).strip() for m in _REFINE_WHY_RE.finditer(markdown) if m.group(1).strip()]
+    if not _REFINE_WHY_RE.search(markdown):
+        return markdown, ""
+    cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", _REFINE_WHY_RE.sub("", markdown)).strip())
+    return cleaned.rstrip() + "\n", (reasons[-1] if reasons else "")
+
+
 def _extension_values(group: str, values: list[float]) -> str:
     """``max_abs_errors = 0.02714, 0.01321``: one result an extension added, as the writer is shown it (cut to a
     readable length)."""
@@ -21386,7 +21716,9 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
             "results are there and only the figures should be arranged, resized or redrawn differently (FI redraws them "
             "from the saved data and does not run the experiment again); with NEEDS_EXPERIMENT: only when it is a "
             "different study (FI goes back to the design). Follow each with the point in one sentence. Write no such "
-            "line when the text can answer every point.",
+            "line when the text can answer every point. Always end your reply with one more line, starting with "
+            "REFINE_WHY:, saying in one sentence why the feedback needs only the text, more data, a new figure layout "
+            "or a new experiment (FI removes this line too).",
         ]
     return "\n".join(lines) or "(none — first draft)"
 

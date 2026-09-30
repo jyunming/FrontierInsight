@@ -13,7 +13,7 @@ Wire protocol (one JSON object per line; both directions):
 Python → extension::
 
     {"type":"lm_request","id":<int>,"node":"<name>","messages":[...],
-     "model_hint":"<optional>","temperature":<float>}
+     "model_hint":"<optional>","temperature":<float>,"ask_thinking":<bool>}
     {"type":"clarify_request","id":<int>,"questions":{...}}
 
 Extension → Python::
@@ -60,6 +60,10 @@ _BRIDGE_LINE_LIMIT = 32 * 1024 * 1024
 
 #: The reasoning text the chat model sent with the current task's last bridge call, when the extension passed it on.
 LAST_BRIDGE_THINKING: contextvars.ContextVar[str | None] = contextvars.ContextVar("fi_vscode_thinking", default=None)
+#: Why the chat model refused the request for its reasoning on the current task's last bridge call (the extension then
+#: asked again without it), or ``None``.
+LAST_BRIDGE_THINKING_DECLINED: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "fi_vscode_thinking_declined", default=None)
 
 #: Names a chat picker uses for "let the service choose": they name no model, so they prove nothing about which
 #: model answered.
@@ -123,6 +127,7 @@ class VSCodeBridgeClient:
         self._served: dict[int, dict[str, str]] = {}
         self._usage: dict[int, dict] = {}
         self._thinking: dict[int, str] = {}
+        self._declined: dict[int, str] = {}
         self._next_id = 1
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # serialize writes
@@ -184,6 +189,7 @@ class VSCodeBridgeClient:
         self._served.clear()
         self._usage.clear()
         self._thinking.clear()
+        self._declined.clear()
 
     async def chat(
         self,
@@ -192,6 +198,7 @@ class VSCodeBridgeClient:
         node: str = "",
         model_hint: str = "",
         temperature: float = 0.2,
+        ask_thinking: bool = False,
     ) -> str:
         """Send one ``lm_request`` to the extension and await its
         ``lm_done``. The extension does the actual ``vscode.lm`` call
@@ -205,6 +212,12 @@ class VSCodeBridgeClient:
         extension translates it into a ``selectChatModels`` filter.
         Empty string means "use whatever model the user has selected
         in the Chat picker."
+
+        ``ask_thinking`` asks the extension to request the chat model's
+        reasoning (Copilot's internal ``_enableThinking`` model option);
+        the extension asks again without it if the model refuses, and
+        says so on ``lm_done`` (``thinking_declined``). An older
+        extension ignores the field.
         """
         if self._writer is None:
             await self.connect()
@@ -213,6 +226,7 @@ class VSCodeBridgeClient:
         LAST_SERVED.set(None)
         LAST_BRIDGE_USAGE.set(None)
         LAST_BRIDGE_THINKING.set(None)
+        LAST_BRIDGE_THINKING_DECLINED.set(None)
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
@@ -226,6 +240,7 @@ class VSCodeBridgeClient:
             "messages": messages,
             "model_hint": model_hint,
             "temperature": temperature,
+            "ask_thinking": bool(ask_thinking),
         }
         await self._send(payload)
         try:
@@ -244,6 +259,7 @@ class VSCodeBridgeClient:
                 LAST_SERVED.set(self._served.pop(req_id, None))
                 LAST_BRIDGE_USAGE.set(self._usage.pop(req_id, None))
                 LAST_BRIDGE_THINKING.set(self._thinking.pop(req_id, None))
+                LAST_BRIDGE_THINKING_DECLINED.set(self._declined.pop(req_id, None))
                 return content
             except asyncio.TimeoutError as e:
                 raise BridgeError(
@@ -256,6 +272,7 @@ class VSCodeBridgeClient:
             self._served.pop(req_id, None)
             self._usage.pop(req_id, None)
             self._thinking.pop(req_id, None)
+            self._declined.pop(req_id, None)
 
     async def clarify(self, questions: dict[str, Any]) -> dict[str, Any]:
         """Pause for human-in-the-loop clarify answers. The extension
@@ -364,6 +381,7 @@ class VSCodeBridgeClient:
             self._served.clear()
             self._usage.clear()
             self._thinking.clear()
+            self._declined.clear()
             w = self._writer
             self._reader = None
             self._writer = None
@@ -420,8 +438,13 @@ class VSCodeBridgeClient:
                     "usage_scope": str(msg.get("usage_scope") or "sent_only"),
                 }
             thinking = msg.get("thinking")
+            if isinstance(thinking, list) and all(isinstance(t, str) for t in thinking):
+                thinking = "".join(thinking)
             if isinstance(thinking, str) and thinking:
                 self._thinking[req_id] = thinking
+            declined = msg.get("thinking_declined")
+            if isinstance(declined, str) and declined.strip():
+                self._declined[req_id] = declined.strip()[:500]
             served = msg.get("served_model")
             if isinstance(served, dict) and isinstance(served.get("id"), str) and served["id"].strip():
                 self._served[req_id] = {k: str(v) for k, v in served.items()

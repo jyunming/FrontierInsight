@@ -71,7 +71,7 @@ from tenacity import (
 )
 
 from .config import ProviderConfig
-from .thinking_capture import add_thinking, note_thinking
+from .thinking_capture import add_thinking, as_text, note_declined, note_thinking, wanted as thinking_wanted
 
 _log = logging.getLogger("frontier_insight.provider")
 
@@ -228,6 +228,10 @@ class _CliSpec:
     # see and which dominates the total. Returning None means "this CLI does
     # not report usage", and the estimator stays in charge.
     usage_extractor: Callable[[str], dict[str, Any] | None] | None = None
+    # Pull the model's reasoning summary (if the CLI prints one) out of its stdout, for ``.fi/thinking.jsonl``
+    # (core/thinking_capture.py). ``None``: this CLI's reasoning is not read. Read beside ``usage_extractor``, from
+    # the same stdout, on the path that collects it (``last_message_file``); never the answer.
+    reasoning_extractor: Callable[[str], str] | None = None
     # Environment variables to clear for this CLI's subprocess, and the one
     # variable whose presence means the user chose the env path deliberately
     # and we must not touch anything.
@@ -411,6 +415,32 @@ def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
             measured["served_model"] = served
         return measured
     return None
+
+
+def _extract_codex_reasoning(raw: str) -> str:
+    """The reasoning summaries in ``codex exec --json`` output: the text of each completed item of type ``reasoning``
+    (once per item id), joined by blank lines; ``""`` when there are none. The answer is never taken from here."""
+    parts: list[str] = []
+    seen: set[str] = set()
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(evt, dict) or evt.get("type") != "item.completed":
+            continue
+        item = evt.get("item")
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        text = as_text(item.get("text")) or ""
+        key = str(item.get("id") or len(parts))
+        if text.strip() and key not in seen:
+            seen.add(key)
+            parts.append(text.strip())
+    return "\n\n".join(parts)
 
 
 def _extract_codex_usage(raw: str) -> dict[str, Any] | None:
@@ -658,6 +688,11 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="stdin",
         output_via="last_message_file",
         usage_extractor=lambda raw: _extract_codex_usage(raw),
+        # `--json` prints each reasoning summary Codex produced as an `item.completed` event whose item is of type
+        # `reasoning` (read from codex-cli 0.159's own list of item types: agent_message, reasoning, command_execution,
+        # ...; not seen in a real call). Whether a model returns one depends on the model and Codex's own summary
+        # setting.
+        reasoning_extractor=lambda raw: _extract_codex_reasoning(raw),
         # provider.model = "gpt-5.5". Left blank, codex uses its own default
         # model: config.toml's `model` is not read (--ignore-user-config).
         model_flag="-m",
@@ -909,8 +944,8 @@ def _reasoning_of(data: dict[str, Any]) -> str:
     if not isinstance(message, dict):
         return ""
     for key in ("reasoning_content", "reasoning"):
-        value = message.get(key)
-        if isinstance(value, str) and value:
+        value = as_text(message.get(key))  # a list of summary strings too
+        if value:
             return value
     return ""
 
@@ -968,8 +1003,8 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
             piece = delta.get("content")
             if isinstance(piece, str) and piece:
                 parts.append(piece)
-            thought = delta.get("reasoning_content") or delta.get("reasoning")
-            if isinstance(thought, str) and thought:
+            thought = as_text(delta.get("reasoning_content") or delta.get("reasoning"))
+            if thought:
                 reasoning.append(thought)
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
@@ -1305,6 +1340,10 @@ _TRANSIENT_BRIDGE_MARKERS = (
     "request failed",
     "bridge connection dropped",
     "bridge write failed",
+    # The extension asked the chat model for its reasoning (Copilot's `_enableThinking`) and the answer failed before
+    # its first part: it will not ask that model again, so the same call made again goes through without the option
+    # (vscode-frontier-insight/src/lm-messages.ts THINKING_DECLINED_MARKER).
+    "the model did not accept the request for its reasoning",
     # The TS-side bridge fires this when it sees no streaming chunks
     # for 180 s; treat as transient so Python's 6-attempt budget
     # retries the request. Wall-time math: each Python attempt invokes
@@ -2507,6 +2546,11 @@ async def _collect_via_communicate(
                 _measured = None
             if _measured:
                 usage_out.update(_measured)
+        if spec.reasoning_extractor is not None:
+            try:
+                note_thinking(spec.reasoning_extractor(raw_stdout))
+            except Exception:  # noqa: BLE001 - a keepsake never fails a call
+                pass
         if spec.output_extractor is not None:
             content = spec.output_extractor(content)
         final = content.strip()
@@ -3803,9 +3847,12 @@ class LLMClient:
                 messages, model_override=model, temperature=temperature,
                 node=node,
             )
-            from .vscode_bridge import LAST_BRIDGE_THINKING, LAST_BRIDGE_USAGE, LAST_SERVED, is_router_alias
+            from .vscode_bridge import (
+                LAST_BRIDGE_THINKING, LAST_BRIDGE_THINKING_DECLINED, LAST_BRIDGE_USAGE, LAST_SERVED, is_router_alias,
+            )
 
             note_thinking(LAST_BRIDGE_THINKING.get() or "")
+            note_declined(LAST_BRIDGE_THINKING_DECLINED.get() or "")
             served = LAST_SERVED.get()
             if served and served.get("id") and not is_router_alias(served):
                 # The extension named the chat model it selected and sent this very call to (as VS Code reports it):
@@ -3813,7 +3860,8 @@ class LLMClient:
                 # rides beside it. A router alias ("auto") names no model, so it is left unreported.
                 self.last_model = served["id"]
                 LAST_CALL.set({"provider": self.last_provider, "model": served["id"], "reported": True,
-                               **({"vendor": served["vendor"]} if served.get("vendor") else {})})
+                               **({"vendor": served["vendor"]} if served.get("vendor") else {}),
+                               **({"family": served["family"]} if served.get("family") else {})})
             # The extension counts with the model's own tokenizer when it
             # can, which beats the char/4 estimate — take it, and let the
             # estimator fill in only when it could not. This call's own counts (per request, in this task).
@@ -4153,6 +4201,9 @@ class LLMClient:
                     return await self._bridge.chat(
                         messages, model_hint=hint or "", temperature=temperature,
                         node=node,
+                        # Ask the chat model for its reasoning only when the engine will keep it
+                        # (``output.save_thinking``, a step's call): a generator's call keeps none, so asks for none.
+                        ask_thinking=thinking_wanted(),
                     )
         except BridgeError as exc:
             # The extension could not hand the screenshots to the model (an

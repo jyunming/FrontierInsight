@@ -103,7 +103,7 @@
           },
           {
             "name": "why",
-            "description": "Why a quest did what it did, from what it recorded: why it stopped, why the review asked for a revision, why the evidence is at its level, or why one step decided what it did. @fi /why <quest_id> [stop|review|evidence|<step>]. Mirrors `python launch.py --why` and the quest page's Why?."
+            "description": "Why a quest did what it did, from what it recorded: why it stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or the reasons the model gave at every step. @fi /why <quest_id> [stop|review|evidence|reasons|<step>]. Mirrors `python launch.py --why` and the quest page's Why?."
           },
           {
             "name": "update",

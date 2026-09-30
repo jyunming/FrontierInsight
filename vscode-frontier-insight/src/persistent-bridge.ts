@@ -25,7 +25,8 @@ import * as fs from "fs";
 import * as net from "net";
 import { persistentBridgePath } from "./bridge-path";
 import {
-    BridgeMessage, ChatMessageApi, ThinkingCollector, lmDoneMessage, partKind, servedModel, toChatMessages,
+    BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, partKind, servedModel,
+    thinkingText, toChatMessages,
 } from "./lm-messages";
 
 interface LmRequest {
@@ -35,6 +36,8 @@ interface LmRequest {
     messages: BridgeMessage[];
     model_hint: string;
     temperature: number;
+    /** Ask the model for its reasoning (Copilot's `_enableThinking`); absent (an older FI) counts as yes. */
+    ask_thinking?: boolean;
 }
 
 // Inactivity budget for streaming chunks from ``model.sendRequest``.
@@ -46,6 +49,8 @@ interface LmRequest {
 const INACTIVITY_MS = 180_000;
 
 export class PersistentBridge {
+    // Which models refused the request for their reasoning, so they are not asked again while the bridge runs.
+    private readonly thinkingRequests = new ThinkingRequests();
     private server: net.Server | null = null;
     private clients = new Set<net.Socket>();
     private buffers = new WeakMap<net.Socket, string>();
@@ -322,6 +327,10 @@ export class PersistentBridge {
     }
 
     private async handleLmRequest(socket: net.Socket, req: LmRequest): Promise<void> {
+        // For the error path: whether this request asked for the model's reasoning, and whether any part arrived.
+        let modelKey = "";
+        let askedForThinking = false;
+        let partsSeen = 0;
         try {
             // Resolve the model by *id* first, then by *family*. The
             // model picker (handleListModels) emits ``value: m.id`` so
@@ -399,12 +408,24 @@ export class PersistentBridge {
             // this drips slowly, but it builds up over a long --serve
             // session.
             let res: vscode.LanguageModelChatResponse;
+            modelKey = model.id;
+            const wantThinking = req.ask_thinking !== false;
             try {
-                res = await model.sendRequest(messages, {}, cts.token);
+                // With Copilot's `_enableThinking` model option when asked (lm-messages.ts ThinkingRequests); a model
+                // that refuses it is asked again once without it.
+                const sent = await this.thinkingRequests.send(
+                    modelKey, wantThinking,
+                    (options) => model.sendRequest(messages, options as vscode.LanguageModelChatRequestOptions, cts.token),
+                    () => cts.token.isCancellationRequested,
+                );
+                res = sent.response;
+                askedForThinking = sent.asked;
             } catch (sendErr) {
                 cts.dispose();
                 throw sendErr;
             }
+            const declined = wantThinking && !askedForThinking
+                ? this.thinkingRequests.declinedReason(modelKey) : undefined;
             let content = "";
             let chunkCount = 0;
             // Race each ``iter.next()`` against an inactivity timer.
@@ -449,10 +470,13 @@ export class PersistentBridge {
                         );
                     }
                     if (result.done) break;
+                    if (partsSeen++ === 0) this.thinkingRequests.firstPart(modelKey, askedForThinking);
                     const part = result.value as any;
                     const kind = partKind(vscode, part);
-                    if (kind === "thinking" && typeof part.value === "string") {
-                        thinkingAll.add(part.value);
+                    // A thinking part's value may be a list of strings; it is joined into one.
+                    const thought = kind === "thinking" ? thinkingText(part.value) : undefined;
+                    if (thought !== undefined) {
+                        thinkingAll.add(thought);
                         continue;
                     }
                     if (kind !== "text" || typeof part.value !== "string") continue;
@@ -508,10 +532,15 @@ export class PersistentBridge {
                 // The model selected and sent this request, so FI can record it; the model's own reasoning rides
                 // along when there is room (cut to fit). An older FI ignores both.
                 served_model: servedModel(model),
+                // This model refused the request for its reasoning, so it was asked without it (FI says so in run.log).
+                ...(declined ? { thinking_declined: declined } : {}),
             }, thinkingAll.text, undefined, thinkingAll.total));
             cts2.dispose();
         } catch (e) {
-            const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            const raw = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
+            // A stream that failed before any part, on a request that asked for the reasoning: the next request goes without it, and
+            // the error says so in words FI retries on.
+            const msg = this.thinkingRequests.streamFailed(modelKey, askedForThinking, partsSeen, raw);
             this.send(socket, { type: "lm_error", id: req.id, error: msg });
         }
     }

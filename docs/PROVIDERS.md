@@ -165,6 +165,32 @@ bring-your-own-key endpoint). If the hint matches nothing, the call uses the
 model selected in your Chat picker and the chat says so in one line, so the
 quest keeps running on a model you chose rather than one FI guessed.
 
+**Which model a `vscode_extension` quest uses.** A quest started or resumed
+from the VS Code chat (`@fi /start`, `/fleet`, `/resume`, `/new`) uses the
+model selected in the chat panel: it replaces `provider.model` from the
+config for that run, and `run.log` and the quest's trace say so ("the chat
+panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml"). A
+step's own `node_models` entry is kept. With the picker on *Auto* no model is
+named and the config's stays. A run started from a terminal or the web page
+has no chat panel, so it uses `provider.model` from the config (so does
+`@fi /update`, which approves the config as it is). Whatever was asked for,
+`run.log` names the model that answered the first call (as VS Code reports
+it; not with the picker on *Auto*, which names no model), warns when it is not the one the config names, and
+warns when it is not the model that answered the quest's earlier calls (the
+results before and after were then made by different models; the trace
+records the change). `.fi/cost.jsonl` names the model that answered each
+call.
+
+**Claude's thinking over the VS Code connection.** Copilot returns a Claude
+model's thinking only when the request asks for it, through Copilot's own
+undocumented model option `_enableThinking`. FI asks by default on every
+step's call and keeps what comes back in `.fi/thinking.jsonl`; Opus returns a
+summary of its thinking, not the full text. The option is internal to
+Copilot and may stop working in any Copilot release. A model that refuses it
+is asked again once without it (the quest goes on; `run.log` says so once).
+`output.save_thinking: false` stops asking. The chat's per-step line
+(`... N thinking ...`) shows how many characters of thinking arrived.
+
 **Which nodes.** Five nodes have been measured on a cheaper model:
 `cross_check`, `select_skills`, `literature_screen`, `slides` and
 `poster`. On one simulation topic, three runs each (codex, `terra` on

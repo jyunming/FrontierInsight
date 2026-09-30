@@ -219,7 +219,7 @@ The steps before the skills are the plan. To change it, use `--revise-plan "<wha
 
 ### Changing a quest's model
 
-Put the model you want in the quest's `config.yaml` (`provider.model`, in the quest folder) and resume it (`fi --resume <quest_id>`, **Resume** on the web quest page, or `@fi /resume <quest_id>` in VS Code). The quest does not stop to ask: a different model does not change what the result means or how strictly it is checked, so it needs no approval. The resumed quest says so in one plain line, for example:
+Put the model you want in the quest's `config.yaml` (`provider.model`, in the quest folder) and resume it (`fi --resume <quest_id>` or **Resume** on the web quest page). In VS Code, pick the model in the chat panel and `@fi /resume <quest_id>`: the chat panel's model wins over `config.yaml` for a quest resumed from the chat (with the picker on *Auto*, `config.yaml`'s model is used). That choice is for the run it starts only: the chat shows `[FI] the chat panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml`, the change goes into the trace and the paper, and `config.yaml` is not changed, so a later resume from a terminal or the web page uses `config.yaml`'s model again. What follows is the `config.yaml` way. The quest does not stop to ask: a different model does not change what the result means or how strictly it is checked, so it needs no approval. The resumed quest says so in one plain line, for example:
 
 ```
 [FI] model: the model changes from gpt-5.6-luna to claude-opus-5 from here on; steps already done were made by gpt-5.6-luna
@@ -256,6 +256,7 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--portfolio` | none | all-time cross-quest synthesis (no time window) | **1** (or 0 if no quests on disk) |
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
 | `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
+| `--why <quest_id> [stop\|review\|evidence\|reasons\|<step>]` | quest_id, then what to ask | why the quest stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or (`reasons`) the reasons the model gave at every step. A step's answer also says whether `.fi/thinking.jsonl` holds the model's reasoning for it and how many characters (the text stays in the file). A reason the model wrote, and a reasoning summary it returned, are its own account of itself, not its hidden reasoning. Web: **Why?** and **Model's reasons** on the quest page; VS Code: `@fi /why`. See [docs/trace.md](trace.md) | 0 |
 | `--install-tectonic` | none | downloads tectonic to `tools/` for no-admin LaTeX | **0** (network download only) |
 
 | Flag | Mode | What it does |
@@ -453,7 +454,7 @@ output:
   paper_format: generic             # scientific: generic | neurips | iclr | ieee_access | nature_mi; non-scientific prose: essay | report | policy_brief | whitepaper
   output_dir: ./outputs
   save_model_calls: false           # keep every prompt and answer, whole, in .fi/io/ (one file per call); see docs/trace.md
-  save_thinking: true               # keep the reasoning a model returns, when its connection gives it, in .fi/thinking.jsonl (for reading; never evidence); false keeps none. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
+  save_thinking: true               # keep the reasoning a model returns, when its connection gives it, in .fi/thinking.jsonl (for reading; never evidence); false keeps none, and on the VS Code connection stops asking Copilot for Claude's thinking (asked by default through Copilot's undocumented `_enableThinking` option; Opus returns a summary). `--why <quest> <step>` says whether the file holds that step's reasoning and how long it is. It can quote your data and prompts: only credentials and your home folder are removed, so check it before sharing the quest folder
   require_pdf: false                # strict mode for paper_pdf — see below
   html_pdf_fallback: true           # when no LaTeX engine: render paper.pdf via pandoc → HTML → headless browser (Edge/Chrome/Chromium). Default on. See below.
   paper_style: latex                # paper.pdf look: latex (Computer Modern article, default) | briefing (FI brand look, HTML-rendered)

@@ -590,10 +590,10 @@ def test_vscode_extension_package_produces_vsix() -> None:
         f"expected {vsix_path.name} to exist after `npm run package`; "
         f"check the `--out` flag in package.json scripts.package"
     )
-    # vsix should be reasonably small (<200 KB) — if it suddenly balloons,
-    # something is leaking node_modules / sources / .git into the bundle.
+    # vsix should be reasonably small (<300 KB; ~200 KB of compiled code, README and icons today) — if it suddenly
+    # balloons, something is leaking node_modules / sources / .git into the bundle (that adds megabytes).
     size_kb = vsix_path.stat().st_size / 1024
-    assert size_kb < 200, (
+    assert size_kb < 300, (
         f"vsix is {size_kb:.0f} KB — check .vscodeignore is excluding "
         f"node_modules and src/*.ts"
     )

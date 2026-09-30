@@ -52,6 +52,10 @@ KINDS = (
     "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
     "title_changed",      # a person changed the quest's title (core/quest_title.py): old, new, the paper's hash before and
                           # after; the only event a seal may be followed by (core/evidence.py chains the paper's hash)
+    "model_changed",      # the quest's model changed: the chat panel's model replaced the config's, or the calls of this
+                          # run were answered by another model than the earlier ones (before, after, source), or the
+                          # recorded model settings in config.yaml changed (changes: [{setting, label, from, to}]);
+                          # before_any_step when nothing had been made on the old model
 )
 
 
@@ -372,7 +376,7 @@ DETAILS = ("summary", "checks", "debug")
 # What each detail level shows. ``summary``: the shape of the run and every decision. ``checks``: plus each check's verdict,
 # the artifacts and the model's stated reasons. ``debug``: everything, including each node's start.
 _SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair",
-                  "quest_finalized", "title_changed"}
+                  "quest_finalized", "title_changed", "model_changed"}
 _CHECK_KINDS = _SUMMARY_KINDS | {"check_result", "artifact_created", "model_claim"}
 
 
@@ -431,6 +435,18 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         return f"quest {'resumed' if e.get('resumed') else 'started'}"
     if kind == "title_changed":
         return f"title changed to \"{e.get('new', '')}\"" + (f" (was \"{e['old']}\")" if e.get("old") else "")
+    if kind == "model_changed" and not e.get("after") and isinstance(e.get("changes"), list):
+        # A change of the recorded model settings (config.yaml): one ``{"label", "from", "to"}`` per setting.
+        def shown(v: Any) -> str:
+            return str(v) if isinstance(v, str) and v else (json.dumps(v, sort_keys=True) if v else "none named")
+
+        parts = [f"{c.get('label') or c.get('setting')} from {shown(c.get('from'))} to {shown(c.get('to'))}"
+                 for c in e["changes"] if isinstance(c, dict)]
+        # No ": " in the text: --why keeps what follows the last node prefix.
+        return f"{where}the model settings changed, " + ("; ".join(parts) or "which ones is not recorded")
+    if kind == "model_changed":
+        return (f"{where}the model changed from {e.get('before') or 'none named'} to {e.get('after', '')}"
+                + (f" ({e['source']})" if e.get("source") else ""))
     if kind == "quest_finalized":
         lost = e.get("write_errors") or 0
         return (f"quest finished: {e.get('events_before')} events recorded"
