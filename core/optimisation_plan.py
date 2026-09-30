@@ -20,8 +20,9 @@ method, the threshold) is computed by the helpers below at the time it is used, 
 It also decides, from the topic's words alone, whether the topic is clear about the kind of study; when it is not, the
 clarify step asks the person one plain question (:func:`add_study_type_question`).
 
-The search itself is not run here, and a quest whose plan is ``find_best_design`` stops before anything runs until the
-engine can run it (``core/engine.py::_node_design``); a plan of that kind never runs as a plain sweep.
+The search itself is not run here: the engine runs it (:mod:`core.optimise`). A plan of that kind never runs as a plain
+sweep; one the engine cannot search (no block, no budget, one script, a cluster) stops before anything runs
+(``core/engine.py::_stop_if_the_search_cannot_start``).
 """
 
 from __future__ import annotations
@@ -662,9 +663,10 @@ def plan_lines(design: Any) -> list[str]:
                 "`optimisation` block in the design below.", ""]
     lines = [f"## {HEADING}", "",
              "> Shown from the design block below (`study_type` and `protocol.optimisation`) as it was when the plan was "
-             "written; edit the block, not this section (after an edit, only the block counts). This version "
-             "of FI can write and check this plan but cannot yet run the search for the best design: the quest stops "
-             "before anything runs, and NEXT_STEP.md says what you can do.", "",
+             "written; edit the block, not this section (after an edit, only the block counts). FI runs the search "
+             "itself, within the budget below, and records every evaluation; the best design is found and scored at the "
+             "search's own numerical settings. This version does not yet recompute it at the finer check settings "
+             "below, and says so in the results.", "",
              "**Kind of study:** find the best design (`study_type: find_best_design`), not a measurement over "
              "settings chosen in advance.", ""]
     if not has_block(design):
@@ -711,7 +713,8 @@ def plan_lines(design: Any) -> list[str]:
     library = _LIBRARY_METHOD.match(method)
     described = (BUILT_IN_METHODS.get(method) or
                  (f"the {library.group(2)} method of {library.group(1)}, used only when the quest's environment has "
-                  f"{library.group(1)}" if library else method))
+                  f"{library.group(1)} (otherwise bounded_local); each of its steps starts the quest's Python again, so "
+                  "a large budget takes noticeably longer than the evaluations alone" if library else method))
     lines += [f"**How the search runs:** {method}: {described}"
               f"{'' if where == 'plan' else ' (FI’s choice: the plan names no method)'}.", ""]
     grid = block.get("grid")
@@ -759,6 +762,8 @@ def plan_lines(design: Any) -> list[str]:
                      "yet)")
     else:
         lines.append("- time per evaluation: not measured yet")
+    lines.append("- the scan and the search stop at the run's time limit (`execution.timeout_s`), whatever is left of the "
+                 "budget; the results say which came first")
     lines.append("")
     return lines
 

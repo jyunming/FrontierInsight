@@ -126,8 +126,10 @@ _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "nee
 # frozen as a change made after results were seen and the paper says so.
 _PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json"]
 # From the design on: the protocol, the design's audit, and everything the run and the writing made from it.
+# A search for the best design (core/optimise.py): its best design and FI's record of the search go with the run.
+_SEARCH = ["results/best_design.json", ".fi/optimisation"]
 _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RUN_RECORDS, "needs/EVIDENCE.json",
-                "code", "figures", "raw", "results.json", "data/auto_collected", *_PAPER]
+                "code", "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 
 _OWN: dict[str, list[str]] = {
     # The review writes no file of its own; what is made from the reviewed paper is made again after it.
@@ -139,10 +141,10 @@ _OWN: dict[str, list[str]] = {
     "analysis": _PAPER,
     "figures": ["figures", "code/web_plots.py", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK],
     # The mean-over-seeds redraw is written into code/ by the run.
-    "run": ["figures", "raw", "results.json", "code/replot_figures.py", "code/replot_figures.json", "code/web_plots.py",
+    "run": ["figures", "raw", "results.json", *_SEARCH, "code/replot_figures.py", "code/replot_figures.json", "code/web_plots.py",
             "data/auto_collected", "needs/RUN_MANIFEST_CHECK.json", "needs/ENVIRONMENT.json", *_PAPER],
-    "code": ["code", "figures", "raw", "results.json", *_RUN_RECORDS, *_PAPER],
-    "skills": ["code", "figures", "raw", "results.json", *_RUN_RECORDS, *_PAPER],
+    "code": ["code", "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
+    "skills": ["code", "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
     # The record of the oracles the engine added to plan.md goes with plan.md: a design rerun keeps both.

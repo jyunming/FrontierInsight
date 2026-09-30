@@ -1,5 +1,6 @@
 """A study that looks for the best design: the plan's `study_type`, its `optimisation` block, the section of plan.md,
-the question asked when the topic is ambiguous, and the stop before anything runs (the search itself is not built yet)."""
+the question asked when the topic is ambiguous, and the stop before anything runs when the search cannot start (the
+search itself: tests/test_optimise_runner.py)."""
 
 from __future__ import annotations
 
@@ -211,7 +212,8 @@ def test_plan_md_says_what_is_optimised_and_the_budget_before_anything_runs() ->
     assert "= 12 evaluations" in text
     assert "about 8 min" in text and "not measured yet" in text
     assert "numerical error of the two designs" in text
-    assert "cannot yet run the search" in text
+    assert "FI runs the search itself" in text and "does not yet recompute it at the finer check settings" in text
+    assert "execution.timeout_s" in text
 
 
 def test_plan_md_names_the_fixed_rule_when_the_plan_gives_no_finer_values() -> None:
@@ -307,21 +309,31 @@ _NO_OBJECTIONS = json.dumps({"objections_addressed": []})
 
 
 @pytest.mark.asyncio
-async def test_a_search_plan_is_written_and_the_quest_stops_before_anything_runs_every_time(tmp_path: Path) -> None:
-    eng = _engine(tmp_path, [json.dumps({**HEAT_SINK, "plan": EXTRA}), _NO_OBJECTIONS])
+async def test_a_complete_search_plan_goes_on_to_be_run(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [json.dumps({**HEAT_SINK, "plan": EXTRA}), _NO_OBJECTIONS, _NO_OBJECTIONS])
     await eng._node_plan({"topic": "Find the fin spacing that minimises the base temperature", "iteration": 0})
     prompt = eng._client.chat.await_args_list[0].args[0][0]["content"]
     assert "A measurement, or a search for the best design?" in prompt
     text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     assert plan.parse(text).design["protocol"]["optimisation"]["objective"]["quantity"] == "max_base_temperature"
+    seen = _stop_at_pause(eng)
+    patch = await eng._node_design({"topic": "heat sink", "iteration": 0})
+    assert seen == [], "the engine runs the search: no stop"
+    assert patch["design"]["protocol"]["optimisation"]["evaluation_budget"]["per_start"] == 60
 
-    for _ in range(2):  # no once-only marker: every resume checks the plan again
+
+@pytest.mark.asyncio
+async def test_a_search_the_setup_cannot_run_stops_before_anything_runs_every_time(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [json.dumps({**HEAT_SINK, "plan": EXTRA}), _NO_OBJECTIONS])
+    await eng._node_plan({"topic": "Find the fin spacing that minimises the base temperature", "iteration": 0})
+    eng.config.execution.split_analysis = False
+    for _ in range(2):  # no once-only marker: every resume checks again
         seen = _stop_at_pause(eng)
         with pytest.raises(Paused):
             await eng._node_design({"topic": "heat sink", "iteration": 0})
-        assert seen[0]["headline"] == "the search for the best design is not available yet"
+        assert seen[0]["headline"] == "the search for the best design cannot start"
         steps = " ".join(seen[0]["steps"])
-        assert "Nothing was run" in steps and "study_type: measure" in steps and "--revise-plan" in steps
+        assert "Nothing was run" in steps and "execution.split_analysis" in steps
     assert not list(eng.quest_root.glob("**/*.py"))
 
 
@@ -336,6 +348,22 @@ async def test_a_plan_changed_to_a_measurement_goes_on(tmp_path: Path) -> None:
     seen = _stop_at_pause(eng)
     patch = await eng._node_design({"topic": "heat sink", "iteration": 0})
     assert seen == [] and patch["design"]["study_type"] == "measure"
+
+
+@pytest.mark.asyncio
+async def test_a_search_the_setup_cannot_run_also_stops_at_the_run_step(tmp_path: Path) -> None:
+    """A resume past the design, after the quest's setup changed, is stopped before anything runs as well."""
+    eng = _engine(tmp_path, [])
+    design = plan.normalize_design(copy.deepcopy(HEAT_SINK))[0]
+    for change in ({"split_analysis": False}, {"background_jobs": True}):
+        for key, value in change.items():
+            setattr(eng.config.execution, key, value)
+        seen = _stop_at_pause(eng)
+        with pytest.raises(Paused):
+            await eng._node_execute({"topic": "heat sink", "iteration": 0, "design": design})
+        assert seen[0]["headline"] == "the search for the best design cannot start"
+        assert next(iter(change)) in " ".join(seen[0]["steps"])
+        eng.config.execution.split_analysis, eng.config.execution.background_jobs = "auto", False
 
 
 @pytest.mark.asyncio
@@ -370,19 +398,20 @@ async def test_an_ambiguous_topic_adds_one_question_to_the_clarify_step(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_a_whole_run_with_a_search_plan_stops_at_the_design_and_writes_no_code(
+async def test_a_whole_run_with_a_search_plan_it_cannot_run_stops_at_the_design_and_writes_no_code(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Through the real graph: the plan is written, the quest stops with a plain card, and nothing is implemented or run
-    (the plan is never run as a plain sweep)."""
+    """Through the real graph: a quest that keeps one script cannot hand FI a simulation to search with. The plan is
+    written, the quest stops with a plain card, and nothing is implemented or run (the plan is never run as a plain
+    sweep). A search that can run: tests/test_optimise_runner.py."""
     from tests.test_engine_smoke import _classify, _fake_response_for
 
     cfg = Config(
         topic="Find the fin spacing and thickness that minimise the base temperature of a heat sink", title="fins",
         provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=120), knowledge=KnowledgeConfig(enabled=False),
-        output=OutputConfig(output_dir=tmp_path / "outputs"),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
     )
     engine = Engine(cfg)
 
@@ -397,7 +426,7 @@ async def test_a_whole_run_with_a_search_plan_stops_at_the_design_and_writes_no_
 
     root = engine.quest_root
     pause = json.loads((root / ".fi" / "pause.json").read_text(encoding="utf-8"))
-    assert pause["headline"] == "the search for the best design is not available yet"
+    assert pause["headline"] == "the search for the best design cannot start"
     assert "Nothing was run" in (root / "NEXT_STEP.md").read_text(encoding="utf-8")
     assert f"## {op.HEADING}" in (root / "plan.md").read_text(encoding="utf-8")
     assert not list(root.glob("**/simulate.py")) and not list(root.glob("**/experiment.py"))

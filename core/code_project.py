@@ -31,6 +31,8 @@ README = "README.md"
 REQUIREMENTS = "requirements.txt"
 RUN = "run.py"
 STUDY = "study.json"
+#: The search for the best design, copied beside run.py so it repeats FI's search without FI (core/optimise_search.py).
+SEARCH = "fi_search.py"
 
 RUN_SOURCE = r'''"""Runs this study: the simulation (when there is one), then the analysis. Written by Frontier Insight.
 
@@ -81,8 +83,7 @@ def is_number(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def run_cell_child(study, index, out_path):
-    """One setting's trials, in a process of its own (as FI runs them)."""
+def load_simulation():
     import importlib.util
 
     sys.path.insert(0, str(HERE))
@@ -90,6 +91,12 @@ def run_cell_child(study, index, out_path):
     module = importlib.util.module_from_spec(spec)
     sys.modules["simulate"] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def run_cell_child(study, index, out_path):
+    """One setting's trials, in a process of its own (as FI runs them)."""
+    module = load_simulation()
     entry = study["entry"]
     fn = getattr(module, entry)
     cell = cells(study.get("grid") or {})[index]
@@ -121,7 +128,9 @@ def run_trials(study):
         key = cell_key(cell)
         with tempfile.TemporaryDirectory() as tmp:
             result = Path(tmp) / "rows.json"
-            subprocess.call([sys.executable, str(HERE / "run.py"), "--cell", str(index), str(result)])
+            study_file = Path(tmp) / "study.json"
+            study_file.write_text(json.dumps(study), encoding="utf-8")
+            subprocess.call([sys.executable, str(HERE / "run.py"), "--cell", str(index), str(result), str(study_file)])
             rows = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else []
         metrics, trials_of = {}, {}
         for row in rows:
@@ -145,6 +154,76 @@ def run_trials(study):
     return {"schema": "fi.trials/v1", "thresholds": study.get("thresholds") or {}, "cells": out}
 
 
+def evaluate_child(spec_path, out_path):
+    """One design of the search, in a process of its own (as FI runs it)."""
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    module = load_simulation()
+    entry = spec["entry"]
+    fn = getattr(module, entry)
+    rows = []
+    for trial in spec["trials"]:
+        try:
+            value = fn(dict(spec["cell"])) if entry == "run_cell" else fn(dict(spec["cell"]), trial["trial"], trial["seed"])
+            if not isinstance(value, dict) or not value:
+                raise TypeError(f"{entry}() must return a dict of numbers")
+            bad = [k for k, v in value.items() if not is_number(v)]
+            if bad:
+                raise TypeError(f"{entry}() returned non-numbers for {bad[:5]}")
+            rows.append({"trial": trial["trial"], "ok": True, "values": {str(k): float(v) for k, v in value.items()}})
+        except BaseException as exc:
+            if isinstance(exc, KeyboardInterrupt):
+                raise
+            traceback.print_exc()
+            rows.append({"trial": trial["trial"], "ok": False, "reason": f"{type(exc).__name__}: {exc}"[:300]})
+    Path(out_path).write_text(json.dumps(rows), encoding="utf-8")
+
+
+def search(study):
+    """The search for the best design, as FI ran it (fi_search.py is FI's own search, copied here): the coarse scan
+    first when the plan has one, then every design in a process of its own, with the same seed."""
+    sys.path.insert(0, str(HERE))
+    import fi_search
+
+    block = study["optimisation"]
+    entry = study["entry"]
+    base = int(study.get("base_seed") or 0)
+    runs = 1 if entry == "run_cell" else int(study.get("runs_per_evaluation") or 1)
+
+    def scan(grid):
+        summary = run_trials({"entry": entry, "grid": grid, "runs_per_setting": runs, "base_seed": base,
+                              "paired": True, "thresholds": study.get("thresholds") or {}})
+        (WORK / "raw" / "trials.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+        os.environ["FI_TRIALS"] = "raw/trials.json"
+        return fi_search.scan_rows(summary, block)
+
+    def evaluate(cell):
+        trials = [{"trial": t, "seed": None if entry == "run_cell" else trial_seed(base, "", t)} for t in range(runs)]
+        with tempfile.TemporaryDirectory() as tmp:
+            spec, result = Path(tmp) / "spec.json", Path(tmp) / "rows.json"
+            spec.write_text(json.dumps({"entry": entry, "cell": cell, "trials": trials}), encoding="utf-8")
+            subprocess.call([sys.executable, str(HERE / "run.py"), "--evaluate", str(spec), str(result)])
+            rows = json.loads(result.read_text(encoding="utf-8")) if result.is_file() else []
+        if len(rows) != len(trials) or not all(r.get("ok") for r in rows):
+            raise RuntimeError(next((r.get("reason") for r in rows if r.get("reason")),
+                                    "the evaluation's process stopped before it reported"))
+        names = set.intersection(*(set(r["values"]) for r in rows))
+        return {name: sum(r["values"][name] for r in rows) / len(rows) for name in names}
+
+    # A search FI stopped at its time limit is repeated to the same point, not further.
+    outcome = fi_search.run_sync(block, evaluate, seed=base, method=study.get("method"), scan_step=scan,
+                                 max_evaluations=study.get("max_evaluations"))
+    record = fi_search.best_design(outcome, block, seed=base, check=study.get("check_settings"))
+    (WORK / "raw" / "optimisation_ledger.jsonl").write_bytes(
+        ("\n".join(fi_search.ledger_lines(outcome, block)) + "\n").encode("utf-8"))
+    (WORK / "results").mkdir(parents=True, exist_ok=True)
+    (WORK / "results" / "best_design.json").write_bytes((json.dumps(record, indent=1) + "\n").encode("utf-8"))
+    os.environ["FI_OPTIMISATION"] = "raw/optimisation_ledger.jsonl"
+    os.environ["FI_BEST_DESIGN"] = "results/best_design.json"
+    print(f"[run] {record['says']}", file=sys.stderr)
+    if not any(r["status"] == "ok" for r in outcome["rows"]):
+        sys.exit("[run] no design produced a result: see the errors above")
+
+
 def stage_inputs():
     """The quest's own data/ and example inputs, for a script that reads them by their relative path."""
     if QUEST is None:
@@ -164,9 +243,15 @@ def stage_inputs():
 
 def main():
     if sys.argv[1:2] == ["--cell"]:
-        study = json.loads((HERE / "study.json").read_text(encoding="utf-8"))
+        study_path = Path(sys.argv[4]) if len(sys.argv) > 4 else HERE / "study.json"
+        study = json.loads(study_path.read_text(encoding="utf-8"))
         os.environ["FI_THRESHOLDS"] = json.dumps(study.get("thresholds") or {})
         run_cell_child(study, int(sys.argv[2]), sys.argv[3])
+        return
+    if sys.argv[1:2] == ["--evaluate"]:
+        study = json.loads((HERE / "study.json").read_text(encoding="utf-8"))
+        os.environ["FI_THRESHOLDS"] = json.dumps(study.get("thresholds") or {})
+        evaluate_child(sys.argv[2], sys.argv[3])
         return
     (WORK / "raw").mkdir(parents=True, exist_ok=True)
     os.chdir(WORK)
@@ -179,6 +264,10 @@ def main():
     study = json.loads(study_path.read_text(encoding="utf-8")) if study_path.is_file() else {}
     if study.get("simulate") is False:
         pass  # this study's analysis does not use a simulation script
+    elif study.get("optimisation") and study.get("entry") and simulate.is_file():
+        os.environ["FI_THRESHOLDS"] = json.dumps(study.get("thresholds") or {})
+        search(study)
+        os.environ.pop("FI_THRESHOLDS")
     elif study.get("entry") and simulate.is_file():
         os.environ["FI_THRESHOLDS"] = json.dumps(study.get("thresholds") or {})
         summary = run_trials(study)
@@ -305,6 +394,35 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
     if not entry:
         return None
     protocol = protocol or {}
+    thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+    block = protocol.get("optimisation")
+    if isinstance(block, dict):
+        # A search for the best design: run.py repeats FI's search (fi_search.py beside it is FI's own search code).
+        from . import optimisation_plan as _optimisation_plan
+
+        # The block as FI's search reads it (through the plan's own check), so run.py searches the same way.
+        block = _optimisation_plan.normalize(block)[0] or block
+        settings = block.get("numerical_settings") if isinstance(block.get("numerical_settings"), dict) else {}
+        # The seed FI's search used, and where the time limit stopped it, from FI's own record of it.
+        try:
+            done = json.loads((code_dir.parent / "results" / "best_design.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            done = {}
+        done = done if isinstance(done, dict) else {}
+        evaluations = done.get("evaluations") if isinstance(done.get("evaluations"), dict) else {}
+        study = {
+            "entry": entry,
+            "optimisation": block,
+            "method": _optimisation_plan.effective_method(block)[0],
+            "runs_per_evaluation": int(block.get("runs_per_evaluation") or 1),
+            "base_seed": int(done["seed"]) if isinstance(done.get("seed"), int) else 0,
+            "thresholds": thresholds,
+            "check_settings": {str(n): _optimisation_plan.check_levels(s if isinstance(s, dict) else {"search": s})[0]
+                               for n, s in settings.items()},
+        }
+        if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
+            study["max_evaluations"] = evaluations["search"]
+        return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     metrics = protocol.get("metrics") or []
     return {
@@ -328,7 +446,18 @@ def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] 
         "here if you copied this folder elsewhere), so the quest's own results are never touched. "
         "The raw results, the figures and the numbers land there.", "",
     ]
-    if two:
+    if two and study and study.get("optimisation"):
+        block = study["optimisation"]
+        budget = block.get("evaluation_budget") or {}
+        scan = " It first runs the coarse scan the plan names, then" if block.get("grid") else " It"
+        lines += [
+            f"This study searches for the best design.{scan} searches the way Frontier Insight did ({study['method']}, "
+            f"at most {budget.get('starts', '?')} starting points x {budget.get('per_start', '?')} evaluations, seed {study.get('base_seed', 0)}), "
+            "calling the simulation once per design, each in a process of its own; then it runs the analysis. The "
+            "record of every evaluation goes to `raw/optimisation_ledger.jsonl` and the best design to "
+            "`results/best_design.json` in the output folder.", "",
+        ]
+    elif two:
         lines += ["It runs the simulation, then the analysis.", ""]
         if study:
             settings = 1
@@ -348,6 +477,9 @@ def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] 
                   "- `experiment.py`: reads the simulation's results, computes the numbers and draws the figures."]
     else:
         lines += ["- `experiment.py`: the study: it runs, computes the numbers and draws the figures."]
+    if study and study.get("optimisation"):
+        lines += ["- `fi_search.py`: the search for the best design (Frontier Insight's own, standard library only; a "
+                  "scipy or Optuna method runs only when that package is installed)."]
     lines += ["- `run.py`: the one command that runs it all.",
               "- `requirements.txt`: the packages it needs, with the versions FI used.",
               "- `CHANGELOG.md`: what changed each time the code was changed, and why."]
@@ -426,6 +558,10 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
         wanted[STUDY] = json.dumps(study, indent=2) + "\n"
     elif simulation_left_out(code_dir, split):
         wanted[STUDY] = json.dumps({"simulate": False}, indent=2) + "\n"
+    if study and study.get("optimisation"):
+        from . import optimise_search as _optimise_search
+
+        wanted[SEARCH] = Path(_optimise_search.__file__).read_text(encoding="utf-8")
     record = _read_record(quest_root)
     written: list[str] = []
     conflicts: dict[str, str] = {}
@@ -447,14 +583,15 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
         except (OSError, UnicodeDecodeError) as exc:
             if log is not None:
                 log.warning("[code] could not write code/%s: %s", name, exc)
-    stale = code_dir / STUDY
-    try:
-        if STUDY not in wanted and stale.is_file() and record.get(STUDY) == _sha(stale.read_bytes().decode("utf-8")):
-            stale.unlink()  # the simulation left the trial contract: run.py must not use an old study
-            record.pop(STUDY, None)
-            written.append(STUDY)
-    except (OSError, UnicodeDecodeError):
-        pass
+    for name in (STUDY, SEARCH):
+        stale = code_dir / name
+        try:
+            if name not in wanted and stale.is_file() and record.get(name) == _sha(stale.read_bytes().decode("utf-8")):
+                stale.unlink()  # the simulation left the trial contract (or the search): run.py must not use an old one
+                record.pop(name, None)
+                written.append(name)
+        except (OSError, UnicodeDecodeError):
+            pass
     _write_json(quest_root / RECORD, record, log)
     _write_json(quest_root / CONFLICTS, conflicts, log)
     if written and log is not None:
