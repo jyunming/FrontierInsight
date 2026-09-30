@@ -165,16 +165,20 @@ def test_the_run_log_line_is_one_plain_sentence() -> None:
     rows = [
         {"title": "The Lancet paper", "status": "retracted"},
         {"title": "B", "status": "not_retracted"},
-        {"title": "C", "status": "not_checked"},
-        {"title": "D", "status": "not_checked"},
+        {"title": "C", "status": "not_checked", "why": "Crossref could not be reached"},
+        {"title": "D", "status": "not_checked", "why": "Crossref could not be reached"},
         {"title": "E", "status": "no_doi"},
     ]
     line = retractions.summary_line(rows)
     assert "\n" not in line
-    assert line.startswith("Checked 4 sources for retractions: 1 retracted (The Lancet paper), "
-                           "2 could not be checked, 1 not retracted")
-    assert "1 without a DOI" in line
-    assert "none retracted" in retractions.summary_line([{"title": "B", "status": "not_retracted"}])
+    assert line == ("Checked 4 sources for retractions: 1 retracted (The Lancet paper), "
+                    "2 could not be checked (mostly: Crossref could not be reached), 1 not retracted; "
+                    "1 without a DOI was not looked up")
+    assert retractions.summary_line([{"title": "B", "status": "not_retracted"}]) == (
+        "Checked 1 source for retractions: none retracted")
+    # Nothing answered: the line does not say "checked".
+    assert retractions.summary_line(rows[2:4]) == (
+        "Could not check 2 sources for retractions (mostly: Crossref could not be reached)")
     assert retractions.summary_line([]) == ""
 
 
@@ -374,6 +378,9 @@ async def test_the_literature_node_marks_records_and_logs_one_line(tmp_path: Pat
     # The to-do card every interface shows names it.
     items = [i for i in todo.waiting(eng.quest_root) if i.kind == "retracted"]
     assert len(items) == 1 and "The Lancet paper" in items[0].why
+    # The list of papers to download never asks for a retracted one (the clean one shows the list is written).
+    wanted = (eng.quest_root / "needs" / "WANTED_PAPERS.md").read_text(encoding="utf-8")
+    assert "A clean paper" in wanted and "The Lancet paper" not in wanted
 
 
 def test_the_todo_card_is_quiet_without_a_retracted_source(tmp_path: Path) -> None:
@@ -383,3 +390,137 @@ def test_the_todo_card_is_quiet_without_a_retracted_source(tmp_path: Path) -> No
         {"stage": "retractions", "sources": [{"source": "doi:10.1/a", "title": "A", "status": "not_checked"}]},
     ]}), encoding="utf-8")
     assert [i for i in todo.waiting(tmp_path) if i.kind == "retracted"] == []
+
+
+# --- after the first review -------------------------------------------------------------------
+
+def test_a_batch_asks_for_enough_rows_for_every_doi() -> None:
+    seen: list[httpx.Request] = []
+    dois = [f"10.1234/{i}" for i in range(retractions.BATCH_SIZE)]
+    asyncio.run(retractions.check_dois(dois, transport=_crossref([], seen)))
+    assert int(seen[0].url.params["rows"]) >= len(dois)  # Crossref's default is 20
+
+
+def test_a_429_is_asked_once_more_and_then_answers(monkeypatch) -> None:
+    waits: list[float] = []
+
+    async def no_wait(seconds):  # noqa: ANN001
+        waits.append(seconds)
+
+    monkeypatch.setattr(retractions, "_sleep", no_wait)
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "1"})
+        return httpx.Response(200, json={"status": "ok", "message": {"items": [RETRACTED_ITEM]}})
+
+    out = asyncio.run(retractions.check_dois([RETRACTED_DOI], transport=httpx.MockTransport(handler)))
+    assert len(calls) == 2 and waits == [1.0]
+    assert out[RETRACTED_DOI.lower()]["status"] == retractions.RETRACTED
+
+
+def test_a_429_that_asks_for_a_long_wait_is_not_waited_for(monkeypatch) -> None:
+    waits: list[float] = []
+
+    async def no_wait(seconds):  # noqa: ANN001
+        waits.append(seconds)
+
+    monkeypatch.setattr(retractions, "_sleep", no_wait)
+    transport = httpx.MockTransport(lambda r: httpx.Response(429, headers={"retry-after": "3600"}))
+    out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=transport))
+    assert waits == []
+    assert out[CLEAN_DOI.lower()]["status"] == retractions.NOT_CHECKED
+
+
+def test_when_crossref_cannot_be_reached_the_later_batches_are_not_sent() -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.ConnectTimeout("dropped", request=request)
+
+    dois = [f"10.1234/{i}" for i in range(retractions.BATCH_SIZE * 2 + 1)]
+    out = asyncio.run(retractions.check_dois(dois, transport=httpx.MockTransport(handler)))
+    assert len(calls) == 1
+    assert len(out) == len(dois) and {r["status"] for r in out.values()} == {retractions.NOT_CHECKED}
+
+
+def test_an_error_status_on_one_batch_still_tries_the_next(monkeypatch) -> None:
+    async def no_wait(seconds):  # noqa: ANN001, ARG001
+        return None
+
+    monkeypatch.setattr(retractions, "_sleep", no_wait)
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(500)
+        asked = [f.split(":", 1)[1] for f in request.url.params["filter"].split(",")]
+        return httpx.Response(200, json={"status": "ok", "message": {"items": [{"DOI": d} for d in asked]}})
+
+    dois = [f"10.1234/{i}" for i in range(retractions.BATCH_SIZE + 2)]
+    out = asyncio.run(retractions.check_dois(dois, transport=httpx.MockTransport(handler)))
+    assert len(calls) == 2
+    assert [out[d]["status"] for d in dois[:2]] == [retractions.NOT_CHECKED] * 2
+    assert [out[d]["status"] for d in dois[-2:]] == [retractions.NOT_RETRACTED] * 2
+
+
+@pytest.mark.parametrize("updated_by", [{"type": "retraction"}, "retraction", [["retraction"]]])
+def test_an_updated_by_in_an_unknown_shape_is_not_checked(updated_by) -> None:
+    item = {"DOI": CLEAN_DOI.lower(), "updated-by": updated_by}
+    out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=_crossref([item])))
+    assert out[CLEAN_DOI.lower()]["status"] == retractions.NOT_CHECKED
+
+
+def test_a_retraction_later_reinstated_is_not_retracted() -> None:
+    item = {"DOI": CLEAN_DOI.lower(), "updated-by": [
+        {"type": "reinstatement", "DOI": "10.1/r", "updated": {"date-time": "2021-05-01T00:00:00Z"}},
+        {"type": "retraction", "DOI": "10.1/x", "updated": {"date-time": "2019-01-01T00:00:00Z"}},
+    ]}
+    out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=_crossref([item])))
+    assert out[CLEAN_DOI.lower()]["status"] == retractions.NOT_RETRACTED
+    assert "reinstated on 2021-05-01" in out[CLEAN_DOI.lower()]["why"]
+
+
+@pytest.mark.parametrize("raw", ["doi.org/10.1038/S41598-023-41032-5", "https://www.doi.org/10.1038/s41598-023-41032-5",
+                                 "10.1038%2Fs41598-023-41032-5", "doi: 10.1038/s41598-023-41032-5"])
+def test_the_usual_ways_of_writing_a_doi_are_read(raw) -> None:
+    assert retractions.normalize_doi(raw) == CLEAN_DOI.lower()
+
+
+def test_a_doi_that_cannot_be_read_is_not_checked_never_no_doi() -> None:
+    lit = [_entry("Odd DOI", "not a doi at all")]
+    out, rows = asyncio.run(retractions.check_literature(lit, transport=_crossref([])))
+    assert out[0]["metadata"]["retraction"] == retractions.NOT_CHECKED
+    assert rows[0]["status"] == retractions.NOT_CHECKED and "could not be read" in rows[0]["why"]
+
+
+def test_a_sentence_that_cites_a_retracted_source_is_flagged_even_when_the_check_grounded_it_elsewhere() -> None:
+    from core.engine import _citing_sentences, _same_statement
+
+    paper = ("# T\n\n## Introduction\n\nThe incidence rose steadily among children over the whole decade studied [1, 2]."
+             "\n\n## References\n\n1. A.\n2. B.\n")
+    sources = {"1": ({"title": "A", "retraction": "retracted"}, "t"), "2": ({"title": "B"}, "t")}
+    claims = [{"claim": "The incidence rose steadily among children over the whole decade studied",
+               "basis": "citation", "citation_index": 2, "quote": "q", "evidence": "e"}]
+    out, changed = retractions.apply_to_claims(claims, sources, _citing_sentences(paper), _same_statement)
+    assert changed == 1
+    added = out[-1]
+    assert added["basis"] == "unsupported" and added["citation_index"] == 1
+    assert "remove the citation" in added["evidence"]
+    # Nothing is added twice: a sentence a claim already marks unsupported is left alone.
+    again, n = retractions.apply_to_claims(out, sources, _citing_sentences(paper), _same_statement)
+    assert n == 0 and len(again) == len(out)
+
+
+def test_a_retracted_foundational_work_is_never_asked_for() -> None:
+    from core.engine import _foundational_review_block, _foundational_write_block
+
+    lit = [{"content": "A long abstract. " * 20, "metadata": {
+        "title": "Withdrawn classic", "year": 1998, "authors": ["A. B"], "source": "openalex", "venue": "V",
+        "doi": "10.1234/withdrawn", "foundational": "cited by 6 of the retrieved papers", "retraction": "retracted"}}]
+    assert _foundational_write_block(lit) == ""
+    assert _foundational_review_block(lit, "# T\n\nNothing cited.\n") == ""

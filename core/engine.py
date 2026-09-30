@@ -4056,7 +4056,10 @@ class Engine:
         # pause again — the resume path picks up the new files and
         # proceeds.
         if not _papers_dir_has_files(self.quest_root):
-            abstract_only = [d for d in docs if _is_abstract_only(d)]
+            # A retracted paper is never asked for: it is not to be cited (core/retractions.py).
+            withdrawn = _retractions.retracted_dois(merged)
+            abstract_only = [d for d in docs if _is_abstract_only(d)
+                             and _retractions.normalize_doi((d.metadata or {}).get("doi")) not in withdrawn]
             # Split the genuinely paywalled from open-access sources we simply
             # failed to fetch. Only the former justify stopping the quest to
             # ask a person for help: an arXiv/PMC paper we could not download
@@ -6418,7 +6421,8 @@ class Engine:
     ) -> None:
         """Keep how the retrieved sources were judged in ``.fi/literature_queries.json`` beside the queries that found
         them: one entry per pass and stage (``floor``, ``screen``) with each source's score or grade, whether it was
-        kept and why. Best-effort: a record never stops a quest."""
+        kept and why, and (``retractions``) what Crossref says of each source's retraction. Best-effort: a record never
+        stops a quest."""
         if not self.config.knowledge.enabled:
             return
         try:
@@ -13747,7 +13751,7 @@ class Engine:
                 "[claim_check] %d claim(s) rest on a source held as its title only; marked unsupported", held,
             )
         # A retracted source supports nothing, whatever the check made of its text (core/retractions.py).
-        claims, withdrawn = _retractions.apply_to_claims(claims, sources)
+        claims, withdrawn = _retractions.apply_to_claims(claims, sources, citing, _same_statement)
         if withdrawn:
             self._log.info("[claim_check] %d claim(s) rest on a retracted source; marked unsupported", withdrawn)
         unsupported =[c["claim"] for c in claims if c["basis"] == "unsupported"]
@@ -18130,7 +18134,8 @@ def _foundational_sources(
     return [
         (label, meta)
         for label, meta, _item in _labelled_sources(literature, audience)
-        if meta.get("foundational") and not label.startswith("W")
+        # A retracted work is not to be cited, so it is never asked for (core/retractions.py).
+        if meta.get("foundational") and not label.startswith("W") and not _retractions.is_retracted(meta)
     ]
 
 
@@ -19010,8 +19015,8 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
     sentences, then what a model read off its figures, labelled as that."""
     title = str(meta.get("title") or "").strip()
     ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
-    head = f"[{label}] {title}" + (" [retracted]" if _retractions.is_retracted(meta) else "") + (
-        f" · {ident}" if ident else "")
+    mark = " [retracted]" if _retractions.is_retracted(meta) else ""
+    head = f"[{label}] {title}{mark}" + (f" · {ident}" if ident else "")
     if not sentences:
         return head
     if not text.strip():
@@ -23898,7 +23903,8 @@ _QUERY_SET_HASHED = ("stage", "key", "iteration", "queries", "prompt_sha256", "m
 _PERSON_QUERIES = Path("inputs") / "search_queries.txt"
 
 
-#: Extra fields the entries that record how the retrieved sources were judged (``stage`` ``floor`` and ``screen``)
+#: Extra fields the entries that record how the retrieved sources were judged (``stage`` ``floor``, ``screen`` and
+#: ``retractions``)
 #: carry; covered by the digest only when present, so the digest of an entry written without them is unchanged.
 _SOURCE_VERDICT_HASHED = ("outcome", "threshold", "minimum", "sources")
 

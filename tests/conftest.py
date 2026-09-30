@@ -106,6 +106,22 @@ def _no_clean_venv_check(request, monkeypatch):
     monkeypatch.setattr(_cp, "verify", lambda *a, **k: {"ok": True, "says": "stub"})
 
 
+@pytest.fixture(autouse=True)
+def _no_crossref_retraction_lookup(request, monkeypatch):
+    """The literature node looks every DOI up in Crossref for a retraction (core/retractions.py). Outside
+    tests/test_retractions.py (which answers with httpx.MockTransport) the lookup answers "not checked" without a
+    request, exactly as it would offline, so no engine test sends one."""
+    if request.module.__name__.endswith("test_retractions"):
+        return
+    import core.retractions as _ret
+
+    async def offline(dois, **_kw):
+        return {d: _ret._not_checked("the lookup is off in tests")
+                for d in (_ret.normalize_doi(x) for x in dois) if d}
+
+    monkeypatch.setattr(_ret, "check_dois", offline)
+
+
 
 @pytest.fixture(autouse=True)
 def _no_embed_model_download(monkeypatch):

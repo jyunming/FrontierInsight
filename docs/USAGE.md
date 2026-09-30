@@ -405,6 +405,7 @@ execution:
 
 knowledge:
   enabled: true
+  # Retracted papers: whenever knowledge is on, every source the search finds with a DOI is looked up in Crossref (which holds the Retraction Watch database); there is no switch for it. A retracted one is marked [retracted] for the writer, never counts as support, is never asked for as a download, and is named on the to-do card; any sentence that cites one is marked unsupported by the claim check. A lookup with no answer is "could not be checked", never "not retracted", and never stops the quest; offline it costs at most one request timeout (about 15 s) per literature pass. One line in run.log; each source's answer in .fi/literature_queries.json.
   # Inline AxonConfig (or pass a path to a YAML). Use Axon's NESTED shape
   # as below, not its flat field names — FI hands this to AxonConfig.load,
   # which does the nesting -> field mapping, env overrides and retired-key
@@ -428,7 +429,6 @@ knowledge:
   requery_max: 2                    # Bound on those retries. Each costs one small LLM call plus a retrieval.
                                     # Your own search queries instead of FI's: write them in <quest folder>/inputs/search_queries.txt, one per line (first three used, # lines skipped); remove the file to go back to FI's. Listed in .fi/literature_queries.json.
   literature_screen: true           # One batched LLM call grades every retrieved source 0-3 ("could the paper cite this?"). Papers need 2, web pages are dropped only at 0; keeps at least relevance_min_keep; fails open. Your own local_papers / inputs/papers are never screened. Every source's grade and why it was kept or dropped is listed in .fi/literature_queries.json.
-                                    # Retracted papers: after the search, every source with a DOI is looked up in Crossref (which holds the Retraction Watch database). A retracted one is marked [retracted] for the writer, never counts as support in the claim check, and is named on the to-do card. A lookup with no answer is "could not be checked", never "not retracted", and never stops the quest. One line in run.log; each source's answer in .fi/literature_queries.json.
   foundational_works: true          # One LLM call names up to 8 foundational works (a method's original paper, a standard textbook); each is looked up by title in OpenAlex, or by author and year when no title matches, and kept only if found, plus the works at least 2 retrieved papers cite. Books count. All go through literature_screen, and the writer is asked to cite the ones that bear on the paper. Up to 18 OpenAlex requests per literature pass.
   write_back_quests: true
   write_back_only_on_accept: true  # accepted evidence only when a study (research/decision) was accepted AND reached publication_ready; anything else written back is kept as preliminary (a reminder later quests never cite)
