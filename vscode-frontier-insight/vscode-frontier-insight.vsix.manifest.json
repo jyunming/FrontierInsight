@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "2d22ba380dcccd10ad1b9d8a920dd02d9213b64fdedfe69ee7fe00f2af102705",
+  "vsix_sha256": "218bf3a86068d254bfac6360caac93b54e8efce45d053112369db5e84bcd87d4",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -46,8 +46,8 @@
       "bytes": 35526
     },
     "extension/out/extension.js": {
-      "sha256": "91444e04b5e6f510cd278dad74e5e9a242e3a07e4af91a8a7b6a71e15292aa6d",
-      "bytes": 105221
+      "sha256": "42e53faef727f1eb9093a6876cf1d7c19efe4214b14c42dd46f3c2609f41bfe1",
+      "bytes": 110132
     },
     "extension/out/fi-home.js": {
       "sha256": "ae836799badc78f90e5899bfd8e598d03e1d0f830777c51917ddf4292c1980f0",
@@ -73,9 +73,13 @@
       "sha256": "83f33fe220bbf749d6d1e1413e8773cf0e0c98718a6726348b6950024b988bd4",
       "bytes": 21679
     },
+    "extension/out/quest-index.js": {
+      "sha256": "fd2e374e4a7f7f90ab9e2c43ba9fdb3e147d2e68e10abd0c08fb349d78c964e2",
+      "bytes": 5145
+    },
     "extension/out/quest-map.js": {
-      "sha256": "1178ba28b91cb09f718369a70890026583dbe91642b931fd12f584bfda4901c7",
-      "bytes": 10312
+      "sha256": "e3c6de4a682074c61c9ca7ef1c90cca210e57c1f1a896d07c9eab5765b7d19c6",
+      "bytes": 11999
     },
     "extension/out/roots-config.js": {
       "sha256": "ce2a452a810331b21523175ab820c478cfd2f1b2df677b1aba665977f30b88b4",
@@ -110,8 +114,8 @@
       "bytes": 14965
     },
     "extension/readme.md": {
-      "sha256": "3382127b2cec5345b5e8825dfeb90e0fc1237c6a64e89bcf8814557f957fd3f6",
-      "bytes": 77264
+      "sha256": "e57983d0bd9888f4bb91c6a15e4a40e4b5b2c52a8cde82156149bd5640b47dd8",
+      "bytes": 78184
     }
   }
 }
