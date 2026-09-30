@@ -739,14 +739,23 @@ def refresh_model_section(text: str) -> str:
         # Checks the plan had none of before: the section goes where render puts it (before the criteria, or the design).
         anchor = (re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE)
                   or _HEADING_RE.search(text))
-        if not lines or anchor is None:
-            return text
-        return text[:anchor.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[anchor.start():]
-    if not lines:
-        lines = [f"## {MODEL_HEADING}", "", "- (the plan no longer has a model or any check against a known answer)", ""]
-    after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
-    end = found.end() + after.start() if after else len(text)
-    return text[:found.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[end:]
+        if lines and anchor is not None:
+            text = text[:anchor.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[anchor.start():]
+    else:
+        if not lines:
+            lines = [f"## {MODEL_HEADING}", "", "- (the plan no longer has a model or any check against a known answer)",
+                     ""]
+        after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
+        end = found.end() + after.start() if after else len(text)
+        text = text[:found.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[end:]
+    # The criteria are shown from the block too, and read the checks: shown again with them.
+    criteria = re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE)
+    crit_lines = _criteria_lines(parsed.design.get("protocol"))
+    if criteria and crit_lines:
+        after = re.search(r"^##\s+", text[criteria.end():], re.MULTILINE)
+        end = criteria.end() + after.start() if after else len(text)
+        text = text[:criteria.start()] + "\n".join(crit_lines).rstrip("\n") + "\n\n" + text[end:]
+    return text
 
 
 def add_to_section(text: str, heading: str, lines: list[str]) -> str:

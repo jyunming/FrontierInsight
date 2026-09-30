@@ -8217,8 +8217,21 @@ class Engine:
         def reads_touched(c: Any) -> bool:
             return isinstance(c, dict) and str(c.get("oracle") or "").strip().lower() in touched
 
-        criteria = ([c for c in part(before, "criteria") if not reads_touched(c)]
-                    + [c for c in part(after, "criteria") if reads_touched(c)])
+        def key(c: Any) -> str:
+            return str(c.get("name") if isinstance(c, dict) else c).strip().lower()
+
+        # Criteria matched by their own name, in the rewrite's order: one that read, or now reads, a changed check is
+        # taken from the rewrite (added, changed or dropped with it); every other one is the plan's as it was.
+        old_criteria = {key(c): c for c in part(before, "criteria")}
+        criteria: list[Any] = []
+        for c in part(after, "criteria"):
+            old = old_criteria.get(key(c))
+            if reads_touched(c) or reads_touched(old):
+                criteria.append(c)
+            elif old is not None:
+                criteria.append(old)
+        seen = {key(c) for c in criteria}
+        criteria += [c for k, c in old_criteria.items() if k not in seen and not reads_touched(c)]
 
         def keep(block: dict[str, Any]) -> dict[str, Any]:
             protocol = dict(block.get("protocol") or {})
@@ -8237,6 +8250,9 @@ class Engine:
             self._log.warning("[oracle] the plan's rewrite changed more than the checks; only the checks were kept")
         if _plan.parse(kept).design is None:
             path.write_text(before_text, encoding="utf-8")
+            # Recorded, so the plan put back is not later taken for a person's edit.
+            _plan.record_version(self.quest_root, before_text, by="engine",
+                                 note="the plan's rewrite of its checks could not be read; put back as it was")
             return "the plan's rewrite of the checks could not be read"
         path.write_text(kept, encoding="utf-8")
         _plan.record_version(self.quest_root, kept, by="engine", note="the plan's changes to its checks")

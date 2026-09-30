@@ -332,6 +332,8 @@ async def test_the_plan_step_sends_a_bare_name_conservation_check_back_once_with
     section = _plan_text(engine).split(f"## {of.HEADING}", 1)[1].split("\n## ", 1)[0]
     assert "FI asked the plan to change a check" in section and "expected 1.0 → 0" in section
     assert "Still not in its kind's form" not in section
+    assert "only the checks were kept" not in (engine.fi_dir / "run.log").read_text(encoding="utf-8"), \
+        "a rewrite that changed only what was asked raises no warning"
 
 
 @pytest.mark.asyncio
@@ -563,3 +565,10 @@ async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_
     assert criteria["kept"]["direction"] == "lower", "the criterion on the changed check changed with it"
     assert criteria["other"]["target"] == 2e-6, "a criterion on an unchanged check is put back"
     assert "change those criteria too" in model.revisions[0]
+    assert list(criteria) == ["kept", "other"], "the order is the plan's"
+    text = _plan_text(engine)
+    shown = text.split(f"## {plan.CRITERIA_HEADING}", 1)[1].split("\n## ", 1)[0]
+    kept_line = next(line for line in shown.splitlines() if "**kept**" in line)
+    assert "lower is better" in kept_line, "the criteria shown above the block are shown again with it"
+    # The rewrite also moved the criterion on the unchanged check, which was put back, and the log says so.
+    assert "only the checks were kept" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
