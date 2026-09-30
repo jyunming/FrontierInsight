@@ -396,6 +396,9 @@
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) { alert('Not renamed: ' + (body.detail || res.status)); return; }
+      if (body.state_problem) {
+        alert('Renamed, but the saved state was not updated (' + body.state_problem + '): resuming the quest would use the old title. Rename it again once nothing else has the quest open.');
+      }
       const redo = body.outputs_to_redo || [];
       if (redo.length) {
         const names = redo.map(k => _OUTPUT_LABELS[k] || k).join(', ');
@@ -420,15 +423,23 @@
           continue;
         }
         const job = `${questId}-emit-${kind}`;
-        for (let i = 0; i < 600; i++) {  // at most 30 minutes per output
+        let ended = false, misses = 0;
+        for (let i = 0; i < 600 && !ended && misses < 5; i++) {  // at most 30 minutes per output
           await new Promise(r => setTimeout(r, 3000));
           const s = await fetch(`/api/jobs/${encodeURIComponent(job)}`).then(r => r.ok ? r.json() : null).catch(() => null);
-          if (!s || !s.alive) {
-            if (s && s.exit_code) failed.push(`${label}: stopped with exit code ${s.exit_code}`);
-            break;
+          if (!s) { misses++; continue; }
+          misses = 0;
+          if (!s.alive) {
+            ended = true;
+            if (s.exit_code) failed.push(`${label}: stopped with exit code ${s.exit_code}`);
           }
         }
-      } catch (e) { failed.push(`${label}: ${e}`); }
+        if (!ended) {
+          // Not known to have finished: starting the next one now could run two at once on the same paper.
+          failed.push(`${label}: still being made, or its state is unknown; the rest were not started`);
+          break;
+        }
+      } catch (e) { failed.push(`${label}: ${e}`); break; }
     }
     refresh();
     if (failed.length) alert('These outputs were not made again:\n' + failed.join('\n'));

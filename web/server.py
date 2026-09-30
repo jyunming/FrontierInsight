@@ -2035,6 +2035,11 @@ def make_app(
             out["started_at"] = st.get("started_at")
             if "exit_code" in st:
                 out["exit_code"] = st["exit_code"]
+        elif (ended := app.state.launcher.job_state(job_id)) is not None:
+            # A run this launcher started and has since set aside as finished: its exit code is still known.
+            out["alive"] = bool(ended.get("alive"))
+            if ended.get("returncode") is not None:
+                out["exit_code"] = ended["returncode"]
         else:
             # Not in the launcher registry. For a quest, infer "running"
             # the same way list_jobs does (recent log + no final summary)

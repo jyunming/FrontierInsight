@@ -185,17 +185,53 @@ def test_a_failed_write_puts_back_what_was_written(tmp_path: Path, monkeypatch: 
             raise PermissionError(13, "in use")
         return real(src, dst)
 
+    paper = q / "paper" / "paper.md"
+    paper.write_bytes(_PAPER.encode("utf-8"))  # LF endings, as a quest run on Linux leaves them
     monkeypatch.setattr(quest_title.os, "replace", flaky)
-    with pytest.raises(quest_title.RenameRefused, match="Nothing was changed"):
+    with pytest.raises(quest_title.RenameRefused, match=r"config\.yaml could not be written.*Nothing was changed"):
         quest_title.rename(q, "New")
-    assert (q / "paper" / "paper.md").read_text(encoding="utf-8") == _PAPER
+    assert paper.read_bytes() == _PAPER.encode("utf-8"), "put back byte for byte"
     assert "rename_me" in (q / "config.yaml").read_text(encoding="utf-8")
     assert not list(q.rglob("*.renaming"))
     assert audit_log.read(q / ".fi" / "audit.jsonl")[-1]["kind"] != "title_changed"
 
 
+def test_line_endings_are_kept(tmp_path: Path) -> None:
+    q = _quest(tmp_path)
+    (q / "config.yaml").write_bytes(b"topic: x\r\ntitle: old\r\n")
+    paper = q / "paper" / "paper.md"
+    paper.write_bytes(b"# Old\r\n\r\ntext\r\n")
+    quest_title.rename(q, "New")
+    assert paper.read_bytes() == b"# New\r\n\r\ntext\r\n"
+    assert (q / "config.yaml").read_bytes() == b'topic: x\r\ntitle: "New"\r\n'
+
+
+def test_the_same_title_again_records_nothing(tmp_path: Path) -> None:
+    q = _quest(tmp_path)
+    quest_title.rename(q, "New")
+    n = len(audit_log.read(q / ".fi" / "audit.jsonl"))
+    quest_title.rename(q, "New")
+    assert len(audit_log.read(q / ".fi" / "audit.jsonl")) == n
+
+
+def test_an_output_made_again_after_the_quest_finished_is_not_a_running_quest(tmp_path: Path) -> None:
+    q = _quest(tmp_path)
+    old = time.time() - 60
+    os.utime(q / "frontier_insight_summary.json", (old, old))
+    (q / ".fi" / "run.log").write_text("[emit] slides warning\n", encoding="utf-8")  # fresh, newer than the summary
+    assert not quest_title.looks_running(q)
+    audit_log.AuditLog(q / ".fi" / "audit.jsonl", _QID).append("node_started", node="write")  # a resumed run
+    assert quest_title.looks_running(q)
+
+
+def test_a_heading_repeating_the_front_matter_title_changes_too(tmp_path: Path) -> None:
+    q = _quest(tmp_path, paper='---\ntitle: "Old"\n---\n\n# Old\n\ntext\n')
+    quest_title.rename(q, "New")
+    assert (q / "paper" / "paper.md").read_text(encoding="utf-8") == '---\ntitle: "New"\n---\n\n# New\n\ntext\n'
+
+
 def test_titles_with_invisible_characters_or_not_text_are_refused() -> None:
-    for bad in ("A\x7fB", "A‮B", ["a"]):
+    for bad in ("A\x7fB", "A‮B", "A\ud800B", ["a"]):
         with pytest.raises(quest_title.RenameRefused):
             quest_title.clean(bad)
 
@@ -274,6 +310,22 @@ def test_cli_title_flag_takes_a_title_that_starts_with_a_dash(tmp_path: Path) ->
     assert args.rename == [_QID] and args.title == "-40 C and --help"
     assert _rename_quest(args.rename, args.output_root, title=args.title) == 0
     assert quest_title.current_title(q) == "-40 C and --help"
+    assert _rename_quest([_QID, "words"], tmp_path, title="both") == 2
+    with pytest.raises(SystemExit):
+        parse_args(["--trace", _QID, "--title=x"])
+
+
+def test_the_printed_emit_command_finds_a_quest_outside_the_default_folder(tmp_path: Path) -> None:
+    from launch import _config_from_quest, parse_args
+
+    q = _quest(tmp_path)
+    (q / "paper.pdf").write_bytes(b"%PDF-1.5")
+    line = next(ln for ln in quest_title.rename(q, "New").lines() if "--emit" in ln)
+    import shlex
+
+    argv = shlex.split(line.strip(), posix=False)[2:]
+    args = parse_args([a.strip('"') for a in argv])
+    assert Path(args.output) == q.parent and Path(args.config) == q / "config.yaml" and args.resume == _QID
 
 
 def test_cli_tools_rename_parses_to_the_rename_flag() -> None:

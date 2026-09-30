@@ -166,7 +166,9 @@ export async function runRename(
     }
     // The title as ONE value in the `--title=` form, so a word starting with "-" is never read as an option; one pair of
     // quotes typed around it is not part of it.
-    const title = words.slice(1).join(" ").replace(/^(["'“])(.*)(["'”])$/, "$2");
+    const typed = words.slice(1).join(" ");
+    const quoted = /^(?:"(.*)"|'(.*)'|“(.*)”)$/.exec(typed);
+    const title = quoted ? (quoted[1] ?? quoted[2] ?? quoted[3] ?? "") : typed;
     const ctx = launchContext(stream);
     if (!ctx || token.isCancellationRequested) return;
     stream.progress(`Renaming ${words[0]}…`);

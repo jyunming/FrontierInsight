@@ -28,10 +28,10 @@ from typing import Any
 MAX_LENGTH = 200
 
 # The same first-``# ``-heading rule the paper generator uses to lift the title (generation/paper.py:_FIRST_H1_RE).
-_FIRST_H1_RE = re.compile(r"^# +(.+?)[ \t\r]*$", re.MULTILINE)
+_FIRST_H1_RE = re.compile(r"^# +(.+?)[ \t]*(?=\r?$)", re.MULTILINE)
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
-_FM_TITLE_RE = re.compile(r"^title:[ \t]*(.*)$", re.MULTILINE)
-_YAML_TITLE_RE = re.compile(r"^title:[^\n]*$", re.MULTILINE)
+_FM_TITLE_RE = re.compile(r"^title:[ \t]*([^\r\n]*)", re.MULTILINE)
+_YAML_TITLE_RE = re.compile(r"^title:[^\r\n]*", re.MULTILINE)
 
 # Each output a person may already have, the kind that makes it again (``--emit <kind>``), and the files that show it.
 _OUTPUTS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -63,6 +63,7 @@ class RenameResult:
     changed: list[str] = field(default_factory=list)   # files changed, relative to the quest folder
     saved_state: bool = False                          # the saved state a resume reads now has the new title
     state_problem: str = ""                            # why a saved state that exists was not updated
+    trace_problem: str = ""                            # why the change is not in the quest's trace
     outputs_to_redo: list[str] = field(default_factory=list)
     quest_root: str = ""
 
@@ -76,16 +77,20 @@ class RenameResult:
         if self.state_problem:
             out.append(f"  The saved state was not updated ({self.state_problem}): resuming the quest would use the old "
                        "title; rename it again once nothing else has the quest open.")
+        if self.trace_problem:
+            out.append(f"  Note: {self.trace_problem}.")
         if self.outputs_to_redo:
             out.append("  Already-made outputs still show the old title. To make them again with the new one:")
-            where = f'"{self.quest_root}"' if self.quest_root else self.quest_id
+            # The quest's own folder and the folder that holds it, so the command works from any directory.
+            where = (f'"{self.quest_root}" --output "{Path(self.quest_root).parent}"' if self.quest_root
+                     else self.quest_id)
             for kind in self.outputs_to_redo:
                 out.append(f"    python launch.py --resume {where} --emit {kind}")
         return out
 
     def as_dict(self) -> dict[str, Any]:
         return {"quest_id": self.quest_id, "old_title": self.old, "title": self.new, "changed": self.changed,
-                "saved_state": self.saved_state, "state_problem": self.state_problem,
+                "saved_state": self.saved_state, "state_problem": self.state_problem, "trace_problem": self.trace_problem,
                 "outputs_to_redo": self.outputs_to_redo}
 
 
@@ -103,7 +108,7 @@ def clean(title: Any) -> str:
         raise RenameRefused(f"The title is {len(text)} characters; keep it to {MAX_LENGTH} or fewer.")
     import unicodedata
 
-    if any(unicodedata.category(c) in ("Cc", "Cf") for c in text):
+    if any(unicodedata.category(c) in ("Cc", "Cf", "Cs") for c in text):
         raise RenameRefused("The title has an invisible control character in it.")
     return text
 
@@ -165,7 +170,24 @@ def looks_running(quest_root: Path, *, now: float | None = None) -> bool:
         summary_mtime = (quest_root / "frontier_insight_summary.json").stat().st_mtime
     except OSError:
         return True
-    return log_mtime > summary_mtime + 5
+    if log_mtime <= summary_mtime + 5:
+        return False
+    # The log is newer than the summary: a resumed run, or only an output made again afterwards (`--emit`), which
+    # also writes to run.log but runs no step. A resumed run always starts a step in the trace after the summary.
+    from core import audit_log
+
+    from datetime import datetime
+
+    for e in reversed(audit_log.read(fi / "audit.jsonl")):
+        try:
+            ts = datetime.fromisoformat(str(e.get("ts"))).timestamp()
+        except ValueError:
+            continue
+        if ts <= summary_mtime:
+            break
+        if e.get("kind") == "node_started":
+            return True
+    return False
 
 
 def _retitle_paper(text: str, title: str) -> str:
@@ -184,7 +206,14 @@ def _retitle_paper(text: str, title: str) -> str:
             ok = False
         if not ok:
             raise RenameRefused("The paper's front matter writes its title over several lines; change it by hand.")
-        return text[:fm.start(1)] + new_body + text[fm.end(1):]
+        out = text[:fm.start(1)] + new_body + text[fm.end(1):]
+        # A heading under the front matter that repeats the old title is the title too (the poster reads the heading).
+        old = _paper_title(text)
+        body_start = fm.start(1) + len(new_body) + (fm.end() - fm.end(1))
+        h1 = _FIRST_H1_RE.search(out, body_start)
+        if old and h1 and h1.group(1).strip() == old:
+            out = out[:h1.start()] + f"# {title}" + out[h1.end():]
+        return out
     start = fm.end() if fm else 0
     m = _FIRST_H1_RE.search(text, start)
     if m:
@@ -255,26 +284,37 @@ def _sha256(path: Path) -> str | None:
         return None
 
 
-def _write_all(edits: list[tuple[str, Path, str, str]]) -> None:
+def _read(path: Path) -> str:
+    """A file's text exactly as it is on disk (its line endings kept), so writing it back changes nothing else."""
+    return path.read_bytes().decode("utf-8")
+
+
+def _write_all(edits: list[tuple[str, Path, bytes, bytes]]) -> None:
     """Write every file, or none: each goes to a temporary file first, and one that cannot be written puts the files
-    already written back as they were."""
-    done: list[tuple[Path, str]] = []
-    try:
-        for _rel, path, old_text, new_text in edits:
-            tmp = path.with_name(path.name + ".renaming")
-            tmp.write_text(new_text, encoding="utf-8")
+    already written back byte for byte."""
+    done: list[tuple[Path, bytes]] = []
+    for _rel, path, old_bytes, new_bytes in edits:
+        tmp = path.with_name(path.name + ".renaming")
+        try:
+            tmp.write_bytes(new_bytes)
             os.replace(tmp, path)
-            done.append((path, old_text))
-    except OSError as e:
-        for path, old_text in reversed(done):
-            try:
-                path.write_text(old_text, encoding="utf-8")
-            except OSError:
-                pass
-        for _rel, path, _old, _new in edits:
-            path.with_name(path.name + ".renaming").unlink(missing_ok=True)
-        raise RenameRefused(f"{path.name} could not be written ({e.strerror or e}); close it where it is open and try "
-                            "again. Nothing was changed.") from e
+            done.append((path, old_bytes))
+        except OSError as e:
+            not_restored = []
+            for written, before in reversed(done):
+                try:
+                    written.write_bytes(before)
+                except OSError:
+                    not_restored.append(written.name)
+            for _r, p, _o, _n in edits:
+                try:
+                    p.with_name(p.name + ".renaming").unlink(missing_ok=True)
+                except OSError:
+                    pass
+            tail = (f" These could not be put back as they were: {', '.join(not_restored)}." if not_restored
+                    else " Nothing was changed.")
+            raise RenameRefused(f"{path.name} could not be written ({e.strerror or e}); close it where it is open and "
+                                f"try again.{tail}") from e
 
 
 def rename(quest_root: Path, new_title: Any) -> RenameResult:
@@ -286,37 +326,47 @@ def rename(quest_root: Path, new_title: Any) -> RenameResult:
         raise RenameRefused(f"No quest at {quest_root}.")
     if looks_running(quest_root):
         raise QuestRunning(f"Quest {quest_root.name} is still running; rename it once it has stopped or finished.")
+    trace = quest_root / ".fi" / "audit.jsonl"
+    # The change is recorded in the trace, and a finished quest's seal reads the paper through that record: a trace
+    # that cannot be written now would leave a changed paper with nothing to account for it.
+    try:
+        with trace.open("ab"):
+            pass
+    except OSError as e:
+        raise RenameRefused(f"The quest's trace ({trace.name}) cannot be written ({e.strerror or e}); close it where it "
+                            "is open and try again. Nothing was changed.") from e
     old = current_title(quest_root)
     result = RenameResult(quest_id=quest_root.name, old=old, new=title, quest_root=str(quest_root))
     paper_before = _sha256(quest_root / _SEALED_PAPER)
 
-    # Every new text is worked out before anything is written, and then all are written or none.
-    edits: list[tuple[str, Path, str, str]] = []
+    # Every new text is worked out (and encoded) before anything is written, and then all are written or none.
+    edits: list[tuple[str, Path, bytes, bytes]] = []
+
+    def _add(rel: str, path: Path, old_text: str, new_text: str) -> None:
+        if new_text != old_text:
+            edits.append((rel, path, old_text.encode("utf-8"), new_text.encode("utf-8")))
+
     try:
         for rel in ("paper/paper.md", "paper.md"):
             path = quest_root / rel
             if path.is_file():
-                text = path.read_text(encoding="utf-8")
-                new_text = _retitle_paper(text, title)
-                if new_text != text:
-                    edits.append((rel, path, text, new_text))
+                text = _read(path)
+                _add(rel, path, text, _retitle_paper(text, title))
         cfg_path = quest_root / "config.yaml"
         if cfg_path.is_file():
-            text = cfg_path.read_text(encoding="utf-8")
-            new_text = _retitle_yaml(text, title)
-            if new_text != text:
-                edits.append(("config.yaml", cfg_path, text, new_text))
+            text = _read(cfg_path)
+            _add("config.yaml", cfg_path, text, _retitle_yaml(text, title))
         summary_path = quest_root / "frontier_insight_summary.json"
         if summary_path.is_file():
-            text = summary_path.read_text(encoding="utf-8")
+            text = _read(summary_path)
             try:
                 summary = json.loads(text)
             except ValueError:
                 summary = None  # a summary that cannot be read is left alone; the next finish writes it again
             if isinstance(summary, dict) and summary.get("title") != title:
-                edits.append(("frontier_insight_summary.json", summary_path, text,
-                              json.dumps({**summary, "title": title}, indent=2, ensure_ascii=False)))
-    except (OSError, UnicodeDecodeError) as e:
+                _add("frontier_insight_summary.json", summary_path, text,
+                     json.dumps({**summary, "title": title}, indent=2, ensure_ascii=False))
+    except (OSError, UnicodeError) as e:
         raise RenameRefused(f"A file of the quest cannot be read ({e}); nothing was changed.") from e
     _write_all(edits)
     result.changed.extend(rel for rel, *_ in edits)
@@ -332,16 +382,21 @@ def rename(quest_root: Path, new_title: Any) -> RenameResult:
         result.changed.append(".fi/state.sqlite")
 
     result.outputs_to_redo = [kind for kind, names in _OUTPUTS if any((quest_root / n).is_file() for n in names)]
+    if not edits:
+        return result  # the title was already this everywhere: nothing to record
 
     from core import audit_log
 
     # The paper's hash before and after: a finished quest's seal names the paper's hash, and core/evidence.py follows
     # these from it, so a changed title is not read as a paper edited after the quest was sealed.
-    audit_log.AuditLog(quest_root / ".fi" / "audit.jsonl", quest_root.name).append(
+    recorded = audit_log.AuditLog(trace, quest_root.name).append(
         "title_changed", node="rename", old=old, new=title, changed=list(result.changed),
         paper_path=_SEALED_PAPER, paper_sha256_before=paper_before,
         paper_sha256_after=_sha256(quest_root / _SEALED_PAPER),
     )
+    if recorded is None:
+        result.trace_problem = ("the change could not be recorded in the quest's trace, so a finished quest's evidence "
+                                "check will read the paper as edited after it finished")
     return result
 
 

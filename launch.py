@@ -1363,6 +1363,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = p.parse_args(argv)
     _config_from_quest(p, args)
     _check_mode(p, mode._group_actions, args)
+    if args.title is not None and not args.rename:
+        p.error("--title goes with --rename <quest_id>")
     # Env-var fallback for the bridge port. The VSCode extension can
     # expose ``FI_VSCODE_BRIDGE_PORT`` to a terminal session it spawns,
     # which lets the user run ``python launch.py --serve`` (or any
@@ -5761,6 +5763,9 @@ def _rename_quest(words: list[str], output_root: Path, *, title: str | None = No
     (core/quest_title.py)."""
     from core import quest_title
 
+    if title is not None and len(words) > 1:
+        print("[FI] give the new title either as the words after the quest id or as --title, not both.")
+        return 2
     new_title = title if title is not None else " ".join(words[1:])
     if not words or not new_title.strip():
         print("[FI] give the quest and the new title: fi tools rename <quest_id> <new title>")
