@@ -139,12 +139,16 @@ def restore(quest_root: Path, files: dict[str, str]) -> None:
         if rel not in files:
             (code / rel).unlink(missing_ok=True)
     for name, text in files.items():
+        if name.count("/") > 1 or ".." in name.split("/"):
+            continue  # the loop keeps only code/ and the package's own modules: anything deeper is not its copy
         path = code / name
         data = text.encode("utf-8", "surrogateescape")
         if path.parent != code and _is_link(path.parent):
             _remove_link(path.parent)  # the package's folder replaced by a link: never written through
         if _is_link(path):
             _remove_link(path)  # a link the run left in place of a file: never written through
+        if _is_link(path) or (path.parent != code and _is_link(path.parent)):
+            continue  # a link that could not be removed: nothing is written through it
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
             if not path.is_file() or path.read_bytes() != data:
@@ -170,14 +174,42 @@ def forget_bytecode(quest_root: Path) -> None:
         dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git") and not _is_link(Path(base) / d)]
 
 
+def own_dir(quest_root: Path, name: str, *, clear_links: bool = True) -> Path | None:
+    """``.fi/improve/<name>``, the loop's own copy, reached without going through a link: a link (or junction) in place of
+    ``.fi``, ``.fi/improve`` or the copy itself is removed (only the link, never what it points at), or, with
+    ``clear_links=False``, makes this ``None``. ``None`` too when a link cannot be removed: nothing is then read or
+    written there."""
+    root = Path(quest_root)
+    path = root / SNAPSHOTS / name
+    step = root
+    for part in path.relative_to(root).parts:
+        step = step / part
+        if _is_link(step):
+            if not clear_links:
+                return None
+            _remove_link(step)
+            if _is_link(step):
+                return None
+    return path
+
+
+def clear_own_dir(quest_root: Path, name: str) -> None:
+    """Remove the loop's copy ``.fi/improve/<name>`` without following a link anywhere on the way."""
+    import shutil
+
+    path = own_dir(quest_root, name)
+    if path is not None and path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)  # Python does not follow a link or junction inside it
+
+
 def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
     """Keep ``files`` as the copy ``name``. What the copy held before is removed without following a link: a link (or a
     junction) inside it is removed itself, never what it points at."""
     import shutil
 
-    folder = Path(quest_root) / SNAPSHOTS / name
-    if _is_link(folder):
-        _remove_link(folder)
+    folder = own_dir(quest_root, name)
+    if folder is None:
+        raise OSError(f"the loop's copy {name!r} is reached through a link that could not be removed")
     folder.mkdir(parents=True, exist_ok=True)
     for old in list(folder.iterdir()):
         if _is_link(old):
@@ -192,8 +224,8 @@ def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
 
 
 def load_snapshot(quest_root: Path, name: str) -> dict[str, str] | None:
-    folder = Path(quest_root) / SNAPSHOTS / name
-    if not folder.is_dir() or _is_link(folder):
+    folder = own_dir(quest_root, name, clear_links=False)
+    if folder is None or not folder.is_dir():
         return None
     files, _links = _walk(folder)  # never into a link
     return {p.relative_to(folder).as_posix(): p.read_bytes().decode("utf-8", "surrogateescape")

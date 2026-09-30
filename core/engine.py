@@ -8831,7 +8831,7 @@ class Engine:
             record.update(blocked=False, stopped=record.get("stopped") or "set aside: the code ran again from an earlier "
                                                                            "step before the loop finished")
             self._improve_save(record)
-            shutil.rmtree(self.quest_root / _improve.SNAPSHOTS / "raw", ignore_errors=True)  # that code's trial record
+            _improve.clear_own_dir(self.quest_root, "raw")  # that code's trial record
             self._log.info("[improve] an earlier loop's record belongs to code that has run again since; set aside")
         if record.get("blocked"):
             return await self._improve_resume_after_block(state, record)
@@ -8904,8 +8904,10 @@ class Engine:
     def _improve_save_raw(self) -> None:
         """FI's record of the last full run's trials, copied to ``.fi/improve/raw/`` before a round runs trials of its
         own (on disk, so a loop cut short can still put it back)."""
-        folder = self.quest_root / _improve.SNAPSHOTS / "raw"
-        shutil.rmtree(folder, ignore_errors=True)
+        _improve.clear_own_dir(self.quest_root, "raw")
+        folder = _improve.own_dir(self.quest_root, "raw")
+        if folder is None:
+            raise OSError("the loop's copy of the trial record is reached through a link that could not be removed")
         folder.mkdir(parents=True, exist_ok=True)
         kept: dict[str, bool] = {}
         for i, path in enumerate(self._improve_raw_files()):
@@ -8917,7 +8919,9 @@ class Engine:
     def _improve_put_back_raw(self, saved: dict[Path, bytes | None] | None = None) -> None:
         """FI's record of the last full run's trials back in place: from ``saved`` (the bytes held in memory while the
         loop ran, which no round's run can reach) or, for a loop cut short, from the copy on disk."""
-        folder = self.quest_root / _improve.SNAPSHOTS / "raw"
+        folder = _improve.own_dir(self.quest_root, "raw", clear_links=saved is not None)
+        if folder is None:
+            return  # reached through a link: nothing is read from it
         if saved is None:
             try:
                 kept = json.loads((folder / "kept.json").read_text(encoding="utf-8"))
@@ -8938,7 +8942,7 @@ class Engine:
                     path.write_bytes(data)
             except OSError:
                 pass
-        shutil.rmtree(folder, ignore_errors=True)
+        _improve.clear_own_dir(self.quest_root, "raw")
 
     async def _improve_put_back_first(self, record: dict[str, Any]) -> int:
         """Undo a loop cut short; returns the rounds it had spent in this quest."""
@@ -9261,9 +9265,12 @@ class Engine:
         more in full when it is not the one the last full run used)."""
         original = _improve.load_snapshot(self.quest_root, "original")
         now = _improve.snapshot(self.quest_root)
-        if original is not None and not any("/" in k for k in original):
-            now = {k: v for k, v in now.items() if "/" not in k}  # a copy saved before the package was part of it
-        rerun = original is not None and now != original
+        if original is not None and not any("/" in k for k in original) and any("/" in k for k in now):
+            # A copy saved before the package was part of it cannot tell whether the package was edited during the
+            # stop: the version in code/ is run once more in full rather than risk results that are not its own.
+            rerun = True
+        else:
+            rerun = original is not None and now != original
         record.update(blocked=False, resumed=_improve._now(), rerun=rerun)
         if rerun:
             record["kept_from"] = ("round " + str(record["best_round"]) if record.get("best_round")

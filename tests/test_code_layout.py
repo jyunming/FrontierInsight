@@ -722,6 +722,23 @@ def test_the_kept_copies_never_follow_a_link(tmp_path: Path) -> None:
     improve.save_snapshot(quest, "best", {"simulate.py": SIM_PKG, f"{PKG}/model.py": MODEL_PY})
     assert (victim / "precious.py").is_file() and not (victim / "model.py").exists()
     assert improve.load_snapshot(quest, "best")[f"{PKG}/model.py"] == MODEL_PY
+    # A link one level up, in place of .fi/improve itself: not read through, not cleared through.
+    other = tmp_path / "other"
+    (other / "best" / "data").mkdir(parents=True)
+    (other / "best" / "data" / "results.csv").write_text("1\n", encoding="utf-8")
+    (other / "best" / "keep.py").write_text("K = 1\n", encoding="utf-8")
+    import shutil
+
+    shutil.rmtree(quest / improve.SNAPSHOTS)
+    up = quest / improve.SNAPSHOTS
+    if os.name == "nt":
+        sp.run(["cmd", "/c", "mklink", "/J", str(up), str(other)], check=True, capture_output=True)
+    else:
+        os.symlink(other, up, target_is_directory=True)
+    assert improve.load_snapshot(quest, "best") is None
+    improve.save_snapshot(quest, "best", {"simulate.py": SIM_PKG})
+    assert (other / "best" / "data" / "results.csv").is_file() and (other / "best" / "keep.py").is_file()
+    assert not (other / "best" / "simulate.py").exists() and improve.load_snapshot(quest, "best") == {"simulate.py": SIM_PKG}
 
 
 def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:
