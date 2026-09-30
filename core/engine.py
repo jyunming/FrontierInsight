@@ -3957,14 +3957,17 @@ class Engine:
         self._log.info("[design] using the design block of plan.md (sha256 %s)", sha[:12])
         return parsed.design, sha
 
-    def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None) -> None:
+    def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None,
+                        unsourced: list[str] | None = None) -> None:
         """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
         supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
 
         ``added`` names the oracles the engine wrote into the plan after the person read it (the caller keeps its own
-        once-per-addition record): the stop then says so first, since the protocol is frozen right after it."""
+        once-per-addition record): the stop then says so first, since the protocol is frozen right after it.
+        ``unsourced`` (``rigor_profile: research``) says which checks' expected values have no source a reader can
+        check; like an unreadable file, it stops every resume until the plan says where each value comes from."""
         marker = self.fi_dir / "paused_at_plan.flag"
-        if not error and added is None and marker.is_file():
+        if not error and added is None and not unsourced and marker.is_file():
             return
         if added is None:
             try:
@@ -3997,6 +4000,30 @@ class Engine:
                 steps=steps,
                 payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
                          "oracles_added": list(added)},
+            )
+            return
+        if unsourced:
+            steps = [
+                "The quest stopped at the plan: the value a check against a known answer expects has to come from "
+                "somewhere a reader can check, and for these it does not:\n"
+                + "\n".join(f"  - {why}" for why in unsourced),
+                "A wrong expected value makes a correct simulation fail its check, or a wrong one pass it. In `plan.md` "
+                f"({path}), under “{_plan.DESIGN_HEADING}”, for each check in the `oracles` list of the protocol, "
+                f"{_oracle.SOURCE_FORMS}. A source counts only if this quest found it (it is listed under "
+                "“The sources this quest found” in plan.md); one recalled from memory does not.",
+                "Or ask for a change and let FI rewrite it: "
+                f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
+                "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
+                "Then resume. (This stop comes from `rigor_profile: research`. Without it FI notes the problem in the "
+                "plan and in run.log and goes on, and the result is not counted as checked against known answers.)",
+            ]
+            self._pause_for_human(
+                kind="plan",
+                interaction="supply",
+                headline="say where the plan's expected values come from",
+                steps=steps,
+                payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
+                         "unsourced": list(unsourced)},
             )
             return
         steps = [
@@ -4039,6 +4066,8 @@ class Engine:
             if parsed.design is None:
                 self._pause_for_plan(error=parsed.error or "no design")
                 return {}
+            protocol = parsed.design.get("protocol")
+            self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None)
             if ask:
                 self._pause_for_plan()
             return {}
@@ -4088,17 +4117,76 @@ class Engine:
             audit += _protocol.metric_notes(normalized.get("protocol"))
             audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
             audit += _protocol.grid_notes(normalized)
+            # Where the model's equations and each check's expected value come from (core/oracle_check.py).
+            source_gaps, model_notes = self._plan_source_findings(state, normalized.get("protocol"))
+            audit += model_notes
+            audit += [f"{g[0].upper()}{g[1:]}: {_oracle.SOURCE_FORMS}." for g in source_gaps]
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
-                            normalized, audit)
+                            normalized, audit,
+                            sources=self._retrieved_sources(state) if self._runs_code(state) else None)
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
                        len((extra or {}).get("literature") or []) if isinstance(extra, dict) else 0, len(audit))
         await self._shadow("plan", {**state, "design": normalized},
                            taken="held the plan for the person" if ask else "went on with the plan")
+        protocol = normalized.get("protocol")
+        self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None)
         if ask:
             self._pause_for_plan()
         return {"design_objections": objections} if isinstance(objections, list) else {}
+
+    def _runs_code(self, state: QuestState) -> bool:
+        """Whether the quest runs an experiment of its own (not the no-simulation path, a survey or ``--analyze``)."""
+        return not (state.get("no_simulation_resolved") or state.get("survey_mode_resolved")
+                    or self.config.engine.analyze_local_first)
+
+    def _retrieved_sources(self, state: QuestState) -> list[dict[str, str]]:
+        """The sources this quest retrieved, labelled as the plan's literature and the paper label them ([1], [W1])."""
+        return _oracle.retrieved_sources(
+            [(label, meta) for label, meta, _item in _labelled_sources(state.get("literature") or [])])
+
+    def _plan_source_findings(self, state: QuestState, protocol: Any = None) -> tuple[list[str], list[str]]:
+        """``(checks whose expected value has no source a reader can check, notes on the model behind the numbers)`` for
+        ``protocol`` (the plan's, read from ``plan.md``, when not given). Empty for a quest that runs no experiment."""
+        if not self._runs_code(state):
+            return [], []
+        if not isinstance(protocol, dict):
+            planned, _why = _plan.load_design(self.quest_root)
+            protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        if not isinstance(protocol, dict):
+            return [], []
+        try:
+            sources = self._retrieved_sources(state)
+            return _oracle.source_gaps(protocol, sources), _oracle.model_notes(protocol, sources)
+        except Exception as e:  # noqa: BLE001 -- a check of the plan must never stop a quest by crashing
+            self._log.warning("[plan] where the checks' expected values come from could not be checked: %r", e)
+            return [], [f"Where the checks' expected values come from could not be checked ({type(e).__name__})."]
+
+    def _check_plan_sources(self, state: QuestState, *, stop: bool, protocol: Any = None) -> list[str]:
+        """Say, in run.log, which checks of the plan expect a value with no source a reader can check (no ``reference``,
+        or a source this quest did not retrieve); under ``rigor_profile: research`` with ``stop``, stop the quest at the
+        plan until it says. A no-op once the protocol is frozen: the evidence record carries the gap from then on."""
+        if _frozen.load(self.quest_root) is not None:
+            return []
+        gaps, _notes = self._plan_source_findings(state, protocol)
+        for why in gaps:
+            self._log.warning("[plan] %s: %s", why, _oracle.SOURCE_FORMS)
+        # Only a plan a person can edit can be stopped for: without plan.md (the draft could not be used) the evidence
+        # record carries the gap instead.
+        if gaps and stop and self.config.rigor_profile == "research" and _plan.plan_path(self.quest_root).is_file():
+            added = self._oracles_added_read()
+            if (added and not added.get("shown") and added.get("oracles")
+                    and all(any(repr(str(n)) in why for why in gaps) for n in added["oracles"])):
+                # This stop names every check the engine added (each lacks a source), so the person reads them here:
+                # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
+                self._oracles_added_write({**added, "shown": True})
+            self._pause_for_plan(unsourced=gaps)
+        elif gaps and not self.__dict__.get("_said_unsourced"):
+            self._said_unsourced = True
+            print(f"[FI] {len(gaps)} check(s) in the plan do not say where their expected value comes from, or cite a "
+                  "source this quest did not find; see plan.md and .fi/run.log")
+        return gaps
 
     async def _connect_llm(self) -> None:
         """Resolve the provider and build the LLM client (with its fallback chain), as a quest run does."""
@@ -6139,10 +6227,12 @@ class Engine:
             source = f"{replaced.get('source')}; it replaces the one frozen before (amendment {replaced.get('n')})"
             record = _frozen.freeze(
                 self.quest_root, protocol, approved_by=approved_by, source=source,
-                version=int(replaced.get("from_version", 1) or 1) + 1, amendments=int(replaced["n"]))
+                version=int(replaced.get("from_version", 1) or 1) + 1, amendments=int(replaced["n"]),
+                sources=self._retrieved_sources(state))
             _frozen.close_replacement(self.quest_root, replaced, str(record["sha256"]))
         else:
-            record = _frozen.freeze(self.quest_root, protocol, approved_by=approved_by, source=source)
+            record = _frozen.freeze(self.quest_root, protocol, approved_by=approved_by, source=source,
+                                    sources=self._retrieved_sources(state))
         self._log.info(
             "[protocol] frozen before the first full run (%s, sha256 %s, run %s)%s",
             record["source"], str(record["sha256"])[:12], record["run_id"],
@@ -6725,6 +6815,24 @@ class Engine:
             payload={"check": check, "failure": failure},
         )
 
+    def _oracle_source_gaps(self, state: QuestState, protocol: Any) -> list[str]:
+        """The checks whose expected value has no source a reader can check, for the evidence record. The sources are
+        the ones the freeze recorded, numbered as the plan cited them (the paper later cites a subset under new numbers).
+        A protocol frozen before the freeze recorded them (or one whose record of them was edited) is judged only on
+        what needs no list: an empty ``reference``."""
+        if not isinstance(protocol, dict) or not self._runs_code(state):
+            return []
+        frozen = _frozen.load(self.quest_root)
+        if frozen is None:
+            return _oracle.source_gaps(protocol, self._retrieved_sources(state))
+        sources = frozen.get("sources")
+        if isinstance(sources, list) and not frozen.get("sources_problem"):
+            return _oracle.source_gaps(protocol, sources)
+        gaps = _oracle.empty_references(protocol)
+        if frozen.get("sources_problem"):
+            gaps.append(str(frozen["sources_problem"]))
+        return gaps
+
     def _write_evidence(self, state: QuestState, *, sealing: bool = False) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
         (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest.
@@ -6750,8 +6858,16 @@ class Engine:
                 self._log.warning("[evidence] the statistics coverage could not be worked out: %r", e)
                 # Never "no gap": a check that crashed has not shown the statistics are adequate.
                 statistics_gaps = [f"the statistics could not be worked out ({type(e).__name__}: {str(e)[:160]})"]
+            # Where each check's expected value comes from, judged against the sources as they were numbered when the
+            # protocol was frozen (the paper later cites a subset under new numbers).
+            try:
+                oracle_source_gaps = self._oracle_source_gaps(state, protocol_now)
+            except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
+                self._log.warning("[evidence] where the checks' expected values come from could not be checked: %r", e)
+                oracle_source_gaps = [f"where the checks' expected values come from could not be checked ({type(e).__name__})"]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
+                oracle_source_gaps=oracle_source_gaps,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
@@ -7192,7 +7308,8 @@ class Engine:
             request = (
                 "These declared oracles cannot be judged by the engine: " + " ".join(incomplete) + " Give each of them a numeric "
                 "`expected` (worked out from the closed form, the limit or the invariant; 0 for an invariant's worst violation or for the difference between two implementations) and "
-                "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0). Change nothing else."
+                "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0), and a "
+                f"`reference` saying where the expected value comes from: {_REFERENCE_FORMS} Change nothing else."
             )
         else:
             request = (
@@ -7200,11 +7317,12 @@ class Engine:
             "that does not rely on the script's own numbers being right (a closed form the simulation must reproduce, a "
             "limiting case with a known answer, a conservation law or invariant every run must satisfy, a small case whose "
             "exact answer can be computed another way, or a second independent implementation). Each entry has a `name`, a "
-            "`kind`, a `check` saying what the script measures on which small case, a NUMERIC `expected` (the value the "
+            "`kind` (one of special_case, invariant, symmetry, second_implementation, convergence_rate, published_value), "
+            "a `check` saying what the script measures on which small case, a NUMERIC `expected` (the value the "
             "measurement must agree with, worked out here from the closed form, the limit or the invariant; 0 for an "
             "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
             "`tolerance_mode` (`absolute`, the default, or `relative`) and a `reference` saying where the expected value comes "
-            "from. Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
+            f"from: {_REFERENCE_FORMS}" " Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
             "`measure` (the name of the number that run returns), so the engine can run the simulation on it itself; when the "
             "check claims an order of accuracy, give `order` too. The engine judges the measurement against these numbers. "
             "Change nothing else."
@@ -7857,6 +7975,8 @@ class Engine:
         self._warn_if_plan_diverges()
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
+        # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
+        self._check_plan_sources(state, stop=True, protocol=self._draft_protocol(state))
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
@@ -7868,6 +7988,9 @@ class Engine:
                 on_disk = None
             if on_disk and on_disk != state.get("code"):
                 oracle_code = on_disk
+        # A check's expected value must say where it comes from before the freeze: the gate may have added checks to the
+        # plan since it was read, and a person may have edited it (rigor_profile: research stops here until it says).
+        self._check_plan_sources(state, stop=True, protocol=self._draft_protocol(state))
         # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
         self._hold_added_oracles()
         # From here on the protocol is what the record says (core/frozen_protocol.py).
@@ -15321,6 +15444,13 @@ If an outline is given, it describes the whole experiment as one program: put th
 `run_cell`) and the statistics, figure and `RESULT_JSON` code in experiment.py, keeping every name and signature.
 """
 
+# How an oracle's expected value may be sourced, for a request to rewrite the plan (core/oracle_check.py reads it).
+_REFERENCE_FORMS = (
+    "`derivation: <the steps that give the number>`, a source from the plan's list of the sources this quest found, by its [n], an equation "
+    "of the plan's `model` by its id (E1), or, for a second implementation, what it is and that it shares no code with "
+    "the simulation. A source that is not in that list does not count."
+)
+
 _PLAN_DIRECTIVE = """
 
 ## Also write the plan (added to the design; it replaces nothing above)
@@ -15350,8 +15480,18 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
-  "oracles": [{"name": "<short name>", "kind": "<closed_form | limiting_case | invariant | exact_small_case | independent_implementation>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from>"}]
+  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>"}],
+  "model": {
+    "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
+    "assumptions": ["<what the model assumes>"],
+    "holds_for": "<the range of parameters where it holds>",
+    "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>"}]
+  }
 }
+
+`model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
+
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 

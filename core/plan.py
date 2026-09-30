@@ -9,7 +9,9 @@ as support, or let a person change any of it before compute was spent. The ``pla
 The file has two kinds of section:
 
 * prose for the reader and for the paper's methods: *In short*, *What the literature says* (each source
-  named), *The gap this experiment addresses*, *Success criteria*, *Risks*, *What this quest will not do*, and
+  named), *The gap this experiment addresses*, *The model behind the numbers* (shown from the protocol's ``model`` and
+  ``oracles``: what model produces the numbers, its equations with their sources, and where each check's expected value
+  comes from; only the design block is read back), *Success criteria*, *Risks*, *What this quest will not do*, and
   *Checks already made* (what the methodology audit objected to and how the design answers it);
 * **the design**, a fenced YAML block under the heading *The design (used as written)*: the hypothesis,
   variables, method, expected outcome, planned figures, dependencies and result bounds. That block is the
@@ -211,7 +213,122 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         out["oracles"] = fixed_oracles
     if out.get("acceptance") is not None:
         out["acceptance"] = _as_list(out["acceptance"])
+    if "model" in out:
+        model, why = normalize_model(out.pop("model"))
+        if model is None:
+            return None, why
+        # Last, so a cut of the protocol (the claim check shows its first few thousand characters) keeps the grid and
+        # the checks, which a long list of equations would push out.
+        out["model"] = model
     return out, None
+
+
+# The two things an equation of the model can be for, and the words a model writes for each.
+ROLES = {"generates": "produces the data", "analyses": "analyses the results"}
+_ROLE_WORDS = {
+    "generates": "generates", "generate": "generates", "generating": "generates", "generation": "generates",
+    "simulation": "generates", "simulates": "generates", "produces": "generates",
+    "analyses": "analyses", "analyzes": "analyses", "analyse": "analyses", "analyze": "analyses",
+    "analysis": "analyses", "analysing": "analyses", "analyzing": "analyses",
+}
+
+
+def normalize_model(model: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """``(model, None)`` when the plan's model block can be read, else ``(None, why)``.
+
+    The model block (``protocol.model``) says what produces the numbers: ``summary`` (what model, in a sentence),
+    ``assumptions``, ``holds_for`` (the range where it holds) and ``equations``, each with an ``id`` (E1, E2...), the
+    ``formula`` as the source writes it, its ``role`` (``generates``: it produces the data; ``analyses``: it is used on
+    the results) and its ``source`` (a source the quest retrieved, by its [n], or ``derivation`` with the steps in
+    ``derivation``). Strict about form only: whether each source was really retrieved is for
+    :func:`core.oracle_check.model_notes`, which needs the quest's sources."""
+    if isinstance(model, str) and model.strip():
+        # A sentence, as a plan written before the block had its parts could carry: kept as it was written (the frozen
+        # protocol's hash depends on it), shown as the summary, and the plan notes that its equations are missing.
+        return model, None
+    if not isinstance(model, dict):
+        return None, "`protocol.model` must be a mapping (`summary`, `assumptions`, `holds_for`, `equations`)"
+    out: dict[str, Any] = dict(model)
+    for key in ("summary", "holds_for"):
+        if out.get(key) is not None and not isinstance(out[key], str):
+            return None, f"`protocol.model.{key}` must be text"
+        if isinstance(out.get(key), str):
+            out[key] = out[key].strip()
+    if out.get("assumptions") is not None:
+        out["assumptions"] = _as_list(out["assumptions"])
+    equations = out.get("equations")
+    if equations is None:
+        return out, None  # left out, not added: a block read back must hash as it was written
+    if isinstance(equations, dict):
+        equations = [equations]
+    if not isinstance(equations, list):
+        return None, "`protocol.model.equations` must be a list (each with an `id`, a `formula`, a `role` and a `source`)"
+    fixed: list[dict[str, Any]] = []
+    for index, item in enumerate(equations, start=1):
+        if not isinstance(item, dict):
+            return None, f"`protocol.model` equation {index} is not a mapping (`id`, `formula`, `role`, `source`)"
+        eq = dict(item)
+        for key in ("id", "formula", "role", "source", "derivation"):
+            value = eq.get(key)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, (str, int, float))):
+                return None, f"`protocol.model` equation {index}: `{key}` must be text"
+            if eq.get(key) is not None:
+                eq[key] = str(eq[key]).strip()
+        if not eq.get("id"):
+            return None, f"`protocol.model` equation {index} has no `id` (E1, E2, ...)"
+        if eq["id"].isdigit():
+            eq["id"] = f"E{eq['id']}"  # a bare number is the equation's number: a check cites it as E<n>
+        if not eq.get("formula"):
+            return None, f"`protocol.model` equation {eq['id']} has no `formula`"
+        role = str(eq.get("role") or "").strip().lower()
+        if role:
+            eq["role"] = _ROLE_WORDS.get(role, role)
+        fixed.append(eq)
+    ids = [eq["id"] for eq in fixed]
+    twice = sorted({i for i in ids if ids.count(i) > 1})
+    if twice:
+        return None, f"`protocol.model` names equation {', '.join(twice)} more than once"
+    out["equations"] = fixed
+    return out, None
+
+
+def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    """A drafted model block with each equation that cannot be read left out (and an equation with no ``id`` given the
+    next free one), and a sentence per change, so the plan says what happened; ``(None, notes)`` when the block itself
+    cannot be read."""
+    if not isinstance(model, dict) or not isinstance(model.get("equations"), (list, dict)):
+        fixed, why = normalize_model(model)
+        return fixed, ([] if fixed is not None else [
+            f"the model behind the numbers (`protocol.model`) was left out of the plan because it could not be read "
+            f"({why}); write it here"
+        ])
+    equations = model["equations"] if isinstance(model["equations"], list) else [model["equations"]]
+    notes: list[str] = []
+    taken = {str(e.get("id")).strip() for e in equations if isinstance(e, dict) and str(e.get("id") or "").strip()}
+    kept: list[Any] = []
+    for index, item in enumerate(equations, start=1):
+        if isinstance(item, dict) and not str(item.get("id") or "").strip() and str(item.get("formula") or "").strip():
+            n = 1
+            while f"E{n}" in taken:
+                n += 1
+            item = {**item, "id": f"E{n}"}
+            taken.add(f"E{n}")
+            notes.append(f"equation {index} of the model had no id and is called E{n} in this plan")
+        fixed, why = normalize_model({**model, "equations": [item]})
+        label = str(item.get("id") or index).strip() if isinstance(item, dict) else str(index)
+        if fixed is None:
+            notes.append(f"equation {label} was left out of the model behind the numbers because it could not be read "
+                         f"({why}); put it right here if it matters")
+            continue
+        if any(str(k.get("id")).strip() == label for k in kept):
+            notes.append(f"a second equation called {label} was left out of the model behind the numbers; give it its "
+                         "own id here if it matters")
+            continue
+        kept.append(item)
+    fixed, why = normalize_model({**model, "equations": kept})
+    if fixed is None:
+        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); write it here"]
+    return fixed, notes
 
 
 _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
@@ -263,6 +380,15 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     for name, out_value in ((n, protocol["thresholds"][n]) for n in left_out)
                 )
                 continue
+        if key == "model":
+            # One equation that cannot be read is left out, not the model it is part of.
+            fixed_model, model_notes = repair_model(out["model"])
+            notes.extend(model_notes)
+            if fixed_model is not None:
+                out["model"] = fixed_model
+                continue
+            del out[key]
+            continue
         if key == "grid":
             notes.append(
                 f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has NO settings to vary and the "
@@ -298,7 +424,88 @@ def _literature_lines(items: Any) -> str:
     return "\n".join(rows) or "- (the model named no source that bears on this topic)"
 
 
-def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None) -> str:
+MODEL_HEADING = "The model behind the numbers"
+SOURCES_HEADING = "The sources this quest found"
+
+
+def _sources_lines(sources: list[dict[str, str]] | None) -> list[str]:
+    """The numbered list of the sources the quest retrieved, as a check or an equation cites them ([n]). Not read back."""
+    from . import oracle_check
+
+    rows = oracle_check.sources_block(sources or [])
+    if not rows:
+        return []
+    return [f"## {SOURCES_HEADING}", "",
+            "> A check's expected value or an equation of the model can cite one of these by its number ([2]); a source "
+            "that is not listed here does not count.", "", *rows, ""]
+
+
+def _flat(text: Any) -> str:
+    """``text`` on one line with no backtick, so nothing in it can open a fence above the design block."""
+    return " ".join(str(text if text is not None else "").replace("`", "'").split())
+
+
+def _inline(text: Any) -> str:
+    """``text`` on one line, as a code span (a formula's ``_`` and ``*`` are not emphasis)."""
+    flat = _flat(text)
+    return f"`{flat}`" if flat else ""
+
+
+def _model_lines(protocol: Any) -> list[str]:
+    """The readable form of the protocol's model and checks, for the section above the design block. Nothing here is
+    read back: the block below is what runs, so an edit belongs there."""
+    from . import oracle_check
+
+    if not isinstance(protocol, dict):
+        return []
+    model = protocol.get("model")
+    model = {"summary": model} if isinstance(model, str) and model.strip() else model
+    model = model if isinstance(model, dict) else None
+    oracles = oracle_check.declared(protocol)
+    if model is None and not oracles:
+        return []
+    lines = [f"## {MODEL_HEADING}", "",
+             f"> Shown from the design block below (`protocol.model` and `protocol.oracles`); edit it there.", ""]
+    if model is None:
+        lines += ["- (the plan does not say what model produces the numbers, what it assumes, or its equations: "
+                  "add `model` to the protocol below)", ""]
+    else:
+        lines.append(f"**What produces the numbers:** {_flat(model.get('summary')) or '(not written)'}")
+        lines.append("")
+        assumptions = [_flat(a) for a in _as_list(model.get("assumptions"))]
+        lines.append("**What it assumes:** " + ("; ".join(assumptions) if assumptions else "(not written)"))
+        lines.append("")
+        lines.append(f"**Where it holds:** {_flat(model.get('holds_for')) or '(not written)'}")
+        lines.append("")
+        items = model.get("equations")
+        equations = [e for e in items if isinstance(e, dict)] if isinstance(items, list) else []
+        lines.append("**Its equations:**")
+        lines.append("")
+        if not equations:
+            lines.append("- (none written)")
+        for eq in equations:
+            role = ROLES.get(str(eq.get("role") or ""), f"role not given ({eq.get('role')})" if eq.get("role") else "role not given")
+            source = _flat(eq.get("source")) or "no source given"
+            if eq.get("derivation"):
+                source += f": {_flat(eq['derivation'])}"
+            lines.append(f"- **{eq.get('id')}** ({role}): {_inline(eq.get('formula'))}. Source: {source}")
+        lines.append("")
+    if oracles:
+        lines.append("**The checks against known answers, and where each expected value comes from:**")
+        lines.append("")
+        for oracle in oracles:
+            kind = oracle_check.KINDS.get(oracle_check.kind_of(oracle) or "", "")
+            kind = kind or (f"kind not recognised ({oracle.get('kind')})" if oracle.get("kind") else "kind not given")
+            expected = oracle.get("expected")
+            reference = _flat(oracle.get("reference")) or "(not said)"
+            lines.append(f"- **{str(oracle['name']).strip()}**, {kind}: expects {expected if expected is not None else '(no value)'}; "
+                         f"from: {reference}")
+        lines.append("")
+    return lines
+
+
+def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
+           sources: list[dict[str, str]] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
     that is used as written."""
     extra = extra if isinstance(extra, dict) else {}
@@ -322,10 +529,12 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         _literature_lines(extra.get("literature")),
         "",
+        *_sources_lines(sources),
         "## The gap this experiment addresses",
         "",
         gap,
         "",
+        *_model_lines(design.get("protocol") if isinstance(design, dict) else None),
         "## Success criteria",
         "",
         _bullets(extra.get("success_criteria"), "- (not written)"),

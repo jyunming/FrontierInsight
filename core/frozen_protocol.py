@@ -89,6 +89,10 @@ def load(quest_root: Path) -> dict[str, Any] | None:
     record = dict(record)
     if record.get("sha256") != sha256(record.get("protocol")):
         record["problem"] = "needs/FROZEN_PROTOCOL.json does not match its own SHA-256 (it was edited after the freeze)"
+    if "sources" in record and record.get("sources_sha256") != sha256(record.get("sources")):
+        # The list the checks' citations are judged against: an edit could clear a gap, so it is not believed.
+        record["sources_problem"] = ("the list of sources in needs/FROZEN_PROTOCOL.json was edited after the freeze, so "
+                                     "whether the checks cite sources this quest retrieved cannot be judged")
     return record
 
 
@@ -101,10 +105,14 @@ def protocol_of(quest_root: Path) -> dict[str, Any] | None:
 
 def freeze(
     quest_root: Path, protocol: dict[str, Any] | None, *, approved_by: str, source: str,
-    version: int = 1, amendments: int = 0,
+    version: int = 1, amendments: int = 0, sources: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Freeze ``protocol`` (idempotent: an existing record is returned untouched). ``protocol`` may be ``None``: the study
-    is then recorded as having run without one, which the evidence level says."""
+    is then recorded as having run without one, which the evidence level says.
+
+    ``sources``: the sources the quest had retrieved when the protocol was frozen, as its checks cite them ([n], title,
+    DOI; :func:`core.oracle_check.retrieved_sources`). Kept beside the protocol, not in its hash: the paper later cites a
+    subset under new numbers, and a check's ``[3]`` means the source that was [3] when the plan was written."""
     existing = load(quest_root)
     if existing is not None:
         return existing
@@ -119,6 +127,7 @@ def freeze(
         "approved_at": now(),
         "source": source,
         "amendments": amendments,
+        **({"sources": list(sources), "sources_sha256": sha256(list(sources))} if sources is not None else {}),
     }
     _write(frozen_path(quest_root), record)
     _write(_needs(quest_root) / "protocol_versions" / f"v{version}.json", record)
@@ -334,6 +343,9 @@ def apply(quest_root: Path, pending: dict[str, Any], approval: dict[str, Any], *
         "approved_at": approval.get("approved_at"),
         "source": f"amendment {n}",
         "amendments": n,
+        # The sources the checks cite are the ones retrieved before the first freeze; an amendment keeps their numbers.
+        **({"sources": frozen["sources"], "sources_sha256": frozen.get("sources_sha256")}
+           if isinstance(frozen.get("sources"), list) else {}),
     }
     _write(frozen_path(quest_root), new_frozen)
     _write(_needs(quest_root) / "protocol_versions" / f"v{version}.json", new_frozen)

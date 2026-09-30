@@ -29,7 +29,17 @@ same PR that adds, splits or renames one.
   (`case_of`); `loose_tolerance` warns when the tolerance would pass a lower-order method than the oracle claims
   (`order`); `script_measured` lists the values that are still the script's own word (`core/evidence.py` never counts them toward
   `independently_validated`, one script or two); `with_run_problems` merges the
-  reasons a value could not be measured.
+  reasons a value could not be measured. Also owns an oracle's kind (`KINDS`, the six; `kind_of` reads the older names)
+  and where its expected value comes from: `source_gaps` (a `reference` that is empty or names a source the quest did
+  not retrieve; matched against `retrieved_sources` — the `[n]` labels of `_labelled_sources`, titles, DOIs — against
+  an equation of the plan's model, or a second implementation's "shares no code") and `model_notes` (the model block
+  itself). `Engine._check_plan_sources` warns, and under `rigor_profile: research` stops at the plan
+  (`_pause_for_plan(unsourced=...)`), at the plan step and right before the freeze; the freeze keeps the sources as
+  numbered then (`sources` and its own `sources_sha256` in `needs/FROZEN_PROTOCOL.json`; `load` sets
+  `sources_problem` on an edit), and `Engine._oracle_source_gaps` (called by `_write_evidence`; a record frozen
+  without `sources` is judged only on `empty_references`) passes the gaps to `evidence.assess(oracle_source_gaps=...)`.
+  `sources_block` is the numbered list plan.md shows (*The sources this quest found*). The model block's shape (`protocol.model`) is `core/plan.py`'s
+  (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`).
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
 - `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).

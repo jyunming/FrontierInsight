@@ -8,7 +8,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Stage / node**: one step of a quest (`literature`, `design`, `execute`, `review`, ...). [architecture.md](architecture.md)
 
-**Plan (`plan.md`)**: the document FI writes before it experiments: what the literature says, the gap, and the design it will run. You can stop there, edit it, and continue. [USAGE.md](USAGE.md)
+**Plan (`plan.md`)**: the document FI writes before it experiments: what the literature says, the gap, the model behind the numbers (for a quest that runs code: what model produces them and its equations, each with its source), and the design it will run. You can stop there, edit it, and continue. [USAGE.md](USAGE.md)
 
 **Pause**: FI stops because it needs you (paywalled papers to download, the plan to read, the result to accept). It is not a failure: `NEXT_STEP.md` in the quest folder says what to do, and `fi --resume <quest id>` continues.
 
@@ -18,7 +18,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Amendment**: a change to the frozen protocol. It always needs a person's explicit approval (`fi --approve-amendment <quest>`); one made after results were seen is recorded as post-hoc. [rigor.md](rigor.md)
 
-**Oracle**: a check with a known right answer (a closed form, a limiting case). The plan states the number it must give and how close; the script only reports what it measured, and FI's engine decides pass or fail. Only a value FI measured by running the simulation itself counts as independent evidence. [rigor.md](rigor.md)
+**Oracle**: a check with a known right answer (a closed form, a limiting case). The plan states the number it must give, how close, and where that number comes from (a derivation written out, a source the quest found, an equation of the model behind the numbers, or a second implementation that shares no code with the simulation); the script only reports what it measured, and FI's engine decides pass or fail. Only a value FI measured by running the simulation itself counts as independent evidence. [rigor.md](rigor.md)
 
 **Run manifest**: what the simulation says it actually ran (settings, trials, seeds). FI compares it with the frozen protocol. [rigor.md](rigor.md)
 
