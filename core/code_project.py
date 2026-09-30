@@ -300,47 +300,6 @@ def _read_record(quest_root: Path) -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
 
 
-def _optional_import_lines(tree: Any) -> set[int]:
-    import ast
-
-    lines: set[int] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Try) and any(
-            h.type is None or "ImportError" in ast.dump(h.type) or "ModuleNotFoundError" in ast.dump(h.type)
-            for h in node.handlers
-        ):
-            for child in ast.walk(ast.Module(body=node.body, type_ignores=[])):
-                if isinstance(child, (ast.Import, ast.ImportFrom)):
-                    lines.add(child.lineno)
-    return lines
-
-
-def _imported(path: Path, local: set[str]) -> set[str]:
-    import ast
-
-    try:
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, ValueError):
-        return set()
-    optional = _optional_import_lines(tree)
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if getattr(node, "lineno", None) in optional:
-            continue
-        if isinstance(node, ast.Import):
-            names.update(a.name.split(".")[0] for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-            names.add(node.module.split(".")[0])
-    stdlib = getattr(sys, "stdlib_module_names", frozenset())
-    return {n for n in names if n not in stdlib and n not in local and n != "__future__"}
-
-
-# Import names whose pip package is named differently; anything else is asked for by its import name.
-_PIP_NAME = {"sklearn": "scikit-learn", "cv2": "opencv-python", "PIL": "Pillow", "yaml": "PyYAML", "skimage": "scikit-image"}
-# Parts of a package that are not a package of their own.
-_NOT_A_PACKAGE = {"mpl_toolkits", "pkg_resources", "_distutils_hack"}
-
-
 def _installed(quest_root: Path) -> list[str] | None:
     try:
         data = json.loads((quest_root / INSTALLED).read_text(encoding="utf-8"))
@@ -363,18 +322,25 @@ def requirements_for(code_dir: Path, deps: list[str], *, installed: bool = False
     """What the scripts need: ``deps`` (the list FI actually installed, when ``installed``) plus each package the
     scripts import (outside an optional ``try/except ImportError``) that the list lacks. A quest environment can see
     packages it never installed (the ones already on the machine), so the imports are checked either way."""
+    deps_mod = _experiment_deps
     lines = [d.strip() for d in deps if d and d.strip()]
-    local = {p.stem for p in code_dir.glob("*.py")} | {p.name for p in code_dir.iterdir() if p.is_dir()}
-    have = {_experiment_deps.normalize(_experiment_deps.requirement_name(d) or d) for d in lines}
-    imported: set[str] = set()
-    for script in sorted(code_dir.glob("*.py")):
-        if script.name != RUN:
-            imported |= _imported(script, local)
-    for name in sorted(imported - _NOT_A_PACKAGE):
-        pip = _PIP_NAME.get(name, name)
-        if _experiment_deps.normalize(pip) not in have and _experiment_deps.normalize(name) not in have:
-            lines.append(pip)
-            have.add(_experiment_deps.normalize(pip))
+    local = deps_mod.local_module_names(code_dir)
+    have = {deps_mod.normalize(deps_mod.requirement_name(d) or d) for d in lines}
+    # The modules the listed packages already provide (opencv-python-headless is cv2: no second cv2 package).
+    provided = {m for d in lines for m in (deps_mod.import_names(d) or [])}
+    scripts = deps_mod.code_sources(code_dir)  # every script, sub-folders too, except run.py
+    full: set[str] = set()
+    for script in scripts:
+        full |= deps_mod.imported_modules(script, optional=False) or set()
+    # A well-known module under a shared namespace (google.protobuf is protobuf) before the namespace is dropped.
+    wanted = [m for m in sorted(deps_mod.IMPORT_TO_PIP) if "." in m and any(n == m or n.startswith(m + ".") for n in full)]
+    wanted += sorted(deps_mod.third_party_of(scripts, local, optional=False) - deps_mod.NOT_A_PACKAGE)
+    for name in wanted:
+        pip = deps_mod.pip_name(name) or name
+        if name in provided or deps_mod.normalize(pip) in have or deps_mod.normalize(name) in have:
+            continue
+        lines.append(pip)
+        have.add(deps_mod.normalize(pip))
     return lines
 
 
@@ -617,7 +583,7 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
     )
     try:
         done = subprocess.run([str(python), "-c", script, json.dumps(sorted(set(names.values())))],
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         versions = json.loads(done.stdout.strip().splitlines()[-1]) if done.returncode == 0 else {}
     except (OSError, ValueError, IndexError, subprocess.SubprocessError):
         return list(deps)

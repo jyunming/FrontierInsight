@@ -192,7 +192,12 @@ same PR that adds, splits or renames one.
   `make_executor`.
 - `core/experiment_deps.py` — what a quest environment is given before a run: requested packages minus the quest's
   own files, the selected skills' `pip_requires`, library skills on `PYTHONPATH`, one-at-a-time install fallback,
-  skill names pip cannot install explained as the skill, the repair note for what could not be installed.
+  skill names pip cannot install explained as the skill, the repair note for what could not be installed. Also the one
+  pip-name / import-name table (`IMPORT_TO_PIP`, `pip_name`, `import_names`; `code_project.requirements_for` uses it
+  too), the import scanner (`imported_modules`, `third_party`, `third_party_of`, `code_sources`, `skill_sources`,
+  `local_module_names`), `env_packages` (asks the quest's Python what an installed package provides),
+  `plan_installs` (the requested packages the scripts use, plus well-known unrequested imports; called by
+  `Engine._node_execute`) and `warmup_modules` (the post-install test import).
 - `core/code_project.py` — `refresh` keeps `code/` a runnable project (README, requirements.txt, `run.py`, and `study.json` for the trial contract; `run.py` repeats FI's trial runner for seed 0, one process per setting, stdlib only, working in `run_output/`; for a search for the best design `study.json` holds the optimisation block and `fi_search.py` is `core/optimise_search.py`, so `run.py` repeats FI's search, one process per design); `.fi/installed_deps.json` (written by `_node_execute`) is the requirements source; `attempt_records.script_hashes` skips the unedited generated files; called by `Engine._refresh_code_project` at the end of `implement` and the start of `analyze`; `record_change` makes one git commit + one `CHANGELOG.md` entry per change inside `code/` (`rerun_from.back_up` carries `code/.git` over a re-run; `script_hashes` ignore `.git` and CHANGELOG.md); `pin` gives the installed versions for requirements.txt; `verify` (called by `Engine._check_code_project` before `write`, once per code version) runs `run.py` in a clean venv and writes `needs/CODE_PROJECT_CHECK.json`, warning only; `unasked_conflicts` / `mark_asked` feed `Engine._ask_about_edited_project_files` (a `code_project` pause when `pauses.review` is `ask`); a file whose hash differs from `.fi/code_project.json` (a person's edit) is never overwritten.
 - `Engine._save_run_data` (called in `_node_execute` only once the run is accepted: exit 0 and the run manifest not
   stopped, pending or repairing; again after the replicate seeds for the raw copy only) copies the data tables the run
