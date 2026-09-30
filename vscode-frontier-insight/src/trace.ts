@@ -150,6 +150,32 @@ export async function runWhy(
 }
 
 /**
+ * `@fi /rename <quest_id> <new title>` — change a finished or paused quest's title (core/quest_title.py): the paper's
+ * title line, config.yaml, the summary and the saved state, recorded in its audit trace. The same change as
+ * `python launch.py --rename` and the pencil beside the title on the web quest page.
+ */
+export async function runRename(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const words = promptArgs.trim().split(/\s+/).filter((w) => w);
+    if (words.length < 2) {
+        stream.markdown("Which quest, and what title? Example: `@fi /rename 1790003131-my-quest Energy Drift in Symplectic Integrators`\n");
+        return;
+    }
+    const ctx = launchContext(stream);
+    if (!ctx || token.isCancellationRequested) return;
+    stream.progress(`Renaming ${words[0]}…`);
+    const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, ["--rename", ...words, "--output-root", ctx.outputRoot]);
+    const text = (res.code === 0 ? res.stdout : [res.stdout, res.stderr].filter((t) => t.trim()).join("\n")).trim();
+    stream.markdown(text ? "```\n" + text.slice(0, OUTPUT_CHARS) + "\n```\n" : `No output (exit ${res.code}).\n`);
+    if (res.code === 0 && text.includes("--emit")) {
+        stream.markdown(`To make an output again with the new title: \`@fi /generate ${words[0]} <format>\`.\n`);
+    }
+}
+
+/**
  * `@fi /resume <quest_id> --from` with no step — the steps this quest reached, which are the ones it can be run again
  * from, each with what that redoes. The same list as `python launch.py --resume <id> --from` and the web Redo menu.
  */

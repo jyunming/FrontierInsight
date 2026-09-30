@@ -1,0 +1,284 @@
+"""A quest's title, and changing it after the quest has run.
+
+The title the model picked (or the one suggested at the start) can be a poor one. :func:`rename` sets a finished or
+paused quest's title in every place it lives: the paper's title line (``paper/paper.md``, and an older top-level
+``paper.md``), ``config.yaml``'s ``title``, ``frontier_insight_summary.json`` and the saved state a later resume or
+re-run reads (``.fi/state.sqlite``). The change is recorded in the quest's audit trace. Results, data and code are
+never touched. Already-rendered outputs (paper.pdf, slides, poster, talk) keep the old title until they are made again;
+:attr:`RenameResult.outputs_to_redo` names them, and :meth:`RenameResult.lines` says how.
+
+The CLI (``fi tools rename``), the web quest page (``POST /api/quests/<id>/title``) and VS Code (``@fi /rename``) all
+call this one function.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+MAX_LENGTH = 200
+
+# The same first-``# ``-heading rule the paper generator uses to lift the title (generation/paper.py:_FIRST_H1_RE).
+_FIRST_H1_RE = re.compile(r"^# +(.+?)[ \t\r]*$", re.MULTILINE)
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
+_FM_TITLE_RE = re.compile(r"^title:[ \t]*(.*)$", re.MULTILINE)
+_YAML_TITLE_RE = re.compile(r"^title:[^\n]*$", re.MULTILINE)
+
+# Each output a person may already have, the kind that makes it again (``--emit <kind>``), and the files that show it.
+_OUTPUTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("paper_pdf", ("paper.pdf",)),
+    ("slides", ("slides.pdf", "slides.html", "slides.pptx")),
+    ("poster", ("poster.pdf",)),
+    ("speech", ("talk.md",)),
+)
+
+_RUNNING_WINDOW_S = 300.0
+
+
+class RenameRefused(ValueError):
+    """The title cannot be changed: the reason is a sentence to show the person as it is."""
+
+
+class QuestRunning(RenameRefused):
+    """The quest is still running: its files are still being written."""
+
+
+@dataclass
+class RenameResult:
+    quest_id: str
+    old: str | None
+    new: str
+    changed: list[str] = field(default_factory=list)   # files changed, relative to the quest folder
+    saved_state: bool = False                          # the saved state a resume reads now has the new title
+    outputs_to_redo: list[str] = field(default_factory=list)
+
+    def lines(self) -> list[str]:
+        """What happened, in a few plain lines, for the CLI and VS Code."""
+        out = [f"Title of {self.quest_id} is now: {self.new}"]
+        if self.old:
+            out.append(f"  (was: {self.old})")
+        if self.changed:
+            out.append(f"  Updated: {', '.join(self.changed)}.")
+        if self.outputs_to_redo:
+            out.append("  Already-made outputs still show the old title. To make them again with the new one:")
+            for kind in self.outputs_to_redo:
+                out.append(f"    python launch.py --resume {self.quest_id} --emit {kind}")
+        return out
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"quest_id": self.quest_id, "old_title": self.old, "title": self.new, "changed": self.changed,
+                "saved_state": self.saved_state, "outputs_to_redo": self.outputs_to_redo}
+
+
+def clean(title: Any) -> str:
+    """The title as it will be saved, or :class:`RenameRefused` saying what is wrong with it."""
+    text = str(title if title is not None else "")
+    if "\n" in text or "\r" in text:
+        raise RenameRefused("The title must be one line.")
+    text = " ".join(text.split())
+    if not text:
+        raise RenameRefused("The title is empty.")
+    if len(text) > MAX_LENGTH:
+        raise RenameRefused(f"The title is {len(text)} characters; keep it to {MAX_LENGTH} or fewer.")
+    if any(ord(c) < 32 for c in text):
+        raise RenameRefused("The title has a control character in it.")
+    return text
+
+
+def _paper_title(text: str) -> str | None:
+    fm = _FRONTMATTER_RE.match(text)
+    if fm:
+        m = _FM_TITLE_RE.search(fm.group(1))
+        if m:
+            raw = m.group(1).strip()
+            try:
+                import yaml
+
+                value = yaml.safe_load(raw)
+                return (str(value).strip() or None) if value is not None else None
+            except Exception:  # noqa: BLE001 -- an odd front matter still has a readable title
+                return raw.strip("'\"") or None
+        return None
+    m = _FIRST_H1_RE.search(text)
+    return (m.group(1).strip() or None) if m else None
+
+
+def _config_title(quest_root: Path) -> str | None:
+    try:
+        import yaml
+
+        data = yaml.safe_load((quest_root / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 -- no or unreadable config: no title from it
+        return None
+    value = data.get("title") if isinstance(data, dict) else None
+    return (str(value).strip() or None) if value else None
+
+
+def current_title(quest_root: Path) -> str | None:
+    """The title a reader sees: the paper's, else the one in ``config.yaml``, else ``None``."""
+    for rel in ("paper/paper.md", "paper.md"):
+        try:
+            found = _paper_title((quest_root / rel).read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if found:
+            return found
+    return _config_title(quest_root)
+
+
+def looks_running(quest_root: Path, *, now: float | None = None) -> bool:
+    """Whether the quest seems to be running now: it has not stopped for a person, and its ``run.log`` changed in the
+    last five minutes while it has no final summary (or the log is newer than the summary: it was resumed)."""
+    fi = quest_root / ".fi"
+    if (fi / "pause.json").is_file() or (quest_root / "NEXT_STEP.md").is_file():
+        return False
+    try:
+        log_mtime = (fi / "run.log").stat().st_mtime
+    except OSError:
+        return False
+    now = time.time() if now is None else now
+    if now - log_mtime >= _RUNNING_WINDOW_S:
+        return False
+    try:
+        summary_mtime = (quest_root / "frontier_insight_summary.json").stat().st_mtime
+    except OSError:
+        return True
+    return log_mtime > summary_mtime + 5
+
+
+def _retitle_paper(text: str, title: str) -> str:
+    fm = _FRONTMATTER_RE.match(text)
+    if fm:
+        body = fm.group(1)
+        line = f"title: {json.dumps(title, ensure_ascii=False)}"
+        new_body = _FM_TITLE_RE.sub(lambda _m: line, body, count=1) if _FM_TITLE_RE.search(body) else line + "\n" + body
+        return text[:fm.start(1)] + new_body + text[fm.end(1):]
+    m = _FIRST_H1_RE.search(text)
+    if m:
+        return text[:m.start()] + f"# {title}" + text[m.end():]
+    return f"# {title}\n\n{text}"
+
+
+def _retitle_yaml(text: str, title: str) -> str:
+    """``config.yaml`` with its ``title`` changed and nothing else: a one-line edit keeps its comments and order. A title
+    written some other way (a block over several lines) falls back to writing the whole mapping again."""
+    import yaml
+
+    before = yaml.safe_load(text) or {}
+    if not isinstance(before, dict):
+        raise RenameRefused("config.yaml is not a YAML mapping; fix it by hand first.")
+    line = f"title: {json.dumps(title, ensure_ascii=False)}"
+    edited = _YAML_TITLE_RE.sub(lambda _m: line, text, count=1) if _YAML_TITLE_RE.search(text) else None
+    if edited is None:
+        m = re.search(r"^topic:", text, re.MULTILINE)
+        edited = (text[:m.start()] + line + "\n" + text[m.start():]) if m else line + "\n" + text
+    try:
+        after = yaml.safe_load(edited) or {}
+    except yaml.YAMLError:
+        after = None
+    expected = {**before, "title": title}
+    if isinstance(after, dict) and after == expected:
+        return edited
+    return yaml.safe_dump(expected, sort_keys=False, indent=2, allow_unicode=True)
+
+
+async def _update_saved_state(quest_root: Path, title: str) -> bool:
+    """Put the new title into the latest saved state, in place, so a resume or a re-run of the writing reads it. The
+    checkpoint keeps its id (and so its pending writes); only the two title values change."""
+    sqlite_path = quest_root / ".fi" / "state.sqlite"
+    if not sqlite_path.is_file():
+        return False
+    from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+    config = {"configurable": {"thread_id": quest_root.name, "checkpoint_ns": ""}}
+    async with AsyncSqliteSaver.from_conn_string(str(sqlite_path)) as saver:
+        current = await saver.aget_tuple(config)
+        if current is None or current.checkpoint is None:
+            return False
+        checkpoint = dict(current.checkpoint)
+        values = dict(checkpoint.get("channel_values") or {})
+        values["title"] = title
+        values["title_confirmed"] = True
+        checkpoint["channel_values"] = values
+        parent = (current.parent_config or {}).get("configurable", {}).get("checkpoint_id")
+        put_config = {"configurable": {"thread_id": quest_root.name, "checkpoint_ns": "",
+                                       **({"checkpoint_id": parent} if parent else {})}}
+        await saver.aput(put_config, checkpoint, current.metadata or {}, {})
+    return True
+
+
+def rename(quest_root: Path, new_title: Any) -> RenameResult:
+    """Set the title of the quest in ``quest_root``. Raises :class:`RenameRefused` (nothing changed) when the title is
+    not usable, the folder is not a quest, or the quest is still running."""
+    quest_root = Path(quest_root)
+    title = clean(new_title)
+    if not (quest_root / ".fi").is_dir():
+        raise RenameRefused(f"No quest at {quest_root}.")
+    if looks_running(quest_root):
+        raise QuestRunning(f"Quest {quest_root.name} is still running; rename it once it has stopped or finished.")
+    old = current_title(quest_root)
+    result = RenameResult(quest_id=quest_root.name, old=old, new=title)
+
+    # Every new text is worked out before anything is written, so a refusal (a config.yaml that is not a mapping)
+    # leaves the quest as it was.
+    edits: list[tuple[str, Path, str]] = []
+    for rel in ("paper/paper.md", "paper.md"):
+        path = quest_root / rel
+        if path.is_file():
+            text = path.read_text(encoding="utf-8")
+            new_text = _retitle_paper(text, title)
+            if new_text != text:
+                edits.append((rel, path, new_text))
+    cfg_path = quest_root / "config.yaml"
+    if cfg_path.is_file():
+        text = cfg_path.read_text(encoding="utf-8")
+        new_text = _retitle_yaml(text, title)
+        if new_text != text:
+            edits.append(("config.yaml", cfg_path, new_text))
+    for rel, path, new_text in edits:
+        path.write_text(new_text, encoding="utf-8")
+        result.changed.append(rel)
+
+    summary_path = quest_root / "frontier_insight_summary.json"
+    if summary_path.is_file():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            summary = None
+        if isinstance(summary, dict) and summary.get("title") != title:
+            summary["title"] = title
+            summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+            result.changed.append("frontier_insight_summary.json")
+
+    try:
+        result.saved_state = _run(_update_saved_state(quest_root, title))
+    except Exception:  # noqa: BLE001 -- the files are renamed; the saved state is best-effort and reported
+        result.saved_state = False
+    if result.saved_state:
+        result.changed.append(".fi/state.sqlite")
+
+    result.outputs_to_redo = [kind for kind, names in _OUTPUTS if any((quest_root / n).is_file() for n in names)]
+
+    from core import audit_log
+
+    audit_log.AuditLog(quest_root / ".fi" / "audit.jsonl", quest_root.name).append(
+        "title_changed", node="rename", old=old, new=title, changed=list(result.changed),
+    )
+    return result
+
+
+def _run(coro: Any) -> Any:
+    """Run ``coro`` to the end from sync code, also when called inside a running event loop (the web server)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()

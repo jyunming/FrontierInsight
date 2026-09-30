@@ -25,6 +25,7 @@ commands:
 | `@fi /digest [days]` | Weekly project-manager digest across your quests: completed, in-progress, themes, ✅/🆕/⚠️/🛑/❓ diff vs prior digest, suggested next quests. Default window: 7 days. | **1** (or 0 if window is empty) |
 | `@fi /portfolio` | All-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next quests. | **1** (or 0 if no quests on disk) |
 | `@fi /critique <quest_id>` | Adversarial second-pass review of a completed quest. For maximum effect, pick a different Copilot model in the picker from the one that wrote the paper. | **1** |
+| `@fi /rename <quest_id> <new title>` | Changes a finished or paused quest's title (see [Changing a quest's title](#changing-a-quests-title)). | **0** |
 | `@fi /help` | Lists the commands. | **0** |
 
 ### What runs, in order
@@ -170,6 +171,16 @@ The web quest page also has a **Quest map** (the Restart button is off while the
 
 The steps before the skills are the plan. To change it, use `--revise-plan "<what to change>"` (or the web **Plan** panel, or `@fi /plan <quest_id> <what to change>`), then `--resume`.
 
+### Changing a quest's title
+
+When the title the model chose is a poor one, change it once the quest has finished (or while it is paused):
+
+```bash
+fi tools rename <quest_id> Energy Drift of Symplectic Integrators at Large Step Sizes
+```
+
+This changes the title line of the paper, the `title` in the quest's `config.yaml`, the summary and the saved state a resume reads, and records the change in the quest's trace. Results, data and code are not touched. It is refused while the quest is running. A PDF, slides or poster already made still show the old title: the command lists them with the command that makes each again from the same paper, for example `python launch.py --resume <quest_id> --emit paper_pdf` (no re-run of the research). A rerun from a step before the writing may choose another title; rename again afterwards. On the web quest page, use **Rename** beside the title (it offers to make the outputs again); in VS Code, `@fi /rename <quest_id> <new title>`.
+
 `--resume` looks under the folder's `output.output_dir`; if it does not find the quest it says exactly where it looked. In VSCode, open your project folder and set `frontierInsight.repoPath` to the FrontierInsight folder; quests then run in the project (`frontierInsight.workingDir` overrides that). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
 
 ### All `fi` flags
@@ -186,6 +197,7 @@ The steps before the skills are the plan. To change it, use `--revise-plan "<wha
 | `--digest` | none | weekly PM digest, pairs with `--days N` (default 7) | **1** (or 0 if window is empty) |
 | `--portfolio` | none | all-time cross-quest synthesis (no time window) | **1** (or 0 if no quests on disk) |
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
+| `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
 | `--install-tectonic` | none | downloads tectonic to `tools/` for no-admin LaTeX | **0** (network download only) |
 
 | Flag | Mode | What it does |

@@ -255,6 +255,7 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "digest": ("--digest", "A weekly project-manager digest across your quests. `fi tools digest [--days N]`."),
     "portfolio": ("--portfolio", "A cross-quest synthesis, all time. `fi tools portfolio`."),
     "critique": ("--critique", "An adversarial second-pass review of a finished quest. `fi tools critique <quest_id>`."),
+    "rename": ("--rename", "Change the title of a finished or paused quest. `fi tools rename <quest_id> <new title>`."),
     "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
     "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
@@ -705,6 +706,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Why a quest did what it did, from what it recorded (no model is asked): why it stopped, why the review "
              "asked for a revision, why the evidence is at its level. Add what to ask about: stop, review, evidence, or "
              "a step's name (design, execute, write, ...) for why that step decided what it did.",
+    )
+    mode.add_argument(
+        "--rename",
+        nargs="+",
+        metavar=("QUEST", "TITLE"),
+        default=None,
+        help="Change the title of a finished or paused quest: the paper's title line, config.yaml, the summary and the "
+             "saved state, recorded in its audit trace. Results, data and code are not touched. QUEST is the quest id "
+             "(looked up under --output-root) or its folder; the rest of the words are the new title. Refused while "
+             "the quest is running. A PDF, slides or poster already made keep the old title until made again with "
+             "--resume QUEST --emit <kind>.",
     )
     mode.add_argument(
         "--approve-all-skills",
@@ -2157,8 +2169,12 @@ async def _finish_outputs(
         cfg, art, supervisor=supervisor,
         skip_existing=skip_existing, on_failure=on_failure,
     )
+    from core.quest_title import current_title
+
     summary = {
         "quest_id": art.quest_id,
+        # The paper's title (else config.yaml's): what the dashboard shows; `fi tools rename` changes it.
+        "title": current_title(Path(art.quest_root)),
         "quest_root": str(art.quest_root),
         "provider": cfg.provider.name,
         "outputs": {k: str(v) for k, v in written.items()},
@@ -2751,6 +2767,7 @@ async def main_async(args: argparse.Namespace) -> int:
         or bool(getattr(args, "approve_amendment", ""))
         or bool(getattr(args, "trace", ""))
         or bool(getattr(args, "why", None))
+        or bool(getattr(args, "rename", None))
         # Listing the steps a quest can be run again from reads its checkpoints only.
         or _list_steps
     )
@@ -2834,6 +2851,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.why:
             return _show_why(args.why[0], " ".join(args.why[1:]), args.output_root)
+
+        if args.rename:
+            return _rename_quest(args.rename, args.output_root)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -5728,6 +5748,28 @@ def _show_why(quest: str, about: str, output_root: Path) -> int:
         print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
         return 1
     print(why.explain(root, about))
+    return 0
+
+
+def _rename_quest(words: list[str], output_root: Path) -> int:
+    """``--rename QUEST TITLE...``: change a finished or paused quest's title (core/quest_title.py)."""
+    from core import quest_title
+
+    if len(words) < 2:
+        print("[FI] give the quest and the new title: fi tools rename <quest_id> <new title>")
+        return 2
+    root = _quest_dir(words[0], output_root)
+    if root is None:
+        print(f"[FI] no quest {words[0]!r} (looked at {Path(words[0])} and {output_root / words[0]}); pass its folder, "
+              "or --output-root.")
+        return 1
+    try:
+        result = quest_title.rename(root, " ".join(words[1:]))
+    except quest_title.RenameRefused as e:
+        print(f"[FI] not renamed: {e}")
+        return 1
+    for line in result.lines():
+        print(line)
     return 0
 
 

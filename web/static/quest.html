@@ -27,6 +27,10 @@
     <div class="flex flex-col md:flex-row md:items-center justify-between gap-6">
       <div class="flex flex-col gap-2">
         <h1 class="font-code-md text-headline-xl text-primary tracking-tight break-all" id="quest-title">Quest <span id="quest-id">…</span></h1>
+        <div id="title-row" class="hidden flex items-center gap-2 flex-wrap">
+          <span id="paper-title" class="text-on-surface font-label-md text-label-md"></span>
+          <button id="rename-btn" onclick="renameQuest()" title="Change this quest's title (the paper, its config and summary). Results, data and code are not touched." class="hidden text-outline hover:text-primary flex items-center gap-1 font-label-sm text-label-sm uppercase"><span class="material-symbols-outlined text-[16px]">edit</span> Rename</button>
+        </div>
         <div class="flex items-center gap-4 flex-wrap">
           <span id="status-badge" class="flex items-center gap-2 bg-surface-mid cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase text-on-surface-variant">loading…</span>
           <span id="current-node" class="font-label-sm text-label-sm text-outline uppercase"></span>
@@ -374,7 +378,39 @@
     } catch (e) { showError(`Network error: ${e}`); }
   }
 
+  let questTitle = null;
+  function renderTitle(data) {
+    questTitle = data.title || null;
+    document.getElementById('title-row').classList.remove('hidden');
+    document.getElementById('paper-title').textContent = questTitle || '(no title yet)';
+    // A running quest is still writing its files: the title is changed once it has stopped or finished.
+    document.getElementById('rename-btn').classList.toggle('hidden', !!data.alive);
+  }
+
+  async function renameQuest() {
+    const title = window.prompt('New title for this quest (one line). Results, data and code are not touched.', questTitle || '');
+    if (title === null || title.trim() === '' || title.trim() === questTitle) return;
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/title`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({title}),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { alert('Not renamed: ' + (body.detail || res.status)); return; }
+      const redo = body.outputs_to_redo || [];
+      if (redo.length) {
+        const names = redo.map(k => _OUTPUT_LABELS[k] || k).join(', ');
+        if (confirm('Renamed. The outputs already made (' + names + ') still show the old title. Make them again now with the new title? (No re-run of the research.)')) {
+          for (const kind of redo) {
+            await fetch(`/api/quests/${encodeURIComponent(questId)}/generate?kind=${encodeURIComponent(kind)}`, { method: 'POST' }).catch(() => {});
+          }
+        }
+      }
+      refresh();
+    } catch (e) { alert('Not renamed: ' + e); }
+  }
+
   function renderStatus(data) {
+    renderTitle(data);
     const badge = document.getElementById('status-badge');
     const baseCls = 'flex items-center gap-2 cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase';
     if (data.alive && data.pending_clarify) {
