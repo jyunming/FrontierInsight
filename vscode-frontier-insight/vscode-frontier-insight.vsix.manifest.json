@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "fa8568e6413436f51add9d9f0c2990d0b5afe7129c4ce0d534343afae654ee68",
+  "vsix_sha256": "0acb27980a4b5e7b4b5266adbfb06a35045eca205db24c68ba45dbbba0dc33a4",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -54,12 +54,12 @@
       "bytes": 2087
     },
     "extension/out/interview-core.js": {
-      "sha256": "af91810c00070b79898c598b9c5a98f5e24dd1b128017869a15261839571f1ce",
-      "bytes": 26870
+      "sha256": "a07d5ec9e35eab2752f6841e2b15f077093d2ff88792dbf41fb0d04dd49688e3",
+      "bytes": 26956
     },
     "extension/out/interview.js": {
-      "sha256": "0434b317671b8d2070f6894d185b0d28ff847adf1335019dad07620de447d7c6",
-      "bytes": 69298
+      "sha256": "76e1a122095d8deb83c98404a50a1fb08cfb220c169a6a6290cd706822fcd02c",
+      "bytes": 70863
     },
     "extension/out/lm-messages.js": {
       "sha256": "ebde76bc31e90bc2ab7a82b73095de6fdf43166b493eb1fda987a22e63ca8aeb",
@@ -114,8 +114,8 @@
       "bytes": 14965
     },
     "extension/readme.md": {
-      "sha256": "0cd01abbb85fd57342e9fabfc6634ba727a5999e2b249df9a348a040e553398d",
-      "bytes": 78531
+      "sha256": "8d46145bf8eec990843059cffd9a7bbaf16f7b988f05c724ec34ac81b759574d",
+      "bytes": 78819
     }
   }
 }
