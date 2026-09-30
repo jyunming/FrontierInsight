@@ -62,7 +62,7 @@ def test_the_model_is_kept_in_the_protocol_and_placed_last() -> None:
 
 
 @pytest.mark.parametrize("bad, needle", [
-    ("just a sentence", "protocol.model"),
+    (42, "protocol.model"),
     ({"summary": "x", "equations": "E1: y = x"}, "protocol.model"),
     ({"summary": "x", "equations": [{"id": "E1"}]}, "formula"),
     ({"summary": ["x"]}, "protocol.model"),
@@ -238,10 +238,13 @@ class Paused(Exception):
     pass
 
 
-def _engine(tmp_path: Path, protocol: dict[str, Any], *, research: bool = False) -> tuple[Engine, list[dict[str, Any]]]:
+def _engine(tmp_path: Path, protocol: dict[str, Any], *, research: bool = False,
+            ask: bool = False) -> tuple[Engine, list[dict[str, Any]]]:
     eng = Engine(_cfg(tmp_path))
     if research:
-        eng.config = eng.config.model_copy(update={"rigor_profile": "research"})
+        # As the profile has it: the plan is held for the person (pauses.plan: ask).
+        eng.config = eng.config.model_copy(update={
+            "rigor_profile": "research", "pauses": eng.config.pauses.model_copy(update={"plan": "ask" if ask else "off"})})
     design = {"hypothesis": "RK4 converges at order 4", "method": "sweep h", "protocol": protocol,
               "plan": {"in_short": "x", "literature": [{"source": "[1]", "says": "RK4 is order 4"}]}}
     audit = json.dumps({"objections_addressed": []})
@@ -257,7 +260,8 @@ def _engine(tmp_path: Path, protocol: dict[str, Any], *, research: bool = False)
 
 
 def _literature() -> list[dict[str, Any]]:
-    return [{"content": "RK4 ...", "metadata": {"title": s["title"], "doi": s["doi"], "source": "openalex"}} for s in SOURCES]
+    return [{"content": "RK4 ...", "metadata": {"title": s["title"], "doi": s["doi"], "source": "openalex",
+                                              "url": f"https://example.org/{s['label']}"}} for s in SOURCES]
 
 
 @pytest.mark.asyncio
@@ -324,3 +328,168 @@ async def test_under_research_an_oracle_the_engine_added_without_a_source_stops_
     with pytest.raises(Paused):
         eng._check_plan_sources(state, stop=True)
     assert frozen_protocol.load(eng.quest_root) is None
+
+
+# --- the edge cases a review found -------------------------------------------------------------------------------
+
+
+def test_a_grouped_or_ranged_citation_of_retrieved_sources_is_a_source() -> None:
+    three = SOURCES + [{"label": "3", "title": "x", "doi": "", "url": ""}]
+    assert _gaps("[1, 2]", sources=three) == []
+    assert _gaps("[1–3]", sources=three) == []
+    (gap,) = _gaps("[1, 7]", sources=three)
+    assert "[7]" in gap and "[1]" not in gap
+
+
+def test_an_array_index_is_not_a_citation() -> None:
+    assert _gaps("the value y[10] of E1 after 10 steps") == []
+
+
+def test_a_doi_with_parentheses_or_a_prefix_is_matched_as_written() -> None:
+    sources = [{"label": "1", "title": "t", "doi": "https://doi.org/10.1016/0021-9991(76)90041-3", "url": ""}]
+    from core.oracle_check import retrieved_sources
+    assert _gaps("doi 10.1016/0021-9991(76)90041-3, eq. 12", sources=sources) == []
+    assert _gaps("see https://doi.org/10.1016/0021-9991(76)90041-3.", sources=sources) == []
+    stored = retrieved_sources([("1", {"title": "t", "doi": "doi:10.1016/0021-9991(76)90041-3"})])
+    assert stored[0]["doi"] == "10.1016/0021-9991(76)90041-3"
+
+
+def test_a_derivation_that_only_points_to_a_recalled_source_is_not_a_derivation() -> None:
+    (gap,) = _gaps("derived from Butcher (2008), Numerical Methods, table 5.2")
+    assert "Butcher" in gap or "steps" in gap
+    (gap,) = _gaps("Derivation: see Butcher 2008 p. 99 for the constant")
+    assert "steps" in gap or "Butcher" in gap
+    (gap,) = _gaps("derivation: the constant is in the textbook we all know well")
+    assert "steps" in gap
+    eq = {"id": "E1", "formula": "a = b", "role": "generates", "source": "derived", "derivation": "from Hairer's book, recalled"}
+    assert oracle_check.equation_problem(eq, SOURCES)
+
+
+def test_an_equation_is_cited_by_its_id_in_any_case_and_a_physics_symbol_is_not_an_equation() -> None:
+    assert _gaps("e1 at h = 0.1") == []
+    assert _gaps("[2], the ground-state energy E0") == []
+    fixed, why = plan.normalize_protocol({"model": {"summary": "x", "equations": [
+        {"id": 1, "formula": "a = b", "role": "generates", "source": "[1]"}]}})
+    assert why is None and fixed["model"]["equations"][0]["id"] == "E1"
+
+
+def test_a_short_generic_title_is_not_a_citation() -> None:
+    sources = [{"label": "1", "title": "Monte Carlo Methods", "doi": "", "url": ""}]
+    assert _gaps("a standard result for monte carlo methods, from memory", sources=sources) != []
+
+
+def test_a_second_implementation_that_reuses_the_simulations_code_is_not_independent() -> None:
+    assert _gaps("second implementation using a different method: the same RK4 function",
+                 kind="second_implementation") != []
+    assert _gaps("a second implementation that doesn’t use the simulation’s code: scipy's solve_ivp",
+                 kind="second_implementation") == []
+
+
+def test_a_model_written_as_one_sentence_before_the_block_had_parts_still_parses() -> None:
+    fixed, why = plan.normalize_protocol({"grid": {"h": [0.1]}, "model": "SIR ODE with frequency-dependent transmission"})
+    assert why is None and fixed["model"] == "SIR ODE with frequency-dependent transmission"
+    notes = oracle_check.model_notes(fixed, SOURCES)
+    assert any("one sentence" in n for n in notes), notes
+    text = plan.render("t", {}, {"hypothesis": "h", "protocol": fixed})
+    assert "SIR ODE with frequency-dependent transmission" in text.split("## Success criteria")[0]
+
+
+def test_a_model_without_equations_hashes_as_it_was_written() -> None:
+    from core import frozen_protocol
+
+    raw = {"grid": {"h": [0.1]}, "model": {"summary": "x"}}
+    fixed, _ = plan.normalize_protocol(raw)
+    assert frozen_protocol.sha256(fixed) == frozen_protocol.sha256(plan.normalize_protocol(fixed)[0])
+    assert "equations" not in fixed["model"]
+
+
+def test_the_plan_lists_the_sources_the_quest_found_by_number() -> None:
+    text = plan.render("t", {}, {"hypothesis": "h", "protocol": plan.normalize_protocol(_protocol())[0]}, sources=SOURCES)
+    assert "## The sources this quest found" in text
+    assert "- [1] Numerical Methods for Ordinary Differential Equations (DOI 10.1002/9781119121534)" in text
+    assert plan.parse(text).error is None
+
+
+def test_the_malformed_parts_of_a_model_or_a_source_list_never_crash_the_check() -> None:
+    assert oracle_check.source_gaps({"oracles": [{**GOOD_ORACLE, "reference": "E1"}], "model": {"equations": 5}},
+                                    [1, None, "x"]) != []
+    assert oracle_check.model_notes({"model": {"equations": 5}}, [])
+
+
+# --- the engine, again ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path_key", ["no_simulation_resolved", "survey_mode_resolved"])
+async def test_a_quest_that_runs_no_experiment_is_not_checked(tmp_path: Path, path_key: str) -> None:
+    eng, seen = _engine(tmp_path, _protocol(oracles=[{**GOOD_ORACLE, "reference": ""}]), research=True)
+    await eng._node_plan({"topic": "RK4", "iteration": 0, "literature": _literature(), path_key: True})
+    assert seen == []
+    assert "did not" not in plan.plan_path(eng.quest_root).read_text(encoding="utf-8").split("## Checks already made")[1]
+
+
+@pytest.mark.asyncio
+async def test_under_research_with_the_plan_held_the_unsourced_stop_is_the_only_plan_stop(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    eng, seen = _engine(tmp_path, _protocol(oracles=[{**GOOD_ORACLE, "reference": ""}]), research=True, ask=True)
+    state = {"topic": "RK4", "iteration": 0, "literature": _literature()}
+    with pytest.raises(Paused):
+        await eng._node_plan(state)
+    assert seen[-1]["headline"] == "say where the plan's expected values come from"
+    path = plan.plan_path(eng.quest_root)
+    path.write_text(path.read_text(encoding="utf-8").replace("reference: ''", "reference: '[1], the error of RK4'"),
+                    encoding="utf-8")
+    seen.clear()
+    await eng._node_plan(state)
+    assert seen == [], "the person saw the plan at the first stop: it does not stop again"
+    eng._freeze_protocol_if_due(state)
+    record = frozen_protocol.load(eng.quest_root)
+    assert record["approved_by"].startswith("human")
+    assert [s["label"] for s in record["sources"]] == ["1", "2"]
+
+
+def test_the_freeze_keeps_the_sources_outside_the_hash_and_an_amendment_carries_them(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    protocol = {"grid": {"h": [0.1]}}
+    record = frozen_protocol.freeze(tmp_path, protocol, approved_by="t", source="plan.md", sources=SOURCES)
+    assert record["sha256"] == frozen_protocol.sha256(protocol)
+    assert frozen_protocol.load(tmp_path).get("sources_problem") is None
+    pending = {"n": 1, "proposed_protocol": {"grid": {"h": [0.2]}}, "proposed_sha256": frozen_protocol.sha256({"grid": {"h": [0.2]}})}
+    frozen_protocol.apply(tmp_path, pending, {"approved_by": "p"}, raw_root=None)
+    after = frozen_protocol.load(tmp_path)
+    assert after["sources"] == SOURCES and after.get("sources_problem") is None
+
+
+def test_an_edited_list_of_sources_in_the_frozen_record_is_not_believed(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    frozen_protocol.freeze(tmp_path, {"grid": {"h": [0.1]}}, approved_by="t", source="plan.md", sources=SOURCES)
+    path = frozen_protocol.frozen_path(tmp_path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["sources"].append({"label": "7", "title": "added later", "doi": "", "url": ""})
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert "edited after the freeze" in frozen_protocol.load(tmp_path)["sources_problem"]
+
+
+@pytest.mark.asyncio
+async def test_the_evidence_judges_citations_against_the_sources_as_numbered_at_the_freeze(tmp_path: Path) -> None:
+    eng, _seen = _engine(tmp_path, _protocol(oracles=[{**GOOD_ORACLE, "reference": "[2], table 3"}]))
+    state = {"topic": "RK4", "iteration": 0, "literature": _literature()}
+    await eng._node_plan(state)
+    eng._freeze_protocol_if_due(state)
+    protocol = eng._protocol_block(state)
+    # The paper later cites one source only, renumbered: [2] no longer exists in the state's list.
+    after_write = {**state, "literature": _literature()[:1]}
+    assert eng._oracle_source_gaps(after_write, protocol) == []
+
+
+def test_a_quest_frozen_before_the_sources_were_kept_is_judged_only_on_empty_references(tmp_path: Path) -> None:
+    from core import frozen_protocol
+
+    eng, _seen = _engine(tmp_path, _protocol())
+    protocol = {"oracles": [{**GOOD_ORACLE, "reference": "Butcher 2008"}, {**GOOD_ORACLE, "name": "b", "reference": ""}]}
+    frozen_protocol.freeze(eng.quest_root, protocol, approved_by="t", source="plan.md")
+    gaps = eng._oracle_source_gaps({"literature": []}, protocol)
+    assert len(gaps) == 1 and "'b'" in gaps[0] and "empty" in gaps[0]

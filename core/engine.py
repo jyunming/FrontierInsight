@@ -3983,8 +3983,8 @@ class Engine:
                 + "\n".join(f"  - {why}" for why in unsourced),
                 "A wrong expected value makes a correct simulation fail its check, or a wrong one pass it. In `plan.md` "
                 f"({path}), under “{_plan.DESIGN_HEADING}”, for each check in the `oracles` list of the protocol, "
-                f"{_oracle.SOURCE_FORMS}. A source counts only if this quest found it (it is in the plan's literature "
-                "list); one recalled from memory does not.",
+                f"{_oracle.SOURCE_FORMS}. A source counts only if this quest found it (it is listed under "
+                "“The sources this quest found” in plan.md); one recalled from memory does not.",
                 "Or ask for a change and let FI rewrite it: "
                 f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
                 "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
@@ -4096,7 +4096,8 @@ class Engine:
             audit += model_notes
             audit += [f"{g[0].upper()}{g[1:]}: {_oracle.SOURCE_FORMS}." for g in source_gaps]
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
-                            normalized, audit)
+                            normalized, audit,
+                            sources=self._retrieved_sources(state) if self._runs_code(state) else None)
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
@@ -4129,8 +4130,12 @@ class Engine:
             protocol = planned.get("protocol") if isinstance(planned, dict) else None
         if not isinstance(protocol, dict):
             return [], []
-        sources = self._retrieved_sources(state)
-        return _oracle.source_gaps(protocol, sources), _oracle.model_notes(protocol, sources)
+        try:
+            sources = self._retrieved_sources(state)
+            return _oracle.source_gaps(protocol, sources), _oracle.model_notes(protocol, sources)
+        except Exception as e:  # noqa: BLE001 -- a check of the plan must never stop a quest by crashing
+            self._log.warning("[plan] where the checks' expected values come from could not be checked: %r", e)
+            return [], [f"Where the checks' expected values come from could not be checked ({type(e).__name__})."]
 
     def _check_plan_sources(self, state: QuestState, *, stop: bool, protocol: Any = None) -> list[str]:
         """Say, in run.log, which checks of the plan expect a value with no source a reader can check (no ``reference``,
@@ -4141,12 +4146,18 @@ class Engine:
         gaps, _notes = self._plan_source_findings(state, protocol)
         for why in gaps:
             self._log.warning("[plan] %s: %s", why, _oracle.SOURCE_FORMS)
-        if gaps and stop and self.config.rigor_profile == "research":
+        # Only a plan a person can edit can be stopped for: without plan.md (the draft could not be used) the evidence
+        # record carries the gap instead.
+        if gaps and stop and self.config.rigor_profile == "research" and _plan.plan_path(self.quest_root).is_file():
+            added = self._oracles_added_read()
+            if added and not added.get("shown"):
+                # This stop shows the plan, the checks the engine added included: the stop for them is not made again.
+                self._oracles_added_write({**added, "shown": True})
             self._pause_for_plan(unsourced=gaps)
         elif gaps and not self.__dict__.get("_said_unsourced"):
             self._said_unsourced = True
             print(f"[FI] {len(gaps)} check(s) in the plan do not say where their expected value comes from, or cite a "
-                  "source this quest did not find; see plan.md (Checks already made) and .fi/run.log")
+                  "source this quest did not find; see plan.md and .fi/run.log")
         return gaps
 
     async def _connect_llm(self) -> None:
@@ -6776,6 +6787,24 @@ class Engine:
             payload={"check": check, "failure": failure},
         )
 
+    def _oracle_source_gaps(self, state: QuestState, protocol: Any) -> list[str]:
+        """The checks whose expected value has no source a reader can check, for the evidence record. The sources are
+        the ones the freeze recorded, numbered as the plan cited them (the paper later cites a subset under new numbers).
+        A protocol frozen before the freeze recorded them (or one whose record of them was edited) is judged only on
+        what needs no list: an empty ``reference``."""
+        if not isinstance(protocol, dict) or not self._runs_code(state):
+            return []
+        frozen = _frozen.load(self.quest_root)
+        if frozen is None:
+            return _oracle.source_gaps(protocol, self._retrieved_sources(state))
+        sources = frozen.get("sources")
+        if isinstance(sources, list) and not frozen.get("sources_problem"):
+            return _oracle.source_gaps(protocol, sources)
+        gaps = _oracle.empty_references(protocol)
+        if frozen.get("sources_problem"):
+            gaps.append(str(frozen["sources_problem"]))
+        return gaps
+
     def _write_evidence(self, state: QuestState, *, sealing: bool = False) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
         (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest.
@@ -6803,11 +6832,11 @@ class Engine:
                 statistics_gaps = [f"the statistics could not be worked out ({type(e).__name__}: {str(e)[:160]})"]
             # Where each check's expected value comes from, judged against the sources as they were numbered when the
             # protocol was frozen (the paper later cites a subset under new numbers).
-            frozen_record = _frozen.load(self.quest_root) or {}
-            sources = (frozen_record["sources"] if isinstance(frozen_record.get("sources"), list)
-                       else self._retrieved_sources(state))
-            oracle_source_gaps = (_oracle.source_gaps(protocol_now, sources)
-                                  if isinstance(protocol_now, dict) and self._runs_code(state) else [])
+            try:
+                oracle_source_gaps = self._oracle_source_gaps(state, protocol_now)
+            except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
+                self._log.warning("[evidence] where the checks' expected values come from could not be checked: %r", e)
+                oracle_source_gaps = [f"where the checks' expected values come from could not be checked ({type(e).__name__})"]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps,
@@ -7918,6 +7947,8 @@ class Engine:
         self._warn_if_plan_diverges()
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
+        # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
+        self._check_plan_sources(state, stop=True, protocol=self._draft_protocol(state))
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
@@ -15387,9 +15418,9 @@ If an outline is given, it describes the whole experiment as one program: put th
 
 # How an oracle's expected value may be sourced, for a request to rewrite the plan (core/oracle_check.py reads it).
 _REFERENCE_FORMS = (
-    "`derivation: <the steps that give the number>`, a source from the plan's literature list by its [n], an equation "
+    "`derivation: <the steps that give the number>`, a source from the plan's list of the sources this quest found, by its [n], an equation "
     "of the plan's `model` by its id (E1), or, for a second implementation, what it is and that it shares no code with "
-    "the simulation. A source that is not in the plan's literature list does not count."
+    "the simulation. A source that is not in that list does not count."
 )
 
 _PLAN_DIRECTIVE = """

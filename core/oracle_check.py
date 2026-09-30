@@ -173,6 +173,13 @@ def kind_of(oracle: dict[str, Any]) -> str | None:
     return word if word in KINDS else _KIND_WORDS.get(word)
 
 
+def _doi(text: Any) -> str:
+    """A DOI in one form: lower case, without a ``https://doi.org/`` or ``doi:`` prefix or trailing punctuation."""
+    doi = str(text or "").strip().lower()
+    doi = re.sub(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", "", doi)
+    return doi.rstrip(".,;:”’\"'")
+
+
 def retrieved_sources(labelled: list[tuple[str, dict[str, Any]]]) -> list[dict[str, str]]:
     """The quest's retrieved sources as the checks below match them: ``(label, metadata)`` pairs, the labels the plan's
     literature list and the paper use ([1], [W1]), become ``{label, title, doi, url}``."""
@@ -180,59 +187,117 @@ def retrieved_sources(labelled: list[tuple[str, dict[str, Any]]]) -> list[dict[s
     for label, meta in labelled:
         out.append({
             "label": str(label), "title": " ".join(str(meta.get("title") or "").split()),
-            "doi": str(meta.get("doi") or "").strip().lower(), "url": str(meta.get("url") or "").strip().lower(),
+            "doi": _doi(meta.get("doi")), "url": str(meta.get("url") or "").strip().lower(),
         })
     return out
 
 
-_LABEL_RE = re.compile(r"\[(W?\d+)\]", re.IGNORECASE)
-_DOI_RE = re.compile(r"\b10\.\d{4,9}/[^\s,;\]\)]+", re.IGNORECASE)
-_EQ_RE = re.compile(r"\bE(\d+)\b")
+def sources_block(sources: list[dict[str, str]]) -> list[str]:
+    """The numbered list of the sources this quest retrieved, one line each, as a check cites them ([n])."""
+    rows = []
+    for s in sources if isinstance(sources, list) else []:
+        if isinstance(s, dict) and s.get("label"):
+            doi = f" (DOI {s['doi']})" if s.get("doi") else ""
+            rows.append(f"- [{s['label']}] {' '.join(str(s.get('title') or '(untitled)').replace('`', chr(39)).split())}{doi}")
+    return rows
+
+
+# A citation label, alone or in a group or range: [2], [1, 3], [1-3], [W1]. Not an index such as y[10].
+_LABEL_RE = re.compile(r"(?<![\w\]\)])\[\s*(W?\d+(?:\s*[,–\-]\s*W?\d+)*)\s*\]", re.IGNORECASE)
+# A DOI up to whitespace; parentheses inside it are kept (10.1016/0021-9991(76)90041-3), and a closing bracket or
+# punctuation that ends the sentence is not.
+_DOI_RE = re.compile(r"(?:https?://(?:dx\.)?doi\.org/|doi:\s*)?\b10\.\d{4,9}/\S+", re.IGNORECASE)
 _DERIVATION_RE = re.compile(r"^\s*(?:derivation|derived)\b[\s:.\-–—]*", re.IGNORECASE)
-# What a second implementation says about the code it does not share with the simulation.
+# A source named by author and year (Butcher 2008, Hairer et al. (1993)): a source, not a derivation.
+_AUTHOR_YEAR_RE = re.compile(
+    r"\b[A-Z][A-Za-zÀ-ſ'\-]+(?: et al\.?| (?:and|&) [A-Z][A-Za-zÀ-ſ'\-]+)?,? \(?(?:1[6-9]\d\d|20\d\d)\)?")
+# Steps that only point elsewhere ("from the textbook", "see Butcher") are not steps.
+_POINTER_RE = re.compile(r"^(?:from|see|in|as in|according to|following|per|cf\.?)\b", re.IGNORECASE)
+# A step of a derivation has something to compute with: a relation, an operator or a number.
+_MATH_RE = re.compile(r"[=<>≈≤≥+*/^]|\d")
+# What a second implementation says about the code it does not share with the simulation: a negation about code.
 _NOT_SHARED_RE = re.compile(
-    r"shares? no\b|not share|no (?:shared|common) code|no code (?:in common|shared)|independent(?:ly)? of|"
-    r"separate(?:ly)? (?:from|of|written)|without (?:using|calling|reusing|sharing)|does not (?:use|call|reuse)|"
-    r"doesn't (?:use|call|reuse)|written from scratch|different (?:library|code|solver|method|algorithm)",
+    r"shares? no (?:code|function|module|routine|part)|(?:does not|doesn[’']t|do not|don[’']t) share\b"
+    r"|no (?:shared|common) code|no code (?:in common|with|shared)"
+    r"|(?:does not|doesn[’']t|without) (?:use|call|reuse|import|using|calling|reusing|importing)\b[^.;]{0,60}"
+    r"\b(?:code|simulation|function|module|stepper|solver|routine|simulate\.py|run_trial|run_cell)\b"
+    r"|independent(?:ly)? of the simulation(?:'s)?(?: code)?|written from scratch",
     re.IGNORECASE,
 )
 # A derivation shorter than this names one; it does not write its steps.
 _MIN_STEPS = 20
+# A title shorter than this (in words) is too generic to count as naming a source ("Monte Carlo Methods").
+_MIN_TITLE_WORDS = 5
 
 
 def _words(text: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", text.lower()))
 
 
+def _labels_in(group: str) -> list[str]:
+    """The labels of one bracket: ``1, 3`` gives 1 and 3; ``1-3`` gives 1, 2 and 3."""
+    out: list[str] = []
+    for part in re.split(r"\s*,\s*", group.upper()):
+        bounds = re.split(r"\s*[–\-]\s*", part)
+        if len(bounds) == 2 and bounds[0].lstrip("W").isdigit() and bounds[1].lstrip("W").isdigit():
+            web = bounds[0].startswith("W")
+            low, high = int(bounds[0].lstrip("W")), int(bounds[1].lstrip("W"))
+            if 0 < high - low <= 50:
+                out.extend(f"{'W' if web else ''}{n}" for n in range(low, high + 1))
+                continue
+        out.extend(b for b in bounds if b)
+    return out
+
+
 def _cites(text: str, sources: list[dict[str, str]]) -> tuple[list[str], list[str]]:
-    """``(what text cites that the quest retrieved, what it cites that it did not)``: a [n] label, a DOI, or the title of
-    a retrieved source (three words or more) written into it."""
-    labels = {s["label"].upper(): s for s in sources}
+    """``(what text cites that the quest retrieved, what it cites that it did not)``: a [n] label (alone, grouped or a
+    range), a DOI, or the title of a retrieved source (five words or more) written into it."""
+    sources = [s for s in sources if isinstance(s, dict)] if isinstance(sources, list) else []
+    labels = {str(s.get("label") or "").upper() for s in sources}
     found, missing = [], []
-    for label in _LABEL_RE.findall(text):
-        (found if label.upper() in labels else missing).append(f"[{label.upper()}]")
-    dois = {s["doi"] for s in sources if s.get("doi")}
-    for doi in _DOI_RE.findall(text):
-        doi = doi.lower().rstrip(".")
+    for group in _LABEL_RE.findall(text):
+        for label in _labels_in(group):
+            (found if label in labels else missing).append(f"[{label}]")
+    dois = {_doi(s.get("doi")) for s in sources if s.get("doi")}
+    for raw in _DOI_RE.findall(text):
+        doi = _doi(raw)
+        while doi.endswith(")") and doi.count(")") > doi.count("("):
+            doi = _doi(doi[:-1])
+        doi = doi.rstrip("]")
         (found if doi in dois else missing).append(doi)
     flat = f" {_words(text)} "
     for s in sources:
-        title = _words(s.get("title") or "")
-        if len(title.split()) >= 3 and f" {title} " in flat:
-            found.append(f"[{s['label']}]")
+        title = _words(str(s.get("title") or ""))
+        if len(title.split()) >= _MIN_TITLE_WORDS and f" {title} " in flat:
+            found.append(f"[{s.get('label')}]")
     return list(dict.fromkeys(found)), list(dict.fromkeys(missing))
 
 
 def _equations(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     model = protocol.get("model") if isinstance(protocol, dict) else None
     items = model.get("equations") if isinstance(model, dict) else None
-    return {str(e.get("id")).strip().upper(): e for e in items or [] if isinstance(e, dict) and str(e.get("id") or "").strip()}
+    items = items if isinstance(items, list) else []
+    return {str(e.get("id")).strip().upper(): e for e in items if isinstance(e, dict) and str(e.get("id") or "").strip()}
 
 
 def _derivation_steps(text: str) -> str | None:
     """The steps after a leading "derivation" (``None`` when the text does not start with one)."""
     match = _DERIVATION_RE.match(text)
     return text[match.end():].strip() if match else None
+
+
+def _steps_problem(steps: str, sources: list[dict[str, str]]) -> str | None:
+    """Why the steps of a derivation are not steps a reader can follow (too short, only a pointer elsewhere, nothing to
+    compute with, or a source the quest did not retrieve), or ``None``."""
+    if len(steps) < _MIN_STEPS or _POINTER_RE.match(steps) or not _MATH_RE.search(steps):
+        return "does not write its steps"
+    found, missing = _cites(steps, sources)
+    if missing:
+        return f"rests on {', '.join(missing)}, which this quest did not retrieve"
+    named = [m.group(0).strip() for m in _AUTHOR_YEAR_RE.finditer(steps)]
+    if named and not found:
+        return f"rests on {', '.join(dict.fromkeys(named))}, which is not a source this quest retrieved"
+    return None
 
 
 def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str | None:
@@ -244,10 +309,8 @@ def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str |
                 "the steps written in `derivation`")
     steps = _derivation_steps(source)
     if steps is not None:
-        steps = " ".join(f"{steps} {eq.get('derivation') or ''}".split())
-        if len(steps) < _MIN_STEPS:
-            return f"equation {eid} is marked as a derivation, but its steps are not written (`derivation`)"
-        return None
+        why = _steps_problem(" ".join(f"{steps} {eq.get('derivation') or ''}".split()), sources)
+        return f"equation {eid} is marked as a derivation, but it {why}" if why else None
     found, missing = _cites(source, sources)
     if missing:
         return f"equation {eid} cites {', '.join(missing)}, which this quest did not retrieve"
@@ -263,22 +326,18 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
     name = str(oracle.get("name") or "?").strip()
     ref = " ".join(str(oracle.get("reference") or "").split())
     if not ref:
-        return (f"the check {name!r} does not say where its expected value comes from (its `reference` is empty)")
+        return f"the check {name!r} does not say where its expected value comes from (its `reference` is empty)"
     steps = _derivation_steps(ref)
     if steps is not None:
-        if len(steps) < _MIN_STEPS:
-            return f"the check {name!r} names a derivation for its expected value, but does not write its steps"
-        return None
+        why = _steps_problem(steps, sources)
+        return f"the check {name!r} names a derivation for its expected value, but it {why}" if why else None
     found, missing = _cites(ref, sources)
     if missing:
         return (f"the check {name!r} takes its expected value from {', '.join(missing)}, which this quest did not "
                 "retrieve")
     equations = _equations(protocol)
-    cited = [f"E{n}" for n in dict.fromkeys(_EQ_RE.findall(ref))]
-    unknown = [e for e in cited if e not in equations]
-    if unknown:
-        return (f"the check {name!r} rests on equation {', '.join(unknown)}, which the model behind the numbers does not "
-                "list")
+    cited = [eid for eid in equations
+             if re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", ref, re.IGNORECASE)]
     for eid in cited:
         why = equation_problem(equations[eid], sources)
         if why:
@@ -291,12 +350,23 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
         return (f"the check {name!r} compares with a second implementation but does not say what code it does not share "
                 "with the simulation (write, for example, “shares no code with the simulation: it uses "
                 "scipy's solve_ivp”)")
-    return (f"the check {name!r} takes its expected value from a source this quest did not retrieve (“{ref[:80]}”)")
+    unknown = [f"E{n}" for n in dict.fromkeys(re.findall(r"\bE(\d+)\b", ref))]
+    if unknown:
+        return (f"the check {name!r} rests on equation {', '.join(unknown)}, which the model behind the numbers does not "
+                "list")
+    return f"the check {name!r} takes its expected value from a source this quest did not retrieve (“{ref[:80]}”)"
+
+
+def empty_references(protocol: dict[str, Any] | None) -> list[str]:
+    """The sentence :func:`reference_problem` gives each declared oracle whose ``reference`` is empty: the one judgement
+    that needs no list of the quest's sources."""
+    return [reference_problem(o, protocol, []) or "" for o in declared(protocol)
+            if not " ".join(str(o.get("reference") or "").split())]
 
 
 #: How an expected value may be sourced, for the sentences a person reads when one is not.
 SOURCE_FORMS = (
-    "give its `reference` as `derivation: <the steps>`, a source from the plan's literature list by its number ([2]), an "
+    "give its `reference` as `derivation: <the steps>`, a source this quest retrieved by its number in the plan's list of retrieved sources ([2]), an "
     "equation of the model behind the numbers (E1), or, for a second implementation, what code it does not share"
 )
 
@@ -313,7 +383,10 @@ def model_notes(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) 
         return []
     notes: list[str] = []
     model = protocol.get("model")
-    if not isinstance(model, dict):
+    if isinstance(model, str) and model.strip():
+        notes.append("The model behind the numbers is one sentence: write its core equations too (`equations`), each "
+                     "with its source.")
+    elif not isinstance(model, dict):
         notes.append(
             "The plan does not say what model produces the numbers (`model` in the protocol: what it is, what it assumes, "
             "where it holds, and its equations, each with its source). Without it nobody can tell whether a wrong number "
@@ -322,7 +395,8 @@ def model_notes(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) 
     else:
         if not str(model.get("summary") or "").strip():
             notes.append("The model behind the numbers does not say, in a sentence, what model produces them (`summary`).")
-        equations = [e for e in model.get("equations") or [] if isinstance(e, dict)]
+        items = model.get("equations")
+        equations = [e for e in items if isinstance(e, dict)] if isinstance(items, list) else []
         if not equations:
             notes.append("The model behind the numbers lists no equation: write its core equations, each with its source.")
         for eq in equations:

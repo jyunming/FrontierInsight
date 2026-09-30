@@ -242,6 +242,10 @@ def normalize_model(model: Any) -> tuple[dict[str, Any] | None, str | None]:
     the results) and its ``source`` (a source the quest retrieved, by its [n], or ``derivation`` with the steps in
     ``derivation``). Strict about form only: whether each source was really retrieved is for
     :func:`core.oracle_check.model_notes`, which needs the quest's sources."""
+    if isinstance(model, str) and model.strip():
+        # A sentence, as a plan written before the block had its parts could carry: kept as it was written (the frozen
+        # protocol's hash depends on it), shown as the summary, and the plan notes that its equations are missing.
+        return model, None
     if not isinstance(model, dict):
         return None, "`protocol.model` must be a mapping (`summary`, `assumptions`, `holds_for`, `equations`)"
     out: dict[str, Any] = dict(model)
@@ -254,8 +258,7 @@ def normalize_model(model: Any) -> tuple[dict[str, Any] | None, str | None]:
         out["assumptions"] = _as_list(out["assumptions"])
     equations = out.get("equations")
     if equations is None:
-        out["equations"] = []
-        return out, None
+        return out, None  # left out, not added: a block read back must hash as it was written
     if isinstance(equations, dict):
         equations = [equations]
     if not isinstance(equations, list):
@@ -273,6 +276,8 @@ def normalize_model(model: Any) -> tuple[dict[str, Any] | None, str | None]:
                 eq[key] = str(eq[key]).strip()
         if not eq.get("id"):
             return None, f"`protocol.model` equation {index} has no `id` (E1, E2, ...)"
+        if eq["id"].isdigit():
+            eq["id"] = f"E{eq['id']}"  # a bare number is the equation's number: a check cites it as E<n>
         if not eq.get("formula"):
             return None, f"`protocol.model` equation {eq['id']} has no `formula`"
         role = str(eq.get("role") or "").strip().lower()
@@ -420,6 +425,19 @@ def _literature_lines(items: Any) -> str:
 
 
 MODEL_HEADING = "The model behind the numbers"
+SOURCES_HEADING = "The sources this quest found"
+
+
+def _sources_lines(sources: list[dict[str, str]] | None) -> list[str]:
+    """The numbered list of the sources the quest retrieved, as a check or an equation cites them ([n]). Not read back."""
+    from . import oracle_check
+
+    rows = oracle_check.sources_block(sources or [])
+    if not rows:
+        return []
+    return [f"## {SOURCES_HEADING}", "",
+            "> A check's expected value or an equation of the model can cite one of these by its number ([2]); a source "
+            "that is not listed here does not count.", "", *rows, ""]
 
 
 def _flat(text: Any) -> str:
@@ -440,7 +458,9 @@ def _model_lines(protocol: Any) -> list[str]:
 
     if not isinstance(protocol, dict):
         return []
-    model = protocol.get("model") if isinstance(protocol.get("model"), dict) else None
+    model = protocol.get("model")
+    model = {"summary": model} if isinstance(model, str) and model.strip() else model
+    model = model if isinstance(model, dict) else None
     oracles = oracle_check.declared(protocol)
     if model is None and not oracles:
         return []
@@ -457,7 +477,8 @@ def _model_lines(protocol: Any) -> list[str]:
         lines.append("")
         lines.append(f"**Where it holds:** {_flat(model.get('holds_for')) or '(not written)'}")
         lines.append("")
-        equations = [e for e in model.get("equations") or [] if isinstance(e, dict)]
+        items = model.get("equations")
+        equations = [e for e in items if isinstance(e, dict)] if isinstance(items, list) else []
         lines.append("**Its equations:**")
         lines.append("")
         if not equations:
@@ -483,7 +504,8 @@ def _model_lines(protocol: Any) -> list[str]:
     return lines
 
 
-def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None) -> str:
+def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
+           sources: list[dict[str, str]] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
     that is used as written."""
     extra = extra if isinstance(extra, dict) else {}
@@ -507,6 +529,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         "",
         _literature_lines(extra.get("literature")),
         "",
+        *_sources_lines(sources),
         "## The gap this experiment addresses",
         "",
         gap,

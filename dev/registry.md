@@ -35,8 +35,10 @@ same PR that adds, splits or renames one.
   an equation of the plan's model, or a second implementation's "shares no code") and `model_notes` (the model block
   itself). `Engine._check_plan_sources` warns, and under `rigor_profile: research` stops at the plan
   (`_pause_for_plan(unsourced=...)`), at the plan step and right before the freeze; the freeze keeps the sources as
-  numbered then (`sources` in `needs/FROZEN_PROTOCOL.json`), and `Engine._write_evidence` passes the gaps to
-  `evidence.assess(oracle_source_gaps=...)`. The model block's shape (`protocol.model`) is `core/plan.py`'s
+  numbered then (`sources` and its own `sources_sha256` in `needs/FROZEN_PROTOCOL.json`; `load` sets
+  `sources_problem` on an edit), and `Engine._oracle_source_gaps` (called by `_write_evidence`; a record frozen
+  without `sources` is judged only on `empty_references`) passes the gaps to `evidence.assess(oracle_source_gaps=...)`.
+  `sources_block` is the numbered list plan.md shows (*The sources this quest found*). The model block's shape (`protocol.model`) is `core/plan.py`'s
   (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`).
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
