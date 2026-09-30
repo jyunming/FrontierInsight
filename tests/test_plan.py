@@ -556,7 +556,10 @@ async def test_a_plan_whose_protocol_has_one_unusable_key_is_still_written_and_s
     written = plan.parse(text).design
     assert written["protocol"] == {"runs_per_setting": 300}
     assert "`protocol.thresholds` was left out of the plan" in text
-    assert eng._client.chat.await_count == 2, "the design was not drafted again"
+    # The design, the audit, and one more question for the checks of correctness the draft did not name; the design itself
+    # was not drafted again.
+    prompts = [c.args[0][-1]["content"] for c in eng._client.chat.await_args_list]
+    assert len(prompts) == 3 and prompts[2].lstrip().startswith("# Correctness Criteria"), "the design was not drafted again"
 
 
 def test_a_grid_axis_may_be_names_but_not_a_mix_or_a_bool() -> None:

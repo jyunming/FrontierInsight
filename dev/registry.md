@@ -40,6 +40,15 @@ same PR that adds, splits or renames one.
   without `sources` is judged only on `empty_references`) passes the gaps to `evidence.assess(oracle_source_gaps=...)`.
   `sources_block` is the numbered list plan.md shows (*The sources this quest found*). The model block's shape (`protocol.model`) is `core/plan.py`'s
   (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`).
+- `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
+  correctness, each from a declared oracle, a case FI runs, or FI's trial record; never a headline metric or the
+  script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by
+  `plan.repair_protocol`), `describe` / `plan_notes` (the plan's *How we will judge whether the code got better* section,
+  rendered by `plan._criteria_lines`), `evaluate` / `se_rate` / `meets` (the values after a run), `record` / `history`
+  (`.fi/criteria_history.jsonl`) and `summary_line`. `Engine._propose_criteria` (one search, one more question,
+  `agents/plan_criteria.md`) runs in `_node_plan` when the draft names none; `Engine._record_criteria` runs at the end of
+  every `_node_execute` (case runs through `trial_runner.measure_oracles`, trial values through
+  `trial_runner.recorded_series`, the commit through `code_project.head`).
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
 - `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).

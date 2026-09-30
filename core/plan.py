@@ -11,7 +11,8 @@ The file has two kinds of section:
 * prose for the reader and for the paper's methods: *In short*, *What the literature says* (each source
   named), *The gap this experiment addresses*, *The model behind the numbers* (shown from the protocol's ``model`` and
   ``oracles``: what model produces the numbers, its equations with their sources, and where each check's expected value
-  comes from; only the design block is read back), *Success criteria*, *Risks*, *What this quest will not do*, and
+  comes from; only the design block is read back), *How we will judge whether the code got better* (the protocol's
+  ``criteria``, :mod:`core.criteria`; also shown, not read back), *Success criteria*, *Risks*, *What this quest will not do*, and
   *Checks already made* (what the methodology audit objected to and how the design answers it);
 * **the design**, a fenced YAML block under the heading *The design (used as written)*: the hypothesis,
   variables, method, expected outcome, planned figures, dependencies and result bounds. That block is the
@@ -213,6 +214,14 @@ def normalize_protocol(protocol: Any) -> tuple[dict[str, Any] | None, str | None
         out["oracles"] = fixed_oracles
     if out.get("acceptance") is not None:
         out["acceptance"] = _as_list(out["acceptance"])
+    if out.get("criteria") is not None:
+        # After the checks and the metrics: a criterion names a check, and may not name a headline number.
+        from . import criteria as _criteria
+
+        fixed_criteria, why = _criteria.normalize(out["criteria"], out)
+        if fixed_criteria is None:
+            return None, why
+        out["criteria"] = fixed_criteria
     if "model" in out:
         model, why = normalize_model(out.pop("model"))
         if model is None:
@@ -380,6 +389,17 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                     for name, out_value in ((n, protocol["thresholds"][n]) for n in left_out)
                 )
                 continue
+        if key == "criteria":
+            # One criterion that cannot be computed is left out, not the list it is in.
+            from . import criteria as _criteria
+
+            kept_c, dropped_c = _criteria.repair(out["criteria"], {k: v for k, v in out.items() if k != "criteria"})
+            notes.extend(dropped_c)
+            if kept_c:
+                out["criteria"] = kept_c
+                continue
+            del out[key]
+            continue
         if key == "model":
             # One equation that cannot be read is left out, not the model it is part of.
             fixed_model, model_notes = repair_model(out["model"])
@@ -504,6 +524,27 @@ def _model_lines(protocol: Any) -> list[str]:
     return lines
 
 
+CRITERIA_HEADING = "How we will judge whether the code got better"
+
+
+def _criteria_lines(protocol: Any) -> list[str]:
+    """The readable form of the protocol's criteria (``core/criteria.py``). Not read back: the block below is what runs."""
+    from . import criteria as _criteria
+
+    if not isinstance(protocol, dict):
+        return []
+    items = _criteria.declared(protocol)
+    lines = [f"## {CRITERIA_HEADING}", "",
+             "> Checks of correctness, never the study's own finding. FI computes each one itself after every run of the "
+             "code and keeps the result in `.fi/criteria_history.jsonl`; they are fixed with the protocol before the "
+             "first full run. Shown from `criteria` in the design block below; edit it there.", ""]
+    if not items:
+        lines.append("- (none: FI records every run as having no criterion, so a later change to the code cannot be "
+                     "shown to be better; add `criteria` to the protocol below)")
+    lines += [f"- {_criteria.describe(c, protocol)}" for c in items]
+    return lines + [""]
+
+
 def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
            sources: list[dict[str, str]] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
@@ -535,6 +576,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         gap,
         "",
         *_model_lines(design.get("protocol") if isinstance(design, dict) else None),
+        *_criteria_lines(design.get("protocol") if isinstance(design, dict) else None),
         "## Success criteria",
         "",
         _bullets(extra.get("success_criteria"), "- (not written)"),

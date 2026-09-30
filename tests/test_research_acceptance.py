@@ -37,6 +37,11 @@ RESEARCH_PROTOCOL = {
     }],
     "metrics": [METRIC],
     "contrasts": [{"metric": "final_size", "a": "R0=0.9", "b": "R0=3.0"}],
+    # How the code is judged: checks of correctness FI computes itself, never the headline (final_size).
+    "criteria": [
+        {"name": "nobody infected at R0 = 0", "oracle": "no_spread", "direction": "lower", "target": 0.01, "tolerance": 0.001},
+        {"name": "error bars shrink", "trials": "outbreak", "direction": "target", "target": 0.5, "tolerance": 0.25},
+    ],
 }
 ORACLE = '\n\ndef oracle():\n    return {"half": 0.5004}\n'
 SIM = SIM_TRIAL + ORACLE
@@ -167,6 +172,14 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     trials = [json.loads(line) for line in (root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     trials = [t for t in trials if t.get("event") == "trial"]
     assert len(trials) == 900 and len({t["seed"] for t in trials}) == 900
+    # How the code will be judged, computed by FI after the run: from the check FI measured and from its own trial record.
+    from core import criteria as cr
+
+    row = cr.history(root)[-1]
+    by = {c["name"]: c for c in row["criteria"]}
+    assert by["nobody infected at R0 = 0"]["counts"] is True and by["nobody infected at R0 = 0"]["met"] is True
+    assert by["error bars shrink"]["counts"] is True and by["error bars shrink"]["value"] is not None, by
+    assert row["run"] == "run_1" and (row["code_commit"] or shutil.which("git") is None)
     # The environment the experiment ran on, isolated and recorded after its installs.
     env = json.loads((root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
     assert env["isolated"] is True and env["recorded"].startswith("after installing") and "packages" in env
