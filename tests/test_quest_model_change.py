@@ -407,3 +407,48 @@ async def test_after_a_resume_with_a_new_model_cost_jsonl_names_it(tmp_path: Pat
     assert hints == ["claude-opus-5"]
     rows = [json.loads(ln) for ln in (eng.fi_dir / "cost.jsonl").read_text(encoding="utf-8").splitlines() if ln.strip()]
     assert rows[-1]["model"] == "claude-opus-5", rows
+
+
+def test_config_changed_to_b_but_the_chat_panel_runs_c_the_paper_names_c_not_b(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Earlier steps ran on A; config.yaml now names B; this run is resumed from the chat with C picked (launch.py puts C
+    in provider.model and B in the chat panel's record). B never runs: the paper must name A and C, never B."""
+    first = _started(tmp_path, "A")
+    _made_calls(first, "A")
+    _write_config(first.quest_root, "B")
+    cfg = _cfg(tmp_path, "C", extra={Engine.CHAT_MODEL_KEY: {"before": "B", "after": "C"}})
+    eng = Engine(cfg, resume_quest_id=first.quest_id)
+    eng._take_model_change()
+    eng._say_model_change()
+    events = audit_log.read(eng.audit.path)
+    disclosed = plan_settings.model_disclosure(events)
+    assert "A for the steps before the change, C after it" in disclosed
+    assert "B after it" not in disclosed
+    changes = [e for e in events if e["kind"] == "model_changed"]
+    assert len(changes) == 2 and changes[0]["run_uses"] == "C"
+    out = capsys.readouterr().out
+    assert "config.yaml's model changes from A to B; this run uses the chat panel's model C" in out
+    assert "from A to B from here on" not in out, "one sentence, not 'from here on B' then 'not B'"
+
+
+def test_resumed_again_on_the_chat_panel_s_model_with_no_named_calls_is_no_new_change(tmp_path: Path) -> None:
+    """A quest started from the chat on C (config A) whose calls named no model (the picker on Auto), resumed from
+    the chat on C again: nothing changed, so the paper is not told A made part of it."""
+    first = _started(tmp_path, "A")
+    _made_calls(first, "unnamed")
+    first._audit("model_changed", before="A", after="C", source="the model picked in the VS Code chat panel",
+                 before_any_step=True)
+    cfg = _cfg(tmp_path, "C", extra={Engine.CHAT_MODEL_KEY: {"before": "A", "after": "C"}})
+    eng = Engine(cfg, resume_quest_id=first.quest_id)
+    eng._take_model_change()
+    eng._say_model_change()
+    events = audit_log.read(eng.audit.path)
+    assert len([e for e in events if e["kind"] == "model_changed"]) == 1
+    assert plan_settings.model_disclosure(events) == ""
+
+
+def test_a_change_only_to_the_model_that_already_ran_is_not_disclosed(tmp_path: Path) -> None:
+    """Config's A -> B, but the chat panel runs C, which is what the earlier steps ran on too: one model made it."""
+    ev = [{"kind": "model_changed", "changes": [{"setting": "provider.model", "label": "the model", "from": "A",
+                                                   "to": "B"}], "run_uses": "C", "before_any_step": False}]
+    assert plan_settings.model_disclosure(ev) == ""

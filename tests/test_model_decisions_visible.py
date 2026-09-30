@@ -457,6 +457,62 @@ async def test_a_fallback_or_the_same_model_again_is_no_change(tmp_path: Path) -
     assert "earlier results were made by" not in log and "was answered by claude-opus-5" in log
 
 
+def test_a_new_quest_started_on_the_chat_panel_s_model_is_not_disclosed_as_two_models(tmp_path: Path) -> None:
+    from core import plan_settings
+
+    eng = _engine(tmp_path, provider="vscode_extension", model="claude-opus-5")
+    eng.config.provider.extra = {Engine.CHAT_MODEL_KEY: {"before": "gpt-5.6-luna", "after": "claude-opus-5"}}
+    eng._say_model_change()  # no earlier call: nothing was made on the config's model
+    changes = [e for e in al.read(eng.audit.path) if e["kind"] == "model_changed"]
+    assert len(changes) == 1 and changes[0]["before_any_step"] is True
+    assert plan_settings.model_disclosure(changes) == ""
+
+
+def test_config_s_change_and_the_chat_panel_s_other_model_are_both_in_the_trace(tmp_path: Path) -> None:
+    from core import plan_settings
+
+    # Earlier steps ran on A; config.yaml now says B; this run is resumed from the chat with C picked.
+    eng = _engine(tmp_path, provider="vscode_extension", model="C")
+    ar.append_model_call(eng.fi_dir, eng.quest_id, ar.model_call_row(
+        node="design", attempt=1, served={"provider": "vscode_extension", "model": "A", "reported": True},
+        requested_model="A", reports_model=False, messages=MESSAGES, response="x"))
+    eng._audit("node_completed", duration_s=1.0)
+    eng.config.provider.extra = {Engine.CHAT_MODEL_KEY: {"before": "B", "after": "C"}}
+    eng._audit("model_changed", changes=[{"setting": "provider.model", "label": "the model", "from": "A", "to": "B"}],
+               before_any_step=False)
+    eng.__dict__["_model_change_taken"] = ("A", "B")
+    eng._say_model_change()
+    eng._note_served_model("design", {"model": "C", "reported": True})
+    changes = [e for e in al.read(eng.audit.path) if e["kind"] == "model_changed"]
+    assert [(c.get("before"), c.get("after")) for c in changes] == [(None, None), ("A", "C")],         "config.yaml's change and the chat panel's model C, once each"
+    disclosed = plan_settings.model_disclosure(changes)
+    assert "A for the steps before the change, C after it" in disclosed
+    assert "the model from A to B" in al.describe(changes[0])
+
+
+@pytest.mark.asyncio
+async def test_config_s_own_model_change_confirmed_by_the_first_call_is_one_event(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, provider="openai", model="B")
+    ar.append_model_call(eng.fi_dir, eng.quest_id, ar.model_call_row(
+        node="design", attempt=1, served={"provider": "openai", "model": "A", "reported": True},
+        requested_model="A", reports_model=False, messages=MESSAGES, response="x"))
+    eng._audit("model_changed", changes=[{"setting": "provider.model", "label": "the model", "from": "A", "to": "B"}],
+               before_any_step=False)
+    eng.__dict__["_model_change_taken"] = ("A", "B")
+    eng._say_model_change()
+    eng._note_served_model("design", {"model": "B", "reported": True})
+    assert len([e for e in al.read(eng.audit.path) if e["kind"] == "model_changed"]) == 1
+
+
+def test_steps_done_on_auto_count_as_made_for_a_chat_panel_change(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, provider="vscode_extension", model="C")
+    eng._audit("node_completed", duration_s=1.0)  # a step done on the picker's Auto: no model named
+    eng.config.provider.extra = {Engine.CHAT_MODEL_KEY: {"before": "A", "after": "C"}}
+    eng._say_model_change()
+    (change,) = [e for e in al.read(eng.audit.path) if e["kind"] == "model_changed"]
+    assert change["before_any_step"] is False
+
+
 @pytest.mark.asyncio
 async def test_run_log_names_the_model_that_served_and_a_change_is_in_the_trace(tmp_path: Path) -> None:
     server = _MockBridgeServer()
@@ -612,4 +668,6 @@ def test_both_bridges_send_through_the_thinking_request_and_the_chat_passes_its_
         assert "ask_thinking" in text and "thinkingText(" in text, name
         assert not re.search(r"sendRequest\([^)]*,\s*\{\}\s*,", text), f"{name} still sends a bare request"
     ext = (src / "extension.ts").read_text(encoding="utf-8")
-    assert '"--vscode-bridge-port", String(port), ...chatModelArgs(userPickedModel)' in ext
+    # /start, /fleet and /resume pass the chat panel's model; /update and /generate keep the config's.
+    assert ext.count("...chatModelArgs(userPickedModel)") == 1
+    assert "const args: string[] = [...chatModelArgs(userPickedModel)];" in ext

@@ -219,7 +219,7 @@ The steps before the skills are the plan. To change it, use `--revise-plan "<wha
 
 ### Changing a quest's model
 
-Put the model you want in the quest's `config.yaml` (`provider.model`, in the quest folder) and resume it (`fi --resume <quest_id>`, **Resume** on the web quest page, or `@fi /resume <quest_id>` in VS Code). The quest does not stop to ask: a different model does not change what the result means or how strictly it is checked, so it needs no approval. The resumed quest says so in one plain line, for example:
+Put the model you want in the quest's `config.yaml` (`provider.model`, in the quest folder) and resume it (`fi --resume <quest_id>` or **Resume** on the web quest page). In VS Code, pick the model in the chat panel and `@fi /resume <quest_id>`: the chat panel's model wins over `config.yaml` for a quest resumed from the chat (with the picker on *Auto*, `config.yaml`'s model is used). That choice is for the run it starts only: the chat shows `[FI] the chat panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml`, the change goes into the trace and the paper, and `config.yaml` is not changed, so a later resume from a terminal or the web page uses `config.yaml`'s model again. What follows is the `config.yaml` way. The quest does not stop to ask: a different model does not change what the result means or how strictly it is checked, so it needs no approval. The resumed quest says so in one plain line, for example:
 
 ```
 [FI] model: the model changes from gpt-5.6-luna to claude-opus-5 from here on; steps already done were made by gpt-5.6-luna

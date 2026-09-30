@@ -53,7 +53,9 @@ KINDS = (
     "title_changed",      # a person changed the quest's title (core/quest_title.py): old, new, the paper's hash before and
                           # after; the only event a seal may be followed by (core/evidence.py chains the paper's hash)
     "model_changed",      # the quest's model changed: the chat panel's model replaced the config's, or the calls of this
-                          # run were answered by another model than the earlier ones (before, after, source)
+                          # run were answered by another model than the earlier ones (before, after, source), or the
+                          # recorded model settings in config.yaml changed (changes: [{setting, label, from, to}]);
+                          # before_any_step when nothing had been made on the old model
 )
 
 
@@ -433,6 +435,15 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         return f"quest {'resumed' if e.get('resumed') else 'started'}"
     if kind == "title_changed":
         return f"title changed to \"{e.get('new', '')}\"" + (f" (was \"{e['old']}\")" if e.get("old") else "")
+    if kind == "model_changed" and not e.get("after") and isinstance(e.get("changes"), list):
+        # A change of the recorded model settings (config.yaml): one ``{"label", "from", "to"}`` per setting.
+        def shown(v: Any) -> str:
+            return str(v) if isinstance(v, str) and v else (json.dumps(v, sort_keys=True) if v else "none named")
+
+        parts = [f"{c.get('label') or c.get('setting')} from {shown(c.get('from'))} to {shown(c.get('to'))}"
+                 for c in e["changes"] if isinstance(c, dict)]
+        # No ": " in the text: --why keeps what follows the last node prefix.
+        return f"{where}the model settings changed, " + ("; ".join(parts) or "which ones is not recorded")
     if kind == "model_changed":
         return (f"{where}the model changed from {e.get('before') or 'none named'} to {e.get('after', '')}"
                 + (f" ({e['source']})" if e.get("source") else ""))

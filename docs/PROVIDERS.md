@@ -172,8 +172,8 @@ config for that run, and `run.log` and the quest's trace say so ("the chat
 panel's model claude-opus-5 replaces gpt-5.6-luna from config.yaml"). A
 step's own `node_models` entry is kept. With the picker on *Auto* no model is
 named and the config's stays. A run started from a terminal or the web page
-has no chat panel, so it uses `provider.model` from the config (so does the
-resume `@fi /update` starts in its terminal). Whatever was asked for,
+has no chat panel, so it uses `provider.model` from the config (so does
+`@fi /update`, which approves the config as it is). Whatever was asked for,
 `run.log` names the model that answered the first call (as VS Code reports
 it; not with the picker on *Auto*, which names no model), warns when it is not the one the config names, and
 warns when it is not the model that answered the quest's earlier calls (the

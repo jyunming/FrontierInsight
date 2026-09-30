@@ -5244,10 +5244,36 @@ class Engine:
         if isinstance(change, dict) and change.get("after") and change.get("after") != change.get("before"):
             before = str(change.get("before") or "") or "no model"
             self._log.warning("[model] the chat panel's model %s replaces %s from config.yaml", change["after"], before)
-            if not (earlier and self.same_model(str(change["after"]), earlier)):
-                self._audit("model_changed", before=earlier or change.get("before") or None, after=change["after"],
-                            source="the model picked in the VS Code chat panel")
+            # A change of config.yaml's model is recorded apart (_take_model_change compares the config's own model,
+            # never the chat panel's): this is the change this run makes. Nothing made yet (a new quest started from
+            # the chat): the event says so, so the paper is not told two models produced the quest.
+            # With no earlier call naming its model (the picker on Auto, say), the trace's latest change says which
+            # model the quest was last moved to: resumed again on that one, nothing changed.
+            last = earlier or self._last_model_in_trace()
+            if not (last and self.same_model(str(change["after"]), last)):
+                taken = self.__dict__.get("_model_change_taken")
+                # Before this run: the model the earlier calls named, else the one config.yaml had before its change,
+                # else config.yaml's (never a model config.yaml names now but this run does not use, when it changed).
+                was = earlier or (taken[0] if isinstance(taken, tuple) else None) or change.get("before") or None
+                self._audit("model_changed", before=was, after=change["after"],
+                            source="the model picked in the VS Code chat panel",
+                            before_any_step=not self._made_anything())
                 self.__dict__["_chat_change_audited"] = True
+
+    def _last_model_in_trace(self) -> str | None:
+        """The model the quest's latest ``model_changed`` event (before this run's) moved it to: the chat panel's or the
+        served model (``after``), else the model config.yaml's change left running (``run_uses``); ``None`` when none."""
+        last = None
+        before_run = self.__dict__.get("_model_events_before_run")  # this run's own config.yaml change is not earlier
+        try:
+            earlier = [e for e in _audit_log.read(self.audit.path) if e.get("kind") == "model_changed"]
+            for e in earlier[:before_run] if isinstance(before_run, int) else earlier:
+                main = next((c.get("to") for c in e.get("changes") or []
+                             if isinstance(c, dict) and c.get("setting") == "provider.model"), None)
+                last = e.get("after") or e.get("run_uses") or main or last
+        except Exception:  # noqa: BLE001 -- a note, never in the way of the quest
+            return None
+        return str(last) if last else None
 
     def _note_served_model(self, node: str, served: dict[str, Any]) -> None:
         """Once per run, on the first answered call that used the quest's main model on its own provider (not a fallback):
@@ -5275,9 +5301,15 @@ class Engine:
             self._log.warning("[model] this quest's earlier results were made by %s and its results from here on by %s: "
                               "the quest's results were made by different models", earlier, model)
             change = (self.config.provider.extra or {}).get(self.CHAT_MODEL_KEY)
-            already = (self.__dict__.get("_chat_change_audited") and isinstance(change, dict)
-                       and self.same_model(str(change.get("after") or ""), model, family))
-            if not already:  # the chat panel's change is in the trace already, from the start of this run
+            taken = self.__dict__.get("_model_change_taken")
+            already = ((self.__dict__.get("_chat_change_audited") and isinstance(change, dict)
+                        and self.same_model(str(change.get("after") or ""), model, family))
+                       # config.yaml's own model change from the earlier model to this one, with no chat panel model.
+                       or (isinstance(taken, tuple) and not isinstance(change, dict)
+                           and self.same_model(taken[1], model, family) and self.same_model(taken[0], earlier)))
+            # The chat panel's change, or config.yaml's change to this model, is in the trace already, from the start
+            # of this run.
+            if not already:
                 self._audit("model_changed", before=earlier, after=model, source="the model that answered the calls",
                             node=node)
 
@@ -5508,17 +5540,43 @@ class Engine:
             self._log.warning("[model] could not record the model change: %r", e)
             return
         # Nothing made on the old model yet (its first start failed before any step, say): nothing to disclose.
-        try:
-            cost = self.fi_dir / "cost.jsonl"
-            made = (cost.is_file() and cost.stat().st_size > 0) or any(
-                e.get("kind") == "node_completed" for e in _audit_log.read(self.audit.path))
-        except Exception:  # noqa: BLE001 -- when unsure, say it as a change
-            made = True
+        made = self._made_anything()
         lines = _plan_settings.model_change_lines(changes, self.config.provider.node_models, made=made)
-        self._audit("model_changed", changes=changes, before_any_step=not made)
+        chat = (self.config.provider.extra or {}).get(self.CHAT_MODEL_KEY)
+        chat_after = chat.get("after") if isinstance(chat, dict) else None
+        try:
+            self.__dict__["_model_events_before_run"] = sum(
+                1 for e in _audit_log.read(self.audit.path) if e.get("kind") == "model_changed")
+        except Exception:  # noqa: BLE001
+            pass
+        # With the chat panel's model on this run, config.yaml's new model is not what runs: the paper is told of the
+        # chat panel's model instead (_say_model_change), not of one that never ran.
+        self._audit("model_changed", changes=changes, before_any_step=not made,
+                    **({"run_uses": chat_after} if chat_after else {}))
+        main = next((c for c in changes if c.get("setting") == "provider.model"), None)
+        if main is not None:
+            # The first call confirming this very change is not recorded again (_note_served_model).
+            self.__dict__["_model_change_taken"] = (str(main.get("from") or ""), str(main.get("to") or ""))
+        if chat_after and main is not None:
+            # config.yaml's model changed, but this run uses the chat panel's (_say_model_change records that): one
+            # sentence, not "from here on B" followed by "not B".
+            said = f"the model changes from {main.get('from') or 'none'} to "
+            lines = [f"config.yaml's model changes from {main.get('from') or 'none'} to {main.get('to') or 'none'}; "
+                     f"this run uses the chat panel's model {chat_after}" if line.startswith(said) else line
+                     for line in lines]
         for line in lines:
             self._log.info("[model] %s", line)
             print(f"[FI] model: {line}")
+
+    def _made_anything(self) -> bool:
+        """Whether anything was made on the quest's earlier model: a call in ``cost.jsonl`` or a completed step in the
+        trace. When unsure, yes (a change is then disclosed rather than hidden)."""
+        try:
+            cost = self.fi_dir / "cost.jsonl"
+            return (cost.is_file() and cost.stat().st_size > 0) or any(
+                e.get("kind") == "node_completed" for e in _audit_log.read(self.audit.path))
+        except Exception:  # noqa: BLE001 -- when unsure, say it as a change
+            return True
 
     def _stop_for_changed_settings(self, changed: list[str]) -> QuestArtifacts:
         """Stop before anything runs because a setting that decides how strictly the quest is checked differs from
