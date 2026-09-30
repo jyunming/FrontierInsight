@@ -930,8 +930,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "research-shaping fields are editable (no topic / "
              "title / provider). Affected LangGraph stages are "
              "invalidated based on what changed, then the quest "
-             "resumes via the existing --resume path. Mirrors "
-             "`@fi /update` in the VSCode extension.",
+             "resumes via the existing --resume path. Without a "
+             "terminal to answer in, nothing is asked: the settings "
+             "in the quest's config.yaml are approved as they are. "
+             "Mirrors `@fi /update` in the VSCode extension.",
     )
     p.add_argument(
         "--summarize-kind",
@@ -1373,9 +1375,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "PersistentBridge (Unix-domain socket on POSIX, named pipe on "
              "Windows). Every FI run that is not a child of the extension "
              "routes LLM calls through `vscode.lm.*` this way: --serve / "
-             "--tools, and the integrated-terminal commands the extension "
-             "spawns (`@fi /update`, `@fi /generate`), which pass this flag "
-             "explicitly. Auto-resolved per OS / user via "
+             "--tools, and a `--update` you run in a terminal yourself (the "
+             "line `@fi /update` shows carries this flag). Auto-resolved per OS / user via "
              "`core.bridge_path.persistent_bridge_path()` under --serve "
              "only — pass it yourself in any other mode. Pass empty "
              "string to disable.",
@@ -2194,6 +2195,12 @@ async def run_one(
                 # Non-fatal: the quest can still run. We just lose the
                 # auto-resume convenience for THIS quest.
                 print(f"[FI] couldn't copy config.yaml into quest dir: {e!r}", file=sys.stderr)
+        elif resume_quest_id is not None and _refresh_quest_config(source_yaml_path, dest):
+            # Resumed with another config (`--config edited.yaml --resume <id>`): that config is what runs, so the
+            # quest's own copy follows it. Otherwise the next `--resume <id>`, `@fi /resume` or `--update` would read
+            # the old copy and quietly go back to its settings (its model, say).
+            print(f"[FI] the quest's config.yaml now matches {source_yaml_path} (the one it resumed with); "
+                  f"the earlier one is kept as {dest.name}.before-resume")
     _record_quest(Path(engine.quest_root), cfg, started=resume_quest_id is None)
     # Pick the right clarify handler:
     #   --interactive          → terminal Q&A
@@ -4259,6 +4266,21 @@ def _cli_prompt_for(
         print(f"    (no match for '{raw}' — pick a number or a unique prefix)")
 
 
+def _refresh_quest_config(source: Path, dest: Path) -> bool:
+    """Make the quest's ``config.yaml`` (``dest``) a copy of the config it was resumed with (``source``) when the two
+    differ, keeping the earlier one beside it as ``config.yaml.before-resume``. True when it was replaced. Best-effort:
+    a copy that fails leaves the quest's config as it was (the run itself uses ``source`` either way)."""
+    try:
+        if source.resolve() == dest.resolve() or source.read_bytes() == dest.read_bytes():
+            return False
+        shutil.copy2(dest, dest.with_name(dest.name + ".before-resume"))
+        shutil.copy2(source, dest)
+        return True
+    except OSError as e:
+        print(f"[FI] couldn't bring the quest's config.yaml up to date with {source}: {e!r}", file=sys.stderr)
+        return False
+
+
 async def _run_update(
     *,
     quest_id: str,
@@ -4276,9 +4298,17 @@ async def _run_update(
     stages, writes the updated YAML, then resumes the quest via the
     existing ``--resume`` path. Implementation in
     :mod:`core.interview_update`.
+
+    With no terminal to answer in (stdin is not a TTY: the VS Code chat's ``@fi /update`` runs this in the chat), no
+    question is asked: the settings in ``config.yaml`` are approved as they are and the quest resumes.
     """
     from core.interview_update import run_update_flow
+    try:
+        ask = bool(sys.stdin is not None and sys.stdin.isatty())
+    except (AttributeError, ValueError):
+        ask = False
     return await run_update_flow(
+        ask=ask,
         quest_id=quest_id,
         output_root=output_root,
         vscode_bridge_port=vscode_bridge_port,

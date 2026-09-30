@@ -321,7 +321,11 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
         approved = _json.loads((fi_dir / plan_settings.NAME).read_text(encoding="utf-8"))["settings"]
     except (OSError, ValueError, KeyError, TypeError):
         approved = None
-    changed = plan_settings.differences(approved, plan_settings.settings_of(cfg)) if isinstance(approved, dict) else []
+    now = plan_settings.settings_of(cfg)
+    changed = plan_settings.differences(approved, now, models=False) if isinstance(approved, dict) else []
+    # A different model needs no approval: it is left as recorded here, so the quest's next start takes it, records
+    # it in the trace and says it (Engine._take_model_change).
+    models = plan_settings.model_changes(fi_dir, cfg) if isinstance(approved, dict) else []
     if changed and say is not None:
         say("")
         say("Approving these changes to how strictly the quest is checked:")
@@ -330,7 +334,12 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
     elif not isinstance(approved, dict) and say is not None and (quest_root / "config.yaml").is_file():
         say("")
         say("No earlier record of the settings this quest was approved with; approving them as they are now.")
-    plan_settings.record(fi_dir, cfg, quest_root)
+    if models and say is not None:
+        say("")
+        say("The model changes (no approval needed; the quest records it when it starts):")
+        for line in plan_settings.model_change_lines(models, getattr(cfg.provider, "node_models", None)):
+            say(f"  - {line}")
+    plan_settings.record(fi_dir, cfg, quest_root, models_from=approved if isinstance(approved, dict) else None)
     # The approval, by its hash, in the quest's hash-chained trace: the engine checks the record against the last one.
     try:
         import hashlib
@@ -530,10 +539,16 @@ async def run_update_flow(
     apply_vscode_bridge_override: Callable[..., None],
     vscode_bridge_socket: str = "",
     apply_vscode_bridge_socket_override: Callable[..., None] | None = None,
+    ask: bool = True,
 ) -> int:
     """Top-level entry from ``launch.py``. Validates the quest_id,
     runs the interview filtered to editable fields, performs soft
     invalidation, writes the updated YAML, then resumes the quest.
+
+    ``ask`` asks the setup questions (``launch.py`` passes whether stdin is a terminal). With no terminal to answer
+    in (the VS Code chat's ``@fi /update``, which runs this in the chat rather than in a terminal) the answers are the
+    ones in ``config.yaml`` as it is now: the settings are approved as they stand and the quest resumes. Every line a
+    person needs then starts with ``[FI] update:``, which the chat shows.
     """
     # Reject quest_id values that could escape the output root (path
     # traversal). Two-layer guard: regex allowlist + post-resolve
@@ -570,17 +585,23 @@ async def run_update_flow(
         print(f"[FI] --update: {e}", file=sys.stderr)
         return 1
 
-    print("=" * 72)
-    print(f"Frontier Insight — update quest {quest_id}")
-    print(f"Current YAML: {yaml_path}")
-    print("Editable fields only. Press Ctrl-C to cancel.")
-    print("=" * 72)
+    def say(line: str) -> None:
+        print(line if ask else (f"[FI] update: {line}" if line.strip() else ""))
+
+    if ask:
+        print("=" * 72)
+        print(f"Frontier Insight — update quest {quest_id}")
+        print(f"Current YAML: {yaml_path}")
+        print("Editable fields only. Press Ctrl-C to cancel.")
+        print("=" * 72)
+    else:
+        say(f"approving the settings in {yaml_path} as they are now, then resuming {quest_id}")
 
     partial: dict[str, Any] = asdict(current)
     new_partial = dict(partial)
 
     try:
-        for q in QUESTIONS:
+        for q in (QUESTIONS if ask else ()):
             if not q.mid_quest_editable:
                 continue
             if q.id in HARD_REFUSE_FIELDS:
@@ -695,10 +716,14 @@ async def run_update_flow(
         page_limit=_page_limit(new_partial.get("page_limit", current.page_limit)),
     )
 
+    if not ask:
+        # Nothing was asked: the answers are config.yaml's, exactly (never re-emitted, so nothing in it moves).
+        new = current
     changes = diff_answers(current, new)
     if not changes:
-        print()
-        print("No changes. Quest will resume with the existing YAML.")
+        if ask:
+            print()
+            print("No changes. Quest will resume with the existing YAML.")
     else:
         print()
         print("Changes detected:")
@@ -741,24 +766,24 @@ async def run_update_flow(
     # checkpoint reopen is a no-op (it only fires when next is empty), so the
     # surgical soft-invalidate + resume above is unchanged.
     reopen_on_terminal = bool(stages)
-    print()
+    if ask:
+        print()
     if reopen_on_terminal:
-        print(f"Resuming quest {quest_id} (re-opening if already finished)...")
+        say(f"Resuming quest {quest_id} (re-opening if already finished)...")
     else:
-        print(f"Resuming quest {quest_id}...")
+        say(f"Resuming quest {quest_id}...")
     cfg = Config.from_yaml(yaml_path)
     # The quest resumes in its own outputs folder, whatever a relative output_dir in its YAML means from the folder
     # this runs in (the quest may be one from another folder, found by its id among every quest FI has run).
     cfg.output.output_dir = quest_root.parent
-    approve_settings(quest_root, cfg, say=print)
+    approve_settings(quest_root, cfg, say=say)
+    # The VS Code chat's ``@fi /update`` runs this as a child of the extension and hands it a per-command bridge port,
+    # as ``/resume`` does.
     apply_vscode_bridge_override(cfg, vscode_bridge_port)
-    # The VSCode extension runs ``--update`` in an integrated terminal,
-    # which is NOT a child of the extension and so has no per-command TCP
-    # bridge to inherit; it passes the session-long PersistentBridge
-    # address instead. Without forwarding it here the resumed quest
-    # resolves a ``vscode_extension`` provider carrying neither
-    # ``bridge_socket`` nor ``bridge_port`` and raises at the first model
-    # call — forwarding the port alone no-ops, because it is 0.
+    # A terminal the person runs ``--update`` in (to answer the questions) is NOT a child of the extension and so has
+    # no per-command TCP bridge to inherit; it passes the session-long PersistentBridge address instead. Without
+    # forwarding it here the resumed quest resolves a ``vscode_extension`` provider carrying neither ``bridge_socket``
+    # nor ``bridge_port`` and raises at the first model call — forwarding the port alone no-ops, because it is 0.
     if apply_vscode_bridge_socket_override is not None:
         apply_vscode_bridge_socket_override(cfg, vscode_bridge_socket)
     try:
