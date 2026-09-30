@@ -75,6 +75,7 @@ from . import code_project as _code_project
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
+from . import phased as _phased
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
@@ -802,6 +803,8 @@ class Engine:
             self._preflight_paper_pdf()
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
+            if _phased.enabled(self.config):
+                await asyncio.to_thread(self._phased_prepare)
             await self.executor.setup(self.quest_root)
             await self._record_environment()
 
@@ -2089,10 +2092,14 @@ class Engine:
         )
         # evidence_gate → write (sufficient / insufficient-but-write) OR
         # back to literature for ONE bounded broaden pass.
+        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design"}
+        if _phased.enabled(self.config):
+            # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more.
+            after_gate["confirm"] = "execute"
         g.add_conditional_edges(
             "evidence_gate",
             self._audited_route("evidence_gate", self._route_after_evidence_gate),
-            {"write": "write", "broaden_lit": "literature", "redesign": "design"},
+            after_gate,
         )
         # write → claim_check → review. claim_check grounds each paper claim to
         # evidence (a no-op passthrough when engine.claim_grounding is off).
@@ -2308,6 +2315,11 @@ class Engine:
             return "write"
         analysis = state.get("analysis") or {}
         next_step = analysis.get("next_step", "publish")
+        if next_step in ("broaden_lit", "re_experiment") and self._phased_confirming():
+            self._log.info("[phased] confirm stage: the frozen design is run once, so the analysis's request to %s is "
+                           "not followed; the confirm result is written up as it is",
+                           "look at the literature again" if next_step == "broaden_lit" else "redesign")
+            return "write"
         if state.get("iteration", 0) >= self.config.engine.max_iterations:
             return "write"
         if next_step == "broaden_lit":
@@ -2319,8 +2331,66 @@ class Engine:
     def _route_after_evidence_gate(self, state: QuestState) -> str:
         """The evidence_gate node already decided write vs broaden (it
         owns the bounded-broaden bookkeeping); the router just reads it.
-        Fails open to ``write`` when the gate was a passthrough."""
-        return (state.get("evidence_assessment") or {}).get("route", "write")
+        Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
+        exploration goes to the confirm run first (``_phased_route``)."""
+        route = (state.get("evidence_assessment") or {}).get("route", "write")
+        if _phased.enabled(self.config):
+            return self._phased_route(state, route)
+        return route
+
+    # ---- explore, then confirm (engine.phased; core/phased.py) --------------------------------------------------
+
+    def _phased_log(self, lines: list[str]) -> None:
+        for line in lines:
+            self._log.info("[phased] %s", line)
+
+    def _phased_prepare(self) -> None:
+        """At every start: the exploration stage begins, or takes in the data supplied since (a part held back)."""
+        try:
+            _record, lines = _phased.prepare(self.quest_root, self.quest_id)
+        except OSError as e:
+            self._log.warning("[phased] the supplied data could not be held back (%r); the confirm run will use new "
+                              "random seeds only", e)
+            return
+        self._phased_log(lines)
+
+    def _phased_confirming(self) -> bool:
+        return _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.CONFIRM
+
+    def _phased_route(self, state: QuestState, route: str) -> str:
+        """Where the quest goes after the evidence gate in two stages. In exploration, a write on an accepted result
+        ends exploration: the protocol is frozen and the frozen design runs once more (``confirm``). In the confirm
+        stage the confirm run's result is recorded and the quest writes it up, never going back to change the design
+        (that would choose on data meant only for confirming)."""
+        current = _phased.stage(self.quest_root)
+        if current == _phased.CONFIRM and route != "write":
+            self._log.info("[phased] confirm stage: the frozen design is run once, so the evidence gate's %s is not "
+                           "followed; the confirm result is written up as it is", route)
+            route = "write"
+        if route != "write":
+            return route
+        if current in (None, _phased.EXPLORE):
+            if not self._runs_code(state) or not state.get("result_json"):
+                self._log.info("[phased] exploration stage: there is no accepted result to confirm, so the paper is "
+                               "written from exploration and says its numbers are exploratory")
+                return "write"
+            self._freeze_protocol_if_due(state, at_confirm=True)
+            frozen = _frozen.load(self.quest_root)
+            explore_runs = sum(1 for e in _audit_log.read(self.audit.path)
+                               if e.get("kind") == "node_completed" and e.get("node") == "execute") \
+                if self.audit.path.is_file() else 0
+            _record, lines = _phased.enter_confirm(
+                self.quest_root, explore_result=state.get("result_json"),
+                frozen_sha256=str(frozen["sha256"]) if frozen else None,
+                stride=max(1, int(self.config.engine.replicate_seed_stride)),
+                replicates=max(1, int(self.config.engine.execute_replicates)), explore_runs=explore_runs,
+            )
+            self._phased_log(lines)
+            return "confirm"
+        _record, lines = _phased.record_confirm(
+            self.quest_root, state.get("result_json") if (state.get("exec_result") or {}).get("returncode", 0) == 0 else None)
+        self._phased_log(lines)
+        return "write"
 
     def _route_after_review(self, state: QuestState) -> str:
         # Ordering is load-bearing:
@@ -6208,11 +6278,16 @@ class Engine:
             return protocol
         return planned_protocol
 
-    def _freeze_protocol_if_due(self, state: QuestState) -> None:
+    def _freeze_protocol_if_due(self, state: QuestState, *, at_confirm: bool = False) -> None:
         """Freeze the protocol right before the first full run, after the oracle gate has settled it (an oracle the
         engine added counts as part of it). A no-op once frozen. The record says who approved it: a person, when the
-        plan was held for them to read (``pauses.plan: ask``), and otherwise the engine on its own."""
+        plan was held for them to read (``pauses.plan: ask``), and otherwise the engine on its own. Under
+        ``engine.phased`` it is frozen when exploration ends instead (``at_confirm``), before the confirm run."""
         if _frozen.load(self.quest_root) is not None:
+            return
+        if not at_confirm and _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.EXPLORE:
+            self._log.info("[phased] exploration stage: the protocol is not frozen yet (the design may still change); "
+                           "it is frozen when exploration ends, before the confirm run")
             return
         protocol = self._draft_protocol(state)
         mode = self.config.pauses.plan
@@ -6248,6 +6323,8 @@ class Engine:
                 approved_by = f"auto: nobody approved the rest of this protocol (pauses.plan={mode}); {oracle_note}"
         iteration = int(state.get("iteration", 0) or 0)
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
+        if at_confirm:
+            source = f"the design exploration settled on ({source}), frozen when exploration ended, before the confirm run"
         replaced = _frozen.open_replacement(self.quest_root)
         if replaced is not None:
             approved_by = f"human: {replaced.get('approved_by')} approved replacing the protocol (--approve-as)"
@@ -6264,7 +6341,8 @@ class Engine:
             record = _frozen.freeze(self.quest_root, protocol, approved_by=approved_by, source=source,
                                     sources=self._retrieved_sources(state))
         self._log.info(
-            "[protocol] frozen before the first full run (%s, sha256 %s, run %s)%s",
+            "[protocol] frozen %s (%s, sha256 %s, run %s)%s",
+            "at the end of exploration, before the confirm run" if at_confirm else "before the first full run",
             record["source"], str(record["sha256"])[:12], record["run_id"],
             "" if protocol else " -- there is no protocol: nothing holds the experiment to a grid, runs or thresholds",
         )
@@ -6914,6 +6992,7 @@ class Engine:
                     "claim_check": "on" if self.config.engine.claim_grounding else "off",
                     # --analyze has no experiment to design, so there is no design to audit.
                     "design_audit": "not_applicable" if self.config.engine.analyze_local_first else "on",
+                    **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
                 },
             )
             path = self.quest_root / "needs" / "EVIDENCE.json"
@@ -8109,6 +8188,11 @@ class Engine:
         # counter`` means three runs of almost exactly the same trials.
         stride = max(1, int(self.config.engine.replicate_seed_stride))
         primary_env = _replicate_env(exec_env, 0, stride)
+        if _phased.enabled(self.config):
+            primary_env = _phased.seed_env(self.quest_root, primary_env)
+            self._log.info("[phased] %s", "exploration stage: this run may be changed after its results are seen"
+                           if _phased.stage(self.quest_root) == _phased.EXPLORE else
+                           "confirm stage: running the frozen design on data or seeds exploration never saw")
         run_started = time.time()
         result: ExecutionResult = await self._await_with_heartbeat(
             runner.execute(
@@ -8363,6 +8447,8 @@ class Engine:
             for seed in range(1, replicates_n):
                 replicates_ran = True
                 rep_env = _replicate_env(exec_env, seed, stride)
+                if _phased.enabled(self.config):
+                    rep_env = _phased.seed_env(self.quest_root, rep_env)
                 rep_result = await runner.execute(
                     [str(py), str(code_path)],
                     cwd=self.quest_root,
@@ -10299,6 +10385,8 @@ class Engine:
         amended = _frozen.disclosure(self.quest_root)
         if amended:
             evidence_note = f"{evidence_note}\n\n{amended}".strip()
+        if _phased.enabled(self.config):
+            evidence_note = f"{evidence_note}\n\n{_phased.write_note(self.quest_root)}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -10481,6 +10569,8 @@ class Engine:
             )
         markdown = (_mark_preliminary(markdown) if self.config.effective_result_use == "explore"
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
+        if _phased.enabled(self.config):
+            markdown = _phased.mark_paper(markdown, _phased.load(self.quest_root))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))

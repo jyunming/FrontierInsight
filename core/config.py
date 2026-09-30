@@ -631,6 +631,11 @@ class EngineConfig(BaseModel):
     # records of the other quests under the same output folder (their ids, hashes and exception type names are copied
     # into this quest's record). ``off`` reads and writes nothing.
     attempt_memory: Literal["shadow", "off"] = "shadow"
+    # Explore, then confirm (core/phased.py). On: the model may try designs and look at results in an exploration
+    # stage; when it ends the protocol is frozen and the frozen design is run once more on data held back from the
+    # person's own files (or, without enough of it, on new random seeds exploration never used). Only that confirm
+    # run's numbers can be publication-ready. Off (the default) changes nothing.
+    phased: bool = False
     # Human-feedback gate. ``"after_review"`` (the default) pauses
     # the quest AFTER the review node fires and waits for the user
     # to accept / reject / refine the result before finalising. The

@@ -261,6 +261,17 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
         gaps.append(f"the paper ({paper}) changed after the quest was sealed")
     return gaps
 
+# What keeps a two-stage quest's result preliminary, by its stage (core/phased.py ``status``); a confirmed one has no gap.
+_PHASED_GAPS = {
+    "explore": ("the numbers come from the exploration stage, where the design could still be changed after its results "
+                "were seen; they have not been confirmed on data or seeds exploration never saw"),
+    "confirming": "the confirm run of the frozen design has not finished",
+    "confirm_failed": "the confirm run of the frozen design produced no result, so nothing is confirmed",
+    "confirm_reused": ("the frozen design was run again after its confirm numbers were seen, so the numbers are no longer "
+                       "from one untouched confirm run"),
+}
+
+
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
@@ -488,6 +499,11 @@ def assess(
             "this quest was set up to explore (what the result is for: explore, or not said), so its result is "
             "preliminary: run it again for research (`result_use: research`) to make it publication-ready"
         )
+    # A quest run in two stages (engine.phased, core/phased.py): only the confirm run's result, on data or seeds the
+    # exploration never saw, is more than preliminary.
+    phased_gap = _PHASED_GAPS.get(str(settings.get("phased") or ""))
+    if phased_gap:
+        ready_gaps.append(phased_gap)
     # Under rigor_profile: research the hash-chained trace is what the quest's decisions are audited from: missing, or
     # no longer checking out, the result cannot be shown to have come about as its records say.
     if settings.get("rigor_profile") == "research":
@@ -595,6 +611,9 @@ def assess(
         "ladder": ladder,
         "rigor_profile": settings.get("rigor_profile") or "default",
     }
+    if settings.get("phased"):
+        record["phased"] = {"status": settings["phased"], "strategy": settings.get("phased_strategy") or "",
+                            "why_no_data": settings.get("phased_why_no_data") or ""}
     if settings.get("sealing") and settings.get("rigor_profile") == "research":
         # Written before the seal that names it: whoever reads it checks the seal (verify_seal).
         record["trace_seal"] = "pending"
