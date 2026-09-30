@@ -6,7 +6,7 @@ Ingest history timeline. Newest entries on top.
 
 Compiled by hand (the `llm-wiki` skill was not available) from the code on `origin/main` at `8338c30`, checked against the source, not the commit messages. `wiki/raw/` was not used; `index.md` was not rebuilt (no `sync_index.py` in this repository).
 
-Pages created (18):
+Pages created (17):
 - Correctness: [[How FI judges correctness]], [[Oracle provenance]], [[The model behind the numbers]], [[Scoring criteria]], [[Engine-callable simulations]], [[Skill self-tests]]
 - Study design and running: [[Study types]], [[Explore then confirm]], [[The code project and run data]]
 - Changing a quest: [[Refine]], [[Doing a step again]], [[Quest map]], [[Renaming a quest]]

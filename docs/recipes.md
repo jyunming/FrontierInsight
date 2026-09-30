@@ -497,7 +497,7 @@ Run with `--interactive`:
 python launch.py --config my_quest.yaml --interactive
 ```
 
-The agent prints 5 questions; press Enter to accept each suggested default, or type your own answer.
+The agent asks its setup questions one at a time (the banner says "5 questions", but there are usually more: one per open slot); press Enter to accept each suggested default, or type your own answer.
 
 ### Topics that need real data, not a Python script
 
@@ -516,7 +516,7 @@ The engine skips `implement → execute` entirely. Instead, `auto_collect_data` 
 python launch.py --config <yaml> --resume <quest_id>
 ```
 
-The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `clarify_mode: auto|interactive` — setting `no_simulation: true` in YAML is just the explicit override.
+The `simulatability` slot in the `clarify` agent's questionnaire decides this automatically when `pauses.clarify` is `auto` or `ask` (or left unset) — setting `no_simulation: true` in YAML is just the explicit override.
 
 The companion `topic_shape` slot (`experimental` / `review` / `case_study` / `opinion`) classifies the topic's natural shape independently of simulatability. When the shape is non-experimental but the engine still resolves to SIMULATE, run.log carries a WARNING and the design stage shifts to a narrow illustrative experiment with weight on literature synthesis — rather than producing a toy benchmark pretending to answer a broad question. If you'd rather skip the experiment entirely for survey-shaped topics, pin `simulatability: "no"` in `clarify_overrides` (note the **quotes** — PyYAML parses unquoted `no` as boolean `False`; the engine now coerces that to `"no"` but explicit strings are still preferred). The interview pre-fills this for review-shaped topics.
 

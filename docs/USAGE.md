@@ -46,7 +46,7 @@ It can go back at several points, each bounded: a crashed script is fixed and ru
 
 ### Per-quest LLM call breakdown
 
-A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; default engine settings — `clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
+A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete runs of one SIR simulation quest (gemma4 through Ollama; the engine settings of those runs — `clarify_mode: off`, a single reviewer, `cross_check_per_finding_k: 3` — plus `knowledge.source_routing: manual`, slides and a poster), counted from each quest's `.fi/cost.jsonl`, which records every model call under its node's name:
 
 | Node | Calls | Notes |
 |---|---|---|
@@ -734,8 +734,8 @@ precedence — first match wins, decision is logged to `run.log` as
    need real-world data?"* with `default: yes | no | uncertain`
    plus a one-line `reason`. `no` triggers no-simulation
    (`source=clarify_simulatability`); `yes`/`uncertain` keeps the
-   simulation path. In `clarify_mode: interactive` you see the
-   agent's default + reason and can override; in `clarify_mode:
+   simulation path. With `pauses.clarify: ask` you see the
+   agent's default + reason and can override; with `pauses.clarify:
    auto` the default is accepted but the reason is still logged.
 3. Legacy fallback: when the new `simulatability` slot is absent
    (older clarify prompts) the existing `empirical_vs_theoretical:
