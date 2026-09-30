@@ -216,6 +216,11 @@ same PR that adds, splits or renames one.
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client (`AxonHTTPBrain`: ingest, delete_documents, list_sources, search_raw), sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
+- `core/retractions.py` — the retraction check: `check_literature` looks each DOI up in Crossref (`updated-by`
+  notices, Retraction Watch included) after the literature node's dedup and sets `metadata["retraction"]`
+  (`retracted` / `not_retracted` / `not_checked` / `no_doi`); `apply_to_claims` makes a claim grounded in a retracted
+  source unsupported after the claim check; `summary_line` is the run.log line; `retracted_in_record` feeds the to-do
+  card. The `[retracted]` mark itself is added by `core/engine.py::_format_lit_header` and `_claim_source_block`.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
   one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
   `measure_oracles` in `_oracle_gate`: it calls the simulation on each oracle's case via `run_case`, and `run_oracle` only for an oracle without a case); `recorded_values_by_cell` / `given_values_not_run` hold each reported value to the trials of its own settings; under research `recorded_rows_by_cell` / `given_rows_problems` (via `Engine._given_row_findings`) check a mean over a subset trial by trial; the harness hands every trial the protocol's thresholds as `FI_THRESHOLDS` (`run_oracle` too; the proportion's 0/1 under its id and the averaged quantity under the mean's own id, `RETURN_MEMBERSHIP`); the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`); `code_changed_while_queued` compares the code at submission with the code at collection.

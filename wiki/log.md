@@ -30,3 +30,9 @@ Sources: core/oracle_check.py, core/trial_runner.py, core/evidence.py, core/crit
 Pages updated: [[oracle-provenance|Oracle provenance]] (a derivation needs an equation with `=`; shapes read at read time; FI fills once under research; the three ways on at the stop; going on as it is, with a name), [[model-behind-the-numbers|The model behind the numbers]] (parts under other names are read; the section is shown again after a rewrite).
 
 Sources: core/oracle_check.py, core/plan.py, core/accepted_checks.py, core/engine.py, agents/plan_revise.md, launch.py, web/server.py, web/static/quest.html, vscode-frontier-insight/src/extension.ts, vscode-frontier-insight/src/skills.ts.
+
+## 2026-09-30 — retracted sources
+
+Pages updated: [[literature-screening-record|Literature screening record]] (a third entry per literature pass: each DOI looked up in Crossref for a retraction; a retracted source is marked `[retracted]`, cannot ground a claim, and is named on the to-do card; no answer is "not checked").
+
+Sources: core/retractions.py, core/engine.py, core/todo.py, agents/claim_check.md, agents/write.md, agents/write_patch.md.

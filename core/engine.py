@@ -98,6 +98,7 @@ from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
 from . import protocol_check as _protocol
+from . import retractions as _retractions
 from . import split_run as _split_run
 from . import stats as _stats
 from .config import (
@@ -4010,6 +4011,13 @@ class Engine:
                 "[literature] picked up %d user-supplied paper(s) from inputs/papers/",
                 user_added,
             )
+        # Each DOI looked up in Crossref for a retraction (core/retractions.py); a retracted source is marked, never
+        # used as support. No answer is "could not be checked", and nothing here stops the quest.
+        if self.config.knowledge.enabled:
+            merged, retraction_rows = await _retractions.check_literature(merged)
+            if retraction_rows:
+                self._record_source_verdicts("retractions", this_iter, "checked", retraction_rows)
+                self._log.info("[literature] %s", _retractions.summary_line(retraction_rows))
         self._log.info(
             "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
             "+%d user-supplied, total=%d)",
@@ -13738,7 +13746,11 @@ class Engine:
             self._log.info(
                 "[claim_check] %d claim(s) rest on a source held as its title only; marked unsupported", held,
             )
-        unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
+        # A retracted source supports nothing, whatever the check made of its text (core/retractions.py).
+        claims, withdrawn = _retractions.apply_to_claims(claims, sources)
+        if withdrawn:
+            self._log.info("[claim_check] %d claim(s) rest on a retracted source; marked unsupported", withdrawn)
+        unsupported =[c["claim"] for c in claims if c["basis"] == "unsupported"]
         # A paper with a real body that yields zero claims is suspicious, not
         # clean: the check almost certainly missed something rather than the
         # paper genuinely making no substantive claims. Thresholded on the
@@ -17723,6 +17735,9 @@ def _format_lit_header(meta: dict[str, Any], i: int, thin: str | None = None) ->
         # The record holds no more than this says, and the writer is told so
         # where it reads the entry (see agents/write.md, "Citing sources").
         line1 += f" [{_THIN_MARKS[thin]}]"
+    if _retractions.is_retracted(meta):
+        # Crossref lists a retraction of it (core/retractions.py): every block that names it says so.
+        line1 += " [retracted]"
 
     extras: list[str] = []
     if venue:
@@ -18995,7 +19010,8 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
     sentences, then what a model read off its figures, labelled as that."""
     title = str(meta.get("title") or "").strip()
     ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
-    head = f"[{label}] {title}" + (f" · {ident}" if ident else "")
+    head = f"[{label}] {title}" + (" [retracted]" if _retractions.is_retracted(meta) else "") + (
+        f" · {ident}" if ident else "")
     if not sentences:
         return head
     if not text.strip():

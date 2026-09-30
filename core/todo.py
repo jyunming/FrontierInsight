@@ -356,6 +356,16 @@ def waiting(quest_root: Path) -> list[Item]:
         out.append(Item("sources", "Some literature sources could not be reached (.fi/source_failures.json).",
                         recommended="Nothing to do unless the literature looks thin: go on later, or add papers to "
                                     "inputs/papers/."))
+    from .retractions import retracted_in_record
+
+    retracted = retracted_in_record(root / ".fi")
+    if retracted:
+        named = "; ".join(t[:80] for t in retracted[:3]) + (f"; and {len(retracted) - 3} more" if len(retracted) > 3
+                                                            else "")
+        out.append(Item("retracted", f"{len(retracted)} source(s) the literature search found have been retracted "
+                                     f"({named}). The paper may not rest a claim on them.",
+                        recommended="Nothing to do unless the paper cites one: the claim check marks such a claim "
+                                    "unsupported (.fi/literature_queries.json lists the retraction notices)."))
     from .evidence import read as _read_evidence  # with its seal checked, as every surface shows it
 
     evidence = _read_evidence(root)
