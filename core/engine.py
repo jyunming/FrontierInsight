@@ -1697,6 +1697,16 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- the trace is a record; it must never stop a quest
             self._log.debug("[audit] could not record %s: %r", kind, e)
 
+    async def _flag_sources(self, items: list[Any], stage: str, *, record_clean: bool = False) -> None:
+        """Flag text in these sources that is hidden from a reader or addressed to an AI model (core/source_text.py):
+        kept, marked in the prompts, recorded once per source in the audit trace and run.log. In a thread: a source's
+        whole text can be 10 MB, and a --fleet shares the event loop."""
+        await asyncio.to_thread(
+            _source_text.flag_and_record, items, stage=stage, audit=self._audit, log=self._log,
+            content_of=_item_content, record_clean=record_clean,
+            reported=self.__dict__.setdefault("_sources_flagged", set()),
+        )
+
     def _seal_trace(self, state: QuestState) -> None:
         """The last event of a finished quest (``quest_finalized``), written after everything else the quest keeps:
         how many events the trace holds before it, how many events and attempt records could not be written, which
@@ -3540,7 +3550,7 @@ class Engine:
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
             work_scope=self._work_scope(state),
         )
-        _source_text.flag_and_record(seeded, stage="ideate", audit=self._audit, log=self._log)
+        await self._flag_sources(seeded, "ideate")
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
             literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
@@ -4136,8 +4146,7 @@ class Engine:
         )
         # Text in a source that is hidden from a reader or addressed to an AI model is flagged, never removed
         # (core/source_text.py): marked in the prompts, recorded in the audit trace, and the quest goes on.
-        await asyncio.to_thread(_source_text.flag_and_record, merged, stage="literature", audit=self._audit,
-                                log=self._log, content_of=_item_content, record_clean=True)
+        await self._flag_sources(merged, "literature", record_clean=True)
         qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
         full_n = qualities.get("full_text", 0)
         # "Nothing fetched" is not "no abstract": a search record from OpenAlex / Crossref / Semantic Scholar carries
@@ -4955,7 +4964,7 @@ class Engine:
                        "new source(s)) and asking the model again", query, len(new))
         lines = [f"- [{s['label']}] {s.get('title') or '(untitled)'}" for s in known[:25]] or ["- (none)"]
         lines += ["", f"One more search ({query!r}) found:"]
-        _source_text.flag_and_record(new, stage="criteria", audit=self._audit, log=self._log)
+        await self._flag_sources(new, "criteria")
         for i, doc in enumerate(new, start=1):
             meta = getattr(doc, "metadata", {}) or {}
             text = " ".join(str(getattr(doc, "content", "") or "").split())[:400]
@@ -5944,6 +5953,7 @@ class Engine:
         read = await self._read_literature_figures(state, merged)
         if not added and not read:
             return {}
+        await self._flag_sources(merged, "after_literature")  # the papers added and the readings appended
         if read:
             self._write_literature_files(merged, self.quest_root / "data" / "literature")
         return {"literature": merged}
@@ -12894,7 +12904,7 @@ class Engine:
             # provider.node_ensemble["cross_check"] is configured —
             # majority verdict wins per-finding, ties surfaced. Either
             # way ``parsed`` carries the same shape downstream.
-            _source_text.flag_and_record(hits, stage="cross_check", audit=self._audit, log=self._log)
+            await self._flag_sources(hits, "cross_check")
             cand_block = _format_lit(hits, **self._lit_kwargs(state))
             prompt = self._prompts["cross_check"].substitute(
                 topic=state.get("topic", "")[:1000],
@@ -23722,9 +23732,10 @@ def _ingest_user_dropped_papers(
             continue
         ocr_note = ""
         figures: list[dict[str, Any]] = []
+        hidden: list[str] = []
         try:
             if suffix == ".pdf":
-                content, ocr_note, figures = _extract_pdf(p)
+                content, ocr_note, figures, hidden = _extract_pdf(p)
                 log.info("[literature] %s: %s%s", p.name, ocr_note,
                          f"; {len(figures)} figure(s) with captions" if figures else "")
             else:
@@ -23751,15 +23762,17 @@ def _ingest_user_dropped_papers(
             "fetched_full_text": True,
             **({"full_text_ocr": True} if "by OCR" in ocr_note else {}),
             **({"figures": figures} if figures else {}),
+            **({"hidden_text": hidden} if hidden else {}),  # flagged by core/source_text.py
         }, quality="full_text"))
         count += 1
     return merged, count
 
 
-def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]]]:
+def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]], list[str]]:
     """Text of a PDF the person dropped in ``inputs/papers/`` (core/pdf_text.py: every page, scanned pages read by
-    OCR, up to 10 MB), its one-line summary, and its captioned figures (core/knowledge.py ``_pdf_figures``: cut once
-    and cached; a scanned page's figures too when OCR read it)."""
+    OCR, up to 10 MB), its one-line summary, its captioned figures (core/knowledge.py ``_pdf_figures``: cut once
+    and cached; a scanned page's figures too when OCR read it), and the passages it draws so a reader cannot see
+    them."""
     from core import pdf_text
     from core.knowledge import _pdf_figures
 
@@ -23769,7 +23782,7 @@ def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]]]:
         figures = _pdf_figures(data, ocr_lines=result.ocr_lines or None)
     except Exception:  # noqa: BLE001 -- the text is what the source is for; its figures are extra
         figures = []
-    return result.text, result.summary(), figures
+    return result.text, result.summary(), figures, list(result.hidden_text)
 
 
 #: What the quest state keeps of a source's text: the first this many characters, as it always held (64 KB). The

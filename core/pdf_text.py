@@ -15,11 +15,13 @@ lost its results and discussion.
   31 MB, are inside the wheel, so it runs offline once installed). With neither, the page is counted as unread and the result says so;
   it is never silently empty. No language model is involved.
 - ``max_bytes`` bounds the text (10 MB by default); a PDF cut there says at which page.
-- Text drawn so a reader cannot see it (in white on a white page, or at a size below :data:`HIDDEN_SIZE_PT`) is kept
-  in the text like the rest and also listed in ``hidden_text``: it reaches the model all the same, and it is how
-  instructions are planted in a paper for a model to read (core/source_text.py flags it). White text over a coloured
-  panel or an image (a label on a dark figure, a journal's banner) is not counted, and neither is a text layer drawn
-  invisibly (the searchable layer of a scan, or of a page a browser printed with its text drawn as images).
+- Text drawn so a reader cannot see it (in white on a white page, invisibly, or at a size below
+  :data:`HIDDEN_SIZE_PT`) is kept in the text like the rest and also listed in ``hidden_text``: it reaches the model
+  all the same, and it is how instructions are planted in a paper for a model to read (core/source_text.py flags it).
+  White or invisible text over a coloured fill or an image is not counted: a label on a dark figure, a journal's
+  banner, and the searchable layer a scan (or a browser printing its text as images) lays over the page image. Not
+  found: near-white text, text covered by a white box drawn after it, and (on the pypdfium2 path) text inside an
+  included figure.
 """
 
 from __future__ import annotations
@@ -170,11 +172,21 @@ def _inside(box: tuple[float, float, float, float], boxes: list[tuple[float, flo
     return any(min(b[0], b[2]) <= x <= max(b[0], b[2]) and min(b[1], b[3]) <= y <= max(b[1], b[3]) for b in boxes)
 
 
+def _is_hidden(*, invisible: bool, tiny: bool, white: bool, covered: bool) -> bool:
+    """A run of text no reader sees: drawn invisibly, tiny, or white, and (unless tiny) not over an image or a
+    coloured fill. An invisible layer over a page image is how a scan (and some browsers' print-to-PDF) makes the page
+    searchable, so it does not count; an invisible run on a bare page does."""
+    if invisible:
+        return not covered
+    return tiny or (white and not covered)
+
+
 def _hidden_pymupdf(page: Any) -> list[str]:
     backdrops: list[tuple[float, float, float, float]] = []
     for d in page.get_drawings():
         fill = d.get("fill")
-        if fill and min(fill) * 255 < _WHITE and (d.get("fill_opacity") or 1) > 0:
+        opacity = d.get("fill_opacity")
+        if fill and min(fill) * 255 < _WHITE and (1.0 if opacity is None else float(opacity)) > 0:
             backdrops.append(tuple(d["rect"]))
     backdrops += [tuple(i["bbox"]) for i in page.get_image_info()]
     out: list[str] = []
@@ -182,34 +194,44 @@ def _hidden_pymupdf(page: Any) -> list[str]:
         for line in block.get("lines", []):
             for span in line.get("spans", []):
                 text = " ".join(str(span.get("text") or "").split())
-                if not text or span.get("alpha", 255) == 0:  # a text layer drawn invisibly: see the module docstring
+                if not text:
                     continue
                 color = int(span.get("color") or 0)
-                white = min((color >> 16) & 255, (color >> 8) & 255, color & 255) >= _WHITE
-                if float(span.get("size") or 12) < HIDDEN_SIZE_PT or (white and not _inside(tuple(span["bbox"]), backdrops)):
+                if _is_hidden(invisible=span.get("alpha", 255) == 0,
+                              tiny=float(span.get("size") or 12) < HIDDEN_SIZE_PT,
+                              white=min((color >> 16) & 255, (color >> 8) & 255, color & 255) >= _WHITE,
+                              covered=_inside(tuple(span["bbox"]), backdrops)):
                     out.append(text)
     return out
 
 
 def _hidden_pdfium(page: Any) -> list[str]:
+    """The pypdfium2 reading. Only the page's own objects are read (``max_depth=1``): an object inside a form (a
+    figure included as one) has its size and place in the form's own coordinates, which would misread both."""
     import ctypes
 
     import pypdfium2.raw as pdfium_c
 
-    def fill(obj: Any) -> tuple[int, int, int, int] | None:
+    def colour_of(obj: Any, *, stroke: bool = False) -> tuple[int, int, int, int] | None:
         r, g, b, a = (ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint())
-        if not pdfium_c.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a):
+        get = pdfium_c.FPDFPageObj_GetStrokeColor if stroke else pdfium_c.FPDFPageObj_GetFillColor
+        if not get(obj.raw, r, g, b, a):
             return None
         return r.value, g.value, b.value, a.value
 
-    objects = list(page.get_objects(max_depth=3))
+    invisible_modes = {pdfium_c.FPDF_TEXTRENDERMODE_INVISIBLE, pdfium_c.FPDF_TEXTRENDERMODE_CLIP}
+    stroked_modes = {pdfium_c.FPDF_TEXTRENDERMODE_STROKE, pdfium_c.FPDF_TEXTRENDERMODE_STROKE_CLIP}
+    objects = list(page.get_objects(max_depth=1))
     backdrops: list[tuple[float, float, float, float]] = []
     for obj in objects:
         if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
             backdrops.append(tuple(obj.get_bounds()))
-        elif obj.type == pdfium_c.FPDF_PAGEOBJ_PATH:
+        elif obj.type in (pdfium_c.FPDF_PAGEOBJ_PATH, pdfium_c.FPDF_PAGEOBJ_FORM):
+            if obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:  # a form (an included figure): what it draws is unknown here
+                backdrops.append(tuple(obj.get_bounds()))
+                continue
             mode, stroke = ctypes.c_int(), ctypes.c_int()
-            colour = fill(obj)
+            colour = colour_of(obj)
             if (colour and min(colour[:3]) < _WHITE and colour[3] > 0
                     and pdfium_c.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value):
                 backdrops.append(tuple(obj.get_bounds()))
@@ -217,18 +239,18 @@ def _hidden_pdfium(page: Any) -> list[str]:
     textpage = None
     try:
         for obj in objects:
-            if (obj.type != pdfium_c.FPDF_PAGEOBJ_TEXT
-                    # A text layer drawn invisibly (see the module docstring).
-                    or pdfium_c.FPDFTextObj_GetTextRenderMode(obj.raw) == pdfium_c.FPDF_TEXTRENDERMODE_INVISIBLE):
+            if obj.type != pdfium_c.FPDF_PAGEOBJ_TEXT:
                 continue
-            colour = fill(obj)
+            mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj.raw)
+            colour = colour_of(obj, stroke=mode in stroked_modes)  # outlined text is seen by its outline
             size = ctypes.c_float()
             if colour is None or not pdfium_c.FPDFTextObj_GetFontSize(obj.raw, ctypes.byref(size)):
                 continue
             m = obj.get_matrix()
             drawn = size.value * (abs(m.a * m.d - m.b * m.c) ** 0.5 or 1.0)
-            white = min(colour[:3]) >= _WHITE
-            if not (drawn < HIDDEN_SIZE_PT or (white and colour[3] > 0 and not _inside(tuple(obj.get_bounds()), backdrops))):
+            if not _is_hidden(invisible=mode in invisible_modes, tiny=drawn < HIDDEN_SIZE_PT,
+                              white=min(colour[:3]) >= _WHITE and colour[3] > 0,
+                              covered=_inside(tuple(obj.get_bounds()), backdrops)):
                 continue
             if textpage is None:
                 textpage = page.get_textpage()

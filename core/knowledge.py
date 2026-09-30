@@ -2842,11 +2842,12 @@ def _load_local_paper(path: Path) -> RetrievedDoc | None:
         _log.warning("local_paper not found: %s", path)
         return None
     suffix = path.suffix.lower()
+    hidden: list[str] = []  # text the PDF draws so a reader cannot see it (core/pdf_text.py)
     try:
         if suffix in (".md", ".txt", ".rst"):
             content = path.read_text(encoding="utf-8", errors="replace")
         elif suffix == ".pdf":
-            content = _extract_pdf_text(path)
+            content, hidden = _extract_pdf_text(path)
             if content is None:
                 return None
         else:
@@ -2872,21 +2873,23 @@ def _load_local_paper(path: Path) -> RetrievedDoc | None:
             "filename": path.name,
             "size_bytes": path.stat().st_size,
             "kind": "local_paper",
+            **({"hidden_text": hidden} if hidden else {}),
             # No `doi` field on purpose — local files don't dedup against
             # external sources unless the user has set the title to match.
         },
     )
 
 
-def _extract_pdf_text(path: Path) -> str | None:
-    """Text of a PDF the person gave FI (``knowledge.local_papers``), scanned pages read by OCR (core/pdf_text.py).
-    Returns None when nothing could be read; the log says why."""
+def _extract_pdf_text(path: Path) -> tuple[str | None, list[str]]:
+    """Text of a PDF the person gave FI (``knowledge.local_papers``), scanned pages read by OCR (core/pdf_text.py),
+    and the passages it draws so a reader cannot see them. The text is None when nothing could be read; the log says
+    why."""
     from core import pdf_text
 
     result = pdf_text.extract(path)
     if result.error or result.unread_pages or result.ocr_pages or result.truncated_at_page or result.hidden_text:
         _log.warning("PDF %s: %s", path.name, result.summary())
-    return result.text or None
+    return result.text or None, list(result.hidden_text)
 
 
 _LOCAL_PAPER_SUFFIXES = (".pdf", ".md", ".txt", ".rst")
