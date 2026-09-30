@@ -72,6 +72,8 @@ Every research quest runs this way unless its config says `phased: false`: a con
 | The improvement is not shown at the finest setting (gone, within the numerical error, under the plan's threshold, or with randomness not more than chance), could not be tested (the numerical error could not be estimated, or fewer than two fresh runs), or is above the plan's threshold but within the numerical error | `statistically_adequate` |
 | A better design nearby, a design at the edge of its range, a variable that changes nothing, starting points that disagree (or only one), a search that stopped for its budget or time | `publication_ready` |
 
+A search whose plan names no numerical setting is never "verified", even with randomness and fresh runs: nothing was checked at finer settings, and the verdict says so. FI puts its own copy of the search's record and of the check back after every script it runs during the run step; the check file's hash is also kept in `results/best_design.json`, and a check file that no longer matches it is a gap. A script run outside FI with write access to the quest folder could still change all of them consistently: the audit trace records every change to these files, but does not undo it.
+
 What the check cannot rule out: an error of the model itself (an assumption, a material value) is the same at every setting, so a verified improvement is an improvement within the plan's model; and a simulation far from converged at every level can look converged. The paper's own section on the best design is not in this version.
 
 ## 6. What each number estimates

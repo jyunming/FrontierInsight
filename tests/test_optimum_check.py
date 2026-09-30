@@ -658,6 +658,49 @@ async def test_a_check_a_script_rewrote_on_disk_is_never_reused(tmp_path: Path) 
                    for g in oc.evidence_gaps(root, {"optimisation": block}).get("independently_validated", []))
 
 
+def test_with_a_threshold_a_design_that_failed_at_a_finer_level_is_still_not_verified() -> None:
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        if (cell["x"], cell["y"]) != (0.0, 0.0) and cell["mesh"] == 0.2:
+            raise RuntimeError("the solver diverged")
+        return _bowl(cell)
+
+    block = _block(improvement_tolerance=0.1)
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.08, {}), (0, {"x": 2.0, "y": -1.0}, 0.08, {})])
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["verdict"] == "unverified" and "diverged" in check["says"]
+
+
+def test_without_a_numerical_setting_no_numerical_error_of_zero_is_claimed() -> None:
+    check = _search_then_check(_block(numerical_settings=None), lambda c: {"f": (c["x"] - 2) ** 2 + (c["y"] + 1) ** 2})
+    says = check["checks"]["improvement"]["says"]
+    assert "numerical error was not estimated" in says and "(0 K)" not in says
+
+
+@pytest.mark.asyncio
+async def test_a_new_search_removes_an_earlier_searchs_check_and_other_scripts_get_it_put_back(tmp_path: Path) -> None:
+    from tests.test_optimise_runner import LocalExecutor
+
+    block = _block(design_variables=[{"name": "x", "low": -1, "high": 5, "kind": "integer"}],
+                   baseline={"values": {"x": 0}, "source": "s"}, numerical_settings={"mesh": {"search": 0.5}},
+                   evaluation_budget={"starts": 1, "per_start": 20}, search_method="exhaustive")
+    root = _runner_quest(tmp_path, ARTEFACT_SIM)
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol={"optimisation": block},
+                                         simulate=root / "code" / "simulate.py",
+                                         analysis=root / "code" / "experiment.py")
+    await runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root, timeout_s=120)
+    good = (root / oc.CHECK_PATH).read_bytes()
+    # Another script run through the runner (a replot, say) overwrites the check: FI's copy is put back after it.
+    (root / "code" / "replot.py").write_text(
+        "open('needs/OPTIMUM_CHECK.json', 'w').write('{\"verdict\": \"verified\"}')\n", encoding="utf-8")
+    await runner.execute([sys.executable, str(root / "code" / "replot.py")], cwd=root, timeout_s=60)
+    assert (root / oc.CHECK_PATH).read_bytes() == good
+    # A new search (the simulation changed) removes the earlier search's check before anything else.
+    (root / "code" / "simulate.py").write_text(ARTEFACT_SIM.replace("60.0", "61.0"), encoding="utf-8")
+    run = await optimise.run_search(LocalExecutor(), sys.executable, root, "code/simulate.py", {"optimisation": block},
+                                    base_seed=0, timeout_s=300)
+    assert run.reused is False and not (root / oc.CHECK_PATH).exists() and not (root / oc.RECORD).exists()
+
+
 # --- run.log --------------------------------------------------------------------------------------------------------------
 
 

@@ -515,7 +515,11 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                      f"{'better' if search_value > 0 else 'worse'})")
         ci = f" (the lower end of its 95% interval is {_fmt(measure)}{u})" if noisy and measure is not None else ""
         e_text = _fmt(e_sum) if e_sum is not None else "?"
-        if why_not:
+        if not named and value > 0 and not why_not:
+            # Nothing finer to compare with: the improvement is measured again, but its numerical error is not known.
+            status, says = NOT_CHECKED, (f"{what}; the plan names no numerical setting, so its numerical error was not "
+                                         "estimated")
+        elif why_not:
             status, says = NOT_CHECKED, f"{what}; {why_not}"
         elif shown:
             status = PASSED
@@ -653,6 +657,8 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         says = "; ".join(parts) if parts else "no nearby design is better, and every variable changes the result"
         if not finished:
             status = FAILED if better else NOT_CHECKED
+            if not parts:
+                says = "no nudge evaluated so far gives a better design"
             says += " (the check's time ran out before every nudge was evaluated)"
         checks["neighbourhood"] = {"status": status, "says": says, "at_bound": at_bound, "no_effect": no_effect,
                                    "better_neighbour": sorted(better, key=lambda x: -x["gain"])[:3],
@@ -688,6 +694,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     elif not named:
         # Evaluated again at the same settings only: nothing was checked at finer ones.
         verdict, reason = "unverified", checks["refinement"]["says"]
+    elif any((j or {}).get("status") != "ok" for x in (base, chosen) if x for j in x["levels"]):
+        # The reported design (or the baseline) gave no value at some finer level: its numbers are not all there.
+        verdict, reason = "unverified", checks["refinement"]["says"]
     elif imp_status != PASSED:
         verdict, reason = "unverified", checks["improvement"]["says"]
     elif better:
@@ -697,8 +706,14 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                                          "around the best design was evaluated")
     else:
         verdict, reason = "verified", checks["improvement"]["says"]
+    # The best design WAS evaluated at the finer settings, but a part of the check could not be done.
+    partly = verdict == "unverified" and chosen is not None and base_ok and named and all(
+        (j or {}).get("status") == "ok" for x in (base, chosen) for j in x["levels"])
     if reason.startswith("the improvement over the baseline"):
         says = reason[0].upper() + reason[1:] + "."  # the check's own sentence already says it
+    elif partly:
+        says = ("The best design was checked at finer numerical settings, but not every part of the check could be "
+                f"done: {reason}.")
     else:
         says = VERDICTS[verdict][0].upper() + VERDICTS[verdict][1:] + (f": {reason}." if reason else ".")
     if chosen is not None and first is not None and chosen is not first:
@@ -1093,7 +1108,11 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
         attached = json.loads(best_path.read_text(encoding="utf-8")).get("check") or {}
     except (OSError, ValueError, AttributeError):
         attached = {}
-    if attached.get("record_sha256") != _sha((quest_root / CHECK_PATH).read_bytes()):
+    if not attached.get("record_sha256"):
+        out["independently_validated"].append(
+            "the check of the best design was not recorded in results/best_design.json, so the check file cannot be "
+            "shown to be the one FI wrote for this search")
+    elif attached.get("record_sha256") != _sha((quest_root / CHECK_PATH).read_bytes()):
         out["independently_validated"].append(
             "the check of the best design (needs/OPTIMUM_CHECK.json) is not the one FI recorded in "
             "results/best_design.json: it changed after FI wrote it")
@@ -1106,7 +1125,8 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
             f"the check of the best design at finer numerical settings was not finished ({record.get('says')})")
     elif verdict == "unverified" and not checks:
         out["independently_validated"].append(str(record.get("says") or "the best design was not checked"))
-    elif verdict == "unverified" and (checks.get("constraints") or {}).get("status") == NOT_CHECKED:
+    elif (verdict == "unverified" and (checks.get("constraints") or {}).get("status") == NOT_CHECKED
+          and (checks.get("refinement") or {}).get("status") != FAILED):
         out["independently_validated"].append(str(record.get("says")))
     if (checks.get("refinement") or {}).get("status") == NOT_CHECKED and "no numerical setting" in says("refinement"):
         out["independently_validated"].append(

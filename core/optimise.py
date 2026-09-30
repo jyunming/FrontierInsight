@@ -373,7 +373,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     work = quest_root / WORK_DIR
     work.mkdir(parents=True, exist_ok=True)
     # An earlier search's record and files never stand beside this one's (a search cut short is not kept either).
-    for rel in (RECORD, LEDGER_PATH, BEST_PATH):
+    # The same goes for an earlier search's check at finer settings (core/optimum_check.py).
+    for rel in (RECORD, LEDGER_PATH, BEST_PATH, Path("needs") / "OPTIMUM_CHECK.json", WORK_DIR / "check.json"):
         (quest_root / rel).unlink(missing_ok=True)
     (quest_root / _trials.HARNESS_PATH).parent.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -621,12 +622,29 @@ class OptimisationRunner:
         self.log = log
         self.failed_script: str | None = None
         self.last: SearchRun | None = None
+        #: FI's check at finer settings, from memory: ``(its text, the key it is kept under)``.
+        self.last_check: tuple[str | None, str | None] = (None, None)
+
+    def put_back(self) -> bool:
+        """Put FI's own record of the search and of its check back, from memory, wherever a script changed them."""
+        from . import optimum_check as _check
+
+        put_back = restore(self.quest_root, self.last.files) if self.last is not None and self.last.files else False
+        text, key = self.last_check
+        if text is not None:
+            put_back = _check.restore(self.quest_root, text, key) or put_back
+        return put_back
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
 
         if len(cmd) != 2 or Path(cmd[1]).name != self.analysis.name:
-            return await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+            # Any other script (a replot, a helper) runs as it is; what it changed of FI's record is put back after it.
+            result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+            if self.put_back() and self.log is not None:
+                self.log.warning("[optimise] %s changed FI's record of the search or of its check; FI's own copy was "
+                                 "put back", Path(cmd[-1]).name if cmd else "a script")
+            return result
         started = time.monotonic()
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         if block_of(protocol) is None:
@@ -671,6 +689,7 @@ class OptimisationRunner:
         # FI checks the best design at finer settings (core/optimum_check.py), with a time limit of its own. A check that
         # fails is the study's result, reported and carried on with; one that cannot run is recorded as not finished.
         check_text, check_key = await self._check(cmd[0], run, protocol, base, timeout_s, env)
+        self.last_check = (check_text, check_key)
         analysis_env = {**(env or {}), LEDGER_ENV: LEDGER_PATH.as_posix(), BEST_ENV: BEST_PATH.as_posix(),
                         "FI_RAW_DIR": _trials.RAW_DIRNAME}
         if check_text is not None:
@@ -686,6 +705,7 @@ class OptimisationRunner:
             from . import optimum_check as _check
 
             put_back = _check.restore(self.quest_root, check_text, check_key) or put_back
+        # (self.last was set by the search; self.last_check just above: put_back() restores both the same way.)
         if put_back and self.log is not None:
             self.log.warning("[optimise] %s changed FI's record of the search (%s, %s, %s, %s or %s); FI's own copy "
                              "was put back", self.analysis.name, LEDGER_PATH.as_posix(), BEST_PATH.as_posix(),
