@@ -423,12 +423,14 @@ def history(quest_root: Path) -> list[dict[str, Any]]:
 def record(quest_root: Path, *, run: str, code_commit: str | None, results: list[dict[str, Any]],
            code_changed: bool | None = None, protocol_version: int | None = None, protocol_sha256: str | None = None,
            attempt: str | None = None, protocol_problem: str | None = None,
-           improve: dict[str, Any] | None = None) -> dict[str, Any]:
+           improve: dict[str, Any] | None = None, result_digest: dict[str, str] | None = None) -> dict[str, Any]:
     """Append one row to ``.fi/criteria_history.jsonl`` and return it. ``n`` counts the rows (one per run of the code);
     ``run`` is the frozen protocol's run (``run_1`` until an amendment), so rows are compared only within one
     ``protocol_sha256``. ``attempt`` is the id of this run's record in ``.fi/attempts.jsonl``. ``results`` empty is
     recorded as "no criterion". ``improve``: for a round of the improve loop (:mod:`core.improve`), the round, whether
-    its version was kept as the best, and the criteria that got better or worse against the version kept before it."""
+    its version was kept as the best, and the criteria that got better or worse against the version kept before it.
+    ``result_digest``: for a full run that produced results, one hash per result (``improve.headline_digest``), so a
+    later run can say whether the study's results changed (``core/changelog.py``) without keeping their values here."""
     row: dict[str, Any] = {
         "n": len(history(quest_root)) + 1, "run": run, "protocol_version": protocol_version,
         "protocol_sha256": protocol_sha256, "attempt": attempt,
@@ -441,6 +443,8 @@ def record(quest_root: Path, *, run: str, code_commit: str | None, results: list
         row["protocol_problem"] = protocol_problem
     if improve:
         row["improve"] = improve
+    if result_digest:
+        row["result_digest"] = dict(result_digest)
     if not results:
         row["note"] = "no criterion"
     try:
