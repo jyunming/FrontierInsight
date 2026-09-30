@@ -96,7 +96,7 @@ jobs:
           path: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
           if-no-files-found: error
           retention-days: 1
-          # "Re-run failed jobs" uploads the same name again.
+          # A re-run (e.g. "Re-run all jobs") uploads the same name again.
           overwrite: true
 
   # ---- Fast-tier coverage floor, per OS ------------------------------
