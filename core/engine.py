@@ -2350,19 +2350,31 @@ class Engine:
 
     def _phased_prepare(self) -> None:
         """At every start: the exploration stage begins, or takes in the data supplied since (a part held back)."""
-        # Turned on after the experiment already ran: every row was seen, so nothing can be held back.
-        already_ran = _phased.load(self.quest_root) is None and self.audit.path.is_file() and any(
-            e.get("kind") == "node_completed" and e.get("node") == "execute" for e in _audit_log.read(self.audit.path))
+        # Turned on after the experiment already ran: every row was seen, so nothing can be held back. Without the
+        # decision trace (engine.audit_trace off) a saved state is taken to mean it may have run.
+        already_ran = False
+        if _phased.load(self.quest_root) is None and not (self.fi_dir / _phased.RECORD).exists():
+            if self.audit.path.is_file():
+                already_ran = any(e.get("kind") == "node_completed" and e.get("node") == "execute"
+                                  for e in _audit_log.read(self.audit.path))
+            else:
+                already_ran = (self.fi_dir / "state.sqlite").is_file()
         try:
             _record, lines = _phased.prepare(self.quest_root, self.quest_id, already_ran=already_ran)
         except OSError as e:
-            self._log.warning("[phased] the two stages could not be set up (%r); this quest's numbers stay "
-                              "exploratory", e)
+            self._log.warning("[phased] the data held back could not be kept apart from exploration (%r); nothing in "
+                              "this quest can be confirmed, so its numbers stay exploratory", e)
+            _phased.mark_compromised(self.quest_root, f"a data file could not be written at a start ({e!r})")
             return
         self._phased_log(lines)
 
     def _phased_restore_inputs(self) -> None:
-        """When a run stops (finished, paused or failed): the person's whole files back in inputs/data/."""
+        """When a run stops (finished, paused or failed): the person's whole files back in inputs/data/. Not while a
+        background job the run submitted is waiting: its tasks read inputs/data/ when they start."""
+        if getattr(self, "_phased_job_pending", False):
+            self._log.info("[phased] a background job is waiting, so inputs/data/ keeps the part of the data this stage "
+                           "may see until the quest is resumed")
+            return
         try:
             _phased.restore_inputs(self.quest_root)
         except OSError as e:
@@ -2403,16 +2415,28 @@ class Engine:
             explore_runs = sum(1 for e in _audit_log.read(self.audit.path)
                                if e.get("kind") == "node_completed" and e.get("node") == "execute") \
                 if self.audit.path.is_file() else 0
-            _record, lines = _phased.enter_confirm(
-                self.quest_root, explore_result=state.get("result_json"),
-                frozen_sha256=str(frozen["sha256"]) if frozen else None,
-                stride=max(1, int(self.config.engine.replicate_seed_stride)),
-                replicates=max(1, int(self.config.engine.execute_replicates)), explore_runs=explore_runs,
-            )
+            try:
+                _record, lines = _phased.enter_confirm(
+                    self.quest_root, explore_result=state.get("result_json"),
+                    frozen_sha256=str(frozen["sha256"]) if frozen else None,
+                    stride=max(1, int(self.config.engine.replicate_seed_stride)),
+                    replicates=max(1, int(self.config.engine.execute_replicates)), explore_runs=explore_runs,
+                )
+            except OSError as e:
+                self._log.warning("[phased] the confirm run could not be given the data held back (%r); nothing in this "
+                                  "quest can be confirmed, so the paper is written from exploration", e)
+                _phased.mark_compromised(self.quest_root, f"the held-back data could not be put in place ({e!r})")
+                return "write"
             self._phased_log(lines)
             return "confirm"
-        _record, lines = _phased.record_confirm(
-            self.quest_root, state.get("result_json") if (state.get("exec_result") or {}).get("returncode", 0) == 0 else None)
+        try:
+            _record, lines = _phased.record_confirm(
+                self.quest_root,
+                state.get("result_json") if (state.get("exec_result") or {}).get("returncode", 0) == 0 else None)
+        except OSError as e:
+            # The record was saved before the files are put back; the next stop puts them back again.
+            self._log.warning("[phased] the whole data files could not be put back in inputs/data/ yet (%r)", e)
+            return "write"
         self._phased_log(lines)
         return "write"
 
@@ -6349,6 +6373,10 @@ class Engine:
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
         if at_confirm:
             source = f"the design exploration settled on ({source}), frozen when exploration ended, before the confirm run"
+            if iteration > 0 and approved_by.startswith("human"):
+                # The person read plan.md; exploration then changed the design, so they did not read this protocol.
+                approved_by = ("auto: exploration changed the design after the person read the plan "
+                               f"(pauses.plan={mode}), and nobody approved the protocol it settled on")
         replaced = _frozen.open_replacement(self.quest_root)
         if replaced is not None:
             approved_by = f"human: {replaced.get('approved_by')} approved replacing the protocol (--approve-as)"
@@ -14154,6 +14182,8 @@ class Engine:
         )
         detail = job_watch.describe(info)
         self._log.info("[execute] the job is pending (%s)", detail)
+        # Explore, then confirm: the job's tasks read inputs/data/ when they start, so it keeps this stage's part.
+        self._phased_job_pending = True
         self._pause_for_human(
             kind="results",
             interaction="supply",

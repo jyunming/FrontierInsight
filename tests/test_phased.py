@@ -478,3 +478,99 @@ def test_the_gate_run_again_before_the_confirm_run_sends_the_quest_to_it(tmp_pat
     phased.seed_env(engine.quest_root, _env(0, 0))  # the confirm run starts
     assert engine._route_after_evidence_gate({**gate, "result_json": {"a": 2}}) == "write"
     assert phased.status(phased.load(engine.quest_root)) == phased.CONFIRMED
+
+
+# ---- the confirm data is looked at once, or the result is not confirmed ------------------------------------------
+
+
+def _confirm(tmp_path: Path) -> None:
+    phased.prepare(tmp_path, "q1")
+    phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1,
+                         explore_runs=1)
+
+
+def test_a_confirm_run_repaired_and_run_again_is_not_confirmed(tmp_path: Path) -> None:
+    _confirm(tmp_path)
+    phased.seed_env(tmp_path, _env(0, 0))
+    phased.seed_env(tmp_path, _env(0, 0))  # the script was changed after the first confirm run and run again
+    record, lines = phased.record_confirm(tmp_path, {"a": 2})
+    assert phased.status(record) == "confirm_reused" and any("run again" in x for x in lines)
+
+
+def test_any_later_run_on_the_confirm_seeds_makes_the_result_preliminary_even_a_failed_one(tmp_path: Path) -> None:
+    _confirm(tmp_path)
+    phased.seed_env(tmp_path, _env(0, 0))
+    record, _ = phased.record_confirm(tmp_path, {"a": 2})
+    assert phased.status(record) == phased.CONFIRMED
+    phased.seed_env(tmp_path, _env(0, 0))  # a re-run the review asked for, which crashed
+    record, lines = phased.record_confirm(tmp_path, None)
+    assert phased.status(record) == "confirm_reused" and lines
+    assert phased.record_confirm(tmp_path, None)[1] == [], "said once"
+
+
+def test_an_empty_result_is_not_a_confirmed_result(tmp_path: Path) -> None:
+    _confirm(tmp_path)
+    phased.seed_env(tmp_path, _env(0, 0))
+    record, _ = phased.record_confirm(tmp_path, {})
+    assert phased.status(record) == "confirm_failed"
+
+
+def test_data_that_becomes_splittable_after_exploration_ran_on_it_whole_is_not_held_back(tmp_path: Path) -> None:
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    (tmp_path / "inputs" / "data" / "codebook.json").write_text("{}", encoding="utf-8")
+    phased.prepare(tmp_path, "q1")
+    phased.seed_env(tmp_path, _env(0, 0))  # exploration ran on every row
+    (tmp_path / "inputs" / "data" / "codebook.json").unlink()
+    record, _ = phased.prepare(tmp_path, "q1")
+    assert record["strategy"] == phased.FRESH_SEEDS and _inputs(tmp_path) == original
+
+
+def test_more_than_one_data_file_holds_nothing_back(tmp_path: Path) -> None:
+    a = _csv(tmp_path / "inputs" / "data" / "patients.csv", 100)
+    _csv(tmp_path / "inputs" / "data" / "outcomes.csv", 100)
+    record, _ = phased.prepare(tmp_path, "q1")
+    assert record["strategy"] == phased.FRESH_SEEDS and "more than one data file" in record["why_no_data"]
+    assert (tmp_path / "inputs" / "data" / "patients.csv").read_bytes() == a
+    phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=1, replicates=1, explore_runs=1)
+    phased.seed_env(tmp_path, _env(0, 0))
+    phased.record_confirm(tmp_path, {"a": 2})
+    assert "more than one file" in phased.summary(phased.load(tmp_path))
+
+
+def test_too_few_rows_held_back_means_new_seeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(phased, "MIN_HELD_BACK_ROWS", 1000)
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    record, _ = phased.prepare(tmp_path, "q1")
+    assert record["strategy"] == phased.FRESH_SEEDS and "fewer than the 1000" in record["why_no_data"]
+    assert _inputs(tmp_path) == original
+
+
+def test_a_file_the_person_deleted_is_not_brought_back(tmp_path: Path) -> None:
+    _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    phased.prepare(tmp_path, "q1")
+    (tmp_path / "inputs" / "data" / "d.csv").unlink()
+    phased.restore_inputs(tmp_path)
+    assert not (tmp_path / "inputs" / "data" / "d.csv").exists()
+
+
+def test_a_part_edited_after_a_hard_stop_never_loses_the_kept_whole_file(tmp_path: Path) -> None:
+    original = _csv(tmp_path / "inputs" / "data" / "d.csv", 100)
+    phased.prepare(tmp_path, "q1")  # a hard stop: no restore, exploration's part stays in inputs/data/
+    with (tmp_path / "inputs" / "data" / "d.csv").open("ab") as f:
+        f.write("".join(f"{i},{i + 1}\n" for i in range(1000, 1080)).encode())
+    record, _ = phased.prepare(tmp_path, "q1")
+    assert record["strategy"] == phased.HELD_BACK, "enough new rows to hold some back"
+    kept = list((tmp_path / ".fi" / "phased" / "original").glob("d.csv.replaced-*"))
+    assert len(kept) == 1 and kept[0].read_bytes() == original
+
+
+def test_held_back_rows_that_could_not_be_kept_apart_mean_nothing_is_confirmed(tmp_path: Path) -> None:
+    _confirm(tmp_path)
+    phased.mark_compromised(tmp_path, "a data file could not be written")
+    phased.seed_env(tmp_path, _env(0, 0))
+    record, _ = phased.record_confirm(tmp_path, {"a": 2})
+    assert phased.status(record) == "compromised"
+    assert phased.evidence_settings(tmp_path)["phased"] == "compromised"
+    gaps = _ready_gaps(tmp_path, {"phased": "compromised", "phased_strategy": "fresh_seeds"})
+    assert any("could not be kept apart" in g for g in gaps)
+    assert "nothing here is confirmed" in phased.summary(record)
