@@ -68,8 +68,8 @@ Every research quest runs this way unless its config says `phased: false`: a con
 | What the check found | Keeps the quest below |
 |---|---|
 | FI's record of the search is missing, changed after the check, over the budget, or holds a design outside the ranges | `protocol_runtime_matched` |
-| No check, a check that did not finish (its own time limit ran out), no numerical setting to refine, a design that failed at the finer settings, a limit broken there | `independently_validated` |
-| The improvement is not shown at the finest setting (gone, within the numerical error, or under the plan's threshold), or above the plan's threshold but within the numerical error | `statistically_adequate` |
+| No check, a check that did not finish (its own time limit ran out), a check file changed after FI wrote it, no numerical setting to refine, a design that failed at the finer settings, a limit broken there | `independently_validated` |
+| The improvement is not shown at the finest setting (gone, within the numerical error, under the plan's threshold, or with randomness not more than chance), could not be tested (the numerical error could not be estimated, or fewer than two fresh runs), or is above the plan's threshold but within the numerical error | `statistically_adequate` |
 | A better design nearby, a design at the edge of its range, a variable that changes nothing, starting points that disagree (or only one), a search that stopped for its budget or time | `publication_ready` |
 
 What the check cannot rule out: an error of the model itself (an assumption, a material value) is the same at every setting, so a verified improvement is an improvement within the plan's model; and a simulation far from converged at every level can look converged. The paper's own section on the best design is not in this version.

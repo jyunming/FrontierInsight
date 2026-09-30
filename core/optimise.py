@@ -563,10 +563,11 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
     return lines
 
 
-def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any]) -> None:
+def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any], text: str | None = None) -> None:
     """Put what FI's check at finer settings found (:func:`core.optimum_check.attach_summary`) into
     ``results/best_design.json`` (``check``, ``checked_at_finer_settings``, and its sentence), and keep FI's record of the
-    file in step, so :func:`restore` puts back this copy. Idempotent: an earlier check's part is replaced."""
+    file in step, with the check's hash, so :func:`restore` puts back this copy and a check kept on disk is reused only
+    when it is this one. Idempotent: an earlier check's part is replaced."""
     from . import optimum_check as _check
 
     quest_root = Path(quest_root)
@@ -576,9 +577,14 @@ def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any]) -> Non
         saved = json.loads(run.files[record_rel])
     except (KeyError, ValueError, TypeError):
         return
-    summary = _check.attach_summary(check)
+    summary = _check.attach_summary(check, text)
     best["check"] = summary
-    best["checked_at_finer_settings"] = bool(check.get("finished")) and (check.get("evaluations") or {}).get("check", 0) > 0
+    # Only a check that finished and had finer settings to use checked anything at finer settings.
+    best["checked_at_finer_settings"] = bool(
+        check.get("finished") and (check.get("settings") or {}).get("named")
+        and (check.get("evaluations") or {}).get("check", 0) > 0)
+    if text is not None:
+        saved["check_sha256"] = _sha(text.encode("utf-8"))
     says = str(best.get("says") or "")
     for old in (" Found and scored at the search's own numerical settings only; it has not been recomputed at finer "
                 "settings.", " Checked at finer numerical settings:"):
@@ -588,8 +594,9 @@ def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any]) -> Non
     best_text = json.dumps(best, indent=1) + "\n"
     saved["best"] = {"sha256": _sha(best_text.encode("utf-8")), "text": best_text}
     record_text = json.dumps(saved)
-    (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
-    (quest_root / RECORD).write_bytes(record_text.encode("utf-8"))
+    for rel, body in ((BEST_PATH, best_text), (RECORD, record_text)):
+        (quest_root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (quest_root / rel).write_bytes(body.encode("utf-8"))
     run.files = _files(run.files.get(LEDGER_PATH.as_posix(), ""), best_text, record_text)
     run.record = json.loads(best_text)
 
@@ -663,7 +670,7 @@ class OptimisationRunner:
                                           f"simulation: {reason}".strip())
         # FI checks the best design at finer settings (core/optimum_check.py), with a time limit of its own. A check that
         # fails is the study's result, reported and carried on with; one that cannot run is recorded as not finished.
-        check_text = await self._check(cmd[0], run, protocol, base, timeout_s, env)
+        check_text, check_key = await self._check(cmd[0], run, protocol, base, timeout_s, env)
         analysis_env = {**(env or {}), LEDGER_ENV: LEDGER_PATH.as_posix(), BEST_ENV: BEST_PATH.as_posix(),
                         "FI_RAW_DIR": _trials.RAW_DIRNAME}
         if check_text is not None:
@@ -678,11 +685,11 @@ class OptimisationRunner:
         if check_text is not None:
             from . import optimum_check as _check
 
-            put_back = _check.restore(self.quest_root, check_text) or put_back
+            put_back = _check.restore(self.quest_root, check_text, check_key) or put_back
         if put_back and self.log is not None:
-            self.log.warning("[optimise] %s changed FI's record of the search (%s, %s, %s or %s); FI's own copy was "
-                             "put back", self.analysis.name, LEDGER_PATH.as_posix(), BEST_PATH.as_posix(),
-                             RECORD.as_posix(), "needs/OPTIMUM_CHECK.json")
+            self.log.warning("[optimise] %s changed FI's record of the search (%s, %s, %s, %s or %s); FI's own copy "
+                             "was put back", self.analysis.name, LEDGER_PATH.as_posix(), BEST_PATH.as_posix(),
+                             RECORD.as_posix(), "needs/OPTIMUM_CHECK.json", ".fi/optimisation/check.json")
         stdout = result.stdout
         if result.returncode == 0:
             stdout, differs = with_fi_record(stdout, run.record)
@@ -696,13 +703,15 @@ class OptimisationRunner:
         )
 
     async def _check(self, python: Any, run: SearchRun, protocol: dict[str, Any], base: int, timeout_s: int,
-                     env: dict[str, str] | None) -> str | None:
-        """Run FI's check of the best design and put its verdict into ``results/best_design.json``: the check's text
-        (``needs/OPTIMUM_CHECK.json``), or ``None`` when it could not be written at all."""
+                     env: dict[str, str] | None) -> tuple[str | None, str | None]:
+        """Run FI's check of the best design and put its verdict into ``results/best_design.json``: ``(the check's text
+        (needs/OPTIMUM_CHECK.json), the key it is kept under)``, or ``(None, None)`` when it could not be written at
+        all. Nothing here stops the quest: a check that cannot run, or cannot be recorded, is said in run.log."""
         from . import optimum_check as _check
 
+        key: str | None = None
         try:
-            check, text = await _check.run_check(
+            check, text, key = await _check.run_check(
                 self.executor, python, self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(),
                 protocol, run, base_seed=base, timeout_s=timeout_s, env=env, log=self.log)
         except Exception as exc:  # noqa: BLE001 -- the check reports; it never stops the quest
@@ -710,18 +719,25 @@ class OptimisationRunner:
                 self.log.warning("[optimise] the check at finer numerical settings could not run (%s: %s); the best "
                                  "design is reported as not checked", type(exc).__name__, str(exc)[:300])
             record = _check._nothing_to_check(None, run.record)
-            record["says"] = (f"The check at finer numerical settings could not be finished: it could not run "
-                              f"({type(exc).__name__}).")
+            record["finished"] = False
+            record["says"] = (f"The best design could not be checked at finer numerical settings: the check could not "
+                              f"run ({type(exc).__name__}).")
             try:
-                text = _check._write(self.quest_root, record, "")
+                key = ""
+                text = _check._write(self.quest_root, record, key)
                 check = json.loads(text)
             except Exception:  # noqa: BLE001
-                return None
-        attach_check(self.quest_root, run, check)
-        if self.log is not None:
-            for line in _check.summary_lines(check):
-                self.log.info("%s", line)
-        return text
+                return None, None
+        try:
+            attach_check(self.quest_root, run, check, text)
+            if self.log is not None:
+                for line in _check.summary_lines(check):
+                    self.log.info("%s", line)
+        except Exception as exc:  # noqa: BLE001 -- e.g. a file another program holds open: said, never a stop
+            if self.log is not None:
+                self.log.warning("[optimise] the check's verdict could not be written into %s (%s: %s); the check is in "
+                                 "needs/OPTIMUM_CHECK.json", BEST_PATH.as_posix(), type(exc).__name__, str(exc)[:300])
+        return text, key
 
 
 def _record_numbers(record: dict[str, Any]) -> list[float]:
@@ -742,7 +758,8 @@ def _record_numbers(record: dict[str, Any]) -> list[float]:
     out += [float(ev[k]) for k in ("search", "budget", "scan") if isinstance(ev.get(k), (int, float))]
     # What FI's check at finer settings measured (results/best_design.json's ``check``).
     check = record.get("check") or {}
-    for key in ("objective", "baseline_objective", "improvement", "numerical_error"):
+    for key in ("objective", "baseline_objective", "improvement", "improvement_numerical_error",
+                "best_numerical_error"):
         if isinstance(check.get(key), (int, float)) and not isinstance(check.get(key), bool):
             out.append(float(check[key]))
     for value in (check.get("design") or {}).values():
@@ -791,6 +808,7 @@ def with_fi_record(stdout: str, record: dict[str, Any]) -> tuple[str, list[str]]
         # FI's check at finer settings: the verdict, and the numbers at the finest settings (the ones to report).
         result["fi_search"]["check"] = {k: check.get(k) for k in ("verdict", "says", "design", "objective",
                                                                   "baseline_objective", "improvement",
-                                                                  "numerical_error")}
+                                                                  "improvement_numerical_error",
+                                                                  "best_numerical_error")}
     lines[index] = "RESULT_JSON: " + json.dumps(result, allow_nan=True, default=str)
     return "\n".join(lines) + ("\n" if (stdout or "").endswith("\n") else ""), differs

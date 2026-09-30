@@ -148,8 +148,10 @@ same PR that adds, splits or renames one.
   in the quest's Python, the budget and `execution.timeout_s`, the run key cache in `.fi/optimisation/run.json`),
   the record FI alone writes (`raw/optimisation_ledger.jsonl`, `results/best_design.json`; `restore` / `read` put
   FI's copy back), `summary_lines` (run.log), `OptimisationRunner._check` (runs `optimum_check.run_check` after the
-  search and before the analysis, then `attach_check` puts the verdict into `results/best_design.json` under `check`
-  and re-saves the run record so `restore` keeps it; the analysis gets `FI_OPTIMUM_CHECK`), and
+  search and before the analysis, then `attach_check` puts the verdict and the check file's hash into
+  `results/best_design.json` under `check` and the hash into the run record (`check_sha256`), re-saved so `restore`
+  keeps it and `optimum_check.run_check` reuses a kept check only when it is that one; the analysis gets
+  `FI_OPTIMUM_CHECK`; nothing in `_check` can stop the quest), and
   `complete_case` (an oracle's case gets the fixed conditions, search settings and baseline, in `Engine._oracle_gate`),
   `with_fi_record` (FI's numbers added to the analysis's RESULT_JSON as `fi_search`, the check's under `fi_search.check`),
   `searches_itself` (an optimiser in the simulation's code: a warning). `Engine._node_execute` calls

@@ -18753,12 +18753,12 @@ the record. The rules above still hold, with these differences:
   When the plan has a coarse scan (`optimisation.grid`), `FI_TRIALS` names its per-setting results as described above:
   draw them as a map. Its `RESULT_JSON` reports the best design, its objective, the baseline's and the improvement,
   read from that file; a best of null means no design met every limit, and it says so. It never writes either file.
-- Before the analysis runs, FI checks the best design at finer numerical settings: `best["check"]` holds its
-  `"verdict"` (`verified`, `improvement_not_shown`, `infeasible`, `not_local_optimum` or `unverified`), `"says"` (one
-  plain sentence), `"design"`, `"objective"` and `"baseline_objective"` at the finest settings, `"improvement"` and
-  `"numerical_error"` (the whole record is the file `os.environ["FI_OPTIMUM_CHECK"]` names). Report those checked
-  numbers beside the search's, and the verdict as it is: an improvement that disappears at finer settings is the
-  result, not something to hide.
+- Before the analysis runs, FI checks the best design at finer numerical settings: `best["check"]` holds `"says"`
+  (one plain sentence: report THIS, in its words, never the internal `"verdict"` code, which is only for branching),
+  `"design"`, `"objective"` and `"baseline_objective"` at the finest settings, `"improvement"`,
+  `"improvement_numerical_error"` (the numerical error of the two designs added) and `"best_numerical_error"` (the
+  best design's own); the whole record is the file `os.environ["FI_OPTIMUM_CHECK"]` names. Report those checked numbers
+  beside the search's: an improvement that disappears at finer settings is the result, not something to hide.
 """
 
 # How an oracle's expected value may be sourced, for a request to rewrite the plan (core/oracle_check.py reads it).

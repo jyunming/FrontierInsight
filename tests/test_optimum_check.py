@@ -351,9 +351,10 @@ def _gaps(*, tmp_record: dict[str, Any], block: dict[str, Any], root: Path) -> d
     (root / "results").mkdir(parents=True, exist_ok=True)
     (root / "needs").mkdir(parents=True, exist_ok=True)
     (root / optimise.LEDGER_PATH).write_bytes(ledger.encode("utf-8"))
-    (root / optimise.BEST_PATH).write_text("{}", encoding="utf-8")
-    (root / oc.CHECK_PATH).write_text(json.dumps({**tmp_record, "ledger_sha256": oc._sha(ledger.encode("utf-8"))}),
-                                      encoding="utf-8")
+    text = json.dumps({**tmp_record, "ledger_sha256": oc._sha(ledger.encode("utf-8"))})
+    (root / oc.CHECK_PATH).write_bytes(text.encode("utf-8"))
+    # FI's best-design file names the check it recorded, by its hash.
+    (root / optimise.BEST_PATH).write_text(json.dumps({"check": oc.attach_summary(tmp_record, text)}), encoding="utf-8")
     return oc.evidence_gaps(root, {"optimisation": block})
 
 
@@ -493,7 +494,7 @@ async def test_with_randomness_the_check_runs_with_seeds_the_search_never_used(t
     run = await optimise.run_search(LocalExecutor(), sys.executable, root, "code/simulate.py", {"optimisation": block},
                                     base_seed=0, timeout_s=300)
     search_seeds = {int(s) for s in (root / "seeds.txt").read_text(encoding="utf-8").split()}
-    check, _text = await oc.run_check(LocalExecutor(), sys.executable, root, "code/simulate.py",
+    check, _text, _key = await oc.run_check(LocalExecutor(), sys.executable, root, "code/simulate.py",
                                       {"optimisation": block}, run, base_seed=0, timeout_s=300)
     all_seeds = [int(s) for s in (root / "seeds.txt").read_text(encoding="utf-8").split()]
     check_seeds = set(all_seeds[len(all_seeds) - check["evaluations"]["check"] * 4:])
@@ -515,12 +516,146 @@ async def test_a_check_its_time_limit_cuts_short_is_unverified_never_a_pass(tmp_
     root = _runner_quest(tmp_path, slow)
     run = await optimise.run_search(LocalExecutor(), sys.executable, root, "code/simulate.py", {"optimisation": block},
                                     base_seed=0, timeout_s=300)
-    check, _text = await oc.run_check(LocalExecutor(), sys.executable, root, "code/simulate.py",
+    check, _text, _key = await oc.run_check(LocalExecutor(), sys.executable, root, "code/simulate.py",
                                       {"optimisation": block}, run, base_seed=0, timeout_s=2)
     assert check["verdict"] == "unverified" and check["finished"] is False
     assert "time limit" in check["says"]
     gaps = oc.evidence_gaps(root, {"optimisation": block})
     assert any("was not finished" in g for g in gaps["independently_validated"])
+
+
+# --- what the check does NOT count as a pass ------------------------------------------------------------------------------
+
+
+def test_a_design_that_failed_at_a_finer_level_does_not_get_a_numerical_error_of_zero() -> None:
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        if (cell["x"], cell["y"]) != (0.0, 0.0) and cell["mesh"] == 0.2:
+            raise RuntimeError("the solver diverged")
+        return _bowl(cell)
+
+    block = _block()
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.08, {}), (0, {"x": 2.0, "y": -1.0}, 0.08, {})])
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["checks"]["refinement"]["status"] == "failed"
+    assert check["improvement"]["numerical_error"] is None
+    assert check["verdict"] == "unverified", check["says"]
+    assert "could not be estimated" in check["checks"]["improvement"]["says"]
+
+
+def test_with_randomness_and_one_finer_level_the_numerical_error_is_not_taken_as_zero() -> None:
+    block = _block(numerical_settings={"mesh": {"search": 0.4, "check": [0.2]}}, runs_per_evaluation=2, check_runs=6)
+
+    def sim(cell: dict[str, Any]) -> list[dict[str, float]]:
+        return [{"f": (9.0 if cell["x"] else 10.0) + 0.01 * t + cell["mesh"]} for t in range(6)]
+
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 10.4, {}), (0, {"x": 1.0, "y": 0.0}, 9.4, {})])
+    check = oc.check_sync(block, record, rows, sim, noisy=True, check_runs=6)
+    assert check["improvement"]["beyond_numerical_error"] is None
+    assert check["verdict"] == "unverified" and "second finer" in check["says"]
+
+
+def test_with_randomness_one_fresh_run_is_not_a_test_of_the_improvement() -> None:
+    block = _block()
+
+    def sim(cell: dict[str, Any]) -> list[dict[str, float]]:
+        return [{"f": (9.0 if cell["x"] else 10.0) + cell["mesh"] ** 2}]
+
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 10.16, {}), (0, {"x": 1.0, "y": 0.0}, 9.16, {})])
+    check = oc.check_sync(block, record, rows, sim, noisy=True, check_runs=1)
+    assert check["checks"]["improvement"]["status"] == "not_checked"
+    assert check["verdict"] == "unverified" and "check_runs" in check["says"]
+
+
+def test_best_designs_that_all_failed_at_the_finest_level_are_not_called_infeasible() -> None:
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        if cell["x"] != 0.0 and cell["mesh"] < 0.15:
+            raise RuntimeError("the solver diverged")
+        return _bowl(cell)
+
+    block = _block(constraints=[{"quantity": "g", "limit": "<= 10"}])
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.08, {"g": 0.0}), (0, {"x": 2.0, "y": -1.0}, 0.08, {"g": 1.0})])
+    check = oc.check_sync(block, record, rows, sim)
+    assert check["verdict"] == "unverified", check["says"]
+    assert "diverged" in check["says"]
+
+
+def test_a_check_cut_short_during_the_nudges_keeps_what_it_measured() -> None:
+    block = _block()
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 5.08, {}), (0, {"x": 1.5, "y": -1.0}, 0.33, {})])
+    gen = oc.check(block, record, rows)
+    request, answered = next(gen), 0
+    try:
+        while True:
+            # Every design at every level (2 designs × 2 levels), then the time is up during the nudges.
+            reply = {"values": _bowl(request["cell"])} if answered < 4 else {"stop": "time"}
+            answered += 1
+            request = gen.send(reply)
+    except StopIteration as done:
+        check = done.value
+    assert check["finished"] is False and check["verdict"] == "unverified"
+    assert check["best"]["design"] == {"x": 1.5, "y": -1.0}, "the measured best design is kept"
+    assert check["checks"]["refinement"]["status"] == "passed"
+    assert "nudge" in check["says"]
+
+
+def test_the_one_sentence_says_when_the_design_reported_is_not_the_searchs() -> None:
+    block = _block(constraints=[{"quantity": "mass", "limit": "<= 120"}])
+
+    def sim(cell: dict[str, Any]) -> dict[str, float]:
+        f = {0.0: 10.0, 1.0: 6.0, 2.0: 6.5}[cell["x"]]
+        return {"f": f, "mass": {0.0: 100.0, 1.0: 119.9, 2.0: 110.0}[cell["x"]] + (0.4 - cell["mesh"]) * 2.0}
+
+    record, rows = _rows(block, [(0, {"x": 0.0, "y": 0.0}, 10.0, {"mass": 100.0}),
+                                 (0, {"x": 1.0, "y": 0.0}, 6.0, {"mass": 119.9}),
+                                 (1, {"x": 2.0, "y": 0.0}, 6.5, {"mass": 110.0})])
+    check = oc.check_sync(block, record, rows, sim)
+    assert "not the one the search chose (x = 1, y = 0), which breaks a limit there" in check["says"]
+    # The improvement is the reported design's, at the search's settings too (10 - 6.5), not the search's best's.
+    assert check["improvement"]["search"] == pytest.approx(3.5)
+
+
+def test_without_finer_settings_the_best_design_file_does_not_say_it_was_checked_at_finer_settings(
+        tmp_path: Path) -> None:
+    block = _block(numerical_settings=None)
+    outcome = osearch.run_sync(block, lambda c: {"f": (c["x"] - 2) ** 2}, seed=0)
+    record = osearch.best_design(outcome, block, seed=0)
+    check = oc.check_sync(block, record, outcome["rows"], lambda c: {"f": (c["x"] - 2) ** 2})
+    ledger = "\n".join(osearch.ledger_lines(outcome, block)) + "\n"
+    best_text = json.dumps(record)
+    saved = json.dumps({"key": "k", "ledger": {"text": ledger}, "best": {"text": best_text}})
+    run = optimise.SearchRun(record=record, rows=outcome["rows"],
+                             files=optimise._files(ledger, best_text, saved))
+    optimise.attach_check(tmp_path, run, check, json.dumps(check))
+    assert run.record["checked_at_finer_settings"] is False
+    assert "could not be checked at finer numerical settings" in run.record["check"]["says"]
+
+
+@pytest.mark.asyncio
+async def test_a_check_a_script_rewrote_on_disk_is_never_reused(tmp_path: Path) -> None:
+    from tests.test_optimise_runner import LocalExecutor
+
+    block = _block(design_variables=[{"name": "x", "low": -1, "high": 5, "kind": "integer"}],
+                   baseline={"values": {"x": 0}, "source": "s"}, numerical_settings={"mesh": {"search": 0.5}},
+                   evaluation_budget={"starts": 1, "per_start": 20}, search_method="exhaustive")
+    root = _runner_quest(tmp_path, ARTEFACT_SIM)
+    runner = optimise.OptimisationRunner(LocalExecutor(), quest_root=root, protocol={"optimisation": block},
+                                         simulate=root / "code" / "simulate.py",
+                                         analysis=root / "code" / "experiment.py")
+    cmd = [sys.executable, str(root / "code" / "experiment.py")]
+    await runner.execute(cmd, cwd=root, timeout_s=120)
+    # A later script forges FI's kept copy of the check (keeping its key) to say "verified".
+    kept_path = root / oc.RECORD
+    kept = json.loads(kept_path.read_text(encoding="utf-8"))
+    forged = {**json.loads(kept["text"]), "verdict": "verified", "says": "forged"}
+    kept_path.write_text(json.dumps({"key": kept["key"], "text": json.dumps(forged)}), encoding="utf-8")
+    (root / oc.CHECK_PATH).write_text(json.dumps(forged), encoding="utf-8")
+    assert any("changed after FI wrote it" in g for g in oc.evidence_gaps(root, {"optimisation": block})[
+        "independently_validated"]), "the ladder does not take a changed check on its word"
+    await runner.execute(cmd, cwd=root, timeout_s=120)
+    check = json.loads((root / oc.CHECK_PATH).read_text(encoding="utf-8"))
+    assert check["verdict"] == "improvement_not_shown", "the forged check was not reused: FI ran its own again"
+    assert not any("changed after FI wrote it" in g
+                   for g in oc.evidence_gaps(root, {"optimisation": block}).get("independently_validated", []))
 
 
 # --- run.log --------------------------------------------------------------------------------------------------------------

@@ -62,7 +62,7 @@ VERDICTS = {
     "improvement_not_shown": "the improvement over the baseline is not shown at finer numerical settings",
     "infeasible": "no design found meets every limit at finer numerical settings",
     "not_local_optimum": "a nearby design is better at finer numerical settings, so the search had not finished",
-    "unverified": "the check at finer numerical settings could not be finished",
+    "unverified": "the best design could not be checked at finer numerical settings",
 }
 PASSED, FAILED, NOT_CHECKED = "passed", "failed", "not_checked"
 BLIND_SPOTS = [
@@ -386,21 +386,29 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             return numerical_error(_series(item, name)[1:], ratios[1:])
         return numerical_error(_series(item, name), ratios)
 
-    def err(item: dict[str, Any], name: str | None = None) -> float:
+    def err(item: dict[str, Any], name: str | None = None) -> float | None:
+        """The design's numerical error; 0 with no numerical setting named (nothing finer to compare with, said by the
+        refinement check), ``None`` when it could not be estimated (a level gave no value, or too few levels)."""
+        if not named:
+            return 0.0
         e = estimate(item, name).get("error")
-        return float(e) if _number(e) else 0.0
+        return float(e) if _number(e) else None
 
     search_best = search_record.get("best") if isinstance(search_record.get("best"), dict) else None
-    measured_all = finished and all(at(x) is not None for x in [base, *cands])
+    # Every design has a result at every level (a result may be a failure): what the time limit may have cut short.
+    measured_all = all(all(j is not None for j in x["levels"]) for x in [base, *cands])
     base_final = at(base)
     base_ok = bool(base_final and base_final.get("status") == "ok")
     chosen = _choose(cands, finest, limits, margin, sign) if measured_all else None
+    ran_finest = [c for c in cands if (at(c) or {}).get("status") == "ok"]
     # The search's own best, when it is one of the candidates (it is not when nothing beat the baseline).
     first = (cands[0] if cands and search_best is not None and space.key(cands[0]["design"]) ==
              space.key(space.canonical(search_best["design"])) else None)
+    baseline_was_best = search_best is not None and space.key(space.canonical(search_best["design"])) == space.key(
+        base["design"])
 
     # --- 1. refinement
-    if not finished:
+    if not measured_all:
         checks["refinement"] = {"status": NOT_CHECKED, "says": "the check's time limit (execution.timeout_s) ran out "
                                                                "before every design was evaluated at the finer settings"}
     elif not base_ok:
@@ -411,11 +419,11 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             "the plan names no numerical setting (a mesh size, a time step, a tolerance), so the designs could only be "
             "evaluated again at the same settings: whether an improvement is a numerical error was not checked")}
     else:
-        failed = [c for c in cands if (at(c) or {}).get("status") != "ok"]
+        failed = [(x, j) for x in [base, *cands] for j in x["levels"] if (j or {}).get("status") != "ok"]
         says = "the baseline and the best designs were evaluated again at each finer level"
         if failed:
-            says = (f"{len(failed)} of the best designs could not be evaluated at the finer settings ("
-                    + "; ".join(str((at(c) or {}).get("reason") or "no value") for c in failed[:2]) + ")")
+            says = (f"{len({id(x) for x, _j in failed})} design(s) could not be evaluated at every finer level ("
+                    + "; ".join(str(j.get("reason") or "no value") for _x, j in failed[:2]) + ")")
         if first is not None and chosen is not None and chosen is not first and _meets(at(first), limits, margin):
             says += (f"; at the finest settings another of the search's best designs ({_describe(chosen['design'])}) is "
                      "better than the one the search chose, so it is the one reported")
@@ -436,11 +444,14 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             e = err(chosen, name)
             constraints_out[name] = {"value": value, "limit": f"{op} {_fmt(bound)}", "unit": cu, "slack": slack,
                                      "numerical_error": e if named else None,
-                                     "active": bool(abs(slack) <= max(e, floor * (1.0 + abs(bound))))}
+                                     "active": bool(abs(slack) <= max(e or 0.0, floor * (1.0 + abs(bound))))}
     if not measured_all:
         checks["constraints"] = {"status": NOT_CHECKED, "says": "not every design was evaluated at the finest settings"}
     elif not limits:
         checks["constraints"] = {"status": PASSED, "says": "the plan sets no limit"}
+    elif cands and not ran_finest:
+        checks["constraints"] = {"status": NOT_CHECKED, "says": "none of the best designs could be evaluated at the "
+                                                                "finest settings"}
     elif broke:
         name, op, bound, cu, value = broke[0]
         c_u = f" {cu}" if cu else ""
@@ -463,13 +474,14 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
     # --- 3. better than the baseline
     improvement: dict[str, Any] | None = None
     search_base_value = (search_record.get("baseline") or {}).get("objective")
-    search_value = (sign * (search_base_value - search_best["objective"])
-                    if search_best is not None and _number(search_base_value) else None)
     if chosen is not None and base_ok:
         base_value, best_value = base_final["objective"], at(chosen)["objective"]
         value = sign * (base_value - best_value)
+        # The same design at the search's settings (not the search's best, when another one is reported).
+        search_value = (sign * (search_base_value - chosen["search"])
+                        if _number(search_base_value) and _number(chosen.get("search")) else None)
         e_best, e_base = err(chosen), err(base)
-        e_sum = e_best + e_base
+        e_sum = e_best + e_base if e_best is not None and e_base is not None else None
         threshold, threshold_info = _threshold(block, base_value)
         bar = threshold if threshold is not None else e_sum
         interval, measure, why_not = None, value, ""
@@ -479,50 +491,65 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             if interval is None:
                 measure = None
                 why_not = ("a study with randomness needs at least two fresh runs of each design to tell an improvement "
-                           "from chance (`check_runs`)")
+                           "from chance (`check_runs` of at least 2)")
             else:
                 measure = interval["ci_lower"]
+        if bar is None and not why_not:
+            why_not = ("the numerical error of the two designs could not be estimated (a finer level gave no value, or "
+                       "there is only one finer level: give a second finer `check` value)")
         tiny = floor * (1.0 + abs(base_value))
-        shown = measure is not None and measure > bar + tiny
-        beyond_error = (measure is not None and measure > e_sum + tiny) if named else None
+        shown = measure is not None and bar is not None and measure > bar + tiny
+        beyond_error = (measure is not None and measure > e_sum + tiny) if named and e_sum is not None else None
         improvement = {"value": value, "search": search_value, "unit": unit,
                        "relative": value / abs(base_value) if base_value else None,
                        "numerical_error": e_sum if named else None, "numerical_error_best": e_best if named else None,
                        "numerical_error_baseline": e_base if named else None, "threshold": threshold_info,
                        "bar": bar, "rule": "plan" if threshold is not None else "rule", "interval": interval,
                        "shown": bool(shown), "beyond_numerical_error": beyond_error}
-        what = f"{_fmt(abs(value))}{u} {'better' if value > 0 else 'worse'} than the baseline at the finest settings"
-        if search_value is not None:
+        what = (f"{_fmt(abs(value))}{u} {'better' if value > 0 else 'worse'} than the baseline at the finest settings"
+                + (" on average" if noisy else ""))
+        if baseline_was_best:
+            what += " (at the search's own settings no design beat the baseline; this is the best other design found)"
+        elif search_value is not None:
             what += (f" (at the search's own settings: {_fmt(abs(search_value))}{u} "
                      f"{'better' if search_value > 0 else 'worse'})")
         ci = f" (the lower end of its 95% interval is {_fmt(measure)}{u})" if noisy and measure is not None else ""
+        e_text = _fmt(e_sum) if e_sum is not None else "?"
         if why_not:
-            status, says = FAILED, f"{what}; {why_not}"
+            status, says = NOT_CHECKED, f"{what}; {why_not}"
         elif shown:
             status = PASSED
             says = (f"{what}, more than the plan's threshold of {_fmt(threshold)}{u}{ci}" if threshold is not None else
-                    f"{what}, more than the numerical error of the two designs ({_fmt(e_sum)}{u}){ci}")
+                    f"{what}, more than the numerical error of the two designs ({e_text}{u}){ci}")
             if beyond_error is False:
-                says += (f"; but not more than the numerical error of the two designs ({_fmt(e_sum)}{u}), so it is not "
+                says += (f"; but not more than the numerical error of the two designs ({e_text}{u}), so it is not "
                          "shown to be more than a numerical error")
+            elif named and beyond_error is None:
+                says += "; the numerical error of the two designs could not be estimated"
         else:
             status = FAILED
-            if value <= 0 or (noisy and measure is not None and measure <= 0):
-                says = (f"the improvement over the baseline disappears at finer settings: the best design is {what}{ci}"
-                        if search_value is not None and search_value > 0 else f"the best design is {what}{ci}")
+            if value <= 0:
+                says = (f"the improvement over the baseline disappears at finer settings: the best design is {what}"
+                        if search_value is not None and search_value > 0 else f"the best design is {what}")
+            elif noisy and measure is not None and measure <= bar + tiny and measure <= 0:
+                says = (f"the best design is {what}{ci}, so the improvement over the baseline is not shown to be more "
+                        "than chance")
             elif threshold is not None:
                 says = f"{what}, not more than the plan's threshold of {_fmt(threshold)}{u}{ci}"
             elif named:
-                says = (f"{what}, within the numerical error of the two designs ({_fmt(e_sum)}{u}){ci}: the "
+                says = (f"{what}, within the numerical error of the two designs ({e_text}{u}){ci}: the "
                         "improvement over the baseline is not shown to be more than a numerical error")
             else:
                 says = f"{what}{ci}, not better than the baseline"
         if limits and not _meets(base_final, limits, margin):
             says += "; the baseline itself breaks a limit at the finest settings"
         checks["improvement"] = {"status": status, "says": says}
-    elif not finished or not base_ok:
+    elif not measured_all or not base_ok:
         checks["improvement"] = {"status": NOT_CHECKED, "says": "the baseline and the best design were not both "
                                                                 "evaluated at the finest settings"}
+    elif cands and not ran_finest:
+        checks["improvement"] = {"status": NOT_CHECKED, "says": "none of the best designs could be evaluated at the "
+                                                                "finest settings"}
     elif not cands:
         checks["improvement"] = {"status": FAILED, "says": (
             "the search found no design other than the baseline that meets every limit, so nothing improves on it")}
@@ -547,7 +574,7 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         threshold, _t = _threshold(block, chosen_value)
         for other in others:
             diff = sign * (at(other)["objective"] - chosen_value)
-            tol = max(threshold or 0.0, err(chosen) + err(other), floor * (1.0 + abs(chosen_value)))
+            tol = max(threshold or 0.0, (err(chosen) or 0.0) + (err(other) or 0.0), floor * (1.0 + abs(chosen_value)))
             if _same(other["design"], chosen["design"], space):
                 continue
             (flat if diff <= tol else worse).append((other, diff))
@@ -565,14 +592,14 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
             checks["starts"] = {"status": PASSED, "says": "the starting points found the same design"}
         else:
             checks["starts"] = {"status": NOT_CHECKED, "says": (
-                "only one starting point found a design better than the baseline that meets every limit, so there is "
-                "nothing to compare it with")}
+                "the other starting points' best designs break a limit or could not be evaluated at the finest "
+                "settings (or none was found), so there is nothing to compare this design with")}
 
     # --- 5. the neighbourhood
     at_bound, no_effect, better, sensitivity = [], [], [], {}
     if chosen is not None:
         centre = at(chosen)
-        c_err = err(chosen)
+        c_err = err(chosen) or 0.0
         for name, probe in probes.items():
             if probe["at_bound"]:
                 at_bound.append({"variable": name, "edge": probe["at_bound"], "value": probe["value"]})
@@ -612,8 +639,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         parts: list[str] = []
         if better:
             b = max(better, key=lambda x: x["gain"])
-            parts.append(f"moving {b['variable']} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better, more "
-                         "than the numerical error: the search had not finished, so this is not the best design nearby")
+            parts.append(f"moving {b['variable']} to {_fmt(b['value'])} gives a design {_fmt(b['gain'])}{u} better at the "
+                         "finest settings, more than the numerical error: this is not the best design nearby (the search "
+                         "had not finished, or its coarser settings misled it)")
         for edge in at_bound:
             parts.append(f"the best design sits at the {'lower' if edge['edge'] == 'low' else 'upper'} edge of the range "
                          f"allowed for {edge['variable']} ({_fmt(edge['value'])}): a design outside the range may be "
@@ -637,18 +665,22 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         checks["budget"] = {"status": PASSED, "says": ("every combination was evaluated" if stopped == "finished"
                                                        else "every starting point converged")}
     else:
-        why = {"budget": f"the search used its whole budget ({ev.get('search')} of {ev.get('budget')} evaluations)",
-               "share": "a starting point used its whole share of the budget",
-               "time": "the search's time limit (execution.timeout_s) was reached"}.get(
-            stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
+        why = {"budget": f"the search used its whole budget ({ev.get('search')} of {ev.get('budget')} evaluations) "
+                         "before every starting point converged",
+               "share": "at least one starting point used its whole share of the budget before it converged",
+               "time": "the search's time limit (execution.timeout_s) was reached before every starting point "
+                       "converged"}.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
         checks["budget"] = {"status": FAILED, "says": (
-            f"{why} before every starting point converged: the design is the best of {ev.get('search')} evaluations, "
-            "not shown to be the best the search would find with more")}
+            f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "
+            "would find with more")}
 
     # --- the verdict
     imp_status = (checks.get("improvement") or {}).get("status")
-    if not finished or not base_ok:
+    if not measured_all or not base_ok:
         verdict, reason = "unverified", (checks["refinement"]["says"])
+    elif cands and not ran_finest:
+        # The best designs did not run at the finest settings: nothing is known about their limits.
+        verdict, reason = "unverified", checks["refinement"]["says"]
     elif cands and chosen is None:
         verdict, reason = "infeasible", checks["constraints"]["says"]
     elif imp_status == FAILED:
@@ -660,12 +692,22 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         verdict, reason = "unverified", checks["improvement"]["says"]
     elif better:
         verdict, reason = "not_local_optimum", checks["neighbourhood"]["says"]
+    elif not finished:
+        verdict, reason = "unverified", ("the check's time limit (execution.timeout_s) ran out before every nudge "
+                                         "around the best design was evaluated")
     else:
         verdict, reason = "verified", checks["improvement"]["says"]
     if reason.startswith("the improvement over the baseline"):
         says = reason[0].upper() + reason[1:] + "."  # the check's own sentence already says it
     else:
         says = VERDICTS[verdict][0].upper() + VERDICTS[verdict][1:] + (f": {reason}." if reason else ".")
+    if chosen is not None and first is not None and chosen is not first:
+        # The one sentence a person reads must not let the search's own best pass for the one that was checked.
+        j = at(first) or {}
+        why_other = ("could not be evaluated there" if j.get("status") != "ok" else
+                     "breaks a limit there" if not _meets(j, limits, margin) else "is not as good there")
+        says += (f" The design reported is not the one the search chose ({_describe(first['design'])}), which "
+                 f"{why_other}.")
 
     def view(item: dict[str, Any] | None) -> dict[str, Any] | None:
         if item is None:
@@ -691,7 +733,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
         "objective": {k: objective.get(k) for k in ("quantity", "direction", "unit", "meaning") if objective.get(k)},
         "settings": {"search": info["search"], "levels": levels, "ratios": ratios, "where": info["where"],
                      "named": named},
+        # ``planned`` counts runs (each evaluation × ``runs_each``), as plan.md does.
         "evaluations": {"check": counts["designs"], "failed": counts["failed"], "runs_each": check_runs if noisy else 1,
+                        "runs": counts["designs"] * (check_runs if noisy else 1),
                         "planned": _plan.budget(block)["check"], "search": ev.get("search"), "budget": ev.get("budget"),
                         "stopped_because": stopped},
         "baseline": view(base),
@@ -758,14 +802,29 @@ def _key(search_key: str, entry: str) -> str:
     and FI's own check, search and harness code."""
     from . import trial_runner as _trials
 
-    return _sha(b"\1".join([search_key.encode(), entry.encode(), Path(__file__).read_bytes(),
-                            Path(_search.__file__).read_bytes(), _trials.HARNESS_SOURCE.encode()]))
+    from . import optimise as _optimise
+
+    code = [Path(m.__file__).read_bytes() for m in (_search, _plan, _optimise, _stats)]
+    return _sha(b"\1".join([search_key.encode(), entry.encode(), Path(__file__).read_bytes(), *code,
+                            _trials.HARNESS_SOURCE.encode()]))
 
 
-def restore(quest_root: Path, text: str | None = None) -> bool:
+def restore(quest_root: Path, text: str | None = None, key: str | None = None) -> bool:
     """Put FI's check back where a script changed or removed it: ``text`` is FI's copy from memory, else the one kept in
-    ``.fi/optimisation/check.json``. ``True`` when it was put back."""
+    ``.fi/optimisation/check.json``; with ``key`` (FI's copy from memory too), that record is put back as well.
+    ``True`` when something was put back."""
     quest_root = Path(quest_root)
+    put_back = False
+    if text is not None and key is not None:
+        record_text = json.dumps({"key": key, "text": text})
+        try:
+            current_record = (quest_root / RECORD).read_bytes()
+        except OSError:
+            current_record = None
+        if current_record != record_text.encode("utf-8"):
+            (quest_root / RECORD).parent.mkdir(parents=True, exist_ok=True)
+            (quest_root / RECORD).write_bytes(record_text.encode("utf-8"))
+            put_back = True
     if text is None:
         try:
             saved = json.loads((quest_root / RECORD).read_text(encoding="utf-8"))
@@ -773,14 +832,14 @@ def restore(quest_root: Path, text: str | None = None) -> bool:
         except (OSError, ValueError):
             return False
     if not isinstance(text, str):
-        return False
+        return put_back
     path = quest_root / CHECK_PATH
     try:
         current = path.read_bytes()
     except OSError:
         current = None
     if current == text.encode("utf-8"):
-        return False
+        return put_back
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(text.encode("utf-8"))
     return True
@@ -802,7 +861,7 @@ def _write(quest_root: Path, record: dict[str, Any], key: str) -> str:
     path.write_bytes(text.encode("utf-8"))
     saved = Path(quest_root) / RECORD
     saved.parent.mkdir(parents=True, exist_ok=True)
-    saved.write_text(json.dumps({"key": key, "text": text}), encoding="utf-8")
+    saved.write_bytes(json.dumps({"key": key, "text": text}).encode("utf-8"))
     return text
 
 
@@ -819,9 +878,9 @@ def _clean(value: Any) -> Any:
 
 async def run_check(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], search: Any,
                     *, base_seed: int, timeout_s: int, env: dict[str, str] | None = None,
-                    log: Any = None) -> tuple[dict[str, Any], str]:
+                    log: Any = None) -> tuple[dict[str, Any], str, str]:
     """Check the search's best design (see the module docstring) and write ``needs/OPTIMUM_CHECK.json``:
-    ``(the record, its text)``. ``search`` is the :class:`core.optimise.SearchRun`; ``timeout_s`` bounds the check alone.
+    ``(the record, its text, the key it is kept under)``. ``search`` is the :class:`core.optimise.SearchRun`; ``timeout_s`` bounds the check alone.
     Never raises for a problem of the simulation: a check that cannot finish is ``unverified``."""
     from . import optimise as _optimise
 
@@ -832,24 +891,30 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
     noisy = entry == "run_trial"
     files = getattr(search, "files", None) or {}
     try:
-        search_key = str(json.loads(files.get(_optimise.RECORD.as_posix(), "{}")).get("key") or "")
+        search_saved = json.loads(files.get(_optimise.RECORD.as_posix(), "{}"))
     except ValueError:
-        search_key = ""
+        search_saved = {}
+    search_key = str(search_saved.get("key") or "") if isinstance(search_saved, dict) else ""
+    # The hash of the check FI attached to the search's record (which FI puts back from memory): a check kept on disk is
+    # reused only when it is that one, so a script that rewrote it cannot have its version reused.
+    kept_sha = search_saved.get("check_sha256") if isinstance(search_saved, dict) else None
     key = _key(search_key, entry)
     try:
         saved = json.loads((quest_root / RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         saved = None
-    if (isinstance(saved, dict) and saved.get("key") == key and search_key and isinstance(saved.get("text"), str)):
+    if (isinstance(saved, dict) and saved.get("key") == key and search_key and isinstance(saved.get("text"), str)
+            and kept_sha and _sha(saved["text"].encode("utf-8")) == kept_sha):
         try:
             again = json.loads(saved["text"])
         except ValueError:
             again = None
-        if isinstance(again, dict) and again.get("verdict") != "unverified":
-            restore(quest_root, saved["text"])
+        # A check that finished is kept whatever its verdict; one its time limit cut short runs again.
+        if isinstance(again, dict) and again.get("finished") is not False:
+            restore(quest_root, saved["text"], key)
             if log is not None:
                 log.info("[optimise] the search is unchanged: the check at finer settings FI already ran is used")
-            return again, saved["text"]
+            return again, saved["text"], key
     ledger_text = files.get(_optimise.LEDGER_PATH.as_posix()) or ""
     rows = [json.loads(line) for line in ledger_text.splitlines() if line.strip()]
     rows = [r for r in rows if isinstance(r, dict) and r.get("event") == "evaluation"]
@@ -864,8 +929,8 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
     else:
         if log is not None:
             planned = _plan.budget(block)["check"]
-            log.info("[optimise] checking the best design at finer numerical settings (%s evaluations planned, apart "
-                     "from the search's budget)", planned)
+            log.info("[optimise] checking the best design at finer numerical settings (at most %s runs of the "
+                     "simulation, apart from the search's budget)", planned)
         gen = check(block, record_in, rows, noisy=noisy, check_runs=runs)
         load_error = ""
         try:
@@ -890,15 +955,15 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
     if noisy:
         record["seeds"] = {"check": seeds, "search": search_seeds}
     text = _write(quest_root, record, key)
-    return json.loads(text), text
+    return json.loads(text), text, key
 
 
 def _nothing_to_check(block: dict[str, Any] | None, search_record: dict[str, Any]) -> dict[str, Any]:
-    why = ("the search found no design that meets every limit, so there is nothing to check"
-           if block is not None else "the plan's optimisation block cannot be read")
     verdict = "infeasible" if block is not None else "unverified"
-    return {"schema": SCHEMA, "verdict": verdict, "passed": False, "finished": True,
-            "says": VERDICTS[verdict][0].upper() + VERDICTS[verdict][1:] + f": {why}.",
+    says = ("The search found no design that meets every limit, so there was nothing to check at finer settings."
+            if block is not None else
+            VERDICTS[verdict][0].upper() + VERDICTS[verdict][1:] + ": the plan's optimisation block cannot be read.")
+    return {"schema": SCHEMA, "verdict": verdict, "passed": False, "finished": True, "says": says,
             "checks": {}, "best": None, "baseline": None, "improvement": None,
             "evaluations": {"check": 0, "failed": 0, **{k: (search_record.get("evaluations") or {}).get(k)
                                                         for k in ("search", "budget", "stopped_because")}},
@@ -936,7 +1001,8 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         rule = "FI's fixed rule (the plan gives no finer values)"
         lines.append("[optimise]   the finer settings come from "
                      + "; ".join(f"{n}: {'the plan' if w == 'plan' else rule}" for n, w in where.items()))
-    lines.append(f"[optimise]   the check used {ev.get('check', 0)} evaluation(s) ({ev.get('planned', '?')} planned), "
+    runs = ev.get("runs", ev.get("check", 0))
+    lines.append(f"[optimise]   the check ran the simulation {runs} time(s) (at most {ev.get('planned', '?')} planned), "
                  "apart from the search's budget")
     return lines
 
@@ -946,8 +1012,10 @@ def summary_line(record: dict[str, Any]) -> str:
     return str((record or {}).get("says") or "The best design has not been checked at finer numerical settings.")
 
 
-def attach_summary(record: dict[str, Any]) -> dict[str, Any]:
-    """What ``results/best_design.json`` carries of the check (the full record is ``needs/OPTIMUM_CHECK.json``)."""
+def attach_summary(record: dict[str, Any], text: str | None = None) -> dict[str, Any]:
+    """What ``results/best_design.json`` carries of the check (the full record is ``needs/OPTIMUM_CHECK.json``, whose
+    hash is ``record_sha256`` when ``text`` is given). ``improvement_numerical_error`` is the numerical error of the two
+    designs added (the bar for the improvement by default); ``best_numerical_error`` the best design's own."""
     best = record.get("best") or {}
     base = record.get("baseline") or {}
     imp = record.get("improvement") or {}
@@ -958,8 +1026,10 @@ def attach_summary(record: dict[str, Any]) -> dict[str, Any]:
 
     return {"verdict": record.get("verdict"), "says": record.get("says"), "passed": record.get("passed"),
             "design": best.get("design"), "objective": finest(best), "baseline_objective": finest(base),
-            "improvement": imp.get("value"), "numerical_error": imp.get("numerical_error"),
-            "interval": imp.get("interval"), "record": CHECK_PATH.as_posix()}
+            "improvement": imp.get("value"), "improvement_numerical_error": imp.get("numerical_error"),
+            "best_numerical_error": best.get("numerical_error"), "interval": imp.get("interval"),
+            "record": CHECK_PATH.as_posix(),
+            **({"record_sha256": _sha(text.encode("utf-8"))} if text is not None else {})}
 
 
 # --- the evidence ladder ----------------------------------------------------------------------------------------------
@@ -1011,18 +1081,33 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
             "the best design was not checked at finer numerical settings (needs/OPTIMUM_CHECK.json is missing): an "
             "improvement that is only a numerical error cannot be ruled out")
         return out
+    checks = record.get("checks") or {}
+    verdict = str(record.get("verdict") or "")
     if record.get("ledger_sha256") and record["ledger_sha256"] != _sha(ledger_bytes):
         out["protocol_runtime_matched"].append(
             "the search's record (raw/optimisation_ledger.jsonl) changed after FI checked the best design")
-    checks = record.get("checks") or {}
-    verdict = str(record.get("verdict") or "")
+    elif not record.get("ledger_sha256") and checks:
+        out["protocol_runtime_matched"].append(
+            "the check of the best design does not say which record of the search it checked")
+    try:
+        attached = json.loads(best_path.read_text(encoding="utf-8")).get("check") or {}
+    except (OSError, ValueError, AttributeError):
+        attached = {}
+    if attached.get("record_sha256") != _sha((quest_root / CHECK_PATH).read_bytes()):
+        out["independently_validated"].append(
+            "the check of the best design (needs/OPTIMUM_CHECK.json) is not the one FI recorded in "
+            "results/best_design.json: it changed after FI wrote it")
 
     def says(name: str) -> str:
         return str((checks.get(name) or {}).get("says") or "")
 
-    if verdict == "unverified":
+    if record.get("finished") is False:
         out["independently_validated"].append(
             f"the check of the best design at finer numerical settings was not finished ({record.get('says')})")
+    elif verdict == "unverified" and not checks:
+        out["independently_validated"].append(str(record.get("says") or "the best design was not checked"))
+    elif verdict == "unverified" and (checks.get("constraints") or {}).get("status") == NOT_CHECKED:
+        out["independently_validated"].append(str(record.get("says")))
     if (checks.get("refinement") or {}).get("status") == NOT_CHECKED and "no numerical setting" in says("refinement"):
         out["independently_validated"].append(
             "the plan names no numerical setting (a mesh size, a time step), so the best design could not be recomputed "
@@ -1034,12 +1119,17 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
     if verdict == "infeasible" and not checks:
         out["independently_validated"].append(str(record.get("says") or "no design meets every limit"))
     imp = checks.get("improvement") or {}
-    if imp.get("status") == FAILED:
+    named = bool((record.get("settings") or {}).get("named"))
+    if imp.get("status") in (FAILED, NOT_CHECKED) and imp.get("says"):
         out["statistically_adequate"].append(says("improvement"))
     elif imp.get("status") == PASSED and (record.get("improvement") or {}).get("beyond_numerical_error") is False:
         out["statistically_adequate"].append(
             "the improvement over the baseline is above the plan's threshold but within the numerical error of the two "
             "designs, so it is not shown to be more than a numerical error")
+    elif imp.get("status") == PASSED and named and (record.get("improvement") or {}).get("beyond_numerical_error") is None:
+        out["statistically_adequate"].append(
+            "the numerical error of the two designs could not be estimated, so the improvement over the baseline is not "
+            "shown to be more than a numerical error")
     for name in ("neighbourhood", "starts", "budget"):
         c = checks.get(name) or {}
         if c.get("status") in (FAILED, NOT_CHECKED) and c.get("says"):
