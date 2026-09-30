@@ -44,10 +44,16 @@ _RUN_WORDS = {
 # A count of re-draws from results the experiment already produced (a bootstrap, a permutation test, a posterior
 # sample) is not a number of runs of the experiment: a GPT-6 quest was stopped as "the script differs from the plan"
 # because BOOTSTRAP_REPLICATES = 2000 sat beside a protocol of 300 runs per setting.
-_RESAMPLE_WORDS = {
-    "bootstrap", "bootstraps", "boot", "resample", "resamples", "resampling", "permutation", "permutations", "perm",
-    "perms", "jackknife", "posterior", "mcmc",
-}
+# Only a SAMPLING word beside a re-draw word is skipped (BOOTSTRAP_REPLICATES, n_boot_samples, mcmc_samples); a name that
+# says runs, trials or realizations (N_MCMC_RUNS, bootstrap_trials) is still read as runs. Stems, so glued or inflected
+# forms match too (NBootSamples -> "nboot", n_bootstrap2_samples -> "bootstrap2"); "perm" is left out (permeability).
+_SAMPLING_RUN_WORDS = {"samples", "sample", "replicates", "replicate", "reps", "repeats"}
+_RESAMPLE_STEM = re.compile(r"^n?(boot|resampl|subsampl|permut|shuffl|jackknif|surrogat|posterior|mcmc|hmc|burnin|warmup)")
+
+
+def _is_resample_count(name: str) -> bool:
+    tokens = _tokens(name)
+    return bool(set(tokens) & _SAMPLING_RUN_WORDS) and any(_RESAMPLE_STEM.match(t) for t in tokens)
 # Words that make a name a list of the axis's values (R0_LIST, dose_values) rather than something else about it
 # (dose_response, temperature_history).
 _LIST_WORDS = {
@@ -363,7 +369,7 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         # and not a negative count either (that is a wrong setting, and is reported like any other).
         counts = [
             f for f in scalars
-            if set(_tokens(f.name)) & _RUN_WORDS and not set(_tokens(f.name)) & _RESAMPLE_WORDS
+            if set(_tokens(f.name)) & _RUN_WORDS and not _is_resample_count(f.name)
             and float(f.values[0]).is_integer() and f.values[0] != 0
         ]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):

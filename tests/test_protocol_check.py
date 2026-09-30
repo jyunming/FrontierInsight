@@ -65,12 +65,23 @@ def test_the_runs_per_setting_are_read_from_a_count_the_script_names() -> None:
 def test_a_bootstrap_or_permutation_count_is_not_read_as_the_runs_per_setting() -> None:
     """A GPT-6 quest stopped on "the protocol fixes the runs per setting at 300; the script sets 2000
     (BOOTSTRAP_REPLICATES in experiment.py)": 2000 was the bootstrap resamples of the analysis, not runs."""
-    for name in ("BOOTSTRAP_REPLICATES", "n_boot_samples", "N_PERMUTATIONS_RUNS", "posterior_samples", "nResampleReps"):
+    skipped = ("BOOTSTRAP_REPLICATES", "n_boot_samples", "NBootSamples", "nboot_reps", "n_bootstrap2_samples",
+               "N_PERMUTATION_REPS", "posterior_samples", "mcmc_samples", "nResampleReps", "n_shuffle_samples")
+    for name in skipped:
         assert pc.check({"runs_per_setting": 300}, {"experiment.py": f"{name} = 2000\n"}) == [], name
-    # The real count beside it is still read, and a wrong one still caught.
+    # A name that says runs, trials or realizations is still a count of runs, whatever else it says; "perm" can be
+    # permeability, so a porous-media study's perm_samples is read too.
+    for name in ("N_MCMC_RUNS", "bootstrap_trials", "perm_samples", "mcmc_realizations"):
+        found = pc.check({"runs_per_setting": 300}, {"experiment.py": f"{name} = 50\n"})
+        assert [(m.kind, m.found) for m in found] == [("runs", [50.0])], name
+    # The real count beside a bootstrap count is still read, a wrong one still caught and named.
     found = pc.check({"runs_per_setting": 300}, {"experiment.py": "BOOTSTRAP_REPLICATES = 2000\nN_RUNS = 50\n"})
-    assert [(m.kind, m.found) for m in found] == [("runs", [50.0])]
+    assert [(m.kind, m.found, m.where) for m in found] == [("runs", [50.0], "N_RUNS in experiment.py, line 2")]
     assert pc.check({"runs_per_setting": 300}, {"experiment.py": "BOOTSTRAP_REPLICATES = 2000\nN_RUNS = 300\n"}) == []
+    # The incident's shape: the bootstrap count in the analysis, the runs in the simulation.
+    found = pc.check({"runs_per_setting": 300}, {"analysis.py": "BOOTSTRAP_REPLICATES = 2000\n",
+                                                "simulate.py": "N_RUNS = 50\n"})
+    assert [(m.kind, m.where) for m in found] == [("runs", "N_RUNS in simulate.py, line 1")]
 
 
 def test_a_tally_the_script_adds_to_is_not_read_as_its_runs_per_setting() -> None:
