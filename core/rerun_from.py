@@ -300,18 +300,24 @@ def map_blocks(*, no_simulation: bool = False) -> list[dict[str, Any]]:
             for key, (name, desc, off) in MAP_BLOCKS.items()]
 
 
-def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulation: bool = False) -> list[dict[str, Any]]:
+def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulation: bool = False,
+             at: list[str] | tuple[str, ...] = ()) -> list[dict[str, Any]]:
     """Every graph node as a map shows it, in graph order: name, plain title, block, sentence, reads, writes, loop note,
     the step a restart from it means (or ``""``), whether it can be clicked, and its status: ``done``, ``now`` (where the
-    quest stopped), ``todo`` or ``off`` (the other path). ``steps`` is what ``Engine.rerun_steps()`` returns. A node is
-    clickable only when it names a step that has its backup list and sentence, the quest reached that step, the node
-    is on the quest's path, and the quest got as far as the node itself (two nodes can share one step)."""
+    quest stopped), ``todo`` or ``off`` (the other path). ``steps`` is what ``Engine.rerun_steps()`` returns; ``at`` and
+    ``finished`` are what ``Engine.stopped_at()`` returns. The node the quest stopped in is the first of ``at`` on the
+    quest's path (the pause it waits in, the node that failed); without one it is the first node of the last step the
+    quest reached. A node is clickable only when it names a step that has its backup list and sentence, the quest
+    reached that step, the node is on the quest's path, and the quest got as far as the node itself (two nodes can
+    share one step)."""
     by_step = {s["name"]: s for s in steps}
     off_blocks = {b["id"] for b in map_blocks(no_simulation=no_simulation) if b["off"]}
     on_path = [n for n in NODES if NODES[n]["block"] not in off_blocks]
-    reached_steps = [s["name"] for s in steps if s["reached"]]
-    stop_step = reached_steps[-1] if reached_steps else ""
-    stop_idx = next((i for i, n in enumerate(on_path) if stop_step and resolve(n) == stop_step), -1)
+    stop_idx = min((on_path.index(n) for n in at if n in on_path), default=-1)
+    if stop_idx < 0:
+        reached_steps = [s["name"] for s in steps if s["reached"]]
+        stop_step = reached_steps[-1] if reached_steps else ""
+        stop_idx = next((i for i, n in enumerate(on_path) if stop_step and resolve(n) == stop_step), -1)
     status: dict[str, str] = {}
     for i, node in enumerate(on_path):
         if finished and stop_idx >= 0:
@@ -336,11 +342,12 @@ def node_map(steps: list[dict[str, Any]], *, finished: bool = False, no_simulati
     return out
 
 
-def map_payload(steps: list[dict[str, Any]], *, finished: bool = False, no_simulation: bool = False) -> dict[str, Any]:
+def map_payload(steps: list[dict[str, Any]], *, finished: bool = False, no_simulation: bool = False,
+                at: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
     """What the quest map draws, in one piece: ``blocks``, ``finished`` and ``nodes``. The web page and the VS Code panel
-    both get exactly this."""
+    both get exactly this (built by ``Engine.quest_map()``)."""
     return {"blocks": map_blocks(no_simulation=no_simulation), "finished": finished,
-            "nodes": node_map(steps, finished=finished, no_simulation=no_simulation)}
+            "nodes": node_map(steps, finished=finished, no_simulation=no_simulation, at=at)}
 
 
 async def _current_branch(graph: Any, run_config: dict[str, Any]):

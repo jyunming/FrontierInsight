@@ -872,6 +872,13 @@ class Engine:
                                   f"back where they were and the quest was not run again. Close whatever holds those files "
                                   f"and try `--resume {self.quest_id} --from {from_step}` again.")
                             return self._collect_artifacts({})
+                        if not (_rerun_from.needs_approval(from_step) or _rerun_from.picks_skills(from_step)):
+                            # Make the fork the thread's newest checkpoint now (a copy of it, about to run the same
+                            # step), as the steps above already do by writing state: LangGraph saves nothing until the
+                            # step's first node finishes, so until then the quest's map read the old line's end and
+                            # showed a quest whose outputs were just moved aside as finished (and did so for good when
+                            # the run was stopped or failed in that node).
+                            fork_config = await graph.aupdate_state(fork_config, None, as_node="__copy__")
                         extra_audit: dict[str, Any] = {}
                         if _rerun_from.needs_approval(from_step):
                             extra_audit = {"approved_by": approved_by, "replaced_protocol_sha256": replaced_sha}
@@ -1937,6 +1944,48 @@ class Engine:
         values = await self._checkpoint_values()
         return bool(values.get("no_simulation_resolved") or values.get("survey_mode_resolved"))
 
+    async def quest_map(self, steps: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """What the quest map draws (``core.rerun_from.map_payload``): the CLI's ``--from --json`` (the VS Code panel)
+        and the web page both take it from here, so they agree on where the quest stopped. ``steps`` is
+        ``rerun_steps()`` when the caller already has it. No model call, nothing written."""
+        if steps is None:
+            steps = await self.rerun_steps()
+        finished, at = await self.stopped_at()
+        return _rerun_from.map_payload(steps, finished=finished, no_simulation=await self.rerun_no_simulation(), at=at)
+
+    async def stopped_at(self) -> tuple[bool, list[str]]:
+        """Where the quest is, for its map: ``(finished, nodes)``. ``nodes`` are the graph nodes the checkpoint is about
+        to run (the one a pause waits in, the one that failed, the one a killed run was in); ``finished`` is true only
+        when there is none left AND nothing is waiting: no pause (``.fi/pause.json``, ``NEXT_STEP.md``) and no failure
+        (``quest_failed.md``). A pause writes ``frontier_insight_summary.json`` too, so that file never says "finished".
+        A quest with no checkpoint, or one that cannot be read, is not finished. No model call, nothing written."""
+        nxt = await self._checkpoint_next()
+        if nxt is None:
+            return False, []
+        waiting = any(p.is_file() for p in (self.fi_dir / "pause.json", self.quest_root / "NEXT_STEP.md",
+                                             self.quest_root / "quest_failed.md"))
+        return (not nxt and not waiting), list(nxt)
+
+    async def _checkpoint_next(self) -> tuple[str, ...] | None:
+        """The nodes the latest checkpoint is about to run (``()`` at the end of the graph), or ``None`` when the quest
+        has no checkpoint or it cannot be read."""
+        try:
+            opened = await self._open_readonly_graph()
+            if opened is None:
+                return None
+            graph, conn = opened
+            try:
+                snap = await graph.aget_state({"configurable": {"thread_id": self.quest_id}})
+            finally:
+                await conn.close()
+        except Exception as e:  # noqa: BLE001 -- a map that cannot read the checkpoint shows "not finished"
+            self._log.debug("[map] could not read the checkpoint: %r", e)
+            return None
+        # A thread with no checkpoint at all also has nothing next: that is "never ran", not "finished".
+        if not ((snap.config or {}).get("configurable") or {}).get("checkpoint_id"):
+            return None
+        return tuple(snap.next or ())
+
     async def _checkpoint_values(self) -> dict[str, Any]:
         graph_and_close = await self._open_readonly_graph()
         if graph_and_close is None:
@@ -1957,9 +2006,13 @@ class Engine:
         # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
         # own setup would write to its database.
         conn = await aiosqlite.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-        saver = AsyncSqliteSaver(conn)
-        saver.is_setup = True
-        return self._build_graph().compile(checkpointer=saver), conn
+        try:
+            saver = AsyncSqliteSaver(conn)
+            saver.is_setup = True
+            return self._build_graph().compile(checkpointer=saver), conn
+        except BaseException:
+            await conn.close()
+            raise
 
     async def _reached_steps(self) -> list[str]:
         opened = await self._open_readonly_graph()

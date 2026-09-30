@@ -1135,7 +1135,6 @@ def make_app(
         if not yaml_path.is_file() or not (quest_root / ".fi" / "state.sqlite").is_file():
             return JSONResponse({"quest_id": quest_id, "steps": [], "nodes": [], "blocks": [],
                                  "config_path": str(yaml_path)})
-        from core import rerun_from as _rerun_from
         from core.config import Config
         from core.engine import Engine, _close_quest_logger
 
@@ -1144,15 +1143,16 @@ def make_app(
         try:
             engine = Engine(cfg, resume_quest_id=quest_id)
             steps = await engine.rerun_steps()
-            no_sim = await engine.rerun_no_simulation()
+            # Where the quest stopped comes from its checkpoint and its pause / failure files, never from the summary
+            # file (a pause writes that too): the same helper the VS Code panel's `--from --json` uses.
+            quest_map = await engine.quest_map(steps)
         finally:
             # The Engine opened the quest's log files for this process; nothing is logged, so they are closed now.
             _close_quest_logger(quest_id)
-        finished = (quest_root / "frontier_insight_summary.json").is_file()
         return JSONResponse({
             "quest_id": quest_id,
             "config_path": str(yaml_path),
-            **_rerun_from.map_payload(steps, finished=finished, no_simulation=no_sim),
+            **quest_map,
             "steps": [{"step": s["name"], "redoes": s["sentence"], "group": s["group"],
                        "needs_approval": s["needs_approval"], "outputs": s["outputs"]}
                       for s in steps if s["reached"]],
