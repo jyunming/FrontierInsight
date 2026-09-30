@@ -90,6 +90,7 @@ from . import receipts as _receipts
 from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
+from . import oracle_forms as _forms
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
 from . import protocol_check as _protocol
@@ -4176,7 +4177,7 @@ class Engine:
         return parsed.design, sha
 
     def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None,
-                        unsourced: list[str] | None = None, no_criteria: bool = False) -> None:
+                        unsourced: list[str] | None = None, no_criteria: bool = False, reason: str = "") -> None:
         """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
         supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
 
@@ -4210,9 +4211,12 @@ class Engine:
             names = ", ".join(f"“{n}”" for n in added) or "(none named)"
             checks_on = self.config.engine.oracle_check != "off"
             steps = [
-                f"After you read the plan, FI added checks against known answers (oracles) to it, or filled in their "
-                f"numbers: {names}. The plan had no such check, or its checks had no numbers to compare against. You "
-                "have not seen these yet, and the plan is fixed for the run once the quest goes on.",
+                (f"After you read the plan, FI changed checks against known answers (oracles) in it: {names}. {reason} "
+                 "You have not seen these changes yet, and the plan is fixed for the run once the quest goes on.")
+                if reason else
+                (f"After you read the plan, FI added checks against known answers (oracles) to it, or filled in their "
+                 f"numbers: {names}. The plan had no such check, or its checks had no numbers to compare against. You "
+                 "have not seen these yet, and the plan is fixed for the run once the quest goes on."),
                 f"Read them in `plan.md` ({path}), in the `oracles` list of the protocol under "
                 f"“{_plan.DESIGN_HEADING}”: what each one checks, the value it expects and how close is close "
                 "enough. Edit any you disagree with (a plan left with no check at all gets one added again).",
@@ -4226,7 +4230,7 @@ class Engine:
             self._pause_for_human(
                 kind="plan",
                 interaction="supply",
-                headline="read the checks FI added to the plan",
+                headline="read the checks FI changed in the plan" if reason else "read the checks FI added to the plan",
                 steps=steps,
                 payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
                          "oracles_added": list(added)},
@@ -4312,6 +4316,24 @@ class Engine:
             if parsed.design is None:
                 self._pause_for_plan(error=parsed.error or "no design")
                 return {}
+            if not self._oracle_guidance_path().is_file():
+                # A plan written before its checks were looked at (a person's own, or a quest begun before this):
+                # looked at once, as a plan FI writes is. When the person already read it at the plan stop, what this
+                # changes is theirs to read again before the freeze.
+                read_already = (self.fi_dir / "paused_at_plan.flag").is_file()
+                before = self._planned_oracles()
+                await self._guide_oracles(state)
+                after = self._planned_oracles()
+                changed = [n for n, o in after.items() if before.get(n) != o]
+                removed = [n for n in before if n not in after]
+                if read_already and (changed or removed):
+                    self._note_engine_change(changed, removed, reason=(
+                        "FI put the checks in their kinds' numeric form after you read the plan: "
+                        + "; ".join(_forms.describe_changes(before, after)) + "."))
+                parsed = _plan.parse(path.read_text(encoding="utf-8"))
+                if parsed.design is None:
+                    self._pause_for_plan(error=parsed.error or "no design")
+                    return {}
             protocol = parsed.design.get("protocol")
             no_criteria = (ask and self._runs_code(state) and isinstance(protocol, dict)
                            and self._split_on({**state, "design": parsed.design}) and not _criteria.countable(protocol))
@@ -4426,6 +4448,11 @@ class Engine:
                        len((extra or {}).get("literature") or []) if isinstance(extra, dict) else 0, len(audit))
         await self._shadow("plan", {**state, "design": normalized},
                            taken="held the plan for the person" if ask else "went on with the plan")
+        # The checks against known answers, each in its kind's numeric form, before the person reads the plan.
+        await self._guide_oracles(state)
+        guided, _why = _plan.load_design(self.quest_root)
+        if isinstance(guided, dict):
+            normalized = guided
         protocol = normalized.get("protocol")
         self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None,
                                  no_criteria=no_criteria and ask)
@@ -4649,7 +4676,8 @@ class Engine:
         # record carries the gap instead.
         if gaps and stop and self.config.rigor_profile == "research" and _plan.plan_path(self.quest_root).is_file():
             added = self._oracles_added_read()
-            if (added and not added.get("shown") and added.get("oracles")
+            if (added and not added.get("shown") and added.get("oracles") and not added.get("removed")
+                    and not added.get("reason")  # a change, not an addition: that stop does not say what changed
                     and all(any(repr(str(n)) in why for why in gaps) for n in added["oracles"])):
                 # This stop names every check the engine added (each lacks a source), so the person reads them here:
                 # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
@@ -6707,13 +6735,17 @@ class Engine:
         added = self._oracles_added_read() or {}
         frozen_names = {str(o["name"]) for o in _oracle.declared(protocol if isinstance(protocol, dict) else None)}
         engine_added = [str(n) for n in added.get("oracles") or [] if str(n) in frozen_names]
+        engine_removed = [str(n) for n in added.get("removed") or [] if str(n) not in frozen_names]
         oracle_note = ""
-        if engine_added:
-            names = ", ".join(f"'{n}'" for n in engine_added)
+        if engine_added or engine_removed:
+            # A test run of the checks changes or removes them (it has a reason); the gate adds them.
+            how = "changed or removed" if added.get("reason") else "added"
+            names = ", ".join(f"'{n}'" for n in [*engine_added, *engine_removed])
+            engine_added = engine_added or engine_removed
             oracle_note = (
-                f"the oracles {names} were added by the engine after the plan was written and held for the person to read"
+                f"the oracles {names} were {how} by the engine after the plan was written and held for the person to read"
                 if added.get("shown") else
-                f"the oracles {names} were added by the engine after the plan was written and nobody approved them"
+                f"the oracles {names} were {how} by the engine after the plan was written and nobody approved them"
             )
             if not added.get("shown"):
                 approved_by = f"auto: {oracle_note}; " + (
@@ -7771,6 +7803,7 @@ class Engine:
         # disputed checks that were failing). Read once, right after the next run.
         guard: tuple[str, str | None, set[str]] | None = None
         attempt = 0
+        test_run_read = False  # the first measurement of the checks has been read as a test run of them
         while True:
             protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
             oracles = _oracle.declared(protocol)
@@ -7838,6 +7871,13 @@ class Engine:
                         "[oracle] put %s back as it was: the repair made the disputed check(s) %s pass, and the script may "
                         "not be changed for them until a person decides", seed_path.name, ", ".join(repr(n) for n in flipped),
                     )
+                    continue
+            if oracles and not incomplete and not test_run_read:
+                # The first measurement of the checks is a test run of them: a definition mismatch goes back to the plan
+                # once, before any repair of the script is spent on it; when the plan changed the checks they are
+                # measured again as it now states them.
+                test_run_read = True
+                if found and _frozen.load(self.quest_root) is None and await self._revise_after_dry_run(oracles, attempts[-1]):
                     continue
             if not found:
                 break
@@ -8027,7 +8067,9 @@ class Engine:
             "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
             "`tolerance_mode` (`absolute`, the default, or `relative`) and a `reference` saying where the expected value comes "
             f"from: {_REFERENCE_FORMS}" " Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
-            "`measure` (the name of the number that run returns), so the engine can run the simulation on it itself (for a "
+            "`measure` (how the number is computed from what that run returns: one returned name, or a formula of them "
+            "such as abs(P_out - P_in) / P_in; for an invariant, a symmetry or a second implementation it is the worst "
+            "violation, expecting 0), so the engine can run the simulation on it itself (for a "
             "random simulation that run is one trial, so a case suits a check one trial shows exactly); when the "
             "check claims an order of accuracy, give `order` too. The engine judges the measurement against these numbers. "
             "Change nothing else."
@@ -8043,12 +8085,23 @@ class Engine:
         after = self._planned_oracles()
         changed = [name for name, oracle in after.items() if before.get(name) != oracle]
         if changed:
-            earlier = self._oracles_added_read() or {}
-            carried = [] if earlier.get("shown") else [str(n) for n in earlier.get("oracles") or []]
-            self._oracles_added_write({
-                "oracles": list(dict.fromkeys([*carried, *changed])), "shown": False, "at": _frozen.now(),
-            })
+            self._note_engine_change(changed)
         return True
+
+    def _note_engine_change(self, changed: list[str], removed: list[str] | None = None, reason: str = "") -> None:
+        """Record checks the engine added, changed or removed in plan.md after it was written, merged with what is
+        recorded and not yet shown, so the stop before the freeze (``_hold_added_oracles``) names all of them and the
+        freeze record never says a person approved one they were not shown."""
+        earlier = self._oracles_added_read() or {}
+        unseen = not earlier.get("shown")
+        carried = [str(n) for n in earlier.get("oracles") or []] if unseen else []
+        gone = [str(n) for n in earlier.get("removed") or []] if unseen else []
+        reasons = [str(earlier["reason"])] if unseen and earlier.get("reason") else []
+        merged = " ".join([*reasons, reason]).strip()
+        self._oracles_added_write({
+            "oracles": list(dict.fromkeys([*carried, *changed])), "removed": list(dict.fromkeys([*gone, *(removed or [])])),
+            "shown": False, "at": _frozen.now(), **({"reason": merged} if merged else {}),
+        })
 
     def _planned_oracles(self) -> dict[str, dict[str, Any]]:
         """The oracles of the protocol in ``plan.md``, by name."""
@@ -8082,15 +8135,232 @@ class Engine:
         if self.config.pauses.plan != "ask" or _frozen.load(self.quest_root) is not None:
             return
         added = self._oracles_added_read()
-        if added is None or added.get("shown") or not added.get("oracles"):
+        if added is None or added.get("shown") or not (added.get("oracles") or added.get("removed")):
             return
         # Only the added checks still in the plan: one the person renamed or removed at an earlier stop they have seen.
         planned = self._planned_oracles()
         still = [str(n) for n in added.get("oracles") or [] if str(n) in planned]
+        # A check the engine's request removed is named too: removing a failing check is a change the person must see.
+        removed = [str(n) for n in added.get("removed") or [] if str(n) not in planned]
         # Written before the stop: the stop never returns, and the resume must go on to the freeze.
-        self._oracles_added_write({**added, "oracles": still, "shown": True})
-        if still:
-            self._pause_for_plan(added=still)
+        self._oracles_added_write({**added, "oracles": still, "removed": removed, "shown": True})
+        if still or removed:
+            self._pause_for_plan(added=still + [f"{n} (removed)" for n in removed], reason=str(added.get("reason") or ""))
+
+    # --- the checks against known answers, before anything runs (core/oracle_forms.py) ---------------------------------
+
+    def _oracle_guidance_path(self) -> Path:
+        return self.fi_dir / "oracle_guidance.json"
+
+    async def _guide_oracles(self, state: QuestState) -> None:
+        """Plan time, once per quest, before anything runs: hold each check against a known answer in ``plan.md`` to its
+        kind's numeric form. A rewrite that cannot change the check's verdict is made and said in plan.md; a check that
+        needs the plan's own judgement goes back to the plan once, with a precise request (``plan_revise``). A no-op for
+        a quest that runs no experiment, with the checks off, once the protocol is frozen, or when it was done before."""
+        if (not self._runs_code(state) or self.config.engine.oracle_check == "off"
+                or _frozen.load(self.quest_root) is not None or self._oracle_guidance_path().is_file()):
+            return
+        path = _plan.plan_path(self.quest_root)
+        if not path.is_file():
+            return
+        record: dict[str, Any] = {"at": _frozen.now()}
+        try:
+            record["forms"] = await self._hold_oracle_forms(path, fi_runs=self._split_on(state))
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a check of the plan must never stop a quest by crashing
+            self._log.warning("[oracle] the checks in the plan could not be looked at: %r", e)
+            record["error"] = repr(e)[:300]
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            self._oracle_guidance_path().write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[oracle] couldn't record the look at the plan's checks: %r", e)
+
+    def _write_plan_section(self, path: Path, lines: list[str], note: str) -> None:
+        """Add ``lines`` to plan.md's section on the checks (prose, never read back) and keep that version."""
+        text = _plan.add_to_section(path.read_text(encoding="utf-8"), _forms.HEADING, lines)
+        path.write_text(text, encoding="utf-8")
+        _plan.record_version(self.quest_root, text, by="engine", note=note)
+
+    async def _revise_checks_only(self, request: str) -> str:
+        """Ask the plan (``plan_revise``) for ``request`` and keep only what it changed in the checks
+        (``protocol.oracles``): anything else it changed in the design block is put back, so a request about the checks
+        can never move the grid, the thresholds or the criteria. ``""`` when the plan was rewritten, else why not (a
+        failed call is reported, never a crash)."""
+        path = _plan.plan_path(self.quest_root)
+        before_text = path.read_text(encoding="utf-8")
+        try:
+            await self.revise_plan(request, by="engine")
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a request that got no usable answer leaves the plan as it was
+            return f"the plan could not be rewritten ({str(e)[:200] or type(e).__name__})"
+        after_text = path.read_text(encoding="utf-8")
+        before, after = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        if before is None or after is None:
+            return ""
+
+        def part(block: dict[str, Any], key: str) -> list[Any]:
+            protocol = block.get("protocol") if isinstance(block.get("protocol"), dict) else {}
+            items = protocol.get(key)
+            return items if isinstance(items, list) else []
+
+        def named(items: list[Any]) -> dict[str, Any]:
+            return {str(o.get("name") if isinstance(o, dict) else o).strip(): o for o in items}
+
+        old_checks, new_checks = named(part(before, "oracles")), named(part(after, "oracles"))
+        # The checks that changed (added, removed, renamed or edited): a criterion that reads one of them may change
+        # with it (its number changed meaning); every other criterion stays as it was.
+        touched = {n.lower() for n in {*old_checks, *new_checks} if old_checks.get(n) != new_checks.get(n)}
+
+        def reads_touched(c: Any) -> bool:
+            return isinstance(c, dict) and str(c.get("oracle") or "").strip().lower() in touched
+
+        def key(c: Any) -> str:
+            return str(c.get("name") if isinstance(c, dict) else c).strip().lower()
+
+        # Criteria matched by their own name, in the rewrite's order: one that read, or now reads, a changed check is
+        # taken from the rewrite (added, changed or dropped with it); every other one is the plan's as it was.
+        old_criteria = {key(c): c for c in part(before, "criteria")}
+        criteria: list[Any] = []
+        for c in part(after, "criteria"):
+            old = old_criteria.get(key(c))
+            if reads_touched(c) or reads_touched(old):
+                criteria.append(c)
+            elif old is not None:
+                criteria.append(old)
+        seen = {key(c) for c in criteria}
+        criteria += [c for k, c in old_criteria.items() if k not in seen and not reads_touched(c)]
+
+        def keep(block: dict[str, Any]) -> dict[str, Any]:
+            protocol = dict(block.get("protocol") or {})
+            protocol["oracles"] = part(after, "oracles")
+            if criteria or "criteria" in protocol:
+                protocol["criteria"] = criteria
+            return {**block, "protocol": protocol}
+
+        # The plan as it was, with only the checks (and the criteria reading them) from the rewrite: nothing else in
+        # the design, and no prose the rewrite dropped (FI's own sentences about the checks among it), is lost.
+        kept = _plan.edit_design_block(before_text, keep)
+        if kept is None:
+            return ""
+        kept = _plan.refresh_model_section(kept)
+        if _plan.raw_design_block(kept) != after or _plan.parse(kept).design is None:
+            self._log.warning("[oracle] the plan's rewrite changed more than the checks; only the checks were kept")
+        if _plan.parse(kept).design is None:
+            path.write_text(before_text, encoding="utf-8")
+            # Recorded, so the plan put back is not later taken for a person's edit.
+            _plan.record_version(self.quest_root, before_text, by="engine",
+                                 note="the plan's rewrite of its checks could not be read; put back as it was")
+            return "the plan's rewrite of the checks could not be read"
+        path.write_text(kept, encoding="utf-8")
+        _plan.record_version(self.quest_root, kept, by="engine", note="the plan's changes to its checks")
+        return ""
+
+    async def _hold_oracle_forms(self, path: Path, *, fi_runs: bool = True) -> dict[str, Any]:
+        """Hold plan.md's checks to their kinds' forms (see :meth:`_guide_oracles`); what was rewritten, asked and left."""
+        text, rewrites, requests = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
+        left: list[str] = []
+        for r in rewrites:
+            self._log.info("[oracle] %s", r)
+        if rewrites or requests:
+            # The rewrites are said before the plan is asked anything, so a failed request never leaves them unexplained.
+            path.write_text(text, encoding="utf-8")
+            self._write_plan_section(path, [
+                "> What FI did to the checks before anything ran. Each kind of check has one numeric form: the worst "
+                "violation, expecting 0, for an invariant, a symmetry or a second implementation; the quantity itself "
+                "for the others.", "", *[f"- {r}" for r in rewrites]],
+                note="checks against known answers written in their kind's numeric form")
+        if requests:
+            for r in requests:
+                self._log.warning("[oracle] asking the plan to change a check: %s", r)
+            before = self._planned_oracles()
+            failed = await self._revise_checks_only(_forms.request(requests))
+            if failed:
+                self._log.warning("[oracle] %s", failed)
+            changes = _forms.describe_changes(before, self._planned_oracles())
+            text, again, left = _forms.apply_to_plan(path.read_text(encoding="utf-8"), fi_runs=fi_runs)
+            if again:
+                path.write_text(text, encoding="utf-8")
+            for r in left:
+                self._log.warning("[oracle] still not in its kind's form after the plan was asked once: %s", r)
+            self._write_plan_section(path, [
+                *[f"- FI asked the plan to change a check: {r}" for r in requests],
+                *([f"- {failed[0].upper()}{failed[1:]}; nothing was changed for it."] if failed else
+                  [f"- What changed: {c}." for c in changes] or ["- The plan did not change the checks."]),
+                *[f"- {r}" for r in again],
+                *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
+            ], note="the checks against known answers looked at")
+        return {"rewritten": rewrites, "asked": requests, "left": left}
+
+    def _dry_run_path(self) -> Path:
+        return self.fi_dir / "oracle_dry_run.json"
+
+    async def _revise_after_dry_run(self, oracles: list[dict[str, Any]], record: dict[str, Any]) -> bool:
+        """The oracle gate's first measurement, before the protocol is frozen, is a test run of the checks: a number whose
+        size says the plan and the simulation mean different things by a check (:func:`core.oracle_forms.mismatch`) sends
+        ONE targeted request to the plan (never a change to an expected value made here), and the checks it changes or
+        removes are recorded as the engine's, so a person reads them before the freeze (``pauses.plan: ask``, which
+        research sets). ``True`` when the plan's checks changed and the gate should measure again. Asked at most once
+        per quest."""
+        if self._dry_run_path().is_file():
+            return False
+        found = _forms.mismatches(oracles, record.get("checks"))
+        if not found:
+            return False
+        record["test_run_mismatches"] = found
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            self._dry_run_path().write_text(json.dumps({"mismatches": found, "at": _frozen.now()}, indent=2) + "\n",
+                                            encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[oracle] couldn't record the test run of the checks: %r", e)
+        for why in found:
+            self._log.warning("[oracle] a test run of the checks before the study: %s", why)
+        print(f"[FI] A test run of the checks before the study: {len(found)} of them may mean something different in the "
+              "plan and in the simulation; asking the plan to look at them once (see plan.md and .fi/run.log)")
+        before = self._planned_oracles()
+        failed = await self._revise_checks_only(_forms.dry_run_request(found))
+        after = self._planned_oracles()
+        changes = _forms.describe_changes(before, after)
+        changed = [name for name, oracle in after.items() if before.get(name) != oracle]
+        removed = [name for name in before if name not in after]
+        # Whether a changed check now passes on the test run's own numbers: a change that simply makes the measured value
+        # pass is said as exactly that, so a person checks its reason, not its result.
+        returned = {str(c.get("name") or "").strip(): c.get("returned") for c in record.get("checks") or []
+                    if isinstance(c, dict) and c.get("measured_by") == "engine"}
+        fits = [n for n in changed
+                if _forms.passes_on(after[n], returned.get(n), (before.get(n) or {}).get("case")) is True]
+        path = _plan.plan_path(self.quest_root)
+        try:
+            self._write_plan_section(path, [
+                "", "A test run of the checks before the study, on each check's own case:", "",
+                *[f"- {why[0].upper()}{why[1:]}." for why in found],
+                *([f"- The plan was asked once to look at their definitions, and {failed}; nothing was changed."]
+                  if failed else
+                  [f"- The plan was asked once to look at their definitions. What changed: {c}." for c in changes]
+                  or ["- The plan was asked once to look at their definitions, and kept them as they were."]),
+                *[f"- With this change the check {n!r} passes on the test run's own numbers: check the reason for the "
+                  "change, not the result." for n in fits],
+            ], note="a test run of the checks before the study")
+        except OSError as e:
+            self._log.warning("[oracle] couldn't write the test run of the checks into plan.md: %r", e)
+        for c in changes:
+            self._log.warning("[oracle] after the test run the plan changed: %s", c)
+        if failed:
+            self._log.warning("[oracle] after the test run, %s", failed)
+        if not changed and not removed:
+            self._log.info("[oracle] after the test run the plan kept its checks as they were")
+            return False
+        # The engine changed the plan after it was written: a person reads that before the freeze, or the freeze record
+        # says nobody approved it (as for a check the gate adds).
+        self._note_engine_change(changed, removed, reason=(
+            "A test run of the checks before the study measured numbers that did not fit their definitions, and the "
+            "plan was asked once to look at them: " + "; ".join(changes) + "."
+            + (f" With the change, {', '.join(repr(n) for n in fits)} pass on the test run's own numbers: check the "
+               "reason for the change, not the result." if fits else "")))
+        return True
 
     async def _repair_script_for_oracle(
         self, state: QuestState, path: Path, oracles: list[dict[str, Any]], found: list[str], stderr_tail: str = "",
@@ -16345,8 +16615,9 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   A cut-off that decides it (what counts as a major outbreak) is read from the protocol's thresholds,
   `json.loads(os.environ["FI_THRESHOLDS"])`, never written into the script as a number of its own.
 - When the protocol lists oracles: an oracle that names a `case` (the settings of one run) and a `measure` is run by
-  FI itself: it calls run_trial / run_cell on that case and reads `measure` from the dict returned, so that function
-  must return the number, computed by the real simulation. Only an oracle without a `case` needs `def oracle() -> dict`,
+  FI itself: it calls run_trial / run_cell on that case and computes `measure` (one returned name, or a formula of
+  them) from the dict returned, so that function must return every name the `measure` uses, computed by the real
+  simulation (never the check's number already worked out in another form). Only an oracle without a `case` needs `def oracle() -> dict`,
   which computes, with the SAME simulation code, the values those oracles name, returned as a dict keyed by the oracle
   names; this replaces the `FI_ORACLE` rule above. `FI_PILOT` does not apply.
 
@@ -16431,7 +16702,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
-  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<the name of the number that run returns, as the simulation function returns it>"}],
+  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
     "assumptions": ["<what the model assumes>"],
@@ -16443,7 +16714,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 
@@ -16510,8 +16781,9 @@ Reply with exactly two fenced Python blocks: the first starting with the line `#
 _TRIAL_ORACLE_NOTE = """
 
 THE TRIAL CONTRACT: simulate.py defines run_trial (or run_cell). An oracle that names a `case` and a `measure` is NOT
-measured by anything you write for the check: FI calls run_trial (or run_cell) itself on that case and reads `measure` from
-the dict it returns, so the simulation function must return that number, computed by the real simulation. Only an oracle
+measured by anything you write for the check: FI calls run_trial (or run_cell) itself on that case and computes `measure`
+(one returned name, or a formula of them) from the dict it returns, so the simulation function must return every name
+the `measure` uses, computed by the real simulation. Only an oracle
 without a `case` is measured by `def oracle() -> dict` in simulate.py, which must compute, with the same simulation code,
 each such check and return them as a dict keyed by the check's name, e.g. `{"closed_form_limit": 0.4987}`. There is no
 FI_ORACLE variable and no ORACLE_JSON line. Keep every comment that marks where an equation of the plan's model is

@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 from . import oracle_check as _oracle
+from . import oracle_forms as _forms
 
 RAW_DIRNAME = "raw"
 LEDGER_NAME = "ledger.jsonl"
@@ -762,13 +763,38 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         if values is None:
             problems.append(f"the oracle {name!r}: the simulation could not be run on its case ({why[:300]})")
             timed_out = timed_out or "ran out of time" in why
-        elif measure not in values:
+            continue
+        if measure in values:  # one returned name, as every oracle was before formulas: read as it is
+            checks.append({"name": name, "value": values[measure], "measured_by": "engine", "returned": dict(values)})
+            continue
+        # How the number is computed is the protocol's formula of what the simulation returned, applied here by the
+        # engine (core/oracle_forms.py): the script never decides the representation.
+        got = _forms.evaluate(measure, values)
+        returned = ", ".join(sorted(values)) or "nothing"
+        if not got.unreadable and not _forms.names(measure):
+            # A number that takes nothing from the simulation (`0`, `pi - pi`) is not a measurement of it.
+            problems.append(f"the oracle {name!r}: its number is computed as `{measure}`, which takes nothing the "
+                            "simulation returns, so it is not a measurement of the simulation")
+            continue
+        if got.unreadable or (got.missing and _forms.is_name(measure)):
             problems.append(
-                f"the oracle {name!r}: the simulation returned {', '.join(sorted(values)) or 'nothing'} but the oracle "
-                f"measures {measure!r} (the simulation function must return it)"
+                f"the oracle {name!r}: the simulation returned {returned} but the oracle measures {measure!r} (the "
+                "simulation function must return it" + (f"; as a formula it cannot be read: {got.unreadable}" if
+                                                         got.unreadable and not _forms.is_name(measure) else "") + ")"
             )
+        elif got.missing:
+            problems.append(
+                f"the oracle {name!r}: its number is computed as `{measure}`, from "
+                f"{', '.join(repr(n) for n in got.missing)}, which the simulation did not return (it returned "
+                f"{returned}; the simulation function must return every name the formula uses)"
+            )
+        elif got.value is None:
+            problems.append(f"the oracle {name!r}: its number is computed as `{measure}`, and on its case {got.problem}")
+            checks.append({"name": name, "value": None, "measured_by": "engine", "computed_as": measure,
+                           "formula_problem": got.problem, "returned": dict(values)})
         else:
-            checks.append({"name": name, "value": values[measure], "measured_by": "engine"})
+            checks.append({"name": name, "value": got.value, "measured_by": "engine", "computed_as": measure,
+                           "returned": dict(values)})
     if any(_oracle.case_of(o) is None for o in oracles):
         values, why = await run_oracle(executor, python, quest_root, module, timeout_s=timeout_s, env=env, thresholds=thresholds)
         if values is None:

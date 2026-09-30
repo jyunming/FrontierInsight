@@ -567,8 +567,14 @@ def _model_lines(protocol: Any) -> list[str]:
             kind = kind or (f"kind not recognised ({oracle.get('kind')})" if oracle.get("kind") else "kind not given")
             expected = oracle.get("expected")
             reference = _flat(oracle.get("reference")) or "(not said)"
-            lines.append(f"- **{str(oracle['name']).strip()}**, {kind}: expects {expected if expected is not None else '(no value)'}; "
-                         f"from: {reference}")
+            # How the number is computed: FI applies this formula to what the simulation returns on the check's case.
+            case, measure = oracle.get("case"), oracle.get("measure")
+            computed = (f"; computed as {_inline(measure)} from what the simulation returns on "
+                        f"{_inline(', '.join(f'{k}={v}' for k, v in case.items()) or 'its default settings')}"
+                        if isinstance(case, dict) and isinstance(measure, str) and measure.strip() else
+                        "; its number is the script's own (it names no `case` and `measure` FI can run)")
+            lines.append(f"- **{str(oracle['name']).strip()}**, {kind}: expects {expected if expected is not None else '(no value)'}"
+                         f"{computed}; from: {reference}")
         lines.append("")
     return lines
 
@@ -689,6 +695,87 @@ def load_design(quest_root: Path) -> tuple[dict[str, Any] | None, str | None]:
     except OSError as e:
         return None, f"plan.md could not be read: {e}"
     return parsed.design, parsed.error
+
+
+def raw_design_block(text: str) -> dict[str, Any] | None:
+    """The design block of ``text`` as written (not normalised), or ``None`` when it cannot be read."""
+    heading = _HEADING_RE.search(text or "")
+    fenced = _FENCE_RE.search(text, heading.end()) if heading else None
+    if fenced is None:
+        return None
+    try:
+        loaded = yaml.safe_load(fenced.group(1))
+    except yaml.YAMLError:
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def edit_design_block(text: str, change: Any) -> str | None:
+    """``text`` with its design block replaced by ``change(block)``, where ``block`` is the YAML of the block as written
+    (not the normalised design, so no default key is added to what a person wrote); ``None`` when the block cannot be
+    read or ``change`` returns ``None``. The block is written back as YAML (a comment in it is not kept; a block fenced
+    as JSON is still read, YAML being a superset of JSON)."""
+    heading = _HEADING_RE.search(text or "")
+    fenced = _FENCE_RE.search(text, heading.end()) if heading else None
+    loaded = raw_design_block(text)
+    if fenced is None or loaded is None:
+        return None
+    changed = change(loaded)
+    if not isinstance(changed, dict):
+        return None
+    block = yaml.safe_dump(changed, sort_keys=False, allow_unicode=True, default_flow_style=False, width=100).rstrip()
+    return text[:fenced.start(1)] + block + text[fenced.end(1):]
+
+
+def refresh_model_section(text: str) -> str:
+    """``text`` with its *The model behind the numbers* section shown again from its design block, after the engine
+    edited the block (the section is shown from it and never read back). Unchanged when either cannot be found."""
+    parsed = parse(text)
+    if parsed.design is None:
+        return text
+    found = re.search(rf"^##\s+{re.escape(MODEL_HEADING)}\s*$", text or "", re.MULTILINE)
+    lines = _model_lines(parsed.design.get("protocol"))
+    if not found:
+        # Checks the plan had none of before: the section goes where render puts it (before the criteria, or the design).
+        anchor = (re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE)
+                  or _HEADING_RE.search(text))
+        if lines and anchor is not None:
+            text = text[:anchor.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[anchor.start():]
+    else:
+        if not lines:
+            lines = [f"## {MODEL_HEADING}", "", "- (the plan no longer has a model or any check against a known answer)",
+                     ""]
+        after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
+        end = found.end() + after.start() if after else len(text)
+        text = text[:found.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[end:]
+    # The criteria are shown from the block too, and read the checks: shown again with them.
+    criteria = re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE)
+    crit_lines = _criteria_lines(parsed.design.get("protocol"))
+    if criteria and crit_lines:
+        after = re.search(r"^##\s+", text[criteria.end():], re.MULTILINE)
+        end = criteria.end() + after.start() if after else len(text)
+        text = text[:criteria.start()] + "\n".join(crit_lines).rstrip("\n") + "\n\n" + text[end:]
+    return text
+
+
+def add_to_section(text: str, heading: str, lines: list[str]) -> str:
+    """``text`` with ``lines`` added at the end of its ``## heading`` section, which is made (above the design block)
+    when there is none. Prose only: nothing in it is read back."""
+    lines = [line for line in lines if line is not None]
+    if not lines:
+        return text
+    body = "\n".join(lines).rstrip() + "\n"
+    found = re.search(rf"^##\s+{re.escape(heading)}\s*$", text or "", re.MULTILINE)
+    if found:
+        after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
+        end = found.end() + after.start() if after else len(text)
+        section = text[found.end():end].rstrip("\n")
+        return text[:found.end()] + section + "\n" + body + "\n" + text[end:]
+    design = _HEADING_RE.search(text or "")
+    block = f"## {heading}\n\n{body}\n"
+    if design is None:
+        return (text.rstrip("\n") + "\n\n" + block) if text else block
+    return text[:design.start()] + block + text[design.start():]
 
 
 def strip_outer_fence(reply: str) -> str:
