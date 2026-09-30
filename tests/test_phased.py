@@ -950,6 +950,30 @@ def test_a_seed_handed_on_by_keyword_is_not_taken_for_a_fixed_seed(tmp_path: Pat
     assert route == "confirm" and phased.status(record) == "confirming"
 
 
+def test_a_fixed_seed_beside_a_plot_argument_named_x_is_still_a_fixed_seed(tmp_path: Path) -> None:
+    script = ("import os, random\nimport matplotlib.pyplot as plt\ns = os.environ.get('FI_REPLICATE_SEED')\n"
+              "rng = random.Random(42)\nmu = rng.random()\nplt.axvline(x=mu)\n")
+    route, record, _frozen = _gate_after(tmp_path, {"experiment.py": script}, label="axv")
+    assert route == "write" and phased.status(record) == "not_confirmable"
+
+
+def test_a_relative_import_never_leaves_the_code_folder(tmp_path: Path) -> None:
+    from core.engine import _own_modules
+
+    code = tmp_path / "q" / "code"
+    code.mkdir(parents=True)
+    (tmp_path / "q" / "outside.py").write_text("import random\n", encoding="utf-8")
+    (code / "experiment.py").write_text("from .. import outside\n", encoding="utf-8")
+    assert _own_modules(code / "experiment.py") == [code / "experiment.py"]
+
+
+def test_a_fixed_seed_in_a_relatively_imported_module_is_named_as_such(tmp_path: Path) -> None:
+    files = {"experiment.py": "from sim import run\nprint(run())\n", "sim/__init__.py": "from .core import run\n",
+             "sim/core.py": "import random\nrandom.seed(42)\ndef run():\n    return random.random()\n"}
+    route, record, _frozen = _gate_after(tmp_path, files, label="relfixed")
+    assert route == "write" and "never reads the seed" in record["not_confirmable"]
+
+
 def test_a_seed_read_in_a_package_imported_relatively_is_found(tmp_path: Path) -> None:
     files = {"experiment.py": "from sim import run\nprint(run())\n",
              "sim/__init__.py": "from .core import run\n",

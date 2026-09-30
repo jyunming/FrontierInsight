@@ -18122,10 +18122,12 @@ def _seeds_only_constants(paths: list[Path]) -> bool:
                 continue
             # A seed handed to anything by keyword (``random_state=seed`` for scikit-learn or scipy, ``entropy=``): not
             # a constant, so not "only constants".
-            if any(k.arg in _SEED_KEYWORDS and not _constant_expr(k.value) for k in node.keywords):
-                return False
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            # ``x=`` and ``a=`` are seeds only for a seeding call (``plt.axvline(x=mu)`` is not one).
+            carriers = _SEED_KEYWORDS if name in _SEEDING_CALLS else _SEED_KEYWORDS - {"x", "a"}
+            if any(k.arg in carriers and not _constant_expr(k.value) for k in node.keywords):
+                return False
             if name not in _SEEDING_CALLS:
                 continue
             arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in _SEED_KEYWORDS), None)
