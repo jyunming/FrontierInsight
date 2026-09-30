@@ -15,6 +15,11 @@ lost its results and discussion.
   31 MB, are inside the wheel, so it runs offline once installed). With neither, the page is counted as unread and the result says so;
   it is never silently empty. No language model is involved.
 - ``max_bytes`` bounds the text (10 MB by default); a PDF cut there says at which page.
+- Text drawn so a reader cannot see it (in white on a white page, or at a size below :data:`HIDDEN_SIZE_PT`) is kept
+  in the text like the rest and also listed in ``hidden_text``: it reaches the model all the same, and it is how
+  instructions are planted in a paper for a model to read (core/source_text.py flags it). White text over a coloured
+  panel or an image (a label on a dark figure, a journal's banner) is not counted, and neither is a text layer drawn
+  invisibly (the searchable layer of a scan, or of a page a browser printed with its text drawn as images).
 """
 
 from __future__ import annotations
@@ -55,6 +60,8 @@ class PdfText:
     #: Each OCR-read page's lines with their place, ``{page: [((left, bottom, right, top) in PDF points, text)]}``,
     #: for core/pdf_figures.py to find a scanned page's figures without reading the page twice.
     ocr_lines: dict[int, list[tuple[tuple[float, float, float, float], str]]] = field(default_factory=dict)
+    #: Passages drawn so a reader cannot see them (white on the page, or tiny); see the module docstring.
+    hidden_text: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         """One plain line for the log and the file header."""
@@ -67,6 +74,9 @@ class PdfText:
             parts.append(f"{len(self.unread_pages)} scanned page(s) not read ({why})")
         if self.truncated_at_page:
             parts.append(f"cut at page {self.truncated_at_page} by the size limit")
+        if self.hidden_text:
+            words = sum(len(t.split()) for t in self.hidden_text)
+            parts.append(f"{words} word(s) drawn so a reader cannot see them (white on the page, or tiny)")
         if self.error:
             parts.append(f"error: {self.error}")
         return "; ".join(parts)
@@ -142,6 +152,106 @@ def _pdfium_reading_order(page: Any, textpage: Any) -> str:
         left, bottom, right, top = rects[i]
         lines.append(textpage.get_text_bounded(left, bottom, right, top))
     return "\n".join(lines)
+
+
+#: Text drawn below this size (points, with the page's scaling) counts as hidden. Real small print (a figure's axis
+#: label, a copyright line) is 4 pt or more.
+HIDDEN_SIZE_PT = 2.0
+#: A colour with every channel at least this (0-255) counts as white.
+_WHITE = 250
+#: At most this many hidden passages are kept per PDF (each cut to 200 characters).
+_HIDDEN_MAX = 20
+
+
+def _inside(box: tuple[float, float, float, float], boxes: list[tuple[float, float, float, float]]) -> bool:
+    """Whether the middle of ``box`` lies within one of ``boxes`` (any corner order)."""
+    x = (box[0] + box[2]) / 2
+    y = (box[1] + box[3]) / 2
+    return any(min(b[0], b[2]) <= x <= max(b[0], b[2]) and min(b[1], b[3]) <= y <= max(b[1], b[3]) for b in boxes)
+
+
+def _hidden_pymupdf(page: Any) -> list[str]:
+    backdrops: list[tuple[float, float, float, float]] = []
+    for d in page.get_drawings():
+        fill = d.get("fill")
+        if fill and min(fill) * 255 < _WHITE and (d.get("fill_opacity") or 1) > 0:
+            backdrops.append(tuple(d["rect"]))
+    backdrops += [tuple(i["bbox"]) for i in page.get_image_info()]
+    out: list[str] = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = " ".join(str(span.get("text") or "").split())
+                if not text or span.get("alpha", 255) == 0:  # a text layer drawn invisibly: see the module docstring
+                    continue
+                color = int(span.get("color") or 0)
+                white = min((color >> 16) & 255, (color >> 8) & 255, color & 255) >= _WHITE
+                if float(span.get("size") or 12) < HIDDEN_SIZE_PT or (white and not _inside(tuple(span["bbox"]), backdrops)):
+                    out.append(text)
+    return out
+
+
+def _hidden_pdfium(page: Any) -> list[str]:
+    import ctypes
+
+    import pypdfium2.raw as pdfium_c
+
+    def fill(obj: Any) -> tuple[int, int, int, int] | None:
+        r, g, b, a = (ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint())
+        if not pdfium_c.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a):
+            return None
+        return r.value, g.value, b.value, a.value
+
+    objects = list(page.get_objects(max_depth=3))
+    backdrops: list[tuple[float, float, float, float]] = []
+    for obj in objects:
+        if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+            backdrops.append(tuple(obj.get_bounds()))
+        elif obj.type == pdfium_c.FPDF_PAGEOBJ_PATH:
+            mode, stroke = ctypes.c_int(), ctypes.c_int()
+            colour = fill(obj)
+            if (colour and min(colour[:3]) < _WHITE and colour[3] > 0
+                    and pdfium_c.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value):
+                backdrops.append(tuple(obj.get_bounds()))
+    out: list[str] = []
+    textpage = None
+    try:
+        for obj in objects:
+            if (obj.type != pdfium_c.FPDF_PAGEOBJ_TEXT
+                    # A text layer drawn invisibly (see the module docstring).
+                    or pdfium_c.FPDFTextObj_GetTextRenderMode(obj.raw) == pdfium_c.FPDF_TEXTRENDERMODE_INVISIBLE):
+                continue
+            colour = fill(obj)
+            size = ctypes.c_float()
+            if colour is None or not pdfium_c.FPDFTextObj_GetFontSize(obj.raw, ctypes.byref(size)):
+                continue
+            m = obj.get_matrix()
+            drawn = size.value * (abs(m.a * m.d - m.b * m.c) ** 0.5 or 1.0)
+            white = min(colour[:3]) >= _WHITE
+            if not (drawn < HIDDEN_SIZE_PT or (white and colour[3] > 0 and not _inside(tuple(obj.get_bounds()), backdrops))):
+                continue
+            if textpage is None:
+                textpage = page.get_textpage()
+            n = pdfium_c.FPDFTextObj_GetText(obj.raw, textpage.raw, None, 0)
+            if n <= 2:
+                continue
+            buf = (ctypes.c_ushort * (n // 2 + 1))()
+            pdfium_c.FPDFTextObj_GetText(obj.raw, textpage.raw, buf, n)
+            text = " ".join(bytes(buf)[:n - 2].decode("utf-16-le", errors="ignore").split())
+            if text:
+                out.append(text)
+    finally:
+        if textpage is not None:
+            textpage.close()
+    return out
+
+
+def _hidden_text(engine: str, page: Any) -> list[str]:
+    """What ``page`` draws so a reader cannot see it; ``[]`` when that cannot be read (never raises)."""
+    try:
+        return (_hidden_pymupdf if engine == "pymupdf" else _hidden_pdfium)(page)
+    except Exception:  # noqa: BLE001 -- a check on top of the text; the text is what the PDF is read for
+        return []
 
 
 def _page_height(engine: str, page: Any) -> float:
@@ -293,6 +403,8 @@ def extract(
         for i in range(out.pages):
             page = doc[i]
             text, has_images = (_page_text_pymupdf if engine == "pymupdf" else _page_text_pdfium)(page)
+            if len(out.hidden_text) < _HIDDEN_MAX:
+                out.hidden_text += [t[:200] for t in _hidden_text(engine, page)][:_HIDDEN_MAX - len(out.hidden_text)]
             if len(text.strip()) < SCANNED_PAGE_CHARS and has_images:
                 if ocr and reader is None:
                     reader = _Ocr()

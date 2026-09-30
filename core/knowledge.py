@@ -1410,6 +1410,12 @@ OCR_BUDGET_S = 600.0
 _fetched_pdfs: "contextvars.ContextVar[list[tuple[bytes, str]] | None]" = contextvars.ContextVar(
     "fi_fetched_pdfs", default=None,
 )
+#: A fetch's PDFs that draw text a reader cannot see, ``(first 200 characters of their text, the hidden passages)``,
+#: set per fetch like ``_fetched_pdfs``: the source whose text the fetch kept carries them in ``hidden_text``, which
+#: core/source_text.py flags.
+_hidden_pdf_text: "contextvars.ContextVar[list[tuple[str, list[str]]] | None]" = contextvars.ContextVar(
+    "fi_hidden_pdf_text", default=None,
+)
 #: How long cutting the figures out of a fetch's PDFs may take in all (about a second or two per paper).
 FIGURE_BUDGET_S = 180.0
 
@@ -1433,6 +1439,9 @@ def _pdf_bytes_to_text(body: bytes, *, cap: int) -> str | None:
         kept = _fetched_pdfs.get()
         if kept is not None:
             kept.append((body, result.text[:200]))
+        hidden = _hidden_pdf_text.get()
+        if hidden is not None and result.hidden_text:
+            hidden.append((result.text[:200], list(result.hidden_text)))
     return result.text or None
 
 
@@ -2875,7 +2884,7 @@ def _extract_pdf_text(path: Path) -> str | None:
     from core import pdf_text
 
     result = pdf_text.extract(path)
-    if result.error or result.unread_pages or result.ocr_pages or result.truncated_at_page:
+    if result.error or result.unread_pages or result.ocr_pages or result.truncated_at_page or result.hidden_text:
         _log.warning("PDF %s: %s", path.name, result.summary())
     return result.text or None
 
@@ -3162,6 +3171,7 @@ async def _enrich_with_full_text(
 
     scanned: dict[int, list[bytes]] = {}
     pdfs: dict[int, bytes] = {}
+    hidden: dict[int, list[str]] = {}  # text the kept PDF draws so a reader cannot see it (core/pdf_text.py)
 
     async def fetch_one(idx: int) -> tuple[int, str | None]:
         # The batch budget is also the arXiv queue's deadline: a fetch that
@@ -3174,6 +3184,8 @@ async def _enrich_with_full_text(
         scanned_token = _scanned_pdfs.set(slot)
         readable: list[tuple[bytes, str]] = []
         readable_token = _fetched_pdfs.set(readable)
+        hidden_seen: list[tuple[str, list[str]]] = []
+        hidden_token = _hidden_pdf_text.set(hidden_seen)
         try:
             text = await asyncio.to_thread(
                 fetch_fn,
@@ -3185,12 +3197,17 @@ async def _enrich_with_full_text(
             _gate.fetch_deadline.reset(token)
             _scanned_pdfs.reset(scanned_token)
             _fetched_pdfs.reset(readable_token)
+            _hidden_pdf_text.reset(hidden_token)
         if slot:
             scanned[idx] = slot
         # The PDF whose text the fetch returned (a route may read one PDF, find it short, and return another's text).
         for body, head in reversed(readable):
             if text and head and text.startswith(head):
                 pdfs[idx] = body
+                break
+        for head, runs in reversed(hidden_seen):
+            if text and head and text.startswith(head):
+                hidden[idx] = runs
                 break
         return idx, text
 
@@ -3253,6 +3270,7 @@ async def _enrich_with_full_text(
                     **original.metadata,
                     "fetched_full_text": True,
                     "full_text_bytes": len(text.encode("utf-8", errors="replace")),
+                    **({"hidden_text": hidden[idx]} if hidden.get(idx) else {}),
                 }
                 enriched[idx] = RetrievedDoc(
                     content=f"{original.content}\n\n---FULL TEXT (fetched)---\n\n{text}",

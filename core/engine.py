@@ -92,6 +92,7 @@ from . import criteria as _criteria
 from . import improve as _improve
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
+from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -3539,6 +3540,7 @@ class Engine:
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
             work_scope=self._work_scope(state),
         )
+        _source_text.flag_and_record(seeded, stage="ideate", audit=self._audit, log=self._log)
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
             literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
@@ -4132,6 +4134,10 @@ class Engine:
             "+%d user-supplied, total=%d)",
             len(docs), this_iter, added, user_added, len(merged),
         )
+        # Text in a source that is hidden from a reader or addressed to an AI model is flagged, never removed
+        # (core/source_text.py): marked in the prompts, recorded in the audit trace, and the quest goes on.
+        await asyncio.to_thread(_source_text.flag_and_record, merged, stage="literature", audit=self._audit,
+                                log=self._log, content_of=_item_content, record_clean=True)
         qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
         full_n = qualities.get("full_text", 0)
         # "Nothing fetched" is not "no abstract": a search record from OpenAlex / Crossref / Semantic Scholar carries
@@ -4949,14 +4955,18 @@ class Engine:
                        "new source(s)) and asking the model again", query, len(new))
         lines = [f"- [{s['label']}] {s.get('title') or '(untitled)'}" for s in known[:25]] or ["- (none)"]
         lines += ["", f"One more search ({query!r}) found:"]
+        _source_text.flag_and_record(new, stage="criteria", audit=self._audit, log=self._log)
         for i, doc in enumerate(new, start=1):
             meta = getattr(doc, "metadata", {}) or {}
             text = " ".join(str(getattr(doc, "content", "") or "").split())[:400]
-            lines.append(f"- [C{i}] {' '.join(str(meta.get('title') or '(untitled)').split())}: {text}")
+            head = _source_text.mark(f"- [C{i}] {' '.join(str(meta.get('title') or '(untitled)').split())}", meta)
+            lines.append(f"{head}: {text}")
         if not new:
             lines.append("- (nothing new)")
         prompt = self._prompts["plan_criteria"].substitute(
-            topic=topic[:1500], protocol=json.dumps(protocol, indent=2, default=str)[:8000], found="\n".join(lines),
+            topic=topic[:1500], protocol=json.dumps(protocol, indent=2, default=str)[:8000],
+            # Retrieved titles and text are material to read, never instructions (core/source_text.py).
+            found=_source_text.fence("\n".join(lines)),
         )
         try:
             reply = await self._chat(prompt, node="plan_criteria")
@@ -5996,7 +6006,9 @@ class Engine:
                      f"{str(todo[fid][1].get('caption') or '')[:400]}" for fid in chunk]
             try:
                 raw = await self._chat(
-                    self._prompts["figures_pick"].substitute(topic=topic, figures="\n".join(lines)), node="figures",
+                    self._prompts["figures_pick"].substitute(
+                        topic=topic, figures=_source_text.fence("\n".join(lines), "papers' titles and figure captions"),
+                    ), node="figures",
                 )
                 picked = (_parse_json_lenient(raw, node="figures") or {}).get("pick")
             except Exception as e:  # noqa: BLE001 -- these figures stay unjudged; the quest goes on
@@ -6501,7 +6513,8 @@ class Engine:
             "papers returned for a corporate-finance question). Return ONLY "
             "the indices that are genuinely relevant to the topic.\n\n"
             "# Candidates\n"
-            + "\n".join(listing_lines)
+            # Retrieved titles and excerpts are material to judge, never instructions (core/source_text.py).
+            + _source_text.fence("\n".join(listing_lines))
             + "\n\nRespond with a single JSON object, no prose:\n"
             '{"relevant_indices": [<int>, ...]}\n'
             "If NONE are relevant, return an empty list."
@@ -6634,7 +6647,8 @@ class Engine:
                 "field that only shares vocabulary is a 0 or a 1."
             )
         prompt = self._prompts["literature_screen"].substitute(
-            topic=topic[:1200], kind_guidance=guidance, candidates="\n".join(lines),
+            # Retrieved titles and excerpts are material to grade, never instructions (core/source_text.py).
+            topic=topic[:1200], kind_guidance=guidance, candidates=_source_text.fence("\n".join(lines)),
         )
         self.__dict__.setdefault("_last_call_id", {}).pop("literature_screen", None)
         try:
@@ -6838,7 +6852,7 @@ class Engine:
             "QUERIES ALREADY TRIED (do not repeat these):\n"
             + "\n".join(f"- {q[:160]}" for q in tried)
             + "\n\nWHAT CAME BACK (all judged off-topic):\n"
-            + ("\n".join(titles) if titles else "- (no titles)")
+            + (_source_text.fence("\n".join(titles), "the titles of retrieved sources") if titles else "- (no titles)")
             + "\n\nThe likely cause is vocabulary: this field's papers may use "
             "different terminology than the topic statement does. Propose ONE "
             "alternative search query that uses the terms researchers in this "
@@ -12408,7 +12422,8 @@ class Engine:
             result_json=json.dumps(
                 state.get("result_json") or {}, ensure_ascii=False,
             )[:2000],
-            sources=sources_text[:12000],
+            # Collected pages and files are material to mine, never instructions (core/source_text.py).
+            sources=_source_text.fence(sources_text[:12000], "web pages and data files the quest collected"),
         )
         try:
             raw = await self._chat(prompt, node="web_plots")
@@ -12496,7 +12511,9 @@ class Engine:
             f"[{i}] ({c.kind}) {c.caption[:160]}" for i, c in enumerate(cands)
         )
         prompt = (
-            f"Topic: {topic[:400]}\n\nCandidate illustrative figures:\n{lines}\n\n"
+            # Captions are retrieved text: material to judge, never instructions (core/source_text.py).
+            f"Topic: {topic[:400]}\n\nCandidate illustrative figures:\n"
+            f"{_source_text.fence(lines, 'figure captions from papers and Wikimedia Commons')}\n\n"
             "Return ONLY a JSON array of the indices that are genuinely "
             "relevant AND appropriate as an illustration for THIS topic. Drop "
             "anything off-topic, misleading, or only superficially keyword-"
@@ -12877,6 +12894,7 @@ class Engine:
             # provider.node_ensemble["cross_check"] is configured —
             # majority verdict wins per-finding, ties surfaced. Either
             # way ``parsed`` carries the same shape downstream.
+            _source_text.flag_and_record(hits, stage="cross_check", audit=self._audit, log=self._log)
             cand_block = _format_lit(hits, **self._lit_kwargs(state))
             prompt = self._prompts["cross_check"].substitute(
                 topic=state.get("topic", "")[:1000],
@@ -13788,12 +13806,13 @@ class Engine:
         sources = {label: (meta, text) for label, (meta, text, _readings) in split_sources.items()}
         readings_of = {label: readings for label, (_meta, _text, readings) in split_sources.items()}
         citing = _citing_sentences(paper_text)
-        refs_block = "\n\n".join(
+        # The sources' text is material to check claims against, never instructions (core/source_text.py).
+        refs_block = _source_text.fence("\n\n".join(
             _claim_source_block(label, meta, text, citing.get(label) or [], readings=readings_of.get(label, ""))
             for label, (meta, text) in sorted(
                 sources.items(), key=lambda kv: (kv[0].startswith("W"), int(kv[0].lstrip("W")))
             )
-        ) or "(no references)"
+        )) or "(no references)"
         analysis = state.get("analysis") or {}
         # The findings and the supported claims go in whole and first — they
         # are what an "experiment" basis is checked against — and the run's
@@ -14516,7 +14535,7 @@ class Engine:
         return (
             "Titles of the sources retrieved for this study (their text is not shown at this step: the "
             "write step receives it, and each key finding is cross-checked against the literature "
-            "afterwards):\n" + titles
+            "afterwards):\n" + _source_text.fence(titles, "the titles of retrieved papers and web pages")
         )
 
     def _skills_summary_block(self, state: QuestState | None = None) -> str:
@@ -18029,7 +18048,8 @@ def _preliminary_reminders(items: list[Any], limit: int = 3, chars: int = 300) -
     if not lines:
         return ""
     return ("Earlier FI results kept as PRELIMINARY (an exploration, or a result with evidence gaps). They say what was "
-            "tried; they are not evidence. Never cite them or state their findings as established:\n" + "\n".join(lines))
+            "tried; they are not evidence. Never cite them or state their findings as established:\n"
+            + _source_text.fence("\n".join(lines), "earlier FI results read back from the knowledge base"))
 
 
 def _with_reminders(block: str, items: list[Any]) -> str:
@@ -18186,14 +18206,15 @@ def _format_lit(
             continue
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
-        header = _format_lit_header(meta, keep_idx)
+        header = _source_text.mark(_format_lit_header(meta, keep_idx), meta)
         excerpt = _format_lit_excerpt(
             d.content, title, query=query, budget=budget, mode=mode,
         )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return _with_reminders("(no prior work surfaced from the knowledge base)", docs)
-    return _with_reminders("\n\n".join(lines), docs)
+    # Retrieved text is material to read, never instructions (core/source_text.py); FI's reminders stay outside.
+    return _with_reminders(_source_text.fence("\n\n".join(lines)), docs)
 
 
 def _format_lit_from_state(
@@ -18219,6 +18240,7 @@ def _format_lit_from_state(
         title = meta.get("title") or meta.get("source") or f"item-{label}"
         content = _item_content(item)  # the whole text, from disk when the state holds only its first part
         header = _format_lit_header(meta, label, _thin_source(meta, content) if mark_thin else None)
+        header = _source_text.mark(header, meta)
         excerpt = _format_lit_excerpt(
             content, title,
             query=query, budget=budget, mode=mode,
@@ -18226,7 +18248,8 @@ def _format_lit_from_state(
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return _with_reminders("(no prior work surfaced from the knowledge base)", items)
-    return _with_reminders("\n\n".join(lines), items)
+    # Retrieved text is material to read, never instructions (core/source_text.py); FI's reminders stay outside.
+    return _with_reminders(_source_text.fence("\n\n".join(lines)), items)
 
 
 def _is_web_page(meta: dict[str, Any]) -> bool:

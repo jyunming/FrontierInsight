@@ -261,6 +261,18 @@ same PR that adds, splits or renames one.
   source, and any sentence citing one, unsupported after the claim check; `retracted_dois` keeps retracted papers off
   `WANTED_PAPERS.md`; `summary_line` is the run.log line; `retracted_in_record` feeds the to-do card. Tests never reach
   Crossref: `tests/conftest.py` answers "not checked" outside `tests/test_retractions.py`. The `[retracted]` mark itself is added by `core/engine.py::_format_lit_header` and `_claim_source_block`.
+- `core/source_text.py` — retrieved text is data, not instructions. `fence` puts every block of retrieved text a
+  prompt carries (the prior-work blocks `engine._format_lit` / `_format_lit_from_state`, analyze's title list, the
+  claim check's sources, the literature screen, relevance guard and requery, plan_criteria's search, figure captions
+  for figures_pick and web_figures, web_plots' collected pages, `summarizer._render_content_blocks` for data_load /
+  analyze / `fi summarize`, `engine._preliminary_reminders`) between `BEGIN` / `END` markers after one sentence saying
+  what it is; `neutralise` strips a copy of the markers from the source text and changes nothing else. `scan` flags
+  text addressed to a model or hidden from a reader (tag characters, invisible characters inside words, a PDF's
+  `hidden_text`); `flag_and_record` marks each source's metadata once per text (`source_text_scanned` /
+  `source_text_flags`, read by `mark` for the prompt's `[flagged: ...]` tag), writes one `check_result` event
+  (`check="source_text"`) and one run.log line, and never raises or removes anything. Called by the literature node
+  (every pass, clean passes recorded as `ok`), ideate, cross_check and `_propose_criteria`. figures_read (image +
+  caption pairs) is told in `agents/figures_read.md` instead of fenced.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
   one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
   `measure_oracles` in `_oracle_gate`: it calls the simulation on each oracle's case via `run_case`, and `run_oracle` only for an oracle without a case); `recorded_values_by_cell` / `given_values_not_run` hold each reported value to the trials of its own settings; under research `recorded_rows_by_cell` / `given_rows_problems` (via `Engine._given_row_findings`) check a mean over a subset trial by trial; the harness hands every trial the protocol's thresholds as `FI_THRESHOLDS` (`run_oracle` too; the proportion's 0/1 under its id and the averaged quantity under the mean's own id, `RETURN_MEMBERSHIP`); the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`); `code_changed_while_queued` compares the code at submission with the code at collection.
@@ -304,7 +316,10 @@ same PR that adds, splits or renames one.
 - `core/pdf_text.py` — every PDF FI reads: all pages in reading order (PyMuPDF if installed, else pypdfium2), scanned
   pages by OCR (tesseract, else RapidOCR), a size cap that names its page. Fetched scans are OCR'd after the fetch
   (`knowledge._ocr_scanned`); `engine._literature_entry` / `_content_quality` / `_item_content` keep the whole text on
-  disk (`data/literature/.full_text/`) and label what it is.
+  disk (`data/literature/.full_text/`) and label what it is. `PdfText.hidden_text` lists text drawn in white on the
+  page or below 2 pt (`_hidden_pymupdf` / `_hidden_pdfium`; white over a coloured fill or image and invisible text
+  layers do not count); a fetched PDF's list reaches the source's `metadata["hidden_text"]` through
+  `knowledge._hidden_pdf_text`, and `core/source_text.py` flags it.
 - `core/pdf_figures.py` — captioned figures cut out of a PDF by layout (drawings above the caption; scanned pages from
   `PdfText.ocr_lines`). `knowledge._pdf_figures` caches them, `knowledge._cut_figures` runs after a fetch,
   `engine._save_literature_figures` puts them in `data/literature/figures/`, and
