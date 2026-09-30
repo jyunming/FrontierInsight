@@ -16,10 +16,13 @@ same PR that adds, splits or renames one.
   protocol (`approved_by`) is decided in `Engine._freeze_protocol_if_due`; an oracle the oracle gate had added to the
   plan (`Engine._declare_oracles`) is recorded in `.fi/oracles_added.json`, and `Engine._hold_added_oracles` stops the
   quest again (the `plan` pause, `_pause_for_plan(added=...)`) before the freeze under `pauses.plan: ask`.
-- `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol?
+- `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol? Also the plan's
+  notes on the protocol (`*_notes`; `run_count_notes`: repeated runs of a design that names nothing random).
 - `core/run_manifest.py` — runtime check: does what the simulation says it ran (`run_manifest.json`) match the
-  protocol's exact Cartesian product? Also the two-script split-analysis lint, and the strata of a `given` mean
-  (`NESTING`, `DERIVED`, `_given_findings`, `strata_coverage`, read by `metric_spec.coverage_gaps`).
+  protocol's exact Cartesian product? Also the two-script split-analysis lint, the strata of a `given` mean
+  (`NESTING`, `DERIVED`, `_given_findings`, `strata_coverage`, read by `metric_spec.coverage_gaps`), and
+  `once_per_setting`: for a `run_cell` with no randomness, `runs_per_setting` is left out of the comparison (one run
+  per setting; `Engine._run_cell_randomness` and `trial_runner.run_cell_again` decide there is no randomness).
 - `core/oracle_check.py` — an oracle the script must pass before its main run, judged by the engine against the
   protocol's own expected value and tolerance, not by the script's self-report. Also owns what a repair may propose
   about a check (`proposals`, never applied without a person; `undisputed` / `disputed_failing` split the problems a

@@ -739,6 +739,64 @@ async def run_case(executor: Any, python: Path | str, quest_root: Path, module: 
                           env=env, thresholds=thresholds, label=f"{entry}()")
 
 
+def _same_value(a: Any, b: Any) -> bool:
+    """Two values a trial returned are the same: numbers to within rounding (two NaNs are the same), anything else equal."""
+    numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (a, b))
+    if not numbers:
+        return a == b
+    if math.isnan(a) or math.isnan(b):
+        return math.isnan(a) and math.isnan(b)
+    return math.isclose(a, b, rel_tol=1e-9, abs_tol=1e-12)
+
+
+async def run_cell_again(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
+                         env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
+                         most: int = 3) -> tuple[bool | None, str]:
+    """Whether ``run_cell`` returns the same numbers when FI calls it again, each call in a new process, on up to
+    ``most`` settings that ran to the end (the fastest first, and only while their first runs together took under a
+    tenth of ``timeout_s``; always at least one): ``(True, "")``, ``(False, what differed)``, or ``(None, why it could not
+    be checked)``.
+
+    This is what lets one run per setting stand for a protocol that asked for several: a simulation whose code shows no
+    source of random numbers can still draw some (a library that samples by default, the order of a set), and a second
+    call that returns other numbers says so where reading the code cannot. Settings that are not called again are not
+    checked: randomness that only one of them has can be missed."""
+    try:
+        record = json.loads((Path(quest_root) / RUN_RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "FI's run record could not be read"
+    done: list[tuple[float, dict[str, Any], dict[str, Any]]] = []
+    for cell in record.get("cells") or []:
+        row = next((r for r in cell.get("rows") or [] if isinstance(r, dict) and r.get("status") == "ok"), None)
+        if row is not None and isinstance(cell.get("cell"), dict):
+            seconds = row.get("duration_s")
+            done.append((float(seconds) if isinstance(seconds, (int, float)) else float("inf"), cell, row))
+    if not done:
+        return None, "no setting ran to the end"
+    done.sort(key=lambda item: item[0])
+    spent = 0.0
+    for index, (seconds, cell, row) in enumerate(done[:max(1, most)]):
+        spent += seconds
+        if index and spent > timeout_s / 10:
+            break
+        again, why = await run_case(executor, python, quest_root, module, cell=cell["cell"], timeout_s=timeout_s,
+                                    env=env, thresholds=thresholds)
+        if again is None and "did not report" in why:
+            # A new venv's first start can fail before it reaches the code (see the retry in the execute step).
+            again, why = await run_case(executor, python, quest_root, module, cell=cell["cell"], timeout_s=timeout_s,
+                                        env=env, thresholds=thresholds)
+        if again is None:
+            return None, why
+        first = {str(k): v for k, v in (row.get("values") or {}).items()}
+        second = {str(k): v for k, v in again.items()}
+        changed = sorted(k for k in set(first) | set(second)
+                         if k not in first or k not in second or not _same_value(first[k], second[k]))
+        if changed:
+            shown = ", ".join(f"{k}: {first.get(k)!r} then {second.get(k)!r}" for k in changed[:3])
+            return False, f"the setting {cell.get('key')} returned other numbers ({shown})"
+    return True, ""
+
+
 async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, module: Path | str,
                           oracles: list[dict[str, Any]], *, timeout_s: int, env: dict[str, str] | None = None,
                           thresholds: dict[str, Any] | None = None, case_env: dict[str, str] | None = None,

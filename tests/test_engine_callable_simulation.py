@@ -18,7 +18,7 @@ from typing import Any
 
 import pytest
 
-from core import evidence, oracle_check as oc
+from core import evidence, oracle_check as oc, run_manifest
 from core.config import (
     Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig,
 )
@@ -304,3 +304,208 @@ async def test_a_simulation_that_does_not_label_its_equation_is_warned_and_not_i
     assert record["levels"]["independently_validated"] is False
     assert any("E1" in g for g in record["all_gaps"]["independently_validated"]), record["all_gaps"]
     assert _json(engine, "needs/ORACLE_CHECK.json")["status"] == "ok", "the oracle itself passed: the gap is the label"
+
+
+def _one_trial_per_setting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, simulate: str = SIMULATE) -> Engine:
+    """An engine after FI ran a run_cell simulation once per setting, under a protocol that asks for 3 runs."""
+    engine = _engine(tmp_path)
+    (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / "code" / "simulate.py").write_text(simulate, encoding="utf-8")
+    (engine.quest_root / "raw").mkdir(parents=True, exist_ok=True)
+    (engine.quest_root / "raw" / "ledger.jsonl").write_text("".join(
+        json.dumps({"event": "trial", "cell": f"dt={dt}", "trial": 0, "status": "ok"}) + "\n" for dt in (0.1, 0.05)
+    ), encoding="utf-8")
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: {"grid": {"dt": [0.1, 0.05]}, "runs_per_setting": 3})
+    engine._trial_mode, engine._trial_entries = True, {"run_cell"}
+    return engine
+
+
+@pytest.mark.asyncio
+async def test_a_run_cell_is_held_to_one_run_per_setting_only_when_fi_finds_no_randomness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine's own wiring: FI's ledger holds one trial per setting and the protocol asks for 3. A run_cell with no
+    source of random numbers in its code, whose setting returns the same numbers when called again, matches; one whose
+    code names a source, whose second call differs, or that could not be called again is told why and to define
+    run_trial, and the count still differs."""
+    from core import trial_runner
+    from core.execution import ExecutionResult
+
+    ok = ExecutionResult(0, 'RESULT_JSON: {"x": 1}', "", 0.1, False)
+    again: list[tuple[bool | None, str]] = []
+
+    async def fake_again(*a, **kw):  # noqa: ANN002, ANN003
+        return again.pop(0)
+
+    monkeypatch.setattr(trial_runner, "run_cell_again", fake_again)
+
+    engine = _one_trial_per_setting(tmp_path / "same", monkeypatch)
+    record = engine.quest_root / trial_runner.RUN_RECORD
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text('{"key": "k", "cells": []}', encoding="utf-8")
+    again.append((True, ""))
+    found = await engine._run_cell_randomness({}, "python", None)
+    assert found == ("", "none in its code, and settings run a second time returned the same numbers", "")
+    assert engine._run_manifest_problems({}, True, ok, found) == ("ok", [])
+    assert engine._manifest_note.startswith("the protocol asks for 3 runs per setting, but FI found no randomness")
+    assert "calling a setting again to check" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    # The same trials (an analysis repaired on them): the answer is kept, nothing is called again.
+    assert await engine._run_cell_randomness({}, "python", None) == found and again == []
+    record.write_text('{"key": "other", "cells": []}', encoding="utf-8")  # new trials: asked again
+    again.append((True, ""))
+    assert await engine._run_cell_randomness({}, "python", None) == found and again == []
+
+    for why, reason, fix in (
+        ((False, "the setting dt=0.1 returned other numbers (error: 1 then 2)"), "returned other numbers",
+         "make run_cell return the same numbers on every call"),
+        ((None, "did not report"), "could not call it a second time", "can be called on its own for one setting"),
+    ):
+        engine = _one_trial_per_setting(tmp_path / reason[:5], monkeypatch)
+        again.append(why)
+        found = await engine._run_cell_randomness({}, "python", None)
+        status, problems = engine._run_manifest_problems({}, True, ok, found)
+        assert status == "differs" and any(reason in p and "define run_trial" in p and fix in p for p in problems), problems
+        assert any("ran another number" in p for p in problems) and engine._manifest_note == ""
+
+    # A source of random numbers in the code, or in a module it imports, or named in a docstring: no second call is
+    # needed, and what was found is named so that it can be taken out.
+    for index, (simulate, named) in enumerate((("import random\n" + SIMULATE, "`random` in simulate.py"),
+                                               ("from sampler import draw\n" + SIMULATE, "in sampler.py"),
+                                               ('"""Deterministic: no seed."""\n' + SIMULATE, "`seed` in simulate.py"))):
+        engine = _one_trial_per_setting(tmp_path / f"code{index}", monkeypatch, simulate)
+        (engine.quest_root / "code" / "sampler.py").write_text(
+            "import numpy as np\n\ndef draw():\n    return np.random.default_rng().random()\n", encoding="utf-8")
+        found = await engine._run_cell_randomness({}, "python", None)
+        assert named in found[0] and "take that out of the code" in found[2] and again == [], found
+        status, problems = engine._run_manifest_problems({}, True, ok, found)
+        assert status == "differs" and any(named in p for p in problems), problems
+    # Not asked at all (None): held to the protocol's count.
+    engine = _one_trial_per_setting(tmp_path / "none", monkeypatch)
+    assert engine._run_manifest_problems({}, True, ok)[0] == "differs"
+    # A simulation that defines run_trial is run as trials: the count is held as fixed, and nothing is called again.
+    engine = _one_trial_per_setting(tmp_path / "trial", monkeypatch)
+    engine._trial_entries = {"run_trial", "run_cell"}
+    assert await engine._run_cell_randomness({}, "python", None) == ("", "", "")
+    status, problems = engine._run_manifest_problems({}, True, ok, ("", "", ""))
+    assert status == "differs" and any("ran another number" in p for p in problems) and engine._manifest_note == ""
+    # No entries known (a stale or missing record of what simulate.py defines): not relaxed.
+    engine = _one_trial_per_setting(tmp_path / "unknown", monkeypatch)
+    engine._trial_entries = set()
+    assert engine._run_manifest_problems({}, True, ok, ("", "", ""))[0] == "differs"
+
+
+@pytest.mark.asyncio
+async def test_run_cell_again_compares_a_second_call_with_the_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import trial_runner
+
+    record = tmp_path / trial_runner.RUN_RECORD
+    assert await trial_runner.run_cell_again(None, "python", tmp_path, "code/simulate.py", timeout_s=5) == (
+        None, "FI's run record could not be read")
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"cells": [
+        {"key": "dt=0.1", "cell": {"dt": 0.1}, "rows": [{"trial": 0, "status": "failed"}]},
+        {"key": "dt=0.05", "cell": {"dt": 0.05},
+         "rows": [{"trial": 0, "status": "ok", "values": {"error": 0.25, "gone": float("nan")}, "duration_s": 2.0}]},
+        {"key": "dt=0.02", "cell": {"dt": 0.02},
+         "rows": [{"trial": 0, "status": "ok", "values": {"error": 1e-17}, "duration_s": 1.0}]},
+    ]}), encoding="utf-8")
+    replies: list[tuple[dict[str, float] | None, str]] = []
+    cells: list[dict[str, Any]] = []
+
+    async def fake_case(*a, cell, **kw):  # noqa: ANN002, ANN003
+        cells.append(cell)
+        return replies.pop(0)
+
+    monkeypatch.setattr(trial_runner, "run_case", fake_case)
+    # Rounding noise and two NaNs are the same numbers; the fastest setting first, then the next while the budget lasts.
+    replies += [({"error": 1.3e-17}, ""), ({"error": 0.25, "gone": float("nan")}, "")]
+    assert await trial_runner.run_cell_again(None, "python", tmp_path, "code/simulate.py", timeout_s=100) == (True, "")
+    assert cells == [{"dt": 0.02}, {"dt": 0.05}] and replies == []
+    # A short budget: only the fastest setting is called again.
+    cells.clear()
+    replies.append(({"error": 1e-17}, ""))
+    assert await trial_runner.run_cell_again(None, "python", tmp_path, "code/simulate.py", timeout_s=20) == (True, "")
+    assert cells == [{"dt": 0.02}]
+    replies += [({"error": 1e-17}, ""), ({"error": 0.5, "gone": float("nan")}, "")]
+    same, why = await trial_runner.run_cell_again(None, "python", tmp_path, "code/simulate.py", timeout_s=100)
+    assert same is False and "dt=0.05" in why and "error: 0.25 then 0.5" in why
+    # A start that did not reach the code is tried once more; a second failure is reported.
+    replies += [(None, "run_cell() did not report (exit code 1)"), ({"error": 1e-17}, ""),
+                ({"error": 0.25, "gone": float("nan")}, "")]
+    assert await trial_runner.run_cell_again(None, "python", tmp_path, "code/simulate.py", timeout_s=100) == (True, "")
+    replies.append((None, "run_cell() ran out of time"))
+    assert await trial_runner.run_cell_again(None, "python", tmp_path, "code/simulate.py", timeout_s=100) == (
+        None, "run_cell() ran out of time")
+
+
+HIDDEN_CLOCK = SIMULATE.replace("import math", "import math\nimport time").replace(
+    'return {"error": abs(y - math.exp(-1.0))}', 'return {"error": abs(y - math.exp(-1.0)), "t": time.perf_counter_ns()}')
+
+
+@pytest.mark.asyncio
+async def test_a_run_cell_whose_second_call_differs_is_not_held_to_one_run_through_the_real_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing in the code names a random source, but the numbers change from call to call: FI calls a setting again,
+    sees other numbers, and holds the run to the protocol's 3 runs per setting."""
+    calls: list[str] = []
+    fake = _fake(calls, HIDDEN_CLOCK)
+
+    async def with_repeats(self, messages, **kw):  # noqa: ANN001
+        reply = await fake(self, messages, **kw)
+        if _classify(messages[-1]["content"]) == "Experiment Design":
+            body = json.loads(reply)
+            body["protocol"] = {**PROTOCOL, "runs_per_setting": 3}
+            return json.dumps(body)
+        return reply
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", with_repeats)
+    engine = Engine(_cfg(tmp_path))
+    await engine.run()
+    manifest = _json(engine, "needs/RUN_MANIFEST_CHECK.json")
+    assert manifest["status"] in ("stopped", "repairing"), manifest
+    assert any("returned other numbers" in p and "define run_trial" in p for p in manifest["problems"]), manifest
+    assert "note" not in manifest
+
+
+@pytest.mark.asyncio
+async def test_a_deterministic_quest_whose_protocol_asks_for_repeats_runs_each_setting_once_and_is_not_a_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A protocol with `runs_per_setting: 3` for a simulation that draws no random numbers: repeating an identical
+    calculation returns the same numbers, so FI runs each setting once, and the run check counts one run per setting
+    as what the protocol asks, not as a difference to send simulate.py back for."""
+    calls: list[str] = []
+    prompts: list[str] = []
+    fake = _fake(calls, SIMULATE)
+
+    async def with_repeats(self, messages, **kw):  # noqa: ANN001
+        prompts.append(messages[-1]["content"])
+        reply = await fake(self, messages, **kw)
+        if _classify(messages[-1]["content"]) == "Experiment Design":
+            body = json.loads(reply)
+            body["protocol"] = {**PROTOCOL, "runs_per_setting": 3}
+            return json.dumps(body)
+        return reply
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", with_repeats)
+    engine = Engine(_cfg(tmp_path))
+    await engine.run()
+    trials = [json.loads(line) for line in (engine.quest_root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len([t for t in trials if t["event"] == "trial"]) == 2, "one call per setting"
+    manifest = _json(engine, "needs/RUN_MANIFEST_CHECK.json")
+    assert manifest["status"] == "ok", manifest
+    said = ("the protocol asks for 3 runs per setting, but FI found no randomness in the simulation (none in its code, "
+            "and settings run a second time returned the same numbers), so each setting ran once")
+    assert said in manifest.get("note", ""), manifest
+    assert said in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    plan = (engine.quest_root / "plan.md").read_text(encoding="utf-8")
+    assert "The protocol asks for 3 runs per setting, but the design's description names nothing random" in plan
+    assert "but no target precision" not in plan, "not asked for a precision its repeats would buy"
+    assert any("[FI NOTE] The protocol asks for 3 runs per setting" in p and "Report one run per setting" in p
+               for p in prompts), "the analysis is told each setting ran once"
+    told = {_classify(p) for p in prompts if "Report one run per setting" in p}
+    assert len(told) >= 2, f"the paper's writer is told too: {told}"
+    assert "ExecuteReflect" not in calls
+    record = _json(engine, "needs/EVIDENCE.json")
+    assert record["levels"]["protocol_runtime_matched"] is True, record["all_gaps"]
