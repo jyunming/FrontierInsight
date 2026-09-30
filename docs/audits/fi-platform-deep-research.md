@@ -12,6 +12,15 @@
 > - 本篇涵蓋其餘所有與平台相關的面向。第 8 節把三篇的建議合併成一份路線圖。
 >
 > 各節的參考資料編號只在該節內有效。
+>
+> **這條分支上的四份研究報告**(都在 `docs/audits/`):
+>
+> | 檔案 | 內容 |
+> |---|---|
+> | `fi-platform-deep-research.md`(本篇,**從這裡開始讀**) | 六個主題的研究,以及第 8 節的合併路線圖 |
+> | `code-iteration-research.md` | 讓 code/ 越來越對:突變分析、收斂階數、關係檢查、確效、保真度升級 |
+> | `code-development-practices-research.md` | 把 code/ 當軟體專案:小批次、行為不變的整理、版本、CHANGELOG、決策紀錄、升級為 skill |
+> | `self-improving-repo-research.md` | 另一個 session 較早寫的:公開的程式自我改進迴圈(AlphaEvolve、AIDE、DGM 等)與防刷分機制。它的設計已由 `feat/improve-loop-ratchet` 分支實作,對應路線圖第 13 項 |
 
 ## 0. 結論
 
@@ -424,7 +433,7 @@ FI 在「記錄」和「內部檢查」上已經比公開的同類系統嚴格�
 
 ## 8. 合併路線圖(本篇與前兩篇)
 
-依「影響 ÷ 成本」排序。「來源」欄的 **I** 代表 `code-iteration-research.md`,**D** 代表 `code-development-practices-research.md`,§n 代表本篇章節。
+依「影響 ÷ 成本」排序。「來源」欄的 **I** 代表 `code-iteration-research.md`,**D** 代表 `code-development-practices-research.md`,**S** 代表 `self-improving-repo-research.md`,§n 代表本篇章節。
 
 | 優先 | 項目 | 來源 | 大小 |
 |---|---|---|---|
@@ -440,7 +449,7 @@ FI 在「記錄」和「內部檢查」上已經比公開的同類系統嚴格�
 | 10 | 研究模式預設打開先探索再確認 | §1 | 小(需決定政策) |
 | 11 | 保存模型回應全文與 fingerprint,建立錄製重播評估集 | §4、§6 | 中 |
 | 12 | 「紀錄審查」審稿角色(讀程式碼差異和嘗試紀錄) | §2 | 中 |
-| 13 | 合併 multi-module 與 improve 兩條分支;突變分析報告;檢查只增不減 | I | 中 |
+| 13 | 合併 multi-module 與 improve 兩條分支;突變分析報告;檢查只增不減 | I、S | 中 |
 | 14 | 待辦卡最多 3 條並去重;網頁晶片改白話;論文前加一頁摘要表 | §5 | 中 |
 | 15 | 散佈式設計點(LHS)、閾值穩健性曲線、蒙地卡羅誤差 | §1 | 中大 |
 | 16 | 套件版本號、修復改成只改差異、行為不變的整理步驟 | D | 中 |
