@@ -196,6 +196,8 @@ class ProviderConfig(BaseModel):
             # The second reading of the plan's checks: a referee's reasoning, like the methodology audit.
             "oracle_review": 600.0,
             "analyze": 300.0,
+            # Reads the whole simulation before it answers with one change.
+            "improve": 300.0,
         }
     )
     # Last-resort prompt-size guard (total characters across all messages).
@@ -793,6 +795,13 @@ class EngineConfig(BaseModel):
     # changed it, and accepts the run as it is if you did not. ``warn`` only logs and records them; ``off`` does not look.
     numeric_warnings: Literal["block", "warn", "off"] = "block"
     oracle_repair_attempts: int = Field(default=2, ge=0, le=5)
+    # After a run with a result, how many times FI may change the simulation to meet the protocol's checks of
+    # correctness (``criteria``; core/improve.py): one small change per round, measured by FI itself, kept only when no
+    # check got worse by more than its own tolerance. It stops when every check is met, when a round makes none better,
+    # or when these rounds are used up (one budget for the whole quest; each round is one model call). A version kept
+    # this way is run once more in full, and that run is the one analysed. Under ``rigor_profile: research`` a change
+    # that made a check worse stops the quest for you. 0 turns it off; it never runs without such checks.
+    improve_rounds: int = Field(default=3, ge=0, le=20)
     # What the finished simulation says it did (``run_manifest.json`` in its raw-data folder: the grid it swept, the trials
     # it attempted and completed per setting, the failures, the thresholds) is compared with the frozen protocol
     # (``core/run_manifest.py``); it needs the two-script layout (``execution.split_analysis``), because that is where the

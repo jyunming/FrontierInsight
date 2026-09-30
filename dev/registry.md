@@ -80,6 +80,24 @@ same PR that adds, splits or renames one.
   `agents/plan_criteria.md`) runs in `_node_plan` when the draft names none; `Engine._record_criteria` runs at the end of
   every `_node_execute` (oracle values from `oracle_check.last_judged`, trial values through
   `trial_runner.recorded_series`, the commit through `code_project.head`).
+- `core/improve.py` — the improve loop and the ratchet: one edit per round to the simulation against the protocol's
+  criteria. `parse_edit` / `check_edit` (the edit refused before it runs: another file, not found once, does not
+  parse, `normalized` unchanged = print/comment-only, a version already tried by `fingerprint`, a check's expected
+  value or a criterion's target `planted`, `_measure_exprs` changed = the checked number worked out differently,
+  `_asks_for_a_setting` = a new comparison with a check's setting), `guard_hashes` / `guard_bytes` / `put_back` (the files a round's run must not change),
+  `compare` / `verdict` / `all_met` (per-criterion ratchet by each criterion's own tolerance), `series_of` (a round's
+  trial values), the prompt blocks (`criteria_block`, `history_block`, `code_block`; never `result_json` or the
+  metrics), `snapshot` / `restore` / `save_snapshot` (byte-exact `code/*.py`; `forget_bytecode` so a same-size version written
+  in the same second is never run from Python's stale cache), `tree_bytes` / `put_back_tree` (all of `code/` and its
+  git settings and hooks, links never followed), the record `.fi/improve.json`
+  (`load` / `save` / `summary`) and `write_note` (the writer's note). Graph node `improve` (after `execute_reflect`;
+  `rerun` → `execute` once for a kept version): `Engine._node_improve` / `_improve_skip` / `_improve_loop` /
+  `_improve_measure` (engine-run oracle cases and trials, `needs/ORACLE_CHECK.json` untouched) /
+  `_improve_stop_for_regression` (research: `improve` pause) / `_improve_resume_after_block` /
+  `_improve_put_back_first` (a loop cut short) / `_improve_save_raw` / `_improve_put_back_raw` (the first run's trial
+  record, on disk in `.fi/improve/raw/`) / `_improve_fresh_run` (`_FRESH_SCRIPT` and no cached trials for a rerun) /
+  `_improve_after_rerun` (the headline "changed" note via `code_project.record_note`), prompt `agents/improve.md`,
+  config `engine.improve_rounds`; each round's row is `criteria.record(..., improve=...)`.
 - `core/optimisation_plan.py` — the kind of study (`study_type`: `measure` or `find_best_design`; `study_type_of`
   reads a design with an `optimisation` block as a search whatever it says) and the plan's `protocol.optimisation`
   block for a search for the best design: `normalize` / `repair` (hooked into `core/plan.py`'s `normalize_protocol`
@@ -219,7 +237,7 @@ same PR that adds, splits or renames one.
   `local_module_names`), `env_packages` (asks the quest's Python what an installed package provides),
   `plan_installs` (the requested packages the scripts use, plus well-known unrequested imports; called by
   `Engine._node_execute`) and `warmup_modules` (the post-install test import).
-- `core/code_project.py` — `refresh` keeps `code/` a runnable project (README, requirements.txt, `run.py`, and `study.json` for the trial contract; `run.py` repeats FI's trial runner for seed 0, one process per setting, stdlib only, working in `run_output/`; for a search for the best design `study.json` holds the optimisation block and `fi_search.py` is `core/optimise_search.py`, so `run.py` repeats FI's search, one process per design); `.fi/installed_deps.json` (written by `_node_execute`) is the requirements source; `attempt_records.script_hashes` skips the unedited generated files; called by `Engine._refresh_code_project` at the end of `implement` and the start of `analyze`; `record_change` makes one git commit + one `CHANGELOG.md` entry per change inside `code/` (`rerun_from.back_up` carries `code/.git` over a re-run; `script_hashes` ignore `.git` and CHANGELOG.md); `pin` gives the installed versions for requirements.txt; `verify` (called by `Engine._check_code_project` before `write`, once per code version) runs `run.py` in a clean venv and writes `needs/CODE_PROJECT_CHECK.json`, warning only; `unasked_conflicts` / `mark_asked` feed `Engine._ask_about_edited_project_files` (a `code_project` pause when `pauses.review` is `ask`); a file whose hash differs from `.fi/code_project.json` (a person's edit) is never overwritten.
+- `core/code_project.py` — `refresh` keeps `code/` a runnable project (README, requirements.txt, `run.py`, and `study.json` for the trial contract; `run.py` repeats FI's trial runner for seed 0, one process per setting, stdlib only, working in `run_output/`; for a search for the best design `study.json` holds the optimisation block and `fi_search.py` is `core/optimise_search.py`, so `run.py` repeats FI's search, one process per design); `.fi/installed_deps.json` (written by `_node_execute`) is the requirements source; `attempt_records.script_hashes` skips the unedited generated files; called by `Engine._refresh_code_project` at the end of `implement` and the start of `analyze`; `record_change` makes one git commit + one `CHANGELOG.md` entry per change inside `code/` (`record_note`: an entry and its commit when nothing else changed, used by the improve loop) (`rerun_from.back_up` carries `code/.git` over a re-run; `script_hashes` ignore `.git` and CHANGELOG.md); `pin` gives the installed versions for requirements.txt; `verify` (called by `Engine._check_code_project` before `write`, once per code version) runs `run.py` in a clean venv and writes `needs/CODE_PROJECT_CHECK.json`, warning only; `unasked_conflicts` / `mark_asked` feed `Engine._ask_about_edited_project_files` (a `code_project` pause when `pauses.review` is `ask`); a file whose hash differs from `.fi/code_project.json` (a person's edit) is never overwritten.
 - `Engine._save_run_data` (called in `_node_execute` only once the run is accepted: exit 0 and the run manifest not
   stopped, pending or repairing; again after the replicate seeds for the raw copy only) copies the data tables the run
   wrote in the quest folder (`_RUN_DATA_SUFFIXES`, each up to `_RUN_DATA_MAX_BYTES`, never the secret/setup names in

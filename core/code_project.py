@@ -593,11 +593,21 @@ def pin(python: Path | str, deps: list[str]) -> list[str]:
 def _git(code_dir: Path, *args: str) -> Any:
     import subprocess
 
+    import os
+
+    # No hook and no file-system monitor runs at FI's own commits, and no system or personal git config is read:
+    # code/ is written by the experiment's code, which could otherwise plant one. The null device, named absolutely, is
+    # never a folder of hooks.
+    null = "\\\\.\\nul" if os.name == "nt" else os.devnull
+    # And git never looks above code/ for a repository: with code/.git gone or broken, a commit must fail, never land in
+    # a repository that happens to hold the quest folder (with whatever that repository has uncommitted).
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+           "GIT_CEILING_DIRECTORIES": str(Path(code_dir).resolve().parent)}
     return subprocess.run(
         ["git", "-c", "user.name=Frontier Insight", "-c", "user.email=fi@localhost", "-c", "commit.gpgsign=false",
-         "-c", "core.autocrlf=false", "-c", f"core.hooksPath={code_dir / '.git' / 'no-hooks'}",
+         "-c", "core.autocrlf=false", "-c", f"core.hooksPath={null}", "-c", "core.fsmonitor=false",
          "-c", f"safe.directory={code_dir.as_posix()}", *args],
-        cwd=code_dir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        cwd=code_dir, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60, env=env,
     )
 
 
@@ -657,6 +667,35 @@ def record_change(quest_root: Path, note: str, *, log: Any = None) -> bool:
         if log is not None:
             log.warning("[code] could not record this change in code/'s history: %s", exc)
         return False
+
+
+def record_note(quest_root: Path, note: str, *, log: Any = None) -> bool:
+    """An entry in ``code/CHANGELOG.md`` (and its commit) when nothing else in the folder changed: something about the
+    code a person should read beside its history, such as the study's results changing after a change kept earlier.
+    Without a history yet (no git), nothing is written."""
+    import shutil
+    import subprocess
+    import time
+
+    code_dir = Path(quest_root) / "code"
+    if not (code_dir / ".git").exists() or shutil.which("git") is None:
+        return False
+    changelog = code_dir / "CHANGELOG.md"
+    try:
+        head_text = changelog.read_bytes().decode("utf-8") if changelog.is_file() else "# What changed in this code\n\n"
+        changelog.write_bytes((head_text + f"## {time.strftime('%Y-%m-%d %H:%M')} - {note}\n\n").encode("utf-8"))
+    except OSError as exc:
+        if log is not None:
+            log.warning("[code] could not add a note to code/CHANGELOG.md: %s", exc)
+        return False
+    try:
+        _git(code_dir, "add", "-A")
+        done = _git(code_dir, "commit", "-q", "-m", note)
+    except (OSError, subprocess.SubprocessError) as exc:
+        if log is not None:
+            log.warning("[code] could not record the note in code/'s history: %s", exc)
+        return False
+    return done.returncode == 0
 
 
 def head(quest_root: Path) -> tuple[str | None, bool | None]:

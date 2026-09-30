@@ -1124,7 +1124,10 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     hf_branch = next(iter(g.branches["human_feedback"].values()))
     assert hf_branch.ends == {"rewrite": "write", "revise": "design", "done": END}
     reflect_branch = next(iter(g.branches["execute_reflect"].values()))
-    assert reflect_branch.ends == {"retry": "execute", "proceed": "analyze"}
+    assert reflect_branch.ends == {"retry": "execute", "proceed": "improve"}
+    # improve → analyze, or back to execute once for a kept change to the simulation.
+    improve_branch = next(iter(g.branches["improve"].values()))
+    assert improve_branch.ends == {"rerun": "execute", "proceed": "analyze"}
     cross_branch = next(iter(g.branches["cross_check"].values()))
     # Three terminal labels: ``broaden_lit`` re-enters the literature
     # node (iterative literature loop), ``redesign`` re-enters design

@@ -592,7 +592,11 @@ def _criteria_lines(protocol: Any) -> list[str]:
     lines = [f"## {CRITERIA_HEADING}", "",
              "> Checks of correctness, never the study's own finding. FI computes each one itself after every run of the "
              "code and keeps the result in `.fi/criteria_history.jsonl`; they are fixed with the protocol before the "
-             "first full run. Shown from `criteria` in the design block below; edit it there.", ""]
+             "first full run. Shown from `criteria` in the design block below; edit it there.",
+             "> When one is not met after a run, FI changes the simulation one small step at a time (at most "
+             "`engine.improve_rounds` times, 3 unless set) and keeps a change only when it makes a check better and "
+             "none worse by more than that check's own tolerance; the study's own results never choose the version, "
+             "and every round is in `code/CHANGELOG.md`.", ""]
     if not items:
         lines.append("- (none: FI records every run as having no criterion, so a later change to the code cannot be "
                      "shown to be better; add `criteria` to the protocol below)")

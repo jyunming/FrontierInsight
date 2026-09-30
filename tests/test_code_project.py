@@ -435,3 +435,33 @@ def test_a_file_with_windows_line_endings_is_not_taken_for_an_edit(tmp_path):
     path.write_bytes(path.read_bytes().decode("utf-8").replace("\n", "\r\n").encode("utf-8"))
     code_project.refresh(root, deps=[], protocol=PROTOCOL)
     assert code_project.unasked_conflicts(root) == []
+
+
+def test_a_commit_never_lands_in_a_repository_that_holds_the_quest_and_runs_no_hook(tmp_path):
+    """code/ is written by the experiment's code: a hook planted in its history, or a history it broke, must not make FI
+    run the hook or commit into a repository the quest folder happens to sit in (with whatever that one has uncommitted)."""
+    import shutil
+
+    if shutil.which("git") is None:
+        return
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=parent, check=True)
+    subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@b", "commit", "-q", "--allow-empty", "-m", "base"],
+                   cwd=parent, check=True)
+    (parent / "work.txt").write_text("not committed yet\n", encoding="utf-8")
+    root = parent / "outputs" / "q"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    assert code_project.record_change(root, "first")
+    hooks = root / "code" / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    (hooks / "pre-commit").write_text("#!/bin/sh\necho ran > HOOK_RAN\n", encoding="utf-8")
+    (root / "code" / "a.py").write_text("x = 2\n", encoding="utf-8")
+    assert code_project.record_change(root, "second")
+    assert not (root / "code" / "HOOK_RAN").exists()
+    (root / "code" / ".git" / "HEAD").unlink()  # a history the code broke
+    (root / "code" / "a.py").write_text("x = 3\n", encoding="utf-8")
+    assert code_project.record_change(root, "third") is False
+    log = subprocess.run(["git", "log", "--oneline"], cwd=parent, capture_output=True, text=True).stdout
+    assert log.strip().endswith("base") and len(log.strip().splitlines()) == 1

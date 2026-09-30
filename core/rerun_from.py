@@ -18,6 +18,7 @@ Graph nodes that are not a step, and why:
 * ``clarify``: redoing it means starting a new quest; ``ideas`` is the first step.
 * ``pause_after_literature`` and ``wait_for_data``: pauses. They write nothing of their own.
 * ``execute_reflect``: the repair of a crashed script, inside ``run`` (it has its own budget).
+* ``improve``: the changes to the simulation against its checks of correctness, inside ``run`` (``engine.improve_rounds``).
 * ``human_feedback``: a person's decision, not something to redo.
 * ``implement_outline`` / ``implement`` (the ``code`` step), ``auto_collect_data`` / ``data_load`` (the ``run`` step),
   ``web_plots`` / ``web_figures`` (the ``figures`` step) and ``select_skills`` (the ``skills`` step) are parts of a
@@ -54,7 +55,7 @@ STEPS: dict[str, tuple[str, ...]] = {
     "review": ("review",),
 }
 # Nodes a step loops through without leaving it: the run's repair of a crashed script goes back to execute.
-_WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect",)}
+_WITHIN: dict[str, tuple[str, ...]] = {"run": ("execute_reflect", "improve")}
 
 # The big blocks a map of the quest shows, and the steps in each.
 GROUPS: dict[str, tuple[str, ...]] = {
@@ -146,7 +147,9 @@ _OWN: dict[str, list[str]] = {
     "figures": ["figures", "code/web_plots.py", *_EVIDENCE, *_PAPER, *_CLAIM_CHECK],
     # The mean-over-seeds redraw is written into code/ by the run.
     "run": ["figures", "raw", "results.json", *_SEARCH, "code/replot_figures.py", "code/replot_figures.json", "code/web_plots.py",
-            "data/auto_collected", "needs/RUN_MANIFEST_CHECK.json", "needs/ENVIRONMENT.json", *_PAPER],
+            "data/auto_collected", "needs/RUN_MANIFEST_CHECK.json", "needs/ENVIRONMENT.json",
+            # The improve loop's record and saved copies belong to the run they started from.
+            ".fi/improve.json", ".fi/improve", *_PAPER],
     "code": ["code", "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
     "skills": ["code", "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
@@ -251,6 +254,11 @@ NODES: dict[str, dict[str, str]] = {
                         "sentence": "If the run crashed, reads the error and fixes the script, then runs it again.",
                         "reads": "error log", "writes": "fixed code",
                         "loop": "crash: back to Run it (its own retry budget)"},
+    "improve": {"block": "run", "title": "Improve the code",
+                "sentence": "If a check of correctness is not met, changes the simulation one step at a time and keeps "
+                            "a change only when no check got worse.",
+                "reads": "checks of correctness, code/", "writes": "code/CHANGELOG.md, criteria history",
+                "loop": "a change kept: back to Run it once, in full (engine.improve_rounds)"},
     "auto_collect_data": {"block": "data", "title": "Find data",
                           "sentence": "Looks for public datasets.",
                           "reads": "plan", "writes": "data/auto_collected/"},
