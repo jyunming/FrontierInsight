@@ -351,3 +351,93 @@ async def test_a_reply_without_the_package_is_asked_once_more_then_keeps_two_scr
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     assert "left out the model's package" in log and "keeps two scripts" in log
     assert json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))["status"] == "ok"
+
+
+# --- the package where a script is rewritten: an extension, a repair, the labels -------------------------------------
+
+
+def _engine_with_tool(tmp_path: Path) -> tuple[Engine, Path, dict[str, Any]]:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    _write_tool(code)
+    (code / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    return engine, code, {"design": {"protocol": PROTOCOL}}
+
+
+@pytest.mark.asyncio
+async def test_an_extension_sees_the_package_and_a_part_of_it_never_replaces_the_whole(tmp_path: Path) -> None:
+    from core.engine import _PY_FENCE_RE, _extend_directive
+
+    engine, code, state = _engine_with_tool(tmp_path)
+    shown = engine._package_shown(state)
+    assert shown is not None and shown[0] == PKG and f"{PKG}/model.py" in shown[1]
+    directive = _extend_directive(engine._scripts_on_disk(), ["the error at dt = 0.05"], package=shown)
+    assert f"### code/{PKG}/model.py" in directive and "def rk4_step" in directive and "back exactly as it is" in directive
+    assert f"code/{PKG}/" not in _extend_directive(engine._scripts_on_disk(), ["x"]), "no package, nothing shown"
+
+    # The extension gives model.py back with only its new function: the package is kept as it is.
+    part = "def euler_step(y, h):\n    return y + h * rhs(y)\n"
+    scripts = {"simulate": SIM_PKG, "analysis": ANALYSIS}
+    _s, _t, files = await engine._code_package_reply(state, "prompt", _package_reply(model_py=part), scripts, extend=True)
+    assert files == {}
+    assert "without rhs, rk4_step" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    # The whole file with the new function added is taken.
+    whole = MODEL_PY + "\n\n" + part
+    _s, _t, files = await engine._code_package_reply(state, "prompt", _package_reply(model_py=whole), scripts, extend=True)
+    assert "def euler_step" in files[f"{PKG}/model.py"] and "def rk4_step" in files[f"{PKG}/model.py"]
+    assert cl.reply_files(_package_reply(model_py=whole), _PY_FENCE_RE, PKG) == files
+
+
+def test_a_repair_of_the_simulation_sees_the_package_and_can_fix_it(tmp_path: Path) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    note = engine._package_repair_note(state)
+    assert "package_files" in note and f"### code/{PKG}/model.py" in note and "def rhs" in note
+    before = engine._package_snapshot()
+    fixed = MODEL_PY.replace("return -y", "return -1.0 * y")
+    wrote = engine._apply_package_repair(state, {"code": SIM_PKG, "package_files": {
+        f"{PKG}/model.py": fixed,
+        "../outside.py": "x = 1\n",          # not in the package: ignored
+        f"{PKG}/broken.py": "def f(:\n",     # does not parse: ignored
+    }}, node="oracle")
+    assert wrote == [f"{PKG}/model.py"] and (code / PKG / "model.py").read_text(encoding="utf-8") == fixed
+    assert not (code.parent / "outside.py").exists() and not (code / PKG / "broken.py").exists()
+    assert engine._apply_package_repair(state, {"code": SIM_PKG}, node="oracle") == []
+    # A repair that is undone takes its package change with it.
+    (code / PKG / "extra.py").write_text("y = 2\n", encoding="utf-8")
+    engine._restore_package(before)
+    assert engine._package_snapshot() == before
+    # Two scripts alone: nothing about a package is said.
+    plain = _engine(tmp_path / "plain")
+    (plain.quest_root / "code").mkdir(parents=True)
+    (plain.quest_root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    assert plain._package_repair_note(state) == "" and plain._apply_package_repair(
+        state, {"package_files": {f"{PKG}/model.py": fixed}}, node="oracle") == []
+
+
+def test_the_labels_are_asked_for_in_the_package(tmp_path: Path) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    assert engine._label_target(state, code / "simulate.py") == code / PKG / "model.py"
+    plain = _engine(tmp_path / "plain")
+    assert plain._label_target(state, plain.quest_root / "code" / "simulate.py") == plain.quest_root / "code" / "simulate.py"
+
+
+def test_a_plan_without_a_number_to_check_is_not_missing_unit_tests(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    no_number = {**PROTOCOL, "oracles": [{"name": "shape", "check": "the error falls as dt falls"}]}
+    assert cl.oracle_tests(no_number) is None
+    _write_tool(code)
+    (code / cl.TEST_PATH).unlink()
+    assert not any("unit tests" in p for p in cl.check(code, no_number, PKG))
+    assert any("unit tests" in p for p in cl.check(code, PROTOCOL, PKG))
+
+
+def test_what_the_package_imports_is_in_requirements(tmp_path: Path) -> None:
+    from core import code_project
+
+    code = tmp_path / "code"
+    _write_tool(code, model_py="import scipy.integrate\n\nfrom . import helpers\n\n\n"
+                               "def rhs(y):  # E1\n    return -y\n")
+    (code / PKG / "helpers.py").write_text("X = 1\n", encoding="utf-8")
+    lines = code_project.requirements_for(code, ["numpy"])
+    assert "scipy" in lines and "numpy" in lines
+    assert not {PKG, "model", "helpers", "simulate"} & set(lines), lines

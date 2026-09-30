@@ -302,6 +302,11 @@ same PR that adds, splits or renames one.
   asks once more, else keeps two scripts and says so), `_package_in_use`, `_check_code_layout` (in `_node_execute`
   beside `_check_equation_labels`: `check`, a warning, a stop only under research through the `split` contract pause).
   `trial_runner._run_key` and `Engine._simulation_sources` read the package as part of the simulation.
+  Where simulate.py is rewritten the package goes with it: `Engine._package_shown` (shown by `_extend_directive`; an
+  extension's package file missing functions it had is not written, `dropped_functions`), `_package_repair_note` /
+  `_apply_package_repair` (`repair_note` / `repair_files`: the reflect and oracle repairs of simulate.py may return
+  `package_files`), `_package_snapshot` / `_restore_package` (the oracle gate's undo of a repair bent to a disputed
+  check), `_label_target` (labels asked for in `model.py`); `code_project.requirements_for` scans the package's imports.
 - `core/split_run.py` — the two-script contract (`simulate.py` / `experiment.py`), raw-dir naming, replicate seeding.
   Whether a quest gets it is `Engine._split_on`: under `split_analysis: auto` every quest that runs a simulation
   (`_runs_code`), deterministic (`run_cell`) or stochastic (`run_trial`); `design_is_stochastic` only decides whether

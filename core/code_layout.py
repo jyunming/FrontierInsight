@@ -227,14 +227,78 @@ def reply_files(text: str, fence: re.Pattern[str], package: str) -> dict[str, st
         marker = _FILE_MARKER.match(lines[first])
         if not marker:
             continue
-        rel = marker.group(1).replace("\\", "/").strip("/")
-        if rel.startswith("code/"):
-            rel = rel[len("code/"):]
-        parts = rel.split("/")
-        if len(parts) != 2 or parts[0] != package or not parts[1].endswith(".py") or not parts[1][:-3].isidentifier():
+        rel = _package_rel(marker.group(1), package)
+        if rel is None:
             continue
         out[rel] = "\n".join(lines[first + 1:]).strip("\n") + "\n"
     return out
+
+
+def _package_rel(path: str, package: str) -> str | None:
+    """``"<package>/<module>.py"`` for a path naming a Python file directly inside the package, else ``None``."""
+    rel = str(path or "").strip().replace("\\", "/").strip("/")
+    if rel.startswith("code/"):
+        rel = rel[len("code/"):]
+    parts = rel.split("/")
+    if len(parts) != 2 or parts[0] != package or not parts[1].endswith(".py") or not parts[1][:-3].isidentifier():
+        return None
+    return rel
+
+
+def repair_files(value: Any, package: str) -> dict[str, str]:
+    """The package files a repair reply gives back (its JSON ``package_files``: ``{"<package>/model.py": text}``); only
+    Python files directly inside the package that parse are taken."""
+    out: dict[str, str] = {}
+    if not isinstance(value, dict):
+        return out
+    for path, text in value.items():
+        rel = _package_rel(str(path), package)
+        if rel is None or not isinstance(text, str) or not text.strip() or not _parses(text):
+            continue
+        out[rel] = text.strip("\n") + "\n"
+    return out
+
+
+def _top_functions(source: str) -> set[str]:
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    return {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+
+
+def dropped_functions(old: str, new: str) -> list[str]:
+    """The functions (and classes) ``old`` defines at its top level that ``new`` no longer does: a file given back with
+    some of them missing is a part of the file, not the whole of it."""
+    return sorted(_top_functions(old) - _top_functions(new))
+
+
+def sources_block(sources: dict[str, str]) -> str:
+    """The package's files as the prompts show them."""
+    return "\n\n".join(f"### code/{rel}\n```python\n{text}\n```" for rel, text in sorted(sources.items()))
+
+
+def repair_note(package: str, sources: dict[str, str]) -> str:
+    """What a repair of simulate.py is told about the package it imports: its files, and how to fix one of them."""
+    if not sources:
+        return ""
+    return (
+        f"\nTHE MODEL'S PACKAGE: simulate.py computes with the package code/{package}/, which holds the model's equations. "
+        "Its files are below. If the fault is in an equation, fix it there: add to your JSON "
+        f"`\"package_files\": {{\"{package}/{MODEL_NAME}\": \"<the whole corrected file>\"}}` beside `code` (which is "
+        "still the whole of simulate.py). Keep the equations in the package (do not copy them into simulate.py) and keep "
+        "every equation label (`# E1`). Leave `package_files` out when the package is right.\n\n"
+        + sources_block(sources) + "\n"
+    )
+
+
+def extend_note(package: str) -> str:
+    """What an extension is told about the package shown beside the scripts."""
+    return (
+        f"The model's package code/{package}/ is shown above too. Give each of its files back exactly as it is unless "
+        "what is asked needs a change to an equation; a package file you change comes back whole (every function it has "
+        "now, plus what you add), never only the new part."
+    )
 
 
 def complete(files: dict[str, str], package: str) -> bool:
@@ -518,10 +582,12 @@ def check(code_dir: Path, protocol: dict[str, Any] | None, package: str) -> list
         if not _imports(simulate, package):
             problems.append(f"code/simulate.py does not use the package code/{package}/, so the equations it runs are "
                             "not the ones in the package")
+    # FI writes the unit tests from the plan's checks with a number to agree with; a plan with none has none to write,
+    # and that is not something the code is missing.
     tests = [p for p in (code_dir / TESTS_DIR).glob("test_*.py")] if (code_dir / TESTS_DIR).is_dir() else []
-    if not any(re.search(r"^def test_", p.read_text(encoding="utf-8", errors="replace"), re.MULTILINE) for p in tests):
-        problems.append(f"there are no unit tests in code/{TESTS_DIR}/ (the plan has no check with a number to agree "
-                        "with, or they could not be written)")
+    if oracle_tests(protocol) is not None and not any(
+            re.search(r"^def test_", p.read_text(encoding="utf-8", errors="replace"), re.MULTILINE) for p in tests):
+        problems.append(f"there are no unit tests in code/{TESTS_DIR}/ for the plan's checks")
     if not (code_dir / METHODS_NAME).is_file():
         problems.append(f"code/{METHODS_NAME}, which says which function computes each equation, is missing")
     unmapped = [row["id"] for row in equation_map(protocol, sources) if not row["function"]]

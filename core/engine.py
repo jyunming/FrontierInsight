@@ -6883,7 +6883,8 @@ class Engine:
                            + ". Keep what was added for it, and keep its results in RESULT_JSON.\n")
         if extend:
             self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
-            prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk())
+            prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk(),
+                                        package=self._package_shown(state))
             if self._split_on(state) and (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
                 prompt += _SPLIT_RERUN_NOTE
         text = await self._chat(prompt, node="implement")
@@ -6997,10 +6998,12 @@ class Engine:
             self._log.info("[implement] wrote %s (%d bytes)", submit_path, len(submit_code))
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
+        package_written: list[str] = []
         if package_files:
-            wrote = _code_layout.write_package(code_path.parent, package_files, same=_split_run.same_script)
-            if wrote:
-                self._log.info("[implement] wrote the model's package: %s", ", ".join(f"code/{w}" for w in wrote))
+            package_written = _code_layout.write_package(code_path.parent, package_files, same=_split_run.same_script)
+            if package_written:
+                self._log.info("[implement] wrote the model's package: %s",
+                               ", ".join(f"code/{w}" for w in package_written))
         if extracted and not extend:  # nothing to seed in the stub written above; an extension changes as little as it can
             if simulate_code.strip() and _trial_runner.entries(simulate_path) & {"run_trial", "run_cell"}:
                 pass  # the trial contract: FI hands every trial its seed, there is no seed for the script to read
@@ -7016,7 +7019,8 @@ class Engine:
             # The labels of the plan's equations (`# E1`): asked for once more when the reply left one out.
             # Not when the simulation came back unchanged: adding comments changes its bytes, and the trials FI already ran
             # are kept against those bytes, so they would all run again. The check before the run still says what is missing.
-            if not sim_kept and await self._label_equations(state) == code_path:
+            # With the model's package, the labels go in it: a package written again this pass runs its trials again anyway.
+            if (not sim_kept or package_written) and await self._label_equations(state) == code_path:
                 code = code_path.read_text(encoding="utf-8")  # a one-script quest: the labelled script is the one that runs
         if extend:
             note = "added what a refine asked for: " + "; ".join(extend)[:200]
@@ -7892,6 +7896,13 @@ class Engine:
         implements it), as one sentence. Only the labelled mapping is read, never the mathematics."""
         return self._label_sentences(*self._unlabelled(state, protocol))
 
+    def _label_target(self, state: QuestState, main: Path) -> Path:
+        """Where an equation's label belongs: in the model's package (``code/<package>/model.py``) when the simulation
+        computes with one, since that is where the equations are; else the simulation script itself."""
+        package = self._package_in_use(state)
+        model = self.quest_root / "code" / package / _code_layout.MODEL_NAME if package else None
+        return model if model is not None and model.is_file() else main
+
     @staticmethod
     def _label_sentences(main: Path, missing: list[str]) -> list[str]:
         if not missing:
@@ -7908,6 +7919,7 @@ class Engine:
             main, missing = self._unlabelled(state, self._protocol_block(state))
             if not missing:
                 return None
+            main = self._label_target(state, main)
             before = main.read_text(encoding="utf-8")
             view = _oracle.model_view((self._protocol_block(state) or {}).get("model")) or {}
             equations = [e for e in view.get("equations") or []
@@ -7980,6 +7992,18 @@ class Engine:
         package = layout["package"]
         files = _code_layout.reply_files(text, _PY_FENCE_RE, package)
         on_disk = (self.quest_root / "code" / package / _code_layout.MODEL_NAME).is_file()
+        if extend:
+            # An extension changes as little as it can: a package file given back without functions it has now is a part
+            # of the file (the new function alone), and writing it would lose the rest. The package is then kept.
+            for rel in list(files):
+                old_path = self.quest_root / "code" / rel
+                old = old_path.read_text(encoding="utf-8") if old_path.is_file() else ""
+                dropped = _code_layout.dropped_functions(old, files[rel]) if old else []
+                if dropped:
+                    self._log.warning("[implement] the extension gave code/%s back without %s; the package is kept as "
+                                      "it is", rel, ", ".join(dropped))
+                    files = {}
+                    break
         if not _code_layout.complete(files, package) and not on_disk and not extend:
             self._log.warning("[implement] the reply left out the model's package (code/%s/); asking once more", package)
             again = await self._chat(prompt + _code_layout.reminder(package), node="implement")
@@ -7989,9 +8013,10 @@ class Engine:
                 scripts, text, files = again_scripts, again, again_files
         fell_back = ""
         if not _code_layout.complete(files, package) and not on_disk:
-            fell_back = "the reply left out the model's package, also when asked again"
-            self._log.warning("[implement] the reply left out the model's package (code/%s/), also when asked again: the "
-                              "code keeps two scripts (simulate.py and experiment.py) this time", package)
+            asked = "" if extend else ", also when asked again"
+            fell_back = f"the reply left out the model's package{asked}"
+            self._log.warning("[implement] the reply left out the model's package (code/%s/)%s: the code keeps two "
+                              "scripts (simulate.py and experiment.py) this time", package, asked)
         else:
             self._log.info("[implement] %s", _code_layout.summary(layout))
         _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
@@ -8004,6 +8029,53 @@ class Engine:
             return None
         package = layout["package"]
         return package if (self.quest_root / "code" / package / "__init__.py").is_file() else None
+
+    def _package_shown(self, state: QuestState) -> tuple[str, dict[str, str]] | None:
+        """``(package, {"<package>/model.py": text})`` for a quest whose simulation computes with the model's package:
+        what a prompt that rewrites simulate.py shows beside it, so the model sees the equations it calls."""
+        try:
+            package = self._package_in_use(state)
+            if not package:
+                return None
+            sources = {rel: text for rel, text in _code_layout.package_sources(self.quest_root / "code").items()
+                       if rel.startswith(f"{package}/")}
+            return (package, sources) if sources else None
+        except Exception as e:  # noqa: BLE001 -- showing the package is a help to the prompt, never a stop
+            self._log.warning("[implement] could not read the model's package: %r", e)
+            return None
+
+    def _package_repair_note(self, state: QuestState) -> str:
+        shown = self._package_shown(state)
+        return _code_layout.repair_note(*shown) if shown else ""
+
+    def _apply_package_repair(self, state: QuestState, parsed: Any, *, node: str) -> list[str]:
+        """Write the package files a repair gave back (its JSON ``package_files``); returns the files written."""
+        shown = self._package_shown(state)
+        if not shown or not isinstance(parsed, dict):
+            return []
+        files = _code_layout.repair_files(parsed.get("package_files"), shown[0])
+        if not files:
+            return []
+        wrote = _code_layout.write_package(self.quest_root / "code", files, same=_split_run.same_script)
+        if wrote:
+            self._log.info("[%s] the repair rewrote the model's package: %s", node, ", ".join(f"code/{w}" for w in wrote))
+        return wrote
+
+    def _package_snapshot(self) -> dict[str, str]:
+        return _code_layout.package_sources(self.quest_root / "code")
+
+    def _restore_package(self, before: dict[str, str]) -> None:
+        """Put the model's package back as ``before`` held it (a repair that is undone takes its package change with it)."""
+        code = self.quest_root / "code"
+        for rel, text in _code_layout.package_sources(code).items():
+            if rel not in before:
+                (code / rel).unlink(missing_ok=True)
+            elif text != before[rel]:
+                (code / rel).write_text(before[rel], encoding="utf-8")
+        for rel, text in before.items():
+            if not (code / rel).is_file():
+                (code / rel).parent.mkdir(parents=True, exist_ok=True)
+                (code / rel).write_text(text, encoding="utf-8")
 
     def _check_code_layout(self, state: QuestState) -> list[str]:
         """After the code is written, before anything runs: say in run.log what the research-tool layout of ``code/`` is
@@ -8054,7 +8126,8 @@ class Engine:
         for why in gaps:
             self._log.warning("[implement] %s", why)
         if gaps and self.config.rigor_profile == "research":
-            script = f"code/{main.name}"
+            target = self._label_target(state, main)
+            script = f"code/{target.relative_to(self.quest_root / 'code').as_posix()}" if target != main else f"code/{main.name}"
             self._pause_for_human(
                 kind="equation_labels",
                 interaction="supply",
@@ -8366,7 +8439,7 @@ class Engine:
         new_code: str | None = None
         # After a repair is applied while some checks are disputed: (the script before it, new_code before it, the
         # disputed checks that were failing). Read once, right after the next run.
-        guard: tuple[str, str | None, set[str]] | None = None
+        guard: tuple[str, str | None, set[str], dict[str, str]] | None = None
         attempt = 0
         test_run_read = False  # the first measurement of the checks has been read as a test run of them
         while True:
@@ -8425,11 +8498,12 @@ class Engine:
             if guard is not None:
                 # The repair just applied was told to leave the disputed checks alone. One that made such a check pass
                 # changed the script towards a number the repair itself called wrong: that is put back.
-                prev_code, prev_new_code, held = guard
+                prev_code, prev_new_code, held, prev_package = guard
                 guard = None
                 flipped = [j["name"] for j in attempts[-1]["judged"] if j.get("name") in held and j.get("passed_by_engine") is True]
                 if flipped:
                     seed_path.write_text(prev_code, encoding="utf-8")
+                    self._restore_package(prev_package)  # a change to the model's package goes back with it
                     new_code = prev_new_code
                     attempts[-2]["repair"] = "reverted_disputed_changed"
                     self._log.warning(
@@ -8475,6 +8549,7 @@ class Engine:
                 len(to_fix), "; ".join(to_fix), budget - repairs_left + 1, budget,
             )
             code_before, new_code_before = seed_path.read_text(encoding="utf-8"), new_code
+            package_before = self._package_snapshot()
             text, call_failed, outcome = await self._repair_script_for_oracle(
                 state, seed_path, oracles, to_fix, stderr_tail, disputed=disputed,
                 passing=[str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True],
@@ -8493,7 +8568,7 @@ class Engine:
             passing_now = {str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True}
             held = {n for n in disputed if n not in passing_now}
             if outcome == "applied" and held:
-                guard = (code_before, new_code_before, held)
+                guard = (code_before, new_code_before, held, package_before)
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
         proposed = list(self._oracle_proposals.values())
         # The checks still failing (a value measured and judged outside tolerance) whose expected value a repair
@@ -9616,7 +9691,9 @@ class Engine:
             previous_code=code,
             returncode="(the oracle run did not pass)",
             stdout_tail=_oracle.directive(oracles, found, disputed=disputed)
-            + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else ""),
+            + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else "")
+            # A check against a known answer tests the equations, which may be in the model's package.
+            + (self._package_repair_note(state) if path.name == _split_run.SIMULATE_NAME else ""),
             stderr_tail=stderr_tail,
             duration_s="0.00",
             figures_count="0",
@@ -9666,6 +9743,8 @@ class Engine:
                               "define oracle()" if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
             return None, False, "not_usable"
         path.write_text(new_code, encoding="utf-8")
+        if path.name == _split_run.SIMULATE_NAME:
+            self._apply_package_repair(state, parsed, node="oracle")
         self._log.info(
             "[oracle] rewrote %s (%d bytes): %s", path.name, len(new_code),
             str(parsed.get("patch_summary") or "no summary")[:160],
@@ -11382,8 +11461,10 @@ class Engine:
                 )
             elif repair_simulation:
                 script_code = simulate_path.read_text(encoding="utf-8")
-                split_note = _SPLIT_REFLECT_SIMULATE + (_SEARCH_REFLECT_SIMULATE if _optim.has_block(state.get("design"))
-                                                        else "")
+                # The crash may be in the model's package simulate.py calls: shown, and fixable there.
+                split_note = (_SPLIT_REFLECT_SIMULATE + (_SEARCH_REFLECT_SIMULATE if _optim.has_block(state.get("design"))
+                                                         else "")
+                              + self._package_repair_note(state))
             elif _optim.has_block(state.get("design")):
                 split_note = _SEARCH_REFLECT_ANALYSIS
             else:
@@ -11486,6 +11567,8 @@ class Engine:
         code_path.parent.mkdir(parents=True, exist_ok=True)
         parent_sha = _attempts._file_sha(code_path)
         code_path.write_text(new_code, encoding="utf-8")
+        if repair_simulation:
+            self._apply_package_repair(state, parsed, node="execute_reflect")
         self._last_ledger_id = self._record(_attempts.LEDGER, lambda: {
             "kind": "repair", "script": code_path.name, "attempt": iters + 1,
             "parent_sha256": parent_sha, "sha256": _attempts._sha(new_code.encode("utf-8")),
@@ -20862,12 +20945,16 @@ def _rerun_directive(review: dict[str, Any], named: str) -> str:
     ])
 
 
-def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = "") -> str:
+def _extend_directive(scripts: dict[str, str], points: list[str], submit: str = "",
+                      package: tuple[str, dict[str, str]] | None = None) -> str:
     """What the implement prompt is told when a person's refine asked for a number the study lacks: the scripts that
-    exist are the base, and only what the number needs is changed."""
+    exist are the base, and only what the number needs is changed. ``package``: the model's package the simulation
+    computes with (``core/code_layout.py``), shown too so the extension sees the equations it calls."""
     shown = "\n\n".join(f"### code/{name}\n```python\n{code}\n```" for name, code in scripts.items())
     if submit.strip():
         shown += f"\n\n### code/{_trial_runner.SUBMIT_NAME}\n```python\n{submit}\n```"
+    if package and package[1]:
+        shown += "\n\n" + _code_layout.sources_block(package[1]) + "\n\n" + _code_layout.extend_note(package[0])
     return "\n".join([
         "",
         "## Extend the scripts that exist",
