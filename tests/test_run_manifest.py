@@ -32,6 +32,38 @@ def test_a_manifest_that_says_what_the_protocol_fixed_has_no_difference() -> Non
     assert rm.problems(PROTOCOL, _manifest()) == []
 
 
+def test_a_run_with_no_randomness_is_held_to_one_run_per_setting_and_says_so() -> None:
+    once = _manifest(attempted_per_cell={f"R0={r}": 1 for r in (0.9, 1.5, 3.0)},
+                     successful_per_cell={f"R0={r}": 1 for r in (0.9, 1.5, 3.0)})
+    assert any("ran another number" in p for p in rm.problems(PROTOCOL, once)), "the raw protocol still differs"
+    counted, note, problem = rm.once_per_setting(PROTOCOL, random_source="", checked="none in its code")
+    assert rm.problems(counted, once) == [] and problem == ""
+    assert "runs_per_setting" not in counted and PROTOCOL["runs_per_setting"] == 300, "the frozen protocol is not changed"
+    assert note == ("the protocol asks for 300 runs per setting, but FI found no randomness in the simulation (none in "
+                    "its code), so each setting ran once: a repeat would return the same numbers")
+    # The same comparison a deterministic protocol written without a run count gets; one run asked for needs no note.
+    assert rm.once_per_setting({"grid": PROTOCOL["grid"]}, random_source="") == ({"grid": PROTOCOL["grid"]}, "", "")
+    assert rm.once_per_setting({**PROTOCOL, "runs_per_setting": 1}, random_source="")[1] == ""
+    # A mean metric is then held to no count of per-trial values, as for a protocol written without runs_per_setting.
+    mean = {**_MEAN_PROTOCOL}
+    assert rm.problems(rm.once_per_setting(mean, random_source="")[0], once, result_json={"x": 1}) == []
+    # A simulation with a sign of randomness is not excused by defining run_cell, and is told why.
+    found = "FI found `seed` in simulate.py, a source of random numbers"
+    counted, note, problem = rm.once_per_setting(PROTOCOL, random_source=found, without="take that out of the code")
+    assert counted is PROTOCOL and note == "" and "define run_trial" in problem and "300" in problem
+    assert found in problem and problem.endswith("for one without, take that out of the code")
+    assert any("ran another number" in p for p in rm.problems(counted, once))
+    assert rm.once_per_setting({**PROTOCOL, "runs_per_setting": 1}, random_source=found)[2] == ""
+
+
+def test_the_repair_request_under_the_trial_contract_asks_for_the_function_not_a_loop() -> None:
+    found = ["simulate.py defines run_cell ... define run_trial(cell, trial_id, seed) instead"]
+    trial = rm.directive(found, PROTOCOL, trial_mode=True)
+    assert "run_trial(cell, trial_id, seed)" in trial and "no loop over settings" in trial
+    assert rm.LEDGER_NAME not in trial and "run_manifest.json" not in trial
+    assert rm.LEDGER_NAME in rm.directive(found, PROTOCOL), "the older contract's request is as it was"
+
+
 # --- the claimed trial count against the real per-trial values a mean metric reports -------------------------------
 
 

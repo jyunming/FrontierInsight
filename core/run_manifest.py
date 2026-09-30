@@ -220,6 +220,39 @@ def checkable(protocol: dict[str, Any] | None) -> bool:
     )
 
 
+def once_per_setting(protocol: dict[str, Any], *, random_source: str, checked: str = "",
+                     without: str = "take the source of random numbers out") -> tuple[dict[str, Any], str, str]:
+    """``(the protocol to check the run against, a note for the log, a problem)`` for a simulation that FI ran once per
+    setting (``run_cell``: no seed, no trials). ``random_source`` is why it may draw random numbers after all (its code
+    names a source of them, a second call returned other numbers, or that call could not be made), empty when FI found
+    no sign of any; ``checked`` then says where FI looked, for the note. ``without`` is what a study with no randomness
+    changes so that FI finds none, which depends on what FI found.
+
+    A calculation with no randomness returns the same numbers every time it is repeated, so the protocol's
+    ``runs_per_setting`` is not a count such a run can miss: it is left out of the comparison, which is then exactly the
+    one a deterministic protocol written without it gets (including that no `kind: "mean"` metric is held to a count of
+    per-trial values: one run per setting has none to average). When the protocol asked for more than one run, the note
+    says so in plain words. A simulation with a sign of randomness that defines only ``run_cell`` is not excused: the
+    protocol is kept as it is (the count differs), and the problem says why and what to change."""
+    runs = _num(protocol.get("runs_per_setting"))
+    if runs is None:
+        return protocol, "", ""
+    if random_source:
+        if runs <= 1:
+            return protocol, "", ""
+        return protocol, "", (
+            f"simulate.py defines run_cell, which FI calls once per setting with no seed, but {random_source}: for a "
+            f"study with randomness, define run_trial(cell, trial_id, seed) instead, so FI runs the {runs:g} runs per "
+            f"setting the protocol fixes; for one without, {without}"
+        )
+    note = "" if runs <= 1 else (
+        f"the protocol asks for {runs:g} runs per setting, but FI found no randomness in the simulation"
+        + (f" ({checked})" if checked else "")
+        + ", so each setting ran once: a repeat would return the same numbers"
+    )
+    return {k: v for k, v in protocol.items() if k != "runs_per_setting"}, note, ""
+
+
 def _coerce_number(raw: str) -> Any:
     """A cell key's value as the number it names, when it is one (``"0.9"`` -> ``0.9``); the string itself otherwise."""
     try:
@@ -935,14 +968,26 @@ def contract() -> str:
     )
 
 
-def directive(found: list[str], protocol: dict[str, Any]) -> str:
-    """What stands where a traceback would in the repair request."""
-    return (
+def directive(found: list[str], protocol: dict[str, Any], *, trial_mode: bool = False) -> str:
+    """What stands where a traceback would in the repair request. ``trial_mode``: FI ran the trials itself (simulate.py
+    defines ``run_trial`` / ``run_cell``), so the request is about that function, not about a loop and its own record."""
+    head = (
         "This run finished, but what it actually did does not match the frozen protocol:\n"
         + "\n".join(f"- {line}" for line in found[:8])
         + "\n\nThe frozen protocol (it cannot change here):\n"
         + json.dumps({k: protocol.get(k) for k in ("grid", "runs_per_setting", "thresholds", "failure_policy") if protocol.get(k) is not None}, separators=(",", ":"))
-        + f"\n\nRewrite simulate.py so that it runs EXACTLY that design: appends one real line to `{LEDGER_NAME}` as EACH "
+    )
+    if trial_mode:
+        return head + (
+            "\n\nFI runs the trials itself and keeps their record: every setting of that grid, `runs_per_setting` trials "
+            "each for run_trial, once each for run_cell. Rewrite simulate.py so that what FI runs matches that design: "
+            "run_trial(cell, trial_id, seed) for a study with randomness (drawing only from a generator made from "
+            "`seed`), or run_cell(cell) for one with none (FI checks that it has none); "
+            "the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, "
+            "no files and no RESULT_JSON. Keep everything else."
+        )
+    return head + (
+        f"\n\nRewrite simulate.py so that it runs EXACTLY that design: appends one real line to `{LEDGER_NAME}` as EACH "
         "trial finishes (cell, trial, status, and reason when failed), and writes run_manifest.json from what its loops "
         "did (realized_grid, attempted_per_cell, successful_per_cell, failed_trials, thresholds_used, schema "
         "`fi.run-manifest/v1`). Do not edit either file to say what the protocol says: change what the simulation does "

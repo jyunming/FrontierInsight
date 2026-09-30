@@ -30,6 +30,7 @@ plan, and does not claim to prove a script that agrees with it.
 from __future__ import annotations
 
 import ast
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -455,6 +456,44 @@ def grid_notes(design: dict[str, Any] | None) -> list[str]:
         "The design claims something about how a result changes with a parameter (convergence, scaling, a threshold), "
         "but " + ", ".join(thin) + " has fewer than five values: a rate, a fit or a critical point cannot be told from "
         "so few points. Add values, in particular near where the behaviour changes."
+    ]
+
+
+_RANDOM_WORDS = re.compile(
+    # Words a deterministic ODE or PDE design uses too ("on the interval", "time evolution", "temperature
+    # distribution", "sampling interval", "proportional") are matched only in their random sense.
+    r"random|stochastic|monte[- ]?carlo|gillespie|mcmc|markov|metropolis|langevin|brownian|\bnois[ey]|"
+    r"\bsampl(e|es|ed|ing)\b(?!\s+(interval|rate|time|step|point))|sampler|resampl|subsampl|gibbs|seed|bootstrap|"
+    r"probabilit|likelihood|agent[- ]based|replicat|\bdraws?\b|shuffl|permut|jitter|poisson|gaussian|"
+    r"distribution of (outcomes|results|runs)|fluctuat|uncertaint|ensemble|genetic (drift|algorithm)|evolutionary|"
+    r"anneal|swarm|dropout|variance|confidence interval|error bar|standard error|\bproportions?\b|outbreak|extinct",
+    re.IGNORECASE,
+)
+
+
+def run_count_notes(design: dict[str, Any] | None, *, fi_runs: bool = True) -> list[str]:
+    """A protocol that asks for repeated runs of a design whose description names nothing random: for the plan's
+    *Checks already made*. Whether the simulation is random is only known once its code exists (FI runs a ``run_cell``
+    with no sign of randomness once per setting), so this says what will happen then, in plain words, rather than
+    changing the protocol now. Said only where FI runs the simulation (``fi_runs``) and only when nothing in the design,
+    its metrics or a precision target suggests repeated random runs (any such word keeps it quiet)."""
+    protocol = design.get("protocol") if isinstance(design, dict) else None
+    runs = protocol.get("runs_per_setting") if isinstance(protocol, dict) else None
+    if not fi_runs or not isinstance(runs, (int, float)) or isinstance(runs, bool) or runs <= 1:
+        return []
+    if protocol.get("precision") is not None:
+        return []  # a target precision is a width over repeated random runs
+    text = " ".join(str((design or {}).get(k) or "") for k in ("hypothesis", "method", "expected_outcome", "variables"))
+    text += " " + " ".join(str(protocol.get(k) or "") for k in ("seed_policy", "ci_method", "failure_policy", "acceptance"))
+    text += " " + json.dumps(protocol.get("metrics") or [], default=str)
+    if _RANDOM_WORDS.search(text):
+        return []
+    return [
+        f"The protocol asks for {int(runs)} runs per setting, but the design's description names nothing random. If the "
+        "simulation is written as run_cell and FI finds no randomness in it (it checks the code, and calls a setting "
+        "twice unless the run is a cluster job), FI runs each setting once: repeating the same calculation returns the "
+        "same numbers, so the repeats are not counted as missing. If the study is meant to be random, say what varies "
+        "from run to run."
     ]
 
 

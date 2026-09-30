@@ -4629,9 +4629,14 @@ class Engine:
             audit += _protocol.oracle_notes(normalized.get("protocol"))
             audit += _protocol.failure_notes(normalized.get("protocol"))
             audit += _protocol.metric_notes(normalized.get("protocol"))
-            audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
+            fi_runs = self._split_on({**state, "design": normalized})
+            once = _protocol.run_count_notes(normalized, fi_runs=fi_runs)
+            # A design that names nothing random is not asked for a precision its repeats would buy.
+            if not once:
+                audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
             audit += _protocol.grid_notes(normalized)
-            audit += _criteria.plan_notes(normalized.get("protocol"), fi_runs=self._split_on({**state, "design": normalized}))
+            audit += once
+            audit += _criteria.plan_notes(normalized.get("protocol"), fi_runs=fi_runs)
             # Where the model's equations and each check's expected value come from (core/oracle_check.py).
             source_gaps, model_notes = self._plan_source_findings(state, normalized.get("protocol"))
             audit += model_notes
@@ -7245,11 +7250,83 @@ class Engine:
         return _trial_runner.given_rows_problems(
             protocol, _trial_runner.recorded_rows_by_cell(self.quest_root), result_json, ok_trials=ok_trials)
 
-    def _run_manifest_problems(self, state: QuestState, split: bool, result: Any) -> tuple[str, list[str]]:
+    def _ran_once_note(self) -> str:
+        """For the analysis and the paper: the frozen protocol still says N runs per setting, but FI ran each setting
+        once (a simulation with no randomness), so the text must say what ran. The run check's record is written again
+        on every run, so a note there is this run's. Empty when there is none."""
+        record = _read_json_or_none_path(self.quest_root / "needs" / "RUN_MANIFEST_CHECK.json")
+        note = record.get("note") if isinstance(record, dict) else None
+        if not isinstance(note, str) or not note.strip():
+            return ""
+        return (f"{note[0].upper()}{note[1:]}. Report one run per setting: do NOT write that each setting was repeated, "
+                "and do NOT report a mean over repeats, a standard error or a confidence interval.")
+
+    def _runs_once_per_setting(self) -> bool:
+        """Whether FI ran the simulation once per setting: it defines ``run_cell`` and no ``run_trial``."""
+        entries = getattr(self, "_trial_entries", None) or set()
+        return bool(getattr(self, "_trial_mode", False)) and "run_cell" in entries and "run_trial" not in entries
+
+    async def _run_cell_randomness(self, state: QuestState, python: Path | str,
+                                   env: dict[str, str] | None) -> tuple[str, str, str]:
+        """``(why the simulation may draw random numbers, what FI checked, what a study with none changes)`` for a
+        simulation FI ran once per setting under a protocol that asked for several runs per setting: its code names a
+        source of random numbers, or a setting called again returns other numbers (or could not be called again). The
+        first is empty when FI found no sign of randomness, or nothing needs checking. No setting is called again for a
+        cluster job, whose one setting may take hours: there only the code is read. The answer is kept for as long as
+        FI's record of the trials is the same one (an analysis repaired on the same trials does not call them again)."""
+        protocol = self._protocol_block(state) or {}
+        runs = protocol.get("runs_per_setting")
+        if (not self._runs_once_per_setting() or not _run_manifest.checkable(protocol)
+                or not isinstance(runs, (int, float)) or isinstance(runs, bool) or runs <= 1):
+            return "", "", ""
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        found = _random_source_found(simulate)
+        if found.startswith("`"):
+            return (f"FI found {found}, a source of random numbers", "",
+                    "take that out of the code (a docstring or a string counts too)")
+        if found:
+            return found, "", "make sure the code can be read, then resume"
+        if self.config.execution.background_jobs:
+            return "", "none in its code; a cluster job's settings are not run again to check", ""
+        try:
+            record_text = (self.quest_root / _trial_runner.RUN_RECORD).read_bytes()
+            key = hashlib.sha256(record_text + simulate.read_bytes()).hexdigest()
+        except OSError:
+            key = ""
+        cached = getattr(self, "_run_cell_again_cache", None)
+        if key and isinstance(cached, tuple) and cached[0] == key:
+            return cached[1]
+        self._log.info("[run_manifest] the protocol asks for %g runs per setting and simulate.py defines run_cell: "
+                       "calling a setting again to check that it returns the same numbers", runs)
+        try:
+            same, why = await self._await_with_heartbeat(_trial_runner.run_cell_again(
+                self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
+                timeout_s=self.config.execution.timeout_s, env=env,
+                thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+            ), label="calling a setting of simulate.py again")
+        except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
+            same, why = None, f"{type(e).__name__}: {e}"[:300]
+        if same:
+            answer = ("", "none in its code, and settings run a second time returned the same numbers", "")
+        elif same is False:
+            answer = (f"FI called it a second time and {why}", "",
+                      "make run_cell return the same numbers on every call (no timings, a fixed seed for any library "
+                      "that samples)")
+        else:
+            answer = (f"FI could not call it a second time to check that it returns the same numbers ({why})", "",
+                      "make sure run_cell can be called on its own for one setting, or resume so that FI checks again")
+        if key and same is not None:
+            self._run_cell_again_cache = (key, answer)
+        return answer
+
+    def _run_manifest_problems(self, state: QuestState, split: bool, result: Any,
+                               run_cell_random: tuple[str, str, str] | None = None) -> tuple[str, list[str]]:
         """``(status, differences)`` of the finished first run: what its manifest says against the frozen protocol.
-        Statuses other than ``ok`` and ``differs`` say why nothing was compared."""
+        Statuses other than ``ok`` and ``differs`` say why nothing was compared. ``run_cell_random``: what
+        :meth:`_run_cell_randomness` found (``None`` when it was not asked, which holds the run to the protocol's count)."""
         self._manifest_failed_trials: int | None = None  # None: no manifest was read, so nothing corroborates a 0
         self._manifest_analysis_problems: list[str] = []
+        self._manifest_note = ""  # a plain sentence for the record, when the run was compared in a way worth saying
         if self.config.engine.run_manifest_check == "off":
             return "off", []
         protocol = self._protocol_block(state)
@@ -7284,8 +7361,19 @@ class Engine:
             # subset's membership and value of the same trial), not from two separate pools of values.
             row_analysis, row_sim = self._given_row_findings(protocol, ledger, result_json)
             not_run = not_run + row_analysis
-            found = (row_problems + altered
-                     + _run_manifest.problems(protocol, manifest, result_json=result_json, trial_mode=True) + not_run
+            # run_cell: FI ran each setting once. With no randomness a repeat returns the same numbers, so the
+            # protocol's runs_per_setting is not a count this run can miss (core/run_manifest.py::once_per_setting).
+            counted, random_run_cell = protocol, ""
+            if self._runs_once_per_setting():
+                source, checked, without = run_cell_random or (
+                    "FI did not call it a second time to check that it returns the same numbers", "",
+                    "resume, so that FI checks it")
+                counted, self._manifest_note, random_run_cell = _run_manifest.once_per_setting(
+                    protocol, random_source=source, checked=checked, **({"without": without} if without else {}))
+                if self._manifest_note:
+                    self._log.info("[run_manifest] %s", self._manifest_note)
+            found = (row_problems + altered + ([random_run_cell] if random_run_cell else [])
+                     + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True) + not_run
                      + row_sim)
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
@@ -7295,7 +7383,7 @@ class Engine:
                       if self.config.rigor_profile == "research" else [])
             found = found + no_ids
             self._manifest_analysis_problems = (
-                _run_manifest.analysis_output_problems(protocol, manifest, result_json, trial_mode=True)
+                _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True)
                 + not_run + no_ids
             )
             return ("differs" if found else "ok"), found
@@ -10287,9 +10375,12 @@ class Engine:
         _job = _job_watch.job_of(_extract_result_json(result.stdout or ""))
         if _job is not None and _job["status"] == _job_watch.PENDING and result.returncode == 0:
             # A job still running has recorded nothing yet: its record is checked when it is done.
-            manifest_status, manifest_found = "pending", []
+            manifest_status, manifest_found, self._manifest_note = "pending", [], ""
         else:
-            manifest_status, manifest_found = self._run_manifest_problems(state, split, result)
+            run_cell_random = (await self._run_cell_randomness(state, py, primary_env)
+                               if split and result.returncode == 0 and self.config.engine.run_manifest_check != "off"
+                               else None)
+            manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
         manifest_attempts_next = 0
         if manifest_found:
             mode = self.config.engine.run_manifest_check
@@ -10324,7 +10415,10 @@ class Engine:
                 kept = "\n".join(line for line in (result.stdout or "").splitlines() if not line.startswith("RESULT_JSON:"))
                 why = (
                     _run_manifest.analysis_directive(manifest_found) if analysis_only
-                    else _run_manifest.directive(manifest_found, self._protocol_block(state) or {})
+                    else _run_manifest.directive(manifest_found, self._protocol_block(state) or {},
+                                                 # research asks the older contract for run_trial as well
+                                                 trial_mode=bool(getattr(self, "_trial_mode", False))
+                                                 or self.config.rigor_profile == "research")
                 )
                 result = ExecutionResult(1, kept, (result.stderr or "") + "\n[FI] " + why, result.duration_s, result.timed_out)
                 failed_script = to_fix
@@ -10334,6 +10428,7 @@ class Engine:
         self._run_manifest_record({
             "status": manifest_status, "problems": manifest_found, "attempts": manifest_attempts_next or manifest_attempts,
             "failed_trials": getattr(self, "_manifest_failed_trials", 0) or 0,
+            **({"note": self._manifest_note} if getattr(self, "_manifest_note", "") else {}),
         })
         # The run's data is kept only once the run is accepted: not a crash, a run the manifest sent back or stopped,
         # nor a job still pending (its raw files are half written).
@@ -10364,9 +10459,12 @@ class Engine:
                 )
             else:
                 headline = "the simulation does not do what the protocol fixed"
+                trials = bool(getattr(self, "_trial_mode", False))
                 fix = (
-                    f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that it runs the protocol's design and writes the "
-                    "manifest from what its loops did, then resume."
+                    f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that "
+                    + ("what FI runs matches the protocol's design (run_trial for a study with randomness, run_cell for "
+                       "one with none), then resume." if trials else
+                       "it runs the protocol's design and writes the manifest from what its loops did, then resume.")
                     + (otherwise if research else " (The protocol is frozen: a different design needs an amendment.) "
                        "Set `engine.run_manifest_check: warn` to go on with the difference recorded.")
                 )
@@ -10374,8 +10472,10 @@ class Engine:
                 kind="manifest",
                 headline=headline,
                 steps=[
-                    "The run's own manifest (`run_manifest.json` in its raw-data folder) differs from the frozen protocol, and "
-                    "no repair removed it (the repairs failed, gave up, or none was left): " + "; ".join(manifest_found) + ".",
+                    ("FI's record of the trials it ran (`raw/ledger.jsonl`)" if getattr(self, "_trial_mode", False)
+                     else "The run's own manifest (`run_manifest.json` in its raw-data folder)")
+                    + " differs from the frozen protocol, and no repair removed it (the repairs failed, gave up, or none "
+                    "was left): " + "; ".join(manifest_found) + ".",
                     fix,
                 ],
                 problems=manifest_found,
@@ -11822,6 +11922,8 @@ class Engine:
                 "says about the question, and no number may be reported as a result of this run.\n\n"
                 + stdout_for_analyze
             )
+        if once_note := self._ran_once_note():
+            stdout_for_analyze = f"[FI NOTE] {once_note}\n\n{stdout_for_analyze}"
         if state.get("result_json_replicate_seed_ignored") and state.get("result_json_no_random_source"):
             stdout_for_analyze = (
                 "[FI NOTE] This study is deterministic: the script draws no random numbers, so one run is the whole "
@@ -12458,6 +12560,8 @@ class Engine:
         improved = _improve.write_note(self.quest_root)
         if improved:
             evidence_note = f"{evidence_note}\n\n{improved}".strip()
+        if once_note := self._ran_once_note():
+            evidence_note = f"{evidence_note}\n\n{once_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -18097,7 +18201,7 @@ The experiment is two scripts. Give simulate.py back exactly as it is unless the
 """
 
 _SPLIT_REFLECT_SIMULATE = """\
-SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI calls its run_trial(cell, trial_id, seed) (or run_cell(cell)) once per trial and keeps the record itself; no trial succeeded, so experiment.py did not run. Fix simulate.py and return the whole of it: the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, no files and no RESULT_JSON. Keep every comment that marks where an equation of the plan's model is computed (`# E1`).
+SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-script experiment. FI calls its run_trial(cell, trial_id, seed) (or run_cell(cell)) once per trial and keeps the record itself; the trials failed, or what FI ran does not match the frozen protocol (the reason is below). Fix simulate.py and return the whole of it: the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, no files and no RESULT_JSON. Keep every comment that marks where an equation of the plan's model is computed (`# E1`).
 """
 
 _SPLIT_REFLECT_ANALYSIS = """\
@@ -18995,7 +19099,10 @@ _RANDOM_SOURCE_PATTERN = re.compile(
     r"random|seed|secrets|\brng\b|default_rng|SeedSequence|\brvs\b|randn|randint|randrange|randperm|shuffle|permutation"
     r"|multinomial|gillespie|bootstrap|scramble|sobol|halton|latin_?hypercube|dropout|erdos_renyi|watts_strogatz"
     r"|barabasi_albert|torch|tensorflow|keras|\bjax\b"
-    r"|\.(rand|normal|uniform|binomial|poisson|exponential|choice|choices|sample|integers|standard_normal)\(",
+    # Library calls that sample unless given a seed, with no random word in their name.
+    r"|differential_evolution|dual_annealing|basinhopping|kmeans|train_test_split|spring_layout|\buuid"
+    # The source is scanned with its tokens joined by spaces (``_without_comments``): ``df.sample(`` reads ``df . sample (``.
+    r"|\.\s*(rand|normal|uniform|binomial|poisson|exponential|choice|choices|sample|integers|standard_normal)\s*\(",
     re.IGNORECASE,
 )
 
@@ -19031,12 +19138,21 @@ def _script_has_random_source(code_path: Path) -> bool:
     aside): any mention of a random module, seed argument, sampler or graph generator counts, so "none" is only said
     when nothing could draw. It follows the script's own imports into sibling files (a multi-module project keeps its
     sampler elsewhere) but not the whole folder, which also holds the analysis script and FI's own helpers.
-    Over-detecting only brings back the old warning. An unreadable or unparsable file returns ``True`` because
-    silence is not evidence of determinism.
+    Over-detecting only brings back the old warning, or holds a ``run_cell`` to the protocol's run count. Missing a
+    source is not the only guard there: a ``run_cell`` this finds none in is also called a second time on one setting
+    (:meth:`Engine._run_cell_randomness`). An unreadable or unparsable file returns ``True`` because silence is not
+    evidence of determinism.
     """
+    return bool(_random_source_found(code_path))
+
+
+def _random_source_found(code_path: Path) -> str:
+    """What :func:`_script_has_random_source` found, in words a person can act on (``"`seed` in simulate.py"``), or
+    ``""`` when it found nothing."""
     folder = code_path.parent
     seen: set[Path] = set()
     todo = [code_path]
+    path = code_path
     try:
         while todo and len(seen) < 100:
             path = todo.pop()
@@ -19044,20 +19160,21 @@ def _script_has_random_source(code_path: Path) -> bool:
                 continue
             seen.add(path)
             text = path.read_text(encoding="utf-8", errors="replace")
-            if _RANDOM_SOURCE_PATTERN.search(_without_comments(text)) is not None:
-                return True
+            hit = _RANDOM_SOURCE_PATTERN.search(_without_comments(text))
+            if hit is not None:
+                return f"`{hit.group(0).strip('.( ')}` in {path.name}"
             try:
                 tree = ast.parse(text)
             except (SyntaxError, ValueError):
-                return True
+                return f"{path.name} could not be read as Python to check it"
             for name in _imported_module_names(tree):
                 stem = folder.joinpath(*name.split("."))
                 for candidate in (stem.with_suffix(".py"), stem / "__init__.py"):
                     if candidate.is_file():
                         todo.append(candidate)
-        return False
+        return ""
     except OSError:
-        return True
+        return f"{path.name} could not be read to check it"
 
 
 def _own_modules(code_path: Path) -> list[Path]:

@@ -86,6 +86,23 @@ def test_a_bootstrap_or_permutation_count_is_not_read_as_the_runs_per_setting() 
     assert [(m.kind, m.where) for m in found] == [("runs", "N_RUNS in simulate.py, line 1")]
 
 
+def test_the_plan_says_a_design_with_nothing_random_runs_each_setting_once() -> None:
+    ode = {"hypothesis": "RK4 is fourth order", "method": "integrate y' = -y with RK4 at several step sizes",
+           "protocol": {"grid": {"dt": [0.1, 0.05]}, "runs_per_setting": 3}}
+    (note,) = pc.run_count_notes(ode)
+    assert note.startswith("The protocol asks for 3 runs per setting, but the design's description names nothing random")
+    assert "FI runs each setting once" in note
+    assert pc.run_count_notes(ode, fi_runs=False) == [], "one script: FI does not run the simulation itself"
+    assert pc.run_count_notes({**ode, "method": "a Monte Carlo estimate of the error"}) == []
+    assert pc.run_count_notes({**ode, "method": "Metropolis updates of an Ising lattice"}) == []
+    assert pc.run_count_notes({**ode, "protocol": {**ode["protocol"], "seed_policy": "one seed per trial"}}) == []
+    assert pc.run_count_notes({**ode, "protocol": {**ode["protocol"], "precision": {"target_half_width": 0.05}}}) == []
+    assert pc.run_count_notes({**ode, "protocol": {**ode["protocol"], "metrics": [
+        {"id": "p", "kind": "proportion", "estimand": "share of runs that end"}]}}) == []
+    assert pc.run_count_notes({**ode, "protocol": {"grid": {"dt": [0.1]}, "runs_per_setting": 1}}) == []
+    assert pc.run_count_notes({**ode, "protocol": {"grid": {"dt": [0.1]}}}) == [] and pc.run_count_notes(None) == []
+
+
 def test_a_tally_the_script_adds_to_is_not_read_as_its_runs_per_setting() -> None:
     """A live kimi-k3 quest stopped on "the protocol fixes 200 runs per setting; the script sets 0 (n_runs in simulate.py,
     line 242)": ``n_runs = 0`` was the counter its oracle check started at and then did ``n_runs += 2`` on."""
