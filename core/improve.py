@@ -184,9 +184,10 @@ def own_dir(quest_root: Path, name: str, *, clear_links: bool = True, fi_real: P
     root = Path(quest_root)
     if fi_real is not None:
         try:
-            if (root / SNAPSHOTS.parts[0]).resolve() != Path(fi_real):
+            # realpath, not resolve(): a link loop makes resolve() raise RuntimeError, realpath gives a path back.
+            if Path(os.path.realpath(root / SNAPSHOTS.parts[0])) != Path(fi_real):
                 return None
-        except OSError:
+        except (OSError, RuntimeError):
             return None
     path = root / SNAPSHOTS / name
     step = root / SNAPSHOTS.parts[0]

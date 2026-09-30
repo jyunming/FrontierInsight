@@ -623,7 +623,7 @@ class Engine:
         self.fi_dir: Path = self.quest_root / ".fi"
         # Where .fi leads now (it may be kept elsewhere through a link): the improve loop touches its own copies only
         # while .fi still leads here, so a run that moves .fi cannot steer those writes (core/improve.py:own_dir).
-        self._fi_real: Path = self.fi_dir.resolve()
+        self._fi_real: Path = Path(os.path.realpath(self.fi_dir))  # realpath: a link loop does not raise
         self._clarify_answerable = False
         self.supervisor = supervisor or ProxySupervisor()
         self.executor = make_executor(
