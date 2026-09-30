@@ -71,6 +71,7 @@ from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
+from . import code_layout as _code_layout
 from . import code_project as _code_project
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
@@ -1068,6 +1069,7 @@ class Engine:
                                     "[FI] paused for the %s (%s): read %s, fix what it names, then run `fi --resume %s`",
                                     "equation labels in the simulation"
                                     if (intr_value.get("pause") or {}).get("kind") == "equation_labels"
+                                    else "layout of code/" if intr_value.get("layout")
                                     else "two-script contract",
                                     "; ".join(intr_value.get("problems") or [])[:200],
                                     self.quest_root / "NEXT_STEP.md", self.quest_id,
@@ -4638,7 +4640,8 @@ class Engine:
             audit += [f"{g[0].upper()}{g[1:]}: {_oracle.SOURCE_FORMS}." for g in source_gaps]
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit,
-                            sources=self._retrieved_sources(state) if self._runs_code(state) else None)
+                            sources=self._retrieved_sources(state) if self._runs_code(state) else None,
+                            code_layout=self._plan_code_layout({**state, "design": normalized}))
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
@@ -6890,6 +6893,7 @@ class Engine:
         # runs as one script and says so, rather than stopping.
         simulate_code = ""
         submit_code = ""
+        package_files: dict[str, str] = {}
         if self._split_on(state):
             scripts = _split_run.parse_split_response(text, _PY_FENCE_RE)
             if scripts is None:
@@ -6904,6 +6908,9 @@ class Engine:
                 text = await self._chat(prompt + _SPLIT_REPLY_REMINDER + _CLUSTER_REPLY_REMINDER, node="implement")
                 scripts = _split_run.parse_split_response(text, _PY_FENCE_RE) or scripts
             if scripts is not None:
+                # The research-tool layout (core/code_layout.py): the model's package, asked for once more when missing.
+                scripts, text, package_files = await self._code_package_reply(state, prompt, text, scripts,
+                                                                              extend=bool(extend))
                 simulate_code, code = scripts["simulate"], scripts["analysis"]
                 submit_code = scripts.get("submit", "")
                 deps = _parse_split_deps(text)
@@ -6990,6 +6997,10 @@ class Engine:
             self._log.info("[implement] wrote %s (%d bytes)", submit_path, len(submit_code))
         code_path.write_text(code, encoding="utf-8")
         self._log.info("[implement] wrote %s (%d bytes)", code_path, len(code))
+        if package_files:
+            wrote = _code_layout.write_package(code_path.parent, package_files, same=_split_run.same_script)
+            if wrote:
+                self._log.info("[implement] wrote the model's package: %s", ", ".join(f"code/{w}" for w in wrote))
         if extracted and not extend:  # nothing to seed in the stub written above; an extension changes as little as it can
             if simulate_code.strip() and _trial_runner.entries(simulate_path) & {"run_trial", "run_cell"}:
                 pass  # the trial contract: FI hands every trial its seed, there is no seed for the script to read
@@ -7036,11 +7047,15 @@ class Engine:
             idea = state.get("chosen_idea") if isinstance(state.get("chosen_idea"), dict) else {}
             question = str(idea.get("question") or idea.get("title") or state.get("topic") or "")[:500]
             # git and the file scan block: keep them off the event loop so a --fleet's other quests keep going.
+            protocol = self._protocol_block(state)
+            package = self._package_in_use(state)
             await asyncio.to_thread(
                 _code_project.refresh,
-                self.quest_root, deps=deps, protocol=self._protocol_block(state),
+                self.quest_root, deps=deps, protocol=protocol,
                 title=str(state.get("title") or ""), question=question, split=self._split_on(state),
                 log=self._log,
+                extra_files=_code_layout.project_files(self.quest_root / "code", protocol, package) if package else None,
+                readme_files=_code_layout.readme_lines(package) if package else None,
             )
             if note:
                 await asyncio.to_thread(_code_project.record_change, self.quest_root, note, log=self._log)
@@ -7860,6 +7875,8 @@ class Engine:
                 texts[path.name] = path.read_text(encoding="utf-8")
             except OSError:
                 continue
+        if split and main.name in texts:
+            texts.update(_code_layout.package_sources(code))  # the model's package is part of the simulation
         return main, (texts if main.name in texts else {})
 
     def _unlabelled(self, state: QuestState, protocol: Any) -> tuple[Path, list[str]]:
@@ -7918,6 +7935,110 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- a convenience; the check before the run is what counts
             self._log.warning("[implement] could not ask for the equation labels: %r", e)
             return None
+
+    def _code_layout(self, state: QuestState, protocol: Any = None) -> dict[str, Any] | None:
+        """How this quest's code is laid out (:mod:`core.code_layout`): the research-tool layout or two scripts, with what
+        the layout costs. ``None`` for a quest that keeps no simulation of its own in two scripts (the no-simulation path,
+        a survey, ``split_analysis: false``), which is left exactly as it was."""
+        if not self._runs_code(state) or not self._split_on(state):
+            return None
+        if protocol is None:
+            protocol = self._protocol_block(state)
+        ex = self.config.execution
+        package = str((_code_layout.load(self.quest_root) or {}).get("package") or "") or _code_layout.package_name(
+            str(self.config.title or self.config.topic or ""))
+        return _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
+                                   max_extra_lines=ex.code_package_max_extra_lines,
+                                   max_extra_calls=ex.code_package_max_extra_calls,
+                                   max_iterations=self.config.engine.max_iterations, package=package)
+
+    def _plan_code_layout(self, state: QuestState) -> list[str]:
+        """At plan time: decide the layout of the code from the plan, say it in run.log and return plan.md's lines."""
+        try:
+            protocol = (state.get("design") or {}).get("protocol")
+            layout = self._code_layout(state, protocol if isinstance(protocol, dict) else {})
+            if layout is None:
+                return []
+            _code_layout.save(self.quest_root, layout)
+            self._log.info("[plan] %s", _code_layout.summary(layout))
+            return _code_layout.plan_lines(layout)
+        except Exception as e:  # noqa: BLE001 -- how the code is laid out must never stop the plan
+            self._log.warning("[plan] could not work out how the code will be laid out: %r", e)
+            return []
+
+    async def _code_package_reply(self, state: QuestState, prompt: str, text: str, scripts: dict[str, str], *,
+                                  extend: bool) -> tuple[dict[str, str], str, dict[str, str]]:
+        """``(scripts, reply, package files)`` for a two-script reply: the model's package in it, asked for once more when
+        the reply left it out and ``code/`` has none yet. A reply that still has none keeps two scripts, and says so."""
+        layout = self._code_layout(state)
+        if layout is None:
+            return scripts, text, {}
+        if layout["shape"] != _code_layout.PACKAGE:
+            self._log.info("[implement] %s", _code_layout.summary(layout))
+            _code_layout.save(self.quest_root, layout)
+            return scripts, text, {}
+        package = layout["package"]
+        files = _code_layout.reply_files(text, _PY_FENCE_RE, package)
+        on_disk = (self.quest_root / "code" / package / _code_layout.MODEL_NAME).is_file()
+        if not _code_layout.complete(files, package) and not on_disk and not extend:
+            self._log.warning("[implement] the reply left out the model's package (code/%s/); asking once more", package)
+            again = await self._chat(prompt + _code_layout.reminder(package), node="implement")
+            again_scripts = _split_run.parse_split_response(again, _PY_FENCE_RE)
+            again_files = _code_layout.reply_files(again, _PY_FENCE_RE, package)
+            if again_scripts is not None and _code_layout.complete(again_files, package):
+                scripts, text, files = again_scripts, again, again_files
+        fell_back = ""
+        if not _code_layout.complete(files, package) and not on_disk:
+            fell_back = "the reply left out the model's package, also when asked again"
+            self._log.warning("[implement] the reply left out the model's package (code/%s/), also when asked again: the "
+                              "code keeps two scripts (simulate.py and experiment.py) this time", package)
+        else:
+            self._log.info("[implement] %s", _code_layout.summary(layout))
+        _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
+        return scripts, text, files if _code_layout.complete(files, package) else {}
+
+    def _package_in_use(self, state: QuestState) -> str | None:
+        """The model's package when this quest's code is laid out as a research tool and the package is there."""
+        layout = self._code_layout(state)
+        if not layout or layout["shape"] != _code_layout.PACKAGE:
+            return None
+        package = layout["package"]
+        return package if (self.quest_root / "code" / package / "__init__.py").is_file() else None
+
+    def _check_code_layout(self, state: QuestState) -> list[str]:
+        """After the code is written, before anything runs: say in run.log what the research-tool layout of ``code/`` is
+        missing (the package, the unit tests, which function computes each equation); under ``rigor_profile: research``
+        stop until it is there. On a resume the folder is read again."""
+        research = self.config.rigor_profile == "research"
+        try:
+            layout = self._code_layout(state)
+            code = self.quest_root / "code"
+            if not layout or layout["shape"] != _code_layout.PACKAGE or not (code / _split_run.SIMULATE_NAME).is_file():
+                return []
+            package = layout["package"]
+            fell_back = (_code_layout.load(self.quest_root) or {}).get("fell_back") and not (code / package).is_dir()
+            if fell_back and not research:
+                return []  # said when the code was written: this quest keeps two scripts
+            problems = _code_layout.check(code, self._protocol_block(state), package)
+        except Exception as e:  # noqa: BLE001 -- a check of the folder must never stop a quest by crashing
+            self._log.warning("[implement] could not check the layout of code/: %r", e)
+            return []
+        for why in problems:
+            self._log.warning("[implement] code/ as a research tool: %s", why)
+        if problems and research:
+            self._pause_for_human(
+                kind="split",
+                interaction="supply",
+                headline="the code in code/ is missing part of its research-tool layout",
+                steps=[
+                    f"{problems[0][0].upper()}{problems[0][1:]}." + (f" Also: {'; '.join(problems[1:])}." if problems[1:] else ""),
+                    f"Add what is missing in code/ (the model's equations in code/{package}/, each function labelled with "
+                    "its equation, used by simulate.py), or set `execution.code_package: false` to keep two scripts.",
+                    "Then resume: the folder is read again before anything runs.",
+                ],
+                payload={"contract_stage": True, "layout": True, "quest_id": self.quest_id, "problems": problems},
+            )
+        return problems
 
     def _check_equation_labels(self, state: QuestState) -> list[str]:
         """Say, in run.log, which equations of the plan's model the simulation does not mark where it implements them;
@@ -10125,6 +10246,7 @@ class Engine:
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
+        self._check_code_layout(state)
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
         if seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate:
@@ -16212,8 +16334,12 @@ class Engine:
         if not self._split_on(state):
             return ""
         search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
-        return (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
-                + (_SEARCH_PROTOCOL if search else ""))
+        block = (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
+                 + (_SEARCH_PROTOCOL if search else ""))
+        layout = self._code_layout(state)
+        if layout and layout["shape"] == _code_layout.PACKAGE:
+            block += _code_layout.prompt_block(layout["package"], _oracle.generating_equations(self._protocol_block(state)))
+        return block
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
         """The experiment reported its job as pending. Record what is being

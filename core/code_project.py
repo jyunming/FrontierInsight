@@ -401,7 +401,8 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
     }
 
 
-def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] | None, split: bool = True) -> str:
+def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] | None, split: bool = True,
+            layout: list[str] | None = None) -> str:
     two = (code_dir / _split_run.SIMULATE_NAME).is_file() and split
     lines = [f"# {title or 'Study code'}", ""]
     if question:
@@ -441,6 +442,7 @@ def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] 
     if two:
         lines += ["- `simulate.py`: what one run of the study does (the simulation itself).",
                   "- `experiment.py`: reads the simulation's results, computes the numbers and draws the figures."]
+        lines += list(layout or [])
     else:
         lines += ["- `experiment.py`: the study: it runs, computes the numbers and draws the figures."]
     if study and study.get("optimisation"):
@@ -454,7 +456,8 @@ def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] 
     lines += ["", "## Changes and older versions", "",
               "Every change to this folder is one commit in its own git history (`git log`). To go back to an "
               "earlier version of a file: `git checkout <id> -- <file>`.", "",
-              "Frontier Insight keeps `README.md`, `requirements.txt`, `run.py` and `study.json` up to date. "
+              "Frontier Insight keeps `README.md`, `requirements.txt`, `run.py` and `study.json` up to date"
+              + (" (and `METHODS.md` and `tests/test_oracles.py`)" if layout else "") + ". "
               "If you edit one of them, it asks before replacing it (an unattended run keeps your version and says "
               "so); to get its version back, delete yours.", ""]
     return "\n".join(lines)
@@ -504,9 +507,12 @@ def mark_asked(quest_root: Path, names: list[str]) -> None:
 
 
 def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[str, Any] | None = None,
-            title: str = "", question: str = "", split: bool = True, log: Any = None) -> list[str]:
+            title: str = "", question: str = "", split: bool = True, log: Any = None,
+            extra_files: dict[str, str] | None = None, readme_files: list[str] | None = None) -> list[str]:
     """Write or update the project files in ``code/``; return the names written. Best effort: a quest never stops
-    for these files. A file a person edited is not replaced; it is listed for :func:`unasked_conflicts`."""
+    for these files. A file a person edited is not replaced; it is listed for :func:`unasked_conflicts`.
+    ``extra_files`` (``{path in code/: text}``) and ``readme_files`` (README lines for them) are the research-tool
+    layout's own files (``core/code_layout.py``), kept the same way."""
     quest_root = Path(quest_root)
     code_dir = quest_root / "code"
     if not (code_dir / "experiment.py").is_file():
@@ -514,12 +520,13 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
     study = study_of(code_dir, protocol, split=split)
     installed = _installed(quest_root)
     wanted = {
-        README: _readme(code_dir, title=title, question=question, study=study, split=split),
+        README: _readme(code_dir, title=title, question=question, study=study, split=split, layout=readme_files),
         REQUIREMENTS: "\n".join(
             requirements_for(code_dir, installed if installed is not None else list(deps or []),
                              installed=installed is not None)) + "\n",
         RUN: RUN_SOURCE,
     }
+    wanted.update(extra_files or {})
     if study:
         wanted[STUDY] = json.dumps(study, indent=2) + "\n"
     elif simulation_left_out(code_dir, split):
@@ -543,6 +550,7 @@ def refresh(quest_root: Path, *, deps: list[str] | None = None, protocol: dict[s
                 if record.get(name) not in (_sha(current), _sha(plain)):
                     conflicts[name] = _sha(text)  # edited by a person, or not written by FI: left as it is
                     continue
+            path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(text.encode("utf-8"))
             record[name] = _sha(text)
             written.append(name)

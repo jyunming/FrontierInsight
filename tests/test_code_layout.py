@@ -1,0 +1,353 @@
+"""The quest's code/ as a small research tool, by default (core/code_layout.py).
+
+A quest that runs a simulation gets, besides simulate.py and experiment.py, the model's equations in a package of their
+own (``code/<package>/``, each function labelled with its equation), the plan's checks as unit tests
+(``tests/test_oracles.py``, written by FI) and ``METHODS.md`` (which function computes each equation, written by FI).
+simulate.py stays the file FI imports and calls, so the trial runner and the oracle gate are unchanged.
+
+What that costs is estimated at plan time and shown in plan.md; over ``execution.code_package_max_extra_lines`` /
+``code_package_max_extra_calls`` the quest keeps two scripts and says so in plan.md and run.log. After the code is
+written the layout is checked: a missing part is a warning, a stop only under ``rigor_profile: research``.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from core import code_layout as cl
+from core import plan as _plan
+from core import trial_runner as tr
+from core.config import (
+    Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig,
+)
+from core.engine import Engine
+from tests.test_engine_callable_simulation import ANALYSIS, MODEL, ORACLE, PROTOCOL, SIMULATE, _reply
+from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
+
+PKG = "engine_callable"  # the package name the title "engine-callable" gives
+
+MODEL_PY = """\
+\"\"\"Classical RK4 on y' = -y.\"\"\"
+
+
+def rhs(y):  # E1: y' = -y
+    return -y
+
+
+def rk4_step(y, h):
+    k1 = rhs(y); k2 = rhs(y + h * k1 / 2); k3 = rhs(y + h * k2 / 2); k4 = rhs(y + h * k3)
+    return y + h * (k1 + 2 * k2 + 2 * k3 + k4) / 6
+"""
+SIM_PKG = f"""\
+import math
+
+from {PKG} import model
+
+
+def run_cell(cell):
+    dt = cell["dt"]
+    y = 1.0
+    for _ in range(int(round(1.0 / dt))):
+        y = model.rk4_step(y, dt)
+    return {{"error": abs(y - math.exp(-1.0))}}
+"""
+
+
+def _package_reply(model_py: str = MODEL_PY, simulate: str = SIM_PKG) -> str:
+    return (f"```python\n# file: simulate.py\n{simulate}\n```\n"
+            f"```python\n# file: {PKG}/__init__.py\n\"\"\"RK4 on y' = -y.\"\"\"\n```\n"
+            f"```python\n# file: {PKG}/model.py\n{model_py}\n```\n"
+            f"```python\n# file: experiment.py\n{ANALYSIS}\n```\nDEPS: matplotlib\n")
+
+
+def _write_tool(code: Path, *, model_py: str = MODEL_PY, simulate: str = SIM_PKG) -> None:
+    (code / PKG).mkdir(parents=True, exist_ok=True)
+    (code / PKG / "__init__.py").write_text('"""RK4."""\n', encoding="utf-8")
+    (code / PKG / "model.py").write_text(model_py, encoding="utf-8")
+    (code / "simulate.py").write_text(simulate, encoding="utf-8")
+    for name, text in cl.project_files(code, PROTOCOL, PKG).items():
+        (code / name).parent.mkdir(parents=True, exist_ok=True)
+        (code / name).write_text(text, encoding="utf-8")
+
+
+# --- the estimate and the cap ----------------------------------------------------------------------------------------
+
+
+def test_the_package_name_comes_from_the_title_and_never_shadows_a_name_in_use() -> None:
+    assert cl.package_name("engine-callable") == PKG
+    assert cl.package_name("SIR outbreaks: how R0 sets the final size") == "sir_outbreaks_how_r0_sets_the"
+    assert cl.package_name("") == cl.package_name("json") == cl.package_name("simulate") == "study_model"
+    assert cl.package_name("3 body problem") == "study_3_body_problem"
+
+
+def test_the_estimate_grows_with_the_equations_and_checks_and_the_cap_decides_the_shape() -> None:
+    small = cl.estimate(PROTOCOL, max_iterations=2)
+    assert small["extra_files"] == 4 and small["extra_calls"] == 3 and small["equations"] == 1 and small["checks"] == 1
+    many = {**PROTOCOL, "model": {"equations": [{"id": f"E{i}", "role": "generates"} for i in range(1, 21)]}}
+    assert cl.estimate(many, max_iterations=2)["extra_lines"] > small["extra_lines"]
+
+    kept = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, max_iterations=2, package=PKG)
+    assert kept["shape"] == cl.PACKAGE and kept["reason"] == ""
+    over = cl.decide(PROTOCOL, enabled=True, max_extra_lines=10, max_extra_calls=3, max_iterations=2, package=PKG)
+    assert over["shape"] == cl.SINGLE and "execution.code_package_max_extra_lines" in over["reason"]
+    calls = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, max_iterations=5, package=PKG)
+    assert calls["shape"] == cl.SINGLE and "6 more requests" in calls["reason"]
+    off = cl.decide(PROTOCOL, enabled=False, max_extra_lines=400, max_extra_calls=3, max_iterations=2, package=PKG)
+    assert off["shape"] == cl.SINGLE and "code_package is off" in off["reason"]
+
+
+def test_the_plan_says_in_plain_words_what_the_layout_costs_or_why_it_was_left_out() -> None:
+    kept = cl.decide(PROTOCOL, enabled=True, max_extra_lines=400, max_extra_calls=3, max_iterations=2, package=PKG)
+    text = "\n".join(cl.plan_lines(kept))
+    assert f"## {cl.HEADING}" in text and f"code/{PKG}/" in text and "tests/test_oracles.py" in text
+    assert "more lines of code" in text and "more requests to the model" in text and "METHODS.md" in text
+    over = cl.decide(PROTOCOL, enabled=True, max_extra_lines=10, max_extra_calls=3, max_iterations=2, package=PKG)
+    text = "\n".join(cl.plan_lines(over))
+    assert "keep two scripts" in text and "Raise the limit" in text
+    assert cl.plan_lines(None) == []
+    rendered = _plan.render("t", {}, {"hypothesis": "h", "protocol": PROTOCOL}, code_layout=cl.plan_lines(kept))
+    assert f"## {cl.HEADING}" in rendered
+    assert _plan.parse(rendered).design is not None, "the section is prose: the design block still reads"
+
+
+def test_the_defaults_turn_the_layout_on_with_a_cap() -> None:
+    ex = ExecutionConfig()
+    assert ex.code_package is True and ex.code_package_max_extra_lines > 0 and ex.code_package_max_extra_calls >= 3
+
+
+# --- the reply and the files FI writes -------------------------------------------------------------------------------
+
+
+def test_the_package_files_are_read_from_the_reply() -> None:
+    from core.engine import _PY_FENCE_RE
+
+    files = cl.reply_files(_package_reply(), _PY_FENCE_RE, PKG)
+    assert set(files) == {f"{PKG}/__init__.py", f"{PKG}/model.py"} and cl.complete(files, PKG)
+    assert "def rhs" in files[f"{PKG}/model.py"] and "# file:" not in files[f"{PKG}/model.py"]
+    assert cl.reply_files(_reply(SIMULATE), _PY_FENCE_RE, PKG) == {}
+    assert not cl.complete({}, PKG)
+
+
+def test_methods_maps_each_equation_to_the_function_that_carries_its_label(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    _write_tool(code)
+    rows = cl.equation_map(PROTOCOL, cl.package_sources(code))
+    assert rows == [{"id": "E1", "formula": "y' = -y", "file": f"{PKG}/model.py", "function": "rhs", "line": 4}]
+    text = (code / cl.METHODS_NAME).read_text(encoding="utf-8")
+    assert f"`{PKG}/model.py`, `rhs()`" in text and "E1" in text
+    # A label above the def names the function below it; a docstring names its own.
+    above = cl.equation_map(PROTOCOL, {"p/m.py": "# E1\ndef f(y):\n    return -y\n"})
+    doc = cl.equation_map(PROTOCOL, {"p/m.py": 'def g(y):\n    """Implements E1."""\n    return -y\n'})
+    assert above[0]["function"] == "f" and doc[0]["function"] == "g"
+    assert cl.equation_map(PROTOCOL, {"p/m.py": "# E1\nX = 1\n"})[0]["function"] is None
+
+
+def _pytest_file(code: Path) -> subprocess.CompletedProcess:
+    return subprocess.run([sys.executable, str(code / cl.TEST_PATH)], cwd=code, capture_output=True, text=True,
+                          timeout=60)
+
+
+def test_the_plans_checks_become_unit_tests_that_run_the_simulation_like_fi(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    _write_tool(code)
+    text = (code / cl.TEST_PATH).read_text(encoding="utf-8")
+    assert "def test_rk4_error_at_dt_0_1" in text
+    ok = _pytest_file(code)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    # A wrong equation fails the test, with the plan's value in the message.
+    _write_tool(tmp_path / "wrong", model_py=MODEL_PY.replace("return -y", "return -1.1 * y  # E1"))
+    bad = _pytest_file(tmp_path / "wrong")
+    assert bad.returncode == 1 and "the plan expects 0.0" in bad.stdout
+    assert cl.oracle_tests({"oracles": [{"name": "no number", "check": "x"}]}) is None
+
+
+def test_a_random_simulations_test_uses_the_seed_fi_gives_trial_0() -> None:
+    oracle = {"name": "zero", "expected": 0, "tolerance": 0, "case": {"R0": 0.0, "n": 10}, "measure": "infected"}
+    import ast
+    import hashlib
+    import os
+
+    text = cl.oracle_tests({"oracles": [oracle]})
+    seed_fn = next(n for n in ast.parse(text).body if isinstance(n, ast.FunctionDef) and n.name == "_seed")
+    namespace: dict[str, Any] = {"hashlib": hashlib, "os": os}
+    exec(compile(ast.Module(body=[seed_fn], type_ignores=[]), "tests", "exec"), namespace)
+    assert namespace["_seed"]({"R0": 0.0, "n": 10}) == tr.trial_seed(0, tr.cell_key({"R0": 0.0, "n": 10}), 0)
+
+
+# --- the check after the code is written -----------------------------------------------------------------------------
+
+
+def test_the_layout_check_names_each_missing_part(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    _write_tool(code)
+    assert cl.check(code, PROTOCOL, PKG) == []
+    (code / cl.METHODS_NAME).unlink()
+    (code / cl.TEST_PATH).unlink()
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    (code / PKG / "model.py").write_text(MODEL_PY.replace("  # E1: y' = -y", ""), encoding="utf-8")
+    problems = " | ".join(cl.check(code, PROTOCOL, PKG))
+    assert "does not use the package" in problems and "no unit tests" in problems
+    assert "METHODS.md" in problems and "equation E1 of the model is not labelled" in problems
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert "package code/engine_callable/ is missing" in cl.check(empty, PROTOCOL, PKG)[0]
+
+
+def test_a_change_to_the_package_runs_the_trials_again(tmp_path: Path) -> None:
+    code = tmp_path / "code"
+    _write_tool(code)
+    before = tr._run_key(code / "simulate.py", PROTOCOL, 1, 0, True)
+    assert tr._run_key(code / "simulate.py", PROTOCOL, 1, 0, True) == before
+    (code / PKG / "model.py").write_text(MODEL_PY.replace("-y", "-(y)"), encoding="utf-8")
+    assert tr._run_key(code / "simulate.py", PROTOCOL, 1, 0, True) != before, "the trials were run with other equations"
+    (code / cl.TEST_PATH).write_text("# edited\n", encoding="utf-8")
+    after = tr._run_key(code / "simulate.py", PROTOCOL, 1, 0, True)
+    (code / cl.TEST_PATH).write_text("# edited again\n", encoding="utf-8")
+    assert tr._run_key(code / "simulate.py", PROTOCOL, 1, 0, True) == after, "the tests are not the simulation"
+
+
+# --- in the engine ---------------------------------------------------------------------------------------------------
+
+
+def _engine(tmp_path: Path, **execution: Any) -> Engine:
+    return Engine(Config(
+        topic="t", title="engine-callable", provider=ProviderConfig(name="openai"),
+        execution=ExecutionConfig(sandbox="venv", **execution),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
+    ))
+
+
+def test_the_layout_is_for_a_simulation_only(tmp_path: Path) -> None:
+    state = {"design": {"protocol": PROTOCOL}}
+    assert _engine(tmp_path / "a")._code_layout(state)["shape"] == cl.PACKAGE
+    assert _engine(tmp_path / "b")._code_layout({**state, "no_simulation_resolved": True}) is None
+    assert _engine(tmp_path / "c", split_analysis=False)._code_layout(state) is None
+    assert _engine(tmp_path / "d")._split_block(state).count(f"# file: {PKG}/model.py") == 1
+    assert f"{PKG}/" not in _engine(tmp_path / "e", split_analysis=False)._split_block(state)
+
+
+def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text(SIMULATE, encoding="utf-8")  # two scripts, no package
+    monkeypatch.setattr(engine, "_protocol_block", lambda state: PROTOCOL)
+    stops: list[dict[str, Any]] = []
+    monkeypatch.setattr(engine, "_pause_for_human", lambda **kw: stops.append(kw))
+    problems = engine._check_code_layout({"design": {"protocol": PROTOCOL}})
+    assert problems and stops == []
+    assert "package code/engine_callable/ is missing" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    monkeypatch.setattr(engine.config, "rigor_profile", "research")
+    engine._check_code_layout({"design": {"protocol": PROTOCOL}})
+    assert len(stops) == 1 and stops[0]["kind"] == "split" and stops[0]["payload"]["contract_stage"]
+    assert any("execution.code_package: false" in s for s in stops[0]["steps"])
+    # The person adds the missing parts and resumes: the folder is read again and nothing stops.
+    _write_tool(code)
+    assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == [] and len(stops) == 1
+
+
+def _cfg(tmp_path: Path, **execution: Any) -> Config:
+    return Config(
+        topic="the error of RK4 on y' = -y at two step sizes", title="engine-callable",
+        provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1,
+                            pilot_run=False),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, shared_interpreter=False, system_site_packages=False,
+                                  **execution),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
+        pauses=PausesConfig(review="off"),
+    )
+
+
+def _fake(prompts: list[str]):
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        kind = _classify(prompt)
+        if kind == "Experiment Design":
+            body = json.loads(_FAKE_RESPONSES["design"])
+            body["method"] = "integrate y' = -y to t = 1 with classical RK4 at each step size"
+            body["protocol"] = PROTOCOL
+            return json.dumps(body)
+        if kind == "Implementation":
+            if "Implementation Outline" not in prompt[:200]:
+                prompts.append(prompt)
+            return _package_reply() if f"# file: {PKG}/model.py" in prompt else _reply(SIMULATE)
+        return _fake_response_for(prompt)
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_quest_gets_the_research_tool_layout_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(prompts))
+    engine = Engine(_cfg(tmp_path))
+    await engine.run()
+    code = engine.quest_root / "code"
+    assert (code / PKG / "model.py").is_file() and (code / PKG / "__init__.py").is_file()
+    assert "from engine_callable import model" in (code / "simulate.py").read_text(encoding="utf-8")
+    assert (code / cl.TEST_PATH).is_file() and "`engine_callable/model.py`, `rhs()`" in (
+        code / cl.METHODS_NAME).read_text(encoding="utf-8")
+    assert len(prompts) == 1, "the reply held the package: no second request"
+    plan = (engine.quest_root / "plan.md").read_text(encoding="utf-8")
+    assert f"## {cl.HEADING}" in plan and "more requests to the model" in plan
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "laid out as a small research tool" in log and "is missing" not in log
+    oracle = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert oracle["status"] == "ok" and oracle.get("contract") == "trial", "FI still calls simulate.py's run_cell"
+    readme = (code / "README.md").read_text(encoding="utf-8")
+    assert f"`{PKG}/`" in readme and cl.TEST_PATH in readme
+    # The unit tests FI wrote pass on the code the quest ran.
+    ran = _pytest_file(code)
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
+    assert record["levels"]["independently_validated"] is True, record["all_gaps"]
+
+
+@pytest.mark.asyncio
+async def test_a_quest_over_the_cap_keeps_two_scripts_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    prompts: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(prompts))
+    engine = Engine(_cfg(tmp_path, code_package_max_extra_lines=10))
+    await engine.run()
+    code = engine.quest_root / "code"
+    assert not (code / PKG).exists() and not (code / cl.TEST_PATH).exists() and not (code / cl.METHODS_NAME).exists()
+    assert (code / "simulate.py").is_file(), "the two scripts, as before"
+    assert prompts and all(f"{PKG}/model.py" not in p for p in prompts), "the package is not asked for"
+    plan = (engine.quest_root / "plan.md").read_text(encoding="utf-8")
+    assert "The code will keep two scripts" in plan and "execution.code_package_max_extra_lines" in plan
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert re.search(r"the code keeps two scripts .*over the limit of 10", log), log[-3000:]
+    oracle = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert oracle["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_reply_without_the_package_is_asked_once_more_then_keeps_two_scripts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompts: list[str] = []
+
+    async def never_a_package(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "Implementation":
+            if "Implementation Outline" not in prompt[:200]:
+                prompts.append(prompt)
+            return _reply(SIMULATE)
+        return await _fake([])(self, messages, **kw)
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", never_a_package)
+    engine = Engine(_cfg(tmp_path))
+    await engine.run()
+    assert len(prompts) == 2 and "the reply did not hold the package" in prompts[1]
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "left out the model's package" in log and "keeps two scripts" in log
+    assert json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))["status"] == "ok"
