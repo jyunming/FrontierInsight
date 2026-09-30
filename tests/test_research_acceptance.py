@@ -76,12 +76,26 @@ def _fake(protocol: dict[str, Any], simulate: str, analysis: str, calls: list[st
             body["protocol"] = protocol
             return json.dumps(body)
         if kind == "Implementation":
-            return _reply(simulate, analysis)
+            return _with_package(_reply(simulate, analysis), prompt)
         if prompt.lstrip().startswith("**Persona:"):  # a review-panel member
             return _FAKE_RESPONSES["review"]
         return _fake_response_for(prompt)
 
     return fake_chat
+
+
+def _with_package(reply: str, prompt: str) -> str:
+    """The code as a small research tool (the default layout, core/code_layout.py), when the prompt asks for it: the
+    model's package, and simulate.py using it."""
+    import re
+
+    asked = re.search(r"# file: (\w+)/model\.py", prompt)
+    if not asked:
+        return reply
+    pkg = asked.group(1)
+    reply = reply.replace("# file: simulate.py\n", f"# file: simulate.py\nfrom {pkg} import model  # noqa: F401\n", 1)
+    return (reply + f"```python\n# file: {pkg}/__init__.py\n\"\"\"The epidemic model.\"\"\"\n```\n"
+            f"```python\n# file: {pkg}/model.py\ndef infection_rate(r0, gamma):\n    return r0 * gamma\n```\n")
 
 
 def _run_through_pauses(config: Config, *, quest_id: str | None = None, from_step: str | None = None,
