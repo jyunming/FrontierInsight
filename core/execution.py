@@ -593,31 +593,37 @@ _HOST_ONLY_VARS = frozenset({
     "PATH", "HOME", "PWD", "OLDPWD", "TMPDIR", "TEMP", "TMP",
     "PYTHONHOME", "PYTHONSTARTUP", "PYTHONUSERBASE", "PYTHONPYCACHEPREFIX", "PYTHONEXECUTABLE",
     "LD_PRELOAD", "LD_LIBRARY_PATH", "VIRTUAL_ENV", "CONDA_PREFIX",
+    "MPLCONFIGDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
 })
+# Where a path can start: not in the middle of a longer name or path
+# (/mnt/q/abc is not /q/abc).
+_PATH_START = r"(?<![\w.~-])"
 # Where a path in a value ends: the separators of a list or an option.
 _PATH_END = r"""(?=$|[;,=\s"'])"""
 
 
 def _to_container(value: str, host_root: str, *, windows: bool | None = None) -> str:
-    """``value`` with the host quest folder as /work, only where the folder
-    name ends (``/q/abc`` is not in ``/q/abcd``). On a Windows host the folder
-    matches in either slash and any letter case, and the rest of the path is
-    written with slashes: a Linux container reads a backslash as part of a
-    file name."""
+    """``value`` with the host quest folder as /work, only where a whole path
+    starts with it (``/q/abc`` is not in ``/q/abcd`` nor ``/mnt/q/abc``). On a
+    Windows host the folder matches in either slash and any letter case, and
+    the rest of the path is written with slashes (a Linux container reads a
+    backslash as part of a file name): all of it when the whole value is that
+    one path, as a command argument is; inside a longer value, up to the first
+    space, ``;``, ``,``, ``=`` or quote."""
     if windows is None:
         windows = os.sep == "\\"
     if not windows:
         root = host_root.rstrip("/") or "/"
-        return re.sub(re.escape(root) + r"(?=$|/|[:;,=\s\"'])", "/work", value)
+        return re.sub(_PATH_START + re.escape(root) + r"(?=$|/|[:;,=\s\"'])", "/work", value)
     parts = [p for p in re.split(r"[\\/]+", host_root) if p]
-    root_rx = r"[\\/]+".join(re.escape(p) for p in parts)
-    # The whole value is one path under the folder (a command argument, which
-    # may hold spaces): all of the rest is the path.
-    whole = re.match(root_rx + r"(?P<rest>[\\/].*)?$", value, re.IGNORECASE | re.DOTALL)
-    if whole:
-        return "/work" + (whole.group("rest") or "").replace("\\", "/")
+    lead = len(host_root) - len(host_root.lstrip("\\/"))  # a UNC path's leading \\
+    root_rx = r"[\\/]" * lead + r"[\\/]+".join(re.escape(p) for p in parts)
+    if ";" not in value:  # a list (a;b) goes through the general case below
+        whole = re.match(root_rx + r"(?P<rest>[\\/].*)?$", value, re.IGNORECASE | re.DOTALL)
+        if whole:
+            return "/work" + (whole.group("rest") or "").replace("\\", "/")
     return re.sub(
-        root_rx + r"""(?P<rest>[\\/][^;,=\s"']*)?""" + _PATH_END,
+        _PATH_START + root_rx + r"""(?P<rest>[\\/][^;,=\s"']*)?""" + _PATH_END,
         lambda m: "/work" + (m.group("rest") or "").replace("\\", "/"),
         value, flags=re.IGNORECASE,
     )
@@ -854,7 +860,7 @@ class DockerExecutor:
                 if close is not None:
                     close()
         if found:
-            more = " (and maybe more)" if len(found) >= 3 or seen > 2000 else ""
+            more = " (and maybe more)" if len(found) >= 3 or seen >= 2000 else ""
             self._say(logging.WARNING, "[docker] %s%s in the quest folder belong to root (written when experiments "
                       "still ran as root), and experiments now run as user %s, which cannot change them. Run "
                       "`sudo chown -R %s %s` once to give them back.", ", ".join(found), more, user, user, host_root)

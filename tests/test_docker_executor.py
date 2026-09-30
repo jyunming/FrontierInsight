@@ -222,16 +222,10 @@ def test_run_sync_translates_host_path_in_cmd_args() -> None:
         assert host_root not in a
 
 
-def test_run_sync_path_translation_substring_caveat() -> None:
-    """Documents a known sharp-edge in path translation.
-
-    `_run_sync` does a literal `str.replace` of the host quest_root with
-    `/work`. If a cmd arg happens to contain the host_root as a substring
-    of an unrelated path (different drive, mid-string match), it would be
-    rewritten incorrectly. In practice the engine never constructs such
-    args, so this is a latent caveat rather than a live bug. This test
-    pins the current behaviour so any future fix is intentional.
-    """
+def test_run_sync_leaves_a_longer_name_alone() -> None:
+    """A cmd arg where the host quest_root is followed by more of a name
+    ("<root>-suffix", a sibling folder) is some other path: `/work` is only
+    put where the folder name ends."""
     exe = DockerExecutor()
     container = _make_fake_container(exit_code=0)
     client = MagicMock()
@@ -845,6 +839,21 @@ def test_linux_path_translation_stops_at_the_folder_name() -> None:
     assert _to_container("--out=/q/abc/f.png", root, windows=False) == "--out=/work/f.png"
     # Backslashes are ordinary file-name characters on Linux: left alone.
     assert _to_container("/q/abc/a\\b", root, windows=False) == "/work/a\\b"
+    # Only where a whole path starts with the folder.
+    assert _to_container("/mnt/q/abc/x", root, windows=False) == "/mnt/q/abc/x"
+    assert _to_container("/q/abc/q/abc", root, windows=False) == "/work/q/abc"
+    assert _to_container("/q/abc:/other", root, windows=False) == "/work:/other"
+
+
+def test_windows_unc_and_list_values() -> None:
+    from core.execution import _to_container
+
+    unc = r"\\server\share\q\abc"
+    assert _to_container(r"\\server\share\q\abc\code\e.py", unc, windows=True) == "/work/code/e.py"
+    assert _to_container(r"x=\\server\share\q\abc\f", unc, windows=True) == "x=/work/f"
+    root = r"C:\q\abc"
+    assert _to_container(r"C:\q\abc\a;C:\q\abc\b", root, windows=True) == "/work/a;/work/b"
+    assert _to_container(r"XC:\q\abc\x", root, windows=True) == r"XC:\q\abc\x"
 
 
 def test_host_python_and_system_paths_are_not_passed_in() -> None:
