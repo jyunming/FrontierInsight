@@ -74,7 +74,7 @@ export function resolveRoots(input: RootsInput): Roots | RootsError {
 /** How FI was found, in the order it is looked for. */
 export type FoundHow = "setting" | "workspace" | "python" | "saved" | "picked";
 
-export type Located = { repoPath: string; how: FoundHow } | RootsError;
+export type Located = { repoPath: string; how: FoundHow; remembered?: boolean } | RootsError;
 
 export interface LocateInput {
     /** `frontierInsight.repoPath`; empty for nearly everyone. */
@@ -97,9 +97,17 @@ export function savedLocationFile(home: string = os.homedir()): string {
     return path.join(home, ".frontier-insight", "fi_location.json");
 }
 
-/** A folder is FrontierInsight when it holds `launch.py`. */
+/** A folder holds `launch.py` (all a `frontierInsight.repoPath` someone typed is checked for). */
 function hasLaunch(dir: string, exists: (p: string) => boolean): boolean {
     return !!dir && exists(path.join(dir, "launch.py"));
+}
+
+/**
+ * A folder is FrontierInsight when it holds `launch.py` beside `core/engine.py`: a study's own
+ * `launch.py` (a common name for a start script) is never taken for FI.
+ */
+export function isFiFolder(dir: string, exists: (p: string) => boolean = fs.existsSync): boolean {
+    return hasLaunch(dir, exists) && exists(path.join(dir, "core", "engine.py"));
 }
 
 function readSaved(file: string, read: (p: string) => string | undefined): string {
@@ -140,17 +148,18 @@ export async function locateFi(input: LocateInput): Promise<Located> {
                     "Point it at the FrontierInsight folder, or clear it and FI is found by itself.",
             };
     }
-    const own = input.workspaceFolders.find((f) => hasLaunch(f, exists));
+    const own = input.workspaceFolders.find((f) => isFiFolder(f, exists));
     if (own) return { repoPath: own, how: "workspace" };
 
     let fromPython: string | undefined;
     try { fromPython = await input.askPython(); } catch { fromPython = undefined; }
-    if (fromPython && hasLaunch(fromPython, exists)) return { repoPath: fromPython, how: "python" };
+    if (fromPython && isFiFolder(fromPython, exists)) return { repoPath: fromPython, how: "python" };
 
     const saved = readSaved(input.savedFile, read);
-    if (saved && hasLaunch(saved, exists)) return { repoPath: saved, how: "saved" };
+    if (saved && isFiFolder(saved, exists)) return { repoPath: saved, how: "saved" };
 
-    const picked = await input.askUser();
+    let picked: string | undefined;
+    try { picked = await input.askUser(); } catch { picked = undefined; }
     if (!picked) {
         return {
             error: "❌ FrontierInsight was not found. Run the command again and pick the FrontierInsight " +
@@ -158,18 +167,20 @@ export async function locateFi(input: LocateInput): Promise<Located> {
                 "`pip install -e <FrontierInsight folder>`.",
         };
     }
-    if (!hasLaunch(picked, exists)) {
+    if (!isFiFolder(picked, exists)) {
         return {
-            error: `❌ \`${picked}\` has no \`launch.py\`, so it is not the FrontierInsight folder. ` +
+            error: `❌ \`${picked}\` is not the FrontierInsight folder (that one has \`launch.py\` and \`core/engine.py\`). ` +
                 "Run the command again and pick the folder that contains `launch.py`.",
         };
     }
+    let remembered = true;
     try {
         write(input.savedFile, JSON.stringify({ path: picked }, null, 2) + "\n");
     } catch {
         // Not remembered (read-only home, say): it still works now, and is asked again next session.
+        remembered = false;
     }
-    return { repoPath: picked, how: "picked" };
+    return { repoPath: picked, how: "picked", remembered };
 }
 
 /**
@@ -188,7 +199,7 @@ export function fiFolderFromPythonAnswer(stdout: string, exists: (p: string) => 
     const origin = stdout.trim().split(/\r?\n/).pop()?.trim() || "";
     if (!origin || path.basename(origin) !== "launch.py") return undefined;
     const dir = path.dirname(origin);
-    return exists(path.join(dir, "launch.py")) && exists(path.join(dir, "core", "engine.py")) ? dir : undefined;
+    return isFiFolder(dir, exists) ? dir : undefined;
 }
 
 export function askPythonWhereFiIs(pythonPath: string, timeoutMs = 8000): Promise<string | undefined> {
@@ -196,7 +207,12 @@ export function askPythonWhereFiIs(pythonPath: string, timeoutMs = 8000): Promis
         try {
             execFile(
                 pythonPath, ["-c", PYTHON_WHERE_IS_FI],
-                { cwd: os.tmpdir(), timeout: timeoutMs, windowsHide: true, encoding: "utf-8" },
+                {
+                    // The extension's own folder: Windows looks for a bare `python` in the current
+                    // folder first, so not one anyone writes to. UTF-8 out so C:\Users\張三 survives.
+                    cwd: __dirname, timeout: timeoutMs, windowsHide: true, encoding: "utf-8",
+                    env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+                },
                 (err, stdout) => resolve(err ? undefined : fiFolderFromPythonAnswer(String(stdout))),
             );
         } catch {
@@ -222,7 +238,7 @@ export interface WorkFolderInput {
 
 function inside(folder: string, p: string): boolean {
     const rel = path.relative(folder, p);
-    return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+    return rel === "" || (rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel));
 }
 
 /** The open folder holding `p` (the deepest one when folders nest), or undefined. */
@@ -235,7 +251,8 @@ function folderHolding(folders: string[], p: string): string | undefined {
 /**
  * With one folder open, that folder. With several: the folder of the file the command
  * names (the YAML of `/start`), else the folder of the file in the active editor, else
- * the first folder. Never a question: the folder open in the window is where you work.
+ * the first folder that is not FrontierInsight's own checkout (so nothing lands in it by accident),
+ * else the first. Never a question: the folder open in the window is where you work.
  * (Finding a quest by its id alone, across folders, is left to the quest index.)
  */
 export function chooseWorkFolder(input: WorkFolderInput): string | undefined {
@@ -256,5 +273,5 @@ export function chooseWorkFolder(input: WorkFolderInput): string | undefined {
         const holder = folderHolding(folders, input.activeFile);
         if (holder) return holder;
     }
-    return folders[0];
+    return folders.find((f) => !isFiFolder(f, exists)) ?? folders[0];
 }

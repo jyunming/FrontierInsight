@@ -171,7 +171,7 @@ length.
 |---|---|---|
 | `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine, and the one quest code runs on. Install FI's dependencies into this same interpreter (`<that python> -m pip install -e .`); a plain `pip` may belong to a different Python. `run.log` starts with `[env] python=<path>` so you can see which one ran. Use a venv path if you don't want FI cluttering your global packages. The CLI's own self-setup (`python launch.py` creating a `.venv/` on a missing dependency) is off for every command this extension runs, so a missing dependency here is always this setting to fix, not a different environment appearing on its own. |
 | `frontierInsight.repoPath` | `""` | Leave empty: FrontierInsight is found by itself (see *One-time setup*, step 4). Set it only to force one FrontierInsight folder (the one containing `launch.py`). |
-| `frontierInsight.workingDir` | `""` | The folder quests run in. Defaults to the open folder (FI's own folder when that is the one open). With several folders open in one window, the folder holding the YAML the command names, else the folder of the file you are editing, else the first. Relative values are resolved against that folder. |
+| `frontierInsight.workingDir` | `""` | The folder quests run in. Defaults to the open folder (FI's own folder when that is the one open). With several folders open in one window, the folder holding the YAML the command names, else the folder of the file you are editing, else the first that is not the FrontierInsight checkout. Relative values are resolved against that folder. |
 | `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to the working folder, or absolute). |
 | `frontierInsight.axonStartupWaitSec` | `600` | How long to keep watching for the Axon sidecar after the editor starts, before saying none was found. Axon loads its embedding model and indexes before it serves, and you may start it well after opening VS Code — so the wait is long and silent. A sidecar that appears at any point during it produces no notification at all. `0` never shows the notice. |
 | `frontierInsight.axonUrl` | `""` | Base URL of the Axon sidecar, e.g. `http://127.0.0.1:8420`. Empty means discover it automatically. Set it only when Axon runs somewhere discovery can't see — another machine, a container. Plain HTTP only. It pins the extension to that one instance rather than acting as a first guess, since two Axon instances hold different corpora. |
@@ -317,6 +317,8 @@ Give each study its own folder, and open each folder in its own VS Code window
   window's folder (its `outputs/`).
 - FrontierInsight is found the same way in every window; if you were asked for its folder once,
   no other window asks again.
+- One exception: a `fi --serve` (the web page) you start yourself in a terminal sends its model
+  calls through the VS Code window that was opened first, and loses them when that window closes.
 - The files FI keeps for you across studies (`~/.frontier-insight/`: installed packages, paper
   downloads, the Axon library's current project) are shared safely: FI takes turns on them.
 

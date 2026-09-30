@@ -42,9 +42,10 @@ def _resolve(**inp) -> dict:  # noqa: ANN003
 def folders(tmp_path: Path) -> dict[str, str]:
     fi = tmp_path / "FrontierInsight"
     project = tmp_path / "my_project"
-    fi.mkdir()
+    (fi / "core").mkdir(parents=True)
     project.mkdir()
     (fi / "launch.py").write_text("", encoding="utf-8")
+    (fi / "core" / "engine.py").write_text("", encoding="utf-8")
     return {"fi": str(fi), "project": str(project)}
 
 
@@ -152,19 +153,38 @@ def test_fi_is_found_in_order_and_the_picker_is_the_last_resort(folders, tmp_pat
     assert got == {"got": {"repoPath": folders["fi"], "how": "python"}, "calls": ["python"]}
     # Nothing found: one folder picker, and the answer is remembered in ~/.frontier-insight.
     got = _locate(folders=[folders["project"]], savedFile=saved, picked=folders["fi"])
-    assert got == {"got": {"repoPath": folders["fi"], "how": "picked"}, "calls": ["python", "picker"]}
+    assert got == {
+        "got": {"repoPath": folders["fi"], "how": "picked", "remembered": True}, "calls": ["python", "picker"],
+    }
     assert json.loads(Path(saved).read_text(encoding="utf-8")) == {"path": folders["fi"]}
     # The next window (or session) finds the remembered folder without asking.
     got = _locate(folders=[folders["project"]], savedFile=saved)
     assert got == {"got": {"repoPath": folders["fi"], "how": "saved"}, "calls": ["python"]}
 
 
+def test_a_studys_own_launch_py_is_never_taken_for_fi(folders, tmp_path) -> None:
+    """`launch.py` is a common name for a study's start script: an open folder, a remembered
+    folder or a picked one is FI only with FI's `core/engine.py` beside it."""
+    (Path(folders["project"]) / "launch.py").write_text("", encoding="utf-8")
+    saved = tmp_path / "fi_location.json"
+    saved.write_text(json.dumps({"path": folders["project"]}), encoding="utf-8")
+    got = _locate(folders=[folders["project"]], savedFile=str(saved), python=folders["fi"])
+    assert got == {"got": {"repoPath": folders["fi"], "how": "python"}, "calls": ["python"]}
+    got = _locate(folders=[folders["project"]], savedFile=str(saved), picked=folders["project"])
+    assert "is not the FrontierInsight folder" in got["got"]["error"]
+
+
 def test_a_wrong_answer_is_refused_in_plain_words(folders, tmp_path) -> None:
     saved = str(tmp_path / "fi_location.json")
     got = _locate(folders=[folders["project"]], savedFile=saved, picked=folders["project"])["got"]
-    assert "has no `launch.py`" in got["error"] and not Path(saved).exists()
+    assert "is not the FrontierInsight folder" in got["error"] and not Path(saved).exists()
     got = _locate(folders=[folders["project"]], savedFile=saved)["got"]
     assert "was not found" in got["error"] and "pip install -e" in got["error"]
+    # A picked folder that cannot be saved still works now, and says it was not remembered.
+    blocker = tmp_path / "a_file"
+    blocker.write_text("", encoding="utf-8")
+    got = _locate(folders=[folders["project"]], savedFile=str(blocker / "fi_location.json"), picked=folders["fi"])
+    assert got["got"] == {"repoPath": folders["fi"], "how": "picked", "remembered": False}
     # A setting someone typed is used as is, and a wrong one is reported, not skipped over.
     got = _locate(setting=folders["project"], folders=[folders["fi"]], savedFile=saved)
     assert "frontierInsight.repoPath" in got["got"]["error"] and got["calls"] == []
@@ -222,27 +242,79 @@ def test_with_several_folders_open_the_study_is_where_its_yaml_is(tmp_path) -> N
     assert choose(folders=folders, namedPath="b.yaml") == str(b)
     assert choose(folders=folders, namedPath=str(b / "b.yaml")) == str(b)
     assert choose(folders=folders, activeFile=str(b / "notes.md")) == str(b)
-    # Nothing to go on: the first folder, as before; never a question.
+    # Nothing to go on: the first folder; never a question.
     assert choose(folders=folders) == str(a)
     assert choose(folders=[]) is None
+    # ... but not FI's own checkout when a study folder is open beside it.
+    fi = tmp_path / "FI"
+    (fi / "core").mkdir(parents=True)
+    (fi / "launch.py").write_text("", encoding="utf-8")
+    (fi / "core" / "engine.py").write_text("", encoding="utf-8")
+    assert choose(folders=[str(fi), str(a)]) == str(a)
+    # A folder whose name merely starts with ".." is still inside.
+    (a / "..data").mkdir()
+    assert choose(folders=[str(b), str(a)], activeFile=str(a / "..data" / "x.csv")) == str(a)
 
 
-def test_a_second_window_gets_a_bridge_address_of_its_own() -> None:
+def test_a_second_window_gets_a_bridge_address_of_its_own(tmp_path) -> None:
     """Two VS Code windows (two study folders) open at once: the second can't take the
     per-user bridge address, so it binds one of its own and hands that to the Python it
     starts, instead of routing through the first window."""
+    import os
+
     node = shutil.which("node")
-    path_js = EXT / "out" / "bridge-path.js"
-    if node is None or not path_js.is_file():
-        pytest.skip("needs node and a compiled bridge-path.js")
-    done = subprocess.run(
-        [node, "-e", "const b=require(process.argv[1]);"
-         "process.stdout.write(JSON.stringify([b.persistentBridgePath(), b.persistentBridgePath('4242')]))",
-         str(path_js)],
-        capture_output=True, text=True, encoding="utf-8", timeout=60,
-    )
-    shared, own = json.loads(done.stdout)
-    assert shared != own and "4242" in own
+    bridge_js = EXT / "out" / "persistent-bridge.js"
+    if node is None or not bridge_js.is_file():
+        pytest.skip("needs node and a compiled persistent-bridge.js")
+    if bridge_js.stat().st_mtime < (EXT / "src" / "persistent-bridge.ts").stat().st_mtime:
+        pytest.skip("out/persistent-bridge.js is older than the source; run npm run compile")
+    # The first window is a plain listener on the per-user address; the second is the real
+    # PersistentBridge. It must take an address of its own, and closing it must leave the
+    # first window's listener alone.
+    script = r"""
+const Module = require("module");
+const realLoad = Module._load;
+Module._load = function (req, ...rest) { return req === "vscode" ? {} : realLoad.call(this, req, ...rest); };
+const net = require("net");
+const outDir = require("path").dirname(process.argv[1]);
+const { persistentBridgePath } = require(outDir + "/bridge-path.js");
+const { PersistentBridge } = require(process.argv[1]);
+const shared = persistentBridgePath();
+const first = net.createServer((s) => s.end());
+first.listen(shared, async () => {
+  const lines = [];
+  const b = new PersistentBridge({ appendLine: (l) => lines.push(l) });
+  const got = await b.listen();
+  const bound = b.boundPath;
+  await b.close();
+  const alive = await new Promise((res) => {
+    const c = net.createConnection(shared);
+    c.once("connect", () => { c.destroy(); res(true); });
+    c.once("error", () => res(false));
+  });
+  first.close();
+  process.stdout.write(JSON.stringify({ shared, got, bound, alive, pid: process.pid }));
+  process.exit(0);
+});
+"""
+    import tempfile
+
+    # A short folder: a unix socket path is limited to ~104 bytes.
+    runtime = tempfile.mkdtemp(prefix="fiw")
+    env = {**os.environ, "USERNAME": f"fi_two_windows_{os.getpid()}", "XDG_RUNTIME_DIR": runtime}
+    try:
+        done = subprocess.run(
+            [node, "-e", script, str(bridge_js)],
+            capture_output=True, text=True, encoding="utf-8", timeout=60, env=env,
+        )
+    finally:
+        shutil.rmtree(runtime, ignore_errors=True)
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout)
+    assert got["got"] != got["shared"], got
+    assert f"-{got['pid']}" in got["got"], got
+    assert got["bound"] == got["got"]
+    assert got["alive"], "closing the second window's bridge broke the first window's"
     ext = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
     assert ext.count("bridgeSocket: thisWindowsBridge(),") == 2
     bridge = (EXT / "src" / "persistent-bridge.ts").read_text(encoding="utf-8")

@@ -53,9 +53,10 @@ def _run(tmp_path: Path, **arg) -> dict:  # noqa: ANN003
 def folders(tmp_path: Path) -> dict[str, Path]:
     fi = tmp_path / "FrontierInsight"
     project = tmp_path / "my_project"
-    fi.mkdir()
+    (fi / "core").mkdir(parents=True)
     project.mkdir()
     (fi / "launch.py").write_text("", encoding="utf-8")
+    (fi / "core" / "engine.py").write_text("", encoding="utf-8")
     return {"fi": fi, "project": project}
 
 
@@ -75,10 +76,32 @@ def test_declared_chat_commands_are_all_routed(tmp_path: Path) -> None:
     assert not missing, f"declared in package.json but never handled: {missing}"
 
 
-def test_when_fi_cannot_be_found_the_commands_say_how_to_fix_it(tmp_path: Path) -> None:
+def test_without_a_folder_open_the_commands_say_what_is_missing(tmp_path: Path, folders) -> None:
+    """With no folder open there is nowhere to put a study: never FI's own checkout, even
+    when FI is found (here, a folder picked before)."""
+    saved = tmp_path / "home" / ".frontier-insight" / "fi_location.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"path": str(folders["fi"])}), encoding="utf-8")
     got = _run(tmp_path, commands=["watch", "resume", "plan", "skills"], workspace=None, settings={})
     for cmd, reply in got["replies"].items():
+        assert "No folder open" in reply, (cmd, reply)
+    assert got["pickerCalls"] == 0
+
+
+def test_when_fi_cannot_be_found_the_commands_say_how_to_fix_it(tmp_path: Path, folders) -> None:
+    got = _run(tmp_path, commands=["watch", "skills"], workspace=str(folders["project"]), settings={})
+    for cmd, reply in got["replies"].items():
         assert "FrontierInsight was not found" in reply and "pip install -e" in reply, (cmd, reply)
+
+
+def test_two_commands_at_once_ask_for_fi_only_once(tmp_path: Path, folders) -> None:
+    got = _run(
+        tmp_path, commands=["resume", "watch", "plan"], workspace=str(folders["project"]), settings={},
+        picked=str(folders["fi"]), concurrent=True,
+    )
+    assert got["pickerCalls"] == 1, "two commands started together both opened the picker"
+    for cmd in ("resume", "watch", "plan"):
+        assert str(folders["project"] / "outputs") in got["replies"][cmd], got["replies"][cmd]
 
 
 def test_a_project_workspace_uses_its_own_outputs_not_fis(tmp_path: Path, folders) -> None:

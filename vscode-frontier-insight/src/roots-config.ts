@@ -1,6 +1,4 @@
 /** The VSCode side of `roots.ts`: reads the settings and the open workspace, and finds FI. */
-import * as fs from "fs";
-import * as path from "path";
 import * as vscode from "vscode";
 import {
     Located,
@@ -8,6 +6,7 @@ import {
     RootsError,
     askPythonWhereFiIs,
     chooseWorkFolder,
+    isFiFolder,
     locateFi,
     resolveRoots,
     savedLocationFile,
@@ -21,7 +20,10 @@ let searching: Promise<Located> | undefined;
 
 async function findFi(cfg: vscode.WorkspaceConfiguration, folders: string[]): Promise<Located> {
     const setting = (cfg.get<string>("repoPath") || "").trim();
-    if (!setting && found && fs.existsSync(path.join(found, "launch.py"))) {
+    // An open FI checkout always wins (cheap to check, so before the session's answer).
+    const own = setting ? undefined : folders.find((f) => isFiFolder(f));
+    if (own) return { repoPath: own, how: "workspace" };
+    if (!setting && found && isFiFolder(found)) {
         return { repoPath: found, how: "saved" };
     }
     if (!setting && searching) return searching;
@@ -46,10 +48,13 @@ async function findFi(cfg: vscode.WorkspaceConfiguration, folders: string[]): Pr
     try {
         const got = await search;
         if (!("error" in got)) {
-            found = got.repoPath;
+            if (got.how !== "workspace") found = got.repoPath;
             if (got.how === "picked") {
                 void vscode.window.showInformationMessage(
-                    `FrontierInsight: using ${got.repoPath}. Remembered for every window, so you are not asked again.`,
+                    got.remembered
+                        ? `FrontierInsight: using ${got.repoPath}. Remembered for every window, so you are not asked again.`
+                        : `FrontierInsight: using ${got.repoPath} for now. It could not be saved in ` +
+                          `${savedLocationFile()}, so you will be asked again next time.`,
                 );
             }
         }
@@ -81,6 +86,10 @@ export async function rootsForCommand(namedPath?: string): Promise<Roots | Roots
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const folders = openFolders();
     const workspaceRoot = workFolderForCommand(namedPath);
+    if (!workspaceRoot && !(cfg.get<string>("workingDir") || "").trim() && !(cfg.get<string>("repoPath") || "").trim()) {
+        // Nowhere to put the study: never FI's own checkout by default.
+        return { error: "❌ No folder open. Open your study's folder in VS Code (File → Open Folder…), then try again." };
+    }
     const located = await findFi(cfg, folders);
     if ("error" in located) return located;
     return resolveRoots({
