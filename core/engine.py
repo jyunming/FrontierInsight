@@ -6958,6 +6958,9 @@ class Engine:
         # What the repairs said about the checks themselves (``oracle_check.proposals``), latest per oracle. Shown to the
         # person at the stop; never applied here.
         self._oracle_proposals: dict[str, dict[str, Any]] = {}
+        # The checks a repair called wrong while they were not passing: the script is not changed for them. (A proposal
+        # about a check that passed is shown to the person but does not excuse that check failing later.)
+        self._oracle_disputed: set[str] = set()
         env = {
             **_replicate_env(exec_env, 0, stride), "FI_ORACLE": "1",
             _split_run.RAW_DIR_ENV: _split_run.env_value(oracle_raw_dir, self.quest_root),
@@ -6972,6 +6975,9 @@ class Engine:
         attempts: list[dict[str, Any]] = []
         found: list[str] = []
         new_code: str | None = None
+        # After a repair is applied while some checks are disputed: (the script before it, new_code before it, the
+        # disputed checks that were failing). Read once, right after the next run.
+        guard: tuple[str, str | None, set[str]] | None = None
         attempt = 0
         while True:
             protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
@@ -7021,6 +7027,21 @@ class Engine:
                 "judged": _oracle.judged(oracles, reported) if reported is not None else [],
             })
             attempt += 1
+            if guard is not None:
+                # The repair just applied was told to leave the disputed checks alone. One that made such a check pass
+                # changed the script towards a number the repair itself called wrong: that is put back.
+                prev_code, prev_new_code, held = guard
+                guard = None
+                flipped = [j["name"] for j in attempts[-1]["judged"] if j.get("name") in held and j.get("passed_by_engine") is True]
+                if flipped:
+                    seed_path.write_text(prev_code, encoding="utf-8")
+                    new_code = prev_new_code
+                    attempts[-2]["repair"] = "reverted_disputed_changed"
+                    self._log.warning(
+                        "[oracle] put %s back as it was: the repair made the disputed check(s) %s pass, and the script may "
+                        "not be changed for them until a person decides", seed_path.name, ", ".join(repr(n) for n in flipped),
+                    )
+                    continue
             if not found:
                 break
             if not oracles or incomplete:
@@ -7031,21 +7052,57 @@ class Engine:
                 if not await self._declare_oracles(incomplete or None):
                     break
                 continue
+            # A check a repair has called wrong is not the script's to fix: its proposal waits for a person, and the script
+            # is never rewritten towards it. When every problem left is such a check, the script is kept as it is and no
+            # more repairs are spent (a real quest's repairs, told the check was wrong, kept rewriting a correct script
+            # until it crashed and the quest had no result at all).
+            disputed = [n for n in self._oracle_proposals if n in self._oracle_disputed]
+            to_fix = _oracle.undisputed(found, disputed)
+            judged_now = attempts[-1]["judged"]
+            if not to_fix:
+                self._log.warning(
+                    "[oracle] the script is kept as it is: the repair says the check(s) %s are what is wrong, not the "
+                    "script; a person decides whether to change them",
+                    ", ".join(repr(n) for n in _oracle.disputed_failing(judged_now, disputed)),
+                )
+                break
             if repairs_left == 0:
                 break
             self._log.warning(
                 "[oracle] %d problem(s): %s; asking for a repair (%d of %d)",
-                len(found), "; ".join(found), budget - repairs_left + 1, budget,
+                len(to_fix), "; ".join(to_fix), budget - repairs_left + 1, budget,
             )
-            text, call_failed = await self._repair_script_for_oracle(state, seed_path, oracles, found, stderr_tail)
+            code_before, new_code_before = seed_path.read_text(encoding="utf-8"), new_code
+            text, call_failed, outcome = await self._repair_script_for_oracle(
+                state, seed_path, oracles, to_fix, stderr_tail, disputed=disputed,
+                passing=[str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True],
+            )
+            attempts[-1]["repair"] = outcome
             if call_failed and call_failures_left > 0:
                 call_failures_left -= 1  # no answer came back: the script was not rewritten, so the repair is not spent
-            else:
+            elif outcome != "set_aside_disputed":
+                # A set-aside answer is not spent either: the next request, without that check, is the repair. It is
+                # bounded: a check can be newly disputed only once.
                 repairs_left -= 1
             if text is not None and seed_path.name == "experiment.py":
                 new_code = text
+            # Every disputed check not passing now, measured or not: a repair that restores a missing measurement must
+            # not restore it bent to the disputed number either.
+            passing_now = {str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True}
+            held = {n for n in disputed if n not in passing_now}
+            if outcome == "applied" and held:
+                guard = (code_before, new_code_before, held)
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
         proposed = list(self._oracle_proposals.values())
+        # The checks still failing (a value measured and judged outside tolerance) whose expected value a repair
+        # disputes: the record, the analysis and the paper say the check failed and that its expected value is disputed
+        # (a person has not approved the proposed one).
+        disputed_failing = _oracle.disputed_failing(attempts[-1].get("judged") or [], sorted(self._oracle_disputed)) if found else []
+        if disputed_failing:
+            by_name = {p["name"]: p for p in proposed}
+            for j in attempts[-1].get("judged") or []:
+                if j.get("name") in disputed_failing:
+                    j["disputed_expected"] = by_name[j["name"]]["expected"]
         loose = [w for w in (_oracle.loose_tolerance(o) for o in oracles) if w]
         for warning in loose:
             self._log.warning("[oracle] %s", warning)
@@ -7054,6 +7111,7 @@ class Engine:
             **({"contract": "trial"} if getattr(self, "_trial_mode", False) else {}),
             **({"warnings": loose} if loose else {}),
             **({"proposed_changes": proposed} if proposed else {}),
+            **({"disputed": disputed_failing} if disputed_failing else {}),
         })
         if not found:
             self._log.info(
@@ -7062,9 +7120,18 @@ class Engine:
             )
             return new_code
         if self.config.engine.oracle_check == "warn":
-            self._log.warning("[oracle] the oracles did not pass: %s; going on (engine.oracle_check: warn)", "; ".join(found))
+            self._log.warning(
+                "[oracle] the oracles did not pass: %s;%s going on (engine.oracle_check: warn)", "; ".join(found),
+                f" the expected value of {', '.join(repr(n) for n in disputed_failing)} is disputed by the repair (not "
+                "approved, so the check counts as failed);" if disputed_failing else "",
+            )
             return new_code
-        self._pause_for_oracle(found, seed_path, list(self._oracle_proposals.values()), attempts[-1].get("judged") or [], oracles)
+        all_disputed = bool(disputed_failing) and not _oracle.undisputed(found, disputed_failing)
+        self._pause_for_oracle(
+            found, seed_path, list(self._oracle_proposals.values()), attempts[-1].get("judged") or [], oracles,
+            kept=("as_it_was" if not any(a.get("repair") == "applied" for a in attempts) else "for_disputed")
+            if all_disputed else None,
+        )
         return new_code  # not reached: the pause exits the run
 
     def _oracle_record_clear(self) -> None:
@@ -7178,16 +7245,25 @@ class Engine:
 
     async def _repair_script_for_oracle(
         self, state: QuestState, path: Path, oracles: list[dict[str, Any]], found: list[str], stderr_tail: str = "",
-    ) -> tuple[str | None, bool]:
-        """ONE repair of the script for its oracle checks: ``(new code or None, the repair call itself failed)``. Kept only
-        if it parses and now mentions FI_ORACLE. The oracle run's own stderr goes with it: "printed no ORACLE_JSON line"
-        says only that the script failed, and a repair asked without the traceback rewrote the oracle branch while the
-        crash was elsewhere (a module-level read, a library call) and stayed."""
+        *, disputed: list[str] | None = None, passing: list[str] | None = None,
+    ) -> tuple[str | None, bool, str]:
+        """ONE repair of the script for its oracle checks: ``(new code or None, the repair call itself failed, what came of
+        it)``; the last is ``applied``, ``set_aside_disputed``, ``no_code``/``not_usable`` or ``call_failed``, and goes in
+        the record. Kept only if it parses and now mentions FI_ORACLE. The oracle run's own stderr goes with it: "printed no
+        ORACLE_JSON line" says only that the script failed, and a repair asked without the traceback rewrote the oracle
+        branch while the crash was elsewhere (a module-level read, a library call) and stayed.
+
+        ``disputed``: the checks an earlier repair already called wrong, left out of the request. A repair that calls
+        another check wrong, one not passing now (``passing``), has its code set aside: that code cannot be split per
+        check, and code written by a repair that believes the check is wrong is code bent towards (or around) it. A
+        proposal about a check that passes is recorded, and its fix for the rest is still used."""
         code = path.read_text(encoding="utf-8")
+        already = {str(n).strip().lower() for n in [*(disputed or []), *(passing or [])]}
         prompt = self._prompts["execute_reflect"].substitute(
             previous_code=code,
             returncode="(the oracle run did not pass)",
-            stdout_tail=_oracle.directive(oracles, found) + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else ""),
+            stdout_tail=_oracle.directive(oracles, found, disputed=disputed)
+            + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else ""),
             stderr_tail=stderr_tail,
             duration_s="0.00",
             figures_count="0",
@@ -7200,18 +7276,29 @@ class Engine:
             text = await self._chat(prompt, node="implement_oracle")
         except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
             self._log.warning("[oracle] the repair call failed (%r); keeping %s as written", exc, path.name)
-            return None, True
+            return None, True, "call_failed"
         parsed: dict[str, Any] = {}
         if _strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _parse_json_lenient(text, node="implement_oracle") or {}
+        newly_disputed = False
         for proposal in _oracle.proposals(parsed.get("oracle_change"), oracles):
             self._oracle_proposals[proposal["name"]] = proposal
+            if proposal["name"].strip().lower() not in {str(n).strip().lower() for n in passing or []}:
+                self._oracle_disputed.add(proposal["name"])
+            newly_disputed = newly_disputed or proposal["name"].strip().lower() not in already
             self._log.info(
                 "[oracle] the repair says the check '%s' is what is wrong and proposes expected %s, tolerance %s (%s): %s",
                 proposal["name"], proposal["expected"], proposal["tolerance"], proposal["tolerance_mode"], proposal["reason"][:200],
             )
+        if newly_disputed:
+            self._log.info(
+                "[oracle] kept %s as it was: a repair that says a check is wrong is not used to rewrite the script", path.name,
+            )
+            return None, False, "set_aside_disputed"
         new_code = parsed.get("code")
         if not (isinstance(new_code, str) and new_code.strip()):
+            if parsed and not parsed.get("code"):
+                return None, False, "no_code"  # an answer with nothing to change
             new_code, _deps = _parse_implement_response(text)
         try:
             ast.parse(new_code)
@@ -7224,21 +7311,23 @@ class Engine:
         if not usable:
             self._log.warning("[oracle] the repair of %s is not usable (it must parse and %s); keeping it as written", path.name,
                               "define oracle()" if getattr(self, "_trial_mode", False) else "honour FI_ORACLE")
-            return None, False
+            return None, False, "not_usable"
         path.write_text(new_code, encoding="utf-8")
         self._log.info(
             "[oracle] rewrote %s (%d bytes): %s", path.name, len(new_code),
             str(parsed.get("patch_summary") or "no summary")[:160],
         )
-        return new_code, False
+        return new_code, False, "applied"
 
     def _pause_for_oracle(
         self, found: list[str], seed_path: Path, proposed: list[dict[str, Any]] | None = None,
-        judged: list[dict[str, Any]] | None = None, oracles: list[dict[str, Any]] | None = None,
+        judged: list[dict[str, Any]] | None = None, oracles: list[dict[str, Any]] | None = None, kept: str | None = None,
     ) -> None:
         """Stop before the main sweep: the oracles did not pass after the repairs. When a repair judged a check itself
         wrong, its proposal is shown beside what the script measured, and whether accepting it would simply let this run
-        pass -- the person decides; nothing here applies it."""
+        pass -- the person decides; nothing here applies it. ``kept``: every check still failing is one a repair called
+        wrong, so the script was not rewritten towards it (``as_it_was``: no repair changed it at all; ``for_disputed``:
+        a repair fixed something else)."""
         frozen = _frozen.load(self.quest_root) is not None
         research = getattr(self.config, "rigor_profile", "default") == "research"
         # After the freeze an oracle changes only through an amendment, and a quest stopped here never reaches the review
@@ -7254,6 +7343,12 @@ class Engine:
         )
         steps = [
             "The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + ".",
+            *([
+                ("The script was kept as it was" if kept == "as_it_was" else "After the repair disputed the failing "
+                 "check(s), the script was not changed for them")
+                + ": the repair says those checks are what is wrong, not the script. Its proposed numbers and reasons are "
+                "below; if you think the script is what is wrong instead, fix it."
+            ] if kept else []),
             (
                 f"Fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
                 "declared oracle check and prints an `ORACLE_JSON:` line, then resume: the oracle checks run again before "
@@ -15261,7 +15356,8 @@ measured by anything you write for the check: FI calls run_trial (or run_cell) i
 the dict it returns, so the simulation function must return that number, computed by the real simulation. Only an oracle
 without a `case` is measured by `def oracle() -> dict` in simulate.py, which must compute, with the same simulation code,
 each such check and return them as a dict keyed by the check's name, e.g. `{"closed_form_limit": 0.4987}`. There is no
-FI_ORACLE variable and no ORACLE_JSON line. Return the whole of simulate.py.
+FI_ORACLE variable and no ORACLE_JSON line. When you fix the script, return the whole of simulate.py; when the only thing
+wrong is a check itself, return its `oracle_change` and leave `code` empty, as said above.
 """
 
 _SPLIT_RERUN_NOTE = """

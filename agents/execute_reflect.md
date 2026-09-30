@@ -21,7 +21,7 @@ Respond with a single JSON object, no prose, no markdown fence:
 
 ```
 {
-  "code": "<full corrected experiment.py source — REQUIRED unless give_up_reason set>",
+  "code": "<full corrected experiment.py source — REQUIRED unless give_up_reason is set, or the oracle request in this prompt says to leave it empty>",
   "deps": ["<pip-installable>", ...],
   "patch_summary": "<one sentence describing what you fixed and why>",
   "give_up_reason": "<set only if the experiment cannot be salvaged; leave empty/null otherwise>"

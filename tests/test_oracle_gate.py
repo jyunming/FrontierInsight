@@ -629,6 +629,229 @@ async def test_a_check_the_repair_calls_wrong_is_shown_to_the_person_and_never_a
     assert plan_after == [ORACLE], "a proposal is never applied by the engine"
 
 
+# --- a repair that blames the check never rewrites the script for it (a real kimi-k3 quest) --------------------------
+# The declared expected value was wrong (1.637e-08 where the true RK4 error is 3.33e-07) and the script measured the true
+# value. Each repair said so in `oracle_change` AND returned new code; the code was applied anyway, and two or three
+# repairs later the correct script crashed, so the quest produced no result at all.
+
+# What a repair that bends the script to the (wrong) expected value looks like: it reports the declared number.
+_BENT = _HEAD + """\
+if os.environ.get("FI_ORACLE") == "1":
+    print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "final size closed form", "value": 1.0}]}))
+    raise SystemExit(0)
+""" + _TAIL
+_DISPUTE = [{"name": ORACLE["name"], "expected": 0.5, "tolerance": 0.01,
+             "reason": "the closed form gives 0.5 on this case; 1.0 is an arithmetic slip in the protocol"}]
+
+
+def _disputing_fake(calls: list[str], protocol: dict[str, Any], prompts: list[str] | None = None):
+    base = _fake(calls, implement=_FAILING, protocol=protocol)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
+            calls.append("OracleRepair")
+            if prompts is not None:
+                prompts.append(prompt)
+            return json.dumps({"code": _BENT, "deps": [], "patch_summary": "made the check pass",
+                               "oracle_change": _DISPUTE})
+        return await base(self, messages, **kw)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_blames_the_check_does_not_rewrite_the_script_and_the_quest_stops_for_a_person(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _disputing_fake(calls, protocol))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=2))
+    await engine.run()
+    assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == _FAILING, \
+        "the script the repair called right must be kept as it was"
+    assert calls.count("OracleRepair") == 1, "once every failing check is disputed, no more repairs are spent"
+    record = _record(engine)
+    assert record["status"] == "stopped" and record["disputed"] == [ORACLE["name"]]
+    assert record["attempts"][0]["repair"] == "set_aside_disputed"
+    assert record["proposed_changes"][0]["expected"] == 0.5
+    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "The script was kept as it was" in text and "judged the check `final size closed form` itself wrong" in text
+    assert "--revise-plan" in text
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[oracle] rewrote experiment.py" not in log
+
+
+@pytest.mark.asyncio
+async def test_under_warn_the_quest_goes_on_with_the_original_script_and_says_the_check_is_disputed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _disputing_fake(calls, protocol))
+    engine = Engine(_cfg(tmp_path, oracle_check="warn", oracle_repair_attempts=2))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == _FAILING
+    assert calls.count("OracleRepair") == 1
+    record = _record(engine)
+    assert record["status"] == "warned" and record["disputed"] == [ORACLE["name"]]
+    judged = oc.last_judged(record)
+    assert judged[0]["passed_by_engine"] is False and judged[0]["disputed_expected"] == 0.5
+    note = oc.analysis_note(judged)
+    assert "failed" in note and "the expected value the protocol declares is itself wrong" in note
+    assert "nobody has approved" in note and "counts as failed" in note
+
+
+_OTHER = {"name": "mass conservation", "kind": "invariant", "check": "total mass drift", "expected": 0.0, "tolerance": 0.01}
+_TWO = {**_PROTOCOL, "oracles": [ORACLE, _OTHER]}
+
+
+def _two(a: float, b: float) -> str:
+    """A script measuring the two checks: ORACLE (expected 1.0) at ``a`` and _OTHER (expected 0.0) at ``b``."""
+    return _HEAD + (
+        'if os.environ.get("FI_ORACLE") == "1":\n'
+        '    print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "final size closed form", "value": %r}, '
+        '{"name": "mass conservation", "value": %r}]}))\n'
+        '    raise SystemExit(0)\n' % (a, b)
+    ) + _TAIL
+
+
+def _scripted_repairs(calls: list[str], prompts: list[str], implement: str, replies: list[dict[str, Any]]):
+    base = _fake(calls, implement=implement, protocol=_TWO)
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
+            calls.append("OracleRepair")
+            prompts.append(prompt)
+            reply = replies[min(len(prompts), len(replies)) - 1]
+            return json.dumps({"deps": [], **reply})
+        return await base(self, messages, **kw)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_with_one_check_disputed_and_one_not_only_the_undisputed_one_is_repaired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two failing checks; the first repair blames check A and returns code (set aside: the code cannot be split per
+    check). The next request names only B's failure and says A is not to be touched; its fix for B is applied."""
+    original, bent, fixed_b = _two(0.5, 0.3), _two(1.0, 0.0), _two(0.5, 0.0)
+    calls: list[str] = []
+    prompts: list[str] = []
+    replies = [{"code": bent, "patch_summary": "both", "oracle_change": _DISPUTE},
+               # repeats the dispute it was told is already recorded: its fix for the other check is still used
+               {"code": fixed_b, "patch_summary": "fixed the mass leak", "oracle_change": _DISPUTE}]
+    monkeypatch.setattr("core.engine.LLMClient.chat", _scripted_repairs(calls, prompts, original, replies))
+    # One repair in the budget: the set-aside answer does not use it up, so the undisputed check is still repaired.
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    await engine.run()
+    assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed_b
+    assert calls.count("OracleRepair") == 2
+    wrong_list = prompts[1].split("What went wrong:", 1)[1].split("The contract:", 1)[0]
+    assert "'mass conservation' failed" in wrong_list and "'final size closed form' failed" not in wrong_list
+    assert "Do not change the script for these checks" in prompts[1] and "final size closed form" in prompts[1]
+    record = _record(engine)
+    assert [a.get("repair") for a in record["attempts"]] == ["set_aside_disputed", "applied", None]
+    assert record["status"] == "stopped" and record["disputed"] == [ORACLE["name"]]
+    assert len(record["problems"]) == 1 and "'final size closed form' failed" in record["problems"][0]
+    assert "the script was not changed for them" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_later_repair_that_makes_a_disputed_check_pass_is_undone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Told to leave the disputed check alone, a repair fixes the other one AND bends the disputed one to the declared
+    number. The gate must not end `ok` on that: the script is put back and the other check is asked for again."""
+    original, bent, fixed_b = _two(0.5, 0.3), _two(1.0, 0.0), _two(0.5, 0.0)
+    calls: list[str] = []
+    prompts: list[str] = []
+    replies = [{"code": original, "patch_summary": "the check", "oracle_change": _DISPUTE},
+               {"code": bent, "patch_summary": "fixed both", "oracle_change": _DISPUTE},
+               {"code": fixed_b, "patch_summary": "fixed the mass leak"}]
+    monkeypatch.setattr("core.engine.LLMClient.chat", _scripted_repairs(calls, prompts, original, replies))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=2))
+    await engine.run()
+    assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed_b
+    record = _record(engine)
+    assert record["status"] == "stopped" and record["disputed"] == [ORACLE["name"]]
+    assert [a.get("repair") for a in record["attempts"]] == [
+        "set_aside_disputed", "reverted_disputed_changed", None, "applied", None]
+    assert "[oracle] put experiment.py back as it was" in (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_disputed_check_whose_measurement_was_dropped_is_not_restored_bent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One step longer than the bend above: a repair drops the disputed check's measurement (then it is sent back to be
+    measured again, as the script's own problem), and the next repair restores it bent to the declared number."""
+    original, fixed_b = _two(0.5, 0.3), _two(0.5, 0.0)
+    dropped_a = _HEAD + (
+        'if os.environ.get("FI_ORACLE") == "1":\n'
+        '    print("ORACLE_JSON: " + json.dumps({"checks": [{"name": "mass conservation", "value": 0.0}]}))\n'
+        '    raise SystemExit(0)\n'
+    ) + _TAIL
+    bent = _two(1.0, 0.0)
+    calls: list[str] = []
+    prompts: list[str] = []
+    replies = [{"code": original, "patch_summary": "the check", "oracle_change": _DISPUTE},
+               {"code": dropped_a, "patch_summary": "fixed the leak", "oracle_change": _DISPUTE},
+               {"code": bent, "patch_summary": "measured it again"},
+               {"code": fixed_b, "patch_summary": "measured it again, honestly"}]
+    monkeypatch.setattr("core.engine.LLMClient.chat", _scripted_repairs(calls, prompts, original, replies))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=3))
+    await engine.run()
+    record = _record(engine)
+    assert record["status"] == "stopped", "a disputed check must never end up passing through a repair"
+    assert "reverted_disputed_changed" in [a.get("repair") for a in record["attempts"]]
+    assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed_b
+    assert "was not checked" in prompts[2] and "restore its honest measurement" in prompts[2]
+
+
+@pytest.mark.asyncio
+async def test_a_dispute_about_a_check_that_passes_does_not_throw_away_the_fix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    passes_a, fixed_b = _two(1.0, 0.3), _two(1.0, 0.0)
+    calls: list[str] = []
+    prompts: list[str] = []
+    replies = [{"code": fixed_b, "patch_summary": "fixed the mass leak", "oracle_change": _DISPUTE}]
+    monkeypatch.setattr("core.engine.LLMClient.chat", _scripted_repairs(calls, prompts, passes_a, replies))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    await engine.run()
+    record = _record(engine)
+    assert record["status"] == "ok" and record["attempts"][0]["repair"] == "applied"
+    assert "disputed" not in record and record["proposed_changes"][0]["name"] == ORACLE["name"]
+
+
+def test_only_a_disputed_checks_value_outside_tolerance_is_set_aside() -> None:
+    """A dispute is about the expected value: a disputed check that was not measured, or whose value is not a number,
+    is still the script's to fix, and so is a crash that names no check."""
+    name = ORACLE["name"]
+    found = [f"the oracle {name!r} failed: the script measured 0.5, the protocol expects 1 within 0.05",
+             f"the declared oracle {name!r} was not checked (the script reported: nothing)",
+             f"the oracle {name!r} reported no finite numeric `value` (it reported None)",
+             "the script printed no `ORACLE_JSON:` line when run with FI_ORACLE=1 (exit code 1)"]
+    assert oc.undisputed(found, [name]) == found[1:]
+    assert oc.undisputed(found, []) == found
+    judged = [{"name": name, "passed_by_engine": None}, {"name": "x", "passed_by_engine": False}]
+    assert oc.disputed_failing(judged, [name]) == []  # never measured: nothing was judged against the disputed value
+    assert "disputed" not in oc.analysis_note([{**judged[0], "disputed_expected": 0.5}])
+
+
+def test_the_repair_request_says_a_wrong_check_is_reported_not_coded_around() -> None:
+    text = oc.directive([ORACLE], ["the oracle 'final size closed form' failed"])
+    assert "do NOT change the code to match it" in text and "leave `code` empty" in text
+    assert "Do not change the script for these checks" not in text
+    excluded = oc.directive([ORACLE], [], disputed=[ORACLE["name"]])
+    assert "Do not change the script for these checks" in excluded and "'final size closed form'" in excluded
+
+
 def test_a_proposed_change_pasted_into_a_shell_only_ever_carries_text() -> None:
     """The reason and the check are the model's words, shown inside a double-quoted command a person copies."""
     bad = {"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute",

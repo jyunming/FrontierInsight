@@ -206,6 +206,13 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         value, expected, limit = _num(j.get("value")), _num(j.get("expected")), _num(j.get("limit"))
         verdict = {True: "passed", False: "failed"}.get(j.get("passed_by_engine"), "not judged")
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
+        disputed = _num(j.get("disputed_expected"))
+        if disputed is not None and j.get("passed_by_engine") is False:
+            verdict += (
+                f"; a repair says the expected value the protocol declares is itself wrong and proposes {_fmt(disputed)}, "
+                "but nobody has approved that change, so the check counts as failed (say so: the check failed and its "
+                "expected value is disputed)"
+            )
         if value is None or expected is None or limit is None:
             lines.append(f"- {j['name']}: {verdict}")
         else:
@@ -281,13 +288,38 @@ def with_run_problems(run_problems: list[str], found: list[str], oracles: list[d
     return list(run_problems) + [f for f in found if not repeats(f)]
 
 
-def directive(oracles: list[dict[str, Any]], found: list[str]) -> str:
-    """What stands where a traceback would in the repair request."""
+def undisputed(found: list[str], disputed: Any) -> list[str]:
+    """The problems in ``found`` that a repair may still fix: all but a disputed check's value judged outside its
+    tolerance (named in ``disputed``, a check a repair has called wrong). A dispute is about the expected value, so any
+    other problem with a disputed check (not measured, not a number, the simulation failing on its case) and a problem
+    that names no oracle (a crash, no ORACLE_JSON line) is the script's to fix."""
+    heads = tuple(f"the oracle {str(n).strip()!r} failed:" for n in disputed or [])
+    return [f for f in found if not (heads and f.startswith(heads))]
+
+
+def disputed_failing(judged_list: list[dict[str, Any]], disputed: Any) -> list[str]:
+    """The disputed checks among ``judged_list`` whose measured value the engine judged outside the tolerance (a check
+    not measured at all is not one: nothing was judged against the disputed expected value)."""
+    names = {str(n).strip() for n in disputed or []}
+    return [str(j["name"]) for j in judged_list if str(j.get("name")) in names and j.get("passed_by_engine") is False]
+
+
+def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[str] | None = None) -> str:
+    """What stands where a traceback would in the repair request. ``disputed``: the checks an earlier repair called wrong
+    (their proposals wait for a person); they are left out of what to fix, and the script is not to be changed for them."""
     declared_block = json.dumps(oracles, indent=2)
+    set_aside = (
+        "Checks an earlier repair already said are wrong themselves: " + ", ".join(repr(str(n)) for n in disputed) + ". "
+        "Their proposed changes are recorded and wait for a person. Do not change the script for these checks (do not "
+        "change how their values are computed to reach the declared expected value, skip them or hard-code their "
+        "values): they go on failing until a person decides. If one of them is listed below as not checked or not a "
+        "number, restore its honest measurement, nothing more. Fix only what is listed below.\n\n"
+    ) if disputed else ""
     return (
         "This script has NOT run its experiment yet: it was run with the environment variable FI_ORACLE=1 to check its "
         "oracles, and that check did not pass. The account of a crash above does not apply.\n\n"
         "The oracles the design declares (independent of the script's own numbers):\n" + declared_block + "\n\n"
+        + set_aside +
         "What went wrong:\n" + "\n".join(f"- {p}" for p in found) + "\n\n"
         "The contract: when FI_ORACLE is 1 the script must NOT run its sweep. It MEASURES each declared oracle on a small, fast "
         "case (seconds) and prints ONE line `ORACLE_JSON: {\"checks\": [{\"name\": <the declared name>, \"value\": <the "
@@ -300,14 +332,19 @@ def directive(oracles: list[dict[str, Any]], found: list[str]) -> str:
         "the checks were missing, add them for every declared oracle.\n\n"
         "The check itself can be what is wrong: an `expected` or `tolerance` the method cannot reach on that case (below its "
         "known error at that step or sample size), or a measurement that is not well defined (a convergence order read far "
-        "from the asymptotic regime, two methods compared on different quantities). You cannot change the protocol, and you must "
-        "not bend the script to hide it. Instead, besides `code`, return `oracle_change`: a list of {\"name\": <the declared "
+        "from the asymptotic regime, two methods compared on different quantities), or an `expected` value that is simply "
+        "miscalculated. You cannot change the protocol, and you must not bend the script to hide it: if the declared "
+        "expected value is wrong and the script measures the right one, do NOT change the code to match it. Instead return "
+        "`oracle_change`: a list of {\"name\": <the declared "
         "name>, \"expected\": <number>, \"tolerance\": <number>, \"tolerance_mode\": \"absolute\" | \"relative\", \"check\": "
         "<the corrected check, only if the measurement itself must change>, \"reason\": <the method's known error or the flaw, "
-        "with the numbers>}. A person decides whether to accept it; nothing changes without them.\n\n"
+        "with the numbers>}, and leave `code` empty: the script is kept as it is. Code returned together with an "
+        "`oracle_change` for a check not already listed as disputed is not used (it cannot be told apart from code bent to "
+        "that check); when other problems need a fix too, you are asked for it again without the disputed check. A person "
+        "decides whether to accept the change; nothing changes without them.\n\n"
         "Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT and "
-        "FI_REPLICATE_SEED, and the same final RESULT_JSON line. Return the whole script in `code`, one sentence in "
-        "`patch_summary`, and leave `give_up_reason` empty."
+        "FI_REPLICATE_SEED, and the same final RESULT_JSON line. When you fix the script, return the whole script in "
+        "`code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty."
     )
 
 
