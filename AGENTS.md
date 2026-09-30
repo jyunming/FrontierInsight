@@ -40,11 +40,13 @@ The project keeps a compiled, cross-referenced wiki at `wiki/` (the Karpathy LLM
 <https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f>), maintained by the maintainer with an `llm-wiki` skill that is not part of this repo. The point is to **compile
 understanding once and reuse it**, not to re-read the source every time. Without that skill, read the wiki the same
 way, and when a page is missing fall back to `dev/registry.md`, `docs/capabilities-reference.md` and the source;
-grow the wiki by hand (compiled pages, `[[...]]` links, an entry in `wiki/log.md`, never hand-editing `wiki/index.md`).
+grow the wiki by hand (compiled pages, `[[slug|Title]]` links, an entry in `wiki/log.md`, never hand-editing
+`wiki/index.md`). After adding or renaming a page, rebuild the index with `python scripts/wiki_sync_index.py`;
+`--check` reports a stale index or a link to a page that does not exist.
 
 - **Check the wiki first.** Before answering a question or starting a task, look for the relevant page in
   `wiki/index.md` and follow `[[wiki-link]]`s out to about two hops for context.
-- **Cite it.** When a wiki page backs an answer, reference it as `[[Page Title]]`.
+- **Cite it.** When a wiki page backs an answer, reference it as `[[slug|Page Title]]` (links resolve by file name).
 - **Say when it's missing.** If the wiki has no answer, say so, then read `wiki/raw/` or the real source and grow the
   wiki with `llm-wiki ingest` — don't silently answer from a stale or absent page.
 - **Compile over search.** Reuse compiled knowledge in `wiki/*.md` rather than re-reading the same source files
@@ -54,7 +56,8 @@ grow the wiki by hand (compiled pages, `[[...]]` links, an entry in `wiki/log.md
 Structure: `wiki/index.md` (auto-rebuilt routing layer — never hand-edit), `wiki/{page}.md` (compiled pages,
 cross-referenced), `wiki/raw/` (immutable source drop zone), `wiki/log.md` (ingest history). Commands (invoke via
 `llm-wiki <command>`): `init`, `ingest <source>`, `query <question>`, `lint` (broken links / orphan pages), `sync`
-(rebuild index.md), `export <template>`, `qmd-index` / `lancedb-sync` (optional hybrid search / vector index).
+(rebuild index.md — in this repo use `scripts/wiki_sync_index.py` instead: the skill's own `sync` writes a Korean
+header that fails `--check`), `export <template>`, `qmd-index` / `lancedb-sync` (optional hybrid search / vector index).
 
 ## Run / develop
 

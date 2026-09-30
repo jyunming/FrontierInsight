@@ -12,4 +12,4 @@ For every source a literature search retrieves, FI keeps why it was kept or drop
 
 The file is covered by the trace's seal, so a verdict edited afterwards shows as a gap. No interface displays it; open the file in the quest folder (the web file list and zip skip `.fi/`).
 
-Related: [[Oracle provenance]] (only sources the quest retrieved can back an expected value).
+Related: [[oracle-provenance|Oracle provenance]] (only sources the quest retrieved can back an expected value).

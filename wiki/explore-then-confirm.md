@@ -17,7 +17,7 @@ A study whose design was tuned after looking at results can fool itself. With `e
 
 ## During the confirm run
 
-A request to redesign or read more literature is not followed; a protocol change is an amendment (it needs your approval, see [[How FI judges correctness]]); running on the confirm data twice is recorded as reuse.
+A request to redesign or read more literature is not followed; a protocol change is an amendment (it needs your approval, see [[how-fi-judges-correctness|How FI judges correctness]]); running on the confirm data twice is recorded as reuse.
 
 ## What the result says
 
@@ -27,4 +27,4 @@ A request to redesign or read more literature is not followed; a protocol change
 
 YAML only (`engine.phased: true`): there is no CLI flag, interview question, web switch or VS Code switch. The result looks the same in all three.
 
-Related: [[Study types]], [[Scoring criteria]].
+Related: [[study-types|Study types]], [[scoring-criteria|Scoring criteria]].

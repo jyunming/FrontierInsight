@@ -10,9 +10,9 @@ For a quest that runs code, the plan states the model that produces the numbers 
 - a one-sentence **summary**, the **assumptions**, and **where it holds**;
 - the **equations** E1, E2, ...: each with its formula, its role (`generates`: the simulation computes the data with it; `analyses`: used on the results) and its source (a retrieved paper `[n]`, or a derivation).
 
-`plan.md` shows it under *The model behind the numbers*, next to *The sources this quest found* (numbered). Each oracle follows with its kind, expected value and where that value comes from ([[Oracle provenance]]). The plan's *Checks already made* list names what is missing: no model, no equations, an equation with no role or no checkable source, or an oracle of an unknown kind.
+`plan.md` shows it under *The model behind the numbers*, next to *The sources this quest found* (numbered). Each oracle follows with its kind, expected value and where that value comes from ([[oracle-provenance|Oracle provenance]]). The plan's *Checks already made* list names what is missing: no model, no equations, an equation with no role or no checkable source, or an oracle of an unknown kind.
 
-Each `generates` equation must be labelled in the simulation code (`# E1`); see [[Engine-callable simulations]].
+Each `generates` equation must be labelled in the simulation code (`# E1`); see [[engine-callable-simulations|Engine-callable simulations]].
 
 ## Using it
 
@@ -20,4 +20,4 @@ Each `generates` equation must be labelled in the simulation code (`# E1`); see 
 - Web: the Plan panel on the quest page (edit, or ask for a change); the Approve button for an amendment.
 - VS Code: `@fi /plan <id>` opens it, `@fi /plan <id> <change>` rewrites it, `@fi /approve-amendment <id>`.
 
-Related: [[How FI judges correctness]], [[Scoring criteria]].
+Related: [[how-fi-judges-correctness|How FI judges correctness]], [[scoring-criteria|Scoring criteria]].

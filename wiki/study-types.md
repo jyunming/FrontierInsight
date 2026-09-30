@@ -12,11 +12,11 @@ Every plan says which of two kinds of study it is (`study_type` in the plan's de
 
 ## What a best-design plan must say
 
-The plan's "What is being optimised" section lists the objective (a quantity to minimise or maximise), the design variables with their ranges, what stays fixed, the constraints (`quantity <= limit`), a baseline with its source, the numerical settings for the search and the finer settings the best designs are checked again at, the evaluation budget, the search method (when none is given FI picks one: try every combination when the variables take few values and they all fit the budget; with a coarse scan, search the whole range first and then locally from the best point found; otherwise search locally inside the ranges from several starting points) and how much better a design must be to count as better (by default: more than the numerical error of the two designs). See [[Scoring criteria]] for the separate question of whether the code itself got better.
+The plan's "What is being optimised" section lists the objective (a quantity to minimise or maximise), the design variables with their ranges, what stays fixed, the constraints (`quantity <= limit`), a baseline with its source, the numerical settings for the search and the finer settings the best designs are checked again at, the evaluation budget, the search method (when none is given FI picks one: try every combination when the variables take few values and they all fit the budget; with a coarse scan, search the whole range first and then locally from the best point found; otherwise search locally inside the ranges from several starting points) and how much better a design must be to count as better (by default: more than the numerical error of the two designs). See [[scoring-criteria|Scoring criteria]] for the separate question of whether the code itself got better.
 
 ## How the type is decided
 
-1. When the question could be either, the clarify step asks one question: measure, find the best design, or let the plan decide ([[Pauses]]).
+1. When the question could be either, the clarify step asks one question: measure, find the best design, or let the plan decide ([[pauses|Pauses]]).
 2. At the plan step FI sets the type to find-the-best-design when you answered so, or when the topic plainly asks for a best design.
 3. The engine runs the search itself (`core/optimise.py`, `core/optimise_search.py`): it evaluates the baseline first, then the optional coarse scan, then tries one design after another within `starts × per_start` evaluations and `execution.timeout_s`, calling the simulation's `run_cell` (or `run_trial`) in a process of its own. FI alone writes `raw/optimisation_ledger.jsonl` and `results/best_design.json`; infeasible and failed designs are never chosen; the best design is not yet recomputed at the finer check settings. A best-design plan that cannot start (no block or budget, one script, trials on a cluster) stops before anything is written or run, on every resume; FI never quietly runs a search as a sweep.
 
@@ -28,4 +28,4 @@ The plan's "What is being optimised" section lists the objective (a quantity to 
 - Web: the Plan box on the quest page.
 - VS Code: `@fi /plan <id> <change>`.
 
-Related: [[Explore then confirm]], [[How FI judges correctness]], [[Literature screening record]].
+Related: [[explore-then-confirm|Explore then confirm]], [[how-fi-judges-correctness|How FI judges correctness]], [[literature-screening-record|Literature screening record]].

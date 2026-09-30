@@ -313,6 +313,9 @@ same PR that adds, splits or renames one.
 - `core/bridge_path.py`, `vscode-frontier-insight/src/bridge-path.ts` — the canonical persistent-bridge socket path,
   kept identical on both sides. A second VS Code window open at the same time binds `<path>-<pid>` instead
   (`persistent-bridge.ts` `listen`), and its `/update` / `/generate` terminals are handed that address.
+- `scripts/wiki_sync_index.py` — rebuilds `wiki/index.md` from the pages (`[[slug|Title]]`, grouped by front-matter
+  `type`); `--check` reports a stale index or a wiki link to a missing page. `tests/test_wiki_sync_index.py` and the
+  `wiki-check` CI job (runs when `wiki/**` changes) keep the repo's wiki index current.
 
 ## Prompts (`agents/*.md`)
 
