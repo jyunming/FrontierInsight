@@ -63,6 +63,8 @@ _ARXIV_PREFIX = "10.48550/"
 #: What the notices' ``source`` field says, in words a reader knows.
 _SOURCE_NAMES = {"retraction-watch": "Retraction Watch", "publisher": "the publisher"}
 _UNREADABLE_DOI = "the DOI could not be read"
+#: A citation in brackets ([1], [2, 3], [W1]): taken out when two texts are compared.
+_CITATION_RE = re.compile(r"\[[^\]]*\]")
 
 
 async def _sleep(seconds: float) -> None:
@@ -102,9 +104,11 @@ def _verdict(item: dict[str, Any]) -> dict[str, Any]:
     notices = [_notice(u) for u in (updates or []) if isinstance(u, dict)]
     if len(notices) != len(updates or []):
         return _not_checked("Crossref's answer could not be read")
-    # By date, oldest first; a notice with no date keeps its place before the dated ones.
+    # By date, oldest first. On the safe side: a withdrawing notice with no date counts as the latest, a
+    # reinstatement with no date as the earliest, and on one day the withdrawal counts as the later.
     relevant = sorted((n for n in notices if n["type"] in RETRACTED_TYPES or n["type"] == _REINSTATED),
-                      key=lambda n: n["date"])
+                      key=lambda n: (n["date"] or ("9999" if n["type"] in RETRACTED_TYPES else ""),
+                                     n["type"] in RETRACTED_TYPES))
     if not relevant or relevant[-1]["type"] == _REINSTATED:
         why = "Crossref lists no retraction" if not relevant else (
             f"retracted, then reinstated on {relevant[-1]['date'] or 'a later date'}")
@@ -125,10 +129,11 @@ async def _ask(client: httpx.AsyncClient, batch: list[str]) -> tuple[dict[str, d
     for attempt in (1, 2):
         try:
             r = await client.get(CROSSREF_WORKS, params=params)
-        except httpx.TimeoutException:
-            return None, "Crossref did not answer in time", True
-        except Exception:  # noqa: BLE001 -- a lookup never stops a quest
-            return None, "Crossref could not be reached", True
+        except httpx.TimeoutException as e:
+            return None, f"Crossref did not answer in time ({type(e).__name__})", True
+        except Exception as e:  # noqa: BLE001 -- a lookup never stops a quest
+            # The kind of failure (a refused connection, a proxy, a certificate) is what tells a network apart.
+            return None, f"Crossref could not be reached ({type(e).__name__})", True
         if r.status_code == 429 and attempt == 1:
             try:
                 wait = float(r.headers.get("retry-after") or _RETRY_WAIT_S)
@@ -138,8 +143,7 @@ async def _ask(client: httpx.AsyncClient, batch: list[str]) -> tuple[dict[str, d
                 await _sleep(max(wait, 0.5))
                 continue
         break
-    if r is None:  # not reached: every try either answers or returns
-        return None, "Crossref could not be reached", True
+    assert r is not None  # every try either answers or returns
     if r.status_code != 200:
         return None, ("Crossref asked for fewer requests" if r.status_code == 429
                       else f"Crossref answered with an error (status {r.status_code})"), False
@@ -273,9 +277,10 @@ def summary_line(rows: list[dict[str, Any]]) -> str:
     tail = f"; {n_none} without a DOI {'was' if n_none == 1 else 'were'} not looked up" if n_none else ""
     if not looked:
         return f"No source had a DOI to check for retractions ({len(rows)} source(s))"
-    reasons = Counter(str(r.get("why") or "no answer") for r in by[NOT_CHECKED]).most_common(1)
-    reason = f" (mostly: {reasons[0][0]})" if len(by[NOT_CHECKED]) > 1 and reasons else (
-        f" ({reasons[0][0]})" if reasons else "")
+    reasons = Counter(str(r.get("why") or "no answer") for r in by[NOT_CHECKED])
+    reason = ""
+    if reasons:
+        reason = f" ({'mostly: ' if len(reasons) > 1 else ''}{reasons.most_common(1)[0][0]})"
     if len(by[NOT_CHECKED]) == looked:
         return f"Could not check {looked} source{'s' if looked != 1 else ''} for retractions{reason}{tail}"
     parts: list[str] = []
@@ -332,10 +337,18 @@ def apply_to_claims(
         claim.update(basis="unsupported", quote="", evidence=why(label) + "; it cannot support a claim")
         changed += 1
     if citing and same:
+        def bare(text: str) -> str:
+            return " ".join(_CITATION_RE.sub(" ", text).split()).strip(" .").lower()
+
+        added: set[str] = set()  # a sentence citing two retracted sources is added once
         for label in retracted:
             for sentence in citing.get(label) or []:
-                if any(c.get("basis") == "unsupported" and same(str(c.get("claim") or ""), sentence) for c in out):
+                if bare(sentence) in added or any(
+                        c.get("basis") == "unsupported"
+                        and (same(str(c.get("claim") or ""), sentence) or bare(str(c.get("claim") or "")) == bare(sentence))
+                        for c in out):
                     continue
+                added.add(bare(sentence))
                 out.append({"claim": sentence, "basis": "unsupported",
                             "citation_index": int(label) if label.isdigit() else label, "quote": "",
                             "evidence": why(label) + "; remove the citation"})

@@ -13743,6 +13743,8 @@ class Engine:
                 "quote": quote,
                 "evidence": evidence,
             })
+        # The rules below add claims of their own; an empty answer from the check is judged before them.
+        model_found_none = not claims
         # A source with nothing but its title cannot back what a sentence says
         # beyond it, whatever the check made of the quote.
         claims, held = _apply_title_only_rule(paper_text, sources, claims)
@@ -13754,13 +13756,13 @@ class Engine:
         claims, withdrawn = _retractions.apply_to_claims(claims, sources, citing, _same_statement)
         if withdrawn:
             self._log.info("[claim_check] %d claim(s) rest on a retracted source; marked unsupported", withdrawn)
-        unsupported =[c["claim"] for c in claims if c["basis"] == "unsupported"]
+        unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         # A paper with a real body that yields zero claims is suspicious, not
         # clean: the check almost certainly missed something rather than the
         # paper genuinely making no substantive claims. Thresholded on the
         # BODY text actually sent (not the raw file), so a short abstract-only
         # draft isn't flagged for having little to check.
-        suspicious_empty = parsed_ok and not claims and len(paper_text) > 2000
+        suspicious_empty = parsed_ok and model_found_none and len(paper_text) > 2000
         failed = ""
         if not parsed_ok:
             failed = f"the grounding reply did not name a claims list: {str(parsed)[:200]!r}"

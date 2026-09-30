@@ -172,13 +172,17 @@ def test_the_run_log_line_is_one_plain_sentence() -> None:
     line = retractions.summary_line(rows)
     assert "\n" not in line
     assert line == ("Checked 4 sources for retractions: 1 retracted (The Lancet paper), "
-                    "2 could not be checked (mostly: Crossref could not be reached), 1 not retracted; "
+                    "2 could not be checked (Crossref could not be reached), 1 not retracted; "
                     "1 without a DOI was not looked up")
     assert retractions.summary_line([{"title": "B", "status": "not_retracted"}]) == (
         "Checked 1 source for retractions: none retracted")
     # Nothing answered: the line does not say "checked".
     assert retractions.summary_line(rows[2:4]) == (
-        "Could not check 2 sources for retractions (mostly: Crossref could not be reached)")
+        "Could not check 2 sources for retractions (Crossref could not be reached)")
+    # Two different reasons: the commoner one, said to be only the commoner one.
+    mixed = rows[2:4] + [{"title": "F", "status": "not_checked", "why": "Crossref has no record of this DOI"}]
+    assert retractions.summary_line(mixed) == (
+        "Could not check 3 sources for retractions (mostly: Crossref could not be reached)")
     assert retractions.summary_line([]) == ""
 
 
@@ -524,3 +528,57 @@ def test_a_retracted_foundational_work_is_never_asked_for() -> None:
         "doi": "10.1234/withdrawn", "foundational": "cited by 6 of the retrieved papers", "retraction": "retracted"}}]
     assert _foundational_write_block(lit) == ""
     assert _foundational_review_block(lit, "# T\n\nNothing cited.\n") == ""
+
+
+# --- after the second review ------------------------------------------------------------------
+
+def test_a_short_sentence_or_one_citing_two_retracted_sources_is_added_once() -> None:
+    from core.engine import _citing_sentences, _same_statement
+
+    paper = "# T\n\n## Introduction\n\nVaccines cause autism [1, 3].\n\n## References\n\n1. A.\n3. C.\n"
+    sources = {"1": ({"title": "A", "retraction": "retracted"}, "t"), "3": ({"title": "C", "retraction": "retracted"}, "t")}
+    claims = [{"claim": "Vaccines cause autism", "basis": "citation", "citation_index": 1, "quote": "q", "evidence": "e"}]
+    out, changed = retractions.apply_to_claims(claims, sources, _citing_sentences(paper), _same_statement)
+    assert changed == 1 and len(out) == 1 and out[0]["basis"] == "unsupported"
+    out, changed = retractions.apply_to_claims([], sources, _citing_sentences(paper), _same_statement)
+    assert changed == 1 and len(out) == 1
+
+
+def test_an_undated_retraction_counts_as_the_latest() -> None:
+    item = {"DOI": CLEAN_DOI.lower(), "updated-by": [
+        {"type": "reinstatement", "DOI": "10.1/r", "updated": {"date-time": "2021-05-01T00:00:00Z"}},
+        {"type": "retraction", "DOI": "10.1/x"},
+    ]}
+    out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=_crossref([item])))
+    assert out[CLEAN_DOI.lower()]["status"] == retractions.RETRACTED
+
+
+def test_the_reason_names_the_kind_of_network_failure() -> None:
+    out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=_down()))
+    assert out[CLEAN_DOI.lower()]["why"] == "Crossref could not be reached (ConnectError)"
+
+
+def test_an_empty_answer_from_the_check_is_still_a_failure_when_a_rule_adds_claims(tmp_path: Path) -> None:
+    eng = _claim_engine(tmp_path)
+    paper = tmp_path / "paper" / "paper.md"
+    paper.parent.mkdir(parents=True)
+    body = "The incidence rose steadily among children over the whole decade studied here [1]. " * 40
+    paper.write_text(f"# T\n\n## Introduction\n\n{body}\n\n## References\n\n1. A.\n", encoding="utf-8")
+    lit = [{"content": "Some text of the source.", "metadata": {"title": "A", "doi": RETRACTED_DOI, "source": "crossref",
+                                                               "retraction": "retracted"}}]
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001, ARG001
+        return json.dumps({"claims": [], "summary": "nothing"})
+
+    eng._chat = fake_chat  # type: ignore[method-assign]
+    out = asyncio.run(eng._node_claim_check({"topic": "t", "paper_md": str(paper), "literature": lit}))  # type: ignore[arg-type]
+    assert out["claim_grounding"]["status"] == "unknown"
+    assert out["claim_grounding"]["total"] >= 1  # the rule's claim is still there
+
+
+@pytest.mark.skipif(__import__("os").environ.get("FI_TEST_ALLOW_NETWORK") != "1",
+                    reason="a live check against Crossref; set FI_TEST_ALLOW_NETWORK=1")
+def test_live_crossref_still_reports_a_known_retraction() -> None:
+    out = asyncio.run(retractions.check_dois([RETRACTED_DOI, CLEAN_DOI]))
+    assert out[RETRACTED_DOI.lower()]["status"] == retractions.RETRACTED
+    assert out[CLEAN_DOI.lower()]["status"] == retractions.NOT_RETRACTED
