@@ -23,9 +23,10 @@ expected value and its own tolerance can always be made to pass, which is what a
 reports a check as failed itself is still a problem.) For an invariant (conservation, monotonicity) the value is the worst
 violation observed and the expected value is 0.
 
-An oracle may also name a **case** (the settings of one run, e.g. ``{"dt": 0.1}``) and a **measure** (which number the
-simulation returns for it). The engine then calls the simulation function (``run_trial``/``run_cell``) itself on that case
-and reads the measure from what it returns: the number never passes through anything the script wrote for the check, so a
+An oracle may also name a **case** (the settings of one run, e.g. ``{"dt": 0.1}``) and a **measure** (how its number is
+computed from what the simulation returns: one returned name, or a formula of them, :mod:`core.oracle_forms`). The engine
+then calls the simulation function (``run_trial``/``run_cell``) itself on that case and computes the measure from what it
+returns: the number never passes through anything the script wrote for the check, so a
 script whose own ``oracle()`` returns the closed form without simulating cannot pass. An oracle without a case falls back to
 the script's ``oracle()``; the record says which of the two produced each value, and a value the script reported is not
 counted as independent evidence.

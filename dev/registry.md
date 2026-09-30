@@ -49,6 +49,19 @@ same PR that adds, splits or renames one.
   rewrote the simulation) warns, and under `rigor_profile:
   research` stops (`equation_labels` pause); `Engine._equation_label_gaps` (called by `_write_evidence`) passes them to
   `evidence.assess(equation_label_gaps=...)`, a gap below `independently_validated`.
+- `core/oracle_forms.py` — how an oracle is written so the plan and the simulation mean one number by it. The formula
+  language of `measure` (`evaluate`, `problem`, `names`, `is_name`, `FUNCTIONS`; parsed with `ast` and walked, never
+  run; a returned name alone is the old form), applied by `trial_runner.measure_oracles`. One numeric form per kind
+  (`VIOLATION_KINDS` expect 0, `QUANTITY_KINDS` the quantity itself): `enforce` / `apply_to_plan` rewrite what can be
+  rewritten without changing a verdict and return precise requests for the rest (`request`), `describe_changes` says
+  what a revision changed. `mismatch` / `mismatches` / `dry_run_request` read the oracle gate's first measurement as a
+  test run of the checks; `passes_on` says whether a changed check passes on the test run's own values. Engine side:
+  `Engine._guide_oracles` / `_hold_oracle_forms` (plan time, from `_node_plan`, once per quest:
+  `.fi/oracle_guidance.json`) and `Engine._revise_after_dry_run` (from `_oracle_gate`, once: `.fi/oracle_dry_run.json`;
+  its changes and removals go through `_oracles_added_write` with a `reason` and `removed` to the plan stop before the
+  freeze); both ask the plan through `Engine._revise_checks_only`, which keeps only the changes to `protocol.oracles`.
+  The plan.md section is `HEADING`; `plan.raw_design_block` / `plan.edit_design_block` read and edit the block as
+  written, `plan.add_to_section` / `plan.refresh_model_section` keep the prose in step.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the
   script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by

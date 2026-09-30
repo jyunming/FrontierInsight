@@ -1,0 +1,552 @@
+"""How a check against a known answer (an oracle, :mod:`core.oracle_check`) is written, so that the plan and the
+simulation cannot mean two different numbers by it.
+
+Two live quests failed on the same kind of mistake. A power-conservation check expected 1 (the ratio of output to input)
+while the simulation measured 0 (the violation): the same physics in two representations, and the repair blamed the
+check. A second quest expected a truncated 0.367879 within 1e-12, and step-size limits as the answers at a finite step.
+The rule that an invariant's value is its worst violation, expected 0, existed only in a prompt. This module is where the
+engine holds it:
+
+* **One numeric form per kind.** :data:`VIOLATION_KINDS` (a conserved quantity or other invariant, a symmetry or
+  scaling law, an independent second implementation): the number is the worst absolute (or declared relative)
+  violation and the expected value is 0. :data:`QUANTITY_KINDS` (a special or limiting case, a published benchmark
+  value, a convergence rate): the number is the quantity itself, with its expected value and tolerance.
+  :func:`enforce` rewrites a check that does not fit when the rewrite cannot change its verdict (a violation-kind check
+  whose number is a formula and whose expected value is not 0 becomes ``abs((formula) - expected)`` expecting 0), and
+  otherwise returns a precise request for the plan.
+* **How the number is computed** is part of the protocol: an oracle's ``measure`` is a formula of the names the
+  simulation's ``run_cell``/``run_trial`` returns (``abs(P_out - P_in) / P_in``), in the small language of
+  :func:`evaluate` (numbers, the returned names, ``+ - * / ** %``, and the functions in :data:`FUNCTIONS`), parsed with
+  :mod:`ast` and never run as code. A ``measure`` that is one returned name is the formula of that name, so every
+  oracle written before this keeps working. The engine applies the formula to what the simulation returned on the
+  oracle's case (:func:`core.trial_runner.measure_oracles`): the script never decides the representation.
+* **A test run of the checks before the study** (:func:`mismatch`): the oracle gate's first measurement, before the
+  protocol is frozen, is read for a number whose size says the plan and the simulation mean different things by the
+  check (a conservation check expecting 1 that measures about 0, a value orders of magnitude from its expected one), so
+  the plan is asked once to look at the definition before any repair of the script is spent on it.
+"""
+
+from __future__ import annotations
+
+import ast
+import math
+import re
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+from typing import Any, Callable
+
+from . import oracle_check as _oracle
+
+#: The kinds whose number is the worst violation of a rule, expected to be 0.
+VIOLATION_KINDS = ("invariant", "symmetry", "second_implementation")
+#: The kinds whose number is the quantity itself, compared with a known value.
+QUANTITY_KINDS = ("special_case", "published_value", "convergence_rate")
+
+MAX_FORMULA_CHARS = 400
+_MAX_NODES = 150
+
+
+def _variadic(fn: Callable[..., float]) -> Callable[..., float]:
+    def call(*args: float) -> float:
+        if not args:
+            raise ValueError("it is given nothing")
+        return float(fn(args))
+    return call
+
+
+#: The functions a formula may call, and nothing else.
+FUNCTIONS: dict[str, Callable[..., float]] = {
+    "abs": abs, "min": _variadic(min), "max": _variadic(max), "sum": _variadic(math.fsum),
+    "sqrt": math.sqrt, "exp": math.exp, "log": math.log, "log10": math.log10, "log2": math.log2,
+    "sin": math.sin, "cos": math.cos, "tan": math.tan, "asin": math.asin, "acos": math.acos, "atan": math.atan,
+    "atan2": math.atan2, "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh, "hypot": math.hypot,
+    "floor": math.floor, "ceil": math.ceil,
+}
+#: The names a formula may use that are not returned by the simulation.
+CONSTANTS: dict[str, float] = {"pi": math.pi}
+
+_BINARY: dict[type, Callable[[float, float], float]] = {
+    ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
+    # math.pow, not **: a negative base to a fractional power is an error here, never a complex number.
+    ast.Div: lambda a, b: a / b, ast.Pow: math.pow, ast.Mod: lambda a, b: a % b,
+}
+_UNARY: dict[type, Callable[[float], float]] = {ast.USub: lambda a: -a, ast.UAdd: lambda a: +a}
+_WHAT: dict[type, str] = {
+    ast.Attribute: "a dot (an attribute such as x.y)", ast.Subscript: "an index (such as x[0])",
+    ast.Compare: "a comparison", ast.BoolOp: "and/or", ast.IfExp: "if/else", ast.Lambda: "a lambda",
+    ast.List: "a list", ast.Tuple: "a tuple", ast.Dict: "a mapping", ast.Set: "a set",
+    ast.ListComp: "a comprehension", ast.GeneratorExp: "a comprehension", ast.Starred: "a *",
+    ast.NamedExpr: "an assignment",
+}
+
+FUNCTION_LIST = ", ".join(sorted(FUNCTIONS))
+#: How a formula may be written, for the sentences a person and the plan read.
+LANGUAGE = (
+    "numbers, the names the simulation function returns, + - * / ** %, parentheses and the functions "
+    f"{FUNCTION_LIST} (and the constant pi)"
+)
+
+
+def _tree(text: Any) -> tuple[ast.Expression | None, str]:
+    """The parsed formula, or ``(None, why it cannot be read)``."""
+    text = str(text if text is not None else "").strip()
+    if not text:
+        return None, "it is empty"
+    if len(text) > MAX_FORMULA_CHARS:
+        return None, f"it is longer than {MAX_FORMULA_CHARS} characters"
+    if re.search(r"[\n\r#\x00]", text):
+        return None, "it runs over more than one line or holds a comment"
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as e:
+        return None, f"it is not a formula ({e.msg})"
+    except (ValueError, RecursionError, MemoryError):
+        return None, "it is not a formula"
+    nodes = list(ast.walk(tree))
+    if len(nodes) > _MAX_NODES:
+        return None, "it is too long a formula"
+    calls = {id(n.func) for n in nodes if isinstance(n, ast.Call)}
+    for node in nodes:
+        if isinstance(node, (ast.Expression, ast.Load)) or type(node) in _BINARY or type(node) in _UNARY:
+            continue
+        if isinstance(node, (ast.BinOp, ast.UnaryOp)):
+            op = node.op
+            if type(op) not in _BINARY and type(op) not in _UNARY:
+                return None, f"it uses the operator {type(op).__name__}, which a formula here may not"
+            continue
+        if isinstance(node, ast.Name):
+            if id(node) in calls and node.id not in FUNCTIONS:
+                return None, f"it calls {node.id}(), which is not one of {FUNCTION_LIST}"
+            if id(node) not in calls and node.id in FUNCTIONS:
+                return None, f"it uses the function {node.id} without calling it"
+            continue
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                return None, f"it holds {node.value!r}, which is not a number"
+            continue
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name):
+                return None, "it calls something that is not one of the functions a formula may use"
+            if node.keywords:
+                return None, f"it calls {node.func.id}() with a named argument"
+            continue
+        return None, f"it uses {_WHAT.get(type(node), type(node).__name__)}, which a formula here may not"
+    return tree, ""
+
+
+def problem(text: Any) -> str | None:
+    """Why ``text`` cannot be read as a formula, or ``None`` when it can."""
+    tree, why = _tree(text)
+    return None if tree is not None else why
+
+
+def names(text: Any) -> list[str]:
+    """The names a formula takes from what the simulation returns (not its functions or constants), in order; empty
+    when it cannot be read."""
+    tree, _ = _tree(text)
+    if tree is None:
+        return []
+    calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+    found = [n for n in ast.walk(tree) if isinstance(n, ast.Name) and id(n) not in calls and n.id not in CONSTANTS]
+    found.sort(key=lambda n: (n.lineno, n.col_offset))  # as written, left to right
+    return list(dict.fromkeys(n.id for n in found))
+
+
+def is_name(text: Any) -> bool:
+    """Whether ``text`` is one returned name alone (the form every oracle had before formulas)."""
+    tree, _ = _tree(text)
+    return tree is not None and isinstance(tree.body, ast.Name)
+
+
+@dataclass
+class Evaluated:
+    """What a formula gave on one set of returned values: ``value`` (finite), or why not."""
+    value: float | None = None
+    unreadable: str = ""
+    missing: list[str] = field(default_factory=list)
+    problem: str = ""
+
+
+def evaluate(text: Any, values: dict[str, Any]) -> Evaluated:
+    """``text`` computed from ``values`` (what the simulation returned). Never runs code: the parsed tree is walked
+    here, and each constant is a float, so no exponent can grow an integer without bound."""
+    tree, why = _tree(text)
+    if tree is None:
+        return Evaluated(unreadable=why)
+    missing = [n for n in names(text) if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
+    if missing:
+        return Evaluated(missing=missing)
+
+    def real(result: Any) -> float:
+        if isinstance(result, complex) or isinstance(result, bool) or not isinstance(result, (int, float)):
+            raise ValueError("it gives a number that is not real")
+        return float(result)
+
+    def walk(node: ast.AST) -> float:
+        if isinstance(node, ast.Expression):
+            return walk(node.body)
+        if isinstance(node, ast.Constant):
+            return real(node.value)
+        if isinstance(node, ast.Name):
+            return real(CONSTANTS[node.id] if node.id in CONSTANTS and node.id not in values else values[node.id])
+        if isinstance(node, ast.UnaryOp):
+            return real(_UNARY[type(node.op)](walk(node.operand)))
+        if isinstance(node, ast.BinOp):
+            return real(_BINARY[type(node.op)](walk(node.left), walk(node.right)))
+        if isinstance(node, ast.Call):
+            return real(FUNCTIONS[node.func.id](*[walk(a) for a in node.args]))  # type: ignore[union-attr]
+        raise ValueError(f"cannot compute {type(node).__name__}")
+
+    try:
+        value = walk(tree)
+        finite = math.isfinite(value)
+    except ZeroDivisionError:
+        return Evaluated(problem="it divides by zero")
+    except OverflowError:
+        return Evaluated(problem="the number is too large")
+    except (ValueError, TypeError, RecursionError) as e:
+        return Evaluated(problem=f"it cannot be computed ({e})")
+    if not finite:
+        return Evaluated(problem=f"it gives {value}")
+    return Evaluated(value=value)
+
+
+# --- one numeric form per kind -----------------------------------------------------------------------------------------
+
+
+def _num(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _fmt(value: float) -> str:
+    return f"{value:g}" if abs(value) >= 1e-4 or value == 0 else f"{value:.3g}"
+
+
+def _literal(value: float) -> str:
+    """``value`` as a formula writes it, exactly (``repr`` of the float, without a trailing ``.0``)."""
+    text = repr(float(value))
+    return text[:-2] if text.endswith(".0") else text
+
+
+def written_precision(value: Any) -> tuple[int, float] | None:
+    """``(significant digits, half a unit of the last one)`` of ``value`` as written in the plan (the shortest form
+    that reads back as the same float), or ``None`` for 0 or a value that is not a number."""
+    number = _num(value)
+    if number is None or number == 0 or number.is_integer():
+        return None  # a whole number (101325, 299792458) is exact as written
+    if Fraction(number).denominator <= 2 ** 20:
+        return None  # a short binary fraction (0.015625 = 1/64) is exact as written
+    try:
+        dec = Decimal(repr(number)).normalize()
+    except InvalidOperation:
+        return None
+    digits = len(dec.as_tuple().digits)
+    exponent = dec.as_tuple().exponent
+    if not isinstance(exponent, int):
+        return None
+    return digits, 0.5 * 10.0 ** exponent
+
+
+#: A value written with at least this many significant digits and fewer than a float holds reads as a truncated
+#: decimal (0.367879 for exp(-1)), not an exact one (0.5, 2, 0.25).
+_TRUNCATED_DIGITS = (5, 13)
+
+
+def _criteria_on(protocol: dict[str, Any] | None, name: str, *, value_only: bool) -> list[str]:
+    """The criteria that read this check (only those that take its measured value itself, ``use: value``, with
+    ``value_only``): a rewrite would change the number they are judged on."""
+    items = protocol.get("criteria") if isinstance(protocol, dict) else None
+    out = []
+    for c in items if isinstance(items, list) else []:
+        if (isinstance(c, dict) and str(c.get("oracle") or "").strip().lower() == name.strip().lower()
+                and (not value_only or str(c.get("use") or "").strip().lower() == "value")):
+            out.append(str(c.get("name") or "?"))
+    return out
+
+
+# A returned key written with hyphens (``l2-ratio``) reads as a subtraction: FI cannot tell the two apart.
+_HYPHEN_KEY_RE = re.compile(r"[A-Za-z_][\w]*(?:-[\w]+)+")
+
+
+@dataclass
+class Enforced:
+    """What :func:`enforce` made of a protocol's checks: the checks (rewritten where that was safe), a sentence for
+    each rewrite, and a request for the plan for each check that needs one."""
+    oracles: list[dict[str, Any]]
+    rewrites: list[str] = field(default_factory=list)
+    requests: list[str] = field(default_factory=list)
+
+
+def _describe(kind: str | None) -> str:
+    return _oracle.KINDS.get(kind or "", "check")
+
+
+def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforced:
+    """Hold each declared check to its kind's numeric form (see the module docstring). A check of an unrecognised
+    kind is left alone (the plan's notes already say its kind is none of the six). ``fi_runs``: FI runs the simulation
+    on each check's case itself and computes its formula (two scripts, the trial contract); when it does not, the
+    script reports each check's number by name, so a rewritten formula would not be applied and nothing is rewritten."""
+    oracles = [dict(o) for o in _oracle.declared(protocol)]
+    out = Enforced(oracles=oracles)
+    names_seen = [str(o["name"]).strip().lower() for o in oracles]
+    for oracle in oracles:
+        name = str(oracle["name"]).strip()
+        kind = _oracle.kind_of(oracle)
+        expected = _num(oracle.get("expected"))
+        tolerance = _num(oracle.get("tolerance"))
+        relative = str(oracle.get("tolerance_mode") or "").strip().lower() == "relative"
+        raw_measure = oracle.get("measure")
+        measure = raw_measure.strip() if isinstance(raw_measure, str) else ""
+        has_case = isinstance(oracle.get("case"), dict)
+        if measure and has_case and not is_name(measure) and problem(measure) and re.search(r"[()+\-*/%]", measure):
+            out.requests.append(
+                f"The check {name!r} computes its number as `{measure}`, which cannot be read ({problem(measure)}): write "
+                f"`measure` with {LANGUAGE}."
+            )
+            continue
+        if kind in VIOLATION_KINDS and expected is not None and expected != 0:
+            what = _describe(kind)
+            formula = has_case and measure and not is_name(measure) and problem(measure) is None
+            users = _criteria_on(protocol, name, value_only=not relative)
+            new = (f"abs(({measure}) - {_literal(expected)})" if expected > 0
+                   else f"abs(({measure}) + {_literal(-expected)})") + (f" / {_literal(abs(expected))}" if relative else "")
+            why_not = (
+                "FI does not run this quest's checks itself (the script reports each number), so a formula would not be "
+                "applied" if not fi_runs else
+                f"its `measure` `{measure}` may be one returned name written with hyphens" if formula and _HYPHEN_KEY_RE.fullmatch(measure) else
+                "two checks have this name" if names_seen.count(name.lower()) > 1 else
+                "the rewritten formula would be too long" if formula and problem(new) else ""
+            )
+            if formula and not users and not why_not and tolerance is not None and tolerance >= 0:
+                oracle.update(measure=new, expected=0, tolerance=tolerance)
+                oracle["tolerance_mode"] = "absolute"
+                out.rewrites.append(
+                    f"The check {name!r} is {what}, so its number is the worst violation and it expects 0. It was "
+                    f"written expecting {_fmt(expected)} for `{measure}`; FI rewrote it as `{new}`, expecting 0 within "
+                    f"{_fmt(tolerance)}{' (the same tolerance, now on the relative violation)' if relative else ''}. "
+                    "Its verdict is the same as before."
+                )
+                continue
+            if users:
+                how = (f"the criteria {', '.join(repr(u) for u in users)} are judged on its number, so FI did not "
+                       "rewrite it")
+            elif why_not:
+                how = why_not
+            elif not has_case:
+                how = ("it has no `case`, so the script's own oracle() decides how the number is computed; give it a "
+                       "`case` and write `measure` as the formula of the violation")
+            elif not measure or is_name(measure):
+                how = (f"its `measure` `{measure or '(none)'}` does not say whether that number is the quantity "
+                       f"(which should come out {_fmt(expected)}) or already its violation (which should come out 0)")
+            else:
+                how = "its tolerance cannot be read"
+            out.requests.append(
+                f"The check {name!r} is {what}: its number must be the worst violation, 0 when the rule holds, but it "
+                f"expects {_fmt(expected)} and {how}. Write `measure` as a formula of the names the simulation returns "
+                f"that gives the violation (for example `abs({measure if is_name(measure) else 'ratio'} - "
+                f"{_literal(expected)})` when that name is the quantity that should be {_fmt(expected)}), set "
+                "`expected: 0` and an absolute `tolerance`."
+            )
+            continue
+        if kind == "convergence_rate" and expected is not None and expected <= 0:
+            out.requests.append(
+                f"The check {name!r} is a convergence rate, so its number is the observed order itself and it expects the "
+                f"method's order (for example 4 for classical RK4), not {_fmt(expected)}: write `measure` as the formula "
+                "of the observed order and `expected` as the order the method should show."
+            )
+            continue
+        precision = written_precision(expected)
+        if precision is not None and tolerance is not None:
+            digits, half = precision
+            limit = tolerance * abs(expected) if relative else tolerance  # type: ignore[arg-type]
+            if _TRUNCATED_DIGITS[0] <= digits < _TRUNCATED_DIGITS[1] and 0 <= limit < half:
+                out.requests.append(
+                    f"The check {name!r} expects {_literal(expected)}, a value written to {digits} significant digits "  # type: ignore[arg-type]
+                    f"(so known only to about ±{_fmt(half)}), but its tolerance is {_fmt(limit)}: a correct simulation "
+                    "would fail it. Give the expected value to full precision (worked out to 15 digits in its "
+                    "`reference`), or a tolerance no tighter than the precision it is written to."
+                )
+    return out
+
+
+#: The section of plan.md that says what FI did to the checks before anything ran (prose, never read back).
+HEADING = "A second look at the checks against known answers"
+
+
+def apply_to_plan(text: str, *, fi_runs: bool = True) -> tuple[str, list[str], list[str]]:
+    """``(text, rewrites, requests)``: ``text`` (a plan.md) with its design block's checks held to their kinds' forms
+    (:func:`enforce`), a sentence per rewrite, and a request per check the plan has to change itself. The block is
+    edited as written; a plan whose block cannot be read is returned as it is."""
+    from . import plan as _plan
+
+    found: dict[str, Enforced] = {}
+
+    def change(block: dict[str, Any]) -> dict[str, Any] | None:
+        protocol = block.get("protocol")
+        if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+            return None
+        enforced = enforce(protocol, fi_runs=fi_runs)
+        found["e"] = enforced
+        if not enforced.rewrites:
+            return None
+        by_name = {str(o["name"]).strip(): o for o in enforced.oracles}
+        items = []
+        for item in protocol["oracles"]:
+            if isinstance(item, dict) and str(item.get("name") or "").strip() in by_name:
+                new = by_name[str(item["name"]).strip()]
+                item = {**item, **{k: new[k] for k in ("measure", "expected", "tolerance", "tolerance_mode") if k in new}}
+            items.append(item)
+        return {**block, "protocol": {**protocol, "oracles": items}}
+
+    edited = _plan.edit_design_block(text, change)
+    if edited is not None:
+        edited = _plan.refresh_model_section(edited)
+    enforced = found.get("e")
+    if enforced is None:
+        return text, [], []
+    return (edited if edited is not None else text), (enforced.rewrites if edited is not None else []), enforced.requests
+
+
+_SHOWN = ("kind", "measure", "case", "expected", "tolerance", "tolerance_mode")
+_TOLD = {"check": "what it checks is worded differently", "reference": "where its expected value comes from changed"}
+
+
+def describe_changes(before: dict[str, dict[str, Any]], after: dict[str, dict[str, Any]]) -> list[str]:
+    """One plain sentence per check the plan added, removed or changed between two versions (by name)."""
+    out = []
+    for name, new in after.items():
+        old = before.get(name)
+        if old is None:
+            out.append(f"the check {name!r} was added (expects {new.get('expected')}, computed as "
+                       f"`{new.get('measure') or 'the script’s own value'}`)")
+            continue
+        parts = [f"{k} {old.get(k)!r} → {new.get(k)!r}" for k in _SHOWN if old.get(k) != new.get(k)]
+        parts += [said for k, said in _TOLD.items() if old.get(k) != new.get(k)]
+        if parts:
+            out.append(f"the check {name!r} changed: " + "; ".join(parts))
+    out += [f"the check {name!r} was removed" for name in before if name not in after]
+    return out
+
+
+def request(requests: list[str]) -> str:
+    """One request to the plan for every check that is not in its kind's form."""
+    return (
+        "Each check against a known answer has one numeric form, fixed by its kind: a conserved quantity or invariant, "
+        "a symmetry or scaling law, or a second implementation is measured as the worst violation and expects 0; a "
+        "special or limiting case, a published value, or a convergence rate is measured as the quantity itself and "
+        "expects its known value. These checks do not fit:\n"
+        + "\n".join(f"- {r}" for r in requests)
+        + "\nChange only these checks, and nothing else in the plan."
+    )
+
+
+# --- a test run of the checks before the study -------------------------------------------------------------------------
+
+#: How far apart (a factor) a value and a non-zero expected value must be to read as a different definition.
+_ORDERS = 100.0
+
+
+def mismatch(oracle: dict[str, Any], value: Any, formula_problem: str = "", *, engine: bool = True) -> str | None:
+    """A sentence when the number a check measured on its test run says the plan and the simulation mean different
+    things by it (its definition, not the simulation, looks wrong), or ``None``. A value within its tolerance is never
+    a mismatch; one that is simply outside it is the simulation's to explain (a repair), not this."""
+    name = str(oracle.get("name") or "?").strip()
+    raw_measure = oracle.get("measure")
+    measure = raw_measure.strip() if isinstance(raw_measure, str) else ""
+    if formula_problem and engine:
+        return (f"the check {name!r} computes its number as `{measure}`, and on its case {formula_problem}: the formula "
+                "or the case does not fit what the simulation returns")
+    number = _num(value)
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if number is None or expected is None or limit is None or abs(number - expected) <= limit:
+        return None
+    kind = _oracle.kind_of(oracle)
+    # A formula FI computed states the representation (the plan chose it); a bare name or the script's own number does not.
+    stated = engine and bool(measure) and not is_name(measure) and problem(measure) is None
+    outer_abs = stated and _outer_call(measure) == "abs"
+    tight = limit < abs(expected) / 10 if expected != 0 else True
+    if kind in VIOLATION_KINDS and expected != 0 and tight and abs(number) <= max(limit, 1e-12):
+        return (f"the check {name!r} is {_describe(kind)} and expects {_fmt(expected)}, but its test run measured "
+                f"{_fmt(number)}: that reads as the violation (0 when the rule holds) where the plan expects the "
+                "quantity itself (a ratio of 1, say)")
+    if kind in VIOLATION_KINDS and expected == 0 and not outer_abs and abs(number - 1.0) <= max(limit, 1e-12):
+        return (f"the check {name!r} is {_describe(kind)} and expects 0 (its worst violation), but its test run measured "
+                f"{_fmt(number)}: that reads as a ratio that is kept at 1, not as a violation")
+    if expected != 0 and number == 0:
+        return (f"the check {name!r} expects {_fmt(expected)}, but its test run measured exactly 0: either the simulation "
+                "returns another quantity than the one the check means, or it fails to compute it; which one must follow "
+                "from the check's `reference`, not from this number")
+    if expected != 0 and number != 0:
+        ratio = abs(number / expected)
+        if ratio >= _ORDERS or ratio <= 1 / _ORDERS:
+            orders = abs(math.log10(ratio))
+            return (f"the check {name!r} expects {_fmt(expected)}, but its test run measured {_fmt(number)}, about "
+                    f"{orders:.0f} orders of magnitude away: either a unit or a representation differs (a per cent and a "
+                    "fraction, a sum and a mean, a step-size limit and the value at a finite step) or the simulation is "
+                    "wrong; which one must follow from the check's `reference`, not from this number")
+        if (number > 0) != (expected > 0) and abs(abs(number) - abs(expected)) <= limit:
+            return (f"the check {name!r} expects {_fmt(expected)}, but its test run measured {_fmt(number)}: the same "
+                    "size with the other sign, so either the simulation or the check has the sign the other way; the "
+                    "check's sign must follow from its `reference`, not from this number")
+    return None
+
+
+def _outer_call(text: str) -> str:
+    """The function the whole formula is an argument of (``abs`` for ``abs(a - b)``), or ``""``."""
+    tree, _ = _tree(text)
+    body = tree.body if tree is not None else None
+    return body.func.id if isinstance(body, ast.Call) and isinstance(body.func, ast.Name) else ""
+
+
+def mismatches(oracles: list[dict[str, Any]], checks: list[dict[str, Any]] | None) -> list[str]:
+    """The :func:`mismatch` sentences for the checks of one run of the oracle gate (``checks`` as the gate records
+    them: name, value, ``measured_by``, and ``formula_problem`` for a formula FI computed that gave no number; a check
+    the script reported is read for its value only, never for text of its own)."""
+    by_name = {str(c.get("name") or "").strip().lower(): c for c in checks or [] if isinstance(c, dict)}
+    out = []
+    for oracle in oracles:
+        check = by_name.get(str(oracle.get("name") or "").strip().lower())
+        if check is None:
+            continue
+        engine = check.get("measured_by") == "engine"
+        why = mismatch(oracle, check.get("value"), str(check.get("formula_problem") or "") if engine else "",
+                       engine=engine)
+        if why:
+            out.append(why)
+    return out
+
+
+def passes_on(oracle: dict[str, Any], returned: Any) -> bool | None:
+    """Whether ``oracle`` (as the plan now states it) passes on the values the simulation returned at the test run
+    (``None`` when that cannot be told: no values kept, a formula they do not answer, no numbers to judge by). A change
+    to a check that makes the test run's own number pass is shown to the person as exactly that."""
+    if not isinstance(returned, dict) or not returned:
+        return None
+    measure = oracle.get("measure")
+    if not isinstance(measure, str) or not measure.strip():
+        return None
+    measure = measure.strip()
+    value = _num(returned.get(measure)) if measure in returned else evaluate(measure, returned).value
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if value is None or expected is None or limit is None:
+        return None
+    return abs(value - expected) <= limit
+
+
+def dry_run_request(found: list[str]) -> str:
+    """The one request to the plan after a test run of the checks showed a definition mismatch."""
+    return (
+        "A test run of the checks against known answers, made before the study, measured numbers whose size says the "
+        "plan and the simulation mean different things by these checks:\n"
+        + "\n".join(f"- {f[0].upper()}{f[1:]}." for f in found)
+        + "\nFor each, look at the check's definition: the quantity it measures, its units and representation, and how "
+        "its number is computed (`measure`, a formula of the names the simulation returns). If the definition was "
+        "wrong, correct it and keep the kind's form (the worst violation expecting 0 for an invariant, a symmetry or a "
+        "second implementation; the quantity itself for the others), and say in `reference` how the expected value "
+        "follows. If the definition is right, leave the check exactly as it is: the simulation is then what gets "
+        "repaired. Never set an expected value to the number measured here. Change only these checks, and nothing else "
+        "in the plan."
+    )
