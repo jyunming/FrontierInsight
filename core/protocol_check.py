@@ -41,6 +41,13 @@ _RUN_WORDS = {
     "runs", "run", "replicates", "replicate", "reps", "trials", "trial", "samples", "sample", "realizations",
     "realisations", "simulations", "simulation", "sims", "repeats",
 }
+# A count of re-draws from results the experiment already produced (a bootstrap, a permutation test, a posterior
+# sample) is not a number of runs of the experiment: a GPT-6 quest was stopped as "the script differs from the plan"
+# because BOOTSTRAP_REPLICATES = 2000 sat beside a protocol of 300 runs per setting.
+_RESAMPLE_WORDS = {
+    "bootstrap", "bootstraps", "boot", "resample", "resamples", "resampling", "permutation", "permutations", "perm",
+    "perms", "jackknife", "posterior", "mcmc",
+}
 # Words that make a name a list of the axis's values (R0_LIST, dose_values) rather than something else about it
 # (dose_response, temperature_history).
 _LIST_WORDS = {
@@ -354,7 +361,11 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         # ``n_runs = 0`` ... ``n_runs += 2``, and was stopped as "the script sets 0 runs per setting"). Only zero is
         # skipped, not every name the script adds to (a real setting that is also incremented somewhere is still read),
         # and not a negative count either (that is a wrong setting, and is reported like any other).
-        counts = [f for f in scalars if set(_tokens(f.name)) & _RUN_WORDS and float(f.values[0]).is_integer() and f.values[0] != 0]
+        counts = [
+            f for f in scalars
+            if set(_tokens(f.name)) & _RUN_WORDS and not set(_tokens(f.name)) & _RESAMPLE_WORDS
+            and float(f.values[0]).is_integer() and f.values[0] != 0
+        ]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):
             first = counts[0]
             out.append(Mismatch(

@@ -62,6 +62,17 @@ def test_the_runs_per_setting_are_read_from_a_count_the_script_names() -> None:
     assert pc.check({"runs_per_setting": 300}, {"experiment.py": "steps = 100\n"}) == []
 
 
+def test_a_bootstrap_or_permutation_count_is_not_read_as_the_runs_per_setting() -> None:
+    """A GPT-6 quest stopped on "the protocol fixes the runs per setting at 300; the script sets 2000
+    (BOOTSTRAP_REPLICATES in experiment.py)": 2000 was the bootstrap resamples of the analysis, not runs."""
+    for name in ("BOOTSTRAP_REPLICATES", "n_boot_samples", "N_PERMUTATIONS_RUNS", "posterior_samples", "nResampleReps"):
+        assert pc.check({"runs_per_setting": 300}, {"experiment.py": f"{name} = 2000\n"}) == [], name
+    # The real count beside it is still read, and a wrong one still caught.
+    found = pc.check({"runs_per_setting": 300}, {"experiment.py": "BOOTSTRAP_REPLICATES = 2000\nN_RUNS = 50\n"})
+    assert [(m.kind, m.found) for m in found] == [("runs", [50.0])]
+    assert pc.check({"runs_per_setting": 300}, {"experiment.py": "BOOTSTRAP_REPLICATES = 2000\nN_RUNS = 300\n"}) == []
+
+
 def test_a_tally_the_script_adds_to_is_not_read_as_its_runs_per_setting() -> None:
     """A live kimi-k3 quest stopped on "the protocol fixes 200 runs per setting; the script sets 0 (n_runs in simulate.py,
     line 242)": ``n_runs = 0`` was the counter its oracle check started at and then did ``n_runs += 2`` on."""
