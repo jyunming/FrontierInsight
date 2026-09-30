@@ -1,6 +1,6 @@
 ---
 title: Explore then confirm
-sources: [core/phased.py, core/engine.py, core/evidence.py, core/config.py, core/interview.py, core/plan.py]
+sources: [core/phased.py, core/engine.py, core/evidence.py, core/config.py, core/interview.py, core/plan.py, core/disclosure.py]
 updated: 2026-10-01
 ---
 # Explore then confirm
@@ -36,6 +36,8 @@ A request to redesign or read more literature is not followed; a protocol change
 ## What the result says
 
 `.fi/phased.json` records the status: explore, confirming, confirmed, confirm_failed, confirm_reused, compromised, not_confirmable or not_applicable. Anything but *confirmed* (or *not_applicable*, which adds no gap) keeps the result below publication-ready. The paper carries a note saying which kind of confirmation ran.
+
+With the setting off too, a design changed after the experiment had first been run (a later entry in `needs/DESIGN_HISTORY.json`) keeps the result below publication-ready, unless a confirm run finished after the last change. That is read from the record (`design_revisions_at_confirm` in `.fi/phased.json`: how many design versions there were when the confirm stage began), not from the setting, so a confirm run followed by another redesign does not count. Every paper also carries FI's own paragraph in its methods, *How this result was reached* (`core/disclosure.py`): how often the design changed and why, how many complete runs were made and how many were discarded. See [[how-fi-judges-correctness|How FI judges correctness]].
 
 ## Interfaces
 

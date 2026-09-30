@@ -80,6 +80,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
+from core.disclosure import strip_for_checks
 from core.numeric_oracle import flatten_numbers
 
 # A replicated run needs at least this many seeds before its spread means
@@ -171,8 +172,11 @@ _LATEX_CMD = re.compile(
 def normalise(text: str) -> str:
     """Strip the LaTeX a paper writes its statistics in, so ``Cohen's $d > 16$``
     and ``$p < 0.001388$`` read as plain text. Both observed claims were inside
-    ``$…$``; leaving the delimiters in place made neither of them parse."""
-    t = text
+    ``$…$``; leaving the delimiters in place made neither of them parse.
+
+    The engine's paragraph on how the result was reached (core/disclosure.py) is taken out first: its counts are
+    about the quest, not results."""
+    t = strip_for_checks(text)
     for pat in _STRIP_BLOCKS:
         t = pat.sub(" ", t)
     t = re.sub(r"\\(?:sim|approx|thicksim|simeq)\b", "~", t)

@@ -77,6 +77,7 @@ from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
 from . import phased as _phased
+from . import disclosure as _disclosure
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
 from . import run_manifest as _run_manifest
@@ -13486,6 +13487,10 @@ class Engine:
                     else markdown.replace("\n" + PRELIMINARY_NOTE + "\n", "\n"))
         if _phased.enabled(self.config):
             markdown = _phased.mark_paper(markdown, _phased.load(self.quest_root))
+        # How often the design changed and how many runs were made, from the records: the engine's words, never the
+        # model's (core/disclosure.py).
+        markdown = _disclosure.mark_paper(markdown, _disclosure.paragraph(
+            self.quest_root, no_simulation=bool(state.get("no_simulation_resolved"))))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -13692,7 +13697,9 @@ class Engine:
             return {}
         started = _receipts.now()
         checked_bytes = Path(paper_md).read_bytes()
-        paper_text = _paper_for_prompt(Path(paper_md).read_text(encoding="utf-8"), "claim_check", self._log)
+        # The engine's paragraph on how the result was reached is not a claim of the paper's (core/disclosure.py).
+        paper_text = _paper_for_prompt(_disclosure.without_block(Path(paper_md).read_text(encoding="utf-8")),
+                                       "claim_check", self._log)
         literature = state.get("literature") or []
         audience = self.config.output.audience
         refs = build_references(literature, audience=audience)

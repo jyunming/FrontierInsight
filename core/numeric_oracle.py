@@ -140,6 +140,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator
 
+from core.disclosure import strip_for_checks
+
 # A paper number must land within this relative distance of a result value
 # before it is even considered a candidate mis-transcription. Beyond it, the
 # number is assumed to be unrelated (a parameter, a literature figure, a
@@ -478,9 +480,11 @@ def extract_paper_numbers(text: str) -> list[tuple[float, str, str]]:
     Code blocks, headings, image embeds and reference entries are removed
     first: their numbers are structural, not claimed. Markdown tables are
     *kept* — a results table is exactly where a mis-transcribed number
-    does the most damage.
+    does the most damage. The engine's paragraph on how the result was
+    reached (core/disclosure.py) is removed too: its counts are about the
+    quest, not results.
     """
-    cleaned = text
+    cleaned = strip_for_checks(text)
     for pat in _STRIP_BLOCKS[:1] + _STRIP_BLOCKS[2:]:  # keep table rows
         cleaned = pat.sub(" ", cleaned)
     # Fold `1.21 \times 10^{-2}` into `1.21e-2` so the exponent survives into
