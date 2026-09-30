@@ -59,6 +59,7 @@ _QUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-.]+$")
 
 from core.config import Config
 from core.interview import (
+    CLARIFY_WHEN_PRESENT,
     EDITABLE_FIELDS,
     InterviewAnswers,
     PAPER_FORMATS,
@@ -182,7 +183,11 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
             return pauses[new_key]
         return legacy.get(legacy_key, default)
 
-    _clarify_raw = _pause("clarify", engine, "clarify_mode", "auto")
+    # No clarify choice in the YAML (or ``clarify: null``) stays no choice: writing ``auto`` back would switch off the
+    # discussion the run holds when someone can answer.
+    # An unquoted ``off`` is read by YAML as False: that is the person's "off", not "no choice".
+    _clarify_value = _pause("clarify", engine, "clarify_mode", None)
+    _clarify_raw = "off" if _clarify_value is False else (_clarify_value or CLARIFY_WHEN_PRESENT)
     _supply_raw = _pause("supply", engine, "pause_for_user_input", "never")
 
     topic = raw.get("topic", "") or ""
@@ -218,7 +223,7 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         comparative_baseline=str(overrides.get("comparative_baseline") or ""),
         success_metric=str(overrides.get("success_metric") or ""),
         budget=str(overrides.get("budget") or ""),
-        clarify_mode=str(_rev_clarify.get(_clarify_raw, _clarify_raw) or "auto"),
+        clarify_mode=str(_rev_clarify.get(_clarify_raw, _clarify_raw)),
         review_panel=list(engine.get("review_panel") or []),
         knowledge_enabled=bool(knowledge.get("enabled", False)),
         provider=provider_name,

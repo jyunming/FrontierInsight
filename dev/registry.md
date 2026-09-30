@@ -52,9 +52,13 @@ same PR that adds, splits or renames one.
 - `core/engine.py` `_node_clarify` — the first discussion of a quest (what you want to see, the title, scope). `pauses.clarify`
   unset means ask when a callback or staged answer exists, else auto (`Engine._clarify_answerable`); the title chosen there
   is `state["title"]` (`title_confirmed`), which the writer is told to use.
+- `core/engine.py` `_review_decision` — whether a human-review answer (callback or staged `human_review_answer.json`)
+  carries accept / reject / refine; `Engine.run` resumes only with one, and otherwise (or on a closed VS Code prompt)
+  pause-exits with the snapshot and `NEXT_STEP.md` kept.
 - `core/interview.py` — the single question set shared by the CLI, the web form and VS Code; a question asked only for
   some earlier answer carries `ask_if`, checked by `question_applies` (the web page and VS Code mirror it; today only
-  `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry.
+  `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry. The
+  clarify-mode default `CLARIFY_WHEN_PRESENT` is never written, so `pauses.clarify` stays unset unless a person chose.
 - `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call, and why its answer ended); `ModelAnswerTruncated` / `ModelAnswerFiltered` / `outcome_of` (an answer cut off at its limit or withheld is never returned as whole; `Engine._pause_for_model_output` turns either into a `model_output` pause); `node_output_limit` (`provider.node_max_tokens` per step); `quest_run_log` (a failed call made outside the engine still reaches the quest's run.log); `_http_streams` / `_post_streamed` (Moonshot calls are streamed).
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
 - `core/ensemble.py` — the multi-model fan-out-and-merge primitive a node opts into.

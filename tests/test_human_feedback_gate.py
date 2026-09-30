@@ -183,12 +183,13 @@ def test_human_feedback_refine_with_empty_feedback_falls_back_to_accept(
     assert "iteration" not in patch
 
 
-def test_human_feedback_malformed_payload_defaults_to_accept(
+def test_human_feedback_node_normalises_a_malformed_payload_to_accept(
     gated_engine: Engine,
 ) -> None:
-    """Defensive: callback returning ``None`` / wrong-typed dict /
-    unknown action all normalise to ``accept`` so a buggy frontend
-    can't dump the quest into an undefined state."""
+    """Last line of defence only: the run loop never resumes the node
+    with an answer that has no decision in it (it stops the quest for
+    one; tests/test_pause_answers.py). Should one reach the node anyway,
+    it normalises to ``accept`` rather than an undefined state."""
     state = {"review": {"verdict": "accept"}, "iteration": 0}
     for bad in (None, "garbage", {"action": "delete-everything"}, 42):
         patch = _drive_node(gated_engine, state, bad)  # type: ignore[arg-type]

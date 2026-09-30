@@ -294,7 +294,7 @@ engine:
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
   attempt_memory: shadow            # at each decision, record what past failed attempts (of the quests under the same output folder) would recommend, and act on none of it; `off` reads and writes nothing
   one_model_review: false           # only one model available: under rigor_profile: research the review panel may run on it (no stop for the reviewers' models); the result is then not publication-ready. Not part of the approved settings: the evidence level already shows it
-  clarify_mode: auto                # off | auto | interactive
+  clarify_mode: auto                # off | auto | interactive; left out, it asks when someone can answer while it runs, else answers for itself
   ideate_reflect: true              # extra self-critique pass (1 LLM call)
   ideate_tournament: false          # pairwise tournament across brainstormed ideas; replaces ideate_reflect; C(N,2) calls in parallel
   exec_reflect_max_iterations: 3    # execute-repair loop bound

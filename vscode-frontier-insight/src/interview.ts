@@ -447,7 +447,8 @@ export async function runInterview(
         title: suggestedTitle,
         output_kinds: outputKinds,
         paper_format: paperFormat,
-        clarify_mode: "auto",
+        // Left to the run: VS Code can answer, so the quest talks the topic over first.
+        clarify_mode: "when_present",
         // Match the Python smart default: a 3-persona panel. An empty list
         // is single-reviewer and silently disables must-flag enforcement
         // (the methodologist owns the non-bypassable rules) — VSCode users
@@ -595,7 +596,9 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Study depth | \`${a.study_depth}\` |`);
     lines.push(`| Title (auto-slug) | \`${a.title}\` |`);
     lines.push(`| Research approach | ${a.survey_mode === true ? "literature synthesis (survey — no experiment/data)" : a.no_simulation ? "observational" : "computational"} |`);
-    lines.push(`| Clarify mode | \`${a.clarify_mode}\` |`);
+    lines.push(`| Clarify mode | ${a.clarify_mode === "when_present"
+        ? "ask me if I'm there, otherwise answer for itself"
+        : `\`${a.clarify_mode}\``} |`);
     lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
     lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
@@ -1160,6 +1163,7 @@ async function editTier2Field(
         case "clarify_mode": {
             const v = await vscode.window.showQuickPick(
                 [
+                    { label: "$(comment-discussion) ask me if I'm there, otherwise answer for itself (recommended)", value: "when_present" as const },
                     { label: "$(zap) auto — agent self-clarifies", value: "auto" as const },
                     { label: "$(question) interactive — pause for me", value: "interactive" as const },
                     { label: "$(rocket) off — just run it", value: "off" as const },

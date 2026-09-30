@@ -454,8 +454,13 @@
       "kind": "single",
       "choices": [
         {
+          "value": "when_present",
+          "label": "Ask me if I'm there, otherwise answer for itself (recommended)",
+          "description": "The quest asks you when it can reach you while it runs (VS Code, or the terminal with --interactive); a run nobody is watching answers the questions itself."
+        },
+        {
           "value": "auto",
-          "label": "Agent self-clarifies (recommended)",
+          "label": "Agent self-clarifies",
           "description": "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."
         },
         {
@@ -470,7 +475,7 @@
         }
       ],
       "placeholder": "",
-      "default": "auto",
+      "default": "when_present",
       "mid_quest_editable": true,
       "frontends": [
         "cli",
@@ -1168,8 +1173,13 @@
   ],
   "clarify_modes": [
     {
+      "value": "when_present",
+      "label": "Ask me if I'm there, otherwise answer for itself (recommended)",
+      "description": "The quest asks you when it can reach you while it runs (VS Code, or the terminal with --interactive); a run nobody is watching answers the questions itself."
+    },
+    {
       "value": "auto",
-      "label": "Agent self-clarifies (recommended)",
+      "label": "Agent self-clarifies",
       "description": "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."
     },
     {

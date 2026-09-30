@@ -30,7 +30,8 @@ export interface InterviewAnswers {
     output_kinds: string[];
     paper_format: PaperFormat;
     paper_style?: "latex" | "briefing";   // paper.pdf look; default "latex"
-    clarify_mode: "off" | "auto" | "interactive";
+    // "when_present" is never written: the run asks when someone can answer, else answers for itself.
+    clarify_mode: "when_present" | "off" | "auto" | "interactive";
     review_panel: string[];           // empty = single reviewer
     knowledge_enabled: boolean;
     no_simulation: boolean;
@@ -533,7 +534,10 @@ export function answersToYaml(answers: InterviewAnswers): string {
     const clarifyPause =
         answers.clarify_mode === "interactive" ? "ask" : answers.clarify_mode;
     lines.push("pauses:");
-    lines.push(`${indent}clarify: "${clarifyPause}"`);
+    // Only a choice the person made is written; unset lets the run ask when someone is there to answer.
+    if (clarifyPause && clarifyPause !== "when_present") {
+        lines.push(`${indent}clarify: "${clarifyPause}"`);
+    }
     // Only a real pause is written; "never" leaves the key out so the
     // generated YAML stays clean. Mirrors core/interview.py.
     const supplyPause =
