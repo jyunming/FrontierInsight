@@ -389,6 +389,7 @@ class QuestLauncher:
         argv_tail: list[str],
         job_id: str,
         extra_env: dict[str, str] | None = None,
+        cwd: Path | None = None,
     ) -> LaunchedQuest:
         """Spawn ``python launch.py <argv_tail>`` for a tool that
         doesn't produce a regular quest (e.g. ``--digest``,
@@ -437,7 +438,8 @@ class QuestLauncher:
             log_file = open(log_path, "wb")
             proc = subprocess.Popen(
                 argv,
-                cwd=str(self.work_dir),
+                # A quest resumed from another folder runs from the folder it was started in (its relative paths).
+                cwd=str(cwd or self.work_dir),
                 env=env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,

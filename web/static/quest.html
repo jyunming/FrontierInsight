@@ -362,6 +362,19 @@
   let logSource = null;
 
   document.getElementById('quest-id').textContent = questId;
+  {
+    // The short id (the six characters after the last dash) is what `fi tools quests` lists and what `fi --resume`
+    // and the other commands accept from any folder.
+    const short = (/-([0-9a-f]{6})$/.exec(questId) || [])[1];
+    if (short) {
+      const tag = document.createElement('span');
+      tag.className = 'font-label-sm text-label-sm text-on-surface-variant';
+      tag.style.marginLeft = '0.75rem';
+      tag.title = 'Any command that takes a quest id accepts this, from any folder';
+      tag.textContent = `short id ${short}`;
+      document.getElementById('quest-id').after(tag);
+    }
+  }
   document.getElementById('update-link').href = `/update/${encodeURIComponent(questId)}`;
   document.getElementById('download-link').href = `/api/quests/${encodeURIComponent(questId)}/download`;
 

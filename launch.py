@@ -256,6 +256,7 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
     "portfolio": ("--portfolio", "A cross-quest synthesis, all time. `fi tools portfolio`."),
     "critique": ("--critique", "An adversarial second-pass review of a finished quest. `fi tools critique <quest_id>`."),
     "rename": ("--rename", "Change the title of a finished or paused quest. `fi tools rename <quest_id> <new title>`."),
+    "quests": ("--quests", "Every quest FI has run on this computer, from any folder: its short id, where it is, its title and folder. `fi tools quests [--prune]`."),
     "proposal": ("--proposal", "A pre-quest planning doc from a topic, no run yet. `fi tools proposal \"<topic>\"`."),
     "analyze": ("--analyze", "Run a no-simulation quest on data you already have. `fi tools analyze <data_path>`."),
     "ingest": ("--ingest", "Load PDFs / Markdown / TXT into the knowledge layer, no quest. `fi tools ingest <path>...`."),
@@ -321,7 +322,7 @@ Run a quest
   --serve                Local web UI at http://127.0.0.1:8765.
 
 While a quest is running, or after
-  --resume QUEST_ID      Continue a quest that paused or stopped mid-run.
+  --resume QUEST_ID      Continue a quest that paused or stopped mid-run (from any folder; its short id is enough).
   --watch QUEST_ID       Wait for a quest's background job (HPC / a cluster) and continue it when it is done.
   --trace QUEST_ID       Print what a quest did, in order, and check nothing in its record was edited. Add --follow to watch it live.
   --why QUEST_ID [ABOUT] Why it stopped, why the review asked for a revision, why the evidence is at its level.
@@ -348,17 +349,36 @@ def _config_from_quest(p: argparse.ArgumentParser, args: argparse.Namespace) -> 
     """``--resume ID`` (or ``--watch ID``) without ``--config``: use the ``config.yaml`` the quest saved in its own folder.
 
     Every message that tells a person how to go on says ``fi --resume <id>``; that only works if the id is enough. ``ID``
-    is the quest's id (looked up under ``--output-root``) or its folder."""
-    quest = args.resume or args.watch
+    is the quest's folder, its id under ``--output-root``, or — from any folder — its id (full, or any unique start or
+    end of it, e.g. the six characters after the last dash) among the quests FI has run on this computer
+    (core/quest_index.py). A quest found that way runs in its own outputs folder (``args.quest_root``)."""
+    quest = args.resume or args.watch or args.rerun
     if not quest or args.config is not None:
         return
     root = next((c for c in (Path(quest), args.output_root / quest) if (c / "config.yaml").is_file()), None)
     if root is None:
-        p.error(
-            f"no quest {quest!r} to go on with: looked for config.yaml in {Path(quest)} and {args.output_root / quest}. "
-            "Pass --config <its yaml>, or --output-root <the folder that holds the quest>."
-        )
+        from core import quest_index
+
+        looked = (f"looked for config.yaml in {Path(quest)} and {args.output_root / quest}. "
+                  "Pass --config <its yaml>, or --output-root <the folder that holds the quest>.")
+        try:
+            found = quest_index.find(quest, [args.output_root])
+        except quest_index.AmbiguousQuest as e:
+            p.error(str(e))
+        except quest_index.QuestNotFound as e:
+            p.error(f"{e} Or: {looked}")
+        if not (found.root / "config.yaml").is_file():
+            p.error(f"no quest {quest!r} to go on with: {found.root} has no config.yaml. {looked}")
+        root = found.root
+        args.quest_root = root
     args.config = root / "config.yaml"
+    if Path(quest) == root or root.parent.resolve() != Path(args.output_root).resolve():
+        # Named by its folder, or found outside --output-root: it runs where it is.
+        args.quest_root = root.resolve()
+    if args.watch and not args.resume:
+        args.watch = root.name
+    if args.rerun and (args.rerun == quest):
+        args.rerun = root.name
     if not args.resume:
         return
     args.resume = root.name
@@ -714,9 +734,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Change the title of a finished or paused quest: the paper's title line, config.yaml, the summary and the "
              "saved state, recorded in its audit trace. Results, data and code are not touched. QUEST is the quest id "
-             "(looked up under --output-root) or its folder; the rest of the words are the new title. Refused while "
+             "(looked up under --output-root, then among every quest FI has run on this computer; a unique start or end "
+             "of the id is enough) or its folder; the rest of the words are the new title. Refused while "
              "the quest is running. A PDF, slides or poster already made keep the old title until made again with "
              "--resume QUEST --emit <kind>.",
+    )
+    mode.add_argument(
+        "--quests",
+        action="store_true",
+        help="List every quest FI has run on this computer, whichever folder it ran in: its short id (the six "
+             "characters after the last dash of its id — `--resume` and the other commands that take a quest id accept "
+             "it from any folder), where it is, its title and its folder. Add --prune to first forget the quests whose "
+             "folder no longer exists, and --json for the list as JSON.",
+    )
+    p.add_argument(
+        "--prune",
+        action="store_true",
+        help="With --quests: first forget the quests whose folder no longer exists (moved or deleted). A moved quest "
+             "is recorded again at its new place when it is resumed from there.",
     )
     mode.add_argument(
         "--approve-all-skills",
@@ -1216,7 +1251,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "<output_dir>/<quest_id>/.fi/state.sqlite is reused so the "
              "run picks up at the last completed node instead of starting "
              "over. Single-quest mode only (use --config). Useful when a "
-             "long Copilot outage exhausts the bridge retry budget mid-quest.",
+             "long Copilot outage exhausts the bridge retry budget mid-quest. "
+             "A quest not under output_dir is found among every quest FI has "
+             "run on this computer (`fi tools quests`), by its full id or any "
+             "unique start or end of it (the short id is the six characters "
+             "after the last dash), and runs in its own folder.",
     )
     p.add_argument(
         "--watch",
@@ -1361,6 +1400,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         p.print_help()
         raise SystemExit(0)
     args = p.parse_args(argv)
+    # Set when a quest named by --resume / --watch was found outside --output-root (by its folder, or in the quest
+    # index): it then runs in its own outputs folder whatever the YAML's relative output_dir means here.
+    args.quest_root = None
     _config_from_quest(p, args)
     _check_mode(p, mode._group_actions, args)
     if args.title is not None and not args.rename:
@@ -2026,7 +2068,8 @@ async def _list_rerun_steps(cfg: Config, quest_id: str, *, supervisor: ProxySupe
     if as_json:
         import json as _json
 
-        print(_json.dumps({"quest_id": engine.quest_id, **await engine.quest_map(steps)}))
+        print(_json.dumps({"quest_id": engine.quest_id, "quest_root": str(engine.quest_root),
+                           "config_path": str(engine.quest_root / "config.yaml"), **await engine.quest_map(steps)}))
         return 0
     print(_rerun_from.listing(engine.quest_id, steps))
     return 0
@@ -2072,6 +2115,27 @@ async def _watch_quest(cfg: Config, args: argparse.Namespace, supervisor: ProxyS
     return 0
 
 
+def _record_quest(quest_root: Path, cfg: Config, *, started: bool) -> None:
+    """Record the quest in the list of every quest FI has run on this computer (core/quest_index.py), so it can be
+    found by its id from any folder. Its working folder is the current one when it starts, or when it is resumed from a
+    folder that holds it (a moved quest is recorded at its new place); a quest resumed by its id from elsewhere keeps
+    the one it had. Never stops the quest."""
+    try:
+        from core import quest_index, quest_title
+
+        root = quest_root.resolve()
+        cwd = Path.cwd().resolve()
+        under_cwd = root.is_relative_to(cwd)
+        quest_index.register(
+            root, config=root / "config.yaml",
+            working_folder=cwd if (started or under_cwd) else None,
+            title=quest_title.current_title(root) or cfg.title or "",
+        )
+    except Exception as e:  # noqa: BLE001 -- the list is a convenience; the quest goes on without it
+        print(f"[FI] could not record the quest in the quest list ({e}); `--resume` still works from its folder.",
+              file=sys.stderr)
+
+
 async def run_one(
     cfg: Config,
     *,
@@ -2097,10 +2161,13 @@ async def run_one(
             resume_quest_id=resume_quest_id,
             auto_accept_on_pass=auto_accept_on_pass,
         )
+    from core.quest_index import short_id as _short_id
+
+    # The short id is what `fi tools quests` lists and what `--resume` takes from any folder.
     if resume_quest_id is not None:
-        print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name}")
+        print(f"[FI] resume quest_id={engine.quest_id} provider={cfg.provider.name} short_id={_short_id(engine.quest_id)}")
     else:
-        print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name}")
+        print(f"[FI] start quest_id={engine.quest_id} provider={cfg.provider.name} short_id={_short_id(engine.quest_id)}")
     _write_launch_record(engine, cfg, resume=resume_quest_id is not None)
     # Drop a copy of the source YAML into the quest dir so future
     # `--resume`s (and the VSCode `/resume` command) can find the
@@ -2116,6 +2183,7 @@ async def run_one(
                 # Non-fatal: the quest can still run. We just lose the
                 # auto-resume convenience for THIS quest.
                 print(f"[FI] couldn't copy config.yaml into quest dir: {e!r}", file=sys.stderr)
+    _record_quest(Path(engine.quest_root), cfg, started=resume_quest_id is None)
     # Pick the right clarify handler:
     #   --interactive          → terminal Q&A
     #   provider=vscode_extension → route through the bridge so the
@@ -2141,6 +2209,7 @@ async def run_one(
         approved_by=approved_by,
     )
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
+    _record_quest(Path(art.quest_root), cfg, started=False)  # the paper's title is known by now
     # The to-do card (core/todo.py): why it stopped, what to decide, the recommendation and the alternatives, or what
     # a finished quest left worth a look. NEXT_STEP.md has the same card with the commands.
     from core import todo as _todo
@@ -2773,6 +2842,7 @@ async def main_async(args: argparse.Namespace) -> int:
         or bool(getattr(args, "trace", ""))
         or bool(getattr(args, "why", None))
         or bool(getattr(args, "rename", None))
+        or bool(getattr(args, "quests", False))
         # Listing the steps a quest can be run again from reads its checkpoints only.
         or _list_steps
     )
@@ -2860,6 +2930,9 @@ async def main_async(args: argparse.Namespace) -> int:
         if args.rename:
             return _rename_quest(args.rename, args.output_root, title=args.title)
 
+        if args.quests:
+            return _list_quests(prune=args.prune, as_json=args.json_out)
+
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
         # beside it). Read once, and a config that cannot be read is one line on
@@ -2940,9 +3013,20 @@ async def main_async(args: argparse.Namespace) -> int:
             # Phase 3 — see core/interview_update.py for the
             # invalidation-matrix wiring. The launch-side dispatch
             # is implemented in _run_update below.
+            located = _locate_quest(args.update, args.output_root)
+            if located is None:
+                return 1
+            if located.parent.resolve() != Path(args.output_root).resolve():
+                # A quest from another folder: updated and resumed from the folder it was started in, as --resume does.
+                started_in = _started_in(located.resolve())
+                if started_in is not None and started_in != Path.cwd().resolve():
+                    print(f"[FI] quest {located.name} is in {located.parent}; running from {started_in}, the folder "
+                          "it was started in.")
+                    located = located.resolve()
+                    os.chdir(started_in)
             return await _run_update(
-                quest_id=args.update,
-                output_root=args.output_root,
+                quest_id=located.name,
+                output_root=located.parent,
                 vscode_bridge_port=args.vscode_bridge_port,
                 vscode_bridge_socket=args.vscode_bridge_socket,
                 interactive=args.interactive,
@@ -2979,9 +3063,12 @@ async def main_async(args: argparse.Namespace) -> int:
             )
 
         if args.critique:
+            located = _locate_quest(args.critique, args.output_root)
+            if located is None:
+                return 1
             return await _run_critique(
-                quest_id=args.critique,
-                output_root=args.output_root,
+                quest_id=located.name,
+                output_root=located.parent,
                 provider_name=args.critique_provider,
                 provider_model=args.critique_model,
                 axon_config_path=args.axon_config,
@@ -3041,9 +3128,49 @@ async def main_async(args: argparse.Namespace) -> int:
             )
 
         if args.config:
+            # Absolute before anything below may change folder (a quest found elsewhere runs from its own).
+            args.config = Path(args.config).resolve()
             cfg = Config.from_yaml(args.config)
             if args.output is not None:
                 cfg.output.output_dir = args.output
+            # A quest named by a shortened id, or one that is not under this YAML's outputs folder: look it up there
+            # first, then among every quest FI has run on this computer (core/quest_index.py).
+            quest_arg = args.resume or args.watch
+            quest_root = getattr(args, "quest_root", None)
+            if quest_arg and quest_root is None and not (Path(cfg.output.output_dir) / quest_arg / ".fi").is_dir():
+                from core import quest_index
+
+                try:
+                    found = quest_index.find(quest_arg, [Path(cfg.output.output_dir)])
+                except quest_index.AmbiguousQuest as e:
+                    print(f"[FI] {e}", file=sys.stderr)
+                    return 2
+                except quest_index.QuestNotFound:
+                    found = None  # the check below says where it looked
+                if found is not None:
+                    quest_root = found.root
+                    if args.resume:
+                        args.resume = found.quest_id
+                    if args.watch:
+                        args.watch = found.quest_id
+                    own = found.root / "config.yaml"
+                    if own.is_file() and Path(args.config).resolve() != own.resolve():
+                        print(f"[FI] quest {found.quest_id} is in {found.root.parent}; it runs with the YAML you gave "
+                              f"({args.config}), not its own ({own}). Leave out --config to use its own.")
+            if quest_root is not None:
+                # The quest runs in its own outputs folder, whatever a relative output_dir in its YAML means here.
+                if Path(quest_root).parent.resolve() != Path(cfg.output.output_dir).resolve():
+                    print(f"[FI] quest {Path(quest_root).name} is in {Path(quest_root).parent}; it runs there.")
+                cfg.output.output_dir = Path(quest_root).parent
+                # ... and from the folder it was started in, so the other relative paths in its YAML (papers, data,
+                # example files, skills folders) mean what they meant then. One quest per process here, so changing
+                # this process's folder touches no other quest.
+                # Only with the quest's own YAML: the relative paths in a YAML you gave mean your folder.
+                own_yaml = (Path(quest_root) / "config.yaml").resolve() == Path(args.config).resolve()
+                started_in = _started_in(Path(quest_root)) if own_yaml else None
+                if started_in is not None and started_in != Path.cwd().resolve():
+                    print(f"[FI] running from {started_in}, the folder the quest was started in.")
+                    os.chdir(started_in)
             _apply_vscode_bridge_override(cfg, args.vscode_bridge_port)
             _apply_vscode_bridge_socket_override(cfg, args.vscode_bridge_socket)
             if args.resume:
@@ -5722,9 +5849,8 @@ def _show_trace(quest: str, node: str, detail: str, output_root: Path) -> int:
     """Print a quest's audit trace (core/audit_log.py) and check its hash chain."""
     from core import audit_log
 
-    root = next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)
+    root = _quest_dir(quest, output_root)
     if root is None:
-        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
         return 1
     path = root / ".fi" / "audit.jsonl"
     events = audit_log.read(path)
@@ -5741,7 +5867,61 @@ def _show_trace(quest: str, node: str, detail: str, output_root: Path) -> int:
 
 
 def _quest_dir(quest: str, output_root: Path) -> Path | None:
-    return next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)
+    """The quest's folder: ``quest`` itself, ``<output_root>/<quest>``, else the quest FI has run anywhere on this computer
+    whose id is (or uniquely starts or ends with) ``quest`` (core/quest_index.py). ``None`` when there is none; a
+    shortened id that matches more than one quest prints them and is ``None`` too."""
+    from core import quest_index
+
+    try:
+        return quest_index.find(quest, [output_root]).root
+    except quest_index.QuestNotFound as e:
+        # Printed here, and only here (the callers just stop): the candidates or the close matches are what the person
+        # needs to pick the right one.
+        print(f"[FI] {e}")
+        return None
+
+
+def _started_in(quest_root: Path) -> Path | None:
+    """The folder the quest was started in, from the list of every quest FI has run (core/quest_index.py), when it
+    still exists; ``None`` otherwise."""
+    from core import quest_index
+
+    entry = quest_index.load().get(quest_root.name) or {}
+    try:
+        if Path(str(entry.get("quest_root") or "")).resolve() != quest_root.resolve():
+            return None
+        wf = Path(str(entry.get("working_folder") or ""))
+        return wf.resolve() if str(wf) not in ("", ".") and wf.is_dir() else None
+    except OSError:
+        return None
+
+
+def _locate_quest(quest: str, output_root: Path) -> Path | None:
+    """``<output_root>/<quest>`` as it always was when that folder exists; else the quest found by :func:`_quest_dir`
+    (its folder, or its id — full or shortened — among every quest FI has run on this computer)."""
+    if (output_root / quest).is_dir():
+        return output_root / quest
+    return _quest_dir(quest, output_root)
+
+
+def _list_quests(*, prune: bool = False, as_json: bool = False) -> int:
+    """``fi tools quests [--prune]``: every quest FI has run on this computer (core/quest_index.py)."""
+    from core import quest_index
+
+    if prune:
+        try:
+            dropped = quest_index.prune()
+        except Exception as e:  # noqa: BLE001 -- a lock held too long, a file that cannot be replaced
+            print(f"[FI] could not tidy the quest list ({quest_index.index_path()}): {e}. Nothing was removed.")
+            return 1
+        if not as_json:
+            print(f"[FI] forgot {len(dropped)} quest(s) whose folder is gone" + (": " + ", ".join(dropped) if dropped else "."))
+    items = quest_index.entries()
+    if as_json:
+        print(json.dumps({"quests": [e.as_dict(with_status=True) for e in items]}, ensure_ascii=False))
+    else:
+        print(quest_index.listing(items))
+    return 0
 
 
 def _show_why(quest: str, about: str, output_root: Path) -> int:
@@ -5750,7 +5930,6 @@ def _show_why(quest: str, about: str, output_root: Path) -> int:
 
     root = _quest_dir(quest, output_root)
     if root is None:
-        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
         return 1
     print(why.explain(root, about))
     return 0
@@ -5770,8 +5949,6 @@ def _rename_quest(words: list[str], output_root: Path, *, title: str | None = No
         return 2
     root = _quest_dir(words[0], output_root)
     if root is None:
-        print(f"[FI] no quest {words[0]!r} (looked at {Path(words[0])} and {output_root / words[0]}); pass its folder, "
-              "or --output-root.")
         return 1
     try:
         result = quest_title.rename(root, new_title)
@@ -5792,7 +5969,6 @@ def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll
 
     root = _quest_dir(quest, output_root)
     if root is None:
-        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
         return 1
     path = root / ".fi" / "audit.jsonl"
     started = _time.time()

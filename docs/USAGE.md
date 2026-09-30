@@ -160,11 +160,27 @@ cd ~/study_b && fi --config b.yaml
 fi --fleet a.yaml b.yaml --max-concurrent 2 --memory-cap-mb 4096   # or several YAMLs from one command
 ```
 
-A fleet writes every quest under the folder it runs from, unless a YAML gives an absolute `output_dir`. In VS Code, open each study folder in its own window (*File → New Window*) and use `@fi /new` or `@fi /start <yaml>` in each: every quest has its own connection to VS Code, and a window's quest lists (`/resume`, `/watch`, `/map`, …) show only its folder's quests. (A `fi --serve` you start yourself in a terminal is the exception: it sends its model calls through the window opened first.) With several folders in one window, a command works in the folder holding the YAML it names, else the folder of the file you are editing, else the first folder that is not the FrontierInsight checkout.
+A fleet writes every quest under the folder it runs from, unless a YAML gives an absolute `output_dir`. In VS Code, open each study folder in its own window (*File → New Window*) and use `@fi /new` or `@fi /start <yaml>` in each: every quest has its own connection to VS Code, and a window's quest lists (`/resume`, `/watch`, `/map`, …) show only its folder's quests (when it has none, the ones FI has run in other folders; see [Finding a quest from any folder](#finding-a-quest-from-any-folder)). (A `fi --serve` you start yourself in a terminal is the exception: it sends its model calls through the window opened first.) With several folders in one window, a command works in the folder holding the YAML it names, else the folder of the file you are editing, else the first folder that is not the FrontierInsight checkout.
 
 The extension finds FrontierInsight without a setting, in this order: the open folder when it is the FrontierInsight folder; the Python in `frontierInsight.pythonPath` when FI is installed in it with `pip install -e`; the folder you picked before; else it asks once, *"Where is FrontierInsight?"*, and remembers the answer in `~/.frontier-insight/fi_location.json` for every window. `frontierInsight.repoPath` still forces one folder when set.
 
 What FI keeps for you across studies (`~/.frontier-insight/`: installed packages, paper downloads, the Axon library's current project) is shared safely: FI takes turns on it. Studies running at the same time share the model account's rate limit (a Copilot quota, a provider's requests per minute), so they may wait or retry; two or three at once is a sensible start.
+
+### Finding a quest from any folder
+
+Several studies, each in its own folder, sometimes at the same time: nothing to set up. Each quest is still written where it always was (`<that folder>/outputs/<quest_id>/`, or your YAML's `output.output_dir`), and FI also remembers where, in one list for this computer: `~/.frontier-insight/quests.json` (`%USERPROFILE%\.frontier-insight\quests.json` on Windows; the `FI_HOME` environment variable moves the folder). A quest is added when it starts, updated when it resumes or is renamed, and several FI runs can write the list at the same time without losing each other's entries.
+
+So a quest can be named from any folder, and by a short id: the six characters after the last dash of its id (`479b06` for `1790003131-energy-drift-479b06`), or any other part the id starts or ends with, as long as it names only one quest. When it matches several, FI lists them, each with its title and folder, and asks for more of the id.
+
+```bash
+fi tools quests                       # every quest: short id, where it is (running, waiting for you, finished, ...), title, folder
+fi --resume 479b06                    # go on with it from any folder: it runs in its own folder, with its own config.yaml
+fi --resume 479b06 --from writing     # the other commands that take a quest id accept it too
+fi tools rename 479b06 A Better Title
+fi tools quests --prune               # forget the quests whose folder was deleted or moved
+```
+
+The quest's own folder is always looked at first, as before. A quest found elsewhere runs as if you had gone there: from the folder it was started in (so the relative paths in its YAML mean what they meant), writing to its own outputs folder, with its own `config.yaml` (a `--config` you give instead is used, FI says so, and it runs from your folder, where that YAML's relative paths point). A quest whose folder was deleted is dropped from the list when it is looked up (when its whole study folder went too, by `--prune`); one on a disk or network share that is only disconnected is left out of lists until it is back, not forgotten, unless you `--prune` meanwhile (on Linux and macOS `--prune` also forgets quests on a disk that is not mounted). A folder you moved is recorded at its new place the next time you resume it from there (`fi --resume <its folder>`). The start line of every run shows the short id (`[FI] start quest_id=... short_id=479b06`). The web dashboard shows each quest's short id and, under **Quests in other folders**, the ones FI has run elsewhere, which open on the same quest page; in VS Code, `@fi /resume <short id>` finds a quest from another folder, and when the open folder has no quests `@fi /resume` and **FI: Quest map** offer the ones FI has run elsewhere.
 
 ### Doing a step again
 
@@ -203,7 +219,7 @@ fi tools rename <quest_id> Energy Drift of Symplectic Integrators at Large Step 
 
 This changes the title line of the paper, the `title` in the quest's `config.yaml`, the summary and the saved state a resume reads, and records the change in the quest's trace. Results, data and code are not touched. It is refused while the quest is running, and the title must be one line of at most 200 characters. A PDF, slides, poster or talk script already made still show the old title: the command lists them with the command that makes each again from the same paper, for example `python launch.py --resume <quest_id> --emit paper_pdf` (no re-run of the research). A rerun with `--from <step>` (the writing included) starts from before the rename and may choose another title; rename again afterwards. A title that starts with `-` goes in as `--title="-..."`. Renaming a finished quest does not lower its evidence level: the change is recorded after the trace's seal with the paper's fingerprint before and after. On the web quest page, use **Rename** beside the title (it offers to make the outputs again); in VS Code, `@fi /rename <quest_id> <new title>`.
 
-`--resume` looks under the folder's `output.output_dir`; if it does not find the quest it says exactly where it looked. In VSCode, open your project folder; quests run in it (`frontierInsight.workingDir` overrides that), and FrontierInsight is found without a setting (see *Running several studies at once*). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
+`--resume` looks under the folder's `output.output_dir` first, then among every quest FI has run on this computer (see [Finding a quest from any folder](#finding-a-quest-from-any-folder)); if it finds none it says where it looked and names close matches. In VSCode, open your project folder; quests run in it (`frontierInsight.workingDir` overrides that), and FrontierInsight is found without a setting (see *Running several studies at once*). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
 
 ### All `fi` flags
 
@@ -229,7 +245,8 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--profile` | quest | dump per-quest viztracer trace if viztracer installed |
 | `--output <dir>` | quest | override `output.output_dir` in the YAML |
 | `--interactive` | quest | talk the topic over first: read the clarify answers (what you want to see, the title, ...) from stdin. Without it a headless run lets the agent answer for itself |
-| `--resume <quest_id>` | quest | re-enter a checkpoint, requires `--config` |
+| `--resume <quest_id>` | quest | re-enter a checkpoint. Without `--config` it uses the `config.yaml` saved in the quest's folder; the id may be the short id, and the quest may be one started in another folder (see [Finding a quest from any folder](#finding-a-quest-from-any-folder)) |
+| `--quests` | list | every quest FI has run on this computer, from any folder (`fi tools quests`); `--prune` first forgets those whose folder is gone, `--json` prints JSON |
 | `--from <step>` | quest | with `--resume` or `--rerun`: do the quest again from `ideas`, `literature`, `plan`, `design`, `skills`, `code`, `run`, `figures`, `analysis`, `crosscheck`, `evidence`, `writing`, `claims` or `review` (see [Doing a step again](#doing-a-step-again)). What that step and the later ones made is moved to `.fi/previous/<time>/` first. `--from` with no step lists the steps the quest reached. The web quest page's menu beside **Resume** and `@fi /resume <quest_id> --from <step>` do the same |
 | `--summarize-kind <kind>` | summarize | content-type hint, default `auto` |
 | `--summarize-provider <name>` | summarize | LLM provider for the summarize call |
@@ -721,6 +738,8 @@ frontier_insight_summary.json         ← machine-readable index
 ```bash
 # From the terminal:
 fi --config outputs/<quest_id>/config.yaml --resume <quest_id>
+# or, from any folder, by its short id (see "Finding a quest from any folder"):
+fi --resume 479b06
 
 # From VSCode chat:
 @fi /resume

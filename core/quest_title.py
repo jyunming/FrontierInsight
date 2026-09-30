@@ -370,6 +370,13 @@ def rename(quest_root: Path, new_title: Any) -> RenameResult:
         raise RenameRefused(f"A file of the quest cannot be read ({e}); nothing was changed.") from e
     _write_all(edits)
     result.changed.extend(rel for rel, *_ in edits)
+    try:
+        # The list of every quest on this computer (core/quest_index.py) shows the title too.
+        from core import quest_index
+
+        quest_index.set_title(quest_root, title)
+    except Exception:  # noqa: BLE001 -- the quest is renamed; the list catches up when it next starts or resumes
+        pass
 
     if (quest_root / ".fi" / "state.sqlite").is_file():
         try:

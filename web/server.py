@@ -333,6 +333,12 @@ def _quest_pending(quest_root: Path) -> str | None:
     return None
 
 
+def _short_id(quest_id: str) -> str:
+    from core.quest_index import short_id
+
+    return short_id(quest_id)
+
+
 def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
     """Return one record per quest directory under ``output_root``. A
     quest dir is any subdirectory containing a ``.fi/`` folder."""
@@ -381,6 +387,7 @@ def _scan_quests(output_root: Path) -> list[dict[str, Any]]:
         paper_md = d / "paper" / "paper.md"
         out.append({
             "quest_id": d.name,
+            "short_id": _short_id(d.name),
             "quest_root": str(d),
             "verdict": verdict,
             "pending": pending,
@@ -469,6 +476,12 @@ def _resolve_quest_root(output_root: Path, quest_id: str) -> Path:
 
     Raises ``HTTPException(400)`` on either failure so the endpoint
     code can just call this and trust the result.
+
+    A quest that is not under ``output_root`` — started from another folder, or named by a unique start or end of its
+    id (e.g. the six characters after the last dash) — is found among every quest FI has run on this computer
+    (core/quest_index.py), and its own folder is returned. A shortened id that matches more than one quest is a 409
+    listing them. When nothing matches, the (missing) local folder is returned as before, so an endpoint answers 404
+    itself — or "starting" for a quest the launcher has just started, whose folder is not written yet.
     """
     if not _QUEST_ID_RE.match(quest_id):
         raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
@@ -478,7 +491,31 @@ def _resolve_quest_root(output_root: Path, quest_id: str) -> Path:
         candidate.relative_to(root)
     except ValueError:
         raise HTTPException(400, f"quest_id escapes output root: {quest_id!r}") from None
-    return candidate
+    if candidate.exists():
+        return candidate
+    from core import quest_index
+
+    try:
+        # Never a folder named by a path relative to where the server runs, and no waiting on the list's lock here.
+        return quest_index.find(quest_id, [root], allow_folder=False, tidy=False).root
+    except quest_index.AmbiguousQuest as e:
+        raise HTTPException(409, str(e)) from None
+    except quest_index.QuestNotFound:
+        return candidate
+
+
+def _index_listing(output_root: Path) -> list[dict[str, Any]]:
+    """Every quest FI has run on this computer (core/quest_index.py), each with its short id, title, where it is and
+    whether it is under this server's outputs folder (``here``)."""
+    from core import quest_index
+
+    here = output_root.resolve()
+    out: list[dict[str, Any]] = []
+    for e in quest_index.entries():
+        d = e.as_dict(with_status=True)
+        d["here"] = e.quest_root.parent.resolve() == here
+        out.append(d)
+    return out
 
 
 _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
@@ -1111,6 +1148,9 @@ def make_app(
         allowlist used elsewhere to block path traversal."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        # A shortened id, or a quest in another folder: the page works with the full id (the launcher, the log
+        # stream and the answers are keyed by it).
+        quest_id = _resolve_quest_root(app.state.output_root, quest_id).name
         page = static_dir / "quest.html"
         if not page.exists():
             return HTMLResponse(
@@ -1131,6 +1171,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file() or not (quest_root / ".fi" / "state.sqlite").is_file():
             return JSONResponse({"quest_id": quest_id, "steps": [], "nodes": [], "blocks": [],
@@ -1175,6 +1216,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         if _clarify_run_waiting(quest_root):
             # It is running, waiting for its setup answers on the quest page: a second run would share its files.
             raise HTTPException(409, "this quest is still running and waiting for your answers on its page")
@@ -1203,12 +1245,23 @@ def make_app(
                                      f"needs your name. In a terminal, run: python launch.py --config "
                                      f"{yaml_path} --resume {quest_id} --from {step} --approve-as <your name>")
         resume_flag = "--rerun" if rerun else "--resume"
+        # The full id (a shortened one names the same quest) and the quest's own outputs folder, which is not this
+        # server's when the quest was started from another folder; it then runs from the folder it was started in.
+        quest_id = quest_root.name
+        cwd = None
+        if quest_root.parent.resolve() != Path(app.state.output_root).resolve():
+            from core import quest_index as _quest_index
+
+            wf = str((_quest_index.load().get(quest_id) or {}).get("working_folder") or "")
+            cwd = Path(wf) if wf and Path(wf).is_dir() else None
         try:
             launched = app.state.launcher.launch_command(
-                argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else [])],
+                argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else []),
+                           "--output", str(quest_root.parent)],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
                 # A resumed quest that has not had its setup questions yet asks them on the quest page.
                 extra_env={"FI_WEB_ANSWERS": "1"},
+                cwd=cwd,
             )
         except QuestLauncherFull as e:
             return JSONResponse(
@@ -1235,6 +1288,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file():
             raise HTTPException(
@@ -1282,6 +1336,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         job_id = f"{quest_id}-watch"
         launched = app.state.launcher.job_state(job_id)
         log_path = (launched or {}).get("log_path") or (
@@ -1367,6 +1422,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         body = await request.json()
         who = str(body.get("who") or "").strip() if isinstance(body, dict) else ""
         ok, message = fi_frozen.approve(quest_root, who, via="web")
@@ -1379,6 +1435,7 @@ def make_app(
         """Change a finished or paused quest's title (core/quest_title.py): the web surface of ``fi tools rename``.
         409 while the quest is running (this server's own record of it, or a run.log still being written)."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         if not (quest_root / ".fi").is_dir():
             raise HTTPException(404, f"quest {quest_id} not found")
         try:
@@ -1405,6 +1462,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         return JSONResponse({"quest_id": quest_id, **_plan_view(quest_root)})
 
     @app.put("/api/quests/{quest_id}/plan")
@@ -1414,6 +1472,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         path = fi_plan.plan_path(quest_root)
         if not path.is_file():
             raise HTTPException(404, "this quest has no plan.md yet: it has not reached the plan step")
@@ -1441,6 +1500,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file():
             raise HTTPException(
@@ -1478,7 +1538,7 @@ def make_app(
         restarted since) or ``not_started``."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
-        _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = _resolve_quest_root(app.state.output_root, quest_id).name
         job_id = f"{quest_id}-plan"
         launched = app.state.launcher.job_state(job_id)
         log_path = (launched or {}).get("log_path") or (
@@ -1513,6 +1573,7 @@ def make_app(
             raise HTTPException(
                 400, f"kind must be one of {sorted(valid)}; got {kind!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file():
             raise HTTPException(
@@ -1550,6 +1611,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         wanted = quest_root / "needs" / "WANTED_PAPERS.md"
         markdown = wanted.read_text(encoding="utf-8") if wanted.is_file() else ""
         papers_dir = quest_root / "inputs" / "papers"
@@ -1580,6 +1642,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         nxt = quest_root / "NEXT_STEP.md"
         markdown = nxt.read_text(encoding="utf-8") if nxt.is_file() else ""
         # The structured descriptor the unified pause core wrote — authoritative
@@ -1667,6 +1730,7 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         saved, skipped = await _save_uploads(
             quest_root / "inputs" / "papers", files, _PAPER_UPLOAD_SUFFIXES,
         )
@@ -1691,6 +1755,7 @@ def make_app(
             )
         rel, suffixes = spec
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         saved, skipped = await _save_uploads(
             quest_root.joinpath(*rel), files, suffixes,
         )
@@ -2117,6 +2182,12 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
+        if quest_root.parent.resolve() != Path(app.state.output_root).resolve():
+            # A quest in another folder (found in the list of every quest FI has run) is not this page's to move:
+            # its own folder's trash, and whatever may be running it there, are elsewhere.
+            raise HTTPException(409, f"quest {quest_id} is in {quest_root.parent}, not in this page's outputs folder; "
+                                     "delete it from there.")
         if not quest_root.is_dir():
             raise HTTPException(404, f"quest {quest_id} not found")
         # Alive in either tracker = refuse.
@@ -2217,6 +2288,7 @@ def make_app(
         cancel that with kill from the terminal)."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_id = _resolve_quest_root(app.state.output_root, quest_id).name  # the full id the launcher knows
         canceled = app.state.launcher.cancel(quest_id)
         if not canceled:
             raise HTTPException(404, f"quest {quest_id} not tracked by web launcher")
@@ -2226,9 +2298,16 @@ def make_app(
     async def list_quests() -> JSONResponse:
         return JSONResponse({"quests": _scan_quests(app.state.output_root)})
 
+    @app.get("/api/quest-index")
+    async def quest_index_listing() -> JSONResponse:
+        """Every quest FI has run on this computer, whichever folder it ran in (core/quest_index.py): the dashboard's
+        "Quests in other folders". Quests whose folder is gone are dropped from the list as it is read."""
+        return JSONResponse({"quests": await asyncio.to_thread(_index_listing, app.state.output_root)})
+
     @app.get("/api/quests/{quest_id}")
     async def get_quest(quest_id: str) -> JSONResponse:
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         # Race window: a quest just submitted via
         # POST /api/interview/submit?launch=true has had its quest_id
         # minted and its subprocess spawned, but the child engine has
@@ -2416,6 +2495,9 @@ def make_app(
 
     @app.get("/api/quests/{quest_id}/log/stream")
     async def stream_log(quest_id: str) -> StreamingResponse:
+        # The full id: whether the quest is still running is asked of the launcher and the registry by it.
+        quest_id = _resolve_quest_root(app.state.output_root, quest_id).name
+
         async def gen():
             offset = 0
             # Wait briefly for the file to exist on cold start; re-resolved on every attempt, since `progress.log` and
@@ -2477,6 +2559,7 @@ def make_app(
                                  "questions": questions})
         try:
             quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+            quest_id = quest_root.name  # the full id, also when a shortened one was given
         except HTTPException:
             return JSONResponse({"pending": False, "questions": None})
         on_disk = quest_root / ".fi" / "clarify_questions.json"
@@ -2503,6 +2586,7 @@ def make_app(
         quest_root: Path | None = None
         try:
             quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+            quest_id = quest_root.name  # the full id, also when a shortened one was given
         except HTTPException:
             quest_root = None
         # Only stage an on-disk answer when the quest is actually paused for
@@ -2559,6 +2643,7 @@ def make_app(
                                  "snapshot": snap})
         try:
             quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+            quest_id = quest_root.name  # the full id, also when a shortened one was given
         except HTTPException:
             return JSONResponse({"pending": False, "source": None,
                                  "snapshot": None})
@@ -2618,6 +2703,7 @@ def make_app(
         quest_root: Path | None = None
         try:
             quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+            quest_id = quest_root.name  # the full id, also when a shortened one was given
         except HTTPException:
             quest_root = None
         if quest_root is not None:
@@ -2663,6 +2749,7 @@ def make_app(
         file-browser pane on /quest/<id>. Skips ``.fi/`` (engine
         internals) so the user doesn't see SQLite + run.log clutter."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         items: list[dict[str, Any]] = []
         for p in sorted(quest_root.rglob("*")):
             try:
@@ -2706,6 +2793,7 @@ def make_app(
         user then saves it.
         """
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         # Prefer the path EXACTLY as given so real filenames containing
         # '?' or '#' (which /files happily lists) still open. Only fall
         # back to the stripped form when the literal path isn't a real
@@ -2737,6 +2825,7 @@ def make_app(
         a few MB; if you have a 500 MB quest, refactor to use
         ZipFile + temp file with proper cleanup."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         import io
         import zipfile
         buf = io.BytesIO()
@@ -2775,6 +2864,7 @@ def make_app(
         Returns ``{"labels": [...]}``; empty list when the file
         doesn't exist yet."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         labels_path = quest_root / ".fi" / "labels.json"
         if not labels_path.is_file():
             return JSONResponse({"quest_id": quest_id, "labels": []})
@@ -2797,6 +2887,7 @@ def make_app(
             raise HTTPException(400, "labels must be a list of strings")
         labels = [str(l).strip() for l in labels if str(l).strip()]
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         fi_dir = quest_root / ".fi"
         if not fi_dir.is_dir():
             raise HTTPException(
@@ -2816,6 +2907,7 @@ def make_app(
         paper.md as a single iteration when the rolled-snapshot
         machinery isn't in place yet."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         paper_dir = quest_root / "paper"
         iterations: list[dict[str, Any]] = []
         if paper_dir.is_dir():
@@ -2867,6 +2959,7 @@ def make_app(
         if not isinstance(code, str) or not code.strip():
             raise HTTPException(400, "code field is required")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         target = quest_root / "code" / "experiment.py"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(code, encoding="utf-8")
@@ -2917,6 +3010,7 @@ def make_app(
         can tell when a total counts only the priced calls
         (``total_cost_usd_partial`` / ``unpriced_requests``)."""
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         cost_path = quest_root / ".fi" / "cost.jsonl"
         if not cost_path.is_file():
             return JSONResponse({"records": [], "available": False})
@@ -2947,6 +3041,7 @@ def make_app(
         # legacy character check (it can have hyphens / dots that the
         # regex would reject but are fine for figure filenames).
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        quest_id = quest_root.name  # the full id, also when a shortened one was given
         if "/" in name or "\\" in name or ".." in name:
             raise HTTPException(400, "bad figure name")
         path = quest_root / "figures" / name
