@@ -1398,6 +1398,7 @@ class Engine:
                 self.fi_dir / "pause.json",
                 self.fi_dir / "clarify_questions.json",
                 self.fi_dir / "clarify_answer.json",
+                self.fi_dir / self._CLARIFY_ASKED,
                 # The human-review snapshot too — the node re-writes it on the
                 # resume pass, so a finished quest could otherwise look like it's
                 # still waiting for review on the dashboard / quest page.
@@ -2760,22 +2761,30 @@ class Engine:
                 **modes,
             }
 
-        prompt = self._prompts["clarify"].substitute(topic=state["topic"])
-        text = await self._chat(prompt, node="clarify")
-        questions = _parse_json_lenient(text) or {}
-        if not isinstance(questions, dict) or not questions:
-            # Degrade gracefully: if the LLM produced unparseable JSON,
-            # synthesize a minimal default questionnaire from the topic
-            # alone so the downstream nodes get *something*.
-            self._log.warning("[clarify] LLM returned no parseable questions; using minimal defaults")
-            questions = _default_clarify_questions(state["topic"])
-        _spell_out_title_options(questions)
+        # The answers resume this node from its first line (LangGraph re-runs a node after its interrupt), so the
+        # questions put to the person are kept on disk before the pause and read back here: the model is not asked
+        # again, and the answers are matched to the questions the person actually saw (a title picked by number).
+        questions = self._asked_clarify_questions(state["topic"])
+        if questions is not None:
+            self._log.info("[clarify] using the %d question(s) already asked (no second model call)", len(questions))
+        else:
+            prompt = self._prompts["clarify"].substitute(topic=state["topic"])
+            text = await self._chat(prompt, node="clarify")
+            questions = _parse_json_lenient(text) or {}
+            if not isinstance(questions, dict) or not questions:
+                # Degrade gracefully: if the LLM produced unparseable JSON,
+                # synthesize a minimal default questionnaire from the topic
+                # alone so the downstream nodes get *something*.
+                self._log.warning("[clarify] LLM returned no parseable questions; using minimal defaults")
+                questions = _default_clarify_questions(state["topic"])
+            _spell_out_title_options(questions)
+            # Measure, or find the best design: asked only when the topic's words leave it open
+            # (core/optimisation_plan.py).
+            if _optim.add_study_type_question(questions, state["topic"]):
+                self._log.info("[clarify] the topic does not say whether it measures or looks for the best design: "
+                               "that question is added")
         if self.config.title:
             questions.pop("title", None)
-        # Measure, or find the best design: asked only when the topic's words leave it open (core/optimisation_plan.py).
-        if _optim.add_study_type_question(questions, state["topic"]):
-            self._log.info("[clarify] the topic does not say whether it measures or looks for the best design: that "
-                           "question is added")
 
         if mode == "auto":
             agent_answers = {
@@ -2845,6 +2854,7 @@ class Engine:
         # (interrupt() returns the answer), so writing it here would re-create
         # the file the run loop just consumed and falsely re-show the form.
         # Interactive: pause the graph until the caller resumes with answers.
+        self._keep_asked_clarify_questions(state["topic"], questions)
         payload = self._pause_for_human(
             kind="clarify",
             interaction="answer",
@@ -2869,6 +2879,7 @@ class Engine:
         if not isinstance(answers, dict) or not answers:
             # Resumed with nothing (or a non-dict): the questions' own defaults are the answers.
             answers = {k: v.get("default") for k, v in questions.items() if isinstance(v, dict)}
+        self._drop_asked_clarify_questions()
         modes = self._resolve_modes(answers)
         self._log_topic_shape_mismatch(
             answers, no_simulation_resolved=modes["no_simulation_resolved"])
@@ -2959,6 +2970,11 @@ class Engine:
             - ``"yes"`` or ``"uncertain"`` → False. The simulation
               path runs; ``uncertain`` adds a review-time caveat (not
               implemented in this method — happens in the review prompt).
+            An answer in the person's own words counts by its first word
+            ("yes, but more than 100 lines" is "yes").
+        2b. The YAML's ``engine.clarify_overrides.simulatability`` (what the
+           interview wrote), when the clarify answer is missing, empty or
+           does not start with yes / no / uncertain.
         3. **Legacy fallback** — ``empirical_vs_theoretical == "empirical"``
            → True. Kept for back-compat with quests started before the
            ``simulatability`` slot existed (resumes from old
@@ -2993,27 +3009,10 @@ class Engine:
         #   "(no reason provided)" so the source is still greppable.
         # Both shapes route the same — the contract is the decision.
         sim = answers.get("simulatability")
-        decision = ""
-        reason = ""
-        if isinstance(sim, dict):
-            raw_default = sim.get("default", "")
-            # Coerce bool to the documented string vocabulary — PyYAML
-            # parses unquoted ``yes`` / ``no`` as ``True`` / ``False``,
-            # which is the most common way users write the slot in
-            # their YAML. Without this coercion, ``simulatability: no``
-            # (unquoted) silently fell through to the legacy fallback
-            # and the engine ran the simulation path despite the user
-            # asking for no-simulation. ``True`` / ``False`` are the
-            # only sensible bool mappings: ``True`` ≈ "yes",
-            # ``False`` ≈ "no". String values are still preferred.
-            if isinstance(raw_default, bool):
-                raw_default = "yes" if raw_default else "no"
-            decision = str(raw_default).strip().lower()
-            reason = str(sim.get("reason", "")).strip()
-        elif isinstance(sim, bool):
-            decision = "yes" if sim else "no"
-        elif isinstance(sim, str):
-            decision = sim.strip().lower()
+        decision, reason = _simulatability_answer(sim)
+        # A person answers in their own words ("yes, but more than 100 lines"): the leading yes / no / uncertain is
+        # the answer, the rest is their note.
+        decision = _leading_simulatability_word(decision) or decision
         if decision or isinstance(sim, dict):
             if decision == "no":
                 self._log.info(
@@ -3029,23 +3028,29 @@ class Engine:
                     decision, reason or "(no reason provided)",
                 )
                 return False
-            # Unknown / empty decision — fall through to legacy fallback.
-            # Surface it though: a misformed LLM response (typo, "maybe",
-            # blank, anything outside the documented {yes, no, uncertain}
-            # set) silently downgrading to the legacy path is a routing
-            # bug waiting to bite. Logging a WARNING here keeps the
-            # decision visible in run.log so the user can see "the LLM
-            # returned X which we didn't recognize, so we fell through
-            # to the empirical_vs_theoretical fallback" without having
-            # to diff the clarify answers against the engine source.
+            # Unknown / empty decision — fall through to the YAML's answer,
+            # then the legacy fallback. Surface it though: an answer
+            # outside the documented {yes, no, uncertain} set ("maybe", a
+            # typo) silently changing the route is a routing bug waiting
+            # to bite, so a WARNING names the value in run.log.
             if decision:
                 self._log.warning(
-                    "[clarify] simulatability.default=%r is not in the "
-                    "documented set {yes, no, uncertain}; falling through "
-                    "to the empirical_vs_theoretical legacy check. "
-                    "Check agents/clarify.md and the LLM's clarify output "
-                    "for drift.", decision,
+                    "[clarify] the answer to \"can a simulation answer this?\" was %r, which does not start with "
+                    "one of {yes, no, uncertain}; using the setting in the YAML if there is one, else the "
+                    "empirical_vs_theoretical legacy check.", decision,
                 )
+
+        # The YAML's own answer (engine.clarify_overrides.simulatability, which the interview writes): used when the
+        # clarify answer left the question open -- the person cleared the slot or wrote something with no yes / no
+        # in front, or their answer did not include this slot at all.
+        pinned = (getattr(self.config.engine, "clarify_overrides", None) or {}).get("simulatability")
+        pinned_decision = _leading_simulatability_word(_simulatability_answer(pinned)[0])
+        if pinned_decision:
+            self._log.info(
+                "[clarify] simulatability resolved: %s (source=yaml_clarify_overrides, decision=%s)",
+                "NO_SIMULATION" if pinned_decision == "no" else "SIMULATE", pinned_decision,
+            )
+            return pinned_decision == "no"
 
         # Legacy fallback for quests scoped before the simulatability
         # slot was added.
@@ -3061,7 +3066,7 @@ class Engine:
 
         self._log.info(
             "[clarify] simulatability resolved: SIMULATE "
-            "(source=default, no signal from YAML or clarify)",
+            "(source=default, neither the clarify answer nor the YAML says yes, no or uncertain)",
         )
         return False
 
@@ -13842,6 +13847,39 @@ class Engine:
             except OSError:
                 pass
 
+    # The setup questions the clarify node put to the person, kept across its pause (see _node_clarify_questions).
+    # Not the web form's ``clarify_questions.json``: that one is cleared as soon as an answer is taken, before the
+    # node runs again, and its presence means "a form is waiting".
+    _CLARIFY_ASKED = "clarify_asked.json"
+
+    def _asked_clarify_questions(self, topic: str) -> dict[str, Any] | None:
+        """The questions already put to the person for ``topic``, when the clarify node paused on them; else None."""
+        try:
+            data = json.loads((self.fi_dir / self._CLARIFY_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict) or data.get("topic_sha256") != hashlib.sha256(str(topic or "").encode("utf-8")).hexdigest():
+            return None
+        questions = data.get("questions")
+        return questions if isinstance(questions, dict) and questions else None
+
+    def _keep_asked_clarify_questions(self, topic: str, questions: dict[str, Any]) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self.fi_dir / (self._CLARIFY_ASKED + ".tmp")
+            tmp.write_text(json.dumps({"topic_sha256": hashlib.sha256(str(topic or "").encode("utf-8")).hexdigest(), "questions": questions},
+                                      indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            os.replace(tmp, self.fi_dir / self._CLARIFY_ASKED)
+        except (OSError, TypeError, ValueError) as e:
+            # Not kept: the resume asks the model again, as before.
+            self._log.debug("[clarify] could not keep the asked questions: %r", e)
+
+    def _drop_asked_clarify_questions(self) -> None:
+        try:
+            (self.fi_dir / self._CLARIFY_ASKED).unlink(missing_ok=True)
+        except OSError:
+            pass
+
     async def _await_with_heartbeat(
         self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0,
     ) -> Any:
@@ -17078,6 +17116,31 @@ def _clean_title(value: Any) -> str:
     if text.startswith("<") and text.endswith(">"):
         return ""
     return text[:120].rstrip()
+
+
+def _simulatability_answer(sim: Any) -> tuple[str, str]:
+    """``(decision, reason)`` of a ``simulatability`` answer in any of its shapes: a slot dict ``{default, reason}``,
+    a bare string, or a bool (PyYAML reads an unquoted ``yes`` / ``no`` as ``True`` / ``False``, the commonest way
+    the slot is written in a YAML; ``True`` means "yes"). The decision is lower-cased and stripped, not yet parsed."""
+    reason = ""
+    if isinstance(sim, dict):
+        reason = str(sim.get("reason", "") or "").strip()
+        sim = sim.get("default", "")
+    if isinstance(sim, bool):
+        return ("yes" if sim else "no"), reason
+    if sim is None:
+        return "", reason
+    return str(sim).strip().lower(), reason
+
+
+_SIMULATABILITY_LEAD = re.compile(r"^\W*(yes|no|uncertain)\b", re.IGNORECASE)
+
+
+def _leading_simulatability_word(text: str) -> str:
+    """``yes`` / ``no`` / ``uncertain`` when ``text`` starts with that word ("Yes, but more than 100 lines" is "yes";
+    "not sure" is none of them), else ``""``."""
+    m = _SIMULATABILITY_LEAD.match(str(text or ""))
+    return m.group(1).lower() if m else ""
 
 
 def _spell_out_title_options(questions: dict[str, Any]) -> None:
