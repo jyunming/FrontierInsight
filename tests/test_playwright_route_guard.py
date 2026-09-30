@@ -200,15 +200,27 @@ def test_allowed_navigation_is_fulfilled():
     assert route.calls == ["fetch", "fulfill"]
 
 
-_REAL_DRIVER_KILL = r'''
+# Runs a real render against a slow local server. The server's handler runs while the guard is
+# inside route.fetch; in "kill" mode it kills the Playwright driver right there, in "timeout" mode
+# the render's own navigation timeout closes the browser under the guard.
+_REAL_RENDER = r'''
 import http.server, os, sys, threading, time
-import psutil
 sys.path.insert(0, sys.argv[1])
+mode = sys.argv[2]
 import core.knowledge as kn
+
+hits = []
 
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        time.sleep(4)  # keep route.fetch in flight while the driver is killed
+        hits.append(self.path)
+        if mode == "kill":
+            import psutil
+            for c in psutil.Process(os.getpid()).children(recursive=True):
+                if "node" in c.name().lower():
+                    c.kill()
+                    print("KILLED_DRIVER", flush=True)
+        time.sleep(4)
         try:
             self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
             self.wfile.write(b"<html><body>slow</body></html>")
@@ -219,40 +231,38 @@ class H(http.server.BaseHTTPRequestHandler):
 
 srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
-
-def killer():
-    time.sleep(2.0)
-    for c in psutil.Process(os.getpid()).children(recursive=True):
-        if "node" in c.name().lower():
-            c.kill()
-
-threading.Thread(target=killer, daemon=True).start()
-out = kn._playwright_fetch_html(f"http://127.0.0.1:{srv.server_port}/", timeout_s=15, allow=lambda u: True)
-print("RENDER", out)
+timeout_s = 15 if mode == "kill" else 1.5
+out = kn._playwright_fetch_html(f"http://127.0.0.1:{srv.server_port}/", timeout_s=timeout_s, allow=lambda u: True)
+time.sleep(1)
+print("RENDER", out, "HITS", len(hits), flush=True)
 '''
 
 
 @pytest.mark.slow
-def test_real_driver_death_mid_route_prints_no_traceback(tmp_path):
-    """Kill the real Playwright driver while the guard is fetching a navigation.
+@pytest.mark.parametrize("mode", ["kill", "timeout"])
+def test_real_page_closing_mid_route_prints_no_traceback(tmp_path, mode):
+    """Close the real page / driver while the guard is fetching a navigation.
 
-    Before the fix this printed "Error occurred in event listener" + a Route.abort traceback."""
+    Before the fix the "kill" case printed "Error occurred in event listener" + a Route.abort traceback."""
     import subprocess
     import sys
     from pathlib import Path
 
-    pytest.importorskip("psutil")
+    if mode == "kill":
+        pytest.importorskip("psutil")
     sync_api = pytest.importorskip("playwright.sync_api")
     try:
         with sync_api.sync_playwright() as p:
             p.chromium.launch(headless=True).close()
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"Chromium for Playwright is not installed: {exc}")
-    script = tmp_path / "kill_driver.py"
-    script.write_text(_REAL_DRIVER_KILL, encoding="utf-8")
+    script = tmp_path / "render.py"
+    script.write_text(_REAL_RENDER, encoding="utf-8")
     repo = str(Path(kn.__file__).resolve().parent.parent)
-    proc = subprocess.run([sys.executable, str(script), repo], capture_output=True, text=True, timeout=120)
+    proc = subprocess.run([sys.executable, str(script), repo, mode], capture_output=True, text=True, timeout=120)
     out = proc.stdout + proc.stderr
-    assert "RENDER None" in out, out
+    assert "RENDER None HITS 1" in out, out  # the guard really was mid-fetch, and nothing was re-sent
+    if mode == "kill":
+        assert "KILLED_DRIVER" in out, out
     for marker in ("Traceback", "Error occurred in event listener", "never retrieved"):
         assert marker not in out, out

@@ -2070,7 +2070,6 @@ def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | N
                     # so a JS challenge is more likely to auto-clear.
                     args=["--disable-blink-features=AutomationControlled"],
                 )
-                page = None
                 try:
                     ctx = browser.new_context(
                         user_agent=_BROWSER_HEADERS["User-Agent"],
@@ -2109,10 +2108,6 @@ def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | N
                         return None
                     return html
                 finally:
-                    # Routes still in flight (a sub-resource the render did not wait for) would
-                    # otherwise print a traceback when the browser closes under them.
-                    if allow is not None:
-                        _quiet_remaining_routes(page)
                     browser.close()
         finally:
             _HEADLESS_RENDER_LOCK.release()
