@@ -287,7 +287,7 @@ def plan_notes(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> list
     if not fi_runs:
         return ["This quest runs its experiment as one script, so FI runs none of its checks itself: whatever criteria "
                 "the plan names are shown after each run but none counts, and no run can be shown to be better than "
-                "another. Two scripts (`execution.split_analysis: true`, as `rigor_profile: research` sets) let FI "
+                "another. Two scripts (the default, `execution.split_analysis: auto`; not `false`) let FI "
                 "run the simulation and measure them."]
     if not countable(protocol):
         return ["The plan has no criterion FI can measure itself for judging whether the code got better (`criteria` in "
