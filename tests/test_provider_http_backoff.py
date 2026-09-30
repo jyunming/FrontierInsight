@@ -160,9 +160,33 @@ async def test_a_dropped_connection_keeps_the_short_four_attempt_budget(waits: l
 
 
 async def test_retry_after_seconds_is_honoured(waits: list[float]) -> None:
-    handler, calls = _replies(_cloudflare(503, **{"Retry-After": "7"}), httpx.Response(200, json=OK))
+    handler, calls = _replies(_cloudflare(429, **{"Retry-After": "7"}), httpx.Response(200, json=OK))
     assert await _chat(PLAIN, handler) == "hello"
     assert len(waits) == 1 and 7.0 <= waits[0] <= 7.7
+
+
+async def test_a_tiny_retry_after_on_a_5xx_does_not_shorten_the_outage_wait(waits: list[float]) -> None:
+    """A 5xx's Retry-After only lengthens the wait: ``Retry-After: 1`` on every 503 would otherwise spend the whole
+    outage budget in seconds, the failure this policy exists to fix."""
+    handler, calls = _replies(_cloudflare(503, **{"Retry-After": "1"}), httpx.Response(200, json=OK))
+    assert await _chat(PLAIN, handler) == "hello"
+    assert len(waits) == 1 and 8.0 <= waits[0] <= 12.0
+
+
+async def test_a_long_retry_after_on_a_5xx_is_honoured(waits: list[float]) -> None:
+    handler, calls = _replies(_cloudflare(503, **{"Retry-After": "100"}), httpx.Response(200, json=OK))
+    assert await _chat(PLAIN, handler) == "hello"
+    assert len(waits) == 1 and 100.0 <= waits[0] <= 110.0
+
+
+def test_one_call_waits_at_most_five_minutes_in_all() -> None:
+    req = httpx.Request("POST", "https://x/v1/chat/completions")
+    exc = httpx.HTTPStatusError("x", request=req,
+                                response=httpx.Response(429, request=req, headers={"Retry-After": "120"}))
+    rs = SimpleNamespace(attempt_number=3, idle_for=290.0, outcome=SimpleNamespace(exception=lambda: exc))
+    assert provider._http_retry_wait(rs) <= 10.0 + 1e-9
+    rs_done = SimpleNamespace(attempt_number=3, idle_for=300.0, outcome=SimpleNamespace(exception=lambda: exc))
+    assert provider._http_retry_stop(rs_done) is True
 
 
 async def test_retry_after_as_an_http_date_is_honoured(waits: list[float]) -> None:
@@ -177,6 +201,113 @@ async def test_an_unreasonable_retry_after_falls_back_to_the_schedule(waits: lis
     handler, calls = _replies(_cloudflare(503, **{"Retry-After": value}), httpx.Response(200, json=OK))
     assert await _chat(PLAIN, handler) == "hello"
     assert len(waits) == 1 and 8.0 <= waits[0] <= 12.0, "the first scheduled wait, 10 s +/- 20 %"
+
+
+# --- one outage, several symptoms; a fallback provider; the concurrency slot -----------------------------------------
+
+
+async def test_a_timeout_in_the_middle_of_an_outage_keeps_the_outage_budget(waits: list[float]) -> None:
+    """Behind Cloudflare a sick origin answers 5xx, then times out: the same outage. The budget is set by any outage
+    status seen in this call, not by the latest error alone."""
+    n = {"calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        n["calls"] += 1
+        if n["calls"] <= 3:
+            return _cloudflare(503)
+        raise httpx.ReadTimeout("origin slow")
+
+    with pytest.raises(httpx.ReadTimeout):
+        await _chat(PLAIN, handler)
+    assert n["calls"] == 6
+
+
+async def test_with_a_fallback_provider_ready_an_outage_gets_the_short_budget(waits: list[float]) -> None:
+    """When another provider can take the call, minutes on a dead one are wasted: four quick attempts, then the
+    fallback chain moves on (the probe of a tripped provider is treated the same way)."""
+    token = provider.CALL_SLOT.set({"provider": "kimi", "fallback": False, "short_retry": True})
+    try:
+        handler, calls = _replies(_cloudflare(521))
+        with pytest.raises(httpx.HTTPStatusError):
+            await _chat(PLAIN, handler)
+    finally:
+        provider.CALL_SLOT.reset(token)
+    assert len(calls) == 4 and waits == []
+
+
+async def test_the_fallback_chain_marks_the_primary_short_only_when_another_provider_is_ready() -> None:
+    seen: list[dict] = []
+
+    class _Fake:
+        def __init__(self, ok: bool) -> None:
+            self.ok = ok
+            self.last_usage = None
+            self.last_model = "m"
+
+        async def chat(self, messages, **kw):
+            seen.append(dict(provider.CALL_SLOT.get() or {}))
+            if not self.ok:
+                raise RuntimeError("down")
+            return "fine"
+
+    async def factory():
+        return _Fake(True)
+
+    chain = provider.FallbackLLMClient(_Fake(False), [("backup", factory)])
+    assert await chain.chat([{"role": "user", "content": "x"}]) == "fine"
+    assert seen[0]["short_retry"] is True, "the primary, with a backup ready"
+    assert seen[1]["short_retry"] is False, "the last provider waits an outage out"
+
+
+async def test_the_concurrency_slot_is_given_back_while_waiting() -> None:
+    import asyncio
+
+    sem = asyncio.Semaphore(1)
+    await sem.acquire()
+    token = provider._HELD_CALL_SLOT.set(sem)
+    try:
+        sleeper = asyncio.create_task(provider._http_retry_sleep(0.2))
+        await asyncio.sleep(0.05)
+        await asyncio.wait_for(sem.acquire(), timeout=1.0)  # another call gets the slot during the wait
+        sem.release()
+        await sleeper
+    finally:
+        provider._HELD_CALL_SLOT.reset(token)
+    assert sem.locked(), "the waiting call holds its slot again before its next attempt"
+    sem.release()
+
+
+async def test_a_524_keeps_the_short_budget(waits: list[float]) -> None:
+    """524: Cloudflare gave up on a slow request; the same request is as slow next time."""
+    handler, calls = _replies(_cloudflare(524))
+    with pytest.raises(httpx.HTTPStatusError):
+        await _chat(PLAIN, handler)
+    assert len(calls) == 4 and waits == []
+
+
+# --- which 429s are a used-up quota ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("body", "headers", "used_up"), [
+    ({"error": {"type": "insufficient_quota", "code": "insufficient_quota"}}, {}, True),
+    ({"error": {"type": "exceeded_current_quota_error", "message": "x"}}, {}, True),
+    ({"error": {"type": "api_error", "message": "you (me) have reached your monthly usage limit, upgrade"}}, {}, True),
+    ({"error": {"type": "too_many_requests_error", "code": "token_quota_exceeded"}}, {}, False),
+    ({"error": {"type": "rate_limit_reached_error", "message": "quota"}}, {}, False),
+    ({"error": {"type": "engine_overloaded_error"}}, {}, False),
+    ({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "You exceeded your current quota"}}, {}, False),
+    ({"error": {"type": "insufficient_quota"}}, {"Retry-After": "20"}, False),
+])
+def test_which_429_is_a_used_up_quota(body: dict, headers: dict, used_up: bool) -> None:
+    assert provider._is_exhausted_quota(httpx.Response(429, json=body, headers=headers)) is used_up
+
+
+def test_a_used_up_quota_opens_the_fallback_circuit_at_once() -> None:
+    req = httpx.Request("POST", "https://x/v1/chat/completions")
+    quota = httpx.Response(429, request=req, json={"error": {"type": "insufficient_quota"}})
+    limit = httpx.Response(429, request=req, json={"error": {"type": "rate_limit_exceeded"}})
+    assert provider._is_fatal_provider_error(httpx.HTTPStatusError("q", request=req, response=quota))
+    assert not provider._is_fatal_provider_error(httpx.HTTPStatusError("r", request=req, response=limit))
 
 
 # --- the policy itself and its log line ------------------------------------------------------------------------------

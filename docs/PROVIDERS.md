@@ -215,26 +215,33 @@ copying a model name from elsewhere.
 
 A provider sometimes answers with a server error for a few minutes (an HTTP
 5xx such as 502, 503 or 504, or 520–529 from the Cloudflare front many
-providers sit behind) or asks FI to slow down (HTTP 429). For the providers
-FI calls over HTTP (`openai`, `codex`, `gemini`, `ollama`, `vllm` and any
-OpenAI-compatible `base_url`, Moonshot/Kimi included), FI then tries the call
-up to six times, waiting about 10, 20, 40, 60 and 90 seconds in between
-(each wait varied by up to a fifth, so parallel quests do not all come back
-at once): about three to four and a half minutes before the step fails. When
-the provider says how long to wait (a `Retry-After` of two minutes or less),
-FI waits that long instead. Each wait leaves one line in the quest's
-`run.log`, for example:
+providers sit behind) or asks FI to slow down (HTTP 429). For every
+provider except the CLI ones and the VS Code extension (so `openai`, `codex`,
+`gemini`, `ollama`, `vllm`, any OpenAI-compatible `base_url` such as
+Moonshot/Kimi, and the local proxies `claude_code` and `github_copilot_*`),
+FI then tries the call up to six times, waiting about 10, 20, 40, 60 and 90
+seconds in between (each wait varied a little, so parallel quests do not all
+come back at once): three to four and a half minutes of waiting before the
+step fails. When the provider says how long to wait (its `Retry-After`
+answer, if it is two minutes or less), FI waits that long instead after a
+429, and at least that long after a server error; one call never waits more
+than five minutes in all. Each wait leaves one line in the quest's `run.log`,
+for example:
 
 ```
 [execute_reflect] the model call failed (kimi over HTTP, model kimi-k3), attempt 2 of 6: the provider's server is down or busy (HTTP 521): ...; trying again in 21s
 ```
 
-A dropped connection or a read timeout keeps the shorter budget (four
-attempts, at most 20 seconds apart). A request the provider rejects (HTTP
-400–499 other than 429) and a 429 that says the account's quota or credit is
-used up are not tried again: waiting cannot fix them, so the step fails at
-once with the provider's message. To keep a quest going through a longer
-outage, name a second provider in `provider.fallback`.
+A dropped connection or a read timeout on its own keeps the shorter budget
+(four attempts, at most 20 seconds apart); so does a request that took longer
+than the Cloudflare front allows (HTTP 524), since the same request is as
+slow next time. A request the provider rejects (HTTP 400–499 other than 429)
+and a 429 that says the account's quota, credit or monthly allowance is used
+up are not tried again: waiting cannot fix them, so the step fails at once
+with the provider's message. To keep a quest going through a longer outage,
+name a second provider in `provider.fallback`: while another provider can
+take the call, FI does not wait out the outage but moves on after the four
+quick attempts.
 
 ## Retry model escalation (opt-in)
 
