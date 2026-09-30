@@ -26,7 +26,7 @@ python -m pytest -v
 - Describe **what** the change does and **why** it is needed.
 - Reference any related issues (e.g., `Closes #123`).
 - Keep PRs focused — split unrelated changes into separate PRs.
-- Update `docs/plan.md` / `docs/architecture.md` / `CLAUDE.md` when behavior or contracts change.
+- Update `docs/plan.md` / `docs/architecture.md` / `AGENTS.md` when behavior or contracts change.
 - All tests must pass: `python -m pytest -v`. New code should add direct tests for the module it touches.
 - Tests must not call real LLM APIs — use `monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)` (or the analogous path for generators). Tests that need external CLIs (Docker, pandoc, marp, pdflatex) must `pytest.mark.skipif(shutil.which("...") is None, ...)`.
 
@@ -39,7 +39,7 @@ python -m pytest -v
 - Prompts in `agents/*.md` use Python `string.Template` (`$placeholder`), not f-strings.
 - The `RESULT_JSON: {...}` contract: experiment scripts emit one line on the LAST line of stdout; `_extract_result_json` parses it.
 
-See `CLAUDE.md` for the longer rationale on conventions.
+See `AGENTS.md` for the longer rationale on conventions (it is also what coding agents read; `CLAUDE.md` imports it).
 
 ## Licensing
 
