@@ -1186,6 +1186,8 @@ def make_app(
             launched = app.state.launcher.launch_command(
                 argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else [])],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
+                # A resumed quest that has not had its setup questions yet asks them on the quest page.
+                extra_env={"FI_WEB_ANSWERS": "1"},
             )
         except QuestLauncherFull as e:
             return JSONResponse(
@@ -2474,6 +2476,11 @@ def make_app(
             raise HTTPException(409, f"no pending clarify for quest {quest_id}")
         payload: dict[str, Any] = {"ok": True,
                                    "in_process_resolved": in_process_resolved}
+        if has_disk_pause and not in_process_resolved:
+            # A quest this server started as its own process is still running and waiting for these answers: it
+            # reads them itself, so the page must not start a second run.
+            state = app.state.launcher.job_state(quest_id) or {}
+            payload["run_waiting"] = bool(state.get("alive"))
         if disk_write_error is not None:
             payload["disk_write_warning"] = disk_write_error
         return JSONResponse(payload)

@@ -159,6 +159,8 @@ class QuestLauncher:
                 # `python launch.py` run has this unset and self-writes the
                 # record so it still shows up in the Jobs tab.
                 "FI_LAUNCH_LOG_CAPTURED": "1",
+                # The person answers the setup questions on the quest page (launch.py _web_page_clarify_callback).
+                "FI_WEB_ANSWERS": "1",
             }
             # Capture the child's stdout + stderr next to the quest's
             # other artifacts at ``<quest_root>/.fi/launch.log``, so a

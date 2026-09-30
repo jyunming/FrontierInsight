@@ -1580,6 +1580,9 @@ def _pick_clarify_callback(
     * `provider.name == "vscode_extension"`: route the questions
       through the same bridge the LLM calls use, so the FI VSCode
       extension can present them as modals and post answers back.
+    * Started or resumed by the web server (``FI_WEB_ANSWERS=1``): the
+      quest page shows the questions and writes the answers to disk
+      (``_web_page_clarify_callback``).
     * Otherwise: no callback. If the YAML has
       ``engine.clarify_mode = "interactive"`` and we return None, the
       engine raises a clear RuntimeError at the clarify pause —
@@ -1625,7 +1628,45 @@ def _pick_clarify_callback(
             return await bridge.clarify(dict(questions))
 
         return callback
+    if os.environ.get(WEB_ANSWERS_ENV) == "1":
+        return _web_page_clarify_callback(engine.fi_dir, engine._log)
     return None
+
+
+# Set by the web server (web/quest_launcher.py) for a quest it starts or resumes as its own process: the person can
+# answer the setup questions on the quest page, so the run asks there instead of answering for itself.
+WEB_ANSWERS_ENV = "FI_WEB_ANSWERS"
+
+
+def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger):  # noqa: ANN202
+    """The setup questions for a quest the web server runs as its own process: written to
+    ``.fi/clarify_questions.json`` (the quest page shows them as a form), answered by the page into
+    ``.fi/clarify_answer.json``. The engine bounds the wait with ``engine.human_feedback_timeout_s`` and then does
+    what ``pauses.clarify`` says, as for a quest the web server runs in-process."""
+    answer_path = fi_dir / "clarify_answer.json"
+    questions_path = fi_dir / "clarify_questions.json"
+
+    def staged() -> dict[str, object] | None:
+        try:
+            data = json.loads(answer_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None  # not there yet, or the page is still writing it
+        return data if isinstance(data, dict) else None
+
+    async def callback(questions: dict[str, object]) -> dict[str, object]:
+        answers = staged()  # a resume after the answers were given takes them without asking again
+        if answers is not None:
+            return answers
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        questions_path.write_text(json.dumps(questions, indent=2) + "\n", encoding="utf-8")
+        log.info("[clarify] waiting for your answers to the setup questions on the quest page")
+        while True:
+            await asyncio.sleep(1.0)
+            answers = staged()
+            if answers is not None:
+                return answers
+
+    return callback
 
 
 def _pick_human_feedback_callback(
