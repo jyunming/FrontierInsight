@@ -243,6 +243,12 @@ name a second provider in `provider.fallback`: while that provider is
 working, FI does not wait out the outage but moves on to it after the four
 quick attempts.
 
+These waits are built in; no setting changes them. The CLI providers and the
+VS Code extension keep their own retries (four attempts, and 30–90 seconds
+apart when a CLI reports that its model's server has no capacity). The same
+applies whichever interface started the quest: the command line, the web page
+or VS Code with a YAML that names one of these providers.
+
 ## Retry model escalation (opt-in)
 
 By default a retried call uses the same model as the first attempt. FI

@@ -37,7 +37,7 @@ A paper (Markdown, plus PDF with LaTeX or a fallback), in scientific formats (ge
 
 ## Three ways to drive it
 
-The command line (`fi`), a local web UI (`fi --serve`), and a VSCode chat extension (`@fi`). All three use the same setup questions (`fi --new`, `/interview`, `@fi /new`), can change a running quest (`--update`), and can resume it. [Details](capabilities-reference.md#interviews--frontends) · [VSCode extension](../vscode-frontier-insight/README.md)
+The command line (`fi`), a local web UI (`fi --serve`), and a VSCode chat extension (`@fi`). All three use the same interview (`fi --new`, `/interview`, `@fi /new`), can change a running quest (`--update`), and can resume it. [Details](capabilities-reference.md#interviews--frontends) · [VSCode extension](../vscode-frontier-insight/README.md)
 
 ## Models and cost
 
