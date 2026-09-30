@@ -957,6 +957,14 @@ def test_a_fixed_seed_beside_a_plot_argument_named_x_is_still_a_fixed_seed(tmp_p
     assert route == "write" and phased.status(record) == "not_confirmable"
 
 
+def test_a_seed_passed_as_a_or_x_to_a_seeding_call_is_not_a_fixed_seed(tmp_path: Path) -> None:
+    for label, call in (("a", "random.seed(a=seed)"), ("x", "rng = random.Random(x=seed)")):
+        script = ("import os, random\nimport numpy as np\nnp.random.seed(0)\n"
+                  f"seed = int(os.environ['FI_REPLICATE_SEED'])\n{call}\n")
+        route, _record, _frozen = _gate_after(tmp_path, {"experiment.py": script}, label=f"kw_{label}")
+        assert route == "confirm", label
+
+
 def test_a_relative_import_never_leaves_the_code_folder(tmp_path: Path) -> None:
     from core.engine import _own_modules
 
