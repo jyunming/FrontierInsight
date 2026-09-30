@@ -221,7 +221,7 @@ def test_the_resume_button_also_lets_the_page_answer(tmp_path: Path, monkeypatch
     app = make_app(out)
     seen: dict[str, Any] = {}
 
-    def fake_launch_command(*, argv_tail, job_id, extra_env=None):  # noqa: ANN001
+    def fake_launch_command(*, argv_tail, job_id, extra_env=None, cwd=None):  # noqa: ANN001
         seen["env"] = extra_env or {}
 
         class _E:

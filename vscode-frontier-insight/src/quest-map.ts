@@ -11,6 +11,7 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
+import { loadIndex, matchIds, shortId } from "./quest-index";
 import { rootsForCommand } from "./roots-config";
 import { runLaunch } from "./trace";
 
@@ -32,11 +33,34 @@ async function pickQuest(outputRoot: string): Promise<string | undefined> {
         }
     }
     if (quests.length === 0) {
-        void vscode.window.showInformationMessage(`No quest with a checkpoint under ${outputRoot}.`);
-        return undefined;
+        // This folder has none: every quest FI has run on this computer, in any folder (core/quest_index.py).
+        const elsewhere = loadIndex();
+        if (elsewhere.length === 0) {
+            void vscode.window.showInformationMessage(`No quest with a checkpoint under ${outputRoot}.`);
+            return undefined;
+        }
+        const picked = await vscode.window.showQuickPick(
+            elsewhere.map((e) => ({ label: `${shortId(e.questId)}  ${e.title || e.questId}`, description: e.questRoot, id: e.questId })),
+            { placeHolder: "This folder has no quests. Which quest from another folder? (most recent first)", matchOnDescription: true },
+        );
+        return picked?.id;
     }
     quests.sort((a, b) => b.mtime - a.mtime);
     return vscode.window.showQuickPick(quests.map((q) => q.id), { placeHolder: "Which quest? (newest first)" });
+}
+
+/** The full id `typed` names: this folder's quest, else the one quest FI has run elsewhere; `typed` when not unique. */
+function fullQuestId(typed: string, outputRoot: string): string {
+    if (fs.existsSync(path.join(outputRoot, typed, ".fi"))) return typed;
+    let local: string[] = [];
+    try {
+        local = fs.readdirSync(outputRoot).filter((n) => fs.existsSync(path.join(outputRoot, n, ".fi")));
+    } catch {
+        local = [];
+    }
+    const ids = new Set([...local, ...loadIndex().map((e) => e.questId)]);
+    const hits = matchIds(typed, [...ids]);
+    return hits.length === 1 ? hits[0] : typed;
 }
 
 function nonce(): string {
@@ -129,12 +153,15 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
     const python = cfg.get<string>("pythonPath") || "python";
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputRoot = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(roots.workDir, outputDirSetting);
-    const questId = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest(outputRoot));
-    if (!questId) return;
-    if (!/^[A-Za-z0-9_\-.]+$/.test(questId)) {
-        void vscode.window.showErrorMessage(`"${questId}" is not a quest id (letters, digits, - _ . only).`);
+    const typed = (questIdArg || "").replace(/^["']+|["']+$/g, "") || (await pickQuest(outputRoot));
+    if (!typed) return;
+    if (!/^[A-Za-z0-9_\-.]+$/.test(typed)) {
+        void vscode.window.showErrorMessage(`"${typed}" is not a quest id (letters, digits, - _ . only).`);
         return;
     }
+    // A short id names the same quest as its full id: one tab per quest, under its full id when it can be told here
+    // (launch.py resolves whatever is left, including an id that matches several quests, and says so).
+    const questId = fullQuestId(typed, outputRoot);
 
     const key = `${outputRoot}\n${questId}`;
     const open = openMaps.get(key);
@@ -158,7 +185,9 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
             ["--resume", questId, "--from", "--json", "--output-root", outputRoot]);
         try {
             const line = res.stdout.split(/\r?\n/).filter((l) => l.startsWith("{")).pop() || "";
-            void panel.webview.postMessage({ type: "data", data: JSON.parse(line), config_path: configPath });
+            const data = JSON.parse(line);
+            // The quest may be one from another folder, or named by its short id: the map says where it really is.
+            void panel.webview.postMessage({ type: "data", data, config_path: data.config_path || configPath });
         } catch {
             const why = [res.stdout, res.stderr].filter((t) => t.trim()).join("\n").trim().slice(0, 1500);
             void panel.webview.postMessage({ type: "error", text: `Could not read the map of ${questId} (exit ${res.code}). ${why}` });

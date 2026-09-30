@@ -745,6 +745,9 @@ async def run_update_flow(
     else:
         print(f"Resuming quest {quest_id}...")
     cfg = Config.from_yaml(yaml_path)
+    # The quest resumes in its own outputs folder, whatever a relative output_dir in its YAML means from the folder
+    # this runs in (the quest may be one from another folder, found by its id among every quest FI has run).
+    cfg.output.output_dir = quest_root.parent
     approve_settings(quest_root, cfg, say=print)
     apply_vscode_bridge_override(cfg, vscode_bridge_port)
     # The VSCode extension runs ``--update`` in an integrated terminal,

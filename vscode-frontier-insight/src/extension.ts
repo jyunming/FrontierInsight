@@ -16,6 +16,7 @@
  * which means: sanctioned API, user-consented, normal Copilot quota.
  */
 import * as vscode from "vscode";
+import * as fs from "fs";
 import * as fsPromises from "fs/promises";
 import * as path from "path";
 import { spawn } from "child_process";
@@ -46,6 +47,7 @@ import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
 import { openQuestMap, tabAreaColumn } from "./quest-map";
+import { IndexEntry, describeAmbiguous, findInIndex, loadIndex, matchIds, shortId } from "./quest-index";
 import { runFollow, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
 
 
@@ -432,7 +434,7 @@ function helpText(): string {
         "- `@fi /start <path-to-config.yaml>` — run one quest from an existing YAML.",
         "- `@fi /fleet <yaml-a> <yaml-b> …` — run several in parallel.",
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
-        "- `@fi /resume <quest_id>` — resume that specific quest directly.",
+        "- `@fi /resume <quest_id>` — resume that specific quest directly. The short id (the six characters after the last dash) is enough, and the quest may be one started in another folder: FI remembers every quest it has run on this computer. When this folder has no quests, `@fi /resume` offers those.",
         "- `@fi /map <quest_id>` — open the quest map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button (also **FI: Quest map** in the command palette).",
         "- `@fi /watch [<quest_id>]` — for a quest waiting on a background job (HPC): re-check it on a timer and resume it when the job is done.",
         "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
@@ -512,18 +514,12 @@ async function runResume(
     const outputsDir = path.isAbsolute(outputDirSetting)
         ? outputDirSetting
         : path.join(workDir, outputDirSetting);
-    if (!(await fsExists(outputsDir))) {
-        stream.markdown(
-            `❌ No outputs directory at \`${outputsDir}\` — nothing to resume. ` +
-            `(Override via the \`frontierInsight.outputDir\` setting.)`,
-        );
-        return;
-    }
+    const outputsExist = await fsExists(outputsDir);
 
     // Find all quest dirs with a checkpoint. Async I/O so the extension
     // host event loop stays responsive on slow filesystems / large dirs.
     type Candidate = { questId: string; questDir: string; mtimeMs: number };
-    const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
+    const entries = outputsExist ? await fsPromises.readdir(outputsDir, { withFileTypes: true }) : [];
     const candidates: Candidate[] = [];
     await Promise.all(entries.map(async (entry) => {
         if (!entry.isDirectory() || entry.name.startsWith("_")) return;
@@ -543,7 +539,23 @@ async function runResume(
             // Missing checkpoint or unreadable file — skip silently.
         }
     }));
-    if (candidates.length === 0) {
+    // Every quest FI has run on this computer, in any folder (core/quest_index.py): offered when this folder has none,
+    // and looked up when an id is not one of this folder's. Those this /watch or /plan cannot act on are left out.
+    const here = path.resolve(outputsDir).toLowerCase();
+    const elsewhere = loadIndex().filter((e) => {
+        if (path.resolve(path.dirname(e.questRoot)).toLowerCase() === here) return false;
+        if (watch && !fs.existsSync(path.join(e.questRoot, ".fi", "pending.json"))) return false;
+        if (plan && !fs.existsSync(path.join(e.questRoot, "plan.md"))) return false;
+        return true;
+    });
+    if (candidates.length === 0 && elsewhere.length === 0) {
+        if (!outputsExist) {
+            stream.markdown(
+                `❌ No outputs directory at \`${outputsDir}\` — nothing to resume. ` +
+                `(Override via the \`frontierInsight.outputDir\` setting.)`,
+            );
+            return;
+        }
         stream.markdown(
             plan
                 ? `❌ No quest under \`${outputsDir}\` has a plan yet (none has \`plan.md\`). The plan is written after the literature and before the experiment is designed.`
@@ -566,7 +578,17 @@ async function runResume(
     const bareFrom = /(?:^|\s)--from(?=\s*$|\s+-)/;
     if (!plan && !watch && bareFrom.test(promptArgs)) {
         const named = (promptArgs.replace(bareFrom, " ").trim().split(/\s+/)[0] || "").replace(/^["']+|["']+$/g, "");
-        await runRerunSteps(named && !named.startsWith("-") ? named : candidates[0].questId, stream, token);
+        const quest = named && !named.startsWith("-") ? named : candidates[0]?.questId;
+        if (!quest) {
+            // This folder has no quests: name one rather than have one from another folder picked for you.
+            stream.markdown(
+                "Which quest? This folder has none; FI has run these elsewhere: " +
+                elsewhere.slice(0, 5).map((e) => `\`${shortId(e.questId)}\` ${e.title || e.questId}`).join(", ") +
+                ". Then: `@fi /resume <short id> --from`.\n",
+            );
+            return;
+        }
+        await runRerunSteps(quest, stream, token);
         return;
     }
     // /resume <quest_id> --from <step> (or --from=<step>): the step is taken out first, so a quest id is never read
@@ -598,29 +620,63 @@ async function runResume(
         return;
     }
     let chosenId = sanitized;
+    // Set when the quest is not under this folder's outputs: found among every quest FI has run on this computer.
+    let foreign: IndexEntry | undefined;
     if (!chosenId) {
-        const picks = candidates.map((c) => ({
-            label: `$(beaker) ${c.questId}`,
-            description: new Date(c.mtimeMs).toLocaleString(),
-            questId: c.questId,
-        }));
+        // This folder's quests; when it has none, every quest FI has run on this computer.
+        const picks = candidates.length > 0
+            ? candidates.map((c) => ({
+                label: `$(beaker) ${c.questId}`,
+                description: `${shortId(c.questId)} · ${new Date(c.mtimeMs).toLocaleString()}`,
+                questId: c.questId, entry: undefined as IndexEntry | undefined,
+            }))
+            : elsewhere.map((e) => ({
+                label: `$(beaker) ${shortId(e.questId)}  ${e.title || e.questId}`,
+                description: e.questRoot,
+                questId: e.questId, entry: e as IndexEntry | undefined,
+            }));
         const picked = await vscode.window.showQuickPick(picks, {
-            placeHolder: plan
+            placeHolder: candidates.length === 0
+                ? "This folder has no quests. Pick one FI has run in another folder (most recent first)"
+                : plan
                 ? "Pick a quest whose plan to open (most recent first)"
                 : "Pick a quest to resume (most recent first)",
             matchOnDescription: true,
         });
         if (!picked) return;   // user hit Esc
         chosenId = picked.questId;
-    } else {
-        // User passed an id directly — validate it has a checkpoint.
-        if (!candidates.find((c) => c.questId === chosenId)) {
+        foreign = picked.entry;
+    } else if (!candidates.find((c) => c.questId === chosenId)) {
+        // Not one of this folder's quests by its full id: a unique start or end of one of their ids (e.g. the six
+        // characters after the last dash), else a quest FI has run in another folder.
+        const local = matchIds(chosenId, candidates.map((c) => c.questId));
+        const inIndex = local.length === 0 ? findInIndex(chosenId, elsewhere) : { kind: "none" as const };
+        if (local.length === 1) {
+            chosenId = local[0];
+        } else if (local.length > 1) {
+            stream.markdown("❌ " + describeAmbiguous(chosenId, local.map((q) => ({
+                questId: q, title: "", questRoot: path.join(outputsDir, q),
+            }))));
+            return;
+        } else if (inIndex.kind === "found") {
+            foreign = inIndex.entry;
+            chosenId = inIndex.entry.questId;
+        } else if (inIndex.kind === "ambiguous") {
+            stream.markdown("❌ " + describeAmbiguous(chosenId, inIndex.entries));
+            return;
+        } else {
             stream.markdown(
-                `❌ No quest dir with id \`${chosenId}\` under \`${outputsDir}\`, ` +
-                `or it has no \`.fi/state.sqlite\` checkpoint.`,
+                `❌ No quest \`${chosenId}\` under \`${outputsDir}\` (with a \`.fi/state.sqlite\` checkpoint), ` +
+                "nor among the quests FI has run in other folders on this computer. " +
+                "`python launch.py tools quests` lists every one with its short id.",
             );
             return;
         }
+    }
+    // The quest's own folder: under this folder's outputs, or where it was run.
+    const questDir = foreign ? foreign.questRoot : path.join(outputsDir, chosenId);
+    if (foreign) {
+        stream.markdown(`📁 \`${chosenId}\` is in \`${path.dirname(questDir)}\`; it runs there.\n\n`);
     }
 
     // YAML discovery has three tiers:
@@ -635,9 +691,13 @@ async function runResume(
     //      (e.g. "cat" matching "caterpillar...").
     //   3. Manual file picker — only used when neither (1) nor (2) hits.
     let yamlPath: string | undefined;
-    const inQuestYaml = path.join(outputsDir, chosenId, "config.yaml");
+    const inQuestYaml = path.join(questDir, "config.yaml");
     if (await fsExists(inQuestYaml)) {
         yamlPath = inQuestYaml;
+    }
+    if (!yamlPath && foreign) {
+        stream.markdown(`❌ Quest \`${chosenId}\` has no \`config.yaml\` in \`${questDir}\`, so it cannot be resumed from here.`);
+        return;
     }
     if (!yamlPath) {
         const slug = chosenId.replace(/^\d+-/, "").replace(/-[0-9a-f]{6}$/i, "");
@@ -673,13 +733,23 @@ async function runResume(
         yamlPath = picked[0].fsPath;
     }
 
-    const relYaml = path.relative(workDir, yamlPath).split(path.sep).join("/");
+    // A quest in another folder runs there: from the folder it was started in (its relative paths), writing to its own
+    // outputs folder, with its own config.yaml named by its full path.
+    const where: RunWhere | undefined = foreign
+        ? {
+            configPath: yamlPath,
+            cwd: foreign.workingFolder && fs.existsSync(foreign.workingFolder) ? foreign.workingFolder : workDir,
+            outputDir: path.dirname(questDir),
+        }
+        : undefined;
+    const relYaml = foreign ? yamlPath : path.relative(workDir, yamlPath).split(path.sep).join("/");
     if (plan) {
-        const planPath = path.join(outputsDir, chosenId, "plan.md");
+        const planPath = path.join(questDir, "plan.md");
         if (!planRequest) {
             // No request: open the file. Editing it is editing the design that will run.
+            const shownPlan = foreign ? planPath : path.relative(workDir, planPath).split(path.sep).join("/");
             stream.markdown(
-                `📋 The plan of \`${chosenId}\` is \`${path.relative(workDir, planPath).split(path.sep).join("/")}\`. ` +
+                `📋 The plan of \`${chosenId}\` is \`${shownPlan}\`. ` +
                 `I opened it in the editor, next to your other tabs.\n\n` +
                 `- **Edit it** and save: the block under *The design (used as written)* is what runs, exactly.\n` +
                 `- **Or ask for a change**: \`@fi /plan ${chosenId} <what to change>\` rewrites it.\n` +
@@ -701,7 +771,7 @@ async function runResume(
         await runQuest(
             relYaml, /*fleet*/ false, stream, token, userPickedModel,
             /*resumeQuestId*/ chosenId, /*watch*/ false, /*revisePlan*/ planRequest,
-            /*fromStep*/ undefined, roots,
+            /*fromStep*/ undefined, roots, where,
         );
         return;
     }
@@ -728,7 +798,15 @@ async function runResume(
         /*revisePlan*/ undefined,
         /*fromStep*/ fromStep,
         roots,
+        where,
     );
+}
+
+/** Where a quest from another folder runs (see runResume): its config by full path, its working folder, its outputs. */
+interface RunWhere {
+    configPath: string;
+    cwd: string;
+    outputDir: string;
 }
 
 // The steps `/resume <quest_id> --from <step>` accepts (core/rerun_from.py STEPS).
@@ -1091,8 +1169,10 @@ async function runQuest(
     revisePlan?: string,
     fromStep?: string,
     knownRoots?: Roots,
+    where?: RunWhere,
 ): Promise<void> {
-    const paths = promptArgs.split(/\s+/).filter((s) => s.length > 0);
+    // A quest from another folder names its config by full path, which may hold spaces: taken whole.
+    const paths = where ? [where.configPath] : promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
         stream.markdown(
             "Need at least one YAML path. Example: `@fi /start examples/integrator_bakeoff/config.yaml`",
@@ -1153,6 +1233,8 @@ async function runQuest(
             // --revise-plan rewrites plan.md and runs nothing else; the words are one argument.
             if (revisePlan) argv.push("--revise-plan", revisePlan);
             if (fromStep) argv.push("--from", fromStep);
+            // Its own outputs folder, whatever a relative output_dir in its YAML means from here.
+            if (where) argv.push("--output", where.outputDir);
         }
     }
 
@@ -1162,7 +1244,7 @@ async function runQuest(
     // user never configured here.
     const startedAt = Date.now();
     const child = spawn(pythonPath, argv, {
-        cwd: workDir,
+        cwd: where?.cwd ?? workDir,
         env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
         stdio: ["ignore", "pipe", "pipe"],
     });
@@ -1249,7 +1331,7 @@ async function runQuest(
     if (exitCode === 0 && revisePlan && resumeQuestId) {
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
         const planPath = path.join(
-            path.isAbsolute(outDirSetting) ? outDirSetting : path.join(workDir, outDirSetting),
+            where?.outputDir ?? (path.isAbsolute(outDirSetting) ? outDirSetting : path.join(workDir, outDirSetting)),
             resumeQuestId, "plan.md",
         );
         stream.markdown(
@@ -1262,9 +1344,9 @@ async function runQuest(
         } catch { /* the message above names the command that opens it */ }
     } else if (exitCode === 0) {
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
-        const outputsDir = path.isAbsolute(outDirSetting)
+        const outputsDir = where?.outputDir ?? (path.isAbsolute(outDirSetting)
             ? outDirSetting
-            : path.join(workDir, outDirSetting);
+            : path.join(workDir, outDirSetting));
         // A quest that stopped for you also exits 0: say it is waiting, not that it finished.
         const card = await readNextStep(outputsDir, resumeQuestId ?? questIdSeen, startedAt);
         if (card) {

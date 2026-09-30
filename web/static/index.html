@@ -59,7 +59,7 @@
   <section class="flex flex-col md:flex-row items-center gap-gutter bg-surface-mid p-component-padding-md rounded-xl border border-white/10 mb-component-padding-md">
     <div class="flex items-center gap-2 text-on-surface-variant bg-surface-low rounded-full px-4 py-2 border border-white/10 focus-within:border-primary/50 transition-colors flex-1">
       <span class="material-symbols-outlined text-[20px]">search</span>
-      <input id="search" type="text" placeholder="Search quest_id or provider…" class="bg-transparent border-none focus:ring-0 font-code-md text-code-md w-full text-on-surface placeholder:text-outline" oninput="applyFilter()" style="background:transparent;border:none;padding:0;width:100%"/>
+      <input id="search" type="text" placeholder="Search id, short id or provider…" class="bg-transparent border-none focus:ring-0 font-code-md text-code-md w-full text-on-surface placeholder:text-outline" oninput="applyFilter()" style="background:transparent;border:none;padding:0;width:100%"/>
     </div>
     <div class="hidden md:flex items-center gap-2">
       <div class="relative">
@@ -97,6 +97,13 @@
 
   <!-- Quest list -->
   <section id="quest-list" class="flex flex-col gap-4 mb-section-gap"></section>
+
+  <!-- Quests FI has run in other folders on this computer (core/quest_index.py) -->
+  <section id="other-folders" class="mb-section-gap" style="display:none">
+    <h2 class="font-headline-md text-headline-md font-bold text-on-surface">Quests in other folders</h2>
+    <p class="font-body-md text-body-md text-on-surface-variant">Every quest FI has run on this computer, wherever it ran. Open one here, or go on with it from any folder: <code>fi --resume &lt;short id&gt;</code>.</p>
+    <div id="other-folders-list" class="flex flex-col gap-2"></div>
+  </section>
 
 </main>
 
@@ -167,7 +174,7 @@
     const status = document.getElementById('status-filter').value || '';
     const sortBy = document.getElementById('sort-by').value || 'newest';
     let filtered = allQuests.filter(q => {
-      if (search && !`${q.quest_id} ${q.provider || ''}`.toLowerCase().includes(search)) return false;
+      if (search && !`${q.quest_id} ${q.short_id || ''} ${q.provider || ''}`.toLowerCase().includes(search)) return false;
       if (status && q.verdict !== status) return false;
       return true;
     });
@@ -183,6 +190,7 @@
   function renderQuestCard(q) {
     const s = describeState(q);
     const meta = [];
+    if (q.short_id && q.short_id !== q.quest_id) meta.push(`<div class="flex items-center gap-1" title="Any command that takes a quest id accepts this, from any folder"><span class="opacity-50">SHORT ID:</span><span class="normal-case">${escapeHtml(q.short_id)}</span></div>`);
     if (q.provider) meta.push(`<div class="flex items-center gap-1"><span class="opacity-50">PROVIDER:</span><span>${escapeHtml(q.provider)}</span></div>`);
     if (q.age_s != null) meta.push(`<div class="flex items-center gap-1"><span class="opacity-50">AGE:</span><span>${formatAge(q.age_s)}</span></div>`);
     if (q.score != null) meta.push(`<div class="flex items-center gap-1"><span class="opacity-50">SCORE:</span><span class="${s.scoreCls}">${escapeHtml(String(q.score))}</span></div>`);
@@ -251,8 +259,30 @@
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  async function loadOtherFolders() {
+    // Every quest FI has run on this computer; the ones under this server's outputs folder are already listed above.
+    try {
+      const res = await fetch('/api/quest-index');
+      if (!res.ok) return;
+      const others = ((await res.json()).quests || []).filter(q => !q.here);
+      const box = document.getElementById('other-folders');
+      box.style.display = others.length ? '' : 'none';
+      document.getElementById('other-folders-list').innerHTML = others.map(q => `
+        <a href="/quest/${encodeURIComponent(q.quest_id)}" title="${escapeHtml(q.quest_id)}" class="hairline-border bg-surface-mid px-4 py-3 rounded-lg flex flex-col md:flex-row md:items-center gap-1 md:gap-4 hover:bg-surface-high no-underline">
+          <span class="font-code-md text-code-md text-primary">${escapeHtml(q.short_id)}</span>
+          <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">${escapeHtml(q.status || '')}</span>
+          <span class="font-body-md text-body-md text-on-surface flex-1">${escapeHtml(q.title || '(no title yet)')}</span>
+          <span class="font-code-md text-[11px] text-outline break-all">${escapeHtml(q.quest_root)}</span>
+        </a>`).join('');
+    } catch (e) {
+      console.warn('[fi] /api/quest-index failed:', e);
+    }
+  }
+
   loadQuests();
   setInterval(loadQuests, 5000);
+  loadOtherFolders();
+  setInterval(loadOtherFolders, 30000);
 </script>
 </body>
 </html>

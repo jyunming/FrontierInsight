@@ -140,6 +140,14 @@ def _isolate_profile(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_fi_home(tmp_path_factory, monkeypatch):
+    """No test may read or write the person's real ~/.frontier-insight/quests.json (core/quest_index.py): every quest a
+    test starts would be listed there, and a real entry could answer a test's lookup. ``FI_HOME`` moves the whole
+    per-person folder (core/fi_home.py); subprocesses a test starts inherit it."""
+    monkeypatch.setenv("FI_HOME", str(tmp_path_factory.mktemp("fi_home")))
+
+
+@pytest.fixture(autouse=True)
 def _hermetic_arxiv_gate(tmp_path_factory, monkeypatch):
     """The arXiv queue keeps its pacing state and a 24-hour response cache
     under ``FI_CACHE_DIR`` (default ``~/.frontier-insight/cache``). No test may
