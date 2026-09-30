@@ -20,3 +20,5 @@ Click a reached step to see what restarting there keeps and redoes, and restart 
 - Web: a section on the quest page. It is hidden while the quest runs.
 - VS Code: `FI: Quest map` or `@fi /map <id>`. It opens in the editor column where scripts and the paper are shown. It does not refresh by itself while a quest runs. Restart sends the `/resume … --from` command to the chat.
 - CLI: no drawing. `--from` with no step prints the list; `--from --json` prints the map's data.
+
+Related: [[Renaming a quest]], [[Pauses]].

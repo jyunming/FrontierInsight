@@ -28,4 +28,4 @@ The plan's "What is being optimised" section lists the objective (a quantity to 
 - Web: the Plan box on the quest page.
 - VS Code: `@fi /plan <id> <change>`.
 
-Related: [[Explore then confirm]], [[How FI judges correctness]].
+Related: [[Explore then confirm]], [[How FI judges correctness]], [[Literature screening record]].
