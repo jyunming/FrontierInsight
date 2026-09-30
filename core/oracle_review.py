@@ -39,7 +39,11 @@ def _yes(value: Any) -> bool | None:
     """``True``/``False`` for a yes or no, also one the reviewer qualified ("no, mostly"); ``None`` otherwise."""
     if isinstance(value, bool):
         return value
-    match = re.match(r"\s*(yes|no|true|false|y|n)\b", str(value or "").lower())
+    word = str(value or "").lower()
+    if (" ".join(word.split()).rstrip(".") in _NOTHING - {"no"}
+            or re.match(r"\s*(no verdict|yes\s*/\s*no|no\s*/\s*yes)\b", word)):
+        return None  # "N/A", "none", "no verdict", "yes/no": no answer given
+    match = re.match(r"\s*(yes|no|true|false|y|n)(?![/\w])", word)
     return None if match is None else match.group(1) in ("yes", "true", "y")
 
 
@@ -92,6 +96,10 @@ def _add_item(item: Any, declared: set[str]) -> dict[str, Any] | None:
     if not name or name.lower() in declared:
         return None
     out: dict[str, Any] = {}
+    if _oracle.kind_of(item) is None and item.get("kind") is not None:
+        return None  # a kind that is none of the six
+    if str(item.get("tolerance_mode") or "absolute").strip().lower() not in ("absolute", "relative"):
+        return None
     for key in _ADD_KEYS:
         value = item.get(key)
         if value is None:
@@ -102,7 +110,7 @@ def _add_item(item: Any, declared: set[str]) -> dict[str, Any] | None:
             out[key] = value
         elif key == "case":
             if isinstance(value, dict):
-                out[key] = {_text(k, 60): v for k, v in list(value.items())[:10]
+                out[key] = {" ".join(str(k).replace("`", "'").split())[:60]: v for k, v in list(value.items())[:10]
                             if isinstance(v, (int, float, str)) and not isinstance(v, bool)}
         else:
             out[key] = _text(value, 400)
@@ -143,7 +151,7 @@ def parse(reply: Any, protocol: dict[str, Any] | None, *, partial: bool = False)
             if known and known not in target:
                 target.append(known)
     for item in reply.get("add") if isinstance(reply.get("add"), list) else []:
-        kept = _add_item(item, set(declared))
+        kept = _add_item(item, set(declared) | {a["name"].lower() for a in out.add})
         if kept is not None and len(out.add) < 2:
             out.add.append(kept)
     out.summary = _text(reply.get("summary"), 600)
@@ -204,8 +212,8 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
                                    "one under `provider: node_models: oracle_review: <another model your provider "
                                    "offers>`." if research else "."))
     if review is None:
-        return ["", f"- {who} Its answer could not be used ({error or 'it named none of the plan checks'}), so nothing "
-                "was changed for it."]
+        return ["", f"- The checks were sent to {reviewer} for a second reading, but its answer could not be used "
+                f"({error or 'it named none of the plan checks'}), so nothing was changed for it."]
     rows = ["", f"- {who}" + (f" Its summary: {review.summary}" if review.summary else "")]
     for c in review.checks:
         verdict = [
@@ -218,8 +226,8 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
         extra = "; ".join(x for x in (c["definition_note"], c["better"] and f"a better check: {c['better']}") if x)
         rows.append(f"  - **{c['name']}**: {', '.join(verdict)}." + (f" {extra}." if extra else ""))
     if review.tested or review.untested:
-        rows.append(f"  - Equations the checks test: {', '.join(review.tested) or 'none named'}; not tested by any: "
-                    f"{', '.join(review.untested) or 'none'}.")
+        rows.append(f"  - Equations the checks test: {', '.join(review.tested) or 'none named'}"
+                    + ("." if review.partial else f"; not tested by any: {', '.join(review.untested) or 'none'}."))
     if review.partial:
         rows.append("  - The plan has more checks than the reader was shown; it did not judge the rest.")
     return rows

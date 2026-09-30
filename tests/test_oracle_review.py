@@ -195,7 +195,7 @@ async def test_a_review_that_finds_nothing_changes_nothing_and_an_unreadable_one
     model = _Model(PROTOCOL, "I think these checks look fine.")
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
-    assert model.revisions == [] and "Its answer could not be used" in _section(engine)
+    assert model.revisions == [] and "answer could not be used" in _section(engine)
     assert [r["by"] for r in plan.history(engine.quest_root)] == ["model", "engine"]
 
 
@@ -242,6 +242,8 @@ def test_a_reviewer_s_way_of_saying_nothing_is_not_a_finding_and_a_qualified_no_
     review = orv.parse(reply, PROTOCOL)
     assert review.checks[0]["appropriate"] is True and review.checks[0]["discriminating"] is False
     assert review.checks[0]["better"] == "" and review.checks[0]["definition_note"] == ""
+    for nothing in ("N/A", "n/a", "No verdict", "yes/no", "none"):
+        assert orv._yes(nothing) is None, nothing
     found = orv.findings(review)
     assert len(found) == 1 and "would not fail on a plausible bug" in found[0]
     only_better = {"checks": [{"name": "power_conservation", "appropriate": "yes", "discriminating": "yes",
@@ -295,7 +297,7 @@ async def test_a_reader_that_fails_or_is_filtered_never_stops_the_quest(tmp_path
 
         engine._client = _Failing(PROTOCOL, REVIEW)
         await engine._node_plan({"topic": engine.config.topic, "literature": []})
-        assert "Its answer could not be used" in _section(engine), exc
+        assert "answer could not be used" in _section(engine), exc
         assert json.loads((engine.fi_dir / "oracle_guidance.json").read_text(encoding="utf-8"))["forms"]
 
 
@@ -321,3 +323,38 @@ async def test_a_resume_after_the_request_stopped_the_quest_asks_nothing_again(t
     await resumed._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.reviews) == 1 and len(model.revisions) == 1, "each part at most once, a resume included"
     assert _section(resumed).count("> What FI did to the checks") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_request_whose_answer_was_never_read_is_said_and_not_made_again(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    model = _Model(PROTOCOL, REVIEW, revise=_add_ohm)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    # As if the run had stopped while the request was out: asked, never answered.
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    (engine.fi_dir / "oracle_review.json").write_text(json.dumps({**record, "answered": False}), encoding="utf-8")
+    (engine.fi_dir / "oracle_guidance.json").unlink()
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.reviews) == 1 and len(model.revisions) == 1
+    assert "the quest stopped before the answer was read" in _section(engine)
+
+
+def test_a_rewrite_is_fi_s_own_version_even_if_the_run_stops_during_the_reading(tmp_path: Path) -> None:
+    import asyncio
+
+    engine = Engine(_config(tmp_path))
+    design = {"hypothesis": "h", "protocol": {**PROTOCOL, "oracles": [{**CHECK, "measure": "P_out / P_in",
+                                                                     "expected": 1.0}]}}
+    text = plan.render(engine.config.topic, {}, design)
+    plan.plan_path(engine.quest_root).write_text(text, encoding="utf-8")
+    plan.record_version(engine.quest_root, text, by="model")
+
+    class _Stops(_Model):
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            raise KeyboardInterrupt  # the process is stopped during the second reading
+
+    engine._client = _Stops(PROTOCOL, REVIEW)
+    with pytest.raises(KeyboardInterrupt):
+        asyncio.run(engine._hold_oracle_forms(plan.plan_path(engine.quest_root)))
+    assert plan.note_edit(engine.quest_root, plan.plan_path(engine.quest_root).read_text(encoding="utf-8")) is None

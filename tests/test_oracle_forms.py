@@ -307,7 +307,8 @@ async def test_the_plan_step_rewrites_an_unambiguous_check_and_says_so_in_plain_
     assert "worst violation and it expects 0" in section and "verdict is the same as before" in section
     assert text.index(f"## {of.HEADING}") < text.index(f"## {plan.DESIGN_HEADING}")
     assert "computed as `abs((P_out / P_in) - 1)`" in text  # how the number is computed, above the block
-    assert [r["by"] for r in plan.history(engine.quest_root)] == ["model", "engine"]
+    history = [r["by"] for r in plan.history(engine.quest_root)]
+    assert history[0] == "model" and set(history[1:]) == {"engine"}, "FI's changes are its own versions, not a person's"
     # Once: a later pass through the plan step does not look again.
     before = _plan_text(engine)
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
