@@ -39,7 +39,15 @@ same PR that adds, splits or renames one.
   `sources_problem` on an edit), and `Engine._oracle_source_gaps` (called by `_write_evidence`; a record frozen
   without `sources` is judged only on `empty_references`) passes the gaps to `evidence.assess(oracle_source_gaps=...)`.
   `sources_block` is the numbered list plan.md shows (*The sources this quest found*). The model block's shape (`protocol.model`) is `core/plan.py`'s
-  (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`).
+  (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`). Also owns the equation
+  labels: `generating_equations` (the model's `generates` ids), `unlabelled_equations` (those no comment or docstring
+  of the simulation carries, `# E1`; read with `tokenize`/`ast`, never the code) and `label_gaps` (the sentence).
+  `Engine._label_equations` (end of `_node_implement`) asks once for missing labels and keeps the answer only when the
+  syntax tree is unchanged; `Engine._simulation_sources` picks the simulation and its helper modules;
+  `Engine._check_equation_labels` (in `_node_execute`, before the oracle gate and again when a repair in the gate
+  rewrote the simulation) warns, and under `rigor_profile:
+  research` stops (`equation_labels` pause); `Engine._equation_label_gaps` (called by `_write_evidence`) passes them to
+  `evidence.assess(equation_label_gaps=...)`, a gap below `independently_validated`.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the
   script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by
@@ -129,6 +137,9 @@ same PR that adds, splits or renames one.
   skill names pip cannot install explained as the skill, the repair note for what could not be installed.
 - `core/code_project.py` — `refresh` keeps `code/` a runnable project (README, requirements.txt, `run.py`, and `study.json` for the trial contract; `run.py` repeats FI's trial runner for seed 0, one process per setting, stdlib only, working in `run_output/`); `.fi/installed_deps.json` (written by `_node_execute`) is the requirements source; `attempt_records.script_hashes` skips the unedited generated files; called by `Engine._refresh_code_project` at the end of `implement` and the start of `analyze`; `record_change` makes one git commit + one `CHANGELOG.md` entry per change inside `code/` (`rerun_from.back_up` carries `code/.git` over a re-run; `script_hashes` ignore `.git` and CHANGELOG.md); `pin` gives the installed versions for requirements.txt; `verify` (called by `Engine._check_code_project` before `write`, once per code version) runs `run.py` in a clean venv and writes `needs/CODE_PROJECT_CHECK.json`, warning only; `unasked_conflicts` / `mark_asked` feed `Engine._ask_about_edited_project_files` (a `code_project` pause when `pauses.review` is `ask`); a file whose hash differs from `.fi/code_project.json` (a person's edit) is never overwritten.
 - `core/split_run.py` — the two-script contract (`simulate.py` / `experiment.py`), raw-dir naming, replicate seeding.
+  Whether a quest gets it is `Engine._split_on`: under `split_analysis: auto` every quest that runs a simulation
+  (`_runs_code`), deterministic (`run_cell`) or stochastic (`run_trial`); `design_is_stochastic` only decides whether
+  a one-script quest (`split_analysis: false`) is a gap for having no run manifest.
 - `core/job_watch.py` — background jobs (HPC / a cluster) that outlive one `execute` call; `--watch`.
 - `core/example_inputs.py` — staging a user's own example files into a quest.
 - `core/plot_style.py` — the shared matplotlib house style every generated figure uses.

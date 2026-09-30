@@ -287,6 +287,86 @@ def _equations(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     return {str(e.get("id")).strip().upper(): e for e in items if isinstance(e, dict) and str(e.get("id") or "").strip()}
 
 
+def _label_texts(source: str) -> list[str]:
+    """The comments and the function and class docstrings of a Python source: where a label such as ``# E1`` is written.
+    Code and other string literals are not labels (``E1`` as a variable name, or inside a formula string, says nothing
+    about where E1 is), and neither is the module's docstring, which marks no code."""
+    import ast
+    import io
+    import tokenize
+
+    texts: list[str] = []
+    try:
+        texts += [tok.string for tok in tokenize.generate_tokens(io.StringIO(source).readline)
+                  if tok.type == tokenize.COMMENT]
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        texts += [line.split("#", 1)[1] for line in source.splitlines() if "#" in line]
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return texts
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            doc = ast.get_docstring(node, clean=False)
+            if doc:
+                texts.append(doc)
+    return texts
+
+
+def generating_equations(protocol: dict[str, Any] | None) -> list[str]:
+    """The ids of the plan's equations whose role is ``generates`` (the simulation computes the data with them), as the
+    plan writes them."""
+    model = protocol.get("model") if isinstance(protocol, dict) else None
+    items = model.get("equations") if isinstance(model, dict) else None
+    out = []
+    for eq in items if isinstance(items, list) else []:
+        if isinstance(eq, dict) and str(eq.get("role") or "").strip().lower() == "generates":
+            eid = str(eq.get("id") or "").strip()
+            if eid and eid not in out:
+                out.append(eid)
+    return out
+
+
+_LABEL_RANGE_RE = re.compile(r"(?<![\w.])([A-Za-z]+)(\d+)\s*(?:-|–|—|\.\.|to)\s*\1?(\d+)(?!\w|\.\d)", re.IGNORECASE)
+
+
+def _labelled_in(eid: str, texts: str) -> bool:
+    """Whether ``eid`` is named in ``texts``, alone (``# E1``) or inside a range (``# E1-E3``, ``# E1 to 3``)."""
+    if re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", texts, re.IGNORECASE):
+        return True
+    parts = re.fullmatch(r"([A-Za-z]+)(\d+)", eid)
+    if not parts:
+        return False
+    prefix, number = parts.group(1).lower(), int(parts.group(2))
+    return any(m.group(1).lower() == prefix and int(m.group(2)) <= number <= int(m.group(3))
+               for m in _LABEL_RANGE_RE.finditer(texts))
+
+
+def unlabelled_equations(protocol: dict[str, Any] | None, source: str | dict[str, str]) -> list[str]:
+    """The ``generates`` equations of the plan whose id no comment or function docstring of the simulation carries (a
+    label such as ``# E1`` on or above the code that implements it, or a range ``# E1-E3``). ``source`` is the
+    simulation's text, or ``{file name: text}`` for a simulation with helper modules. Only the labelled mapping is
+    read, not the mathematics: a label says where to look, not that the code there is right. Ids match in any case."""
+    wanted = generating_equations(protocol)
+    if not wanted:
+        return []
+    sources = source.values() if isinstance(source, dict) else [source]
+    texts = "\n".join(t for s in sources for t in _label_texts(s or ""))
+    return [eid for eid in wanted if not _labelled_in(eid, texts)]
+
+
+def label_gaps(protocol: dict[str, Any] | None, source: str | dict[str, str], script: str) -> list[str]:
+    """One sentence for the equations of the plan the simulation (``script``, its file name) does not say it implements
+    (empty when every ``generates`` equation is labelled, or the plan lists none)."""
+    missing = unlabelled_equations(protocol, source)
+    if not missing:
+        return []
+    names = ", ".join(missing)
+    return [f"{script} does not mark where it implements equation{'s' if len(missing) > 1 else ''} {names} of the model "
+            f"behind the numbers (a comment such as `# {missing[0]}` on or above the code that computes it), so a wrong "
+            "number cannot be traced to the equation or to the code"]
+
+
 def _derivation_steps(text: str) -> str | None:
     """The steps after a leading "derivation" (``None`` when the text does not start with one)."""
     match = _DERIVATION_RE.match(text)

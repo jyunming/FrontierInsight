@@ -1100,11 +1100,12 @@ class ExecutionConfig(BaseModel):
     # script changed (or its files are gone), which is what a simulation that takes hours
     # needs, and the raw outcomes of every run stay on disk for any later analysis (an
     # interval computed from the runs themselves, not from a few batch summaries).
-    # ``auto`` (default) turns it on for a study whose design is stochastic (its protocol
-    # fixes two or more runs per setting, or it describes a Monte Carlo / stochastic /
-    # Gillespie ... process) and leaves it off otherwise, and for a background job, a
-    # no-simulation study or a survey; ``true`` and ``false`` decide for every quest. Not
-    # yet combinable with ``background_jobs`` when ``true``. The contract is in core/split_run.py.
+    # ``auto`` (default) turns it on for every quest that runs a simulation, deterministic
+    # (``run_cell``) or stochastic (``run_trial``), so FI can call the simulation on each
+    # oracle's case itself (what ``independently_validated`` needs), and leaves it off for a
+    # no-simulation study, a survey and an analysis-only run; ``true`` and ``false`` decide for
+    # every quest (``false`` gives up that validation). The contract is in core/split_run.py
+    # and core/trial_runner.py.
     split_analysis: bool | Literal["auto"] = "auto"
     # What happens when a quest that should keep two scripts gets a reply that does not hold both, after the reply was asked
     # for once more. ``warn`` (default): the quest runs as ONE script and says so, which loses the raw outcomes and the

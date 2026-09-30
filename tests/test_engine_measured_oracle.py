@@ -211,7 +211,7 @@ def test_a_value_the_script_reported_is_not_independent_on_a_one_script_quest_ei
     got = evidence.assess(_root(tmp_path / "o", one_script), _state(), settings=ON)
     assert got["levels"]["independently_validated"] is False
     gap = " ".join(got["all_gaps"]["independently_validated"])
-    assert "closed form" in gap and "execution.split_analysis: true" in gap
+    assert "closed form" in gap and "`split_analysis` is false" in gap
     unmarked = {"status": "ok", "judged_by": "engine",
                 "attempts": [{"judged": [{"name": "closed form", "value": 0.0, "passed_by_engine": True}]}]}
     assert evidence.assess(_root(tmp_path / "u", unmarked), _state(), settings=ON)["levels"]["independently_validated"] is False

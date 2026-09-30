@@ -63,7 +63,7 @@ def cfg(tmp_path: Path) -> Config:
             # the clean-verdict happy path without a callback.
             auto_accept_on_pass=True,
         ),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60, split_analysis=False),
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "outputs"),
     )

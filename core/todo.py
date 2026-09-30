@@ -92,6 +92,12 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "Fix the script, then go on.",
         ["Change the check's expected value or tolerance in the plan: `--revise-plan \"...\"`."],
     ),
+    "equation_labels": (
+        "The simulation does not say where it implements each equation of the plan. Label it?",
+        "Add a comment with each missing equation's id (`# E1`) above the code that computes it, then go on.",
+        ["If the equation does not produce the data (it is used on the results), change its role to `analyses` in the "
+         "plan while it is not yet frozen: `--revise-plan \"...\"`."],
+    ),
     "protocol": (
         "The experiment does not follow the plan. Fix the script, or change the plan?",
         "Fix the named script(s) so they follow the plan, then go on.",
@@ -179,6 +185,11 @@ _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
         True: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "
               "and the two scripts are asked for again.",
     },
+    "equation_labels": dict.fromkeys(
+        (False, True),
+        "This quest is set up for research, so the simulation must say where it implements each equation of the plan: "
+        "add the labels and resume.",
+    ),
 }
 _RESEARCH_INSTEAD_ANY = {
     False: "This quest is set up for research, so that check cannot be relaxed: fix what it found and resume (FI "

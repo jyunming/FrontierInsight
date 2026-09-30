@@ -36,7 +36,7 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 2. **Literature** — finds and reads the papers the question rests on.
 3. **Plan** — writes `plan.md`: the gap, the model behind the numbers (what model produces them, its equations and where each comes from), how we will judge whether the code got better (two to five checks of correctness FI computes after every run, never the study's own finding), the method and the numbers to be reported.
 4. **Design** — fixes the experiment: settings, runs per setting, what counts as a pass.
-5. **Write the code** — writes the script or scripts (one, or a simulation plus its analysis, see `execution.split_analysis`).
+5. **Write the code** — writes the simulation and its analysis as two scripts (one script with `execution.split_analysis: false`), and marks in the simulation where each equation of the plan's model is computed (`# E1`).
 6. **Run** — runs them; a crash goes back to a fix-and-run loop first. A topic that needs real data collects and loads it here instead.
 7. **Analyse and check** — computes the findings and compares them with the literature, then checks whether the evidence is enough to write.
 8. **Write the paper** — the paper, then a check that each claim is backed.
@@ -332,7 +332,7 @@ execution:
   timeout_s: 600
   inputs: []                        # example files/folders for the experiment (any type); copied to inputs/examples/, FI_INPUT_DIR
   background_jobs: false            # the simulation runs as an HPC/cluster job: experiment.py submits it and reports pending; --watch wakes the quest
-  split_analysis: auto              # auto (default: two scripts when the plan runs each setting 2+ times or names a random process, else one) | true | false. Keep the simulation (code/simulate.py: run_trial, run by FI, record in raw/) apart from its analysis (code/experiment.py); with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)
+  split_analysis: auto              # auto (default: two scripts for every quest that runs a simulation, deterministic or random) | true | false. Keep the simulation (code/simulate.py: run_cell for a deterministic study, run_trial for a random one, run by FI, record in raw/) apart from its analysis (code/experiment.py), so FI can run each oracle's case itself; false keeps one script and the result then cannot reach independently_validated; with background_jobs the trials run as a job array (code/submit.py submits FI's tasks)
   raw_dir: ""                       # only with split_analysis: where the raw files go (relative to the quest, or absolute; relative with docker); empty = raw/
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)
