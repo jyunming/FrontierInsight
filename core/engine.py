@@ -4405,13 +4405,16 @@ class Engine:
         """The kind of study the person named at the clarify step (``measure`` / ``find_best_design``), or ``None``."""
         return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
 
-    def _asks_for_best_design(self, state: QuestState) -> str:
+    def _asks_for_best_design(self, state: QuestState, *, topic: bool = True) -> str:
         """Why this quest is a search for the best design whatever a design without its own ``study_type`` says: the
-        person answered so (``answer``), or the topic plainly asks to find the best design (``topic``); else ``""``."""
+        person answered so (``answer``), or (with ``topic``, at the plan step only) the topic plainly asks to find the
+        best design (``topic``: :func:`core.optimisation_plan.plainly_seeks_best`); else ``""``. The topic alone is read
+        only when a fresh plan is written, where the plan says so and a person can change it: never to stop a quest
+        whose design was written before."""
         if self._study_type_asked(state) == "find_best_design":
             return "answer"
-        if (self._study_type_asked(state) is None
-                and _optim.classify_topic(state.get("topic") or self.config.topic) == "find_best_design"):
+        if (topic and self._study_type_asked(state) is None
+                and _optim.plainly_seeks_best(state.get("topic") or self.config.topic)):
             return "topic"
         return ""
 
@@ -4463,7 +4466,7 @@ class Engine:
         explicit = isinstance(design, dict) and design.get("study_type") is not None
         # The person's answer, or a topic that plainly asks for the best design, counts for a design that says nothing
         # of its own (one drafted at this step, say); a design that says `measure` is a choice someone made and runs.
-        asked = bool(self._asks_for_best_design(state)) and not explicit and not _optim.has_block(design)
+        asked = bool(self._asks_for_best_design(state, topic=False)) and not explicit and not _optim.has_block(design)
         if _optim.study_type_of(design) != "find_best_design" and not asked:
             return
         path = _plan.plan_path(self.quest_root)
@@ -4475,9 +4478,7 @@ class Engine:
             goal = (f" (make {objective['quantity']} as {'low' if objective['direction'] == 'minimise' else 'high'} as "
                     f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
         missing = _optim.missing_parts(design) if not asked else [
-            ("you answered that this study should find the best design" if self._asks_for_best_design(state) == "answer"
-             else "the topic asks to find the best design")
-            + ", but the design is a measurement over chosen settings"]
+            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
         where = (f"In `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”," if path.is_file()
                  else "This quest has no plan.md (its plan could not be written); in the quest's topic,")
         steps = [

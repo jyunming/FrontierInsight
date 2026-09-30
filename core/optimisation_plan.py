@@ -807,6 +807,25 @@ def classify_topic(topic: str) -> str:
     return "ambiguous"
 
 
+# A topic that plainly asks for a search: a verb of choosing and a word that only a search uses ("find the fin spacing
+# that minimises ...", "choose the optimal gain"). "Find the lowest error of Simpson's rule" or "determine the best-fit
+# exponent" are measurements and do not match.
+_PLAIN_SEARCH = re.compile(
+    r"\b(find|choose|select|design|pick|determine|identify)\b[^.?!]{0,80}\b(optimal|optimum|optimi[sz]e[sd]?|"
+    r"optimi[sz]ing|minimi[sz]e[sd]?|maximi[sz]e[sd]?|minimi[sz]ing|maximi[sz]ing|"
+    r"best(?![\s-]+(?:fit|response|practice|practices|known|case)\b))\b|"
+    r"(找出|找到|求出|設計出|设计出|選出|选出)[^。？?!！]{0,30}(最佳|最優|最优)|最佳化|最优化",
+    re.IGNORECASE,
+)
+
+
+def plainly_seeks_best(topic: str) -> bool:
+    """Whether the topic itself plainly asks to find the best design (narrower than :func:`classify_topic`): the plan step
+    then writes ``study_type: find_best_design`` into a draft that says nothing of its kind, with a note."""
+    text = topic or ""
+    return bool(_PLAIN_SEARCH.search(text)) and not _MEASURE.search(text)
+
+
 def may_seek_best(topic: str) -> bool:
     """Whether the topic has any word of looking for the best (broader than :func:`classify_topic`'s): the plan prompt
     then carries the rules for writing a search for the best design. A topic with none of them is planned as before."""

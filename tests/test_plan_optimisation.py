@@ -458,12 +458,23 @@ async def test_a_topic_that_asks_for_the_best_design_is_not_run_as_a_sweep_when_
     seen = _stop_at_pause(eng)
     with pytest.raises(Paused):
         await eng._node_design({"topic": topic, "iteration": 0})
-    # A design drafted at the design step, with no plan and no study_type, stops too.
-    drafted = _engine(tmp_path / "drafted", [json.dumps(sweep), _NO_OBJECTIONS])
-    seen = _stop_at_pause(drafted)
-    with pytest.raises(Paused):
-        await drafted._node_design({"topic": topic, "iteration": 0})
-    assert "the topic asks to find the best design" in " ".join(seen[0]["steps"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("topic", [
+    "Find the largest eigenvalue of random matrices as the size grows",
+    "Find the lowest error of Simpson's rule quadrature on smooth integrands",
+    "Determine the best-fit exponent of the finite-size scaling law",
+])
+async def test_a_measurement_topic_with_a_superlative_is_not_turned_into_a_search(tmp_path: Path, topic: str) -> None:
+    sweep = {**{k: v for k, v in HEAT_SINK.items() if k not in ("protocol", "study_type")},
+             "protocol": {"grid": {"n": [10, 20, 40]}, "oracles": HEAT_SINK["protocol"]["oracles"]}}
+    eng = _engine(tmp_path, [json.dumps({**sweep, "plan": EXTRA}), _NO_OBJECTIONS, _NO_OBJECTIONS])
+    await eng._node_plan({"topic": topic, "iteration": 0})
+    assert "study_type" not in plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design
+    seen = _stop_at_pause(eng)
+    await eng._node_design({"topic": topic, "iteration": 0})
+    assert seen == []
 
 
 @pytest.mark.asyncio
