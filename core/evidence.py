@@ -377,7 +377,9 @@ def assess(
         if oracle_record.get("contract") == "trial":
             valid_gaps.append(
                 f"the value of {', '.join(scripted)} came from the script's own oracle(), not from the engine running the simulation "
-                "on the oracle's case: a script that returns a closed form without simulating would pass (give the oracle a `case` and a `measure`)"
+                "on the oracle's case: a script that returns a closed form without simulating would pass (give the oracle a `case` and a "
+                "`measure`; a check of a random simulation that needs many trials, such as a probability, cannot have one, "
+                "and stays the script's own word)"
             )
         else:
             valid_gaps.append(

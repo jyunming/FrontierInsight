@@ -95,7 +95,8 @@ def _engine(
             max_iterations=1, review_loop=False, clarify_mode="off",
             execute_replicates=replicates, pilot_run=False,
         ),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=60, background_jobs=background_jobs),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=60, background_jobs=background_jobs,
+                                  split_analysis=False),  # the one-script seed contract (FI_REPLICATE_SEED)
         knowledge=KnowledgeConfig(enabled=False),
         output=OutputConfig(output_dir=tmp_path / "out"),
     )

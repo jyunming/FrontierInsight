@@ -1027,7 +1027,7 @@ class Engine:
                             if intr_value.get("contract_stage"):
                                 self._log.info(
                                     "[FI] paused for the %s (%s): read %s, fix what it names, then run `fi --resume %s`",
-                                    "equation labels (the simulation does not mark where it computes each equation of the plan)"
+                                    "equation labels in the simulation"
                                     if (intr_value.get("pause") or {}).get("kind") == "equation_labels"
                                     else "two-script contract",
                                     "; ".join(intr_value.get("problems") or [])[:200],
@@ -6196,6 +6196,7 @@ class Engine:
 
         code_path = self.quest_root / "code" / "experiment.py"
         simulate_path = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        sim_kept = False  # the simulation came back unchanged: its trials already run stay in use
         if simulate_code.strip():
             # A script written again identically is left exactly as it was: the raw files
             # it wrote are recorded against its bytes, and are used only while they match.
@@ -6205,6 +6206,7 @@ class Engine:
                 self._log.info("[implement] wrote %s (%d bytes)", simulate_path, len(simulate_code))
             else:
                 self._log.info("[implement] %s is unchanged; its raw files stay in use", simulate_path.name)
+                sim_kept = True
         elif simulate_path.is_file():
             # This pass wrote ONE script: a simulation left from an earlier pass would run beside it and mix two
             # iterations. Under ``auto`` a quest with a simulation asks for two scripts every time (``_split_on``), so
@@ -6230,7 +6232,9 @@ class Engine:
         if extracted:
             code, deps = await self._enforce_protocol(state, code_path, simulate_path, code, deps, extended=bool(extend))
             # The labels of the plan's equations (`# E1`): asked for once more when the reply left one out.
-            if await self._label_equations(state) == code_path:
+            # Not when the simulation came back unchanged: adding comments changes its bytes, and the trials FI already ran
+            # are kept against those bytes, so they would all run again. The check before the run still says what is missing.
+            if not sim_kept and await self._label_equations(state) == code_path:
                 code = code_path.read_text(encoding="utf-8")  # a one-script quest: the labelled script is the one that runs
         if extend:
             note = "added what a refine asked for: " + "; ".join(extend)[:200]
@@ -7016,7 +7020,8 @@ class Engine:
         simulate = code / _split_run.SIMULATE_NAME
         split = self._split_on(state) and simulate.is_file()
         main = simulate if split else code / "experiment.py"
-        skip = {"experiment.py" if split else _split_run.SIMULATE_NAME, _trial_runner.SUBMIT_NAME, "run.py"}
+        skip = {"experiment.py" if split else _split_run.SIMULATE_NAME, _trial_runner.SUBMIT_NAME, "run.py",
+                "replot_figures.py", "replot_layout.py"}
         texts: dict[str, str] = {}
         for path in [main, *sorted(p for p in code.glob("*.py") if p != main and p.name not in skip)]:
             try:
@@ -7047,8 +7052,8 @@ class Engine:
 
     async def _label_equations(self, state: QuestState) -> Path | None:
         """Right after the code is written: when the simulation does not mark every ``generates`` equation of the plan,
-        ask the model once to add the labels, and keep its answer only when it changed nothing but comments and
-        docstrings (the code compiles to the same tree). Never stops a quest; the check before the run says what is
+        ask the model once to add the labels as comments, and keep its answer only when the code is otherwise the same
+        (the same syntax tree; a changed docstring counts as a change). Never stops a quest; the check before the run says what is
         still missing. Returns the script it rewrote, or ``None``."""
         try:
             main, missing = self._unlabelled(state, self._protocol_block(state))
@@ -7069,6 +7074,7 @@ class Engine:
             )
             text = await self._chat(prompt, node="implement")
             after, _deps = _parse_implement_response(text)
+            after = re.sub(r"\A\s*#\s*file\s*:[^\n]*\n", "", after)  # a `# file: simulate.py` line is not the script's
             if not after.strip() or ast.dump(ast.parse(before)) != ast.dump(ast.parse(after)):
                 self._log.warning("[implement] the request to label the equations %s changed more than comments; "
                                   "%s is kept as it was", ", ".join(missing), main.name)
@@ -15988,7 +15994,7 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
-`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`: FI calls the simulation's own function (run_cell for a deterministic simulation, run_trial for a random one) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A deterministic simulation's oracles always get a case. For a random simulation a case is ONE trial with one seed, so give a case to a check one trial shows exactly (an invariant every trial keeps, a setting whose outcome is certain, such as no outbreak at R0 = 0); a check that needs many trials (a probability, a mean) has no case and is answered by the script's own oracle(). A check without a `case` is the script's own word and does not count as independent validation. A run whose checks do not pass never reaches the main sweep.
+`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`: FI calls the simulation's own function (run_cell for a deterministic simulation, run_trial for a random one) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A deterministic simulation's oracles always get a case. For a random simulation a case is ONE trial with one seed, so give a case to a check one trial shows exactly (an invariant every trial keeps, a setting whose outcome is certain, such as no outbreak at R0 = 0); a check that needs many trials (a probability, a mean) has no case and is answered by the script's own oracle(). A check without a `case` is the script's own word and does not count as independent validation. (A quest set to keep one script, `execution.split_analysis: false`, has no such function: its script answers every check itself when FI_ORACLE=1, and none of them counts.) A run whose checks do not pass never reaches the main sweep.
 
 Mistakes that stop a run, each seen in real quests:
 - `grid` holds only the settings the simulation runs separately; each grid cell is simulated and its trials are counted. A value used only to classify or summarise the same runs afterwards (a cut-off, a threshold) is not a grid axis: put it in `thresholds`.
