@@ -133,7 +133,7 @@ _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RU
                 ".fi/oracle_dry_run.json",
                 "code", "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
-_PLAN_LOOK = ".fi/oracle_guidance.json"
+_PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json"]
 
 _OWN: dict[str, list[str]] = {
     # The review writes no file of its own; what is made from the reviewed paper is made again after it.
@@ -152,11 +152,11 @@ _OWN: dict[str, list[str]] = {
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
     # The record of the oracles the engine added to plan.md goes with plan.md: a design rerun keeps both.
-    "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", _PLAN_LOOK, "needs/receipts/design_audit.json",
+    "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK, "needs/receipts/design_audit.json",
              *_FROM_DESIGN],
-    "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", _PLAN_LOOK,
+    "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK,
                    *_FROM_DESIGN],
-    "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", _PLAN_LOOK, *_FROM_DESIGN],
+    "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_PLAN_LOOK, *_FROM_DESIGN],
 }
 # A step redoes everything after it, so it moves aside everything the later steps write too (a rerun that stops halfway
 # must not leave the old receipts for the evidence level to read).

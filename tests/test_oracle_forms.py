@@ -307,7 +307,8 @@ async def test_the_plan_step_rewrites_an_unambiguous_check_and_says_so_in_plain_
     assert "worst violation and it expects 0" in section and "verdict is the same as before" in section
     assert text.index(f"## {of.HEADING}") < text.index(f"## {plan.DESIGN_HEADING}")
     assert "computed as `abs((P_out / P_in) - 1)`" in text  # how the number is computed, above the block
-    assert [r["by"] for r in plan.history(engine.quest_root)] == ["model", "engine"]
+    history = [r["by"] for r in plan.history(engine.quest_root)]
+    assert history[0] == "model" and set(history[1:]) == {"engine"}, "FI's changes are its own versions, not a person's"
     # Once: a later pass through the plan step does not look again.
     before = _plan_text(engine)
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
@@ -510,7 +511,7 @@ async def test_a_plan_read_at_the_old_plan_stop_shows_what_the_look_changed_befo
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert _oracle_in_plan(engine)["expected"] == 0
     added = engine._oracles_added_read()
-    assert added["oracles"] == ["power_conservation"] and added["shown"] is False and "after you read" in added["reason"]
+    assert added["oracles"] == ["power_conservation"] and added["shown"] is False and "after you read" in added["reason"].lower()
 
 
 def test_a_formula_that_takes_nothing_from_the_simulation_is_not_a_measurement(tmp_path: Path) -> None:

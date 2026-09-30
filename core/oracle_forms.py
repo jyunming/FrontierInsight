@@ -437,16 +437,17 @@ def describe_changes(before: dict[str, dict[str, Any]], after: dict[str, dict[st
     return out
 
 
-def request(requests: list[str]) -> str:
-    """One request to the plan for every check that is not in its kind's form."""
+def request(requests: list[str], *, last: bool = True) -> str:
+    """One request to the plan for every check that is not in its kind's form (``last``: it ends the request, so it
+    says what else may change; not when another part follows that says it for both)."""
     return (
         "Each check against a known answer has one numeric form, fixed by its kind: a conserved quantity or invariant, "
         "a symmetry or scaling law, or a second implementation is measured as the worst violation and expects 0; a "
         "special or limiting case, a published value, or a convergence rate is measured as the quantity itself and "
         "expects its known value. These checks do not fit:\n"
         + "\n".join(f"- {r}" for r in requests)
-        + "\nChange only these checks (and a criterion that reads one of them, when its number changes meaning), and "
-        "nothing else in the plan."
+        + ("\nChange only these checks (and a criterion that reads one of them, when its number changes meaning), and "
+           "nothing else in the plan." if last else "")
     )
 
 
