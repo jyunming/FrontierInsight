@@ -33,7 +33,7 @@ In plain words a quest goes through these steps (the quest map in the Web page a
 
 1. **Ideas** — turns your topic into a research question.
 2. **Literature** — finds and reads the papers the question rests on.
-3. **Plan** — writes `plan.md`: the gap, the model behind the numbers (what model produces them, its equations and where each comes from), the method and the numbers to be reported.
+3. **Plan** — writes `plan.md`: the gap, the model behind the numbers (what model produces them, its equations and where each comes from), how we will judge whether the code got better (two to five checks of correctness FI computes after every run, never the study's own finding), the method and the numbers to be reported.
 4. **Design** — fixes the experiment: settings, runs per setting, what counts as a pass.
 5. **Write the code** — writes the script or scripts (one, or a simulation plus its analysis, see `execution.split_analysis`).
 6. **Run** — runs them; a crash goes back to a fix-and-run loop first. A topic that needs real data collects and loads it here instead.

@@ -83,6 +83,7 @@ from . import goal_coverage
 from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
+from . import criteria as _criteria
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
 from . import experiment_deps as _experiment_deps
@@ -3969,17 +3970,29 @@ class Engine:
         return parsed.design, sha
 
     def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None,
-                        unsourced: list[str] | None = None) -> None:
+                        unsourced: list[str] | None = None, no_criteria: bool = False) -> None:
         """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
         supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
 
         ``added`` names the oracles the engine wrote into the plan after the person read it (the caller keeps its own
         once-per-addition record): the stop then says so first, since the protocol is frozen right after it.
         ``unsourced`` (``rigor_profile: research``) says which checks' expected values have no source a reader can
-        check; like an unreadable file, it stops every resume until the plan says where each value comes from."""
+        check; like an unreadable file, it stops every resume until the plan says where each value comes from.
+        ``no_criteria``: the plan has no way to judge whether the code got better, and FI found none to propose; the stop
+        (once, like the plain one) asks the person to write one, and a resume without one goes on without."""
         marker = self.fi_dir / "paused_at_plan.flag"
-        if not error and added is None and not unsourced and marker.is_file():
+        # The stop for a missing criterion has its own marker: a quest that first stopped at the plan for another reason
+        # (its sources) still stops once to ask for one.
+        criteria_marker = self.fi_dir / "paused_for_criteria.flag"
+        if (not error and added is None and not unsourced and marker.is_file()
+                and (not no_criteria or criteria_marker.is_file())):
             return
+        if no_criteria and not error and added is None:
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                criteria_marker.write_text("plan", encoding="utf-8")
+            except OSError as e:
+                self._log.warning("[plan] couldn't write pause marker %s: %r", criteria_marker, e)
         if added is None:
             try:
                 self.fi_dir.mkdir(parents=True, exist_ok=True)
@@ -4013,6 +4026,17 @@ class Engine:
                          "oracles_added": list(added)},
             )
             return
+        criteria_steps = [
+            "The plan names no check of correctness FI can compute itself, so there is no way yet to judge whether the "
+            "code got better (when the model's draft had none, FI searched the literature once for how studies like "
+            "this one are checked and asked the model again, and found none).",
+            f"If you know one, write it in `plan.md` ({path}), in the protocol under \u201c{_plan.DESIGN_HEADING}\u201d, as "
+            "`criteria`, for example: `- {name: rk4 error, oracle: <the name of one of the protocol's oracles, one that "
+            "names a case so FI runs it itself>, direction: lower, target: 1.0e-6, tolerance: 1.0e-8}`. A criterion "
+            "checks that the code is right (an error against a known answer, a convergence order, a conserved "
+            "quantity); it is never the study's own finding.",
+            "Or resume without one: the quest goes on, and no run of it can be shown to be better than another.",
+        ] if no_criteria else []
         if unsourced:
             steps = [
                 "The quest stopped at the plan: the value a check against a known answer expects has to come from "
@@ -4025,6 +4049,7 @@ class Engine:
                 "Or ask for a change and let FI rewrite it: "
                 f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
                 "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
+                *criteria_steps,
                 "Then resume. (This stop comes from `rigor_profile: research`. Without it FI notes the problem in the "
                 "plan and in run.log and goes on, and the result is not counted as checked against known answers.)",
             ]
@@ -4039,6 +4064,7 @@ class Engine:
             return
         steps = [
             *([f"`plan.md` could not be used: {error}. Fix it, then resume."] if error else []),
+            *criteria_steps,
             f"Read `plan.md` in the quest folder ({path}): what the literature says, the gap, and the design the "
             "experiment will run.",
             f"Edit it. The block under \u201c{_plan.DESIGN_HEADING}\u201d is the design, exactly: what it says is what runs. "
@@ -4050,9 +4076,12 @@ class Engine:
         self._pause_for_human(
             kind="plan",
             interaction="supply",
-            headline="read and edit the plan" if not error else "plan.md cannot be read",
+            headline=("plan.md cannot be read" if error else
+                      "read and edit the plan: it has no way yet to judge whether the code got better" if no_criteria
+                      else "read and edit the plan"),
             steps=steps,
-            payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": error},
+            payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": error,
+                     **({"no_criteria": True} if no_criteria else {})},
         )
 
     async def _node_plan(self, state: QuestState) -> QuestState:
@@ -4078,9 +4107,12 @@ class Engine:
                 self._pause_for_plan(error=parsed.error or "no design")
                 return {}
             protocol = parsed.design.get("protocol")
-            self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None)
+            no_criteria = (ask and self._runs_code(state) and isinstance(protocol, dict)
+                           and self._split_on({**state, "design": parsed.design}) and not _criteria.countable(protocol))
+            self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None,
+                                     no_criteria=no_criteria)
             if ask:
-                self._pause_for_plan()
+                self._pause_for_plan(no_criteria=no_criteria)
             return {}
 
         prompt = self._design_prompt(state) + _PLAN_DIRECTIVE
@@ -4113,6 +4145,43 @@ class Engine:
         if normalized is None:
             self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
             return {}
+        # How the code will be judged (core/criteria.py): a draft that names no criterion gets one search of the
+        # literature for how such studies are checked, and one more question to the model.
+        no_criteria = False
+        fi_runs = self._split_on({**state, "design": normalized})
+        if self._runs_code(state) and isinstance(normalized.get("protocol"), dict) and not fi_runs:
+            self._log.warning("[criteria] this quest runs its experiment as one script, so FI runs none of its checks "
+                              "itself: the plan's criteria are shown after each run but none counts")
+        elif self._runs_code(state) and isinstance(normalized.get("protocol"), dict) and not _criteria.countable(
+                normalized["protocol"]):
+            drafted = _criteria.declared(normalized["protocol"])
+            proposed, criteria_notes = await self._propose_criteria(state, normalized["protocol"])
+            repaired_notes += criteria_notes
+            if proposed:
+                # What the model proposed comes first, then what the draft had (none FI could measure itself), up to five.
+                merged = proposed + [c for c in drafted if c["name"].lower() not in {p["name"].lower() for p in proposed}]
+                for c in merged[_criteria.MAX:]:
+                    repaired_notes.append(f"the criterion {c['name']!r} was left out of the plan: at most "
+                                          f"{_criteria.MAX} are kept, those FI can measure itself first")
+                renormalized, why_not = _plan.normalize_protocol(
+                    {**normalized["protocol"], "criteria": merged[:_criteria.MAX]})
+                if renormalized is not None:
+                    normalized = {**normalized, "protocol": renormalized}
+                else:
+                    note = f"the plan with the criteria the model proposed could not be read ({why_not}); they were left out"
+                    repaired_notes.append(note)
+                    self._log.warning("[criteria] %s", note)
+            no_criteria = not _criteria.countable(normalized["protocol"])
+            if no_criteria:
+                self._log.warning(
+                    "[criteria] the plan has no check of correctness FI can compute to judge whether the code got better "
+                    "(one search of the literature and a second question found none)%s",
+                    "; the quest stops at the plan for you to write one" if ask else
+                    "; going on without one: every run is recorded as having no criterion",
+                )
+                if not ask:
+                    print("[FI] The plan has no way to judge whether the code got better (no check of correctness FI can "
+                          "compute); going on without one. See plan.md and .fi/run.log")
         # The plan writes the audited design in its own canonical form: the audit's verdict covers it.
         _receipts.carry_output(self.quest_root, "design_audit", _receipts.design_core(design),
                                _receipts.design_core(normalized), "the plan wrote the audited design in its own form")
@@ -4128,6 +4197,7 @@ class Engine:
             audit += _protocol.metric_notes(normalized.get("protocol"))
             audit += _protocol.precision_notes(normalized.get("protocol"), int(self.config.engine.execute_replicates))
             audit += _protocol.grid_notes(normalized)
+            audit += _criteria.plan_notes(normalized.get("protocol"), fi_runs=self._split_on({**state, "design": normalized}))
             # Where the model's equations and each check's expected value come from (core/oracle_check.py).
             source_gaps, model_notes = self._plan_source_findings(state, normalized.get("protocol"))
             audit += model_notes
@@ -4142,10 +4212,62 @@ class Engine:
         await self._shadow("plan", {**state, "design": normalized},
                            taken="held the plan for the person" if ask else "went on with the plan")
         protocol = normalized.get("protocol")
-        self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None)
+        self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None,
+                                 no_criteria=no_criteria and ask)
         if ask:
-            self._pause_for_plan()
+            self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
+
+    async def _propose_criteria(self, state: QuestState, protocol: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
+        """The plan named no criterion: search the literature once for how studies like this one are checked, then ask
+        the model again with what the quest already found and what the search turned up. ``(criteria, notes)``: the
+        criteria FI can compute (possibly none) and a sentence per one left out. A failed search or call is the same as
+        finding none; only a model answer the engine stops for anyway (``_ModelAnswerProblem``) stops the quest."""
+        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())
+        query = f"how the correctness of a simulation or numerical method is verified: {topic[:200]}"
+        known = self._retrieved_sources(state)
+        seen = {str(s.get("doi") or "").strip().lower() or " ".join(str(s.get("title") or "").split()).lower()
+                for s in known}
+        hits: list[Any] = []
+        try:
+            # One bounded search, without asking the model to route it (the fallback sources): a routing call is a third
+            # of a quest's calls, and this one only needs a few titles.
+            hits = await self.knowledge.asearch(query, top_k=5, external_top_k=5, work_scope=self._work_scope(state),
+                                                fetch_full_text=False)
+        except Exception as e:  # noqa: BLE001 -- a search that fails leaves the model with what the quest already found
+            self._log.warning("[criteria] the search for how such studies are checked failed: %s", e)
+        new = []
+        for doc in hits or []:
+            meta = getattr(doc, "metadata", {}) or {}
+            key = str(meta.get("doi") or "").strip().lower() or " ".join(str(meta.get("title") or "").split()).lower()
+            if key and key not in seen:
+                seen.add(key)
+                new.append(doc)
+        self._log.info("[criteria] the plan names no check of correctness FI can measure itself; searched once (%r: %d "
+                       "new source(s)) and asking the model again", query, len(new))
+        lines = [f"- [{s['label']}] {s.get('title') or '(untitled)'}" for s in known[:25]] or ["- (none)"]
+        lines += ["", f"One more search ({query!r}) found:"]
+        for i, doc in enumerate(new, start=1):
+            meta = getattr(doc, "metadata", {}) or {}
+            text = " ".join(str(getattr(doc, "content", "") or "").split())[:400]
+            lines.append(f"- [C{i}] {' '.join(str(meta.get('title') or '(untitled)').split())}: {text}")
+        if not new:
+            lines.append("- (nothing new)")
+        prompt = self._prompts["plan_criteria"].substitute(
+            topic=topic[:1500], protocol=json.dumps(protocol, indent=2, default=str)[:8000], found="\n".join(lines),
+        )
+        try:
+            reply = await self._chat(prompt, node="plan_criteria")
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- no answer is the same as no criterion
+            self._log.warning("[criteria] asking the model for criteria failed: %s", e)
+            return [], []
+        obj = _parse_json_lenient(reply) or {}
+        kept, notes = _criteria.repair(obj.get("criteria") if isinstance(obj, dict) else None, protocol)
+        for note in notes:
+            self._log.warning("[criteria] %s", note)
+        return kept, notes
 
     def _runs_code(self, state: QuestState) -> bool:
         """Whether the quest runs an experiment of its own (not the no-simulation path, a survey or ``--analyze``)."""
@@ -4174,7 +4296,8 @@ class Engine:
             self._log.warning("[plan] where the checks' expected values come from could not be checked: %r", e)
             return [], [f"Where the checks' expected values come from could not be checked ({type(e).__name__})."]
 
-    def _check_plan_sources(self, state: QuestState, *, stop: bool, protocol: Any = None) -> list[str]:
+    def _check_plan_sources(self, state: QuestState, *, stop: bool, protocol: Any = None,
+                            no_criteria: bool = False) -> list[str]:
         """Say, in run.log, which checks of the plan expect a value with no source a reader can check (no ``reference``,
         or a source this quest did not retrieve); under ``rigor_profile: research`` with ``stop``, stop the quest at the
         plan until it says. A no-op once the protocol is frozen: the evidence record carries the gap from then on."""
@@ -4192,7 +4315,7 @@ class Engine:
                 # This stop names every check the engine added (each lacks a source), so the person reads them here:
                 # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
                 self._oracles_added_write({**added, "shown": True})
-            self._pause_for_plan(unsourced=gaps)
+            self._pause_for_plan(unsourced=gaps, no_criteria=no_criteria)
         elif gaps and not self.__dict__.get("_said_unsourced"):
             self._said_unsourced = True
             print(f"[FI] {len(gaps)} check(s) in the plan do not say where their expected value comes from, or cite a "
@@ -6512,6 +6635,21 @@ class Engine:
         iteration = int(state.get("iteration", 0) or 0)
         reason = str(request.get("reason") or "").strip() if isinstance(request, dict) else ""
         reason = reason or f"the redesign at iteration {iteration} asked for this change without giving a reason"
+        if proposed.get("criteria") not in (None, "", []):
+            rest = {k: v for k, v in proposed.items() if k != "criteria"}
+            raw = proposed["criteria"] if isinstance(proposed["criteria"], list) else [proposed["criteria"]]
+            _kept, dropped_c = _criteria.repair(raw, rest)
+            if dropped_c:
+                # The entries FI can use, as they were written (a clean copy would show as changes that are not).
+                usable = [item for i, item in enumerate(raw, start=1) if _criteria.normalize([item], rest)[0]]
+                proposed = {**rest, "criteria": usable[:_criteria.MAX]} if usable else rest
+                reason += " (FI left out what it cannot use as a criterion: " + "; ".join(dropped_c) + ")"
+                for note in dropped_c:
+                    self._log.warning("[criteria] the amendment request: %s", note)
+                if _frozen.sha256(proposed) == frozen.get("sha256"):
+                    self._log.warning("[criteria] the amendment request changed nothing FI can use; the frozen protocol "
+                                      "stands")
+                    return _frozen_design()
         design = {**design, "protocol": proposed}
         pending = _frozen.propose(
             self.quest_root, proposed, design, source=f"redesign at iteration {iteration}", reason=reason,
@@ -7305,6 +7443,55 @@ class Engine:
             if all_disputed else None,
         )
         return new_code  # not reached: the pause exits the run
+
+    async def _record_criteria(self, state: QuestState, *, attempt: str | None = None) -> None:
+        """Compute each of the frozen protocol's criteria (core/criteria.py) from what FI measured in this run, and append
+        a row to ``.fi/criteria_history.jsonl`` with the commit of ``code/`` that ran. Numbers FI measured only: the oracle
+        gate's verdicts (a value the script's own ``oracle()`` gave is shown, not counted) and FI's own record of the
+        trials; never the script's results, and no run of its own. Records, decides nothing, and never stops a quest."""
+        try:
+            frozen = _frozen.load(self.quest_root)
+            protocol = _frozen.protocol_of(self.quest_root) or self._draft_protocol(state)
+            items = _criteria.declared(protocol) if isinstance(protocol, dict) else []
+            if isinstance(protocol, dict) and protocol.get("criteria") not in (None, "", []):
+                for note in _criteria.repair(protocol["criteria"], protocol)[1]:
+                    self._log.warning("[criteria] not computed: %s", note)
+            trial_mode = bool(getattr(self, "_trial_mode", False))
+            why_missing: dict[str, str] = {}
+            judged = _oracle.last_judged(self._oracle_record_read())
+            if not judged:
+                why_missing["oracle"] = ("the checks against known answers are off (engine.oracle_check: off)"
+                                         if self.config.engine.oracle_check == "off" else
+                                         "the checks against known answers gave no verdict this run")
+            series: dict[str, dict[str, list[float]]] = {}
+            names = {c["trials"] for c in items if c.get("trials")}
+            if names and trial_mode:
+                series = _trial_runner.recorded_series(self.quest_root, names)
+            elif names:
+                why_missing["trials"] = "FI keeps its own record of the trials only when it runs them itself"
+            results = _criteria.evaluate(items, judged=judged, series=series, why_missing=why_missing)
+            commit, changed = await asyncio.to_thread(_code_project.head, self.quest_root)
+            if changed:
+                # A repair rewrote the code after it was recorded (the check against known answers, or a person): the
+                # row names the commit of the code that actually ran.
+                if await asyncio.to_thread(_code_project.record_change, self.quest_root,
+                                           "the code as it ran (changed since it was last recorded)", log=self._log):
+                    commit, changed = await asyncio.to_thread(_code_project.head, self.quest_root)
+            row = _criteria.record(
+                self.quest_root, run=_frozen.run_id(self.quest_root), code_commit=commit, results=results,
+                code_changed=changed, protocol_version=int(frozen.get("version", 1) or 1) if frozen else None,
+                protocol_sha256=str(frozen.get("sha256")) if frozen else None,
+                protocol_problem=str(frozen.get("problem") or "") or None if frozen else None,
+                attempt=attempt,
+            )
+            line = _criteria.summary_line(results)
+            if results or self.__dict__.get("_said_no_criteria"):
+                self._log.info("[criteria] run %s: %s", row["n"], line)
+            else:
+                self._said_no_criteria = True
+                self._log.warning("[criteria] run %s: %s", row["n"], line)
+        except Exception as e:  # noqa: BLE001 -- a record of the criteria must never stop a quest
+            self._log.warning("[criteria] could not be computed this run: %r", e)
 
     def _oracle_record_clear(self) -> None:
         """Remove a record this run did not write: when the gate does not run, an earlier run's verdicts must not reach the
@@ -8579,6 +8766,7 @@ class Engine:
         self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
+        await self._record_criteria(state, attempt=run_record_id)
         # Only populate ``result_json_replicates`` when replication
         # actually ran AND produced more than the primary entry. This
         # keeps the field absent on default single-seed quests so
@@ -14608,6 +14796,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "clarify", "ideate", "ideate_reflect", "ideate_tournament",
         "design", "design_self_critique",   # second-pass methodology audit
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
+        "plan_criteria",                    # the plan named no check of correctness: ask once more
         "implement",                        # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
@@ -15666,12 +15855,15 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
     "assumptions": ["<what the model assumes>"],
     "holds_for": "<the range of parameters where it holds>",
     "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>"}]
-  }
+  },
+  "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
 
 Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+
+`criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 

@@ -1056,6 +1056,43 @@ def recorded_values_by_cell(quest_root: Path) -> tuple[dict[str, dict[str, Count
     return out, problems
 
 
+def recorded_series(quest_root: Path, names: set[str] | list[str]) -> dict[str, dict[str, list[float]]]:
+    """For each of ``names`` (keys of ``run_trial``'s dict), its values per setting (cell key) in trial order, from FI's run
+    record, counting only trials that ran to the end and whose values still match the ledger's hash (as
+    :func:`recorded_values_by_cell` checks them; a changed record is left to that function to report). Empty when FI kept
+    no record."""
+    root = Path(quest_root)
+    wanted = {str(n) for n in names}
+    try:
+        record = json.loads((root / RUN_RECORD).read_text(encoding="utf-8"))
+        lines = (root / RAW_DIRNAME / LEDGER_NAME).read_text(encoding="utf-8").splitlines()
+    except (OSError, ValueError):
+        return {}
+    hashes: dict[tuple[str, int], str] = {}
+    for line in lines:
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(row, dict) and row.get("event") == "trial" and row.get("status") == "ok"
+                and _trial_id(row) is not None):
+            hashes[(str(row.get("cell")), _trial_id(row))] = str(row.get("values_sha256") or "")
+    out: dict[str, dict[str, list[tuple[int, float]]]] = {}
+    for cell in record.get("cells") or [] if isinstance(record, dict) else []:
+        for row in cell.get("rows") or []:
+            if not isinstance(row, dict) or row.get("status") != "ok" or _trial_id(row) is None:
+                continue
+            values = row.get("values") or {}
+            digest = hashlib.sha256(json.dumps(values, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
+            if hashes.get((str(cell.get("key")), _trial_id(row))) != digest:
+                continue
+            for name in wanted & set(values):
+                v = values[name]
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
+                    out.setdefault(name, {}).setdefault(str(cell.get("key")), []).append((_trial_id(row), float(v)))
+    return {name: {key: [v for _, v in sorted(rows)] for key, rows in cells.items()} for name, cells in out.items()}
+
+
 #: Grid axis names that are a size (a population, a number of agents): the only axes a trial's value may be divided by.
 _SIZE_AXIS = re.compile(
     r"^(n|n_\w+|\w+_n|size|\w+_size|size_\w+|population|pop\w*|agents|n_?agents|particles|n_?particles|"

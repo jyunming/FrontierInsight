@@ -556,6 +556,26 @@ def record_change(quest_root: Path, note: str, *, log: Any = None) -> bool:
         return False
 
 
+def head(quest_root: Path) -> tuple[str | None, bool | None]:
+    """``(the commit code/ is at, whether code/ has changed since it)`` from code/'s own git history; ``(None, None)``
+    when it has none (no git, or nothing recorded yet)."""
+    import shutil
+    import subprocess
+
+    code_dir = Path(quest_root) / "code"
+    if not (code_dir / ".git").exists() or shutil.which("git") is None:
+        return None, None
+    try:
+        rev = _git(code_dir, "rev-parse", "HEAD")
+        if rev.returncode != 0:
+            return None, None
+        status = _git(code_dir, "status", "--porcelain")
+        changed = bool(status.stdout.strip()) if status.returncode == 0 else None
+        return rev.stdout.strip() or None, changed
+    except (OSError, subprocess.SubprocessError):
+        return None, None
+
+
 def verify(quest_root: Path, *, run_timeout_s: float = 3600.0, install_timeout_s: float = 900.0) -> dict[str, Any]:
     """Run ``code/`` the way a person would: a fresh environment, only ``requirements.txt`` installed, then
     ``python run.py``. Never raises; returns ``{"ok": bool, "reason": plain words}`` (also saved to

@@ -60,10 +60,15 @@ def _is_hash(value: Any) -> bool:
 
 def design_core(design: Any) -> Any:
     """What of a design the methodology audit vouches for: all of it, protocol included (its precision, thresholds and
-    oracles are what the audit judges), but its ``rationale``, the model's own account of it."""
+    oracles are what the audit judges), but its ``rationale``, the model's own account of it, and the protocol's
+    ``criteria`` (how a later version of the code is judged, :mod:`core.criteria`): the audit judges the study, the
+    criteria are checked by :func:`core.criteria.normalize`, and the plan step may add them after the audit ran."""
     if not isinstance(design, dict):
         return design
-    return {k: v for k, v in design.items() if k != "rationale"}
+    out = {k: v for k, v in design.items() if k != "rationale"}
+    if isinstance(out.get("protocol"), dict) and "criteria" in out["protocol"]:
+        out["protocol"] = {k: v for k, v in out["protocol"].items() if k != "criteria"}
+    return out
 
 
 def _when(value: Any) -> Any:
