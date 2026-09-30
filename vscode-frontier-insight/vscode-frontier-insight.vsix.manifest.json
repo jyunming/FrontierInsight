@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "0acb27980a4b5e7b4b5266adbfb06a35045eca205db24c68ba45dbbba0dc33a4",
+  "vsix_sha256": "331a3f68900dd2fe1cf114dc377276edea33ae89db966ec1d9e8c9b9fae1d1c8",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -42,8 +42,8 @@
       "bytes": 3626
     },
     "extension/out/bridge.js": {
-      "sha256": "924b4efa4b7cdb9e01ec2bbbc21e3fa9aa772c11ff33c419f88d2ffda1392426",
-      "bytes": 35526
+      "sha256": "73f1d9342c71cdd1f07a49f9abd4a8cbf606527c085a8adaaa1c4f2d1da28742",
+      "bytes": 35534
     },
     "extension/out/extension.js": {
       "sha256": "42e53faef727f1eb9093a6876cf1d7c19efe4214b14c42dd46f3c2609f41bfe1",
