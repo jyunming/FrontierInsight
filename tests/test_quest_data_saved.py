@@ -49,14 +49,14 @@ async def test_a_table_the_experiment_wrote_is_kept_in_data(tmp_path: Path, monk
 
 
 def test_a_two_script_quest_stays_two_scripts_when_a_redesign_reads_less_stochastic(tmp_path: Path) -> None:
-    """``split_analysis: auto`` decides from the design; a later design that no longer names a random process must
-    not turn a quest that already has ``simulate.py`` into a one-script quest (which deletes it)."""
+    """``split_analysis: auto`` gives every simulation two scripts, so a later design that no longer names a random
+    process never turns a quest into a one-script one (which would delete ``simulate.py``)."""
     cfg = _config(tmp_path)
     assert cfg.execution.split_analysis == "auto"
     engine = Engine(cfg)
     (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
     plain = {"design": {"hypothesis": "the value rises", "method": "closed form", "protocol": {}}}
-    assert engine._split_on(plain) is False
+    assert engine._split_on(plain) is True
     (engine.quest_root / "code" / "simulate.py").write_text("print('sim')\n", encoding="utf-8")
     assert engine._split_on(plain) is True
 
@@ -125,7 +125,7 @@ async def test_a_one_script_reply_removes_the_stale_simulation(tmp_path: Path, m
     await engine._node_implement(state)
     assert not (code_dir / "simulate.py").exists()
     assert (code_dir / "experiment.py").is_file()
-    assert engine._split_on(state) is False
+    assert engine._split_on(state) is True, "under auto the next pass asks for the two scripts again"
 
 
 def test_a_table_from_an_earlier_iteration_is_not_kept_beside_this_runs(tmp_path: Path) -> None:

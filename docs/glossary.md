@@ -24,7 +24,9 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Metric spec**: for each headline number, what it estimates (a proportion, a mean, a difference), so the matching interval and test are used. [rigor.md](rigor.md)
 
-**Two scripts**: the simulation (`simulate.py`, which only says what one trial does; FI runs every trial and keeps the record) kept apart from the analysis (`experiment.py`, which reads FI's results), so the analysis can be redone without re-simulating. Set with `execution.split_analysis`; with the default `auto` a quest gets two scripts when its plan runs each setting 2 or more times or names a random process, and one otherwise (once the code is written, `code/simulate.py` exists for a two-script quest). [USAGE.md](USAGE.md)
+**Two scripts**: the simulation (`simulate.py`, which only says what one setting, or one trial of it, computes; FI runs it and keeps the record) kept apart from the analysis (`experiment.py`, which reads FI's results), so the analysis can be redone without re-simulating and FI can run each oracle's case itself. Set with `execution.split_analysis`; with the default `auto` every quest that runs a simulation, deterministic or random, gets two scripts (`split_analysis: false` keeps one, and its result cannot reach `independently_validated`). [USAGE.md](USAGE.md)
+
+**Equation label**: a comment such as `# E1` in the simulation, on the code that computes equation E1 of the plan's model, so a wrong number can be traced to the equation or to the code. FI checks that each equation the simulation computes the data with has one. [rigor.md](rigor.md)
 
 **Evidence level**: how far a result was checked, from `executed` (it ran) through `internally_reconciled`, `protocol_runtime_matched`, `independently_validated` and `statistically_adequate` to `publication_ready`. Each level says what it guarantees and what it does not. [rigor.md](rigor.md)
 

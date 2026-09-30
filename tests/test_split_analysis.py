@@ -150,21 +150,21 @@ def _engine_with(tmp_path: Path, **execution) -> Engine:
     return Engine(cfg)
 
 
-def test_auto_splits_a_stochastic_design_and_not_a_deterministic_one(tmp_path: Path) -> None:
+def test_auto_splits_every_simulation_deterministic_or_stochastic(tmp_path: Path) -> None:
     eng = _engine_with(tmp_path)
     stochastic = {"design": {"hypothesis": "h", "protocol": {"runs_per_setting": 300}}}
     assert eng._split_on(stochastic) is True
-    assert eng._split_on({"design": {"hypothesis": "h", "method": "RK4 step sizes"}}) is False
-    assert eng._split_on({}) is False
-    assert eng._split_block(stochastic) != ""
-    assert eng._split_block({}) == ""
+    assert eng._split_on({"design": {"hypothesis": "h", "method": "RK4 step sizes"}}) is True
+    assert eng._split_on({}) is True
+    assert eng._split_block(stochastic) != "" and "run_cell" in eng._split_block({})
+    assert _engine_with(tmp_path / "off", split_analysis=False)._split_block(stochastic) == ""
 
 
 def test_auto_never_splits_a_study_with_no_experiment_or_a_data_only_run(tmp_path: Path) -> None:
     stochastic = {"design": {"hypothesis": "h", "protocol": {"runs_per_setting": 300}}}
-    # A stochastic background job now runs FI's trials as a job array; a deterministic one stays one script.
+    # A background job runs FI's trials as a job array, deterministic (run_cell) or stochastic (run_trial).
     jobs = _engine_with(tmp_path / "a", background_jobs=True)
-    assert jobs._split_on(stochastic) is True and jobs._split_on({"design": {"hypothesis": "h"}}) is False
+    assert jobs._split_on(stochastic) is True and jobs._split_on({"design": {"hypothesis": "h"}}) is True
     eng = _engine_with(tmp_path / "b")
     assert eng._split_on({**stochastic, "no_simulation_resolved": True}) is False
     assert eng._split_on({**stochastic, "survey_mode_resolved": True}) is False

@@ -363,7 +363,7 @@ async def test_a_one_script_quest_whose_oracle_value_the_script_printed_is_not_i
     assert oracle["status"] == "ok" and oracle["judged_by"] == "engine" and "contract" not in oracle
     assert record["levels"]["independently_validated"] is False
     gaps = record["all_gaps"]["independently_validated"]
-    assert len(gaps) == 1 and "closed form" in gaps[0] and "execution.split_analysis: true" in gaps[0], gaps
+    assert len(gaps) == 1 and "closed form" in gaps[0] and "`split_analysis` is false" in gaps[0], gaps
 
 
 def test_the_quest_page_the_cli_summary_and_the_chat_carry_it() -> None:

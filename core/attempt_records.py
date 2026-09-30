@@ -72,7 +72,7 @@ _INPUT_FILES_LIMIT = 2000
 #: a fact about the attempt).
 STOP_OUTCOMES = {
     "oracle": "oracle_failure",
-    "manifest": "protocol_mismatch", "protocol": "protocol_mismatch",
+    "manifest": "protocol_mismatch", "protocol": "protocol_mismatch", "equation_labels": "protocol_mismatch",
     "split": "process_error", "numeric": "process_error", "replicate_seed_unrepairable": "process_error",
 }
 

@@ -1026,7 +1026,10 @@ class Engine:
                             data_paused = True
                             if intr_value.get("contract_stage"):
                                 self._log.info(
-                                    "[FI] paused for the two-script contract (%s): read %s, fix what it names, then run `fi --resume %s`",
+                                    "[FI] paused for the %s (%s): read %s, fix what it names, then run `fi --resume %s`",
+                                    "plan's equations in the simulation"
+                                    if (intr_value.get("pause") or {}).get("kind") == "equation_labels"
+                                    else "two-script contract",
                                     "; ".join(intr_value.get("problems") or [])[:200],
                                     self.quest_root / "NEXT_STEP.md", self.quest_id,
                                 )
@@ -7001,6 +7004,54 @@ class Engine:
             gaps.append(str(frozen["sources_problem"]))
         return gaps
 
+    def _simulation_script(self) -> Path:
+        """The script that computes the data: ``simulate.py`` when the quest keeps two scripts, else ``experiment.py``."""
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        return simulate if simulate.is_file() else self.quest_root / "code" / "experiment.py"
+
+    def _equation_label_gaps(self, state: QuestState, protocol: Any) -> list[str]:
+        """The plan's ``generates`` equations the simulation script does not mark (``# E1`` on or above the code that
+        implements it), as one sentence; empty for a quest that runs no experiment, a plan with no such equation, or a
+        quest with no script yet. Only the labelled mapping is read, never the mathematics."""
+        if not isinstance(protocol, dict) or not self._runs_code(state) or not _oracle.generating_equations(protocol):
+            return []
+        script = self._simulation_script()
+        try:
+            source = script.read_text(encoding="utf-8")
+        except OSError:
+            return []
+        return _oracle.label_gaps(protocol, source, f"code/{script.name}")
+
+    def _check_equation_labels(self, state: QuestState) -> list[str]:
+        """Say, in run.log, which equations of the plan's model the simulation does not mark where it implements them;
+        under ``rigor_profile: research`` stop until it does. Checked before every run (a repair rewrites the script);
+        on a resume the script on disk is read again, so a label a person added is seen."""
+        try:
+            gaps = self._equation_label_gaps(state, self._protocol_block(state))
+        except Exception as e:  # noqa: BLE001 -- a check of the script must never stop a quest by crashing
+            self._log.warning("[implement] could not check where the simulation implements the plan's equations: %r", e)
+            return []
+        for why in gaps:
+            self._log.warning("[implement] %s", why)
+        if gaps and self.config.rigor_profile == "research":
+            missing = _oracle.unlabelled_equations(self._protocol_block(state),
+                                                   self._simulation_script().read_text(encoding="utf-8"))
+            script = f"code/{self._simulation_script().name}"
+            self._pause_for_human(
+                kind="equation_labels",
+                interaction="supply",
+                headline="the simulation does not say where it implements each equation of the plan",
+                steps=[
+                    f"{gaps[0][0].upper()}{gaps[0][1:]}.",
+                    f"Open {script} and put a comment with the equation's id (`# {missing[0]}`) on or above the code that "
+                    f"computes {'it' if len(missing) == 1 else 'each of ' + ', '.join(missing)}. Only the label is "
+                    "checked, not the mathematics.",
+                    "Then resume: the script on disk is read again before anything runs.",
+                ],
+                payload={"contract_stage": True, "quest_id": self.quest_id, "problems": gaps},
+            )
+        return gaps
+
     def _write_evidence(self, state: QuestState, *, sealing: bool = False) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
         (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest.
@@ -7033,9 +7084,14 @@ class Engine:
             except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
                 self._log.warning("[evidence] where the checks' expected values come from could not be checked: %r", e)
                 oracle_source_gaps = [f"where the checks' expected values come from could not be checked ({type(e).__name__})"]
+            try:
+                label_gaps = self._equation_label_gaps(state, protocol_now)
+            except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
+                self._log.warning("[evidence] where the simulation implements the plan's equations could not be checked: %r", e)
+                label_gaps = [f"where the simulation implements the plan's equations could not be checked ({type(e).__name__})"]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
-                oracle_source_gaps=oracle_source_gaps,
+                oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
@@ -8080,6 +8136,7 @@ class Engine:
         # (core/trial_runner.py). A simulation that still loops by itself is the older contract, whose record is its own.
         trial_entries = _trial_runner.entries(simulate_path) if split else set()
         self._trial_mode = bool(trial_entries & {"run_trial", "run_cell"})
+        self._trial_entries = set(trial_entries)
         if split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
@@ -8194,6 +8251,9 @@ class Engine:
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
         self._check_plan_sources(state, stop=True, protocol=self._draft_protocol(state))
+        # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
+        # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
+        self._check_equation_labels(state)
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
@@ -8780,7 +8840,10 @@ class Engine:
         # downstream path -- the analyze aggregate, the figure captions, the
         # writer's "seed 0 of N" language, the number and claim checks -- falls
         # back to its honest single-run behaviour on its own.
-        patch["result_json_trials"] = bool(getattr(self, "_trial_mode", False)) and bool(result_json)
+        # A deterministic simulation (run_cell) ran once per setting: there is one measurement per setting and no trials
+        # to pool, so no interval or replicate statistics are computed for it.
+        patch["result_json_trials"] = bool(getattr(self, "_trial_mode", False)) and bool(result_json) and "run_trial" in (
+            getattr(self, "_trial_entries", None) or set())
         if patch["result_json_trials"]:
             # The trial contract: the one result holds every trial of every setting FI ran, each with its own seed; the
             # intervals, precision targets and metric statistics are computed from it (pooled counts and values).
@@ -14189,26 +14252,16 @@ class Engine:
     def _split_on(self, state: QuestState) -> bool:
         """Whether this quest keeps its simulation and its analysis in two scripts (``execution.split_analysis``).
 
-        ``true`` and ``false`` decide for every quest. ``auto`` decides from the design: on for a stochastic study
-        (:func:`core.split_run.design_is_stochastic`), off for a study with no experiment and a run that only
-        analyses data. Once a quest has its ``simulate.py`` it stays two-script under ``auto`` (a later redesign that
-        reads less stochastic must not delete the simulation); ``split_analysis: false`` is the way back to one script."""
+        ``true`` and ``false`` decide for every quest. ``auto`` is on for every quest that runs a simulation of its own,
+        stochastic or deterministic: the simulation is then a function FI calls itself (``run_trial``, or ``run_cell``
+        for a deterministic study), which is what lets FI run an oracle's case itself and so reach
+        ``independently_validated``. It is off for a study with no experiment (the no-simulation path, a survey) and a
+        run that only analyses data. ``split_analysis: false`` is the way back to one script, and gives that up."""
         mode = self.config.execution.split_analysis
         if mode != "auto":
             return bool(mode)
-        if (
-            state.get("no_simulation_resolved")
-            or state.get("survey_mode_resolved")
-            or self.config.engine.analyze_local_first
-        ):
-            return False
-        # A quest that already has its simulation keeps it: a later design that reads less stochastic must not turn
-        # the quest into a one-script one, which deleted simulate.py.
-        if (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
-            return True
-        # A background job (a cluster) with a stochastic design runs FI's trials as a job array (core/trial_runner.py):
-        # two scripts and submit.py. A deterministic one stays the one-script job it was.
-        return _split_run.design_is_stochastic(state.get("design") or {})
+        # A background job (a cluster) runs FI's trials as a job array (core/trial_runner.py): two scripts and submit.py.
+        return self._runs_code(state)
 
     def _split_block(self, state: QuestState) -> str:
         """The two-script contract for the code-writing prompts, or nothing when
@@ -15777,7 +15830,9 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
   every setting of the protocol's grid, each call with its own seed: the `FI_REPLICATE_SEED` rule above does not apply
   here, and the function never picks, derives or fixes a seed of its own.
 - For a deterministic study (no randomness): `def run_cell(cell: dict) -> dict` computes one setting, called once per
-  setting.
+  setting. It takes no seed and reads no `FI_REPLICATE_SEED`: FI calls it once for each setting, with nothing repeated.
+- Each equation of the design's `model` whose role is `generates` carries its id in a comment (`# E1`) on or above the
+  code in simulate.py that computes it.
 - The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
   (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
   reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
@@ -15849,7 +15904,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
-  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>"}],
+  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<the name of the number that run returns, as the simulation function returns it>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
     "assumptions": ["<what the model assumes>"],
@@ -15867,7 +15922,7 @@ Each oracle's `kind` is one of six: `special_case` (a special or limiting case w
 
 `precision` says how tight the claim has to be, and the runs follow from it, not the other way round: a probability near 0.5 needs about 0.96/h^2 trials for a 95% half-width of h (about 1070 for 0.03, 385 for 0.05). `runs_per_setting` is the runs each seed executes and the engine runs several seeds (their counts are pooled), so say how many trials you mean. Use a grid of at least five values for any parameter you make a claim about how a result changes with (convergence, scaling, a threshold), with values close together where the behaviour changes. Say in `seed_policy` that every setting and run draws from its own stream (derived from a base seed and the setting), unless you mean common random numbers, in which case say so and plan a paired analysis.
 
-`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. The script is run once with FI_ORACLE=1 to answer them before its main run, and a run whose checks do not pass never reaches the main sweep.
+`oracles` is required for an experiment that computes anything: at least one check that does not rely on the script's own numbers being right, such as a closed form the simulation must reproduce, a limiting case with a known answer, a conservation law or other invariant every run must satisfy, a small case whose exact answer can be computed another way, or a second independent implementation. Give every oracle a `case` and a `measure`, for a deterministic simulation as much as for a random one: FI calls the simulation's own function (run_cell, or run_trial) on that case itself before the main run and judges the number it returns, so the check does not rest on anything the script reports about itself. A check without a `case` is the script's own word and does not count as independent validation. A run whose checks do not pass never reaches the main sweep.
 
 Mistakes that stop a run, each seen in real quests:
 - `grid` holds only the settings the simulation runs separately; each grid cell is simulated and its trials are counted. A value used only to classify or summarise the same runs afterwards (a cut-off, a threshold) is not a grid axis: put it in `thresholds`.

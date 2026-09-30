@@ -78,7 +78,9 @@ INFO: dict[str, dict[str, Any]] = {
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
             "simulator that agrees with it. The engine checks that each one says where it comes from (a derivation with "
             "its steps, a source this quest retrieved, an equation of the plan's model, or a second implementation that "
-            "shares no code), not that the derivation or the reading of the source is right.",
+            "shares no code), not that the derivation or the reading of the source is right. It checks that the "
+            "simulation marks where it implements each equation the model computes the data with (a comment `# E1`), not "
+            "that the code there computes it.",
             "A tolerance looser than the gap between the claimed method and a cruder one passes both; the record warns when the "
             "case names an order, and does not when it does not.",
         ],
@@ -264,14 +266,16 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
 def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
-    oracle_source_gaps: list[str] | None = None,
+    oracle_source_gaps: list[str] | None = None, equation_label_gaps: list[str] | None = None,
 ) -> dict[str, Any]:
     """The quest's evidence status, the ladder with what each level guarantees, and the gaps below the next level.
 
     ``state`` is the final (or paused) state; ``precision_missed`` names the probabilities whose pooled interval did not
     reach the protocol's target; ``statistics_gaps`` says what keeps the statistics from being adequate
     (:func:`core.metric_spec.coverage_gaps`); ``oracle_source_gaps`` names each oracle whose expected value has no
-    source a reader can check (:func:`core.oracle_check.source_gaps`), a gap below ``independently_validated``; ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
+    source a reader can check (:func:`core.oracle_check.source_gaps`), a gap below ``independently_validated``; ``equation_label_gaps`` says which equations of the plan's model the
+    simulation does not mark where it implements them (a comment ``# E1``), a gap at the same level: the oracles test the
+    code against the model, and without the labels nobody can tell which code an equation's check tests; ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
     ``run_manifest_check`` and ``rigor_profile`` as the run had them (a check that was turned off is a gap, not a pass), and
     ``evidence_gate`` / ``claim_check`` / ``design_audit`` as ``off`` or ``not_applicable`` when the run had them so."""
     settings = settings or {}
@@ -323,7 +327,7 @@ def assess(
         if status == "single_script":
             matched_gaps.append("the quest ran as one script, which writes no run manifest: nothing shows the run did what the protocol fixed (execution.split_analysis)")
         elif status == "not_applicable":
-            pass  # a deterministic study runs as one script and has no per-trial outcomes to record
+            pass  # a deterministic study run as one script (split_analysis: false) has no per-trial outcomes to record
         elif status == "self_reported":
             matched_gaps.append(
                 "the trial record is the simulation's own statement (it ran its own loop): FI did not run the trials "
@@ -379,9 +383,10 @@ def assess(
             valid_gaps.append(
                 f"the value of {', '.join(scripted)} was reported by the script itself, not measured by FI running the simulation: "
                 "a script that prints the expected answer without simulating would pass. For FI to measure it, the simulation "
-                "needs its own script that FI calls on the oracle's case itself (set `execution.split_analysis: true`; the "
-                "simulation script then defines `run_cell`, or `run_trial` for a study with randomness), and the oracle "
-                "needs a `case` and a `measure`"
+                "needs its own script that FI calls on the oracle's case itself (the default, `execution.split_analysis: "
+                "auto`; this quest ran as one script because `split_analysis` is false or the code-writing step returned one "
+                "script; the simulation script defines `run_cell`, or `run_trial` for a study with randomness), and the "
+                "oracle needs a `case` and a `measure`"
             )
     elif protocol is not None and (unpassed := _oracle_check.not_passed(_oracle_check.last_judged(oracle_record))):
         # The gate only writes "ok" when every oracle it judged passed; a record that says otherwise is not taken on its word.
@@ -418,6 +423,9 @@ def assess(
         valid_gaps.extend(
             f"{g}, so the value the check expects cannot be checked by a reader" for g in oracle_source_gaps or []
         )
+        # Which code implements which equation of the model: an oracle that rests on E1 checks the code the simulation
+        # says is E1. Only the labels are read, not the mathematics behind them.
+        valid_gaps.extend(equation_label_gaps or [])
     validated = matched and not valid_gaps
 
     # statistically adequate
