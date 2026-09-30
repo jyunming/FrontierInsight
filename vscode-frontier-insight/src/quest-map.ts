@@ -88,6 +88,37 @@ function pageHtml(webview: vscode.Webview, media: vscode.Uri, questId: string): 
 </script></body></html>`;
 }
 
+/**
+ * Where FI opens a tab of its own (the quest map, `plan.md`): among the tabs already open, never in a new split.
+ * - A file already open in some group (`file`) is shown where it is, not opened a second time.
+ * - Otherwise the active tab group: it covers every kind of tab (a text file, a preview, a webview), and stays the last
+ *   editor group used while focus is on the chat in the side bar.
+ * - When the active tab is the chat opened as an editor (or another built-in editor VS Code does not describe to
+ *   extensions), a group of documents beside it is used instead, so the chat is not covered; with none, its own group.
+ */
+export function tabAreaColumn(file?: vscode.Uri): vscode.ViewColumn {
+    const groups = vscode.window.tabGroups;
+    if (file) {
+        for (const g of groups.all) {
+            if (g.tabs.some((t) => t.input instanceof vscode.TabInputText && t.input.uri.toString() === file.toString())) {
+                return g.viewColumn;
+            }
+        }
+    }
+    const active = groups.activeTabGroup;
+    const input = active.activeTab?.input;
+    const described = [vscode.TabInputText, vscode.TabInputTextDiff, vscode.TabInputCustom, vscode.TabInputWebview,
+        vscode.TabInputNotebook, vscode.TabInputNotebookDiff, vscode.TabInputTerminal];
+    if (active.activeTab && !described.some((k) => input instanceof k)) {
+        const other = groups.all.find((g) => g !== active && g.tabs.length > 0);
+        if (other) return other.viewColumn;
+    }
+    return active.viewColumn;
+}
+
+/** One map per quest: opening it again shows the open one (and reads the checkpoint again) instead of a second tab. */
+const openMaps = new Map<string, { panel: vscode.WebviewPanel; refresh: () => Promise<void> }>();
+
 export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?: string): Promise<void> {
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const roots = rootsFromConfig(cfg);
@@ -105,12 +136,20 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
         return;
     }
 
+    const key = `${outputRoot}\n${questId}`;
+    const open = openMaps.get(key);
+    if (open) {
+        // A tab in the background reloads its page when shown, and the page asks for the data itself; only a tab
+        // already in view needs to be told the checkpoint may have moved.
+        const inView = open.panel.visible;
+        open.panel.reveal(open.panel.viewColumn);
+        if (inView) void open.refresh();
+        return;
+    }
+
     const media = vscode.Uri.joinPath(context.extensionUri, "media");
-    // Open where the scripts and the paper are shown: the column of the editor in view, else beside the chat.
-    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.window.visibleTextEditors[0]?.viewColumn
-        ?? vscode.ViewColumn.Beside;
     const panel = vscode.window.createWebviewPanel("frontierInsight.questMap", `Quest map: ${questId}`,
-        column, { enableScripts: true, localResourceRoots: [media] });
+        { viewColumn: tabAreaColumn(), preserveFocus: true }, { enableScripts: true, localResourceRoots: [media] });
     panel.webview.html = pageHtml(panel.webview, media, questId);
     const configPath = path.join(outputRoot, questId, "config.yaml");
 
@@ -125,6 +164,10 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
             void panel.webview.postMessage({ type: "error", text: `Could not read the map of ${questId} (exit ${res.code}). ${why}` });
         }
     };
+    openMaps.set(key, { panel, refresh: send });
+    panel.onDidDispose(() => {
+        if (openMaps.get(key)?.panel === panel) openMaps.delete(key);
+    });
     panel.webview.onDidReceiveMessage(async (m: { type?: string; step?: string }) => {
         if (m.type === "ready") {
             await send();
@@ -133,5 +176,5 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
                 query: `@fi /resume ${questId} --from ${m.step}`,
             });
         }
-    }, undefined, context.subscriptions);
+    }); // the panel drops its own listeners when it is closed
 }
