@@ -113,6 +113,44 @@ All with `--basetemp ./.pytest_tmp/<unique>`; no test calls a real model.
   `test_office_pdf.py::test_a_real_deck_exports_one_pdf_page_per_slide`, three `test_pptx_slides.py` LibreOffice tests
   (LibreOffice exports no PDF here), `test_pdf_text.py::test_a_scanned_page_is_read_by_ocr`.
 
+## Completed locally (Windows)
+
+The cloud draft was reviewed and completed on the maintainer's Windows machine (Python 3.11, `pytest -n 4`,
+`--basetemp ./.pytest_tmp/<unique>`), rebased on `origin/main` at `a9ab141`.
+
+**Design review (before any external review).** A refine that extends the study, the repair of a crashed simulation and
+the repair for a failed oracle check were all blind to `model.py` (they showed and rewrote simulate.py only), so an
+extension could overwrite `model.py` with a partial file and an oracle failure caused by an equation could not be fixed
+there; a missing label was asked for in simulate.py although the layout check reads it in the package; a plan with no
+numeric check made the layout check report "no unit tests" (a stop under research for a file FI chose not to write);
+`requirements.txt` missed what the package imports. All fixed.
+
+**External reviews** (separate `claude -p` sessions, written reports, five passes: one full review, then targeted
+re-checks of each round of fixes until no P2+ remained). Fixed from them: the layout stop now has its own to-do card
+(`code_layout`; the `split` card's advice was wrong for it); a quest begun before this existed is left as it was on
+resume or refine; the request limit is a quest-wide budget, not `1 + max_iterations`; a later pass that rewrites
+simulate.py without the package is asked again and otherwise says the old package is kept; a package the reply named
+itself (and imports) is kept; simulate.py importing a package that was not written is said plainly; repairs may fix the
+package alone, and the oracle gate's undo restores it; the package is checked for randomness the per-trial seed cannot
+reach (module-level generators, unseeded generators outside the `rng = rng or default_rng()` fallback) and experiment.py
+for importing it; the older contract's raw-file reuse and the attempt record's code hashes know the package; package
+names never hide a library; generated tests take any check name; a `<pkg>/simulate.py` block is not taken for the
+script.
+
+**Tests run locally:**
+
+- First run of the cloud code plus the first local fixes, every test file touching `code_project`, `trial_runner`,
+  `run_manifest`, `split_analysis`, `rerun_from`, refine/extend, `execute_reflect`, the oracle gate or labels (52 files,
+  including `test_self_correction_e2e.py` and `test_research_acceptance.py`) plus `test_engine_smoke.py` and
+  `test_web_e2e.py`, `-n 8`: **1556 passed, 6 failed**. All 6 were environment failures under load: 4 timed out on
+  `~/.frontier-insight/pip-install.lock` (shared with other sessions on this machine) and 2 on an asyncio timeout;
+  none of them passes through the new code, and all passed in the run below.
+- After all review fixes (at `3034c93`), the same selection widened to `split_run`, `attempt_records`, `todo` and
+  `code_layout` (60 files) plus `test_engine_smoke.py` and `test_web_e2e.py`, `-n 4`: **1739 passed, 1 skipped,
+  0 failed** (71 min).
+- `tests/test_code_layout.py` at the final commit (`6c49597`, which only narrowed the random-generator exemption after
+  that run): **33 passed**.
+
 ## What is unverified
 
 - No run against a real model: whether a real model writes a package that keeps the scenario out of `model.py` is only
@@ -127,3 +165,13 @@ All with `--basetemp ./.pytest_tmp/<unique>`; no test calls a real model.
   each fixed file was rerun on its own.
 - The concurrent improve-loop branch was not merged in; the engine changes are kept to new methods plus one-line hooks
   so a merge should be local.
+- Added locally: known gaps left on purpose. The protocol drift check (`protocol_check.check`, including `rng_reuse`)
+  still reads only simulate.py and experiment.py, so a grid value hard-coded in `model.py` is not caught (the prompt
+  forbids scenario values there; feeding the package in risks false matches on coefficient lists with no repair target).
+  An extension's partial package file is rejected, not merged (the run then fails on the missing function and is
+  repaired, one repair spent). Nothing checks for figures or `RESULT_JSON` inside the package. Class attributes are not
+  read by the randomness check, and a few contrived one-line shapes pass its fallback exemption. A package name is
+  checked against libraries installed for FI itself, not those installed only in the quest's environment.
+- Added locally: the execute_reflect path where the repair fixes only the package, and its ledger entry, are covered by
+  code reading and the oracle-path test, not by a test of their own.
+- Added locally: no quest was run with a real model, locally either; the Windows runs above use the fake-model tests.
