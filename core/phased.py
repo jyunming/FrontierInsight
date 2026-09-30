@@ -660,7 +660,10 @@ def mark_unconfirmable(quest_root: Path, why: str) -> None:
     if record is None or record.get("not_confirmable"):
         return
     record["not_confirmable"] = why
-    _save(quest_root, record)
+    try:
+        _save(quest_root, record)
+    except OSError:
+        pass  # best effort, as mark_compromised: the quest then goes to the confirm run, and says what it can
 
 
 def unconfirmable(quest_root: Path) -> bool:

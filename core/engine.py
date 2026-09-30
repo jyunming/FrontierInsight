@@ -2479,13 +2479,20 @@ class Engine:
         script = simulate if simulate.is_file() else code / "experiment.py"
         if not script.is_file():
             return ""
-        if state.get("result_json_replicate_seed_ignored") and not _unseeded_rng_calls(script):
+        if state.get("result_json_replicate_seed_ignored"):
             return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
                     "same numbers, so a run on new seeds would repeat exploration's run")
-        # Generous: the seed read anywhere in code/ (a multi-module project reads it in a helper module) counts.
-        reads = any(_script_reads_replicate_seed(p) for p in sorted(code.rglob("*.py")))
-        if reads or _unseeded_rng_calls(script):
-            return ""
+        # The seed read in the script or a module it imports from code/ (a multi-module project reads it in a helper);
+        # FI's own helpers there (run.py sets a default seed) do not count.
+        modules = _own_modules(script)
+        if any(_unseeded_rng_calls(p) for p in modules):
+            return ""  # a generator built without a seed draws new numbers on every run
+        if any(_script_reads_replicate_seed(p) for p in modules):
+            if any(_replicate_seed_reaches_rng(p) for p in modules if _script_reads_replicate_seed(p)) \
+                    or self.config.execution.background_jobs:
+                return ""  # a background job's driver passes the seed on to the job, not to a generator of its own
+            return (f"code/{script.name} names FI_REPLICATE_SEED but builds its random generators from fixed seeds, so "
+                    "a run on new seeds would repeat exploration's run")
         if not self.config.execution.background_jobs and not _script_has_random_source(script):
             return deterministic
         return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), so a run on new seeds "
@@ -6846,7 +6853,7 @@ class Engine:
         iteration = int(state.get("iteration", 0) or 0)
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
         if at_confirm:
-            source = f"the design exploration settled on ({source}), frozen when exploration ended, before the confirm run"
+            source = f"the design exploration settled on ({source}), frozen when exploration ended"
             if iteration > 0 and approved_by.startswith("human"):
                 # The person read plan.md; exploration then changed the design, so they did not read this protocol.
                 approved_by = ("auto: exploration changed the design after the person read the plan "
@@ -6868,7 +6875,7 @@ class Engine:
                                     sources=self._retrieved_sources(state))
         self._log.info(
             "[protocol] frozen %s (%s, sha256 %s, run %s)%s",
-            "at the end of exploration, before the confirm run" if at_confirm else "before the first full run",
+            "at the end of exploration" if at_confirm else "before the first full run",
             record["source"], str(record["sha256"])[:12], record["run_id"],
             "" if protocol else " -- there is no protocol: nothing holds the experiment to a grid, runs or thresholds",
         )
@@ -9839,6 +9846,9 @@ class Engine:
         # A search's result is one best design, not trials to pool (core/optimise.py).
         patch["result_json_trials"] = bool(getattr(self, "_trial_mode", False)) and bool(result_json) and "run_trial" in (
             getattr(self, "_trial_entries", None) or set()) and not searching
+        # Written on every pass (set below only when this pass's seeds showed it): a pass whose extra seeds did not run
+        # must not keep an earlier script's "every seed agreed".
+        patch["result_json_deterministic"] = False
         if patch["result_json_trials"]:
             # The trial contract: the one result holds every trial of every setting FI ran, each with its own seed; the
             # intervals, precision targets and metric statistics are computed from it (pooled counts and values).
@@ -18036,6 +18046,28 @@ def _script_has_random_source(code_path: Path) -> bool:
         return False
     except OSError:
         return True
+
+
+def _own_modules(code_path: Path) -> list[Path]:
+    """The script and the modules it imports from its own folder, followed as ``_script_has_random_source`` does
+    (not the whole folder, which also holds FI's own helpers such as ``run.py``). An unparsable file ends the walk
+    there."""
+    folder = code_path.parent
+    seen: list[Path] = []
+    todo = [code_path]
+    while todo and len(seen) < 100:
+        path = todo.pop()
+        if path in seen or not path.is_file():
+            continue
+        seen.append(path)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        for name in _imported_module_names(tree):
+            stem = folder.joinpath(*name.split("."))
+            todo += [c for c in (stem.with_suffix(".py"), stem / "__init__.py") if c.is_file()]
+    return seen
 
 
 # Generators that draw from OS entropy when they are handed no seed.

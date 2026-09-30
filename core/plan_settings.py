@@ -171,17 +171,21 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
     if missing:
         # A setting added to this list after the quest was approved (a newer FI): recorded as it is now, so a hand
         # edit of it from here on stops the quest like any other. Whether the file sets it counts as it does now.
+        # Written only on a start that goes on (the engine then records the record's new hash); a start that stops
+        # for another change leaves the record as it was.
         raw_now = _raw(quest_root)
         approved = {**approved, **{p: now.get(p) for p in missing}}
         explicit = explicit | {p for p in missing if raw_now is None or _set_in(raw_now, p)}
-        _write(fi_dir, approved, sorted(explicit))
     changed = [p for p, _label in SETTINGS if p in approved and approved.get(p) != now.get(p)]
     if not changed:
+        if missing:
+            _write(fi_dir, approved, sorted(explicit))
         return []
     raw = _raw(quest_root)
     if raw is not None:
         drifted = [p for p in changed if p not in explicit and not _set_in(raw, p)]
         if drifted:
             approved = {**approved, **{p: now.get(p) for p in drifted}}
-            _write(fi_dir, approved, sorted(explicit))
+            if not missing or not differences(approved, now):
+                _write(fi_dir, approved, sorted(explicit))
     return differences(approved, now)

@@ -838,9 +838,13 @@ def _gate_after(tmp_path: Path, files: dict[str, str], state: dict | None = None
     from core import frozen_protocol as _frozen
     from core.engine import Engine
 
+    from core import code_project
+
     engine = Engine(_bg_config(tmp_path / label) if background else _config(tmp_path / label, phased_on=True))
     code = engine.quest_root / "code"
     code.mkdir(parents=True)
+    # FI's own entry point is always there, and it names FI_REPLICATE_SEED itself.
+    (code / code_project.RUN).write_text(code_project.RUN_SOURCE, encoding="utf-8")
     for name, text in files.items():
         (code / name).write_text(text, encoding="utf-8")
     phased.prepare(engine.quest_root, engine.quest_id)
@@ -857,10 +861,17 @@ def test_a_study_without_randomness_and_without_held_back_data_cannot_be_confirm
     for label, files, state in (
             ("ran", {"experiment.py": seeded}, {"result_json_deterministic": True}),
             ("cell", {"simulate.py": "def run_cell(cell):\n    return {'v': 1.0}\n", "experiment.py": ""}, {}),
-            ("ode", {"experiment.py": "import math\nprint(math.sin(1.0))\n"}, {})):
+            ("ode", {"experiment.py": "import math\nprint(math.sin(1.0))\n"}, {}),
+            # The seed is named, but every generator is built from a constant (one run, so nothing showed it at run time).
+            ("named", {"experiment.py": "import os, random\ns = int(os.environ.get('FI_REPLICATE_SEED', '0'))\n"
+                                        "rng = random.Random(42)\nprint(rng.random())\n"}, {}),
+            ("fixed", {"experiment.py": "import random\nrandom.seed(42)\nprint(random.random())\n"}, {})):
         route, record, frozen = _gate_after(tmp_path, files, state, label=label)
         assert route == "write" and phased.status(record) == "not_confirmable", label
         assert frozen is not None, "the protocol is still frozen before the paper is written"
+    # A background job's driver that never takes the seed.
+    route, record, _frozen = _gate_after(tmp_path, {"experiment.py": "print('submit')\n"}, background=True, label="bg")
+    assert route == "write" and phased.status(record) == "not_confirmable"
 
 
 def test_a_study_that_takes_its_seed_or_draws_fresh_numbers_goes_to_the_confirm_run(tmp_path: Path) -> None:
@@ -871,9 +882,16 @@ def test_a_study_that_takes_its_seed_or_draws_fresh_numbers_goes_to_the_confirm_
             # No seed at all: every run draws new numbers from the operating system.
             ("entropy", {"experiment.py": "import numpy as np\nrng = np.random.default_rng()\nprint(rng.random())\n"}),
             ("trials", {"simulate.py": "def run_trial(cell, trial_id, seed):\n    return {'v': 1.0}\n",
-                        "experiment.py": ""})):
+                        "experiment.py": ""}),
+            # The seed read and passed on to a function in a helper module.
+            ("passed", {"sim.py": "import random\ndef run(seed):\n    return random.Random(seed).random()\n",
+                        "experiment.py": "import os\nfrom sim import run\nprint(run(int(os.environ['FI_REPLICATE_SEED'])))\n"})):
         route, record, _frozen = _gate_after(tmp_path, files, label=label)
         assert route == "confirm" and phased.status(record) == "confirming", label
+    route, record, _frozen = _gate_after(
+        tmp_path, {"experiment.py": "import os\nseed = os.environ.get('FI_REPLICATE_SEED', '0')\nprint('submit', seed)\n"},
+        background=True, label="bg")
+    assert route == "confirm", "a background job's driver passes the seed on to its job"
 
 
 def test_a_temporary_copy_never_stays_in_the_quest_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -900,13 +918,19 @@ def test_a_quest_approved_before_the_setting_was_listed_is_held_to_it_from_now_o
 
     root = tmp_path / "q"
     root.mkdir()
-    (root / "config.yaml").write_text(f"{plan_settings.INTERVIEW_MARK} FI\nengine:\n  phased: true\n", encoding="utf-8")
+    (root / "config.yaml").write_text(f"{plan_settings.INTERVIEW_MARK} FI\nengine:\n  phased: true\n  max_iterations: 1\n",
+                                      encoding="utf-8")
     plan_settings.record(root / ".fi", _config(tmp_path / "out", phased_on=True), root)
     path = root / ".fi" / plan_settings.NAME
     data = json.loads(path.read_text(encoding="utf-8"))
     del data["settings"]["engine.phased"]  # a record an older FI wrote
     data["explicit"].remove("engine.phased")
     path.write_text(json.dumps(data), encoding="utf-8")
+    # A start that stops for another change leaves the record as it was (its hash in the trace still matches).
+    before = path.read_bytes()
+    other = _config(tmp_path / "out", phased_on=True)
+    other.engine.max_iterations = 5
+    assert plan_settings.check(root, root / ".fi", other) and path.read_bytes() == before
     assert plan_settings.check(root, root / ".fi", _config(tmp_path / "out", phased_on=True)) == []
     assert json.loads(path.read_text(encoding="utf-8"))["settings"]["engine.phased"] is True
     changed = plan_settings.check(root, root / ".fi", _config(tmp_path / "out", phased_on=False))
