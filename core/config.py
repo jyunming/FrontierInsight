@@ -1091,7 +1091,7 @@ class ExecutionConfig(BaseModel):
     # names this key. CPUs is a share of the machine (0.5 = half a core, 4 = four
     # cores); a run over it is slowed, not stopped, and numerical libraries are
     # told to start that many threads (OMP_NUM_THREADS and the like, unless already
-    # set). Processes counts processes and threads together: one more cannot be
+    # set lower). Processes counts processes and threads together: one more cannot be
     # started (the run usually fails, and says so), which keeps a runaway fork
     # from taking the machine down.
     # (Docker refuses less than about 6 MB of memory or 0.01 CPU.)

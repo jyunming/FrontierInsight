@@ -552,6 +552,7 @@ async def test_setup_probes_the_user_and_falls_back_to_root(
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
     monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)  # CI may run as root
     probe = _make_fake_container(exit_code=1, stderr=b"PermissionError: [Errno 13]")
     client = _client_with(probe)
     exe._client = client
@@ -581,6 +582,7 @@ async def test_setup_root_fallback_that_works_warns_once(
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
     monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)  # CI may run as root
     fails, works = _make_fake_container(exit_code=1), _make_fake_container(exit_code=0)
     client = MagicMock()
     client.containers.create.side_effect = [fails, works]
@@ -597,6 +599,7 @@ async def test_setup_probe_success_keeps_non_root(monkeypatch: pytest.MonkeyPatc
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
     monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)  # CI may run as root
     client = _client_with(_make_fake_container(exit_code=0))
     exe._client = client
 
@@ -679,6 +682,7 @@ async def test_setup_write_check_error_keeps_the_first_choice(
     logger = MagicMock()
     exe = DockerExecutor(log=logger)
     monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)  # CI may run as root
     client = MagicMock()
     client.containers.create.side_effect = RuntimeError("image has no python")
     exe._client = client
@@ -698,6 +702,7 @@ async def test_setup_says_when_the_cpu_limit_is_lowered(monkeypatch: pytest.Monk
     logger = MagicMock()
     exe = DockerExecutor(limits=DockerLimits(cpus=8), log=logger)
     monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)  # CI may run as root
     client = _client_with(_make_fake_container(exit_code=0))
     client.info.return_value = {"NCPU": 4, "SecurityOptions": []}
     exe._client = client
@@ -733,6 +738,92 @@ def test_root_owned_folders_left_by_an_older_run_are_named(monkeypatch: pytest.M
     assert "chown -R 1000:1000" in " ".join(
         str(c.args[0]) % c.args[1:] for c in logger.warning.call_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_setup_check_error_after_a_failed_check_does_not_pick_the_failed_user(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    exe = DockerExecutor(log=MagicMock())
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)
+    client = MagicMock()
+    client.containers.create.side_effect = [_make_fake_container(exit_code=1), RuntimeError("daemon hiccup")]
+    exe._client = client
+
+    await exe.setup(tmp_path)
+
+    assert exe._user == ""
+
+
+@pytest.mark.asyncio
+async def test_setup_names_each_limit_docker_cannot_apply(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    logger = MagicMock()
+    exe = DockerExecutor(log=logger)
+    monkeypatch.setattr(exe, "_user_candidates", lambda client, root: ["1000:1000", ""])
+    monkeypatch.setattr(exe, "_warn_root_owned", lambda *a: None)
+    client = _client_with(_make_fake_container(exit_code=0))
+    client.info.return_value = {"MemoryLimit": False, "PidsLimit": False, "CpuCfsPeriod": False, "SecurityOptions": []}
+    exe._client = client
+
+    await exe.setup(tmp_path)
+
+    def text(calls: Any) -> str:
+        return " ".join(str(c.args[0]) % c.args[1:] for c in calls)
+
+    warned = text(logger.warning.call_args_list)
+    assert "cannot limit memory" in warned
+    assert "cannot limit the number of processes" in warned
+    assert "cannot limit CPU use" in warned
+    assert "nano_cpus" not in client.containers.create.call_args.kwargs
+    assert "no resource limits" in text(logger.info.call_args_list)
+
+
+def test_host_thread_settings_above_the_cpu_limit_are_lowered() -> None:
+    """An HPC shell's OMP_NUM_THREADS=64 would crowd a 2-CPU container."""
+    exe = DockerExecutor()
+    exe._user = "1000:1000"
+    client = _client_with(_make_fake_container(exit_code=0))
+    exe._run_sync(client, ["python", "-V"], Path.cwd(), 30, {"OMP_NUM_THREADS": "64", "MKL_NUM_THREADS": "x"})
+    env = client.containers.create.call_args.kwargs["environment"]
+    assert env["OMP_NUM_THREADS"] == "2"
+    assert env["MKL_NUM_THREADS"] == "2"
+
+
+def test_host_environment_is_made_to_fit_the_container(tmp_path: Path) -> None:
+    """The engine passes the host's whole environment: its PATH would hide the
+    image's python, and paths in the quest folder must read as /work."""
+    import os as _os
+
+    exe = DockerExecutor()
+    exe._user = ""
+    client = _client_with(_make_fake_container(exit_code=0))
+    root = tmp_path.resolve()
+    boot = str(root / ".fi" / "boot")
+    env = {
+        "PATH": r"C:\Windows\system32" if _os.sep == "\\" else "/home/me/bin",
+        "HOME": "/home/me",
+        "PYTHONPATH": _os.pathsep.join([boot, "/fi-skills/lib", "C:\\host\\lib"]),
+        "FI_INPUT_DIR": str(root / "inputs" / "examples"),
+        "OTHER": "kept",
+    }
+    exe._run_sync(client, ["python", str(root / "code" / "experiment.py")], root, 30, env)
+    kw = client.containers.create.call_args.kwargs
+    out = kw["environment"]
+    assert "PATH" not in out and "HOME" not in out
+    assert out["PYTHONPATH"] == "/work/.fi/boot:/fi-skills/lib"
+    assert out["FI_INPUT_DIR"] == "/work/inputs/examples"
+    assert out["OTHER"] == "kept"
+    assert kw["command"] == ["python", "/work/code/experiment.py"]
+
+
+def test_windows_path_under_the_quest_folder_uses_forward_slashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.execution import _to_container
+
+    monkeypatch.setattr("core.execution.os.sep", "\\")
+    assert _to_container(r"C:\q\abc\code\experiment.py", r"C:\q\abc") == "/work/code/experiment.py"
+    assert _to_container(r"C:\q\abc", r"C:\q\abc") == "/work"
+    assert _to_container(r"x=C:\q\abc", r"C:\q\abc") == "x=/work"
 
 
 def test_engine_passes_the_configured_limits_and_its_log(tmp_path: Path) -> None:
