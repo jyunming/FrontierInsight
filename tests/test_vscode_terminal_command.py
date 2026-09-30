@@ -289,7 +289,7 @@ def test_extension_uses_the_builders_instead_of_its_own_string() -> None:
     # `/update` picks the quest by listing `frontierInsight.outputDir`,
     # so it has to hand that same root to launch.py or the quest it
     # just offered is not found.
-    assert "outputRoot: outputsDir," in src, (
+    assert "outputRoot: questsDir," in src, (
         "runUpdate no longer passes the resolved outputDir as "
         "--output-root; a custom frontierInsight.outputDir breaks."
     )
@@ -411,9 +411,12 @@ def test_chat_commands_never_open_a_terminal() -> None:
         assert "createTerminal" not in body and "sendText" not in body, name
         assert "runLaunchInChat(" in body, name
     update = _function_body(src, "runUpdate")
-    assert '["--update", questId, "--output-root", outputsDir]' in update
-    # The approval is asked for, never assumed.
+    assert '["--update", questId, "--output-root", questsDir]' in update
+    # The approval is asked for, never assumed, and only then does launch.py skip the questions.
     assert "showQuickPick(" in update and '"approve"' in update
+    assert update.index('choice.value === "edit"') < update.index('FI_UPDATE_APPROVE_AS_IS: "1"')
+    # A short id or a quest from another folder is resolved as /resume resolves it.
+    assert "matchIds(" in update and "findInIndex(" in update
 
 
 def test_update_and_model_lines_reach_the_chat() -> None:

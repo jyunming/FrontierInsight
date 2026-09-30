@@ -977,10 +977,49 @@ async function runUpdate(
         questId = picked.questId;
     }
 
+    // The id as typed may be a short id (the six characters after the last dash) or a quest FI ran in another folder,
+    // which `launch.py --update` finds too: resolved here the same way, so the card shown, the config.yaml opened and
+    // the end of the run reported are that quest's.
+    let questDir = path.join(outputsDir, questId);
+    let questsDir = outputsDir;
+    if (!(await fsExists(path.join(questDir, "config.yaml")))) {
+        let local: string[] = [];
+        try {
+            local = (await fsPromises.readdir(outputsDir, { withFileTypes: true }))
+                .filter((e) => e.isDirectory() && !e.name.startsWith("_")).map((e) => e.name);
+        } catch { /* no outputs folder here */ }
+        const matched = matchIds(questId, local);
+        const here = path.resolve(outputsDir).toLowerCase();
+        const elsewhere = loadIndex().filter((e) => path.resolve(path.dirname(e.questRoot)).toLowerCase() !== here);
+        const found = matched.length === 0 ? findInIndex(questId, elsewhere) : { kind: "none" as const };
+        if (matched.length === 1) {
+            questId = matched[0];
+            questDir = path.join(outputsDir, questId);
+        } else if (matched.length > 1) {
+            stream.markdown("❌ " + describeAmbiguous(questId, matched.map((q) => ({
+                questId: q, title: "", questRoot: path.join(outputsDir, q),
+            }))));
+            return;
+        } else if (found.kind === "found") {
+            questId = found.entry.questId;
+            questDir = found.entry.questRoot;
+            questsDir = path.dirname(questDir);
+            stream.markdown(`📁 \`${questId}\` is in \`${questsDir}\`.\n\n`);
+        } else if (found.kind === "ambiguous") {
+            stream.markdown("❌ " + describeAmbiguous(questId, found.entries));
+            return;
+        } else {
+            stream.markdown(
+                `❌ No quest \`${questId}\` with a \`config.yaml\` under \`${outputsDir}\`, nor among the quests FI has ` +
+                "run in other folders on this computer. `python launch.py tools quests` lists every one with its short id.",
+            );
+            return;
+        }
+    }
+
     // `/update` runs here in the chat, like `/resume`: never in a terminal. The settings it approves are the ones in
-    // the quest's config.yaml as it is now (launch.py asks no question when there is no terminal to answer in); the
-    // person sees what stopped the quest, then says whether to approve it, or opens config.yaml to change it first.
-    const questDir = path.join(outputsDir, questId);
+    // the quest's config.yaml as it is now; the person sees what stopped the quest, then says whether to approve them
+    // as they are, or opens config.yaml to change it first.
     const configPath = path.join(questDir, "config.yaml");
     try {
         const card = await fsPromises.readFile(path.join(questDir, "NEXT_STEP.md"), "utf-8");
@@ -1003,11 +1042,11 @@ async function runUpdate(
     const byQuestion = updateTerminalCommand({
         pythonPath,
         questId,
-        // The quest was found under `outputsDir` (the resolved
-        // `frontierInsight.outputDir`), so --update has to be told to
-        // look there too; launch.py would otherwise default to
-        // ./outputs and reject a quest the picker just listed.
-        outputRoot: outputsDir,
+        // The quest was found under `questsDir` (the resolved
+        // `frontierInsight.outputDir`, or the folder another quest is in),
+        // so --update has to be told to look there too; launch.py would
+        // otherwise default to ./outputs and reject a quest just listed.
+        outputRoot: questsDir,
         bridgeSocket: thisWindowsBridge(),
         shell: currentShell(),
     });
@@ -1028,12 +1067,17 @@ async function runUpdate(
     }
     stream.markdown(`🔧 Approving the settings in \`${configPath}\` and resuming \`${questId}\`\n\n`);
     const startedAt = Date.now();
+    // FI_UPDATE_APPROVE_AS_IS: the person chose to approve config.yaml as it is, so launch.py asks no question
+    // (without it, --update asks the setup questions, and with no terminal to answer in it approves nothing).
     const ran = await runLaunchInChat(
-        ["--update", questId, "--output-root", outputsDir], stream, token, userPickedModel,
-        { pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir },
+        ["--update", questId, "--output-root", questsDir], stream, token, userPickedModel,
+        {
+            pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir,
+            env: { FI_UPDATE_APPROVE_AS_IS: "1" },
+        },
     );
     if (!ran) return;
-    await reportQuestEnd(ran, stream, { outputsDir, questId, startedAt });
+    await reportQuestEnd(ran, stream, { outputsDir: questsDir, questId, startedAt });
 }
 
 
@@ -1245,7 +1289,11 @@ async function runLaunchInChat(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
     userPickedModel: vscode.LanguageModelChat,
-    opts: { pythonPath: string; launchScript: string; cwd: string; fleet?: boolean; showAllOutput?: boolean },
+    opts: {
+        pythonPath: string; launchScript: string; cwd: string; fleet?: boolean; showAllOutput?: boolean;
+        /** Extra environment for this run only (`/update` says the person approved config.yaml as it is). */
+        env?: Record<string, string>;
+    },
 ): Promise<ChatRun | undefined> {
     // Bind the bridge to a free port. We thread `userPickedModel`
     // (= request.model from the chat handler) into the bridge so
@@ -1266,12 +1314,26 @@ async function runLaunchInChat(
     // FI_SKIP_BOOTSTRAP: every spawn in this file sets it, so a missing dependency on
     // `frontierInsight.pythonPath` surfaces as this file's own diagnostic (which names that setting) rather
     // than launch.py's CLI-only self-bootstrap silently creating and switching to a different `.venv/` the
-    // user never configured here. stdin is not a terminal, so `--update` asks no question (core/interview_update.py).
+    // user never configured here.
     const child = spawn(opts.pythonPath, argv, {
         cwd: opts.cwd,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8", FI_SKIP_BOOTSTRAP: "1" },
+        env: {
+            ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8", FI_SKIP_BOOTSTRAP: "1",
+            ...(opts.env ?? {}),
+        },
         stdio: ["ignore", "pipe", "pipe"],
     });
+    // With showAllOutput every line, stdout's and stderr's (warnings, a skipped file), is shown in one code block,
+    // opened at the first line so a Python that never started leaves no empty block around its error.
+    let fenceOpen = false;
+    const showRaw = (line: string): void => {
+        if (!line.trim()) return;
+        if (!fenceOpen) {
+            stream.markdown("```\n");
+            fenceOpen = true;
+        }
+        stream.markdown(line.replace(/```/g, "` ` `") + "\n");
+    };
     // Keep a rolling tail of stderr so we can surface the actual
     // traceback in the chat if Python exits non-zero. Without this,
     // the user only sees "exited with code 1, check run.log" — but
@@ -1280,6 +1342,7 @@ async function runLaunchInChat(
     const stderrTail: string[] = [];
     const STDERR_TAIL_LINES = 80;
     bridge.attachChild(child, (line) => {
+        if (opts.showAllOutput) showRaw(line);
         stderrTail.push(line);
         if (stderrTail.length > STDERR_TAIL_LINES) {
             stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
@@ -1301,10 +1364,9 @@ async function runLaunchInChat(
     child.stdout.setEncoding("utf-8");
     let stdoutBuf = "";
     let questIdSeen: string | undefined;
-    if (opts.showAllOutput) stream.markdown("```\n");
     const onLine = (line: string): void => {
         if (opts.showAllOutput) {
-            if (line.trim()) stream.markdown(line.replace(/```/g, "` ` `") + "\n");
+            showRaw(line);
             return;
         }
         const ran = line.match(/^\[FI\] (\d+-[\w-]+) -> /);
@@ -1366,7 +1428,7 @@ async function runLaunchInChat(
 
     const result = await waitForChildExit(child, bridge, opts.pythonPath, stream);
     if (stdoutBuf) onLine(stdoutBuf);
-    if (opts.showAllOutput) stream.markdown("```\n");
+    if (fenceOpen) stream.markdown("```\n");
     if (result.kind === "spawn-error") return undefined;
     return { code: result.code, questIdSeen, stderrTail };
 }
@@ -1481,7 +1543,8 @@ async function reportQuestEnd(
     opts: { outputsDir: string; questId?: string; fleet?: boolean; startedAt: number },
 ): Promise<void> {
     const { outputsDir, fleet, startedAt } = opts;
-    const questId = opts.questId ?? ran.questIdSeen;
+    // The quest launch.py says it ran (`[FI] <quest_id> -> <folder>`), else the one asked for.
+    const questId = ran.questIdSeen ?? opts.questId;
     if (ran.code === 0) {
         // A quest that stopped for you also exits 0: say it is waiting, not that it finished.
         const card = await readNextStep(outputsDir, questId, startedAt);

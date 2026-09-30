@@ -545,10 +545,11 @@ async def run_update_flow(
     runs the interview filtered to editable fields, performs soft
     invalidation, writes the updated YAML, then resumes the quest.
 
-    ``ask`` asks the setup questions (``launch.py`` passes whether stdin is a terminal). With no terminal to answer
-    in (the VS Code chat's ``@fi /update``, which runs this in the chat rather than in a terminal) the answers are the
-    ones in ``config.yaml`` as it is now: the settings are approved as they stand and the quest resumes. Every line a
-    person needs then starts with ``[FI] update:``, which the chat shows.
+    ``ask`` asks the setup questions. ``ask=False`` is the VS Code chat's ``@fi /update`` (run in the chat, not in a
+    terminal, after the person chose to approve config.yaml as it is; ``launch.py`` reads that choice from
+    ``FI_UPDATE_APPROVE_AS_IS=1``): the answers are the ones in ``config.yaml`` as it is now, the settings are approved
+    as they stand and the quest resumes. Every line a person needs then starts with ``[FI] update:``, which the chat
+    shows.
     """
     # Reject quest_id values that could escape the output root (path
     # traversal). Two-layer guard: regex allowlist + post-resolve

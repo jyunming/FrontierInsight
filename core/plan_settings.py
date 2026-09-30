@@ -8,12 +8,13 @@ wrote records the settings in ``.fi/approved_plan.json``; every later start comp
 before anything runs, naming each setting as approved and as it is now. ``--update`` (the interview's own way to change
 a quest) records the new settings, which is how a change is approved.
 
-The model (``MODEL_SETTINGS``: the provider, the model, the per-step models and the ensemble) is recorded too, but a
-change to it does not stop the quest: which model answers does not change what the result means or how strictly it is
-checked, and changing it is an ordinary thing to do between two runs. It is taken as it is now, recorded here and in
-the quest's trace, and said plainly (:func:`model_changes`, :func:`accept_models`, ``Engine.run``). The one model
-change that does bear on the checks, a research quest's reviewers all ending up on one model, is stopped by
-``Engine._review_models_stop`` before this record is read.
+The model (``MODEL_SETTINGS``: the provider, the model and the per-step models) is recorded too, but a change to it
+does not stop the quest: which model answers does not change what the result means or how strictly it is checked, and
+changing it is an ordinary thing to do between two runs. It is taken as it is now, recorded here and in the quest's
+trace, and said plainly (:func:`model_changes`, :func:`accept_models`, ``Engine.run``). The one model change that does
+bear on the checks, a research quest's reviewers all ending up on one model, is stopped by
+``Engine._review_models_stop`` before this record is read (also after the panel has reviewed once). The multi-model
+ensemble is not a model setting here: it decides how many models vote on a check, so a change to it still stops.
 
 Only interview-written configs are recorded (their header says so): a config written by hand was never shown on a
 confirm screen, so there is nothing to hold it to.
@@ -65,9 +66,10 @@ SETTINGS: tuple[tuple[str, str], ...] = (
 )
 
 #: The settings that name the model. Recorded like the others, but a change to one is taken as it is, recorded and
-#: said, never a stop (see the module docstring).
+#: said, never a stop (see the module docstring). The ensemble (``provider.node_ensemble``) is not one of them: it
+#: decides how many models vote on a check, so a change to it still needs approving.
 MODEL_SETTINGS: frozenset[str] = frozenset({
-    "provider.name", "provider.model", "provider.node_models", "provider.node_ensemble",
+    "provider.name", "provider.model", "provider.node_models",
 })
 
 
@@ -260,7 +262,7 @@ def accept_models(fi_dir: Path, cfg: Any, quest_root: Path | None = None) -> Non
 def model_disclosure(events: list[dict[str, Any]]) -> str:
     """What the paper must say when more than one model produced the quest (a ``model_changed`` event in its trace),
     or an empty string when the model never changed."""
-    changes = [e for e in events if e.get("kind") == "model_changed"]
+    changes = [e for e in events if e.get("kind") == "model_changed" and not e.get("before_any_step")]
     if not changes:
         return ""
     lines = ["More than one model produced this study: its model was changed while the quest was under way. State "
@@ -274,17 +276,20 @@ def model_disclosure(events: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def model_change_lines(changes: list[dict[str, Any]], node_models: dict[str, Any] | None = None) -> list[str]:
+def model_change_lines(changes: list[dict[str, Any]], node_models: dict[str, Any] | None = None, *,
+                       made: bool = True) -> list[str]:
     """The plain sentences a model change is announced with: the main model's own sentence first ("the model changes
-    from A to B from here on; steps already done were made by A"), then any other model setting that changed, then the
-    single steps that ``provider.node_models`` still keeps on the old model."""
+    from A to B from here on; steps already done were made by A", or, when ``made`` is False, that nothing had run on
+    A yet), then any other model setting that changed, then the single steps that ``provider.node_models`` still keeps
+    on the old model."""
     lines: list[str] = []
     old_main = None
     for c in changes:
         if c["setting"] == "provider.model":
             old_main = c["from"]
-            lines.append(f"the model changes from {_show(c['from'])} to {_show(c['to'])} from here on; steps already "
-                         f"done were made by {_show(c['from'])}")
+            done = (f"steps already done were made by {_show(c['from'])}" if made
+                    else f"nothing had run on {_show(c['from'])} yet")
+            lines.append(f"the model changes from {_show(c['from'])} to {_show(c['to'])} from here on; {done}")
     for c in changes:
         if c["setting"] != "provider.model":
             lines.append(f"{c['label']} (`{c['setting']}`): {_show(c['from'])} until now, {_show(c['to'])} from here on")

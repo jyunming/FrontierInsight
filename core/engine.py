@@ -795,6 +795,12 @@ class Engine:
             before = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
             changed = _plan_settings.check(self.quest_root, self.fi_dir, self.config)
             if changed:
+                # check() may have rewritten the record for an FI default that moved (not an edit): its hash goes
+                # into the trace before the stop, so putting the edited setting back is not then read as a hand edit
+                # of the record.
+                drifted = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
+                if before and drifted and drifted != before:
+                    self._audit("plan_settings_recorded", sha256=drifted)
                 return self._stop_for_changed_settings(changed)
             # A different model is not a change to how the quest is checked: taken as it is, recorded, and said.
             self._take_model_change()
@@ -5261,7 +5267,7 @@ class Engine:
         return out
 
     def _take_model_change(self) -> None:
-        """The quest's model (``provider.model``, ``provider.name``, the per-step models or the ensemble) differs from
+        """The quest's model (``provider.model``, ``provider.name`` or the per-step models) differs from
         the one recorded when it was approved or last run: never a stop. The new model is used from here on, recorded
         (``.fi/approved_plan.json``, a ``model_changed`` event in the audit trace, run.log) and said in one plain line
         per change on the console (``[FI] model: ...``, which the VS Code chat shows). The paper is told that more than
@@ -5275,8 +5281,15 @@ class Engine:
         except OSError as e:
             self._log.warning("[model] could not record the model change: %r", e)
             return
-        lines = _plan_settings.model_change_lines(changes, self.config.provider.node_models)
-        self._audit("model_changed", changes=changes)
+        # Nothing made on the old model yet (its first start failed before any step, say): nothing to disclose.
+        try:
+            cost = self.fi_dir / "cost.jsonl"
+            made = (cost.is_file() and cost.stat().st_size > 0) or any(
+                e.get("kind") == "node_completed" for e in _audit_log.read(self.audit.path))
+        except Exception:  # noqa: BLE001 -- when unsure, say it as a change
+            made = True
+        lines = _plan_settings.model_change_lines(changes, self.config.provider.node_models, made=made)
+        self._audit("model_changed", changes=changes, before_any_step=not made)
         for line in lines:
             self._log.info("[model] %s", line)
             print(f"[FI] model: {line}")
@@ -15972,8 +15985,11 @@ class Engine:
         models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
         if len(set(models.values())) > 1:
             return None
-        # A panel that has already reviewed (a quest resumed at the human-review gate, say) is not asked again.
-        if any(e.get("kind") == "node_completed" and e.get("node") == "review" for e in _audit_log.read(self.audit.path)):
+        # A panel that has already reviewed (a quest resumed at the human-review gate, say) is not asked again, unless
+        # its models changed since (a model change is taken without a stop, so it would otherwise put every later
+        # review on one model unasked).
+        if (any(e.get("kind") == "node_completed" and e.get("node") == "review" for e in _audit_log.read(self.audit.path))
+                and not _plan_settings.model_changes(self.fi_dir, self.config)):
             return None
         only = next(iter(models.values()))
         persona = "statistician" if "statistician" in models else next(iter(models))

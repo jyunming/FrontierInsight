@@ -59,6 +59,12 @@ def _skip_setup(eng: Engine) -> None:
     eng.executor.setup = nothing  # type: ignore[method-assign]
 
 
+def _made_calls(eng: Engine, model: str = "gpt-5.6-luna") -> None:
+    """The quest made calls on ``model`` before (cost.jsonl is append-only, so they stay)."""
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "cost.jsonl").write_text(json.dumps({"node": "ideate", "model": model}) + "\n", encoding="utf-8")
+
+
 def _started(tmp_path: Path, model: str = "gpt-5.6-luna", **kw: Any) -> Engine:
     """A quest the interview wrote, started once on ``model`` (its settings recorded)."""
     cfg = _cfg(tmp_path, model, **kw)
@@ -71,6 +77,7 @@ def _started(tmp_path: Path, model: str = "gpt-5.6-luna", **kw: Any) -> Engine:
 @pytest.mark.asyncio
 async def test_a_changed_model_does_not_stop_the_resume(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     first = _started(tmp_path)
+    _made_calls(first)
     _write_config(first.quest_root, "claude-opus-5")
     eng = Engine(_cfg(tmp_path, "claude-opus-5"), resume_quest_id=first.quest_id)
     _skip_setup(eng)
@@ -123,22 +130,29 @@ async def test_a_setting_that_changes_what_the_result_means_still_stops(tmp_path
     assert "provider.model" not in text, "the model is not one of the settings that need approving"
 
 
+def _research(tmp_path: Path, model: str, statistician: str) -> Config:
+    return Config.model_validate({
+        "topic": "model change probe", "title": "model-change", "rigor_profile": "research",
+        "provider": {"name": "openai", "model": model, "node_models": {"review_panel.statistician": statistician}},
+        "execution": {"sandbox": "venv", "timeout_s": 60},
+        "knowledge": {"enabled": False},
+        "output": {"output_dir": str(tmp_path / "out")},
+    })
+
+
+def _research_started(tmp_path: Path) -> Engine:
+    cfg = _research(tmp_path, "gpt-5.6-luna", "gemini-3-pro")
+    first = Engine(cfg)
+    _write_config(first.quest_root, "gpt-5.6-luna", {"review_panel.statistician": "gemini-3-pro"})
+    plan_settings.record(first.fi_dir, cfg, first.quest_root)
+    _made_calls(first)
+    return first
+
+
 @pytest.mark.asyncio
 async def test_research_quest_takes_the_model_change_and_the_paper_is_told(tmp_path: Path) -> None:
-    def research(model: str) -> Config:
-        return Config.model_validate({
-            "topic": "model change probe", "title": "model-change", "rigor_profile": "research",
-            "provider": {"name": "openai", "model": model},
-            "engine": {"one_model_review": True},
-            "execution": {"sandbox": "venv", "timeout_s": 60},
-            "knowledge": {"enabled": False},
-            "output": {"output_dir": str(tmp_path / "out")},
-        })
-
-    first = Engine(research("gpt-5.6-luna"))
-    _write_config(first.quest_root, "gpt-5.6-luna")
-    plan_settings.record(first.fi_dir, research("gpt-5.6-luna"), first.quest_root)
-    eng = Engine(research("claude-opus-5"), resume_quest_id=first.quest_id)
+    first = _research_started(tmp_path)
+    eng = Engine(_research(tmp_path, "claude-opus-5", "gemini-3-pro"), resume_quest_id=first.quest_id)
     _skip_setup(eng)
 
     async def connected() -> None:
@@ -151,6 +165,102 @@ async def test_research_quest_takes_the_model_change_and_the_paper_is_told(tmp_p
     note = plan_settings.model_disclosure(audit_log.read(eng.audit.path))
     assert "More than one model produced this study" in note
     assert "gpt-5.6-luna for the steps before the change, claude-opus-5 after it" in note
+
+
+@pytest.mark.asyncio
+async def test_research_still_stops_when_the_change_puts_every_reviewer_on_one_model(tmp_path: Path) -> None:
+    """Even after the panel has reviewed once (a quest at the human-review gate): the model change is taken without a
+    stop, so without this every later review would run on one model unasked."""
+    first = _research_started(tmp_path)
+    first.audit.append("node_completed", node="review")
+    eng = Engine(_research(tmp_path, "gemini-3-pro", "gemini-3-pro"), resume_quest_id=first.quest_id)
+
+    async def no_llm() -> None:
+        raise AssertionError("nothing may run")
+
+    eng._connect_llm = no_llm  # type: ignore[method-assign]
+    await eng.run()
+    pause = json.loads((eng.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert pause["kind"] == "review_models"
+
+
+@pytest.mark.asyncio
+async def test_a_change_before_anything_ran_is_not_disclosed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """The first start failed before any step (an unknown model name, a quota): nothing was made on the old model, so
+    the paper is not told two models produced it."""
+    first = _started(tmp_path)
+    _write_config(first.quest_root, "claude-opus-5")
+    eng = Engine(_cfg(tmp_path, "claude-opus-5"), resume_quest_id=first.quest_id)
+    _skip_setup(eng)
+
+    async def connected() -> None:
+        raise _Stop
+
+    eng._connect_llm = connected  # type: ignore[method-assign]
+    with pytest.raises(_Stop):
+        await eng.run()
+    assert "nothing had run on gpt-5.6-luna yet" in capsys.readouterr().out
+    events = audit_log.read(eng.audit.path)
+    assert [e for e in events if e.get("kind") == "model_changed"][0]["before_any_step"] is True
+    assert plan_settings.model_disclosure(events) == ""
+
+
+@pytest.mark.asyncio
+async def test_putting_an_edit_back_after_a_default_moved_does_not_stop(tmp_path: Path) -> None:
+    """A stop for a real edit, while check() also recorded an FI default that moved: the record's new hash goes into
+    the trace, so putting the edit back resumes (it used to stop with "the record ... was changed after it was
+    approved")."""
+    first = _started(tmp_path)
+    _made_calls(first)
+    data = json.loads((first.fi_dir / plan_settings.NAME).read_text(encoding="utf-8"))
+    data["settings"]["engine.execute_replicates"] = 99  # an older FI's default for a key the file never set
+    (first.fi_dir / plan_settings.NAME).write_text(json.dumps(data), encoding="utf-8")
+    first.audit.append("plan_settings_recorded", sha256=__import__("hashlib").sha256(
+        (first.fi_dir / plan_settings.NAME).read_bytes()).hexdigest())
+    with (first.quest_root / "config.yaml").open("a", encoding="utf-8") as f:
+        f.write("engine:\n  oracle_check: warn\n")
+
+    async def no_llm() -> None:
+        raise AssertionError("nothing may run")
+
+    edited = Engine(_cfg(tmp_path, oracle_check="warn"), resume_quest_id=first.quest_id)
+    edited._connect_llm = no_llm  # type: ignore[method-assign]
+    await edited.run()
+    assert "engine.oracle_check" in (edited.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    (edited.quest_root / "NEXT_STEP.md").unlink()
+    _write_config(first.quest_root, "gpt-5.6-luna")
+
+    back = Engine(_cfg(tmp_path), resume_quest_id=first.quest_id)
+    _skip_setup(back)
+
+    async def connected() -> None:
+        raise _Stop
+
+    back._connect_llm = connected  # type: ignore[method-assign]
+    with pytest.raises(_Stop):
+        await back.run()
+    assert not (back.quest_root / "NEXT_STEP.md").exists()
+
+
+def test_update_asks_unless_the_chat_says_it_was_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--update with no terminal must not approve anything on its own (a pipe, a script, an agent's shell): only the
+    VS Code chat, after the person chose "approve as it is", skips the questions."""
+    import launch
+
+    seen: dict[str, Any] = {}
+
+    async def fake_flow(**kw: Any) -> int:
+        seen.update(kw)
+        return 0
+
+    monkeypatch.setattr("core.interview_update.run_update_flow", fake_flow)
+    monkeypatch.delenv("FI_UPDATE_APPROVE_AS_IS", raising=False)
+    kw = dict(quest_id="q", output_root=Path("."), vscode_bridge_port=0, interactive=False, supervisor=None)
+    asyncio.run(launch._run_update(**kw))
+    assert seen["ask"] is True
+    monkeypatch.setenv("FI_UPDATE_APPROVE_AS_IS", "1")
+    asyncio.run(launch._run_update(**kw))
+    assert seen["ask"] is False
 
 
 def test_the_paper_is_told_nothing_when_the_model_never_changed() -> None:
@@ -237,11 +347,16 @@ def test_resuming_with_another_config_brings_the_quest_copy_up_to_date(tmp_path:
     source = tmp_path / "edited.yaml"
     source.write_text(HEADER + "topic: x\nprovider:\n  name: openai\n  model: claude-opus-5\n", encoding="utf-8")
     old = dest.read_text(encoding="utf-8")
-    assert _refresh_quest_config(source, dest) is True
+    kept = _refresh_quest_config(source, dest)
+    assert kept is not None and kept.name.startswith("config.yaml.before-resume-")
     assert "claude-opus-5" in dest.read_text(encoding="utf-8")
-    assert (dest.parent / "config.yaml.before-resume").read_text(encoding="utf-8") == old
-    assert _refresh_quest_config(source, dest) is False, "already the same"
-    assert _refresh_quest_config(dest, dest) is False, "the quest's own copy"
+    assert kept.read_text(encoding="utf-8") == old
+    assert _refresh_quest_config(source, dest) is None, "already the same"
+    assert _refresh_quest_config(dest, dest) is None, "the quest's own copy"
+    # A second, different resume keeps the first backup too.
+    source.write_text(HEADER + "topic: x\nprovider:\n  name: openai\n  model: m3\n", encoding="utf-8")
+    second = _refresh_quest_config(source, dest)
+    assert second is not None and second != kept and kept.read_text(encoding="utf-8") == old
 
 
 @pytest.mark.asyncio
