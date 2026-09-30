@@ -11,8 +11,8 @@ checks behind it prove:
   nothing: the paper says what the script printed;
 * ``protocol_runtime_matched`` — and the protocol was frozen before the run and is intact, the script held to it, the run's own
   manifest says it did what the protocol fixed, and no warning from its own numerics was accepted;
-* ``independently_validated`` — and the engine judged the script's oracle measurements against the protocol's expected values
-  and tolerances;
+* ``independently_validated`` — and the engine ran the simulation on each oracle's case and judged what it measured against
+  the protocol's expected values and tolerances (a value the script reported itself never counts, on one script or two);
 * ``statistically_adequate`` — and every headline metric has a declared estimator matched to its data, the contrasts carry
   engine-computed p-values, and every precision target was reached;
 * ``publication_ready`` — and the review accepted the paper with no must-fix finding, the protocol was not amended after the
@@ -70,8 +70,8 @@ INFO: dict[str, dict[str, Any]] = {
     "independently_validated": {
         "assurance_claim": (
             "The engine ran the simulation on each oracle's case and judged what it returned against the protocol's expected "
-            "values and tolerances (an oracle without a case is judged on the number the script's own oracle() reported, and the "
-            "record says so)."
+            "values and tolerances. A value the script reported itself (an oracle without a case, or a one-script quest's "
+            "FI_ORACLE run) is judged too, but never counts toward this level."
         ),
         "known_blind_spots": [
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
@@ -362,11 +362,22 @@ def assess(
         valid_gaps.append(f"the script did not pass an independent oracle (oracle check: {status})")
     elif protocol is not None and oracle_record.get("judged_by") != "engine":
         valid_gaps.append("the oracle verdict is the script's own (this quest began before the engine judged oracles): it is not independent evidence")
-    elif protocol is not None and oracle_record.get("contract") == "trial" and (scripted := _oracle_check.script_measured(_oracle_check.last_judged(oracle_record))):
-        valid_gaps.append(
-            f"the value of {', '.join(scripted)} came from the script's own oracle(), not from the engine running the simulation "
-            "on the oracle's case: a script that returns a closed form without simulating would pass (give the oracle a `case` and a `measure`)"
-        )
+    elif protocol is not None and (scripted := _oracle_check.script_measured(_oracle_check.last_judged(oracle_record))):
+        # One rule for every quest, one script or two: a value the script reported is its own word, never independent
+        # evidence. Only the engine running the simulation on the oracle's case measures one.
+        if oracle_record.get("contract") == "trial":
+            valid_gaps.append(
+                f"the value of {', '.join(scripted)} came from the script's own oracle(), not from the engine running the simulation "
+                "on the oracle's case: a script that returns a closed form without simulating would pass (give the oracle a `case` and a `measure`)"
+            )
+        else:
+            valid_gaps.append(
+                f"the value of {', '.join(scripted)} was reported by the script itself, not measured by FI running the simulation: "
+                "a script that prints the expected answer without simulating would pass. For FI to measure it, the simulation "
+                "needs its own script that FI calls on the oracle's case itself (set `execution.split_analysis: true`; the "
+                "simulation script then defines `run_cell`, or `run_trial` for a study with randomness), and the oracle "
+                "needs a `case` and a `measure`"
+            )
     validated = matched and not valid_gaps
 
     # statistically adequate

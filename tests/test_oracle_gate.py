@@ -292,7 +292,7 @@ async def test_a_protocol_with_no_oracle_asks_the_plan_for_one_and_then_checks_i
     artifacts = await engine.run()
     assert artifacts.paper_md is not None and calls.count("PlanRevise") == 1
     assert plan.load_design(engine.quest_root)[0]["protocol"]["oracles"] == [ORACLE]
-    assert [r["by"] for r in plan.history(engine.quest_root)] == ["model", "request"]
+    assert [r["by"] for r in plan.history(engine.quest_root)] == ["model", "engine"]  # the engine's rewrite, not a person's
     record = _record(engine)
     assert record["status"] == "ok" and "declares no oracle" in record["attempts"][0]["problems"][0]
 
@@ -709,3 +709,108 @@ def test_a_stop_after_the_freeze_says_how_an_oracle_can_still_change(tmp_path: P
     assert "The protocol is frozen, so editing plan.md does not change it" in text
     assert "`engine.oracle_check: warn`" in text and "refined at the review" in text
     assert "--revise-plan" not in text and "Change the oracle 'final size closed form' to expected 1, tolerance 0.6" in text
+
+
+# --- an oracle the engine added after the plan was read is never recorded as a person's approval ---------------------------
+
+
+def _frozen_record(engine: Engine) -> dict[str, Any] | None:
+    path = engine.quest_root / "needs" / "FROZEN_PROTOCOL.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+@pytest.mark.asyncio
+async def test_an_oracle_the_engine_adds_after_the_plan_was_read_stops_the_quest_again_before_the_freeze(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``pauses.plan: ask`` the person read a plan with no oracle; the gate then had the model add one. The protocol
+    is frozen as approved by a person, so the person must see that oracle before the freeze, not after it."""
+    from core.config import PausesConfig
+
+    calls: list[str] = []
+    # The script has no oracle branch yet: the gate adds the oracle and repairs the script before it stops.
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_UNAWARE, repair=_PASSING))
+    cfg = _cfg(tmp_path)
+    cfg.pauses = PausesConfig(plan="ask")
+    first = Engine(cfg)
+    await first.run()
+    assert "read and edit the plan" in (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+
+    second = Engine(cfg, resume_quest_id=first.quest_id)
+    await second.run()
+    assert calls.count("PlanRevise") == 1 and calls.count("OracleRepair") == 1
+    assert _frozen_record(second) is None, "the protocol was frozen before the person saw the oracle the engine added"
+    descriptor = json.loads((second.fi_dir / "pause.json").read_text(encoding="utf-8"))
+    assert descriptor["kind"] == "plan" and descriptor["interaction"] == "supply"
+    assert descriptor["headline"] == "read the checks FI added to the plan"
+    text = (second.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "“final size closed form”" in text and "You have not seen these yet" in text
+    assert "[FI] paused for the checks FI added to the plan" in (second.fi_dir / "run.log").read_text(encoding="utf-8")
+    # (The first script ignores FI_ORACLE, so its oracle run drew a figure; the main run is what must not have started.)
+    assert not (second.quest_root / "paper" / "paper.md").exists()
+
+    third = Engine(cfg, resume_quest_id=first.quest_id)
+    artifacts = await third.run()
+    assert artifacts.paper_md is not None and calls.count("PlanRevise") == 1
+    record = _frozen_record(third)
+    assert record is not None and record["approved_by"].startswith("human:")
+    assert "'final size closed form' were added by the engine" in record["approved_by"] and "held for the person" in record["approved_by"]
+    assert record["protocol"]["oracles"] == [ORACLE]
+    # The repair made before the stop is the script the quest carries on with, not the one before it.
+    assert "FI_ORACLE" in artifacts.raw_state["code"]
+
+
+@pytest.mark.asyncio
+async def test_without_the_plan_stop_an_oracle_the_engine_added_is_recorded_as_nobodys_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_PASSING))
+    engine = Engine(_cfg(tmp_path))
+    assert engine.config.pauses.plan == "off"
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and calls.count("PlanRevise") == 1
+    record = _frozen_record(engine)
+    assert record is not None and record["approved_by"].startswith("auto:")
+    assert "added by the engine after the plan was written" in record["approved_by"]
+    assert "final size closed form" in record["approved_by"] and "nobody approved" in record["approved_by"]
+
+
+def _freeze_with(tmp_path: Path, *, plan_mode: str, held: bool, added: dict[str, Any] | None,
+                 replaced_by: str | None = None) -> str:
+    """What ``approved_by`` the freeze writes for a protocol with ORACLE, given the plan stop and the gate's record."""
+    from core import frozen_protocol
+    from core.config import PausesConfig
+
+    cfg = _cfg(tmp_path)
+    cfg.pauses = PausesConfig(plan=plan_mode)
+    engine = Engine(cfg)
+    engine.fi_dir.mkdir(parents=True, exist_ok=True)
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    if replaced_by:  # a rerun from the design, approved by a person, after an earlier freeze
+        frozen_protocol.freeze(engine.quest_root, _PROTOCOL, approved_by="auto", source="plan.md")
+        frozen_protocol.record_replacement(engine.quest_root, approved_by=replaced_by, step="design")
+        frozen_protocol.frozen_path(engine.quest_root).unlink()
+    if held:
+        (engine.fi_dir / "paused_at_plan.flag").write_text("plan", encoding="utf-8")
+    if added is not None:
+        (engine.fi_dir / "oracles_added.json").write_text(json.dumps(added), encoding="utf-8")
+    engine._freeze_protocol_if_due({"design": {"protocol": protocol}, "iteration": 0})
+    return str(frozen_protocol.load(engine.quest_root)["approved_by"])
+
+
+def test_the_freeze_never_says_a_person_approved_what_they_were_not_shown(tmp_path: Path) -> None:
+    unseen = {"oracles": [ORACLE["name"]], "shown": False}
+    seen = {"oracles": [ORACLE["name"]], "shown": True}
+    # A person approved going back to the design before the engine added the oracle: that is said, and so is the oracle.
+    replaced = _freeze_with(tmp_path / "r", plan_mode="off", held=False, added=unseen, replaced_by="Jun")
+    assert replaced.startswith("human: Jun approved replacing") and "nobody approved them" in replaced
+    # The setting says ask, but the quest never stopped at the plan: nobody read it.
+    assert _freeze_with(tmp_path / "a", plan_mode="ask", held=False, added=None).startswith("auto:")
+    assert _freeze_with(tmp_path / "h", plan_mode="ask", held=True, added=None).startswith("human:")
+    # Shown at the stop for the added checks, then the plan stop was turned off: the oracles were still shown.
+    shown_then_off = _freeze_with(tmp_path / "s", plan_mode="off", held=True, added=seen)
+    assert shown_then_off.startswith("auto:") and "held for the person to read" in shown_then_off
+    # A name the person removed at the stop is not named as part of the frozen protocol.
+    gone = _freeze_with(tmp_path / "g", plan_mode="off", held=False, added={"oracles": ["removed at the stop"], "shown": False})
+    assert "removed at the stop" not in gone and gone.startswith("auto: nobody approved this protocol")

@@ -21,7 +21,7 @@ written; the person edits it, or asks for a change (``--revise-plan``), and resu
 read stops the quest again with the reason rather than being guessed at.
 
 Every version is kept under ``.fi/plan_versions/`` and listed in ``needs/PLAN_HISTORY.json`` with who wrote it
-(the model, a request, or the person) and its hash, and the first design entry of ``needs/DESIGN_HISTORY.json``
+(the model, a request, the engine's oracle check, or the person) and its hash, and the first design entry of ``needs/DESIGN_HISTORY.json``
 names the hash of the plan it came from: the plan is the pre-registered version of the hypothesis.
 """
 
@@ -411,7 +411,8 @@ def history(quest_root: Path) -> list[dict[str, Any]]:
 
 def record_version(quest_root: Path, text: str, *, by: str, note: str = "") -> dict[str, Any]:
     """Keep this version of the plan (``.fi/plan_versions/plan.vN.md``) and list it in
-    ``needs/PLAN_HISTORY.json``. ``by`` is ``"model"``, ``"request"`` or ``"user"``."""
+    ``needs/PLAN_HISTORY.json``. ``by`` is ``"model"``, ``"request"``, ``"engine"`` (the oracle gate added
+    or completed its checks) or ``"user"``."""
     rows = history(quest_root)
     entry = {
         "version": len(rows) + 1,

@@ -201,5 +201,17 @@ def test_evidence_says_what_was_not_checked_when_the_value_came_from_the_script(
     assert any("closed form" in g and "not from the engine running the simulation" in g for g in scripted["all_gaps"]["independently_validated"])
     measured = evidence.assess(_root(tmp_path / "m", _judged("engine")), _state(), settings=ON)
     assert measured["levels"]["independently_validated"] is True
-    older = {k: v for k, v in _judged("script").items() if k != "contract"}
-    assert evidence.assess(_root(tmp_path / "o", older), _state(), settings=ON)["levels"]["independently_validated"] is True
+
+
+def test_a_value_the_script_reported_is_not_independent_on_a_one_script_quest_either(tmp_path: Path) -> None:
+    """A one-script quest has no trial contract: its oracle value is what the script printed under FI_ORACLE=1. The rule is
+    the same for every quest: only a value the engine measured counts, and the gap says how to get one."""
+    from tests.test_evidence import ON, _state
+    one_script = {k: v for k, v in _judged("script").items() if k != "contract"}
+    got = evidence.assess(_root(tmp_path / "o", one_script), _state(), settings=ON)
+    assert got["levels"]["independently_validated"] is False
+    gap = " ".join(got["all_gaps"]["independently_validated"])
+    assert "closed form" in gap and "execution.split_analysis: true" in gap
+    unmarked = {"status": "ok", "judged_by": "engine",
+                "attempts": [{"judged": [{"name": "closed form", "value": 0.0, "passed_by_engine": True}]}]}
+    assert evidence.assess(_root(tmp_path / "u", unmarked), _state(), settings=ON)["levels"]["independently_validated"] is False
