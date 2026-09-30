@@ -117,10 +117,14 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
         return;
     }
 
-    const open = openMaps.get(questId);
+    const key = `${outputRoot}\n${questId}`;
+    const open = openMaps.get(key);
     if (open) {
+        // A tab in the background reloads its page when shown, and the page asks for the data itself; only a tab
+        // already in view needs to be told the checkpoint may have moved.
+        const inView = open.panel.visible;
         open.panel.reveal(open.panel.viewColumn);
-        await open.refresh();
+        if (inView) await open.refresh();
         return;
     }
 
@@ -141,9 +145,9 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
             void panel.webview.postMessage({ type: "error", text: `Could not read the map of ${questId} (exit ${res.code}). ${why}` });
         }
     };
-    openMaps.set(questId, { panel, refresh: send });
+    openMaps.set(key, { panel, refresh: send });
     panel.onDidDispose(() => {
-        if (openMaps.get(questId)?.panel === panel) openMaps.delete(questId);
+        if (openMaps.get(key)?.panel === panel) openMaps.delete(key);
     }, undefined, context.subscriptions);
     panel.webview.onDidReceiveMessage(async (m: { type?: string; step?: string }) => {
         if (m.type === "ready") {
