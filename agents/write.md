@@ -106,6 +106,7 @@ Cite only labels that appear in the prior-work block:
 
 - Never cite a source from memory, and never invent an author, year, DOI or URL.
 - An entry marked `[title only]` or `[short blurb only]` has no text beyond that: cite it only to say the work exists or for what its own title states, never for a specific finding, number or mechanism.
+- An entry marked `[retracted]` has been retracted by its publisher: do not cite it, and do not rest any statement on what it reports.
 - An entry whose header is a placeholder label (`[4] item-4`, `[4] (no title)`, `Item-N`, `Reference N`, `Source N`) is not a usable source; do not cite it, and do not turn its label into an author or a title.
 - When the prior-work block is empty (`(no prior work surfaced from the knowledge base)`), cite nothing. Discuss earlier work in prose without naming a specific source.
 

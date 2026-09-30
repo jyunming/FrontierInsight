@@ -98,6 +98,7 @@ from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
 from . import protocol_check as _protocol
+from . import retractions as _retractions
 from . import split_run as _split_run
 from . import stats as _stats
 from .config import (
@@ -4010,6 +4011,13 @@ class Engine:
                 "[literature] picked up %d user-supplied paper(s) from inputs/papers/",
                 user_added,
             )
+        # Each DOI looked up in Crossref for a retraction (core/retractions.py); a retracted source is marked, never
+        # used as support. No answer is "could not be checked", and nothing here stops the quest.
+        if self.config.knowledge.enabled:
+            merged, retraction_rows = await _retractions.check_literature(merged)
+            if retraction_rows:
+                self._record_source_verdicts("retractions", this_iter, "checked", retraction_rows)
+                self._log.info("[literature] %s", _retractions.summary_line(retraction_rows))
         self._log.info(
             "[literature] retrieved %d docs (iter=%d, +%d new after dedup, "
             "+%d user-supplied, total=%d)",
@@ -4048,7 +4056,10 @@ class Engine:
         # pause again — the resume path picks up the new files and
         # proceeds.
         if not _papers_dir_has_files(self.quest_root):
-            abstract_only = [d for d in docs if _is_abstract_only(d)]
+            # A retracted paper is never asked for: it is not to be cited (core/retractions.py).
+            withdrawn = _retractions.retracted_dois(merged)
+            abstract_only = [d for d in docs if _is_abstract_only(d)
+                             and _retractions.normalize_doi((d.metadata or {}).get("doi")) not in withdrawn]
             # Split the genuinely paywalled from open-access sources we simply
             # failed to fetch. Only the former justify stopping the quest to
             # ask a person for help: an arXiv/PMC paper we could not download
@@ -6410,7 +6421,8 @@ class Engine:
     ) -> None:
         """Keep how the retrieved sources were judged in ``.fi/literature_queries.json`` beside the queries that found
         them: one entry per pass and stage (``floor``, ``screen``) with each source's score or grade, whether it was
-        kept and why. Best-effort: a record never stops a quest."""
+        kept and why, and (``retractions``) what Crossref says of each source's retraction. Best-effort: a record never
+        stops a quest."""
         if not self.config.knowledge.enabled:
             return
         try:
@@ -13731,6 +13743,8 @@ class Engine:
                 "quote": quote,
                 "evidence": evidence,
             })
+        # The rules below add claims of their own; an empty answer from the check is judged before them.
+        model_found_none = not claims
         # A source with nothing but its title cannot back what a sentence says
         # beyond it, whatever the check made of the quote.
         claims, held = _apply_title_only_rule(paper_text, sources, claims)
@@ -13738,13 +13752,17 @@ class Engine:
             self._log.info(
                 "[claim_check] %d claim(s) rest on a source held as its title only; marked unsupported", held,
             )
+        # A retracted source supports nothing, whatever the check made of its text (core/retractions.py).
+        claims, withdrawn = _retractions.apply_to_claims(claims, sources, citing, _same_statement)
+        if withdrawn:
+            self._log.info("[claim_check] %d claim(s) rest on a retracted source; marked unsupported", withdrawn)
         unsupported = [c["claim"] for c in claims if c["basis"] == "unsupported"]
         # A paper with a real body that yields zero claims is suspicious, not
         # clean: the check almost certainly missed something rather than the
         # paper genuinely making no substantive claims. Thresholded on the
         # BODY text actually sent (not the raw file), so a short abstract-only
         # draft isn't flagged for having little to check.
-        suspicious_empty = parsed_ok and not claims and len(paper_text) > 2000
+        suspicious_empty = parsed_ok and model_found_none and len(paper_text) > 2000
         failed = ""
         if not parsed_ok:
             failed = f"the grounding reply did not name a claims list: {str(parsed)[:200]!r}"
@@ -17723,6 +17741,9 @@ def _format_lit_header(meta: dict[str, Any], i: int, thin: str | None = None) ->
         # The record holds no more than this says, and the writer is told so
         # where it reads the entry (see agents/write.md, "Citing sources").
         line1 += f" [{_THIN_MARKS[thin]}]"
+    if _retractions.is_retracted(meta):
+        # Crossref lists a retraction of it (core/retractions.py): every block that names it says so.
+        line1 += " [retracted]"
 
     extras: list[str] = []
     if venue:
@@ -18115,7 +18136,8 @@ def _foundational_sources(
     return [
         (label, meta)
         for label, meta, _item in _labelled_sources(literature, audience)
-        if meta.get("foundational") and not label.startswith("W")
+        # A retracted work is not to be cited, so it is never asked for (core/retractions.py).
+        if meta.get("foundational") and not label.startswith("W") and not _retractions.is_retracted(meta)
     ]
 
 
@@ -18995,7 +19017,8 @@ def _claim_source_block(label: str, meta: dict[str, Any], text: str, sentences: 
     sentences, then what a model read off its figures, labelled as that."""
     title = str(meta.get("title") or "").strip()
     ident = meta.get("url") if label.startswith("W") else (f"DOI:{meta['doi']}" if meta.get("doi") else "")
-    head = f"[{label}] {title}" + (f" · {ident}" if ident else "")
+    mark = " [retracted]" if _retractions.is_retracted(meta) else ""
+    head = f"[{label}] {title}{mark}" + (f" · {ident}" if ident else "")
     if not sentences:
         return head
     if not text.strip():
@@ -23882,7 +23905,8 @@ _QUERY_SET_HASHED = ("stage", "key", "iteration", "queries", "prompt_sha256", "m
 _PERSON_QUERIES = Path("inputs") / "search_queries.txt"
 
 
-#: Extra fields the entries that record how the retrieved sources were judged (``stage`` ``floor`` and ``screen``)
+#: Extra fields the entries that record how the retrieved sources were judged (``stage`` ``floor``, ``screen`` and
+#: ``retractions``)
 #: carry; covered by the digest only when present, so the digest of an entry written without them is unchanged.
 _SOURCE_VERDICT_HASHED = ("outcome", "threshold", "minimum", "sources")
 
