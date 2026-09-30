@@ -1,6 +1,6 @@
 ---
 title: Study types
-sources: [core/optimisation_plan.py, core/engine.py]
+sources: [core/optimisation_plan.py, core/optimise.py, core/optimum_check.py, core/engine.py]
 updated: 2026-09-30
 ---
 # Study types
@@ -18,7 +18,7 @@ The plan's "What is being optimised" section lists the objective (a quantity to 
 
 1. When the question could be either, the clarify step asks one question: measure, find the best design, or let the plan decide ([[pauses|Pauses]]).
 2. At the plan step FI sets the type to find-the-best-design when you answered so, or when the topic plainly asks for a best design.
-3. The engine runs the search itself (`core/optimise.py`, `core/optimise_search.py`): it evaluates the baseline first, then the optional coarse scan, then tries one design after another within `starts × per_start` evaluations and `execution.timeout_s`, calling the simulation's `run_cell` (or `run_trial`) in a process of its own. FI alone writes `raw/optimisation_ledger.jsonl` and `results/best_design.json`; infeasible and failed designs are never chosen; the best design is not yet recomputed at the finer check settings. A best-design plan that cannot start (no block or budget, one script, trials on a cluster) stops before anything is written or run, on every resume; FI never quietly runs a search as a sweep.
+3. The engine runs the search itself (`core/optimise.py`, `core/optimise_search.py`): it evaluates the baseline first, then the optional coarse scan, then tries one design after another within `starts × per_start` evaluations and `execution.timeout_s`, calling the simulation's `run_cell` (or `run_trial`) in a process of its own. FI alone writes `raw/optimisation_ledger.jsonl` and `results/best_design.json`; infeasible and failed designs are never chosen. Then FI checks the best design (`core/optimum_check.py`): the best design of each starting point and the baseline are evaluated again at the finer check settings, the best design is nudged, and the starting points are compared; `needs/OPTIMUM_CHECK.json` holds one verdict (for example "the improvement over the baseline disappears at finer settings") and a sentence per check. A failed check never stops the quest; it keeps the evidence level lower ([[how-fi-judges-correctness|How FI judges correctness]]). A best-design plan that cannot start (no block or budget, one script, trials on a cluster) stops before anything is written or run, on every resume; FI never quietly runs a search as a sweep.
 
 `engine.clarify_overrides.study_type` in the YAML answers it in advance when the agent answers the setup questions itself; when you are asked them, it only fills in the suggested answer (and only if that question is asked), and with `pauses.clarify: off` it is not used.
 

@@ -208,11 +208,12 @@ def test_plan_md_says_what_is_optimised_and_the_budget_before_anything_runs() ->
     assert "- fin_count: 8 to 30 (whole numbers)" in text
     assert "mass_g ≤ 120 g" in text
     assert "4 starting points × 60 = 240 evaluations" in text
-    # (3 best + the baseline) × 2 finer levels + 2 × 2 continuous nudges = 12
-    assert "= 12 evaluations" in text
+    # (3 best + the baseline) × 2 finer levels + 2 × 3 nudges (two continuous variables and one whole-numbered) = 14
+    assert "= 14 evaluations at most" in text and "not taken from the search's budget" in text
     assert "about 8 min" in text and "not measured yet" in text
     assert "numerical error of the two designs" in text
-    assert "FI runs the search itself" in text and "does not yet recompute it at the finer check settings" in text
+    assert "FI runs the search itself" in text and "then FI evaluates it and the baseline again at the finer" in text
+    assert "does not yet recompute" not in text
     assert "execution.timeout_s" in text
 
 

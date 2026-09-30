@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import optimise as _optimise
+from . import optimum_check as _optimum_check
 from . import oracle_check as _oracle_check
 from . import receipts as _receipts
 from . import run_manifest as _run_manifest
@@ -104,6 +106,21 @@ INFO: dict[str, dict[str, Any]] = {
         "known_blind_spots": ["The review is a model's opinion (and a person's decision when one was asked for); it does not re-run anything."],
         "artifacts": ["needs/DESIGN_HISTORY.json", "paper/review.json", "needs/receipts/evidence_gate.json",
                       "needs/receipts/design_audit.json", "needs/receipts/claim_check.json"],
+    },
+}
+
+# What a search for the best design adds to a level (``study_type: find_best_design``): FI ran the search and wrote its
+# record, and checked the best design at finer numerical settings (core/optimum_check.py). Each failed or unfinished part
+# of that check is a gap at the level it bears on (core/optimum_check.py::evidence_gaps).
+_OPTIMUM_INFO: dict[str, dict[str, Any]] = {
+    "protocol_runtime_matched": {"artifacts": ["raw/optimisation_ledger.jsonl", "results/best_design.json"]},
+    "independently_validated": {
+        "known_blind_spots": [
+            "For a search for the best design, FI evaluated the best design and the baseline again at finer numerical "
+            "settings; that rules out a numerical error only. The improvement is an improvement within the plan's "
+            "model: an error of the model itself is the same at every setting.",
+        ],
+        "artifacts": ["needs/OPTIMUM_CHECK.json"],
     },
 }
 
@@ -328,8 +345,17 @@ def assess(
         design = state.get("design") or {}
         protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
 
+    # A search for the best design: FI's check of the best design at finer numerical settings (core/optimum_check.py)
+    # holds each level up to the one its failed or unfinished parts keep the quest below.
+    try:
+        optimum_gaps = _optimum_check.evidence_gaps(quest_root, protocol) if protocol is not None else {}
+    except Exception as e:  # noqa: BLE001 -- a record that cannot be read is a gap, never a pass
+        optimum_gaps = {"independently_validated": [
+            f"the check of the best design at finer numerical settings could not be read ({type(e).__name__})"]}
+
     # protocol matched at runtime
     matched_gaps = gaps["protocol_runtime_matched"]
+    matched_gaps.extend(optimum_gaps.get("protocol_runtime_matched", []))
     if frozen is None and executed:
         matched_gaps.append("the protocol was not frozen before the run (the quest began before the freeze existed): nothing shows the run was held to the protocol it started with")
     if frozen is not None and frozen.get("problem"):
@@ -454,6 +480,7 @@ def assess(
         # Which code implements which equation of the model: an oracle that rests on E1 checks the code the simulation
         # says is E1. Only the labels are read, not the mathematics behind them.
         valid_gaps.extend(equation_label_gaps or [])
+    valid_gaps.extend(optimum_gaps.get("independently_validated", []))
     validated = matched and not valid_gaps
 
     # statistically adequate
@@ -466,6 +493,7 @@ def assess(
         stat_gaps.append(
             f"{manifest_record['failed_trials']} trial(s) failed, and the protocol does not say how a failed trial is treated (failure_policy)"
         )
+    stat_gaps.extend(optimum_gaps.get("statistically_adequate", []))
     adequate = validated and not stat_gaps
 
     # publication ready
@@ -605,6 +633,7 @@ def assess(
     claim_failed = str(state.get("claim_check_failed") or "").strip()
     if claim_failed:
         ready_gaps.append(f"the claim check failed on the final draft: {claim_failed}")
+    ready_gaps.extend(optimum_gaps.get("publication_ready", []))
     ready_gaps[:] = list(dict.fromkeys(ready_gaps))
     ready = adequate and not ready_gaps
 
@@ -618,11 +647,14 @@ def assess(
     next_level = LEVELS[LEVELS.index(status) + 1] if status in LEVELS and status != LEVELS[-1] else None
     if status == "not_executed":
         next_level = LEVELS[0]
+    searched = _optimise.block_of(protocol) is not None
     ladder = [
         {
             "level": level, "reached": ok, "assurance_claim": INFO[level]["assurance_claim"],
-            "known_blind_spots": INFO[level]["known_blind_spots"],
-            "evidence_artifacts": [a for a in INFO[level]["artifacts"] if (quest_root / a).exists()],
+            "known_blind_spots": INFO[level]["known_blind_spots"] + (
+                _OPTIMUM_INFO.get(level, {}).get("known_blind_spots", []) if searched else []),
+            "evidence_artifacts": [a for a in INFO[level]["artifacts"] + (
+                _OPTIMUM_INFO.get(level, {}).get("artifacts", []) if searched else []) if (quest_root / a).exists()],
             "gaps": gaps[level],
         }
         for level, ok in zip(LEVELS, reached)

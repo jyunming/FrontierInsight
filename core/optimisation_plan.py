@@ -570,19 +570,22 @@ def budget(block: dict[str, Any]) -> dict[str, Any]:
     """The evaluations a plan asks for, worked out when the plan is written (every number FI will count against):
 
     * ``scan``: the coarse scan's designs; ``search``: ``starts × per_start`` (a limit, not a target);
-    * ``check``: (the best ``min(3, starts)`` designs + the baseline) × the finer levels, plus two nudges of each
-      continuous variable around the best design;
-    * each times ``runs_per_evaluation`` / ``check_runs`` for a study with randomness;
+    * ``check`` (core/optimum_check.py, not taken from the search's budget): (the best ``min(3, starts)`` designs + the
+      baseline) × the finer levels, plus two nudges of each variable that takes numbers (continuous or whole-numbered)
+      around the best design; at most this many, fewer when a nudge would leave the range or starting points agree;
+    * each times ``runs_per_evaluation`` / ``check_runs`` (by default as many as ``runs_per_evaluation``) for a study
+      with randomness;
     * ``seconds``: the search's time from the plan's own estimate per evaluation, or ``None`` (not measured yet)."""
     search, scan = evaluations(block)
     budget_block = block.get("evaluation_budget") if isinstance(block.get("evaluation_budget"), dict) else {}
     starts = int(budget_block.get("starts") or 0)
     candidates = min(CHECK_CANDIDATES, starts) if starts else CHECK_CANDIDATES
     settings = block.get("numerical_settings") if isinstance(block.get("numerical_settings"), dict) else {}
-    levels = max((len(check_levels(s)[0]) for s in settings.values()), default=0) or 1
-    continuous = sum(1 for v in block.get("design_variables") or [] if kind_of(v) == "continuous")
+    levels = max((len(check_levels(s if isinstance(s, dict) else {"search": s})[0]) for s in settings.values()),
+                 default=0) or 1
+    continuous = sum(1 for v in block.get("design_variables") or [] if kind_of(v) in ("continuous", "integer"))
     runs = int(block.get("runs_per_evaluation") or 1)
-    check_runs = int(block.get("check_runs") or 1)
+    check_runs = int(block.get("check_runs") or block.get("runs_per_evaluation") or 1)
     check = ((candidates + 1) * levels + 2 * continuous) * check_runs
     seconds_each = budget_block.get("seconds_per_evaluation")
     searched = (search or 0) * runs + scan * runs
@@ -664,9 +667,10 @@ def plan_lines(design: Any) -> list[str]:
     lines = [f"## {HEADING}", "",
              "> Shown from the design block below (`study_type` and `protocol.optimisation`) as it was when the plan was "
              "written; edit the block, not this section (after an edit, only the block counts). FI runs the search "
-             "itself, within the budget below, and records every evaluation; the best design is found and scored at the "
-             "search's own numerical settings. This version does not yet recompute it at the finer check settings "
-             "below, and says so in the results.", "",
+             "itself, within the budget below, and records every evaluation; the best design is found at the search's "
+             "own numerical settings, then FI evaluates it and the baseline again at the finer check settings below, "
+             "nudges it, and compares the starting points. A check that fails is reported as the result and limits the "
+             "evidence level; it does not stop the quest.", "",
              "**Kind of study:** find the best design (`study_type: find_best_design`), not a measurement over "
              "settings chosen in advance.", ""]
     if not has_block(design):
@@ -754,8 +758,9 @@ def plan_lines(design: Any) -> list[str]:
     check_runs = f", × {count['check_runs']} fresh runs each" if count["check_runs"] > 1 else ""
     lines.append(f"- check: ({count['candidates']} best designs + the baseline) × {count['levels']} finer "
                  f"level{'s' if count['levels'] != 1 else ''} + 2 × {count['continuous']} nudges around the best design"
-                 f"{check_runs} = {count['check']} evaluations, at the finer settings (each costs more than a search "
-                 "evaluation)")
+                 f"{check_runs} = {count['check']} evaluations at most, at the finer settings (each costs more than a "
+                 "search evaluation); not taken from the search's budget, and with its own time limit "
+                 "(`execution.timeout_s`)")
     if count["seconds"] is not None:
         lines.append(f"- time: about {_duration(count['seconds'])} for the scan and the search "
                      f"({_fmt(count['seconds_per_evaluation'])} s per evaluation, the plan's own estimate; not measured "

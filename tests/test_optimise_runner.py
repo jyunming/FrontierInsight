@@ -640,25 +640,32 @@ async def test_a_search_for_the_best_design_runs_through_execute_with_a_fake_mod
     assert best["schema"] == osearch.RECORD_SCHEMA, "FI's own copy stands, not the one the analysis wrote"
     assert abs(best["best"]["design"]["x"] - 2) < 0.1 and abs(best["best"]["design"]["y"] + 1) < 0.1, best["best"]
     assert best["baseline"]["objective"] == 5.0 and best["improvement"]["better"] is True
-    assert best["evaluations"]["search"] <= 40 and best["checked_at_finer_settings"] is False
+    assert best["evaluations"]["search"] <= 40 and best["checked_at_finer_settings"] is True
     rows = [json.loads(line) for line in (root / "raw" / "optimisation_ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     assert len([r for r in rows if r.get("event") == "evaluation"]) == best["evaluations"]["search"]
-    # The simulation's own count of its calls: the oracle's one case, then the search, once (no replicate seeds, no
-    # second search).
-    assert _count(root) == best["evaluations"]["search"] + 1
+    # FI checked the best design at finer settings before the analysis ran (core/optimum_check.py).
+    check = json.loads((root / "needs" / "OPTIMUM_CHECK.json").read_text(encoding="utf-8"))
+    assert check["verdict"] == "verified" and best["check"]["verdict"] == "verified", check["says"]
+    assert check["ledger_sha256"] == best["ledger_sha256"]
+    # The simulation's own count of its calls: the oracle's one case, the search once (no replicate seeds, no second
+    # search), then the check's evaluations.
+    assert _count(root) == best["evaluations"]["search"] + 1 + check["evaluations"]["check"]
     result = artifacts.raw_state["result_json"]
     assert result["fi_search"]["best_objective"] == best["best"]["objective"], "FI's own numbers ride with the result"
-    assert "[optimise] best design:" in log and "not checked at finer numerical settings" in log
+    assert result["fi_search"]["check"]["verdict"] == "verified"
+    assert "[optimise] best design:" in log and "[optimise] check at finer numerical settings:" in log
+    assert "not checked at finer numerical settings" not in log
     assert "changed FI's record of the search" in log
     oracle = json.loads((root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
     assert oracle["status"] == "ok", oracle
     assert (root / "figures" / "search_progress.png").is_file()
 
 
-def test_the_log_lines_say_plainly_that_the_finer_check_is_not_done() -> None:
+def test_the_log_lines_say_plainly_that_the_values_are_the_searchs_and_are_checked_next() -> None:
     block = _block(evaluation_budget={"starts": 1, "per_start": 20})
     record = osearch.best_design(osearch.run_sync(block, _f, seed=0), block, seed=0)
     text = "\n".join(optimise.summary_lines(record))
     assert "best design" in text and "baseline" in text
-    assert "not checked at finer numerical settings" in text
+    assert "at the search's own settings (mesh = 0.5); FI checks them at finer settings next" in text
+    assert "not checked at finer numerical settings" not in text
     assert math.isfinite(record["improvement"]["value"])
