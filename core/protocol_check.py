@@ -41,6 +41,30 @@ _RUN_WORDS = {
     "runs", "run", "replicates", "replicate", "reps", "trials", "trial", "samples", "sample", "realizations",
     "realisations", "simulations", "simulation", "sims", "repeats",
 }
+# A count of re-draws from results the experiment already produced (a bootstrap, a permutation test, a posterior
+# sample) is not a number of runs of the experiment: a GPT-6 quest was stopped as "the script differs from the plan"
+# because BOOTSTRAP_REPLICATES = 2000 sat beside a protocol of 300 runs per setting.
+# Only a SAMPLING word beside a re-draw word is skipped; a name that also says runs, trials or realizations
+# (N_MCMC_RUNS, bootstrap_trials) is always read as runs. Words that only ever mean re-drawing from results
+# (bootstrap, boot, resample, jackknife) skip with any sampling word; words that can also name the study itself (mcmc,
+# posterior, and the joined forms burnin / warmup) skip only beside samples/sample (a chain's length), not beside
+# reps/replicates/repeats (an MCMC simulation study's repetitions). Whole tokens, so boot-time, surrogate, shuffle and
+# permutation studies are read. A permutation test's count (N_PERMUTATION_REPS) is therefore still read as runs: a
+# deliberate trade-off, since skipping a name can only hide a real mismatch while reading one can stop a quest.
+_SAMPLING_RUN_WORDS = {"samples", "sample", "replicates", "replicate", "reps", "repeats"}
+_DRAW_ONLY = {"samples", "sample"}
+_STRONG_RESAMPLE = re.compile(r"^n?(bootstraps?|boots?|resamples?|resampling|jackknife|jackknifes)\d*$")
+_WEAK_RESAMPLE = re.compile(r"^n?(mcmc|hmc|posterior|burnin|warmup)\d*$")
+_ALWAYS_RUNS = {"runs", "run", "trials", "trial", "realizations", "realisations", "simulations", "simulation", "sims"}
+
+
+def _is_resample_count(name: str) -> bool:
+    tokens = set(_tokens(name))
+    if tokens & _ALWAYS_RUNS:
+        return False
+    if tokens & _SAMPLING_RUN_WORDS and any(_STRONG_RESAMPLE.match(t) for t in tokens):
+        return True
+    return bool(tokens & _DRAW_ONLY) and any(_WEAK_RESAMPLE.match(t) for t in tokens)
 # Words that make a name a list of the axis's values (R0_LIST, dose_values) rather than something else about it
 # (dose_response, temperature_history).
 _LIST_WORDS = {
@@ -354,7 +378,11 @@ def check(protocol: dict[str, Any] | None, scripts: dict[str, str]) -> list[Mism
         # ``n_runs = 0`` ... ``n_runs += 2``, and was stopped as "the script sets 0 runs per setting"). Only zero is
         # skipped, not every name the script adds to (a real setting that is also incremented somewhere is still read),
         # and not a negative count either (that is a wrong setting, and is reported like any other).
-        counts = [f for f in scalars if set(_tokens(f.name)) & _RUN_WORDS and float(f.values[0]).is_integer() and f.values[0] != 0]
+        counts = [
+            f for f in scalars
+            if set(_tokens(f.name)) & _RUN_WORDS and not _is_resample_count(f.name)
+            and float(f.values[0]).is_integer() and f.values[0] != 0
+        ]
         if counts and not any(math.isclose(f.values[0], float(runs)) for f in counts):
             first = counts[0]
             out.append(Mismatch(
