@@ -368,7 +368,7 @@ async def test_a_reply_without_the_package_is_asked_once_more_then_keeps_two_scr
     await engine.run()
     assert len(prompts) == 2 and "the reply did not hold the package" in prompts[1]
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "left out the model's package" in log and "keeps two scripts" in log
+    assert "left out the model's package" in log and "no package of equations of its own" in log
     assert json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))["status"] == "ok"
 
 
@@ -577,6 +577,60 @@ def test_a_change_to_the_package_makes_the_older_contracts_raw_files_stale(tmp_p
     before = split_run.simulation_sha(code / "simulate.py")
     (code / PKG / "model.py").write_text(MODEL_PY.replace("-y", "-(y)"), encoding="utf-8")
     assert split_run.simulation_sha(code / "simulate.py") != before
+
+
+def test_a_generator_the_caller_can_replace_is_not_a_problem_but_one_made_at_load_is() -> None:
+    fallback = "import numpy as np\n\n\ndef step(y, rng=None):\n    rng = rng or np.random.default_rng()\n    return y\n"
+    assert set(__import__("core.engine").engine.unseeded_rng_calls(fallback)) and cl.fallback_rng_lines(fallback) >= {5}
+    main = "import numpy as np\n\n\ndef f(y):\n    return y\n\n\nif __name__ == '__main__':\n    np.random.default_rng()\n"
+    assert cl.module_level_randomness(main) == [], "runs only when the file is run by itself"
+    default = "import numpy as np\n\n\ndef f(y, rng=np.random.default_rng(0)):\n    return y\n"
+    assert cl.module_level_randomness(default) == [4], "a default argument is made at load"
+
+
+def test_the_budget_starts_again_for_code_written_from_nothing_and_the_shape_holds(tmp_path: Path) -> None:
+    engine, code, state = _engine_with_tool(tmp_path)
+    cl.save(engine.quest_root, {"shape": cl.PACKAGE, "package": PKG, "extra_calls_spent": 3})
+    # A redesign that adds many equations does not switch a quest whose package is on disk to two scripts.
+    many = {**PROTOCOL, "model": {"equations": [{"id": f"E{i}", "role": "generates"} for i in range(1, 200)]}}
+    assert engine._code_layout({"design": {"protocol": many}}, many)["shape"] == cl.PACKAGE
+    engine.config.execution.code_package = False
+    assert engine._code_layout(state)["shape"] == cl.SINGLE, "switching it off still does"
+    engine.config.execution.code_package = True
+    # A restart from the code step: code/ is empty, the budget is new.
+    import shutil
+
+    shutil.rmtree(code)
+    code.mkdir()
+    import asyncio
+
+    asyncio.run(engine._code_package_reply(state, "p", _package_reply(), {"simulate": SIM_PKG, "analysis": ANALYSIS},
+                                           extend=False))
+    assert cl.calls_left(engine.quest_root, 3) == 3
+
+
+def test_a_package_module_named_like_a_script_is_not_taken_for_it() -> None:
+    from core import split_run
+    from core.engine import _PY_FENCE_RE
+
+    reply = (f"```python\n# file: simulate.py\nREAL = 1\n```\n```python\n# file: experiment.py\nA = 1\n```\n"
+             f"```python\n# file: {PKG}/__init__.py\n```\n```python\n# file: {PKG}/simulate.py\nFAKE = 1\n```\n")
+    scripts = split_run.parse_split_response(reply, _PY_FENCE_RE)
+    assert scripts is not None and "REAL" in scripts["simulate"]
+    plain = "```python\n# file: src/simulate.py\nS = 1\n```\n```python\n# file: src/experiment.py\nE = 1\n```\n"
+    assert split_run.parse_split_response(plain, _PY_FENCE_RE) is not None, "a folder that is not a package still reads"
+
+
+@pytest.mark.asyncio
+async def test_simulate_importing_a_package_that_is_not_there_is_said_plainly(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    (engine.quest_root / "code").mkdir(parents=True)
+    state = {"design": {"protocol": PROTOCOL}}
+    engine.config.execution.code_package_max_extra_calls = 0
+    reply = _reply(SIM_PKG.replace(f"from {PKG} import", "from ghost import"))
+    await engine._code_package_reply(state, "p", reply, {"simulate": SIM_PKG, "analysis": ANALYSIS}, extend=False)
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert f"simulate.py imports code/{PKG}/, which is not in code/" in log
 
 
 def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:

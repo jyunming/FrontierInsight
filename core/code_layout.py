@@ -570,7 +570,9 @@ def _measure(check):
     if check["case"] is None:
         found = simulate.oracle()
         want = check["name"].strip().lower()
-        return next(v for k, v in found.items() if str(k).strip().lower() == want)
+        value = next((v for k, v in found.items() if str(k).strip().lower() == want), None)
+        assert value is not None, f"{{check['name']}}: simulate.oracle() does not return this check"
+        return value
     case = dict(check["case"])
     if hasattr(simulate, "run_trial"):
         return simulate.run_trial(case, 0, _seed(case))[check["measure"]]
@@ -710,16 +712,44 @@ def module_level_randomness(source: str) -> list[int]:
     lines: list[int] = []
     for stmt in tree.body:
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom)):
+            # A default argument is made when the module is loaded, too.
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                defaults = [d for d in [*stmt.args.defaults, *stmt.args.kw_defaults] if d is not None]
+                lines += [n.lineno for d in defaults for n in ast.walk(d) if _makes_rng(n)]
             continue
-        for node in ast.walk(stmt):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
-            owner = ast.unparse(func.value) if isinstance(func, ast.Attribute) else ""
-            if name in _RNG_MAKERS and (owner in _RNG_OWNERS or (not owner and name in {"default_rng", "RandomState"})):
-                lines.append(node.lineno)
+        if isinstance(stmt, ast.If) and "__name__" in ast.unparse(stmt.test) and "__main__" in ast.unparse(stmt.test):
+            continue  # runs only when the file is run by itself, not when simulate.py imports it
+        lines += [node.lineno for node in ast.walk(stmt) if _makes_rng(node)]
     return sorted(set(lines))
+
+
+def _makes_rng(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+    owner = ast.unparse(func.value) if isinstance(func, ast.Attribute) else ""
+    return name in _RNG_MAKERS and (owner in _RNG_OWNERS or (not owner and name in {"default_rng", "RandomState"}))
+
+
+_RNG_PARAMS = {"rng", "seed", "generator", "random_state", "prng", "key", "rs", "random"}
+
+
+def fallback_rng_lines(source: str) -> set[int]:
+    """Lines inside a function that takes the generator or the seed as an argument (``rng``, ``seed``, ...): a generator
+    made there without a seed is the fallback for a caller that passes none (``rng = rng or np.random.default_rng()``),
+    which is the shape the package is asked for, not a generator that ignores FI's seed."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set()
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            params = {a.arg for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]}
+            if params & _RNG_PARAMS:
+                out.update(range(node.lineno, (getattr(node, "end_lineno", None) or node.lineno) + 1))
+    return out
 
 
 def _parses(text: str) -> bool:

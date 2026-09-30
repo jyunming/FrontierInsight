@@ -37,7 +37,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .execution import ExecutionResult
@@ -192,10 +192,17 @@ def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | 
     is the engine's own pattern for a fenced Python block."""
     blocks = [m.group(1).strip("\n") for m in fence.finditer(text or "")]
     named: dict[str, str] = {}
-    for block in blocks:
+    markers = [_FILE_MARKER.match(next((line for line in b.splitlines() if line.strip()), "")) for b in blocks]
+    # Folders the reply writes a Python package into (``<pkg>/__init__.py``, ``<pkg>/model.py``; core/code_layout.py): a
+    # ``<pkg>/simulate.py`` there is a module of that package, not the script FI runs.
+    packages = {PurePosixPath(m.group(1).replace("\\", "/")).parent.as_posix() for m in markers
+                if m and PurePosixPath(m.group(1).replace("\\", "/")).name.lower() in ("__init__.py", "model.py")}
+    packages -= {".", "", "code"}
+    for block, marker in zip(blocks, markers):
         first = next((line for line in block.splitlines() if line.strip()), "")
-        marker = _FILE_MARKER.match(first)
         if not marker:
+            continue
+        if PurePosixPath(marker.group(1).replace("\\", "/")).parent.as_posix() in packages:
             continue
         name = Path(marker.group(1).replace("\\", "/")).name.lower()
         body = "\n".join(block.splitlines()[block.splitlines().index(first) + 1:]).strip("\n")

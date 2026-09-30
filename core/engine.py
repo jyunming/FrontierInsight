@@ -7978,17 +7978,28 @@ class Engine:
         ex = self.config.execution
         package = str((record or {}).get("package") or "") or _code_layout.package_name(
             str(self.config.title or self.config.topic or ""))
-        return _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
-                                   max_extra_lines=ex.code_package_max_extra_lines,
-                                   max_extra_calls=ex.code_package_max_extra_calls, package=package)
+        decision = _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
+                                       max_extra_lines=ex.code_package_max_extra_lines,
+                                       max_extra_calls=ex.code_package_max_extra_calls, package=package)
+        # The line limit decides once, from the plan: a later redesign that adds equations does not switch a quest whose
+        # package is on disk back to two scripts (``code_package: false`` still does, and a plan written again decides
+        # again, at ``_plan_code_layout``).
+        if (ex.code_package and record and record.get("shape") in (_code_layout.PACKAGE, _code_layout.SINGLE)
+                and not state.get("_deciding_layout")):
+            decision["shape"] = record["shape"]
+            decision["reason"] = str(record.get("reason") or "") if record["shape"] == _code_layout.SINGLE else ""
+        return decision
 
     def _plan_code_layout(self, state: QuestState) -> list[str]:
         """At plan time: decide the layout of the code from the plan, say it in run.log and return plan.md's lines."""
         try:
             protocol = (state.get("design") or {}).get("protocol")
-            layout = self._code_layout(state, protocol if isinstance(protocol, dict) else {})
+            layout = self._code_layout({**state, "_deciding_layout": True},  # type: ignore[typeddict-unknown-key]
+                                       protocol if isinstance(protocol, dict) else {})
             if layout is None:
                 return []
+            if not (self.quest_root / "code" / _split_run.SIMULATE_NAME).is_file():
+                layout["extra_calls_spent"] = 0  # no code yet (a new quest, or a restart from the plan): a new budget
             _code_layout.save(self.quest_root, layout)
             self._log.info("[plan] %s", _code_layout.summary(layout))
             return _code_layout.plan_lines(layout)
@@ -8029,6 +8040,9 @@ class Engine:
         package = layout["package"]
         code = self.quest_root / "code"
         on_disk = (code / package / _code_layout.MODEL_NAME).is_file()
+        if not on_disk and not (code / _split_run.SIMULATE_NAME).is_file():
+            # The code is written from nothing (a new quest, or a restart from the code step): a new request budget.
+            _code_layout.save(self.quest_root, {**(_code_layout.load(self.quest_root) or layout), "extra_calls_spent": 0})
         if extend and not on_disk:
             # An extension changes as little as it can: code kept as two scripts is not restructured for it.
             return scripts, text, {}
@@ -8075,19 +8089,23 @@ class Engine:
         if not _code_layout.complete(files, package):
             if not on_disk:
                 fell_back = "the reply left out the model's package"
-                if _code_layout.imports(scripts.get("simulate") or "", package):
-                    self._log.warning(
-                        "[implement] the reply left out the model's package (code/%s/) but simulate.py imports it: the "
-                        "first run will fail on the missing package and be sent for repair", package)
-                else:
-                    self._log.warning("[implement] the reply left out the model's package (code/%s/): the code keeps "
-                                      "two scripts (simulate.py and experiment.py) this time", package)
+                self._log.warning("[implement] the reply left out the model's package (code/%s/): this time the code "
+                                  "has no package of equations of its own, only simulate.py and experiment.py", package)
             elif sim_changed and not extend:
                 self._log.warning(
                     "[implement] simulate.py was written again but the model's package (code/%s/) was not: the package "
                     "from before is kept, so check that it still computes the plan's model", package)
         else:
             self._log.info("[implement] %s", _code_layout.summary(layout))
+        # A package simulate.py imports that neither this reply nor code/ holds (the reply named it otherwise, or wrote
+        # part of it): said plainly, since the first run will fail on it and be sent for repair.
+        kept = package if _code_layout.complete(files, package) else ""
+        absent = [n for n in dict.fromkeys([package, *_code_layout.packages_in_reply(text, _PY_FENCE_RE)])
+                  if n != kept and not (code / n / "__init__.py").is_file()
+                  and _code_layout.imports(scripts.get("simulate") or "", n)]
+        if absent:
+            self._log.warning("[implement] simulate.py imports %s, which is not in code/: the first run will fail on it "
+                              "and be sent for repair", ", ".join(f"code/{n}/" for n in absent))
         _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
         return scripts, text, files if _code_layout.complete(files, package) else {}
 
@@ -8137,11 +8155,13 @@ class Engine:
         return wrote
 
     def _package_repair_files(self, state: QuestState, parsed: Any) -> dict[str, str]:
-        """The usable package files a repair reply holds (nothing is written)."""
+        """The usable package files a repair reply holds that differ from the package on disk (nothing is written)."""
         shown = self._package_shown(state)
         if not shown or not isinstance(parsed, dict):
             return {}
-        return _code_layout.repair_files(parsed.get("package_files"), shown[0])[0]
+        files = _code_layout.repair_files(parsed.get("package_files"), shown[0])[0]
+        return {rel: text for rel, text in files.items()
+                if rel not in shown[1] or not _split_run.same_script(shown[1][rel], text)}
 
     def _package_snapshot(self) -> dict[str, str]:
         return _code_layout.package_sources(self.quest_root / "code")
@@ -8180,7 +8200,8 @@ class Engine:
             # A generator built without a seed in the package ignores the seed FI gives each trial.
             for rel, text in sorted(_code_layout.package_sources(code).items()):
                 if rel.startswith(f"{package}/"):
-                    unseeded = unseeded_rng_calls(text)
+                    fallback = _code_layout.fallback_rng_lines(text)  # `rng = rng or default_rng()`: asked for
+                    unseeded = [(line, expr) for line, expr in unseeded_rng_calls(text) if line not in fallback]
                     if unseeded:
                         problems.append(f"code/{rel} builds a random generator without a seed ("
                                         + "; ".join(f"line {line}: {expr}" for line, expr in unseeded[:3])
@@ -8649,6 +8670,12 @@ class Engine:
                 passing=[str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True],
             )
             attempts[-1]["repair"] = outcome
+            package_after = self._package_snapshot()
+            if package_after != package_before:
+                # A fix in the model's package: the files it changed, by their new hash.
+                attempts[-1]["package_files"] = {
+                    rel: _attempts._sha(body.encode("utf-8")) for rel, body in sorted(package_after.items())
+                    if package_before.get(rel) != body}
             if call_failed and call_failures_left > 0:
                 call_failures_left -= 1  # no answer came back: the script was not rewritten, so the repair is not spent
             elif outcome != "set_aside_disputed":
@@ -18118,7 +18145,7 @@ the line `# file: experiment.py`, then the `DEPS:` line, and nothing else.
 - For a deterministic study (no randomness): `def run_cell(cell: dict) -> dict` computes one setting, called once per
   setting. It takes no seed and reads no `FI_REPLICATE_SEED`: FI calls it once for each setting, with nothing repeated.
 - Each equation of the design's `model` whose role is `generates` carries its id in a comment (`# E1`) on or above the
-  code in simulate.py that computes it.
+  code that computes it (in simulate.py, or in the model's package when the code has one).
 - The function RETURNS a flat dict of numbers, one entry per quantity the analysis needs from that trial
   (`{"outbreak": 1.0, "peak_day": 38.0, "final_size": 812.0}`); a failed or diverged trial RAISES an exception with the
   reason instead of returning a made-up value. It does not write files, print results, or keep state between calls.
