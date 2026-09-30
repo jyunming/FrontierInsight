@@ -15,8 +15,8 @@ default the code is also laid out the way a small research tool is:
 
 The model writes the package and the scenario; FI writes the tests, the equation list and ``run.py``. The extra cost is
 estimated at plan time (:func:`estimate`) and shown in ``plan.md`` (:func:`plan_lines`); over the limit set in
-``execution.code_package_max_extra_lines`` / ``code_package_max_extra_calls`` the quest keeps the two scripts alone and
-says so (:func:`decide`). After the code is written the engine checks the layout (:func:`check`): what is missing is a
+``execution.code_package_max_extra_lines`` the quest keeps the two scripts alone and says so (:func:`decide`), and
+``code_package_max_extra_calls`` bounds the requests made to ask for a package a reply left out (:func:`calls_left`). After the code is written the engine checks the layout (:func:`check`): what is missing is a
 warning, and a stop only under ``rigor_profile: research``.
 """
 
@@ -302,6 +302,22 @@ def packages_in_reply(text: str, fence: re.Pattern[str]) -> list[str]:
         rel = rel[len("code/"):] if rel.startswith("code/") else rel
         parts = rel.split("/")
         if len(parts) == 2 and parts[1] == MODEL_NAME and parts[0] not in names:
+            names.append(parts[0])
+    return names
+
+
+def reply_folders(text: str, fence: re.Pattern[str]) -> list[str]:
+    """The folders a reply wrote any Python file into (``# file: <folder>/<name>.py``), ``code/`` left out."""
+    names: list[str] = []
+    for match in fence.finditer(text or ""):
+        lines = match.group(1).strip("\n").splitlines()
+        marker = _FILE_MARKER.match(next((line for line in lines if line.strip()), ""))
+        if not marker:
+            continue
+        rel = marker.group(1).replace("\\", "/").strip("/")
+        rel = rel[len("code/"):] if rel.startswith("code/") else rel
+        parts = rel.split("/")
+        if len(parts) >= 2 and parts[-1].endswith(".py") and parts[0] not in names and parts[0] not in (".", ".."):
             names.append(parts[0])
     return names
 
@@ -717,10 +733,21 @@ def module_level_randomness(source: str) -> list[int]:
                 defaults = [d for d in [*stmt.args.defaults, *stmt.args.kw_defaults] if d is not None]
                 lines += [n.lineno for d in defaults for n in ast.walk(d) if _makes_rng(n)]
             continue
-        if isinstance(stmt, ast.If) and "__name__" in ast.unparse(stmt.test) and "__main__" in ast.unparse(stmt.test):
-            continue  # runs only when the file is run by itself, not when simulate.py imports it
+        if _is_main_guard(stmt):
+            # The guarded block runs only when the file is run by itself, not when simulate.py imports it; its else does.
+            lines += [node.lineno for other in stmt.orelse for node in ast.walk(other) if _makes_rng(node)]
+            continue
         lines += [node.lineno for node in ast.walk(stmt) if _makes_rng(node)]
     return sorted(set(lines))
+
+
+def _is_main_guard(stmt: ast.AST) -> bool:
+    """``if __name__ == "__main__":``."""
+    if not isinstance(stmt, ast.If) or not isinstance(stmt.test, ast.Compare) or len(stmt.test.ops) != 1:
+        return False
+    sides = [stmt.test.left, *stmt.test.comparators]
+    return (isinstance(stmt.test.ops[0], ast.Eq) and any(isinstance(x, ast.Name) and x.id == "__name__" for x in sides)
+            and any(isinstance(x, ast.Constant) and x.value == "__main__" for x in sides))
 
 
 def _makes_rng(node: ast.AST) -> bool:
@@ -732,23 +759,31 @@ def _makes_rng(node: ast.AST) -> bool:
     return name in _RNG_MAKERS and (owner in _RNG_OWNERS or (not owner and name in {"default_rng", "RandomState"}))
 
 
-_RNG_PARAMS = {"rng", "seed", "generator", "random_state", "prng", "key", "rs", "random"}
+_RNG_PARAMS = {"rng", "seed", "generator", "random_state", "prng"}
 
 
 def fallback_rng_lines(source: str) -> set[int]:
-    """Lines inside a function that takes the generator or the seed as an argument (``rng``, ``seed``, ...): a generator
-    made there without a seed is the fallback for a caller that passes none (``rng = rng or np.random.default_rng()``),
-    which is the shape the package is asked for, not a generator that ignores FI's seed."""
+    """Lines where a function that takes the generator or the seed as an argument (``rng``, ``seed``, ...) makes a
+    generator for a caller that passed none, assigning it to that same argument (``rng = rng or np.random.default_rng()``,
+    or ``if rng is None: rng = np.random.default_rng()``): the shape the package is asked for, not a generator that
+    ignores FI's seed. A generator assigned to anything else in such a function is still reported."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return set()
     out: set[int] = set()
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            params = {a.arg for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]}
-            if params & _RNG_PARAMS:
-                out.update(range(node.lineno, (getattr(node, "end_lineno", None) or node.lineno) + 1))
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        params = {a.arg for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]} & _RNG_PARAMS
+        if not params:
+            continue
+        for stmt in ast.walk(node):
+            if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
+                continue
+            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+            if any(isinstance(t, ast.Name) and t.id in params for t in targets):
+                out.update(range(stmt.lineno, (getattr(stmt, "end_lineno", None) or stmt.lineno) + 1))
     return out
 
 

@@ -195,14 +195,19 @@ def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | 
     markers = [_FILE_MARKER.match(next((line for line in b.splitlines() if line.strip()), "")) for b in blocks]
     # Folders the reply writes a Python package into (``<pkg>/__init__.py``, ``<pkg>/model.py``; core/code_layout.py): a
     # ``<pkg>/simulate.py`` there is a module of that package, not the script FI runs.
-    packages = {PurePosixPath(m.group(1).replace("\\", "/")).parent.as_posix() for m in markers
-                if m and PurePosixPath(m.group(1).replace("\\", "/")).name.lower() in ("__init__.py", "model.py")}
-    packages -= {".", "", "code"}
+    def _path(m: Any) -> PurePosixPath:
+        rel = m.group(1).replace("\\", "/").strip("/")
+        return PurePosixPath(rel[len("code/"):] if rel.startswith("code/") else rel)
+
+    packages = {_path(m).parent.as_posix() for m in markers
+                if m and _path(m).name.lower() in ("__init__.py", "model.py")} - {".", ""}
+    # Only when the same script also comes outside those folders: a reply that puts everything in one folder is read.
+    outside = {_path(m).name.lower() for m in markers if m and _path(m).parent.as_posix() not in packages}
     for block, marker in zip(blocks, markers):
         first = next((line for line in block.splitlines() if line.strip()), "")
         if not marker:
             continue
-        if PurePosixPath(marker.group(1).replace("\\", "/")).parent.as_posix() in packages:
+        if _path(marker).parent.as_posix() in packages and _path(marker).name.lower() in outside:
             continue
         name = Path(marker.group(1).replace("\\", "/")).name.lower()
         body = "\n".join(block.splitlines()[block.splitlines().index(first) + 1:]).strip("\n")

@@ -7981,13 +7981,12 @@ class Engine:
         decision = _code_layout.decide(protocol if isinstance(protocol, dict) else None, enabled=ex.code_package,
                                        max_extra_lines=ex.code_package_max_extra_lines,
                                        max_extra_calls=ex.code_package_max_extra_calls, package=package)
-        # The line limit decides once, from the plan: a later redesign that adds equations does not switch a quest whose
-        # package is on disk back to two scripts (``code_package: false`` still does, and a plan written again decides
-        # again, at ``_plan_code_layout``).
-        if (ex.code_package and record and record.get("shape") in (_code_layout.PACKAGE, _code_layout.SINGLE)
+        # A quest laid out as a package stays one: a later redesign that adds equations does not switch it back to two
+        # scripts (``code_package: false`` still does, and a plan written again decides again). Two scripts are decided
+        # again each time, so raising the limit, as plan.md says, takes effect on a resume.
+        if (ex.code_package and record and record.get("shape") == _code_layout.PACKAGE
                 and not state.get("_deciding_layout")):
-            decision["shape"] = record["shape"]
-            decision["reason"] = str(record.get("reason") or "") if record["shape"] == _code_layout.SINGLE else ""
+            decision["shape"], decision["reason"] = _code_layout.PACKAGE, ""
         return decision
 
     def _plan_code_layout(self, state: QuestState) -> list[str]:
@@ -8040,7 +8039,7 @@ class Engine:
         package = layout["package"]
         code = self.quest_root / "code"
         on_disk = (code / package / _code_layout.MODEL_NAME).is_file()
-        if not on_disk and not (code / _split_run.SIMULATE_NAME).is_file():
+        if not on_disk and not any((code / n).is_file() for n in (_split_run.SIMULATE_NAME, "experiment.py")):
             # The code is written from nothing (a new quest, or a restart from the code step): a new request budget.
             _code_layout.save(self.quest_root, {**(_code_layout.load(self.quest_root) or layout), "extra_calls_spent": 0})
         if extend and not on_disk:
@@ -8100,12 +8099,13 @@ class Engine:
         # A package simulate.py imports that neither this reply nor code/ holds (the reply named it otherwise, or wrote
         # part of it): said plainly, since the first run will fail on it and be sent for repair.
         kept = package if _code_layout.complete(files, package) else ""
-        absent = [n for n in dict.fromkeys([package, *_code_layout.packages_in_reply(text, _PY_FENCE_RE)])
+        absent = [n for n in dict.fromkeys([package, *_code_layout.reply_folders(text, _PY_FENCE_RE)])
                   if n != kept and not (code / n / "__init__.py").is_file()
                   and _code_layout.imports(scripts.get("simulate") or "", n)]
         if absent:
-            self._log.warning("[implement] simulate.py imports %s, which is not in code/: the first run will fail on it "
-                              "and be sent for repair", ", ".join(f"code/{n}/" for n in absent))
+            self._log.warning("[implement] simulate.py imports the package %s, but %s not written: the first run will "
+                              "fail on it and be sent for repair", ", ".join(f"`{n}`" for n in absent),
+                              " and ".join(f"code/{n}/" for n in absent) + (" was" if len(absent) == 1 else " were"))
         _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
         return scripts, text, files if _code_layout.complete(files, package) else {}
 

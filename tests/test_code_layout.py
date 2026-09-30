@@ -582,6 +582,10 @@ def test_a_change_to_the_package_makes_the_older_contracts_raw_files_stale(tmp_p
 def test_a_generator_the_caller_can_replace_is_not_a_problem_but_one_made_at_load_is() -> None:
     fallback = "import numpy as np\n\n\ndef step(y, rng=None):\n    rng = rng or np.random.default_rng()\n    return y\n"
     assert set(__import__("core.engine").engine.unseeded_rng_calls(fallback)) and cl.fallback_rng_lines(fallback) >= {5}
+    ignores = "import numpy as np\n\n\ndef step(y, seed):\n    gen = np.random.default_rng()\n    return y\n"
+    assert 5 not in cl.fallback_rng_lines(ignores), "a function that takes a seed and ignores it is still reported"
+    other_if = "import numpy as np\nif __name__ != '__main__':\n    R = np.random.default_rng()\n"
+    assert cl.module_level_randomness(other_if) == [3]
     main = "import numpy as np\n\n\ndef f(y):\n    return y\n\n\nif __name__ == '__main__':\n    np.random.default_rng()\n"
     assert cl.module_level_randomness(main) == [], "runs only when the file is run by itself"
     default = "import numpy as np\n\n\ndef f(y, rng=np.random.default_rng(0)):\n    return y\n"
@@ -597,6 +601,9 @@ def test_the_budget_starts_again_for_code_written_from_nothing_and_the_shape_hol
     engine.config.execution.code_package = False
     assert engine._code_layout(state)["shape"] == cl.SINGLE, "switching it off still does"
     engine.config.execution.code_package = True
+    # Two scripts are decided again each time: raising the limit, as plan.md says, takes effect on a resume.
+    cl.save(engine.quest_root, {"shape": cl.SINGLE, "package": PKG, "reason": "over the limit of 10"})
+    assert engine._code_layout(state)["shape"] == cl.PACKAGE
     # A restart from the code step: code/ is empty, the budget is new.
     import shutil
 
@@ -619,6 +626,11 @@ def test_a_package_module_named_like_a_script_is_not_taken_for_it() -> None:
     assert scripts is not None and "REAL" in scripts["simulate"]
     plain = "```python\n# file: src/simulate.py\nS = 1\n```\n```python\n# file: src/experiment.py\nE = 1\n```\n"
     assert split_run.parse_split_response(plain, _PY_FENCE_RE) is not None, "a folder that is not a package still reads"
+    one_folder = ("```python\n# file: project/simulate.py\nS = 1\n```\n```python\n# file: project/experiment.py\nE = 1\n```\n"
+                  "```python\n# file: project/model.py\nM = 1\n```\n")
+    assert split_run.parse_split_response(one_folder, _PY_FENCE_RE) is not None, "everything in one folder still reads"
+    mixed = reply.replace(f"# file: {PKG}/__init__.py", f"# file: code/{PKG}/__init__.py")
+    assert "REAL" in split_run.parse_split_response(mixed, _PY_FENCE_RE)["simulate"]
 
 
 @pytest.mark.asyncio
@@ -627,10 +639,12 @@ async def test_simulate_importing_a_package_that_is_not_there_is_said_plainly(tm
     (engine.quest_root / "code").mkdir(parents=True)
     state = {"design": {"protocol": PROTOCOL}}
     engine.config.execution.code_package_max_extra_calls = 0
-    reply = _reply(SIM_PKG.replace(f"from {PKG} import", "from ghost import"))
-    await engine._code_package_reply(state, "p", reply, {"simulate": SIM_PKG, "analysis": ANALYSIS}, extend=False)
+    ghost_sim = SIM_PKG.replace(f"from {PKG} import", "from ghost import")
+    # The reply wrote a package of its own name with no model.py, and simulate.py imports it.
+    reply = _reply(ghost_sim) + "```python\n# file: ghost/__init__.py\n```\n```python\n# file: ghost/dynamics.py\nX = 1\n```\n"
+    await engine._code_package_reply(state, "p", reply, {"simulate": ghost_sim, "analysis": ANALYSIS}, extend=False)
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert f"simulate.py imports code/{PKG}/, which is not in code/" in log
+    assert "simulate.py imports the package `ghost`, but code/ghost/ was not written" in log
 
 
 def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:
