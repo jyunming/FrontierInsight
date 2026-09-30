@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "97bf9f9dd4c640f2cd43a35e7267937c0f5e4981b00dada004cb174c617d72ed",
+  "vsix_sha256": "e550863b7bacf33989409e93d03f2bb054cf09577dfd13d942fa025930137374",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -46,8 +46,8 @@
       "bytes": 35534
     },
     "extension/out/extension.js": {
-      "sha256": "b40ea7e86f1090559a6bea25e9e0198e1ffe8e3f4dac989ba4d5918cae909b15",
-      "bytes": 112653
+      "sha256": "c077400b9dfc1c489c57dd078bf46f08e3f41802f57c775e9e4b88e277862a79",
+      "bytes": 121013
     },
     "extension/out/fi-home.js": {
       "sha256": "ae836799badc78f90e5899bfd8e598d03e1d0f830777c51917ddf4292c1980f0",
@@ -118,8 +118,8 @@
       "bytes": 15295
     },
     "extension/readme.md": {
-      "sha256": "f8a97b416675b0f539fab1e3a12a5b4a84e948fc0370c3f1188a67020484ce3a",
-      "bytes": 80039
+      "sha256": "75d03d0be4fe826bdc11c5b5a9886276e97a824ad1ef35e5ed3634bd8ebca238",
+      "bytes": 80842
     }
   }
 }
