@@ -239,8 +239,8 @@ slow next time. A request the provider rejects (HTTP 400–499 other than 429)
 and a 429 that says the account's quota, credit or monthly allowance is used
 up are not tried again: waiting cannot fix them, so the step fails at once
 with the provider's message. To keep a quest going through a longer outage,
-name a second provider in `provider.fallback`: while another provider can
-take the call, FI does not wait out the outage but moves on after the four
+name a second provider in `provider.fallback`: while that provider is
+working, FI does not wait out the outage but moves on to it after the four
 quick attempts.
 
 ## Retry model escalation (opt-in)

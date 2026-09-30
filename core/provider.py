@@ -1685,8 +1685,10 @@ def _is_exhausted_quota(resp: Any) -> bool:
         err = resp.json()
     except Exception:  # noqa: BLE001 -- no JSON body: nothing names a quota
         return False
-    if isinstance(err, dict) and isinstance(err.get("error"), dict):
+    if isinstance(err, dict) and isinstance(err.get("error"), (dict, str)):
         err = err["error"]
+    if isinstance(err, str):  # Ollama's native shape: {"error": "<message>"}
+        err = {"message": err}
     if not isinstance(err, dict):
         return False
     if _retry_after_s(resp) is not None:
@@ -1700,7 +1702,9 @@ def _is_exhausted_quota(resp: Any) -> bool:
         return False
     if _QUOTA_USED_UP_KIND.search(kind):
         return True
-    return bool(_QUOTA_USED_UP_MESSAGE.search(norm(str(err.get("message") or ""))))
+    message = norm(str(err.get("message") or ""))
+    # A message that names a per-minute limit as well ("requests per minute exceeded; daily limit 1000") is a rate limit.
+    return bool(_QUOTA_USED_UP_MESSAGE.search(message)) and not _RATE_LIMIT_KIND.search(message)
 
 
 #: Waits (seconds, before jitter) after each failed attempt while the provider's server is down or busy -- an HTTP 5xx
@@ -1736,8 +1740,8 @@ def _http_outage_status(exc: BaseException | None) -> int | None:
 
 
 def _http_short_retry() -> bool:
-    """True when this call should not wait out an outage: another provider in ``provider.fallback`` can take the call
-    now, or this call is the one probe of a provider whose circuit opened (see :class:`FallbackLLMClient`)."""
+    """True when this call should not wait out an outage: a healthy provider later in ``provider.fallback`` can take
+    the call (see :class:`FallbackLLMClient`)."""
     slot = CALL_SLOT.get() or {}
     return bool(slot.get("short_retry"))
 
@@ -1834,17 +1838,17 @@ def _http_retry_stop(retry_state: "Any") -> bool:
 async def _http_retry_sleep(seconds: float) -> None:
     """tenacity ``sleep`` for the HTTP transport: gives this call's ``FI_MAX_CONCURRENT_LLM_CALLS`` slot back for the
     wait, so a provider outage of minutes does not hold slots other calls are queued for. The slot is taken again
-    before the next attempt; a cancel during that re-take still leaves the count balanced (the shielded acquire
-    completes, and the dispatch's ``async with`` releases once)."""
-    sem = _HELD_CALL_SLOT.get()
-    if sem is None:
+    before the next attempt. A cancel during the wait or the re-take leaves it given back (``held`` false), so the
+    dispatch does not release it a second time and the cancel is not held up waiting for a free slot."""
+    box = _HELD_CALL_SLOT.get()
+    if box is None or not box.get("held"):
         await asyncio.sleep(seconds)
         return
-    sem.release()
-    try:
-        await asyncio.sleep(seconds)
-    finally:
-        await asyncio.shield(sem.acquire())
+    box["held"] = False
+    box["sem"].release()
+    await asyncio.sleep(seconds)
+    await box["sem"].acquire()  # cancellation-safe: a cancelled acquire takes nothing
+    box["held"] = True
 
 
 def _retry_cli_error(exc: BaseException) -> bool:
@@ -1879,8 +1883,9 @@ def _retry_cli_error(exc: BaseException) -> bool:
 # slot back for the length of each wait (``_http_retry_sleep``), so a provider
 # outage of minutes does not hold slots other quests' calls are queued for.
 _LLM_CALL_SEM: "asyncio.Semaphore | None" = None
-#: The semaphore slot the current ``chat`` dispatch holds (``None`` when the cap is off).
-_HELD_CALL_SLOT: "contextvars.ContextVar[asyncio.Semaphore | None]" = contextvars.ContextVar(
+#: The current ``chat`` dispatch's slot, ``{"sem": <Semaphore>, "held": bool}`` (``None`` when the cap is off):
+#: ``held`` says whether the dispatch holds it right now, so it is released exactly once.
+_HELD_CALL_SLOT: "contextvars.ContextVar[dict[str, Any] | None]" = contextvars.ContextVar(
     "fi_held_call_slot", default=None)
 _LLM_CALL_SEM_LIMIT: int = -1  # -1 == "not yet resolved from the environment"
 _LLM_CALL_SEM_LOOP: "asyncio.AbstractEventLoop | None" = None
@@ -3581,24 +3586,31 @@ class LLMClient:
             # only for this one dispatch and released on return, so retries /
             # fallbacks re-queue rather than deadlock.
             gate = _llm_call_slot()
-            async with gate:
-                # The HTTP path gives the slot back while it waits out a provider outage (_http_retry_sleep).
-                held = _HELD_CALL_SLOT.set(gate if isinstance(gate, asyncio.Semaphore) else None)
-                try:
-                    text = await self._chat_impl(
-                        messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        extra=extra,
-                        model=model,
-                        node=node,
-                    )
-                finally:
-                    _HELD_CALL_SLOT.reset(held)
-                # This call's own token counts, in this task's record of it: the client's ``last_usage`` is shared by
-                # calls running at the same time.
-                LAST_CALL.set({**(LAST_CALL.get() or {}), "usage": self.last_usage})
-                return text
+            # The HTTP path gives the slot back while it waits out a provider outage (_http_retry_sleep), so whether
+            # this dispatch still holds it at the end is tracked, not assumed.
+            box: dict[str, Any] | None = None
+            if isinstance(gate, asyncio.Semaphore):
+                await gate.acquire()
+                box = {"sem": gate, "held": True}
+            held = _HELD_CALL_SLOT.set(box)
+            try:
+                text = await self._chat_impl(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    extra=extra,
+                    model=model,
+                    node=node,
+                )
+            finally:
+                _HELD_CALL_SLOT.reset(held)
+                if box is not None and box["held"]:
+                    box["held"] = False
+                    gate.release()
+            # This call's own token counts, in this task's record of it: the client's ``last_usage`` is shared by
+            # calls running at the same time.
+            LAST_CALL.set({**(LAST_CALL.get() or {}), "usage": self.last_usage})
+            return text
         except Exception as e:
             # ``except Exception`` excludes ``asyncio.CancelledError``
             # (a BaseException subclass since Python 3.8) — see the
@@ -4457,8 +4469,8 @@ class FallbackLLMClient:
             self._slots.append(_FallbackSlot(label=name, factory=factory))
         self._threshold = max(1, int(breaker_threshold))
         # Half-open recovery: a tripped provider is re-probed once after this
-        # many seconds (the probe itself gets the short retry budget, see
-        # _http_short_retry) so a transient outage doesn't
+        # many seconds (a probe with a healthy provider after it gets the short
+        # retry budget, see _http_short_retry) so a transient outage doesn't
         # permanently drop it for the whole quest. 0 disables (open for the run).
         self._cooldown_s = float(breaker_cooldown_s)
         # Read by the Engine cost logger immediately after each chat().
@@ -4504,11 +4516,12 @@ class FallbackLLMClient:
             # This provider's own record of the call: what an earlier one named is not this one's answer.
             LAST_CALL.set(None)
             note_thinking("")
-            # No long outage wait (see _http_short_retry) when another provider can take the call now, or on the one
-            # probe of a provider whose circuit opened: minutes on a dead provider are better spent on a live one.
-            others = any(s.is_available(now, self._cooldown_s) for s in self._slots[idx + 1:])
+            # No long outage wait (see _http_short_retry) while a healthy provider (circuit closed) comes after this
+            # one: minutes on a dead provider are better spent on a live one. When every later provider is tripped
+            # too, this one waits the outage out, as it would with no fallback chain.
+            healthy_next = any(not s.tripped for s in self._slots[idx + 1:])
             slot_token = CALL_SLOT.set({"provider": slot.label, "fallback": idx > 0,
-                                        "short_retry": bool(probing or others)})
+                                        "short_retry": healthy_next})
             try:
                 text = await client.chat(messages, **kwargs)
             except asyncio.CancelledError:

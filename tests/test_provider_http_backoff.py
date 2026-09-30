@@ -259,12 +259,35 @@ async def test_the_fallback_chain_marks_the_primary_short_only_when_another_prov
     assert seen[1]["short_retry"] is False, "the last provider waits an outage out"
 
 
+async def test_when_every_later_provider_is_tripped_the_call_waits_the_outage_out() -> None:
+    """A chain whose other providers are all tripped is no less patient than no chain at all."""
+    seen: list[dict] = []
+
+    class _Fake:
+        last_usage = None
+        last_model = "m"
+
+        async def chat(self, messages, **kw):
+            seen.append(dict(provider.CALL_SLOT.get() or {}))
+            return "fine"
+
+    async def factory():
+        return _Fake()
+
+    chain = provider.FallbackLLMClient(_Fake(), [("backup", factory)], breaker_cooldown_s=0.0)
+    chain._slots[1].tripped = True
+    chain._slots[1].tripped_at = 0.0
+    assert await chain.chat([{"role": "user", "content": "x"}]) == "fine"
+    assert seen[0]["short_retry"] is False
+
+
 async def test_the_concurrency_slot_is_given_back_while_waiting() -> None:
     import asyncio
 
     sem = asyncio.Semaphore(1)
     await sem.acquire()
-    token = provider._HELD_CALL_SLOT.set(sem)
+    box = {"sem": sem, "held": True}
+    token = provider._HELD_CALL_SLOT.set(box)
     try:
         sleeper = asyncio.create_task(provider._http_retry_sleep(0.2))
         await asyncio.sleep(0.05)
@@ -273,8 +296,40 @@ async def test_the_concurrency_slot_is_given_back_while_waiting() -> None:
         await sleeper
     finally:
         provider._HELD_CALL_SLOT.reset(token)
-    assert sem.locked(), "the waiting call holds its slot again before its next attempt"
+    assert sem.locked() and box["held"], "the waiting call holds its slot again before its next attempt"
     sem.release()
+
+
+async def test_a_cancel_while_the_slot_is_taken_elsewhere_is_not_held_up_and_leaves_the_count_balanced() -> None:
+    import asyncio
+
+    sem = asyncio.Semaphore(1)
+    await sem.acquire()
+    box = {"sem": sem, "held": True}
+
+    async def waiting_call() -> None:
+        provider._HELD_CALL_SLOT.set(box)
+        await provider._http_retry_sleep(0.05)
+
+    task = asyncio.create_task(waiting_call())
+    await asyncio.sleep(0.01)
+    await sem.acquire()  # another call takes the freed slot and keeps it
+    await asyncio.sleep(0.1)  # the waiting call is now queued for the slot
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+    assert box["held"] is False, "the cancelled call does not hold the slot, so it will not release it"
+    sem.release()  # the other call finishes
+    assert not sem.locked(), "the count is back where it started"
+
+
+async def test_a_capped_call_through_an_outage_leaves_the_semaphore_balanced(waits: list[float],
+                                                                             monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FI_MAX_CONCURRENT_LLM_CALLS", "1")
+    handler, calls = _replies(*[_cloudflare(503)] * 2, httpx.Response(200, json=OK))
+    assert await _chat(PLAIN, handler) == "hello"
+    sem = provider._llm_call_slot()
+    assert not sem.locked(), "the one slot is free again after the call"
 
 
 async def test_a_524_keeps_the_short_budget(waits: list[float]) -> None:
@@ -297,6 +352,8 @@ async def test_a_524_keeps_the_short_budget(waits: list[float]) -> None:
     ({"error": {"type": "engine_overloaded_error"}}, {}, False),
     ({"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "You exceeded your current quota"}}, {}, False),
     ({"error": {"type": "insufficient_quota"}}, {"Retry-After": "20"}, False),
+    ({"error": "you have reached your monthly usage limit"}, {}, True),
+    ({"error": {"message": "requests per minute exceeded; daily limit 1000"}}, {}, False),
 ])
 def test_which_429_is_a_used_up_quota(body: dict, headers: dict, used_up: bool) -> None:
     assert provider._is_exhausted_quota(httpx.Response(429, json=body, headers=headers)) is used_up
