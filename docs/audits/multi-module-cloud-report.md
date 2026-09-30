@@ -116,7 +116,9 @@ All with `--basetemp ./.pytest_tmp/<unique>`; no test calls a real model.
 ## Completed locally (Windows)
 
 The cloud draft was reviewed and completed on the maintainer's Windows machine (Python 3.11, `pytest -n 4`,
-`--basetemp ./.pytest_tmp/<unique>`), rebased on `origin/main` at `a9ab141`.
+`--basetemp ./.pytest_tmp/<unique>`), first on `origin/main` at `a9ab141`, then rebased on `03ebd79` (after the
+optimisation runner and the oracle-form change landed; the conflicts were in `_split_block`, the reflect note for
+simulate.py and `attempt_records._generated_project_files`, each resolved by keeping both sides).
 
 **Design review (before any external review).** A refine that extends the study, the repair of a crashed simulation and
 the repair for a failed oracle check were all blind to `model.py` (they showed and rewrote simulate.py only), so an
