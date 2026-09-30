@@ -932,6 +932,24 @@ def test_runs_that_differed_by_seed_go_to_the_confirm_run_whatever_the_code_look
     assert route == "write" and phased.status(record) == "not_confirmable"
 
 
+def test_a_confirm_run_on_new_seeds_that_gives_exploration_s_numbers_is_not_confirmed(tmp_path: Path) -> None:
+    """The code check can miss a fixed seed (``SEED = 42; default_rng(SEED)``) when only one run was made: the confirm
+    run giving exactly exploration's numbers on new seeds shows it."""
+    phased.prepare(tmp_path, "q1")
+    phased.enter_confirm(tmp_path, explore_result={"a": 1}, frozen_sha256=None, stride=10, replicates=1, explore_runs=1)
+    phased.seed_env(tmp_path, _env(0, 0))
+    phased.note_confirm_result(tmp_path, {"a": 1})
+    record, lines = phased.record_confirm(tmp_path, {"a": 1})
+    assert phased.status(record) == "not_confirmable" and any("exactly exploration's numbers" in x for x in lines)
+
+
+def test_a_seed_handed_on_by_keyword_is_not_taken_for_a_fixed_seed(tmp_path: Path) -> None:
+    script = ("import os\nimport numpy as np\nfrom scipy import stats\nnp.random.seed(0)\n"
+              "seed = int(os.environ.get('FI_REPLICATE_SEED', '0'))\nprint(stats.norm.rvs(size=3, random_state=seed))\n")
+    route, record, _frozen = _gate_after(tmp_path, {"experiment.py": script}, label="kw")
+    assert route == "confirm" and phased.status(record) == "confirming"
+
+
 def test_a_seed_read_in_a_package_imported_relatively_is_found(tmp_path: Path) -> None:
     files = {"experiment.py": "from sim import run\nprint(run())\n",
              "sim/__init__.py": "from .core import run\n",

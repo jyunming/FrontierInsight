@@ -605,6 +605,13 @@ def record_confirm(quest_root: Path, result: Any) -> tuple[dict[str, Any] | None
             record["compromised"] = ("the result that reached the paper is not the one the confirm run produced (a run "
                                      "from an earlier step brought back exploration's result)")
             lines.append(f"confirm stage: {record['compromised']}, so nothing in this quest is confirmed")
+        elif (digest is not None and record.get("strategy") == FRESH_SEEDS
+              and digest == record.get("explore_result_sha256")):
+            # New seeds gave exactly exploration's numbers: the run does not depend on its seed (or ignores it), so it
+            # repeated exploration's run rather than confirming it.
+            record["not_confirmable"] = ("the confirm run on new seeds gave exactly exploration's numbers, so the study "
+                                         "does not depend on its seed and the run only repeated exploration's")
+            lines.append(f"confirm stage: {record['not_confirmable']}; nothing in this quest is confirmed")
         elif digest is None:
             lines.append("confirm stage: the confirm run produced no result, so nothing in this quest is confirmed")
         elif runs > 1:

@@ -2499,7 +2499,7 @@ class Engine:
                 return ""  # a background job's driver passes the seed on to the job, not to a generator of its own
             return (f"code/{script.name} names FI_REPLICATE_SEED but seeds every random generator with a fixed number, "
                     "so a run on new seeds would repeat exploration's run")
-        if not self.config.execution.background_jobs and not _script_has_random_source(script):
+        if not self.config.execution.background_jobs and not any(_script_has_random_source(p) for p in modules):
             return deterministic
         return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), so a run on new seeds "
                 "would repeat exploration's run")
@@ -18080,14 +18080,19 @@ def _own_modules(code_path: Path) -> list[Path]:
                 parts = node.module.split(".") if node.module else []
                 stems.append(base.joinpath(*parts) if parts else base)
                 stems += [base.joinpath(*parts, a.name) for a in node.names]
+        root = folder.resolve()
         for stem in stems:
-            todo += [c for c in (stem.with_suffix(".py"), stem / "__init__.py") if c.is_file()]
+            todo += [c for c in (stem.with_suffix(".py"), stem / "__init__.py")
+                     if c.is_file() and root in c.resolve().parents]  # never outside code/
     return seen
 
 
 # Calls that seed a random generator (the name of what is called, its last part).
 _SEEDING_CALLS = frozenset({"seed", "manual_seed", "default_rng", "RandomState", "Random", "SeedSequence",
                             "PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64", "PRNGKey", "key"})
+# Keyword arguments that carry a seed (``Random(x=)``, ``random.seed(a=)``, ``SeedSequence(entropy=)``, scikit-learn and
+# scipy's ``random_state=``).
+_SEED_KEYWORDS = frozenset({"seed", "x", "a", "entropy", "random_state"})
 
 
 def _constant_expr(node: ast.AST | None) -> bool:
@@ -18115,11 +18120,15 @@ def _seeds_only_constants(paths: list[Path]) -> bool:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
+            # A seed handed to anything by keyword (``random_state=seed`` for scikit-learn or scipy, ``entropy=``): not
+            # a constant, so not "only constants".
+            if any(k.arg in _SEED_KEYWORDS and not _constant_expr(k.value) for k in node.keywords):
+                return False
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
             if name not in _SEEDING_CALLS:
                 continue
-            arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in ("seed", "x")), None)
+            arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in _SEED_KEYWORDS), None)
             if arg is None:
                 continue  # built without a seed: draws from the operating system (handled apart)
             if not _constant_expr(arg):
