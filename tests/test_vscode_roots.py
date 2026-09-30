@@ -316,6 +316,8 @@ first.listen(shared, async () => {
     assert got["bound"] == got["got"]
     assert got["alive"], "closing the second window's bridge broke the first window's"
     ext = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
-    assert ext.count("bridgeSocket: thisWindowsBridge(),") == 2
+    # The one line meant for a terminal (the `--update` line /update shows for answering the questions one by one)
+    # carries this window's address; no chat command runs in a terminal any more.
+    assert ext.count("bridgeSocket: thisWindowsBridge(),") == 1
     bridge = (EXT / "src" / "persistent-bridge.ts").read_text(encoding="utf-8")
     assert "persistentBridgePath(String(process.pid))" in bridge

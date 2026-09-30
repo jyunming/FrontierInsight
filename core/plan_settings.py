@@ -3,10 +3,18 @@ later start.
 
 The interview's confirm screen shows these settings, and the person launches the quest on what it shows. A config
 edited by hand afterwards (the quest's own ``config.yaml``, or a different ``--config`` passed to ``--resume``) could
-otherwise turn a check down, drop a reviewer or switch the model without anyone seeing it. So the first start of a
-quest the interview wrote records the settings in ``.fi/approved_plan.json``; every later start compares, and a
-difference stops the quest before anything runs, naming each setting as approved and as it is now. ``--update`` (the
-interview's own way to change a quest) records the new settings, which is how a change is approved.
+otherwise turn a check down or drop a reviewer without anyone seeing it. So the first start of a quest the interview
+wrote records the settings in ``.fi/approved_plan.json``; every later start compares, and a difference stops the quest
+before anything runs, naming each setting as approved and as it is now. ``--update`` (the interview's own way to change
+a quest) records the new settings, which is how a change is approved.
+
+The model (``MODEL_SETTINGS``: the provider, the model and the per-step models) is recorded too, but a change to it
+does not stop the quest: which model answers does not change what the result means or how strictly it is checked, and
+changing it is an ordinary thing to do between two runs. It is taken as it is now, recorded here and in the quest's
+trace, and said plainly (:func:`model_changes`, :func:`accept_models`, ``Engine.run``). The one model change that does
+bear on the checks, a research quest's reviewers all ending up on one model, is stopped by
+``Engine._review_models_stop`` before this record is read (also after the panel has reviewed once). The multi-model
+ensemble is not a model setting here: it decides how many models vote on a check, so a change to it still stops.
 
 Only interview-written configs are recorded (their header says so): a config written by hand was never shown on a
 confirm screen, so there is nothing to hold it to.
@@ -57,6 +65,13 @@ SETTINGS: tuple[tuple[str, str], ...] = (
     ("pauses.plan", "stopping to read the plan"),
 )
 
+#: The settings that name the model. Recorded like the others, but a change to one is taken as it is, recorded and
+#: said, never a stop (see the module docstring). The ensemble (``provider.node_ensemble``) is not one of them: it
+#: decides how many models vote on a check, so a change to it still needs approving.
+MODEL_SETTINGS: frozenset[str] = frozenset({
+    "provider.name", "provider.model", "provider.node_models",
+})
+
 
 def _value(cfg: Any, path: str) -> Any:
     obj = cfg
@@ -87,10 +102,13 @@ def _show(value: Any) -> str:
     return str(value)
 
 
-def differences(approved: dict[str, Any], now: dict[str, Any]) -> list[str]:
-    """One plain line per setting that changed: what it is, as approved, and as it is now."""
+def differences(approved: dict[str, Any], now: dict[str, Any], *, models: bool = True) -> list[str]:
+    """One plain line per setting that changed: what it is, as approved, and as it is now. ``models=False`` leaves
+    out the model settings (:data:`MODEL_SETTINGS`), which never need an approval."""
     out = []
     for path, label in SETTINGS:
+        if not models and path in MODEL_SETTINGS:
+            continue
         if path in approved and approved.get(path) != now.get(path):
             out.append(f"{label} (`{path}`): approved {_show(approved.get(path))}, now {_show(now.get(path))}")
     return out
@@ -126,12 +144,18 @@ def _write(fi_dir: Path, settings: dict[str, Any], explicit: list[str]) -> None:
     )
 
 
-def record(fi_dir: Path, cfg: Any, quest_root: Path | None = None) -> None:
+def record(fi_dir: Path, cfg: Any, quest_root: Path | None = None, *,
+           models_from: dict[str, Any] | None = None) -> None:
     """Record ``cfg``'s settings as the approved ones (the first start, or ``--update``), with which of them the
-    config file set itself (``explicit``): only those can be edited by hand."""
+    config file set itself (``explicit``): only those can be edited by hand. ``models_from`` (the record as it was)
+    keeps the model settings as they were recorded, so the quest's next start still finds the model change and says
+    it (``--update`` approves the other settings; a model needs no approval)."""
     raw = _raw(quest_root) if quest_root is not None else None
     explicit = [p for p, _label in SETTINGS if raw is None or _set_in(raw, p)]
-    _write(fi_dir, settings_of(cfg), explicit)
+    settings = settings_of(cfg)
+    if models_from:
+        settings.update({p: models_from[p] for p in MODEL_SETTINGS if p in models_from})
+    _write(fi_dir, settings, explicit)
 
 
 def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
@@ -145,7 +169,10 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
 
     A setting the config file neither set when it was approved nor sets now took FI's default, and a newer FI may
     have changed that default: not an edit anyone made, so it is recorded as it is now instead of stopping the quest.
-    Removing a line counts as an edit (it was set, and is not now)."""
+    Removing a line counts as an edit (it was set, and is not now).
+
+    A change to a model setting (:data:`MODEL_SETTINGS`) is never returned: :func:`model_changes` names it and
+    :func:`accept_models` records it."""
     path = fi_dir / NAME
     present = path.is_file()
     try:
@@ -176,7 +203,8 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
         raw_now = _raw(quest_root)
         approved = {**approved, **{p: now.get(p) for p in missing}}
         explicit = explicit | {p for p in missing if raw_now is None or _set_in(raw_now, p)}
-    changed = [p for p, _label in SETTINGS if p in approved and approved.get(p) != now.get(p)]
+    changed = [p for p, _label in SETTINGS
+               if p not in MODEL_SETTINGS and p in approved and approved.get(p) != now.get(p)]
     if not changed:
         if missing:
             _write(fi_dir, approved, sorted(explicit))
@@ -186,8 +214,88 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
         drifted = [p for p in changed if p not in explicit and not _set_in(raw, p)]
         if drifted:
             approved = {**approved, **{p: now.get(p) for p in drifted}}
-            if not differences(approved, now):
+            if not differences(approved, now, models=False):
                 # Written only when the start goes on (the engine records the new hash); a start that stops for a
                 # hand edit leaves the record as it was, so putting the edit back is not read as an edited record.
                 _write(fi_dir, approved, sorted(explicit))
-    return differences(approved, now)
+    return differences(approved, now, models=False)
+
+
+def _read(fi_dir: Path) -> tuple[dict[str, Any] | None, set[str]]:
+    """The recorded settings and which of them the config file set, or ``(None, set())`` when there is no readable
+    record."""
+    try:
+        data = json.loads((fi_dir / NAME).read_text(encoding="utf-8"))
+        approved = data["settings"] if data.get("schema") == SCHEMA else None
+        explicit = set(data["explicit"]) if isinstance(data.get("explicit"), list) else {p for p, _label in SETTINGS}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None, set()
+    return (approved, explicit) if isinstance(approved, dict) else (None, set())
+
+
+def model_changes(fi_dir: Path, cfg: Any) -> list[dict[str, Any]]:
+    """Each model setting (:data:`MODEL_SETTINGS`) whose value differs from the recorded one: ``{"setting", "label",
+    "from", "to"}``. Empty when nothing is recorded (there is nothing to compare with) or nothing changed."""
+    approved, _explicit = _read(fi_dir)
+    if approved is None:
+        return []
+    now = settings_of(cfg)
+    return [{"setting": p, "label": label, "from": approved.get(p), "to": now.get(p)}
+            for p, label in SETTINGS
+            if p in MODEL_SETTINGS and p in approved and approved.get(p) != now.get(p)]
+
+
+def accept_models(fi_dir: Path, cfg: Any, quest_root: Path | None = None) -> None:
+    """Record the model settings as they are now, leaving every other recorded setting as it was approved."""
+    approved, explicit = _read(fi_dir)
+    if approved is None:
+        return
+    now = settings_of(cfg)
+    raw = _raw(quest_root) if quest_root is not None else None
+    for p in MODEL_SETTINGS:
+        approved[p] = now.get(p)
+        if raw is not None:
+            (explicit.add if _set_in(raw, p) else explicit.discard)(p)
+    _write(fi_dir, approved, sorted(explicit))
+
+
+def model_disclosure(events: list[dict[str, Any]]) -> str:
+    """What the paper must say when more than one model produced the quest (a ``model_changed`` event in its trace),
+    or an empty string when the model never changed."""
+    changes = [e for e in events if e.get("kind") == "model_changed" and not e.get("before_any_step")]
+    if not changes:
+        return ""
+    lines = ["More than one model produced this study: its model was changed while the quest was under way. State "
+             "this in the methods, in these terms (which model made each step is in the quest's record of its model "
+             "calls):"]
+    for e in changes:
+        for c in e.get("changes") or []:
+            if isinstance(c, dict):
+                lines.append(f"- {c.get('label') or c.get('setting')}: {_show(c.get('from'))} for the steps before "
+                             f"the change, {_show(c.get('to'))} after it")
+    return "\n".join(lines)
+
+
+def model_change_lines(changes: list[dict[str, Any]], node_models: dict[str, Any] | None = None, *,
+                       made: bool = True) -> list[str]:
+    """The plain sentences a model change is announced with: the main model's own sentence first ("the model changes
+    from A to B from here on; steps already done were made by A", or, when ``made`` is False, that nothing had run on
+    A yet), then any other model setting that changed, then the single steps that ``provider.node_models`` still keeps
+    on the old model."""
+    lines: list[str] = []
+    old_main = None
+    for c in changes:
+        if c["setting"] == "provider.model":
+            old_main = c["from"]
+            done = (f"steps already done were made by {_show(c['from'])}" if made
+                    else f"nothing had run on {_show(c['from'])} yet")
+            lines.append(f"the model changes from {_show(c['from'])} to {_show(c['to'])} from here on; {done}")
+    for c in changes:
+        if c["setting"] != "provider.model":
+            lines.append(f"{c['label']} (`{c['setting']}`): {_show(c['from'])} until now, {_show(c['to'])} from here on")
+    if old_main and isinstance(node_models, dict):
+        kept = sorted(str(node) for node, model in node_models.items() if model == old_main)
+        if kept:
+            lines.append(f"{', '.join(kept)} stay on {old_main}: `provider.node_models` in config.yaml names it for "
+                         "them; change it there too to move them")
+    return lines

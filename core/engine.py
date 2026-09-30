@@ -756,12 +756,14 @@ class Engine:
             _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
             # Research needs a reviewer on another model: checked before the settings are recorded as approved, so the
-            # model the person adds is part of what is approved, not a change to it.
+            # model the person adds is part of what is approved, not a change to it. A model change that leaves every
+            # reviewer on one model stops here too.
             stopped = self._review_models_stop()
             if stopped is not None:
                 return stopped
             # How strictly this quest is checked was approved on the interview's confirm screen; a hand edit since then
-            # (a check turned down, a reviewer dropped, another model) stops here, before anything runs.
+            # (a check turned down, a reviewer dropped) stops here, before anything runs. Another model does not stop
+            # it: that is taken, recorded and said (_take_model_change).
             record = self.fi_dir / _plan_settings.NAME
             had_record = record.is_file()
             if not had_record and any(
@@ -793,8 +795,16 @@ class Engine:
             before = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
             changed = _plan_settings.check(self.quest_root, self.fi_dir, self.config)
             if changed:
+                # check() may have rewritten the record for an FI default that moved (not an edit): its hash goes
+                # into the trace before the stop, so putting the edited setting back is not then read as a hand edit
+                # of the record.
+                drifted = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
+                if before and drifted and drifted != before:
+                    self._audit("plan_settings_recorded", sha256=drifted)
                 return self._stop_for_changed_settings(changed)
-            after = hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
+            # A different model is not a change to how the quest is checked: taken as it is, recorded, and said.
+            self._take_model_change()
+            after =hashlib.sha256(record.read_bytes()).hexdigest() if record.is_file() else None
             # A first record, FI's own rewrite of it (an FI default that changed), or a record from before its hash was
             # kept: its hash goes into the trace now, so an edit from here on is found.
             if after and (after != before or not any(
@@ -5255,6 +5265,34 @@ class Engine:
                 len(ds_added),
             )
         return out
+
+    def _take_model_change(self) -> None:
+        """The quest's model (``provider.model``, ``provider.name`` or the per-step models) differs from
+        the one recorded when it was approved or last run: never a stop. The new model is used from here on, recorded
+        (``.fi/approved_plan.json``, a ``model_changed`` event in the audit trace, run.log) and said in one plain line
+        per change on the console (``[FI] model: ...``, which the VS Code chat shows). The paper is told that more than
+        one model produced the quest (plan_settings.model_disclosure). Best-effort: a failed write never stops a
+        quest."""
+        try:
+            changes = _plan_settings.model_changes(self.fi_dir, self.config)
+            if not changes:
+                return
+            _plan_settings.accept_models(self.fi_dir, self.config, self.quest_root)
+        except OSError as e:
+            self._log.warning("[model] could not record the model change: %r", e)
+            return
+        # Nothing made on the old model yet (its first start failed before any step, say): nothing to disclose.
+        try:
+            cost = self.fi_dir / "cost.jsonl"
+            made = (cost.is_file() and cost.stat().st_size > 0) or any(
+                e.get("kind") == "node_completed" for e in _audit_log.read(self.audit.path))
+        except Exception:  # noqa: BLE001 -- when unsure, say it as a change
+            made = True
+        lines = _plan_settings.model_change_lines(changes, self.config.provider.node_models, made=made)
+        self._audit("model_changed", changes=changes, before_any_step=not made)
+        for line in lines:
+            self._log.info("[model] %s", line)
+            print(f"[FI] model: {line}")
 
     def _stop_for_changed_settings(self, changed: list[str]) -> QuestArtifacts:
         """Stop before anything runs because a setting that decides how strictly the quest is checked differs from
@@ -12408,6 +12446,13 @@ class Engine:
             self.quest_root, self._not_confirmed_names(state, self._protocol_block(state)))
         if not_confirmed:
             evidence_note = f"{evidence_note}\n\n{not_confirmed}".strip()
+        # The model was changed during the quest: the paper says more than one model produced it.
+        try:
+            models_note = _plan_settings.model_disclosure(_audit_log.read(self.audit.path))
+        except Exception:  # noqa: BLE001 -- an unreadable trace is reported by the evidence check, not here
+            models_note = ""
+        if models_note:
+            evidence_note = f"{evidence_note}\n\n{models_note}".strip()
         if _phased.enabled(self.config):
             evidence_note = f"{evidence_note}\n\n{_phased.write_note(self.quest_root)}".strip()
         improved = _improve.write_note(self.quest_root)
@@ -15940,8 +15985,11 @@ class Engine:
         models = {p: self._reviewer_model(p) for p in self.config.engine.review_panel}
         if len(set(models.values())) > 1:
             return None
-        # A panel that has already reviewed (a quest resumed at the human-review gate, say) is not asked again.
-        if any(e.get("kind") == "node_completed" and e.get("node") == "review" for e in _audit_log.read(self.audit.path)):
+        # A panel that has already reviewed (a quest resumed at the human-review gate, say) is not asked again, unless
+        # its models changed since (a model change is taken without a stop, so it would otherwise put every later
+        # review on one model unasked).
+        if (any(e.get("kind") == "node_completed" and e.get("node") == "review" for e in _audit_log.read(self.audit.path))
+                and not _plan_settings.model_changes(self.fi_dir, self.config)):
             return None
         only = next(iter(models.values()))
         persona = "statistician" if "statistician" in models else next(iter(models))

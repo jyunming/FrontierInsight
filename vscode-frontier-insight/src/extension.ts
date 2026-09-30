@@ -40,9 +40,7 @@ import { PersistentBridge } from "./persistent-bridge";
 import { persistentBridgePath } from "./bridge-path";
 import {
     ShellKind,
-    buildLaunchCommand,
     detectShell,
-    generateTerminalCommand,
     updateTerminalCommand,
 } from "./terminal-command";
 import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
@@ -279,7 +277,7 @@ async function handleRequest(
         return;
     }
     if (cmd === "generate") {
-        await runGenerate(prompt, stream, token);
+        await runGenerate(prompt, stream, token, userPickedModel);
         return;
     }
     if (cmd === "summarize") {
@@ -307,10 +305,11 @@ async function handleRequest(
         return;
     }
     if (cmd === "update") {
-        // Mid-quest re-entry. Routes to the same
-        // `launch.py --update <quest_id>` flow the CLI uses.
-        // ``prompt`` should be the quest_id; the Python side
-        // validates it exists and refuses gracefully if not.
+        // Mid-quest re-entry. Runs `launch.py --update <quest_id>` here in
+        // the chat, like /resume (never in a terminal): it approves the
+        // settings in the quest's config.yaml and resumes. ``prompt``
+        // should be the quest_id; the Python side validates it exists and
+        // refuses gracefully if not.
         await runUpdate(prompt, stream, token, userPickedModel);
         return;
     }
@@ -324,9 +323,9 @@ async function handleRequest(
             stream.markdown("Pass at least one path after `/ingest`. Example: `@fi /ingest ~/papers/foo.pdf`\n");
             return;
         }
-        await runTerminalCommand(
-            "ingest", ["--ingest", ...paths],
-            stream, "Opening a terminal to ingest into Axon.",
+        await runCommandInChat(
+            ["--ingest", ...paths], stream, token, userPickedModel,
+            `📚 Ingesting ${paths.length} file(s) into Axon.`,
         );
         return;
     }
@@ -418,10 +417,9 @@ async function handleRequest(
     }
     if (cmd === "install-tectonic" || cmd === "tectonic") {
         // No-admin LaTeX install for paper_pdf support.
-        await runTerminalCommand(
-            "tectonic", ["--install-tectonic"],
-            stream, "Opening a terminal to install tectonic (~70 MB) " +
-            "into tools/. Self-bootstrapping; no admin needed.",
+        await runCommandInChat(
+            ["--install-tectonic"], stream, token, userPickedModel,
+            "📦 Installing tectonic (~70 MB) into tools/. No admin rights needed.",
         );
         return;
     }
@@ -445,6 +443,7 @@ function helpText(): string {
         "- `@fi /resume` — pick a crashed quest and pick up where it died.",
         "- `@fi /resume <quest_id>` — resume that specific quest directly. The short id (the six characters after the last dash) is enough, and the quest may be one started in another folder: FI remembers every quest it has run on this computer. When this folder has no quests, `@fi /resume` offers those.",
         "- `@fi /map <quest_id>` — open the quest map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button (also **FI: Quest map** in the command palette).",
+        "- `@fi /update [<quest_id>]` — approve the settings in a quest's config.yaml after you changed them (a quest stopped for a changed setting says so), then resume it, here in the chat. A different model needs no approval: `/resume` takes it and says so.",
         "- `@fi /watch [<quest_id>]` — for a quest waiting on a background job (HPC): re-check it on a timer and resume it when the job is done.",
         "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
         "- `@fi /rename <quest_id> <new title>` — change a finished or paused quest's title: the paper's title line, its config and summary. Results, data and code are not touched; a PDF, slides or poster already made keep the old title until you `/generate` them again.",
@@ -875,17 +874,17 @@ function currentShell(): ShellKind {
     return detectShell(vscode.env.shell, process.platform);
 }
 
-async function runTerminalCommand(
-    label: string,
+async function runCommandInChat(
     args: string[],
     stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
     hint: string,
 ): Promise<void> {
-    // Shared helper for /ingest, /install-tectonic, and any other
-    // future CLI command that's easier to expose as a terminal
-    // pass-through than as a fully-rendered chat UI. Opens an
-    // integrated terminal in the FI repo root and runs the
-    // command; the user sees the live output there.
+    // /ingest and /install-tectonic: a launch.py command whose whole
+    // output is the answer. It runs here, with every line it prints shown
+    // in the chat as it comes, as every other chat command runs; no
+    // terminal is opened.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
     const roots = await rootsForCommand();
@@ -895,21 +894,19 @@ async function runTerminalCommand(
     }
     const { repoPath, workDir } = roots;
     stream.markdown(`${hint}\n\n`);
-    const term = vscode.window.createTerminal({
-        name: `FI ${label}`,
-        cwd: workDir,
+    const ran = await runLaunchInChat(args, stream, token, userPickedModel, {
+        pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir, showAllOutput: true,
     });
-    term.show();
-    // Quoting AND the leading call operator depend on the shell — the
-    // previous single spelling (a quoted head, no `&`) was a parse
-    // error in PowerShell, which is the default profile on Windows.
-    // No bridge address here: neither --ingest nor --install-tectonic
-    // makes a model call.
-    term.sendText(buildLaunchCommand({
-        pythonPath,
-        args,
-        shell: currentShell(),
-    }));
+    if (!ran) return;
+    if (ran.code === 0) {
+        stream.markdown("\n✅ Done.\n");
+    } else {
+        const tail = ran.stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${ran.code}.**\n\n` +
+            (tail.trim() ? "```\n" + tail + "\n```\n" : "stderr was empty.\n"),
+        );
+    }
 }
 
 
@@ -980,38 +977,110 @@ async function runUpdate(
         questId = picked.questId;
     }
 
-    // The Python --update flow is stdin-interactive. The chat
-    // surface can't render Q&A modals back into the Python process,
-    // so we open a VSCode integrated terminal and run the command
-    // there — the user types answers in the terminal, then resume
-    // happens automatically. Same questions, same Python schema,
-    // just a different transport for the prompts.
-    stream.markdown(
-        `🔧 Opening an integrated terminal to run the update interview for \`${questId}\`. ` +
-        `Answer in the terminal; the quest auto-resumes when the interview completes.\n\n`,
+    // The id as typed may be a short id (the six characters after the last dash) or a quest FI ran in another folder,
+    // which `launch.py --update` finds too: resolved here the same way, so the card shown, the config.yaml opened and
+    // the end of the run reported are that quest's.
+    let questDir = path.join(outputsDir, questId);
+    let questsDir = outputsDir;
+    if (!(await fsExists(path.join(questDir, "config.yaml")))) {
+        let local: string[] = [];
+        try {
+            local = (await fsPromises.readdir(outputsDir, { withFileTypes: true }))
+                .filter((e) => e.isDirectory() && !e.name.startsWith("_")).map((e) => e.name);
+        } catch { /* no outputs folder here */ }
+        const matched = matchIds(questId, local);
+        const here = path.resolve(outputsDir).toLowerCase();
+        const elsewhere = loadIndex().filter((e) => path.resolve(path.dirname(e.questRoot)).toLowerCase() !== here);
+        const found = matched.length === 0 ? findInIndex(questId, elsewhere) : { kind: "none" as const };
+        if (matched.length === 1) {
+            questId = matched[0];
+            questDir = path.join(outputsDir, questId);
+        } else if (matched.length > 1) {
+            stream.markdown("❌ " + describeAmbiguous(questId, matched.map((q) => ({
+                questId: q, title: "", questRoot: path.join(outputsDir, q),
+            }))));
+            return;
+        } else if (found.kind === "found") {
+            questId = found.entry.questId;
+            questDir = found.entry.questRoot;
+            questsDir = path.dirname(questDir);
+            stream.markdown(`📁 \`${questId}\` is in \`${questsDir}\`.\n\n`);
+        } else if (found.kind === "ambiguous") {
+            stream.markdown("❌ " + describeAmbiguous(questId, found.entries));
+            return;
+        } else {
+            stream.markdown(
+                `❌ No quest \`${questId}\` with a \`config.yaml\` under \`${outputsDir}\`, nor among the quests FI has ` +
+                "run in other folders on this computer. `python launch.py tools quests` lists every one with its short id.",
+            );
+            return;
+        }
+    }
+
+    // `/update` runs here in the chat, like `/resume`: never in a terminal. The settings it approves are the ones in
+    // the quest's config.yaml as it is now; the person sees what stopped the quest, then says whether to approve them
+    // as they are, or opens config.yaml to change it first.
+    const configPath = path.join(questDir, "config.yaml");
+    try {
+        const card = await fsPromises.readFile(path.join(questDir, "NEXT_STEP.md"), "utf-8");
+        stream.markdown(`**Why \`${questId}\` is waiting:**\n\n${card}\n\n---\n\n`);
+    } catch { /* not stopped for anything: the update approves config.yaml as it is */ }
+    const choice = await vscode.window.showQuickPick(
+        [
+            { label: "$(check) Approve the settings in config.yaml as they are, and resume", value: "approve" },
+            { label: "$(edit) Open config.yaml to change it first", value: "edit" },
+            { label: "$(close) Cancel", value: "cancel" },
+        ],
+        { placeHolder: `Update ${questId}: its settings are the ones in its config.yaml` },
     );
-    const term = vscode.window.createTerminal({
-        name: `FI update: ${questId}`,
-        cwd: workDir,
-    });
-    term.show();
-    // This Python is NOT a child of the extension, so it cannot inherit
-    // a per-command TCP bridge the way /start does. Hand it the address
-    // of the session-long PersistentBridge instead. Without it the
-    // resumed quest dies at endpoint resolution: the interview pins
-    // provider.name = vscode_extension, which requires one of
-    // extra['bridge_socket'] / extra['bridge_port'].
-    term.sendText(updateTerminalCommand({
+    if (!choice || choice.value === "cancel") {
+        stream.markdown("Nothing was changed.\n");
+        return;
+    }
+    // The setup questions one by one need a terminal to answer in; FI does not open one. This is the line to run in
+    // one yourself (it reaches this window's models through its session-long bridge).
+    const byQuestion = updateTerminalCommand({
         pythonPath,
         questId,
-        // The quest was found under `outputsDir` (the resolved
-        // `frontierInsight.outputDir`), so --update has to be told to
-        // look there too; launch.py would otherwise default to
-        // ./outputs and reject a quest the picker just listed.
+        // This folder's outputs (the resolved `frontierInsight.outputDir`):
+        // launch.py would otherwise default to ./outputs and reject a quest
+        // just listed. A quest from another folder is found by its full id
+        // among every quest FI has run, and launch.py then runs it from the
+        // folder it was started in (its relative paths).
         outputRoot: outputsDir,
         bridgeSocket: thisWindowsBridge(),
         shell: currentShell(),
-    }));
+    });
+    if (choice.value === "edit") {
+        stream.markdown(
+            `📝 Opened \`${configPath}\`. Change it and save, then \`@fi /update ${questId}\` again to approve it and ` +
+            `resume. (A different model needs no approval: \`@fi /resume ${questId}\` takes it and says so.)\n\n` +
+            `To answer the setup questions one by one instead, run this in a terminal yourself:\n\n` +
+            "```\n" + byQuestion + "\n```\n",
+        );
+        try {
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(configPath));
+            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn(doc.uri) });
+        } catch {
+            stream.markdown(`(Could not open it in the editor; open \`${configPath}\` yourself.)\n`);
+        }
+        return;
+    }
+    stream.markdown(`🔧 Approving the settings in \`${configPath}\` and resuming \`${questId}\`\n\n`);
+    const startedAt = Date.now();
+    // FI_UPDATE_APPROVE_AS_IS: the person chose to approve config.yaml as it is, so launch.py asks no question
+    // (without it, --update asks the setup questions, and with no terminal to answer in it approves nothing).
+    // `--output-root` is this folder's outputs even for a quest from another folder: launch.py finds that one by its
+    // full id and runs it from the folder it was started in, so its config's relative paths mean what they meant.
+    const ran = await runLaunchInChat(
+        ["--update", questId, "--output-root", outputsDir], stream, token, userPickedModel,
+        {
+            pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir,
+            env: { FI_UPDATE_APPROVE_AS_IS: "1" },
+        },
+    );
+    if (!ran) return;
+    await reportQuestEnd(ran, stream, { outputsDir: questsDir, questId, startedAt });
 }
 
 
@@ -1020,12 +1089,14 @@ async function runUpdate(
  * (paper_pdf / slides / poster / speech) for an ALREADY-finished quest
  * without re-running the research. Mirrors `python launch.py --emit` and
  * the web Outputs panel. Quest + kind are quick-picked when omitted; the
- * actual generation runs in an integrated terminal so the user sees output.
+ * generation runs here in the chat, its model calls through this chat's
+ * bridge, as `/resume`'s do.
  */
 async function runGenerate(
     promptArgs: string,
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
 ): Promise<void> {
     if (token.isCancellationRequested) return;
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
@@ -1104,25 +1175,25 @@ async function runGenerate(
     }
 
     const yamlPath = path.join(outputsDir, questId, "config.yaml");
-    stream.markdown(
-        `📄 Generating \`${kind}\` for \`${questId}\` from its existing paper — no re-run. ` +
-        `Opening a terminal so you can watch it render.\n\n`,
+    stream.markdown(`📄 Generating \`${kind}\` for \`${questId}\` from its existing paper — no re-run.\n\n`);
+    // slides / poster / speech each make a model call: they come back
+    // through this command's bridge, as a /resume's do. paper_pdf renders
+    // without one; the bridge client connects lazily on the first call, so
+    // the port is inert for that kind.
+    const ran = await runLaunchInChat(
+        ["--config", yamlPath, "--resume", questId, "--emit", kind], stream, token, userPickedModel,
+        { pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir },
     );
-    const term = vscode.window.createTerminal({ name: `FI generate: ${kind}`, cwd: workDir });
-    term.show();
-    // slides / poster / speech each make a model call, so this run needs
-    // the bridge address exactly as /update does. paper_pdf renders
-    // without one, but the bridge client connects lazily on the first
-    // call, so passing it always is inert for that kind rather than
-    // costly.
-    term.sendText(generateTerminalCommand({
-        pythonPath,
-        yamlPath,
-        questId,
-        kind,
-        bridgeSocket: thisWindowsBridge(),
-        shell: currentShell(),
-    }));
+    if (!ran) return;
+    if (ran.code === 0) {
+        stream.markdown(`\n✅ \`${kind}\` generated for \`${questId}\`.\n`);
+    } else {
+        const tail = ran.stderrTail.join("\n");
+        stream.markdown(
+            `\n❌ **Python exited with code ${ran.code}.**\n\n` +
+            (tail.trim() ? "```\n" + tail + "\n```\n" : "stderr was empty.\n"),
+        );
+    }
 }
 
 
@@ -1193,6 +1264,179 @@ async function runInterviewAndQuest(
     );
 }
 
+/** How a `launch.py` run started from the chat ended (see runLaunchInChat). */
+interface ChatRun {
+    /** The exit code, or null when the process was killed by a signal. */
+    code: number | null;
+    /** The quest this run is, from the `[FI] <quest_id> -> <quest folder>` line launch.py prints (not for a fleet). */
+    questIdSeen?: string;
+    /** The last lines Python wrote to stderr: where an unhandled error lands. */
+    stderrTail: string[];
+}
+
+/**
+ * Run `python launch.py <args>` as a child of the extension with its output in this chat, the way `/start` and
+ * `/resume` always have: never in a terminal. Every chat command that runs launch.py goes through here, so none of
+ * them opens a terminal the person did not ask for, and every model call the run makes comes back through a
+ * per-command bridge to the model picked in the Chat panel (`--vscode-bridge-port`). A command that makes no model
+ * call (`/ingest`, `/install-tectonic`) gets the port too; it is never used.
+ *
+ * Only the lines a person needs are shown: what a quest wrote, source failures, the evidence line, each check of a
+ * watched job, a model change (`[FI] model:`) and what `--update` approved (`[FI] update:`). With `showAllOutput`
+ * (a command whose whole output is the answer) every line is shown as it is printed.
+ *
+ * Returns undefined when Python could not be started (the reason is already in the chat).
+ */
+async function runLaunchInChat(
+    args: string[],
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+    userPickedModel: vscode.LanguageModelChat,
+    opts: {
+        pythonPath: string; launchScript: string; cwd: string; fleet?: boolean; showAllOutput?: boolean;
+        /** Extra environment for this run only (`/update` says the person approved config.yaml as it is). */
+        env?: Record<string, string>;
+    },
+): Promise<ChatRun | undefined> {
+    // Bind the bridge to a free port. We thread `userPickedModel`
+    // (= request.model from the chat handler) into the bridge so
+    // every LLM call routes through THAT model — the one the user
+    // chose in the VSCode Chat picker — instead of an arbitrary
+    // `selectChatModels[0]` from the full Copilot catalog. Without
+    // this, a user who picked gpt-5.4-mini (0.33× per request) could
+    // see their calls silently route through Claude Opus (5×) or
+    // similar, causing 10–15× the premium-request burn they expected.
+    const bridge = new Bridge({
+        progress: stream,
+        cancellationToken: token,
+        defaultModel: userPickedModel,
+    });
+    const port = await bridge.listen();
+    const argv: string[] = ["-u", opts.launchScript, "--vscode-bridge-port", String(port), ...args];
+
+    // FI_SKIP_BOOTSTRAP: every spawn in this file sets it, so a missing dependency on
+    // `frontierInsight.pythonPath` surfaces as this file's own diagnostic (which names that setting) rather
+    // than launch.py's CLI-only self-bootstrap silently creating and switching to a different `.venv/` the
+    // user never configured here.
+    const child = spawn(opts.pythonPath, argv, {
+        cwd: opts.cwd,
+        env: {
+            ...process.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8", FI_SKIP_BOOTSTRAP: "1",
+            ...(opts.env ?? {}),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    // With showAllOutput every line, stdout's and stderr's (warnings, a skipped file), is shown in one code block,
+    // opened at the first line so a Python that never started leaves no empty block around its error.
+    let fenceOpen = false;
+    const showRaw = (line: string): void => {
+        if (!line.trim()) return;
+        if (!fenceOpen) {
+            stream.markdown("```\n");
+            fenceOpen = true;
+        }
+        stream.markdown(line.replace(/```/g, "` ` `") + "\n");
+    };
+    // Keep a rolling tail of stderr so we can surface the actual
+    // traceback in the chat if Python exits non-zero. Without this,
+    // the user only sees "exited with code 1, check run.log" — but
+    // unhandled exceptions don't reach the run.log (it only carries
+    // what `logging.info(...)` etc. emitted before the crash).
+    const stderrTail: string[] = [];
+    const STDERR_TAIL_LINES = 80;
+    bridge.attachChild(child, (line) => {
+        if (opts.showAllOutput) showRaw(line);
+        stderrTail.push(line);
+        if (stderrTail.length > STDERR_TAIL_LINES) {
+            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
+        }
+    });
+
+    // Make sure cancellation kills the child + closes the bridge.
+    token.onCancellationRequested(() => {
+        try { child.kill("SIGTERM"); } catch { /* noop */ }
+    });
+
+    // Surface only the user-meaningful lines from Python's stdout. The
+    // `[FI] start/resume quest_id=...` echo is already shown via the
+    // extension's own header lines, so dropping it avoids the
+    // duplicate-print problem the user reported. Generator-output lines
+    // like `[FI] wrote paper_md -> <abs path>` ARE useful (they're the
+    // final artifact pointers) so we keep those but re-render with just a
+    // basename + a checkmark instead of the raw `[FI]` prefix.
+    child.stdout.setEncoding("utf-8");
+    let stdoutBuf = "";
+    let questIdSeen: string | undefined;
+    const onLine = (line: string): void => {
+        if (opts.showAllOutput) {
+            showRaw(line);
+            return;
+        }
+        const ran = line.match(/^\[FI\] (\d+-[\w-]+) -> /);
+        if (ran && !opts.fleet) questIdSeen = ran[1];
+        const wrote = line.match(/^\[FI\] wrote (\w+) -> (.+)$/);
+        if (wrote) {
+            stream.markdown(`  ✅ wrote ${wrote[1]} → \`${path.basename(wrote[2])}\`\n\n`);
+            return;
+        }
+        const summary = line.match(/^\[FI\] summary -> (.+)$/);
+        if (summary) {
+            stream.markdown(`  📋 summary → \`${path.basename(summary[1])}\`\n\n`);
+            return;
+        }
+        // Literature / full-text sources that failed during the run
+        // (rate limits, blocks, timeouts) — otherwise only in run.log.
+        const failures = line.match(/^\[FI\] source failures: (.+)$/);
+        if (failures) {
+            stream.markdown(`  ⚠️ source failures: \`${failures[1]}\`\n\n`);
+            return;
+        }
+        // How much of the result has been checked against something other than itself.
+        const evidenceLine = line.match(/^\[FI\] evidence: (.+)$/);
+        if (evidenceLine) {
+            stream.markdown(`  🔎 evidence: \`${evidenceLine[1]}\`\n\n`);
+            return;
+        }
+        // The quest's model changed since it last ran (core/engine.py _take_model_change): said, never a stop.
+        const model = line.match(/^\[FI\] model: (.+)$/);
+        if (model) {
+            stream.markdown(`  🤖 ${model[1]}\n\n`);
+            return;
+        }
+        // What `--update` approved and did, run here with no terminal (core/interview_update.py).
+        const update = line.match(/^\[FI\] update: (.*)$/);
+        if (update) {
+            if (update[1].trim()) stream.markdown(`  ${update[1]}\n\n`);
+            return;
+        }
+        // The quest's own config.yaml was brought up to date with the config it resumed with.
+        if (/^\[FI\] the quest's config\.yaml now matches /.test(line)) {
+            stream.markdown(`  📝 ${line.slice("[FI] ".length)}\n\n`);
+            return;
+        }
+        // Each check of a watched background job: the only monitor there is.
+        const checked = line.match(/^\[watch\] (.+)$/);
+        if (checked) {
+            stream.markdown(`  👁 ${checked[1]}\n\n`);
+        }
+        // Drop other [FI] lines (start/resume quest_id=, paths the
+        // user already saw in our header, etc.) — they're noise here.
+    };
+    child.stdout.on("data", (chunk: string) => {
+        stdoutBuf += chunk;
+        const lines = stdoutBuf.split(/\r?\n/);
+        stdoutBuf = lines.pop() || "";
+        for (const line of lines) onLine(line);
+    });
+
+    const result = await waitForChildExit(child, bridge, opts.pythonPath, stream);
+    if (stdoutBuf) onLine(stdoutBuf);
+    if (fenceOpen) stream.markdown("```\n");
+    if (result.kind === "spawn-error") return undefined;
+    return { code: result.code, questIdSeen, stderrTail };
+}
+
+
 async function runQuest(
     promptArgs: string,
     fleet: boolean,
@@ -1234,136 +1478,40 @@ async function runQuest(
 
     stream.markdown(`🧪 Starting ${fleet ? "fleet" : "quest"}: \`${paths.join(", ")}\`\n\n`);
 
-    // 1. Bind the bridge to a free port. We thread `userPickedModel`
-    // (= request.model from the chat handler) into the bridge so
-    // every LLM call routes through THAT model — the one the user
-    // chose in the VSCode Chat picker — instead of an arbitrary
-    // `selectChatModels[0]` from the full Copilot catalog. Without
-    // this, a user who picked gpt-5.4-mini (0.33× per request) could
-    // see their calls silently route through Claude Opus (5×) or
-    // similar, causing 10–15× the premium-request burn they expected.
-    const bridge = new Bridge({
-        progress: stream,
-        cancellationToken: token,
-        defaultModel: userPickedModel,
-    });
-    const port = await bridge.listen();
-
-    // 2. Build argv. --vscode-bridge-port wires this bridge into
-    // provider.extra and selects the vscode_extension provider only
+    // 1. What launch.py is asked to do. The per-command bridge (and its port) is added by runLaunchInChat.
+    // --vscode-bridge-port selects the vscode_extension provider only
     // when the YAML has not already named a different one: a config
     // that explicitly picked claude_cli / openai / etc. keeps its own
     // transport (launch.py:_apply_vscode_bridge_override). Every YAML
     // the /new interview writes pins vscode_extension, so on the
     // common path every LLM call does come back through this bridge.
-    const argv: string[] = ["-u", launchScript, "--vscode-bridge-port", String(port)];
+    const args: string[] = [];
     if (fleet) {
-        argv.push("--fleet", ...paths);
+        args.push("--fleet", ...paths);
     } else {
-        argv.push("--config", paths[0]);
+        args.push("--config", paths[0]);
         if (resumeQuestId) {
             // --watch re-checks the background job on a timer and resumes the
             // quest itself when it is done; --resume resumes right away.
-            argv.push(watch ? "--watch" : "--resume", resumeQuestId);
+            args.push(watch ? "--watch" : "--resume", resumeQuestId);
             // --revise-plan rewrites plan.md and runs nothing else; the words are one argument.
-            if (revisePlan) argv.push("--revise-plan", revisePlan);
-            if (fromStep) argv.push("--from", fromStep);
+            if (revisePlan) args.push("--revise-plan", revisePlan);
+            if (fromStep) args.push("--from", fromStep);
             // Its own outputs folder, whatever a relative output_dir in its YAML means from here.
-            if (where) argv.push("--output", where.outputDir);
+            if (where) args.push("--output", where.outputDir);
         }
     }
 
-    // 3. Spawn Python. FI_SKIP_BOOTSTRAP: every spawn in this file sets it, so a missing dependency on
-    // `frontierInsight.pythonPath` surfaces as this file's own diagnostic (which names that setting) rather
-    // than launch.py's CLI-only self-bootstrap silently creating and switching to a different `.venv/` the
-    // user never configured here.
+    // 2. Run it with its output in this chat, and wait for it to end: the
+    // chat handler resolves when the child terminates, which is when the
+    // quest (or fleet) is done or stops for you.
     const startedAt = Date.now();
-    const child = spawn(pythonPath, argv, {
-        cwd: where?.cwd ?? workDir,
-        env: { ...process.env, PYTHONUNBUFFERED: "1", FI_SKIP_BOOTSTRAP: "1" },
-        stdio: ["ignore", "pipe", "pipe"],
+    const ran = await runLaunchInChat(args, stream, token, userPickedModel, {
+        pythonPath, launchScript, cwd: where?.cwd ?? workDir, fleet,
     });
-    // Keep a rolling tail of stderr so we can surface the actual
-    // traceback in the chat if Python exits non-zero. Without this,
-    // the user only sees "exited with code 1, check run.log" — but
-    // unhandled exceptions don't reach the run.log (it only carries
-    // what `logging.info(...)` etc. emitted before the crash).
-    const stderrTail: string[] = [];
-    const STDERR_TAIL_LINES = 80;
-    bridge.attachChild(child, (line) => {
-        stderrTail.push(line);
-        if (stderrTail.length > STDERR_TAIL_LINES) {
-            stderrTail.splice(0, stderrTail.length - STDERR_TAIL_LINES);
-        }
-    });
+    if (!ran) return;
 
-    // Make sure cancellation kills the child + closes the bridge.
-    token.onCancellationRequested(() => {
-        try { child.kill("SIGTERM"); } catch { /* noop */ }
-    });
-
-    // Surface only the user-meaningful end-of-run lines from Python's
-    // stdout. The `[FI] start/resume quest_id=...` echo is already
-    // shown via the extension's own header lines, so dropping it
-    // avoids the duplicate-print problem the user reported. Generator-
-    // output lines like `[FI] wrote paper_md -> <abs path>` ARE useful
-    // (they're the final artifact pointers) so we keep those but
-    // re-render with just a basename + a checkmark instead of the
-    // raw `[FI]` prefix.
-    child.stdout.setEncoding("utf-8");
-    let stdoutBuf = "";
-    // The quest this run is: launch.py prints `[FI] <quest_id> -> <quest folder>` when it stops or ends, so the card
-    // shown after it is that quest's, never another's written about the same time.
-    let questIdSeen: string | undefined;
-    child.stdout.on("data", (chunk: string) => {
-        stdoutBuf += chunk;
-        const lines = stdoutBuf.split(/\r?\n/);
-        stdoutBuf = lines.pop() || "";
-        for (const line of lines) {
-            const ran = line.match(/^\[FI\] (\d+-[\w-]+) -> /);
-            if (ran && !fleet) questIdSeen = ran[1];
-            const wrote = line.match(/^\[FI\] wrote (\w+) -> (.+)$/);
-            if (wrote) {
-                stream.markdown(`  ✅ wrote ${wrote[1]} → \`${path.basename(wrote[2])}\`\n\n`);
-                continue;
-            }
-            const summary = line.match(/^\[FI\] summary -> (.+)$/);
-            if (summary) {
-                stream.markdown(`  📋 summary → \`${path.basename(summary[1])}\`\n\n`);
-                continue;
-            }
-            // Literature / full-text sources that failed during the run
-            // (rate limits, blocks, timeouts) — otherwise only in run.log.
-            const failures = line.match(/^\[FI\] source failures: (.+)$/);
-            if (failures) {
-                stream.markdown(`  ⚠️ source failures: \`${failures[1]}\`\n\n`);
-                continue;
-            }
-            // How much of the result has been checked against something other than itself.
-            const evidenceLine = line.match(/^\[FI\] evidence: (.+)$/);
-            if (evidenceLine) {
-                stream.markdown(`  🔎 evidence: \`${evidenceLine[1]}\`\n\n`);
-                continue;
-            }
-            // Each check of a watched background job: the only monitor there is.
-            const checked = line.match(/^\[watch\] (.+)$/);
-            if (checked) {
-                stream.markdown(`  👁 ${checked[1]}\n\n`);
-                continue;
-            }
-            // Drop other [FI] lines (start/resume quest_id=, paths the
-            // user already saw in our header, etc.) — they're noise here.
-        }
-    });
-
-    // 4. Wait for Python to exit. Bridge messages flow through the
-    // socket on its own; the chat handler resolves when the child
-    // terminates, which is when the quest (or fleet) is done.
-    const result = await waitForChildExit(child, bridge, pythonPath, stream);
-    if (result.kind === "spawn-error") return;
-    const exitCode = result.code;
-
-    if (exitCode === 0 && revisePlan && resumeQuestId) {
+    if (ran.code === 0 && revisePlan && resumeQuestId) {
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
         const planPath = path.join(
             where?.outputDir ?? (path.isAbsolute(outDirSetting) ? outDirSetting : path.join(workDir, outDirSetting)),
@@ -1377,26 +1525,44 @@ async function runQuest(
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
             await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn(doc.uri) });
         } catch { /* the message above names the command that opens it */ }
-    } else if (exitCode === 0) {
+    } else {
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
         const outputsDir = where?.outputDir ?? (path.isAbsolute(outDirSetting)
             ? outDirSetting
             : path.join(workDir, outDirSetting));
+        await reportQuestEnd(ran, stream, { outputsDir, questId: resumeQuestId, fleet, startedAt });
+    }
+}
+
+
+/**
+ * What a quest run started from the chat ended with (`/start`, `/resume`, `/update`): the to-do card when it stopped
+ * for you (a quest that stops also exits 0), "finished" with what is worth a look when it finished, the papers it
+ * wants, or the end of stderr when Python failed.
+ */
+async function reportQuestEnd(
+    ran: ChatRun,
+    stream: vscode.ChatResponseStream,
+    opts: { outputsDir: string; questId?: string; fleet?: boolean; startedAt: number },
+): Promise<void> {
+    const { outputsDir, fleet, startedAt } = opts;
+    // The quest launch.py says it ran (`[FI] <quest_id> -> <folder>`), else the one asked for.
+    const questId = ran.questIdSeen ?? opts.questId;
+    if (ran.code === 0) {
         // A quest that stopped for you also exits 0: say it is waiting, not that it finished.
-        const card = await readNextStep(outputsDir, resumeQuestId ?? questIdSeen, startedAt);
+        const card = await readNextStep(outputsDir, questId, startedAt);
         if (card) {
             stream.markdown(`\n\n---\n\n⏸ **The quest is waiting for you.**\n\n${card.markdown}\n`);
         } else {
             stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
-            const finishedId = resumeQuestId ?? questIdSeen;
-            if (finishedId) await surfaceWorthALook(outputsDir, stream, finishedId);
+            if (questId) await surfaceWorthALook(outputsDir, stream, questId);
         }
         // This run's quest, never another one running beside it in the same folder.
-        await surfaceWantedPapers(outputsDir, stream, resumeQuestId ?? questIdSeen ?? card?.questId, !!card, startedAt);
+        await surfaceWantedPapers(outputsDir, stream, questId ?? card?.questId, !!card, startedAt);
     } else {
-        const tail = stderrTail.join("\n");
+        const tail = ran.stderrTail.join("\n");
         stream.markdown(
-            `\n❌ **Python exited with code ${exitCode}.**\n\n` +
+            `\n❌ **Python exited with code ${ran.code}.**\n\n` +
             (tail.trim()
                 ? "Last lines of stderr (the actual error usually lives here, **not** in `run.log` — unhandled exceptions skip the logger):\n\n" +
                   "```\n" + tail + "\n```\n"
@@ -2219,6 +2385,10 @@ async function probeAxonOnActivate(
     } else if (action === "Show output") {
         output.show(true);
     } else if (action === "Start in terminal") {
+        // The one terminal this extension opens, and only when the person
+        // clicks this button: Axon is a server that keeps running after the
+        // chat turn ends (a chat command's child would be stopped with it),
+        // and the person may want to watch or stop it there.
         const term = vscode.window.createTerminal({ name: "Axon" });
         term.show();
         term.sendText("python -m axon.api");

@@ -1,13 +1,19 @@
-"""The command lines `@fi /update` and `@fi /generate` type into a terminal.
+"""The command line `@fi /update` offers for a terminal, and the no-terminal rule.
 
-Those two commands do not spawn Python as a child of the extension, so
-they cannot inherit the per-command TCP bridge `/start` uses. They reach
-`vscode.lm.*` only if the line they send carries the session-long
-PersistentBridge address. Before this was wired, every `@fi /update` and
-every `@fi /generate slides|poster|speech` died at endpoint resolution
-with "vscode_extension provider requires either extra['bridge_socket']
-... or extra['bridge_port']", because the `@fi /new` interview pins
-`provider.name: vscode_extension` into every YAML it writes.
+`@fi /update`, `@fi /generate`, `@fi /ingest` and `@fi /install-tectonic` run in the chat as children of the
+extension (``runLaunchInChat``), like `/resume`: none of them opens a terminal. The one terminal the extension opens
+is the Axon server's, when the person clicks "Start in terminal" (a server outlives the chat turn). `/update` still
+shows, for someone who wants to answer the setup questions one by one, the exact line to run in a terminal
+themselves; that line, and the `/generate` one the builder can still produce, are checked here.
+
+A Python started in a terminal is not a child of the extension, so it
+cannot inherit the per-command TCP bridge `/start` uses. It reaches
+`vscode.lm.*` only if the line carries the session-long
+PersistentBridge address. Before this was wired, every such run died at
+endpoint resolution with "vscode_extension provider requires either
+extra['bridge_socket'] ... or extra['bridge_port']", because the
+`@fi /new` interview pins `provider.name: vscode_extension` into every
+YAML it writes.
 
 The line also has to *parse*, and the three shells disagree about how one
 may begin. Measured directly, not assumed:
@@ -279,7 +285,6 @@ def test_extension_uses_the_builders_instead_of_its_own_string() -> None:
         "carries no bridge address and does not quote the interpreter."
     )
     assert "updateTerminalCommand(" in src
-    assert "generateTerminalCommand(" in src
     assert "persistentBridgePath()" in src
     # `/update` picks the quest by listing `frontierInsight.outputDir`,
     # so it has to hand that same root to launch.py or the quest it
@@ -384,3 +389,41 @@ def test_git_bash_hands_python_the_pipe_name_byte_for_byte(
         f"address is mangled and the connect fails with WinError 3."
     )
     assert argv[argv.index("--output-root") + 1] == out_root
+
+
+def _function_body(src: str, name: str) -> str:
+    start = src.index(f"async function {name}(")
+    nxt = src.find("\nasync function ", start + 1)
+    return src[start: nxt if nxt != -1 else len(src)]
+
+
+def test_chat_commands_never_open_a_terminal() -> None:
+    """Reported: `@fi /update` (the command a stopped quest's card names) opened a terminal instead of running in the
+    chat like /resume. Every chat command that runs launch.py goes through runLaunchInChat; the one createTerminal
+    left is the Axon server's "Start in terminal" button."""
+    src = EXTENSION_TS.read_text(encoding="utf-8")
+    assert src.count("createTerminal(") == 1, "a chat command opens a terminal again"
+    axon = src.index('action === "Start in terminal"')
+    assert src.index("createTerminal(") > axon, "the only terminal is the Axon server's button"
+    assert src.count("sendText(") == 1 and src.index("sendText(") > axon
+    for name in ("runUpdate", "runGenerate", "runCommandInChat"):
+        body = _function_body(src, name)
+        assert "createTerminal" not in body and "sendText" not in body, name
+        assert "runLaunchInChat(" in body, name
+    update = _function_body(src, "runUpdate")
+    # This folder's outputs even for a quest from another folder: launch.py then runs it from the folder it was
+    # started in (its own chdir fires only when the quest is not under --output-root).
+    assert '["--update", questId, "--output-root", outputsDir]' in update
+    # The approval is asked for, never assumed, and only then does launch.py skip the questions.
+    assert "showQuickPick(" in update and '"approve"' in update
+    assert update.index('choice.value === "edit"') < update.index('FI_UPDATE_APPROVE_AS_IS: "1"')
+    # A short id or a quest from another folder is resolved as /resume resolves it.
+    assert "matchIds(" in update and "findInIndex(" in update
+
+
+def test_update_and_model_lines_reach_the_chat() -> None:
+    """Run from the chat's approve choice, `--update` prints what it approves as `[FI] update:` lines and the engine says a model change
+    as `[FI] model:`; the chat shows both (other `[FI]` lines are dropped as noise)."""
+    body = _function_body(EXTENSION_TS.read_text(encoding="utf-8"), "runLaunchInChat")
+    assert r"/^\[FI\] update: (.*)$/" in body
+    assert r"/^\[FI\] model: (.+)$/" in body
