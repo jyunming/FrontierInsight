@@ -293,6 +293,7 @@ engine:
   review_loop: true                 # enable review-driven revise
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
   attempt_memory: shadow            # at each decision, record what past failed attempts (of the quests under the same output folder) would recommend, and act on none of it; `off` reads and writes nothing
+  phased: false                     # explore, then confirm: the model may try designs and look at results; then the design is frozen and run once more on a part of your data held back before exploration (one CSV/TSV file in inputs/data/, at least 40 rows), or else on new random seeds; only that confirm run can be publication-ready (see docs/rigor.md)
   one_model_review: false           # only one model available: under rigor_profile: research the review panel may run on it (no stop for the reviewers' models); the result is then not publication-ready. Not part of the approved settings: the evidence level already shows it
   clarify_mode: auto                # off | auto | interactive; left out, it asks when someone can answer while it runs, else answers for itself
   ideate_reflect: true              # extra self-critique pass (1 LLM call)
