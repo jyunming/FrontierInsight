@@ -683,7 +683,12 @@ provider:
     review_panel.statistician:   claude-3-5-sonnet
     review_panel.devil_advocate: gpt-4o
     review_moderator:            gpt-4o-mini
+    oracle_review:               gpt-4o  # a second model reads the plan's checks against known answers
 ```
+
+`oracle_review` is the model that reads the plan's checks against known answers
+before anything runs; with `rigor_profile: research` it should be a different
+model from the one that writes the plan (`plan`), and the plan says when it is not.
 
 The extension passes each `model_hint` to `vscode.lm.selectChatModels`,
 trying `{id: hint}` first and falling back to `{family: hint}`, Copilot
