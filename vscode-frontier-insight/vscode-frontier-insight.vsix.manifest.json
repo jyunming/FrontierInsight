@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "e550863b7bacf33989409e93d03f2bb054cf09577dfd13d942fa025930137374",
+  "vsix_sha256": "71f86d0d467205a1679eec6fec6e15455ecdb96a19a854c793d3be9cecd351b3",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -42,12 +42,12 @@
       "bytes": 3626
     },
     "extension/out/bridge.js": {
-      "sha256": "73f1d9342c71cdd1f07a49f9abd4a8cbf606527c085a8adaaa1c4f2d1da28742",
-      "bytes": 35534
+      "sha256": "3772641a4571393b68ecb74d329877b55689b8109af86835db4d694ceae67aca",
+      "bytes": 37898
     },
     "extension/out/extension.js": {
-      "sha256": "c077400b9dfc1c489c57dd078bf46f08e3f41802f57c775e9e4b88e277862a79",
-      "bytes": 121013
+      "sha256": "68071f77fac648cb42fb452bf3381c0206f3c8f17b309eadc28cf8484b64507e",
+      "bytes": 121644
     },
     "extension/out/fi-home.js": {
       "sha256": "ae836799badc78f90e5899bfd8e598d03e1d0f830777c51917ddf4292c1980f0",
@@ -62,12 +62,12 @@
       "bytes": 70863
     },
     "extension/out/lm-messages.js": {
-      "sha256": "ebde76bc31e90bc2ab7a82b73095de6fdf43166b493eb1fda987a22e63ca8aeb",
-      "bytes": 6404
+      "sha256": "419de108bfa76f8f291366702a260340f50e2419fe759abf4e35b5b67087b012",
+      "bytes": 14163
     },
     "extension/out/persistent-bridge.js": {
-      "sha256": "500daedd3fef4c3b9ea92f7a9c332c2ffc6fabb072d813f8efade2fd445134c6",
-      "bytes": 25917
+      "sha256": "8ca18a9d291e8b55396417aed66b78e2804b263026f97ae387db05e654eb133b",
+      "bytes": 27710
     },
     "extension/out/probe.js": {
       "sha256": "83f33fe220bbf749d6d1e1413e8773cf0e0c98718a6726348b6950024b988bd4",
@@ -110,16 +110,16 @@
       "bytes": 2756
     },
     "extension/out/trace.js": {
-      "sha256": "df747af000e95abbb3f9f848d6fb4dc466164570d85bb7ee4230b783f8c075b4",
-      "bytes": 13411
+      "sha256": "c4301d1d86994b626b6e62c7b82eb5386a7d185478572ace772c479d6d91cefd",
+      "bytes": 13526
     },
     "extension/package.json": {
-      "sha256": "dcd31d6ee7682ef83ec8298bc27f541d4ddf408224b2f00c173ef92fe66ea213",
-      "bytes": 15295
+      "sha256": "1cc91f0fc5b3d301184e459627be32f602c6ab7abdf75287bf887a4742af4538",
+      "bytes": 15345
     },
     "extension/readme.md": {
-      "sha256": "75d03d0be4fe826bdc11c5b5a9886276e97a824ad1ef35e5ed3634bd8ebca238",
-      "bytes": 80842
+      "sha256": "64ae792016cf6f3d6c289839f7f193caee5bf34c5168fd5805a051bd26f118a4",
+      "bytes": 82404
     }
   }
 }
