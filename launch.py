@@ -1580,6 +1580,9 @@ def _pick_clarify_callback(
     * `provider.name == "vscode_extension"`: route the questions
       through the same bridge the LLM calls use, so the FI VSCode
       extension can present them as modals and post answers back.
+    * Started or resumed by the web server (``FI_WEB_ANSWERS=1``): the
+      quest page shows the questions and writes the answers to disk
+      (``_web_page_clarify_callback``).
     * Otherwise: no callback. If the YAML has
       ``engine.clarify_mode = "interactive"`` and we return None, the
       engine raises a clear RuntimeError at the clarify pause —
@@ -1605,7 +1608,8 @@ def _pick_clarify_callback(
         except (TypeError, ValueError):
             port = 0
         if port <= 0:
-            return None
+            # No bridge to ask through: a quest the web server started still asks on its quest page.
+            return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s) if _web_can_answer() else None
 
         async def callback(questions: dict[str, object]) -> dict[str, object]:
             assert engine._client is not None, (
@@ -1625,7 +1629,77 @@ def _pick_clarify_callback(
             return await bridge.clarify(dict(questions))
 
         return callback
+    if _web_can_answer():
+        return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s)
     return None
+
+
+# Set by the web server (web/quest_launcher.py) for a quest it starts or resumes as its own process: the person can
+# answer the setup questions on the quest page, so the run asks there instead of answering for itself.
+WEB_ANSWERS_ENV = "FI_WEB_ANSWERS"
+
+
+def _web_can_answer() -> bool:
+    return os.environ.get(WEB_ANSWERS_ENV) == "1"
+
+
+def _write_json_atomic(path: Path, data: object) -> None:
+    """Written whole (a reader never sees half a file); if Windows refuses the replace because the web page has the
+    file open, written in place instead."""
+    text = json.dumps(data, indent=2) + "\n"
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: float = 0.0):  # noqa: ANN202
+    """The setup questions for a quest the web server runs as its own process: written to
+    ``.fi/clarify_questions.json`` (the quest page shows them as a form), answered by the page into
+    ``.fi/clarify_answer.json``. While it waits, ``.fi/clarify_waiting.json`` holds this process's id, so the page
+    knows the answers reach a running quest (even after the server restarted) and does not start a second run. The
+    engine bounds the wait with ``pauses.timeout_s`` and then does what ``pauses.clarify`` says, as for a quest the
+    web server runs in-process."""
+    answer_path = fi_dir / "clarify_answer.json"
+    questions_path = fi_dir / "clarify_questions.json"
+    waiting_path = fi_dir / "clarify_waiting.json"
+
+    def staged() -> dict[str, object] | None:
+        try:
+            data = json.loads(answer_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None  # not there yet, or the page is still writing it
+        return data if isinstance(data, dict) else None
+
+    async def callback(questions: dict[str, object]) -> dict[str, object]:
+        answers = staged()  # a resume after the answers were given takes them without asking again
+        if answers is not None:
+            return answers
+        fi_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            # Only a hint for the page; ``until`` lets it ignore a marker a killed run left behind.
+            _write_json_atomic(waiting_path, {
+                "pid": os.getpid(), "until": time.time() + timeout_s + 60 if timeout_s > 0 else None})
+        except OSError:
+            pass
+        try:
+            _write_json_atomic(questions_path, questions)
+            log.info("[clarify] waiting for your answers to the setup questions on the quest page")
+            while True:
+                await asyncio.sleep(1.0)
+                answers = staged()
+                if answers is not None:
+                    return answers
+        finally:
+            try:
+                waiting_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return callback
 
 
 def _pick_human_feedback_callback(
@@ -2029,6 +2103,7 @@ async def run_one(
     #   --interactive          → terminal Q&A
     #   provider=vscode_extension → route through the bridge so the
     #                            extension shows VSCode modals
+    #   started by the web server → the quest page shows the questions
     #   otherwise              → None; clarify_mode=interactive crashes
     #                            (the engine catches this and produces
     #                            a clear RuntimeError).

@@ -377,7 +377,10 @@
   function renderStatus(data) {
     const badge = document.getElementById('status-badge');
     const baseCls = 'flex items-center gap-2 cyber-border px-3 py-1 rounded-full font-label-sm text-label-sm uppercase';
-    if (data.alive) {
+    if (data.alive && data.pending_clarify) {
+      badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning glow-pulse"></span><span class="text-status-warning">Waiting for your answers</span>';
+      badge.className = baseCls + ' bg-surface-mid';
+    } else if (data.alive) {
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-success glow-pulse"></span><span class="text-status-success">Running</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_clarify) {
@@ -1361,8 +1364,9 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     form.dataset.loaded = '0';
     const payload = await res.json().catch(() => ({}));
     // Subprocess / CLI quest (no in-process future): the answers were staged on
-    // disk — kick off the --resume so the quest continues without a separate click.
-    if (payload && payload.in_process_resolved === false) {
+    // disk — kick off the --resume so the quest continues without a separate click. A run still waiting for them
+    // (started from this page) reads the answers itself.
+    if (payload && payload.in_process_resolved === false && !payload.run_waiting) {
       try {
         await fetch(`/api/quests/${encodeURIComponent(questId)}/resume`, { method: 'POST' });
         if (!pollHandle) pollHandle = setInterval(refresh, 3000);

@@ -876,7 +876,11 @@ engine:
 ```
 
 Run with `fi --config my.yaml --interactive` for the terminal pause-and-prompt
-flow, or via `@fi /new` for the VSCode-modal flow.
+flow, or via `@fi /new` for the VSCode-modal flow. A quest started from the web page (`fi --serve`)
+shows the questions as a form on its quest page and waits for them there, marked *Waiting for your answers*;
+if nobody answers within `pauses.timeout_s`, it uses the defaults, or, with `pauses.clarify: ask`, stops until you
+answer on the page. While it waits it counts as a running quest against the server's `--max-concurrent`, and
+`pauses.timeout_s: 0` waits with no limit.
 
 ### Fleet of variations
 

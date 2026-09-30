@@ -286,6 +286,23 @@ def _read_json_or_none(path: Path) -> Any:
         return None
 
 
+def _clarify_run_waiting(quest_root: Path) -> bool:
+    """Whether a quest started from the web page as its own process is running and waiting for its setup answers
+    (``.fi/clarify_waiting.json``, written by ``launch.py`` ``_web_page_clarify_callback``). Read from the quest
+    folder rather than the launcher's memory, so it still holds after the server restarted."""
+    from core.axon_sidecar import _pid_is_running
+
+    try:
+        marker = json.loads((quest_root / ".fi" / "clarify_waiting.json").read_text(encoding="utf-8"))
+        pid = int(marker["pid"])
+        until = marker.get("until")
+        if until is not None and time.time() > float(until):
+            return False  # left behind by a run that was killed while it waited
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
+        return False
+    return _pid_is_running(pid)
+
+
 def _quest_pending(quest_root: Path) -> str | None:
     """The pause a quest is waiting on (its kind), or ``None`` when it isn't
     paused.
@@ -1157,6 +1174,9 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        if _clarify_run_waiting(quest_root):
+            # It is running, waiting for its setup answers on the quest page: a second run would share its files.
+            raise HTTPException(409, "this quest is still running and waiting for your answers on its page")
         yaml_path = quest_root / "config.yaml"
         if not yaml_path.is_file():
             raise HTTPException(
@@ -1186,6 +1206,8 @@ def make_app(
             launched = app.state.launcher.launch_command(
                 argv_tail=["--config", str(yaml_path), resume_flag, quest_id, *(["--from", step] if step else [])],
                 job_id=quest_id,  # reuse the quest_id so /quest/<id> tracks it
+                # A resumed quest that has not had its setup questions yet asks them on the quest page.
+                extra_env={"FI_WEB_ANSWERS": "1"},
             )
         except QuestLauncherFull as e:
             return JSONResponse(
@@ -2465,15 +2487,23 @@ def make_app(
             try:
                 fi = quest_root / ".fi"  # type: ignore[union-attr]
                 fi.mkdir(parents=True, exist_ok=True)
-                (fi / "clarify_answer.json").write_text(
-                    json.dumps(answers, indent=2) + "\n", encoding="utf-8",
-                )
+                # Whole or not at all: a run waiting for it reads the file as soon as it appears.
+                tmp = fi / "clarify_answer.json.tmp"
+                tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
+                try:
+                    os.replace(tmp, fi / "clarify_answer.json")
+                finally:
+                    tmp.unlink(missing_ok=True)
             except OSError as e:
                 disk_write_error = f"{type(e).__name__}: {e}"
         if not in_process_resolved and not has_disk_pause:
             raise HTTPException(409, f"no pending clarify for quest {quest_id}")
         payload: dict[str, Any] = {"ok": True,
                                    "in_process_resolved": in_process_resolved}
+        if has_disk_pause and not in_process_resolved:
+            # A quest started from the web page as its own process that is still waiting for these answers reads
+            # them itself, so the page must not start a second run.
+            payload["run_waiting"] = _clarify_run_waiting(quest_root)  # type: ignore[arg-type]
         if disk_write_error is not None:
             payload["disk_write_warning"] = disk_write_error
         return JSONResponse(payload)
