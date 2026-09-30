@@ -1609,7 +1609,7 @@ def _pick_clarify_callback(
             port = 0
         if port <= 0:
             # No bridge to ask through: a quest the web server started still asks on its quest page.
-            return _web_page_clarify_callback(engine.fi_dir, engine._log) if _web_can_answer() else None
+            return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s) if _web_can_answer() else None
 
         async def callback(questions: dict[str, object]) -> dict[str, object]:
             assert engine._client is not None, (
@@ -1630,7 +1630,7 @@ def _pick_clarify_callback(
 
         return callback
     if _web_can_answer():
-        return _web_page_clarify_callback(engine.fi_dir, engine._log)
+        return _web_page_clarify_callback(engine.fi_dir, engine._log, engine.human_feedback_timeout_s)
     return None
 
 
@@ -1644,12 +1644,19 @@ def _web_can_answer() -> bool:
 
 
 def _write_json_atomic(path: Path, data: object) -> None:
+    """Written whole (a reader never sees half a file); if Windows refuses the replace because the web page has the
+    file open, written in place instead."""
+    text = json.dumps(data, indent=2) + "\n"
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        path.write_text(text, encoding="utf-8")
 
 
-def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger):  # noqa: ANN202
+def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: float = 0.0):  # noqa: ANN202
     """The setup questions for a quest the web server runs as its own process: written to
     ``.fi/clarify_questions.json`` (the quest page shows them as a form), answered by the page into
     ``.fi/clarify_answer.json``. While it waits, ``.fi/clarify_waiting.json`` holds this process's id, so the page
@@ -1672,7 +1679,12 @@ def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger):  # noqa: ANN2
         if answers is not None:
             return answers
         fi_dir.mkdir(parents=True, exist_ok=True)
-        _write_json_atomic(waiting_path, {"pid": os.getpid()})
+        try:
+            # Only a hint for the page; ``until`` lets it ignore a marker a killed run left behind.
+            _write_json_atomic(waiting_path, {
+                "pid": os.getpid(), "until": time.time() + timeout_s + 60 if timeout_s > 0 else None})
+        except OSError:
+            pass
         try:
             _write_json_atomic(questions_path, questions)
             log.info("[clarify] waiting for your answers to the setup questions on the quest page")

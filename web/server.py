@@ -293,8 +293,12 @@ def _clarify_run_waiting(quest_root: Path) -> bool:
     from core.axon_sidecar import _pid_is_running
 
     try:
-        pid = int(json.loads((quest_root / ".fi" / "clarify_waiting.json").read_text(encoding="utf-8"))["pid"])
-    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        marker = json.loads((quest_root / ".fi" / "clarify_waiting.json").read_text(encoding="utf-8"))
+        pid = int(marker["pid"])
+        until = marker.get("until")
+        if until is not None and time.time() > float(until):
+            return False  # left behind by a run that was killed while it waited
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, json.JSONDecodeError):
         return False
     return _pid_is_running(pid)
 
@@ -1189,7 +1193,7 @@ def make_app(
             )
         from web.quest_launcher import QuestLauncherFull
         from core import rerun_from as _rerun_from
-        step =_rerun_from.resolve(from_step) if from_step else None
+        step = _rerun_from.resolve(from_step) if from_step else None
         if from_step and step is None:
             raise HTTPException(400, f"{from_step!r} is not a step a quest can be rerun from; choose one of: "
                                      f"{_rerun_from.choices()}")
@@ -2486,7 +2490,10 @@ def make_app(
                 # Whole or not at all: a run waiting for it reads the file as soon as it appears.
                 tmp = fi / "clarify_answer.json.tmp"
                 tmp.write_text(json.dumps(answers, indent=2) + "\n", encoding="utf-8")
-                os.replace(tmp, fi / "clarify_answer.json")
+                try:
+                    os.replace(tmp, fi / "clarify_answer.json")
+                finally:
+                    tmp.unlink(missing_ok=True)
             except OSError as e:
                 disk_write_error = f"{type(e).__name__}: {e}"
         if not in_process_resolved and not has_disk_pause:

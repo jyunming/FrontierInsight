@@ -1219,7 +1219,7 @@ class Engine:
                                 payload = Command(resume={"clarify_answers": answers or {}})
                                 continue
                             except asyncio.TimeoutError:
-                                if clarify_answer_path.is_file():
+                                if _json_file_is_answer(clarify_answer_path):
                                     # An answer written just as the wait ran out is used below, never dropped.
                                     pass
                                 elif self.config.pauses.clarify is None:
@@ -21016,6 +21016,15 @@ def _render_data_readme(state: QuestState, quest_id: str) -> str:
         f"through `analyze → cross_check → write → review` exactly like "
         f"a simulation-driven quest would.\n"
     )
+
+
+def _json_file_is_answer(path: Path) -> bool:
+    """Whether ``path`` holds a non-empty JSON object (a staged answer that can be used)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and bool(data)
 
 
 def _quest_logger(quest_id: str, fi_dir: Path) -> logging.Logger:

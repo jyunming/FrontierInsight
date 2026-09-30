@@ -231,3 +231,34 @@ def test_the_resume_button_also_lets_the_page_answer(tmp_path: Path, monkeypatch
     app.state.launcher.launch_command = fake_launch_command
     assert TestClient(app).post(f"/api/quests/{qid}/resume").status_code == 200
     assert seen["env"].get(_ENV) == "1"
+
+
+def test_a_marker_left_by_a_killed_run_does_not_block_the_page(tmp_path: Path) -> None:
+    import os
+    import time
+
+    from web.server import _clarify_run_waiting
+
+    q = tmp_path / "q"
+    (q / ".fi").mkdir(parents=True)
+    marker = q / ".fi" / "clarify_waiting.json"
+    marker.write_text(json.dumps({"pid": os.getpid(), "until": time.time() + 60}), encoding="utf-8")
+    assert _clarify_run_waiting(q) is True
+    marker.write_text(json.dumps({"pid": os.getpid(), "until": time.time() - 1}), encoding="utf-8")
+    assert _clarify_run_waiting(q) is False, "past its deadline: a run killed while it waited (its pid may be reused)"
+    marker.write_text("not json", encoding="utf-8")
+    assert _clarify_run_waiting(q) is False
+
+
+async def test_an_empty_answer_file_at_the_timeout_still_means_the_defaults(
+        tmp_path: Path, stop_after_clarify) -> None:
+    engine = Engine(_cfg(tmp_path))
+    engine.human_feedback_timeout_s = 1
+
+    async def empty_answer(questions):  # noqa: ANN001
+        (engine.fi_dir / "clarify_answer.json").write_text("{}", encoding="utf-8")
+        await asyncio.sleep(3600)
+
+    with pytest.raises(_Reached):
+        await asyncio.wait_for(engine.run(clarify_callback=empty_answer), timeout=90)
+    assert stop_after_clarify["state"]["clarify_done"] is True
