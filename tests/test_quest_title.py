@@ -160,7 +160,120 @@ def test_rename_updates_the_saved_state_a_later_rerun_reads(tmp_path: Path) -> N
     assert values["topic"] == "t"
 
 
+def test_a_quoted_title_key_is_not_written_twice(tmp_path: Path) -> None:
+    q = _quest(tmp_path, config='"title": Old\ntopic: x\n')
+    quest_title.rename(q, "New")
+    text = (q / "config.yaml").read_text(encoding="utf-8")
+    assert text.count("title") == 1 and yaml.safe_load(text) == {"title": "New", "topic": "x"}
+
+
+def test_an_unreadable_config_is_refused_before_anything_changes(tmp_path: Path) -> None:
+    q = _quest(tmp_path, config="topic: [unclosed\n")
+    with pytest.raises(quest_title.RenameRefused, match="config.yaml cannot be read"):
+        quest_title.rename(q, "New")
+    assert (q / "paper" / "paper.md").read_text(encoding="utf-8") == _PAPER
+
+
+def test_a_failed_write_puts_back_what_was_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    q = _quest(tmp_path)
+    real = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise PermissionError(13, "in use")
+        return real(src, dst)
+
+    monkeypatch.setattr(quest_title.os, "replace", flaky)
+    with pytest.raises(quest_title.RenameRefused, match="Nothing was changed"):
+        quest_title.rename(q, "New")
+    assert (q / "paper" / "paper.md").read_text(encoding="utf-8") == _PAPER
+    assert "rename_me" in (q / "config.yaml").read_text(encoding="utf-8")
+    assert not list(q.rglob("*.renaming"))
+    assert audit_log.read(q / ".fi" / "audit.jsonl")[-1]["kind"] != "title_changed"
+
+
+def test_titles_with_invisible_characters_or_not_text_are_refused() -> None:
+    for bad in ("A\x7fB", "A‮B", ["a"]):
+        with pytest.raises(quest_title.RenameRefused):
+            quest_title.clean(bad)
+
+
+def test_rename_from_inside_the_quest_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    q = _quest(tmp_path)
+    monkeypatch.chdir(q)
+    result = quest_title.rename(Path("."), "New")
+    assert result.quest_id == _QID
+    assert audit_log.read(q / ".fi" / "audit.jsonl")[-1]["quest_id"] == _QID
+
+
+def test_front_matter_without_a_title_keeps_the_heading_as_the_title(tmp_path: Path) -> None:
+    q = _quest(tmp_path, paper="---\nauthor: me\n---\n\n# Old\n\ntext\n")
+    assert quest_title.current_title(q) == "Old"
+    quest_title.rename(q, "New")
+    assert (q / "paper" / "paper.md").read_text(encoding="utf-8") == "---\nauthor: me\n---\n\n# New\n\ntext\n"
+
+
+def _seal(q: Path) -> None:
+    """A finished research quest's seal, as core/engine.py writes it, naming the paper's hash."""
+    from core import evidence
+
+    fi = q / ".fi"
+    for rel in evidence.SEALED_FILES:
+        (q / rel).parent.mkdir(parents=True, exist_ok=True)
+        (q / rel).touch()
+    log = audit_log.AuditLog(fi / "audit.jsonl", _QID)
+    for node in ("write", "review"):
+        log.append("node_completed", node=node)
+    log.append(
+        "quest_finalized", events_before=len(audit_log.read(fi / "audit.jsonl")), write_errors=0, records_not_written=0,
+        model_calls_not_written=0, model_calls={"gaps": []}, rigor_profile="research",
+        nodes_completed=list(evidence._SEALED_STEPS), paper_path="paper/paper.md",
+        paper_sha256=quest_title._sha256(q / "paper" / "paper.md"),
+        files={rel: quest_title._sha256(q / rel) for rel in evidence.SEALED_FILES},
+        sealed_records=evidence.SEAL_RECORDS,
+    )
+
+
+def test_renaming_a_sealed_quest_keeps_its_seal(tmp_path: Path) -> None:
+    from core import evidence
+
+    q = _quest(tmp_path)
+    _seal(q)
+    trace = q / ".fi" / "audit.jsonl"
+    assert evidence._trace_completeness_gaps(trace, audit_log) == []
+    quest_title.rename(q, "Better Title")
+    quest_title.rename(q, "Best Title")
+    assert evidence._trace_completeness_gaps(trace, audit_log) == []
+    # Any other edit of the paper is still one.
+    paper = q / "paper" / "paper.md"
+    paper.write_text(paper.read_text(encoding="utf-8") + "\nmore\n", encoding="utf-8")
+    assert any("changed after the quest was sealed" in g for g in evidence._trace_completeness_gaps(trace, audit_log))
+
+
+def test_following_a_renamed_paused_quest_says_it_stopped(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from launch import _follow_trace
+
+    q = _quest(tmp_path)
+    audit_log.AuditLog(q / ".fi" / "audit.jsonl", _QID).append("node_paused", node="review", pause="review")
+    (q / ".fi" / "pause.json").write_text('{"kind": "review"}', encoding="utf-8")
+    quest_title.rename(q, "New")
+    assert _follow_trace(_QID, "", "summary", tmp_path, poll_s=0.01, max_hours=0.001) == 0
+    assert "stopped for you" in capsys.readouterr().out
+
+
 # --- CLI -----------------------------------------------------------------------------------------------------------
+
+
+def test_cli_title_flag_takes_a_title_that_starts_with_a_dash(tmp_path: Path) -> None:
+    from launch import _rename_quest, parse_args
+
+    q = _quest(tmp_path)
+    args = parse_args(["--rename", _QID, "--title=-40 C and --help", "--output-root", str(tmp_path)])
+    assert args.rename == [_QID] and args.title == "-40 C and --help"
+    assert _rename_quest(args.rename, args.output_root, title=args.title) == 0
+    assert quest_title.current_title(q) == "-40 C and --help"
 
 
 def test_cli_tools_rename_parses_to_the_rename_flag() -> None:

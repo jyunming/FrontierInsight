@@ -67,7 +67,7 @@
           },
           {
             "name": "rename",
-            "description": "Change a finished or paused quest's title: the paper's title line, its config and summary. Results, data and code are not touched. Example: @fi /rename 1790003131-my-quest Energy Drift in Symplectic Integrators. Mirrors `launch.py --rename` and the pencil beside the title on the web quest page."
+            "description": "Change a finished or paused quest's title: the paper's title line, its config and summary. Results, data and code are not touched. Example: @fi /rename 1790003131-my-quest Energy Drift in Symplectic Integrators. Mirrors `launch.py --rename` and the Rename button beside the title on the web quest page."
           },
           {
             "name": "summarize",

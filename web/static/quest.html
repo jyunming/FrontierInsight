@@ -399,14 +399,39 @@
       const redo = body.outputs_to_redo || [];
       if (redo.length) {
         const names = redo.map(k => _OUTPUT_LABELS[k] || k).join(', ');
-        if (confirm('Renamed. The outputs already made (' + names + ') still show the old title. Make them again now with the new title? (No re-run of the research.)')) {
-          for (const kind of redo) {
-            await fetch(`/api/quests/${encodeURIComponent(questId)}/generate?kind=${encodeURIComponent(kind)}`, { method: 'POST' }).catch(() => {});
-          }
+        if (confirm('Renamed. The outputs already made (' + names + ') still show the old title. Make them again now with the new title? (No re-run of the research; one at a time.)')) {
+          remakeOutputs(redo);
         }
       }
       refresh();
     } catch (e) { alert('Not renamed: ' + e); }
+  }
+
+  // Makes each output again, one after the other (each waits for the one before to finish), and says which could not.
+  async function remakeOutputs(kinds) {
+    const failed = [];
+    for (const kind of kinds) {
+      const label = _OUTPUT_LABELS[kind] || kind;
+      try {
+        const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/generate?kind=${encodeURIComponent(kind)}`, { method: 'POST' });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          failed.push(`${label}: ${err.detail || err.error || res.status}`);
+          continue;
+        }
+        const job = `${questId}-emit-${kind}`;
+        for (let i = 0; i < 600; i++) {  // at most 30 minutes per output
+          await new Promise(r => setTimeout(r, 3000));
+          const s = await fetch(`/api/jobs/${encodeURIComponent(job)}`).then(r => r.ok ? r.json() : null).catch(() => null);
+          if (!s || !s.alive) {
+            if (s && s.exit_code) failed.push(`${label}: stopped with exit code ${s.exit_code}`);
+            break;
+          }
+        }
+      } catch (e) { failed.push(`${label}: ${e}`); }
+    }
+    refresh();
+    if (failed.length) alert('These outputs were not made again:\n' + failed.join('\n'));
   }
 
   function renderStatus(data) {

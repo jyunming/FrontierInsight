@@ -1388,6 +1388,10 @@ def make_app(
         title = body.get("title") if isinstance(body, dict) else None
         if registry.alive(quest_id) or bool((app.state.launcher.status_for(quest_id) or {}).get("alive")):
             raise HTTPException(409, f"Quest {quest_id} is still running; rename it once it has stopped or finished.")
+        # An output being made again reads the paper as it goes: a rename now would leave it half old, half new.
+        if any((app.state.launcher.status_for(f"{quest_id}-emit-{kind}") or {}).get("alive")
+               for kind in ("paper_pdf", "slides", "poster", "speech")):
+            raise HTTPException(409, f"An output of quest {quest_id} is being made; rename it once that has finished.")
         try:
             result = await asyncio.to_thread(fi_quest_title.rename, quest_root, title)
         except fi_quest_title.RenameRefused as e:
@@ -2326,7 +2330,7 @@ def make_app(
                     pending_human_review = None
         return JSONResponse({
             "quest_id": quest_id,
-            # The paper's title (else config.yaml's), shown above the quest id; the pencil beside it changes it.
+            # The paper's title (else config.yaml's), shown above the quest id; Rename beside it changes it.
             "title": fi_quest_title.current_title(quest_root),
             "quest_root": str(quest_root),
             "current_node": _current_node_from_log(log_lines),

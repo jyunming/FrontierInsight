@@ -236,9 +236,13 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
                     if "could not be written" not in str(g))
     if seal.get("events_before") != at:
         gaps.append("the decision trace's final seal does not count the events before it (events are missing or were added)")
+    # A person changing the title after the quest finished (core/quest_title.py) is recorded after the seal, with the
+    # paper's hash before and after: those events are the one thing a seal may be followed by, and the paper is
+    # checked against the hash the last of them left.
+    renames = events[at + 1:] if len(audit_log.after_title_changes(events)) == at + 1 else []
     if any(e.get("kind") in ("node_started", "node_completed") for e in events[at + 1:]):
         gaps.append("steps ran after the decision trace's final seal (the quest was re-run and did not finish again)")
-    elif at != len(events) - 1:
+    elif at != len(events) - 1 and not renames:
         gaps.append(f"{len(events) - 1 - at} event(s) were written after the decision trace's final seal, which "
                     "therefore does not cover them")
     missing = [s for s in _SEALED_STEPS if s not in (seal.get("nodes_completed") or [])]
@@ -257,8 +261,14 @@ def _trace_completeness_gaps(trace: Path, audit_log: Any, *, sealing: bool = Fal
     paper = seal.get("paper_path")
     if not paper or not seal.get("paper_sha256"):
         gaps.append("the decision trace's final seal names no hash of the paper")
-    elif seal.get("paper_sha256") != _file_sha256(quest_root / str(paper)):
-        gaps.append(f"the paper ({paper}) changed after the quest was sealed")
+    else:
+        expected = seal.get("paper_sha256")
+        for rename in renames:
+            if rename.get("paper_path") != paper or rename.get("paper_sha256_before") != expected:
+                break
+            expected = rename.get("paper_sha256_after") or expected
+        if expected != _file_sha256(quest_root / str(paper)):
+            gaps.append(f"the paper ({paper}) changed after the quest was sealed")
     return gaps
 
 def assess(

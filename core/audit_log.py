@@ -50,7 +50,17 @@ KINDS = (
     "quest_finalized",    # the seal a finished quest writes last: how many events came before it, how many could not
                           # be written in this run, and which steps completed (core/evidence.py reads it)
     "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
+    "title_changed",      # a person changed the quest's title (core/quest_title.py): old, new, the paper's hash before and
+                          # after; the only event a seal may be followed by (core/evidence.py chains the paper's hash)
 )
+
+
+def after_title_changes(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``events`` without the ``title_changed`` events at its end: where the quest itself stopped."""
+    end = len(events)
+    while end and events[end - 1].get("kind") == "title_changed":
+        end -= 1
+    return events[:end]
 
 # Keys the chain owns: an event's own fields never replace them.
 _RESERVED = frozenset({"schema", "seq", "ts", "quest_id", "kind", "provenance", "prev", "hash", "node"})

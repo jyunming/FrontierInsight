@@ -831,6 +831,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="With --trace: only the events of this node (design, execute, review, ...).",
     )
     p.add_argument(
+        "--title", metavar="TEXT", default=None,
+        help="With --rename: the new title as one value, instead of the words after the quest id. Write it as "
+             "--title=\"...\" when the title starts with a '-'.",
+    )
+    p.add_argument(
         "--follow", action="store_true",
         help="With --trace: keep printing each new event as the quest runs, until it stops for you, finishes or fails.",
     )
@@ -2853,7 +2858,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return _show_why(args.why[0], " ".join(args.why[1:]), args.output_root)
 
         if args.rename:
-            return _rename_quest(args.rename, args.output_root)
+            return _rename_quest(args.rename, args.output_root, title=args.title)
 
         # ``--config`` beside a skill command is not a quest to run: it names the
         # folders those commands look in (``_check_mode`` allows nothing else
@@ -5751,11 +5756,13 @@ def _show_why(quest: str, about: str, output_root: Path) -> int:
     return 0
 
 
-def _rename_quest(words: list[str], output_root: Path) -> int:
-    """``--rename QUEST TITLE...``: change a finished or paused quest's title (core/quest_title.py)."""
+def _rename_quest(words: list[str], output_root: Path, *, title: str | None = None) -> int:
+    """``--rename QUEST TITLE...`` (or ``--rename QUEST --title=TEXT``): change a finished or paused quest's title
+    (core/quest_title.py)."""
     from core import quest_title
 
-    if len(words) < 2:
+    new_title = title if title is not None else " ".join(words[1:])
+    if not words or not new_title.strip():
         print("[FI] give the quest and the new title: fi tools rename <quest_id> <new title>")
         return 2
     root = _quest_dir(words[0], output_root)
@@ -5764,7 +5771,7 @@ def _rename_quest(words: list[str], output_root: Path) -> int:
               "or --output-root.")
         return 1
     try:
-        result = quest_title.rename(root, " ".join(words[1:]))
+        result = quest_title.rename(root, new_title)
     except quest_title.RenameRefused as e:
         print(f"[FI] not renamed: {e}")
         return 1
@@ -5794,6 +5801,8 @@ def _follow_trace(quest: str, node: str, detail: str, output_root: Path, *, poll
     def _ended(events: list[dict]) -> str:
         # Where the quest is now, whenever following began: stopped for a person (the trace's last event), failed, or
         # finished (a record written after the trace's last event: a resumed quest clears or rewrites these first).
+        # A title changed afterwards (`--rename`) is not where the quest stopped.
+        events = audit_log.after_title_changes(events)
         last = events[-1].get("kind") if events else None
         if last == "node_paused" and (root / ".fi" / "pause.json").is_file():
             return "it stopped for you: see NEXT_STEP.md"
