@@ -283,6 +283,8 @@ _PHASED_GAPS = {
                        "are no longer from one untouched confirm run"),
     "compromised": ("the confirm run could not be kept apart from exploration (its held-back data, its new seeds or its "
                     "result), so nothing is confirmed"),
+    "not_confirmable": ("no data was held back and the study gives the same numbers whatever its seeds, so a confirm "
+                        "run could only repeat exploration's run; nothing is confirmed"),
 }
 
 

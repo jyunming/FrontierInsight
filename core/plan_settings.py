@@ -167,6 +167,14 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
             record(fi_dir, cfg, quest_root)
         return []
     now = settings_of(cfg)
+    missing = [p for p, _label in SETTINGS if p not in approved]
+    if missing:
+        # A setting added to this list after the quest was approved (a newer FI): recorded as it is now, so a hand
+        # edit of it from here on stops the quest like any other. Whether the file sets it counts as it does now.
+        raw_now = _raw(quest_root)
+        approved = {**approved, **{p: now.get(p) for p in missing}}
+        explicit = explicit | {p for p in missing if raw_now is None or _set_in(raw_now, p)}
+        _write(fi_dir, approved, sorted(explicit))
     changed = [p for p, _label in SETTINGS if p in approved and approved.get(p) != now.get(p)]
     if not changed:
         return []

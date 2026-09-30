@@ -307,8 +307,9 @@ PHASED_CHOICES: tuple[Choice, ...] = (
            "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs."),
     Choice(True, "Yes: explore first, then confirm once",
            "The model may try designs and look at results first. Then the design is frozen and run once more on data "
-           "or seeds it never saw: a part of your data file held back before it starts (a CSV/TSV in inputs/data/ "
-           "with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready."),
+           "or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ "
+           "with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. "
+           "For a study that runs an experiment; a literature survey stays exploratory."),
 )
 
 

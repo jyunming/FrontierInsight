@@ -204,7 +204,8 @@ if not os.environ.get('FI_PILOT'):
         f.write(json.dumps({'seed': seed, 'index': os.environ.get('FI_REPLICATE_INDEX'), 'rows': rows}) + '\\n')
 os.makedirs('figures', exist_ok=True)
 plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
-print('RESULT_JSON: ' + json.dumps({'score': 0.5, 'rows': rows}))
+import random
+print('RESULT_JSON: ' + json.dumps({'score': 0.5, 'rows': rows, 'draw': random.Random(seed).random()}))
 """
 
 
@@ -802,11 +803,18 @@ def test_a_background_job_s_confirm_run_submits_a_new_job(tmp_path: Path) -> Non
     assert (job.parent / "state.explore.json").read_text(encoding="utf-8") == '{"id": "explore-job"}'
 
 
-def test_the_background_job_prompt_passes_the_seed_on() -> None:
-    from core.engine import _JOB_PROTOCOL
+def test_the_background_job_prompt_passes_the_seed_on_only_when_on(tmp_path: Path) -> None:
+    from core.engine import Engine
 
-    assert "Ignore FI_PILOT and FI_REPLICATE_SEED" not in _JOB_PROTOCOL
-    assert "FI_REPLICATE_SEED" in _JOB_PROTOCOL and "pass it to the job" in _JOB_PROTOCOL
+    on = Engine(_bg_config(tmp_path / "on"))._job_block()
+    assert "Ignore FI_PILOT and FI_REPLICATE_SEED" not in on and "pass it to the job" in on
+    off_cfg = _bg_config(tmp_path / "off")
+    off_cfg.engine.phased = False
+    off = Engine(off_cfg)._job_block()
+    # Off: exactly the prompt it always was.
+    assert off.endswith("Never sleep-wait for the job. Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate "
+                        "run is made for a background job.\n")
+    assert "pass it to the job" not in off
 
 
 def test_a_confirm_run_on_new_seeds_that_cannot_take_the_seed_is_not_confirmed(tmp_path: Path) -> None:
@@ -821,7 +829,88 @@ def test_a_confirm_run_on_new_seeds_that_cannot_take_the_seed_is_not_confirmed(t
     gate = {"evidence_assessment": {"route": "write"}, "result_json": {"a": 1}, "exec_result": {"returncode": 0}}
     assert engine._route_after_evidence_gate(gate) == "write"
     record = phased.load(engine.quest_root)
-    assert phased.status(record) == "compromised" and "FI_REPLICATE_SEED" in record["compromised"]
+    assert phased.status(record) == "not_confirmable" and "FI_REPLICATE_SEED" in record["not_confirmable"]
+    assert "could only repeat exploration's run" in phased.summary(record)
+
+
+def _gate_after(tmp_path: Path, files: dict[str, str], state: dict | None = None, *, background: bool = False,
+                label: str = "q") -> tuple:
+    from core import frozen_protocol as _frozen
+    from core.engine import Engine
+
+    engine = Engine(_bg_config(tmp_path / label) if background else _config(tmp_path / label, phased_on=True))
+    code = engine.quest_root / "code"
+    code.mkdir(parents=True)
+    for name, text in files.items():
+        (code / name).write_text(text, encoding="utf-8")
+    phased.prepare(engine.quest_root, engine.quest_id)
+    engine._runs_code = lambda state: True  # type: ignore[method-assign]
+    engine._draft_protocol = lambda state: {"grid": {"n": [1]}}  # type: ignore[method-assign]
+    gate = {"evidence_assessment": {"route": "write"}, "result_json": {"a": 1}, "exec_result": {"returncode": 0},
+            **(state or {})}
+    return engine._route_after_evidence_gate(gate), phased.load(engine.quest_root), _frozen.load(engine.quest_root)
+
+
+def test_a_study_without_randomness_and_without_held_back_data_cannot_be_confirmed(tmp_path: Path) -> None:
+    seeded = "import os, random\nrng = random.Random(int(os.environ.get('FI_REPLICATE_SEED', '0')))\n"
+    # The runs agreed whatever the seed (recorded by the experiment step), or FI's trial contract runs each setting once.
+    for label, files, state in (
+            ("ran", {"experiment.py": seeded}, {"result_json_deterministic": True}),
+            ("cell", {"simulate.py": "def run_cell(cell):\n    return {'v': 1.0}\n", "experiment.py": ""}, {}),
+            ("ode", {"experiment.py": "import math\nprint(math.sin(1.0))\n"}, {})):
+        route, record, frozen = _gate_after(tmp_path, files, state, label=label)
+        assert route == "write" and phased.status(record) == "not_confirmable", label
+        assert frozen is not None, "the protocol is still frozen before the paper is written"
+
+
+def test_a_study_that_takes_its_seed_or_draws_fresh_numbers_goes_to_the_confirm_run(tmp_path: Path) -> None:
+    for label, files in (
+            # The seed is read in a helper module the experiment imports.
+            ("module", {"rng.py": "import os, random\ngen = random.Random(int(os.environ['FI_REPLICATE_SEED']))\n",
+                        "experiment.py": "from rng import gen\nprint(gen.random())\n"}),
+            # No seed at all: every run draws new numbers from the operating system.
+            ("entropy", {"experiment.py": "import numpy as np\nrng = np.random.default_rng()\nprint(rng.random())\n"}),
+            ("trials", {"simulate.py": "def run_trial(cell, trial_id, seed):\n    return {'v': 1.0}\n",
+                        "experiment.py": ""})):
+        route, record, _frozen = _gate_after(tmp_path, files, label=label)
+        assert route == "confirm" and phased.status(record) == "confirming", label
+
+
+def test_a_temporary_copy_never_stays_in_the_quest_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, _original = _quest(tmp_path)
+    phased.prepare(root, "q1")
+    phased.restore_inputs(root)
+    (root / "inputs" / "data" / ".d.csv.fi-tmp").write_bytes(b"x,y\n1,1\n")  # left by an earlier FI's hard stop
+    phased.prepare(root, "q1")
+    assert [p.name for p in (root / "inputs" / "data").iterdir()] == ["d.csv"]
+
+    def locked(self, target):  # noqa: ANN001, ANN202 -- the file is open in a spreadsheet program
+        raise PermissionError("locked")
+
+    monkeypatch.setattr(Path, "replace", locked)
+    with pytest.raises(PermissionError):
+        phased.restore_inputs(root)
+    monkeypatch.undo()
+    assert [p.name for p in (root / "inputs" / "data").iterdir()] == ["d.csv"]
+    assert not list(phased.store_dir(root).rglob("*.fi-tmp"))
+
+
+def test_a_quest_approved_before_the_setting_was_listed_is_held_to_it_from_now_on(tmp_path: Path) -> None:
+    from core import plan_settings
+
+    root = tmp_path / "q"
+    root.mkdir()
+    (root / "config.yaml").write_text(f"{plan_settings.INTERVIEW_MARK} FI\nengine:\n  phased: true\n", encoding="utf-8")
+    plan_settings.record(root / ".fi", _config(tmp_path / "out", phased_on=True), root)
+    path = root / ".fi" / plan_settings.NAME
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["settings"]["engine.phased"]  # a record an older FI wrote
+    data["explicit"].remove("engine.phased")
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert plan_settings.check(root, root / ".fi", _config(tmp_path / "out", phased_on=True)) == []
+    assert json.loads(path.read_text(encoding="utf-8"))["settings"]["engine.phased"] is True
+    changed = plan_settings.check(root, root / ".fi", _config(tmp_path / "out", phased_on=False))
+    assert any("`engine.phased`" in line for line in changed), changed
 
 
 @pytest.mark.asyncio

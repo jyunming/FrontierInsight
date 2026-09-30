@@ -2460,20 +2460,34 @@ class Engine:
             self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
                               "kept in %s", e, _phased.store_dir(self.quest_root) / "original")
 
-    def _phased_seed_gap(self) -> str:
-        """Why a confirm run on new seeds could not differ from exploration's run (empty when it can): the experiment
-        never reads the seed FI gives it. Under the trial contract FI hands every trial its seed itself; a study with
-        no random source at all does not depend on a seed (a background job's driver must pass the seed on, whatever
-        it imports)."""
+    def _phased_seed_gap(self, state: QuestState) -> str:
+        """Why a confirm run on new seeds could not differ from exploration's run (empty when it can). What the runs
+        showed decides first: identical results whatever the seed (a deterministic study, or a script that ignores the
+        seed), as ``_node_execute`` recorded. Then the code: a deterministic trial contract (``run_cell``), or no file
+        in ``code/`` that reads ``FI_REPLICATE_SEED`` while the experiment draws random numbers only from fixed seeds (a
+        generator built without a seed draws new numbers on every run, so that one does differ). Under ``run_trial`` FI
+        hands every trial its seed itself."""
+        deterministic = ("the study has no randomness (every run gives the same numbers), so a run on new seeds only "
+                         "repeats exploration's run")
         code = self.quest_root / "code"
         simulate = code / _split_run.SIMULATE_NAME
-        if simulate.is_file() and _trial_runner.entries(simulate) & {"run_trial", "run_cell"}:
+        entries = _trial_runner.entries(simulate) if simulate.is_file() else set()
+        if "run_trial" in entries:
             return ""
+        if "run_cell" in entries or state.get("result_json_deterministic") or state.get("result_json_no_random_source"):
+            return deterministic
         script = simulate if simulate.is_file() else code / "experiment.py"
-        if not script.is_file() or _script_reads_replicate_seed(script):
+        if not script.is_file():
+            return ""
+        if state.get("result_json_replicate_seed_ignored") and not _unseeded_rng_calls(script):
+            return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
+                    "same numbers, so a run on new seeds would repeat exploration's run")
+        # Generous: the seed read anywhere in code/ (a multi-module project reads it in a helper module) counts.
+        reads = any(_script_reads_replicate_seed(p) for p in sorted(code.rglob("*.py")))
+        if reads or _unseeded_rng_calls(script):
             return ""
         if not self.config.execution.background_jobs and not _script_has_random_source(script):
-            return ""
+            return deterministic
         return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), so a run on new seeds "
                 "would repeat exploration's run")
 
@@ -2511,9 +2525,12 @@ class Engine:
             self._log.warning("[phased] the record of the two stages is missing or cannot be read; nothing is "
                               "confirmed, so the paper is written from exploration and says its numbers are exploratory")
             return route
-        if record and record.get("compromised"):
+        if record and (record.get("compromised") or record.get("not_confirmable")):
             # Nothing can be confirmed any more (said in run.log when it happened): the quest goes on as it would
-            # without explore-then-confirm, and the paper says its numbers are exploratory.
+            # without explore-then-confirm (its protocol frozen before it writes), and the paper says its numbers are
+            # exploratory.
+            if route == "write" and current == _phased.EXPLORE:
+                self._freeze_protocol_if_due(state, at_confirm=True)
             return route
         if current == _phased.CONFIRM and not _phased.confirm_run_started(self.quest_root):
             # The confirm stage began but its run has not (a stop before this step was saved): run it now, rather
@@ -2532,14 +2549,13 @@ class Engine:
                 self._log.info("[phased] exploration stage: there is no accepted result to confirm, so the paper is "
                                "written from exploration and says its numbers are exploratory")
                 return "write"
-            seed_gap = self._phased_seed_gap() if (record or {}).get("strategy") == _phased.FRESH_SEEDS else ""
-            if seed_gap:
-                self._log.warning("[phased] %s: a confirm run on new seeds could not differ from exploration's run, so "
-                                  "nothing in this quest can be confirmed and the paper says its numbers are exploratory",
-                                  seed_gap)
-                _phased.mark_compromised(self.quest_root, seed_gap)
-                return "write"
             self._freeze_protocol_if_due(state, at_confirm=True)
+            seed_gap = self._phased_seed_gap(state) if (record or {}).get("strategy") == _phased.FRESH_SEEDS else ""
+            if seed_gap:
+                self._log.warning("[phased] %s; no data was held back either, so this quest cannot be confirmed and the "
+                                  "paper says its numbers are exploratory", seed_gap)
+                _phased.mark_unconfirmable(self.quest_root, seed_gap)
+                return "write"
             frozen = _frozen.load(self.quest_root)
             explore_runs = sum(1 for e in _audit_log.read(self.audit.path)
                                if e.get("kind") == "node_completed" and e.get("node") == "execute") \
@@ -6786,7 +6802,8 @@ class Engine:
         ``engine.phased`` it is frozen when exploration ends instead (``at_confirm``), before the confirm run."""
         if _frozen.load(self.quest_root) is not None:
             return
-        if not at_confirm and _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.EXPLORE:
+        if (not at_confirm and _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.EXPLORE
+                and not _phased.unconfirmable(self.quest_root)):
             self._log.info("[phased] exploration stage: the protocol is not frozen yet (the design may still change); "
                            "it is frozen when exploration ends, before the confirm run")
             return
@@ -15197,7 +15214,10 @@ class Engine:
         contract with the two-script one instead (:meth:`_split_block`)."""
         if not self.config.execution.background_jobs:
             return ""
-        return "" if state is not None and self._split_on(state) else _JOB_PROTOCOL
+        if state is not None and self._split_on(state):
+            return ""
+        # Explore, then confirm: the confirm run's job must draw new random numbers, so the driver passes the seed on.
+        return _JOB_PROTOCOL + (_JOB_SEED_PROTOCOL if _phased.enabled(self.config) else _JOB_NO_SEED_PROTOCOL)
 
     _RUN_DATA_SUFFIXES = frozenset({
         ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",
@@ -16802,8 +16822,18 @@ The real simulation runs on a cluster or takes longer than the wall-time limit, 
 3. Every later run: read `job/state.json` and check the job. Still running: print the same pending line with an updated `note` and exit 0. Never submit a second job.
 4. Job finished: read its outputs, draw the figures into `figures/` as usual, and print the real `RESULT_JSON: {...}` (no `fi_job` key) in the format this prompt asks for results.
 5. Job failed: print the reason on stderr and exit non-zero.
-Never sleep-wait for the job. Ignore FI_PILOT: no pilot or replicate run is made for a background job. When you submit, read the integer in the environment variable FI_REPLICATE_SEED (0 when unset), pass it to the job and build every random generator the job uses from it (a task may add its own index to it); save it in `job/state.json` with the job id. FI gives a later run of the same study a different value, so its job draws new random numbers.
-"""
+Never sleep-wait for the job. """
+
+# Appended to _JOB_PROTOCOL (same line), so the prompt with engine.phased off is exactly what it always was.
+_JOB_NO_SEED_PROTOCOL = "Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate run is made for a background job.\n"
+
+# engine.phased only: the confirm run's job is given a seed exploration never used, and must use it.
+_JOB_SEED_PROTOCOL = (
+    "Ignore FI_PILOT: no pilot or replicate run is made for a background job. When you submit, read the integer in the "
+    "environment variable FI_REPLICATE_SEED (0 when unset), pass it to the job and build every random generator the "
+    "job uses from it (a task may add its own index to it); save it in `job/state.json` with the job id. FI gives a "
+    "later run of the same study a different value, so its job draws new random numbers.\n"
+)
 
 _CLUSTER_PROTOCOL = """\
 
