@@ -1925,6 +1925,48 @@ class Engine:
         values = await self._checkpoint_values()
         return bool(values.get("no_simulation_resolved") or values.get("survey_mode_resolved"))
 
+    async def quest_map(self, steps: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        """What the quest map draws (``core.rerun_from.map_payload``): the CLI's ``--from --json`` (the VS Code panel)
+        and the web page both take it from here, so they agree on where the quest stopped. ``steps`` is
+        ``rerun_steps()`` when the caller already has it. No model call, nothing written."""
+        if steps is None:
+            steps = await self.rerun_steps()
+        finished, at = await self.stopped_at()
+        return _rerun_from.map_payload(steps, finished=finished, no_simulation=await self.rerun_no_simulation(), at=at)
+
+    async def stopped_at(self) -> tuple[bool, list[str]]:
+        """Where the quest is, for its map: ``(finished, nodes)``. ``nodes`` are the graph nodes the checkpoint is about
+        to run (the one a pause waits in, the one that failed, the one a killed run was in); ``finished`` is true only
+        when there is none left AND nothing is waiting: no pause (``.fi/pause.json``, ``NEXT_STEP.md``) and no failure
+        (``quest_failed.md``). A pause writes ``frontier_insight_summary.json`` too, so that file never says "finished".
+        A quest with no checkpoint, or one that cannot be read, is not finished. No model call, nothing written."""
+        nxt = await self._checkpoint_next()
+        if nxt is None:
+            return False, []
+        waiting = any(p.is_file() for p in (self.fi_dir / "pause.json", self.quest_root / "NEXT_STEP.md",
+                                             self.quest_root / "quest_failed.md"))
+        return (not nxt and not waiting), list(nxt)
+
+    async def _checkpoint_next(self) -> tuple[str, ...] | None:
+        """The nodes the latest checkpoint is about to run (``()`` at the end of the graph), or ``None`` when the quest
+        has no checkpoint or it cannot be read."""
+        try:
+            opened = await self._open_readonly_graph()
+            if opened is None:
+                return None
+            graph, conn = opened
+            try:
+                snap = await graph.aget_state({"configurable": {"thread_id": self.quest_id}})
+            finally:
+                await conn.close()
+        except Exception as e:  # noqa: BLE001 -- a map that cannot read the checkpoint shows "not finished"
+            self._log.debug("[map] could not read the checkpoint: %r", e)
+            return None
+        # A thread with no checkpoint at all also has nothing next: that is "never ran", not "finished".
+        if not ((snap.config or {}).get("configurable") or {}).get("checkpoint_id"):
+            return None
+        return tuple(snap.next or ())
+
     async def _checkpoint_values(self) -> dict[str, Any]:
         graph_and_close = await self._open_readonly_graph()
         if graph_and_close is None:

@@ -217,6 +217,113 @@ def test_the_map_redoes_the_whole_step_from_its_first_node() -> None:
     assert "x.step === n.step" in script and "Yes, restart now" in script
 
 
+def test_the_node_a_quest_stopped_in_is_now_even_when_it_is_not_a_step() -> None:
+    """A review pause waits in ``human_feedback`` and a clarify pause in ``clarify``: neither is a step, so the last
+    reached step alone put "now" on the review (or on nothing)."""
+    everything = _steps(set(rerun_from.STEPS) - {"figures"})
+    nodes = {n["node"]: n for n in rerun_from.node_map(everything, at=["human_feedback"])}
+    assert nodes["human_feedback"]["status"] == "now"
+    assert all(nodes[n]["status"] == "done" for n in ("clarify", "design", "execute", "write", "claim_check", "review"))
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps(set()), at=["clarify"])}
+    assert nodes["clarify"]["status"] == "now" and nodes["ideate"]["status"] == "todo"
+    # A node on the other path is never where a quest stopped: the last reached step is used instead.
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature"}), at=["wait_for_data"])}
+    assert nodes["literature"]["status"] == "now" and nodes["wait_for_data"]["status"] == "off"
+
+
+def _quest_on_disk(tmp_path: Path, name: str) -> tuple[Engine, Path]:
+    cfg = _cfg(tmp_path)
+    quest_root = cfg.output.output_dir / name
+    (quest_root / ".fi").mkdir(parents=True)
+    return Engine(cfg, resume_quest_id=name), quest_root
+
+
+async def test_a_failed_quest_is_not_finished_and_shows_where_it_failed(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
+    engine, quest_root = _quest_on_disk(tmp_path, "qfail")
+
+    async def at_execute(self):
+        return ("execute",)
+
+    monkeypatch.setattr(Engine, "_checkpoint_next", at_execute)
+    (quest_root / "quest_failed.md").write_text("the run crashed", encoding="utf-8")
+    (quest_root / "frontier_insight_summary.json").write_text("{}", encoding="utf-8")
+    payload = await engine.quest_map(_steps({"ideas", "literature", "plan", "design", "skills", "code", "run"}))
+    nodes = {n["node"]: n for n in payload["nodes"]}
+    assert payload["finished"] is False and nodes["execute"]["status"] == "now"
+    assert nodes["implement"]["status"] == "done" and nodes["analyze"]["status"] == "todo"
+
+
+@pytest.mark.parametrize("marker", [".fi/pause.json", "NEXT_STEP.md", "quest_failed.md", None])
+async def test_finished_means_the_graph_ended_and_nothing_is_waiting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                                    marker: str | None) -> None:
+    engine, quest_root = _quest_on_disk(tmp_path, "qend")
+
+    async def at_end(self):
+        return ()
+
+    monkeypatch.setattr(Engine, "_checkpoint_next", at_end)
+    if marker:
+        (quest_root / marker).write_text("{}", encoding="utf-8")
+    assert await engine.stopped_at() == (marker is None, [])
+
+
+async def test_a_quest_with_no_checkpoint_is_not_finished(tmp_path: Path) -> None:
+    """An empty or unreadable state.sqlite has nothing next either: that is "never ran", not "finished"."""
+    engine, quest_root = _quest_on_disk(tmp_path, "qnone")
+    (quest_root / "frontier_insight_summary.json").write_text("{}", encoding="utf-8")
+    assert await engine.stopped_at() == (False, [])
+    (quest_root / ".fi" / "state.sqlite").write_bytes(b"")
+    assert await engine.stopped_at() == (False, [])
+
+
+async def test_a_quest_paused_at_the_review_is_not_finished_until_it_is_accepted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The bug: a quest paused for the person's review decision showed every node finished, because a pause writes
+    ``frontier_insight_summary.json`` and the map took that file as "finished". A real run (fake model, real venv and
+    checkpoint) is paused at the review, then accepted; the CLI (what the VS Code panel reads) and the web map agree."""
+    import asyncio
+    import json
+
+    import launch
+    from core.provider import ProxySupervisor
+    from tests.test_engine_smoke import _fake_response_for
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        return _fake_response_for(messages[-1]["content"])
+
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    cfg = _cfg(tmp_path)
+    cfg.pauses.review = "ask"
+    cfg.pauses.auto_accept_on_pass = False
+    first = Engine(cfg)
+    await asyncio.wait_for(first.run(), timeout=300)
+    quest_id, quest_root = first.quest_id, first.quest_root
+    assert (quest_root / ".fi" / "pause.json").is_file()
+    # launch.py writes the summary after the run returns, a pause included ("[FI] summary -> ...").
+    (quest_root / "frontier_insight_summary.json").write_text("{}", encoding="utf-8")
+    (quest_root / "config.yaml").write_text(yaml.safe_dump(cfg.model_dump(mode="json")), encoding="utf-8")
+
+    async def cli_map() -> dict:
+        capsys.readouterr()
+        assert await launch._list_rerun_steps(cfg, quest_id, supervisor=ProxySupervisor(), as_json=True) == 0
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    paused = await cli_map()
+    nodes = {n["node"]: n["status"] for n in paused["nodes"]}
+    assert paused["finished"] is False
+    assert nodes["human_feedback"] == "now"
+    assert all(nodes[n] == "done" for n in ("clarify", "ideate", "design", "execute", "write", "claim_check", "review"))
+    web = TestClient(make_app(cfg.output.output_dir)).get(f"/api/quests/{quest_id}/rerun-steps").json()
+    assert web["finished"] is False and web["nodes"] == paused["nodes"]
+
+    (quest_root / ".fi" / "human_review_answer.json").write_text(json.dumps({"action": "accept"}), encoding="utf-8")
+    await asyncio.wait_for(Engine(cfg, resume_quest_id=quest_id).run(), timeout=300)
+    done = await cli_map()
+    assert done["finished"] is True and {n["status"] for n in done["nodes"]} == {"done", "off"}
+
+
 @pytest.mark.parametrize("flag", ["no_simulation", "survey_mode", "analyze_local_first"])
 async def test_the_config_can_put_a_quest_on_the_data_path(tmp_path: Path, flag: str) -> None:
     cfg = _cfg(tmp_path)
