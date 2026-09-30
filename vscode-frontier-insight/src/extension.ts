@@ -1042,11 +1042,12 @@ async function runUpdate(
     const byQuestion = updateTerminalCommand({
         pythonPath,
         questId,
-        // The quest was found under `questsDir` (the resolved
-        // `frontierInsight.outputDir`, or the folder another quest is in),
-        // so --update has to be told to look there too; launch.py would
-        // otherwise default to ./outputs and reject a quest just listed.
-        outputRoot: questsDir,
+        // This folder's outputs (the resolved `frontierInsight.outputDir`):
+        // launch.py would otherwise default to ./outputs and reject a quest
+        // just listed. A quest from another folder is found by its full id
+        // among every quest FI has run, and launch.py then runs it from the
+        // folder it was started in (its relative paths).
+        outputRoot: outputsDir,
         bridgeSocket: thisWindowsBridge(),
         shell: currentShell(),
     });
@@ -1069,8 +1070,10 @@ async function runUpdate(
     const startedAt = Date.now();
     // FI_UPDATE_APPROVE_AS_IS: the person chose to approve config.yaml as it is, so launch.py asks no question
     // (without it, --update asks the setup questions, and with no terminal to answer in it approves nothing).
+    // `--output-root` is this folder's outputs even for a quest from another folder: launch.py finds that one by its
+    // full id and runs it from the folder it was started in, so its config's relative paths mean what they meant.
     const ran = await runLaunchInChat(
-        ["--update", questId, "--output-root", questsDir], stream, token, userPickedModel,
+        ["--update", questId, "--output-root", outputsDir], stream, token, userPickedModel,
         {
             pythonPath, launchScript: path.join(repoPath, "launch.py"), cwd: workDir,
             env: { FI_UPDATE_APPROVE_AS_IS: "1" },

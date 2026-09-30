@@ -291,10 +291,10 @@ def test_update_leaves_the_model_change_for_the_quest_to_record(tmp_path: Path) 
     assert plan_settings.model_changes(root / ".fi", _cfg(tmp_path, "claude-opus-5"))
 
 
-def test_update_with_no_terminal_asks_nothing_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                                                           capsys: pytest.CaptureFixture[str]) -> None:
-    """The VS Code chat's /update runs --update in the chat, with no terminal to answer in: nothing is asked, the
-    settings in config.yaml are approved as they are, and the quest resumes."""
+def test_update_from_the_chat_asks_nothing_and_resumes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                        capsys: pytest.CaptureFixture[str]) -> None:
+    """The VS Code chat's /update runs --update in the chat after the person chose to approve config.yaml as it is
+    (``ask=False``): nothing is asked, those settings are approved, and the quest resumes."""
     from core.interview import InterviewAnswers, answers_to_yaml
     from core.interview_update import run_update_flow
 

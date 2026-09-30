@@ -289,7 +289,7 @@ def test_extension_uses_the_builders_instead_of_its_own_string() -> None:
     # `/update` picks the quest by listing `frontierInsight.outputDir`,
     # so it has to hand that same root to launch.py or the quest it
     # just offered is not found.
-    assert "outputRoot: questsDir," in src, (
+    assert "outputRoot: outputsDir," in src, (
         "runUpdate no longer passes the resolved outputDir as "
         "--output-root; a custom frontierInsight.outputDir breaks."
     )
@@ -411,7 +411,9 @@ def test_chat_commands_never_open_a_terminal() -> None:
         assert "createTerminal" not in body and "sendText" not in body, name
         assert "runLaunchInChat(" in body, name
     update = _function_body(src, "runUpdate")
-    assert '["--update", questId, "--output-root", questsDir]' in update
+    # This folder's outputs even for a quest from another folder: launch.py then runs it from the folder it was
+    # started in (its own chdir fires only when the quest is not under --output-root).
+    assert '["--update", questId, "--output-root", outputsDir]' in update
     # The approval is asked for, never assumed, and only then does launch.py skip the questions.
     assert "showQuickPick(" in update and '"approve"' in update
     assert update.index('choice.value === "edit"') < update.index('FI_UPDATE_APPROVE_AS_IS: "1"')
@@ -420,7 +422,7 @@ def test_chat_commands_never_open_a_terminal() -> None:
 
 
 def test_update_and_model_lines_reach_the_chat() -> None:
-    """With no terminal, `--update` prints what it approves as `[FI] update:` lines and the engine says a model change
+    """Run from the chat's approve choice, `--update` prints what it approves as `[FI] update:` lines and the engine says a model change
     as `[FI] model:`; the chat shows both (other `[FI]` lines are dropped as noise)."""
     body = _function_body(EXTENSION_TS.read_text(encoding="utf-8"), "runLaunchInChat")
     assert r"/^\[FI\] update: (.*)$/" in body
