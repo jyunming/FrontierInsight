@@ -22,7 +22,9 @@ same PR that adds, splits or renames one.
   (`NESTING`, `DERIVED`, `_given_findings`, `strata_coverage`, read by `metric_spec.coverage_gaps`).
 - `core/oracle_check.py` — an oracle the script must pass before its main run, judged by the engine against the
   protocol's own expected value and tolerance, not by the script's self-report. Also owns what a repair may propose
-  about a check (`proposals`, never applied without a person) and the note that carries the engine's verdicts to
+  about a check (`proposals`, never applied without a person; `undisputed` / `disputed_failing` split the problems a
+  repair may still fix from the checks it called wrong, which `Engine._oracle_gate` never rewrites the script for)
+  and the note that carries the engine's verdicts to
   `analyze` (`analysis_note`). An oracle that names a `case` and a `measure` is measured by the engine, not the script
   (`case_of`); `loose_tolerance` warns when the tolerance would pass a lower-order method than the oracle claims
   (`order`); `script_measured` lists the values that are still the script's own word (`core/evidence.py` never counts them toward
