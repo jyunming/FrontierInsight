@@ -47,6 +47,7 @@ from fastapi.staticfiles import StaticFiles
 from core.config import Config
 from core import audit_log as fi_audit
 from core import evidence as fi_evidence
+from core import quest_title as fi_quest_title
 from core import frozen_protocol as fi_frozen
 from core import plan as fi_plan
 from core import todo as fi_todo
@@ -1373,6 +1374,30 @@ def make_app(
             raise HTTPException(400, message)
         return JSONResponse({"quest_id": quest_id, "approved": True, "message": message, **_amendment_view(quest_root)})
 
+    @app.post("/api/quests/{quest_id}/title")
+    async def rename_quest(quest_id: str, request: Request) -> JSONResponse:
+        """Change a finished or paused quest's title (core/quest_title.py): the web surface of ``fi tools rename``.
+        409 while the quest is running (this server's own record of it, or a run.log still being written)."""
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        if not (quest_root / ".fi").is_dir():
+            raise HTTPException(404, f"quest {quest_id} not found")
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        title = body.get("title") if isinstance(body, dict) else None
+        if registry.alive(quest_id) or bool((app.state.launcher.status_for(quest_id) or {}).get("alive")):
+            raise HTTPException(409, f"Quest {quest_id} is still running; rename it once it has stopped or finished.")
+        # An output being made again reads the paper as it goes: a rename now would leave it half old, half new.
+        if any((app.state.launcher.status_for(f"{quest_id}-emit-{kind}") or {}).get("alive")
+               for kind in ("paper_pdf", "slides", "poster", "speech")):
+            raise HTTPException(409, f"An output of quest {quest_id} is being made; rename it once that has finished.")
+        try:
+            result = await asyncio.to_thread(fi_quest_title.rename, quest_root, title)
+        except fi_quest_title.RenameRefused as e:
+            raise HTTPException(409 if isinstance(e, fi_quest_title.QuestRunning) else 400, str(e)) from e
+        return JSONResponse(result.as_dict())
+
     @app.get("/api/quests/{quest_id}/plan")
     async def get_plan(quest_id: str) -> JSONResponse:
         """The quest's ``plan.md`` (what the literature says, the gap, the design the experiment will run) with the
@@ -2010,6 +2035,11 @@ def make_app(
             out["started_at"] = st.get("started_at")
             if "exit_code" in st:
                 out["exit_code"] = st["exit_code"]
+        elif (ended := app.state.launcher.job_state(job_id)) is not None:
+            # A run this launcher started and has since set aside as finished: its exit code is still known.
+            out["alive"] = bool(ended.get("alive"))
+            if ended.get("returncode") is not None:
+                out["exit_code"] = ended["returncode"]
         else:
             # Not in the launcher registry. For a quest, infer "running"
             # the same way list_jobs does (recent log + no final summary)
@@ -2305,6 +2335,8 @@ def make_app(
                     pending_human_review = None
         return JSONResponse({
             "quest_id": quest_id,
+            # The paper's title (else config.yaml's), shown above the quest id; Rename beside it changes it.
+            "title": fi_quest_title.current_title(quest_root),
             "quest_root": str(quest_root),
             "current_node": _current_node_from_log(log_lines),
             # Stage-stuck signals derived from run.log timestamps. The

@@ -66,6 +66,10 @@
             "description": "Generate one more output format (PDF / slides / poster / talk script) for an already-finished quest WITHOUT re-running the research. Pick the quest + format, or pass them: @fi /generate <quest_id> paper_pdf. Mirrors `launch.py --emit` and the web Outputs panel."
           },
           {
+            "name": "rename",
+            "description": "Change a finished or paused quest's title: the paper's title line, its config and summary. Results, data and code are not touched. Example: @fi /rename 1790003131-my-quest Energy Drift in Symplectic Integrators. Mirrors `launch.py --rename` and the Rename button beside the title on the web quest page."
+          },
+          {
             "name": "summarize",
             "description": "Walk a folder of mixed content (papers / code / study notes / logs) and produce a structured markdown summary. Input files plus the summary are ingested into Axon. Example: @fi /summarize ./papers literature"
           },

@@ -45,7 +45,7 @@ import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
 import { openQuestMap } from "./quest-map";
-import { runFollow, runRerunSteps, runTrace, runWhy } from "./trace";
+import { runFollow, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
 
 
 /**
@@ -380,6 +380,11 @@ async function handleRequest(
         await runWhy(prompt, stream, token);
         return;
     }
+    if (cmd === "rename") {
+        // Change a finished or paused quest's title (`launch.py --rename`), the same change as the web quest page.
+        await runRename(prompt, stream, token);
+        return;
+    }
     if (cmd === "follow") {
         // Each step of a running quest as it happens (`launch.py --trace <id> --follow`).
         await runFollow(prompt, stream, token);
@@ -416,6 +421,7 @@ function helpText(): string {
         "- `@fi /map <quest_id>` — open the quest map: every step in a few big blocks, what a restart from each would keep and redo, and a Restart button (also **FI: Quest map** in the command palette).",
         "- `@fi /watch [<quest_id>]` — for a quest waiting on a background job (HPC): re-check it on a timer and resume it when the job is done.",
         "- `@fi /generate [<quest_id>] [<format>]` — produce one more output format (PDF / slides / poster / talk) for a finished quest WITHOUT re-running it. Picks quest + format if omitted.",
+        "- `@fi /rename <quest_id> <new title>` — change a finished or paused quest's title: the paper's title line, its config and summary. Results, data and code are not touched; a PDF, slides or poster already made keep the old title until you `/generate` them again.",
         "- `@fi /summarize <folder>` — walk a folder of papers/code/notes/logs and produce a structured markdown summary; input files + summary land in Axon.",
         "- `@fi /digest [days]` — weekly project-manager digest: completed quests, in-progress, themes, diff vs prior digest, suggested next quests. Default window: 7 days. Lands at `<outputDir>/_digests/<YYYY-Www>.md` (where `<outputDir>` is the `frontierInsight.outputDir` setting, defaulting to `outputs/`).",
         "- `@fi /portfolio` — all-time cross-quest synthesis: topic clusters, near-duplicate detection, meta-paper candidates, coverage gaps, prioritized next-quest suggestions. Lands at `<outputDir>/_portfolio/<YYYY-MM-DD>.md`.",

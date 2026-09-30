@@ -130,12 +130,15 @@ def test_the_trace_command_is_wired_into_the_chat_dispatcher() -> None:
     extension = (EXT / "src" / "extension.ts").read_text(encoding="utf-8")
     assert 'cmd === "trace"' in extension
     assert "runTrace(prompt, stream, token)" in extension
-    assert 'import { runFollow, runRerunSteps, runTrace, runWhy } from "./trace";' in extension
-    # /why and /follow go through the same module, and each reaches launch.py's own flags.
+    assert 'import { runFollow, runRename, runRerunSteps, runTrace, runWhy } from "./trace";' in extension
+    # /why, /follow and /rename go through the same module, and each reaches launch.py's own flags.
     assert 'cmd === "why"' in extension and "runWhy(prompt, stream, token)" in extension
     assert 'cmd === "follow"' in extension and "runFollow(prompt, stream, token)" in extension
+    assert 'cmd === "rename"' in extension and "runRename(prompt, stream, token)" in extension
     trace = (EXT / "src" / "trace.ts").read_text(encoding="utf-8")
     assert '"--why"' in trace and '"--follow"' in trace
+    # The title goes as ONE `--title=` value, so a word starting with "-" is never read as an option.
+    assert '"--rename"' in trace and "`--title=${title}`" in trace
 
 
 def test_the_trace_command_is_declared_in_package_json() -> None:

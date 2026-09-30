@@ -180,3 +180,13 @@ async def test_full_dag_via_server_with_clarify_pause_and_resume(
         assert body["summary"]["outputs"]["paper_md"] == str(quest_root / "paper.md")
         assert body["errors"] is None
         assert body.get("pending_clarify") is False
+
+        # 6. Rename the finished quest from the quest page: both copies of the paper, the config, the summary and
+        # the saved state a later resume reads all carry the new title.
+        r = await client.post(f"/api/quests/{quest_id}/title", json={"title": "A Better Title"})
+        assert r.status_code == 200, r.text
+        for paper in (quest_root / "paper" / "paper.md", quest_root / "paper.md"):
+            assert "# A Better Title\n" in paper.read_text(encoding="utf-8")
+        assert json.loads((quest_root / "frontier_insight_summary.json").read_text(encoding="utf-8"))["title"] == "A Better Title"
+        assert r.json()["saved_state"] is True
+        assert (await client.get(f"/api/quests/{quest_id}")).json()["title"] == "A Better Title"
