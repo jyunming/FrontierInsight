@@ -663,7 +663,7 @@ def mark_unconfirmable(quest_root: Path, why: str) -> None:
     try:
         _save(quest_root, record)
     except OSError:
-        pass  # best effort, as mark_compromised: the quest then goes to the confirm run, and says what it can
+        pass  # best effort, as mark_compromised: the record stays in exploration, so nothing is confirmed either
 
 
 def unconfirmable(quest_root: Path) -> bool:

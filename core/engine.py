@@ -2482,17 +2482,18 @@ class Engine:
         if state.get("result_json_replicate_seed_ignored"):
             return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
                     "same numbers, so a run on new seeds would repeat exploration's run")
+        if len(state.get("result_json_replicates") or []) > 1:
+            return ""  # runs on different seeds already gave different numbers: new seeds change the result
         # The seed read in the script or a module it imports from code/ (a multi-module project reads it in a helper);
         # FI's own helpers there (run.py sets a default seed) do not count.
         modules = _own_modules(script)
         if any(_unseeded_rng_calls(p) for p in modules):
             return ""  # a generator built without a seed draws new numbers on every run
         if any(_script_reads_replicate_seed(p) for p in modules):
-            if any(_replicate_seed_reaches_rng(p) for p in modules if _script_reads_replicate_seed(p)) \
-                    or self.config.execution.background_jobs:
+            if self.config.execution.background_jobs or not _seeds_only_constants(modules):
                 return ""  # a background job's driver passes the seed on to the job, not to a generator of its own
-            return (f"code/{script.name} names FI_REPLICATE_SEED but builds its random generators from fixed seeds, so "
-                    "a run on new seeds would repeat exploration's run")
+            return (f"code/{script.name} names FI_REPLICATE_SEED but seeds every random generator with a fixed number, "
+                    "so a run on new seeds would repeat exploration's run")
         if not self.config.execution.background_jobs and not _script_has_random_source(script):
             return deterministic
         return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), so a run on new seeds "
@@ -18064,10 +18065,62 @@ def _own_modules(code_path: Path) -> list[Path]:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
         except (OSError, SyntaxError, ValueError):
             continue
-        for name in _imported_module_names(tree):
-            stem = folder.joinpath(*name.split("."))
+        stems = [folder.joinpath(*name.split(".")) for name in _imported_module_names(tree)]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level > 0:
+                # A relative import inside a package of the project: resolved from the importing file's own folder.
+                base = path.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                parts = node.module.split(".") if node.module else []
+                stems.append(base.joinpath(*parts) if parts else base)
+                stems += [base.joinpath(*parts, a.name) for a in node.names]
+        for stem in stems:
             todo += [c for c in (stem.with_suffix(".py"), stem / "__init__.py") if c.is_file()]
     return seen
+
+
+# Calls that seed a random generator (the name of what is called, its last part).
+_SEEDING_CALLS = frozenset({"seed", "manual_seed", "default_rng", "RandomState", "Random", "SeedSequence",
+                            "PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64", "PRNGKey", "key"})
+
+
+def _constant_expr(node: ast.AST | None) -> bool:
+    """A literal number, or arithmetic on literals only (``42``, ``-1``, ``2**31 - 1``)."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+    if isinstance(node, ast.UnaryOp):
+        return _constant_expr(node.operand)
+    if isinstance(node, ast.BinOp):
+        return _constant_expr(node.left) and _constant_expr(node.right)
+    return False
+
+
+def _seeds_only_constants(paths: list[Path]) -> bool:
+    """Whether every call in these files that seeds a random generator is given a literal number (``Random(42)``,
+    ``np.random.seed(0)``), so the seed FI gives the run can reach none of them. A seed it cannot tell (a variable, a
+    function's argument, a value worked out) is not a constant: only a certainly fixed seed counts. No seeding call at
+    all is not "only constants" either."""
+    seeded = 0
+    for path in paths:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            return False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            if name not in _SEEDING_CALLS:
+                continue
+            arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in ("seed", "x")), None)
+            if arg is None:
+                continue  # built without a seed: draws from the operating system (handled apart)
+            if not _constant_expr(arg):
+                return False
+            seeded += 1
+    return seeded > 0
 
 
 # Generators that draw from OS entropy when they are handed no seed.

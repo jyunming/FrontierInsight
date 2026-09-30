@@ -186,6 +186,8 @@ def check(quest_root: Path, fi_dir: Path, cfg: Any) -> list[str]:
         drifted = [p for p in changed if p not in explicit and not _set_in(raw, p)]
         if drifted:
             approved = {**approved, **{p: now.get(p) for p in drifted}}
-            if not missing or not differences(approved, now):
+            if not differences(approved, now):
+                # Written only when the start goes on (the engine records the new hash); a start that stops for a
+                # hand edit leaves the record as it was, so putting the edit back is not read as an edited record.
                 _write(fi_dir, approved, sorted(explicit))
     return differences(approved, now)

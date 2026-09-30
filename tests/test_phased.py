@@ -846,6 +846,7 @@ def _gate_after(tmp_path: Path, files: dict[str, str], state: dict | None = None
     # FI's own entry point is always there, and it names FI_REPLICATE_SEED itself.
     (code / code_project.RUN).write_text(code_project.RUN_SOURCE, encoding="utf-8")
     for name, text in files.items():
+        (code / name).parent.mkdir(parents=True, exist_ok=True)
         (code / name).write_text(text, encoding="utf-8")
     phased.prepare(engine.quest_root, engine.quest_id)
     engine._runs_code = lambda state: True  # type: ignore[method-assign]
@@ -892,6 +893,47 @@ def test_a_study_that_takes_its_seed_or_draws_fresh_numbers_goes_to_the_confirm_
         tmp_path, {"experiment.py": "import os\nseed = os.environ.get('FI_REPLICATE_SEED', '0')\nprint('submit', seed)\n"},
         background=True, label="bg")
     assert route == "confirm", "a background job's driver passes the seed on to its job"
+
+
+_READ = "import os\nimport numpy as np\n"
+#: Scripts that take the seed FI gives them in ways a one-step trace cannot follow: none of them is "a fixed seed".
+_SEED_TAKEN_ANOTHER_WAY = {
+    "helper": _READ + "def get_seed():\n    return int(os.environ.get('FI_REPLICATE_SEED', '0'))\n"
+                      "rng = np.random.default_rng(get_seed())\nprint(rng.random())\n",
+    "argparse": _READ + "import argparse\np = argparse.ArgumentParser()\n"
+                        "p.add_argument('--seed', type=int, default=int(os.environ.get('FI_REPLICATE_SEED', '0')))\n"
+                        "args = p.parse_args([])\nrng = np.random.default_rng(args.seed)\nprint(rng.random())\n",
+    "argument": _READ + "def simulate(n, rng_seed):\n    return np.random.default_rng(rng_seed).random(n)\n"
+                        "print(simulate(3, int(os.environ.get('FI_REPLICATE_SEED', '0'))))\n",
+    "two_steps": _READ + "seed = int(os.environ.get('FI_REPLICATE_SEED', '0'))\nbase = seed * 1000\n"
+                         "print([np.random.default_rng(base + i).random() for i in range(3)])\n",
+    "spawn": _READ + "ss = np.random.SeedSequence(int(os.environ.get('FI_REPLICATE_SEED', '0')))\n"
+                     "print([np.random.default_rng(c).random() for c in ss.spawn(3)])\n",
+    "key_name": _READ + "SEED_ENV = 'FI_REPLICATE_SEED'\nrng = np.random.default_rng(int(os.environ.get(SEED_ENV, '0')))\n"
+                        "print(rng.random())\n",
+}
+
+
+@pytest.mark.parametrize("label", sorted(_SEED_TAKEN_ANOTHER_WAY))
+def test_a_seed_taken_in_a_way_that_is_hard_to_trace_still_goes_to_the_confirm_run(tmp_path: Path, label: str) -> None:
+    route, record, _frozen = _gate_after(tmp_path, {"experiment.py": _SEED_TAKEN_ANOTHER_WAY[label]}, label=label)
+    assert route == "confirm" and phased.status(record) == "confirming"
+
+
+def test_runs_that_differed_by_seed_go_to_the_confirm_run_whatever_the_code_looks_like(tmp_path: Path) -> None:
+    fixed_looking = "import os, random\ns = os.environ.get('FI_REPLICATE_SEED')\nrng = random.Random(42)\n"
+    route, _record, _frozen = _gate_after(tmp_path, {"experiment.py": fixed_looking},
+                                          {"result_json_replicates": [{"_seed": 0, "a": 1}, {"_seed": 1, "a": 2}]})
+    assert route == "confirm"
+
+
+def test_a_seed_read_in_a_package_imported_relatively_is_found(tmp_path: Path) -> None:
+    files = {"experiment.py": "from sim import run\nprint(run())\n",
+             "sim/__init__.py": "from .core import run\n",
+             "sim/core.py": "import os\nimport numpy as np\n"
+                            "def run():\n    return np.random.default_rng(int(os.environ['FI_REPLICATE_SEED'])).random()\n"}
+    route, record, _frozen = _gate_after(tmp_path, files, label="pkg")
+    assert route == "confirm" and phased.status(record) == "confirming"
 
 
 def test_a_temporary_copy_never_stays_in_the_quest_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
