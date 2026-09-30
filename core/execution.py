@@ -5,8 +5,11 @@ agent-generated code runs as a child process of the FI engine. Cross-
 platform: the venv's Python lives at `Scripts/python.exe` on Windows and
 `bin/python` on POSIX.
 
-`DockerExecutor` is the opt-in that builds an ephemeral image,
-mounts the quest_root, and runs commands inside the container.
+`DockerExecutor` is the opt-in that runs each command in an ephemeral
+container from a stock image with the quest_root mounted: no network,
+capped memory / CPU / process count (`DockerLimits`), every Linux
+capability dropped, no privilege gain, and a non-root user where the
+host allows one.
 
 Both expose the same async `execute(cmd, cwd, timeout_s) -> ExecutionResult`.
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -525,6 +529,56 @@ def _build_venv(
         )
 
 
+@dataclass(frozen=True)
+class DockerLimits:
+    """What one experiment container may use: ``execution.docker_memory_gb``,
+    ``execution.docker_cpus`` and ``execution.docker_max_processes``."""
+
+    memory_gb: float = 4.0
+    cpus: float = 2.0
+    max_processes: int = 1024
+
+    @classmethod
+    def from_config(cls, execution: object) -> "DockerLimits":
+        return cls(
+            memory_gb=float(getattr(execution, "docker_memory_gb", cls.memory_gb)),
+            cpus=float(getattr(execution, "docker_cpus", cls.cpus)),
+            max_processes=int(getattr(execution, "docker_max_processes", cls.max_processes)),
+        )
+
+    @property
+    def mem_limit(self) -> str:
+        """docker-py's spelling: whole gigabytes as ``4g``, anything else in megabytes."""
+        mb = max(1, int(round(self.memory_gb * 1024)))
+        return f"{mb // 1024}g" if mb % 1024 == 0 else f"{mb}m"
+
+    @property
+    def memory_label(self) -> str:
+        return f"{self.memory_gb:g} GB"
+
+
+# The id experiments run as under Docker Desktop on Windows / macOS (see
+# DockerExecutor._guess_user). Any fixed non-root id works there.
+_DESKTOP_USER = "1000:1000"
+# What a script prints when it cannot start one more process or thread: the
+# process-count limit (pids cgroup) makes fork/clone/pthread_create fail with
+# EAGAIN, which each runtime words its own way.
+_PROCESS_LIMIT_RE = re.compile(
+    r"can't start new thread|pthread_create|fork: (?:retry: )?Resource temporarily unavailable"
+    r"|BlockingIOError: \[Errno 11\] Resource temporarily unavailable"
+)
+# Creates and removes one file in the quest folder: can this user write there?
+_WRITE_CHECK = (
+    "import os, tempfile; fd, p = tempfile.mkstemp(dir='/work', prefix='.fi-write-check-'); "
+    "os.close(fd); os.remove(p)"
+)
+
+
+def _owner_of(path: Path) -> tuple[int, int]:
+    st = os.stat(path)
+    return st.st_uid, st.st_gid
+
+
 class DockerExecutor:
     """Sandboxed executor — runs every command inside an ephemeral Docker
     container with the quest_root bind-mounted at /work.
@@ -534,14 +588,163 @@ class DockerExecutor:
     `execute` runs the given command. `python_path` returns the
     in-container interpreter path (caller treats it as opaque).
 
+    Every container has no network, the memory / CPU / process caps of
+    ``limits``, no Linux capabilities, cannot gain privileges, and runs as a
+    non-root user where the host allows one (``setup`` decides which, once).
+    A run stopped by a cap ends with a plain ``[FI]`` line on its stderr, and
+    the same line goes to ``log`` (the quest's run.log).
+
     The approved external skills a quest selected are the one other thing
     mounted, read-only, each at ``/fi-skills/<name>`` (``set_skill_mounts``).
     """
 
-    def __init__(self, *, image: str = "python:3.11-slim") -> None:
+    def __init__(
+        self, *, image: str = "python:3.11-slim", limits: DockerLimits | None = None,
+        log: logging.Logger | None = None,
+    ) -> None:
         self.image = image
+        self.limits = limits or DockerLimits()
+        self._qlog = log  # the quest's logger (run.log); None -> this module's
         self._client: object | None = None  # lazy docker client
         self._skill_mounts: tuple["SkillMount", ...] = ()
+        # The container user: None = not decided yet, "" = the image's default
+        # (root inside the container), else "uid:gid".
+        self._user: str | None = None
+        self._info: dict | None = None  # the daemon's `docker info`, read once
+
+    def _say(self, level: int, msg: str, *args: object) -> None:
+        logger = self._qlog or _log
+        (logger.warning if level >= logging.WARNING else logger.info)(msg, *args)
+
+    def _daemon_info(self, client: object) -> dict:
+        if self._info is None:
+            try:
+                info = client.info()  # type: ignore[attr-defined]
+            except Exception:
+                info = None
+            self._info = info if isinstance(info, dict) else {}
+        return self._info
+
+    def _cpus(self, client: object) -> float:
+        """The CPU cap, never more than the daemon has: Docker refuses to
+        create a container asked for more CPUs than it has."""
+        ncpu = self._daemon_info(client).get("NCPU")
+        if isinstance(ncpu, int) and ncpu > 0:
+            return min(self.limits.cpus, float(ncpu))
+        return self.limits.cpus
+
+    def _guess_user(self, client: object, host_root: Path) -> str:
+        """Which user experiments run as, before ``setup`` checks it can write.
+
+        The container user must be able to write the mounted quest folder, and
+        who can depends on the host:
+
+        * Windows / macOS (Docker Desktop and the like): the folder reaches the
+          Linux VM through a file-sharing layer that writes as the host user
+          whatever id the container uses, so a fixed non-root id works.
+        * Rootless Docker, and Docker Desktop for Linux: the container's root is
+          mapped to the unprivileged host user, and any other container id maps
+          to a sub-id that cannot write the host user's files. Root inside the
+          container is already not root on the host, so run as that ("").
+        * Native Docker on Linux: the owner of the quest folder (normally the
+          person running FI), so what the experiment writes stays theirs. A
+          folder owned by root (FI itself run as root) leaves only root.
+
+        Whatever this returns, every capability is still dropped and
+        privileges cannot be gained.
+        """
+        if not sys.platform.startswith("linux"):
+            return _DESKTOP_USER
+        info = self._daemon_info(client)
+        security = " ".join(str(s) for s in (info.get("SecurityOptions") or []))
+        if "name=rootless" in security or "docker desktop" in str(info.get("OperatingSystem") or "").lower():
+            return ""
+        try:
+            uid, gid = _owner_of(host_root)
+        except OSError:
+            return ""
+        return "" if uid == 0 else f"{uid}:{gid}"
+
+    def _create_kwargs(self, client: object, user: str) -> dict[str, object]:
+        """The isolation every container gets, experiment or write check."""
+        return {
+            "network_disabled": True,  # no network from the experiment by default
+            "mem_limit": self.limits.mem_limit,
+            # Swap equal to memory: over the cap the run is stopped (and said
+            # so) instead of swapping itself slowly to a halt.
+            "memswap_limit": self.limits.mem_limit,
+            "nano_cpus": int(round(self._cpus(client) * 1e9)),
+            "pids_limit": int(self.limits.max_processes),
+            "cap_drop": ["ALL"],
+            "security_opt": ["no-new-privileges:true"],
+            "user": user or None,  # None = the image's default
+        }
+
+    def _write_check(self, client: object, host_root: Path, user: str) -> bool:
+        container = client.containers.create(  # type: ignore[attr-defined]
+            self.image,
+            command=["python", "-c", _WRITE_CHECK],
+            working_dir="/work",
+            volumes={str(host_root): {"bind": "/work", "mode": "rw"}},
+            environment=self._env_for(user, {}),
+            detach=True,
+            **self._create_kwargs(client, user),
+        )
+        try:
+            container.start()
+            status = container.wait(timeout=120)
+            return isinstance(status, dict) and status.get("StatusCode") == 0
+        finally:
+            try:
+                container.remove(force=True)
+            except Exception:
+                pass
+
+    def _resolve_user(self, client: object, host_root: Path) -> None:
+        """Decide the container user once: the guess, checked by writing a file
+        in the quest folder; the container's root when the guess cannot."""
+        guess = self._guess_user(client, host_root)
+        who = f"user {guess} (not root)" if guess else "the container's root user"
+        try:
+            ok = self._write_check(client, host_root, guess)
+        except Exception as exc:  # noqa: BLE001 -- the run itself will say what is wrong
+            self._user = guess
+            self._say(logging.WARNING, "[docker] could not check that %s can write the quest folder (%s); "
+                      "experiments run as %s", who, exc, who)
+            return
+        if not ok and guess:
+            try:
+                ok = self._write_check(client, host_root, "")
+            except Exception:  # noqa: BLE001
+                ok = False
+            self._user = ""
+            self._say(logging.WARNING, "[docker] experiments cannot write the quest folder as user %s on this "
+                      "Docker setup, so they run as the container's root user, still with no network, no added "
+                      "privileges and the same limits", guess)
+            who = "the container's root user"
+        else:
+            self._user = guess
+        if not ok:
+            self._say(logging.WARNING, "[docker] %s cannot write the quest folder %s either: experiments will not "
+                      "be able to save their results. Check that Docker can share that folder.", who, host_root)
+        self._say(logging.INFO, "[docker] experiments run as %s, with at most %s of memory, %g CPUs and %d "
+                  "processes (execution.docker_memory_gb / docker_cpus / docker_max_processes)",
+                  who, self.limits.memory_label, self._cpus(client), self.limits.max_processes)
+        if self._cpus(client) < self.limits.cpus:
+            self._say(logging.WARNING, "[docker] execution.docker_cpus is %g but Docker has only %g CPUs; "
+                      "using %g", self.limits.cpus, self._cpus(client), self._cpus(client))
+
+    @staticmethod
+    def _env_for(user: str, env: dict[str, str]) -> dict[str, str]:
+        """A non-root id has no home directory in a stock image (and the host's
+        HOME means nothing inside it): give it /tmp, so libraries that keep a
+        cache or config there (matplotlib) work."""
+        if not user:
+            return env
+        out = {**env, "HOME": "/tmp"}
+        if not any(out.get(k) for k in ("LOGNAME", "USER", "LNAME", "USERNAME")):
+            out["USER"] = "fi"
+        return out
 
     @property
     def skill_mounts(self) -> tuple["SkillMount", ...]:
@@ -610,6 +813,8 @@ class DockerExecutor:
             client.images.pull(self.image)  # type: ignore[attr-defined]
 
         await asyncio.to_thread(_ensure)
+        if self._user is None:
+            await asyncio.to_thread(self._resolve_user, client, quest_root.resolve())
 
     def python_path(self, quest_root: Path) -> Path:
         # Inside the container the Python interpreter is on PATH as `python`.
@@ -663,14 +868,18 @@ class DockerExecutor:
         for a in cmd:
             translated.append(a.replace(str(host_root), "/work"))
 
+        if self._user is None:
+            # setup() was not called: go with the guess, unchecked.
+            self._user = self._guess_user(client, host_root)
+        user = self._user
         container = client.containers.create(  # type: ignore[attr-defined]
             self.image,
             command=translated,
             working_dir="/work",
             volumes=self._volumes(host_root),
-            environment=env,
-            network_disabled=True,  # no network from the experiment by default
+            environment=self._env_for(user, env),
             detach=True,
+            **self._create_kwargs(client, user),
         )
         try:
             container.start()
@@ -685,6 +894,13 @@ class DockerExecutor:
                 rc = int(exit_status.get("StatusCode", -1)) if isinstance(exit_status, dict) else -1
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+            note = "" if timed_out else self._limit_note(rc, stderr, _oom_killed(container))
+            if note:
+                # The repair step and the error a person sees read the end of
+                # stderr; run.log gets the same sentence.
+                self._say(logging.WARNING, "[docker] %s", note)
+                sep = "" if not stderr or stderr.endswith("\n") else "\n"
+                stderr = stderr + sep + "[FI] " + note + "\n"
             return ExecutionResult(
                 returncode=rc,
                 stdout=stdout,
@@ -697,6 +913,44 @@ class DockerExecutor:
                 container.remove(force=True)
             except Exception:
                 pass
+
+    def _limit_note(self, rc: int, stderr: str, oom: bool) -> str:
+        """One plain sentence when a run was stopped by one of the container's
+        caps, naming the setting that raises it; "" otherwise."""
+        mem = self.limits.memory_label
+        if oom and rc == 0:
+            return (f"part of the experiment (one of its processes) used more than the {mem} memory limit and "
+                    "was stopped, so its results may be incomplete; raise execution.docker_memory_gb "
+                    f"(now {self.limits.memory_gb:g}) to give it more")
+        if oom:
+            return (f"the experiment used more than the {mem} memory limit and was stopped; raise "
+                    f"execution.docker_memory_gb (now {self.limits.memory_gb:g}) to give it more")
+        if rc == 137:
+            # Killed (SIGKILL) without Docker recording an out-of-memory stop:
+            # some kernels do not report it. The memory cap is the usual cause.
+            return (f"the experiment was stopped by a kill signal (exit code 137), most often because it used "
+                    f"more than the {mem} memory limit; if it needs more, raise execution.docker_memory_gb "
+                    f"(now {self.limits.memory_gb:g})")
+        if rc != 0 and _PROCESS_LIMIT_RE.search(stderr or ""):
+            n = self.limits.max_processes
+            return (f"the experiment could not start another process or thread, most likely because it reached "
+                    f"the limit of {n} processes and threads at once; raise execution.docker_max_processes "
+                    f"(now {n}) or use fewer worker processes")
+        return ""
+
+
+def _oom_killed(container: object) -> bool:
+    """Whether Docker recorded that the container went over its memory cap.
+    Strictly ``True``: anything else (a missing field, a test double) is no."""
+    try:
+        container.reload()  # type: ignore[attr-defined]
+        attrs = container.attrs  # type: ignore[attr-defined]
+    except Exception:
+        return False
+    if not isinstance(attrs, dict):
+        return False
+    state = attrs.get("State")
+    return isinstance(state, dict) and state.get("OOMKilled") is True
 
 
 class SharedInterpreterExecutor(VenvExecutor):
@@ -780,7 +1034,10 @@ class SharedInterpreterExecutor(VenvExecutor):
 def make_executor(
     sandbox: str, *, python_version: str, docker_image: str,
     system_site_packages: bool = True, shared_interpreter: bool = True,
+    docker_limits: DockerLimits | None = None, log: logging.Logger | None = None,
 ) -> Executor:
+    """``docker_limits`` and ``log`` (the quest's logger, for run.log) are
+    used by the Docker sandbox only."""
     if sandbox == "venv" and shared_interpreter:
         return SharedInterpreterExecutor(python_version=python_version)
     if sandbox == "venv":
@@ -789,5 +1046,5 @@ def make_executor(
             system_site_packages=system_site_packages,
         )
     if sandbox == "docker":
-        return DockerExecutor(image=docker_image)
+        return DockerExecutor(image=docker_image, limits=docker_limits, log=log)
     raise ValueError(f"unknown sandbox: {sandbox!r}")

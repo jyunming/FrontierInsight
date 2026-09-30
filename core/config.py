@@ -1086,6 +1086,16 @@ class ExecutionConfig(BaseModel):
     # core.execution._resolve_python_for_version.
     python_version: str = "3.11"
     docker_image: str = "python:3.11-slim"
+    # (docker only) What one experiment container may use. Memory is a hard cap
+    # (swap included): a run that needs more is stopped, and run.log says so and
+    # names this key. CPUs is a share of the machine (0.5 = half a core, 4 = four
+    # cores); a run over it is slowed, not stopped. Processes counts processes and
+    # threads together; it stops a runaway fork from taking the machine down, and
+    # is high enough for a numerical library's per-core threads times a small
+    # multiprocessing pool.
+    docker_memory_gb: float = Field(default=4.0, gt=0)
+    docker_cpus: float = Field(default=2.0, gt=0)
+    docker_max_processes: int = Field(default=1024, gt=0)
     # Example files or folders the experiment should start from: a simulation
     # setup, an input deck, a config, a script, a document — any file type. They
     # are copied into <quest>/inputs/examples/ (files dropped there by hand while
