@@ -79,6 +79,7 @@ interface HumanReviewRequest {
         numeric_oracle_warnings?: string[];
         figure_caption_warnings?: string[];
         goal_coverage_notes?: string[];
+        layout_not_redrawn?: string[];
         feedback_history?: Array<{ iteration?: number; text?: string }>;
         paper_md_path?: string;
     };
@@ -322,6 +323,12 @@ export class Bridge {
         const sugs = snap.suggestions || [];
         const history = snap.feedback_history || [];
         let md = "\n🟡 **Human review** — the engine paused after review.\n\n";
+        // A figure request of the last refine that two tries at redrawing could not apply: said first.
+        const notRedrawn = snap.layout_not_redrawn || [];
+        if (notRedrawn.length) {
+            md += `- ⚠️ **Your figure request was NOT applied:** ${notRedrawn.map(escapeMd).join("; ")}. `
+                + "The figures are as they were (the error is in `.fi/run.log`). Refine again to retry.\n";
+        }
         md += `- **Verdict:** \`${escapeMd(verdict)}\`\n`;
         md += `- **Score:** \`${escapeMd(score)}\`\n`;
         md += `- **Iteration:** \`${escapeMd(iter)}\`\n`;

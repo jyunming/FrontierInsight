@@ -54,7 +54,10 @@ def test_a_redraw_with_nothing_to_draw_from_or_that_fails_is_reported(tmp_path: 
     (empty.quest_root / "code").mkdir(parents=True)
     gone = asyncio.run(empty._node_replot_layout({**STATE, "refine_layout": ["make it bigger"]}))  # type: ignore[arg-type]
     assert gone["layout_missed"] == ["make it bigger"]
-    fine, _ = _run_replot(_replot_quest(tmp_path / "third"), "print('REPLOTTED: fig2.png')")
+    # A redraw that names a figure but changes none did not carry out the request (that is the case below, in
+    # test_replot_sees_data_structure.py); this one does draw it.
+    fine, _ = _run_replot(_replot_quest(tmp_path / "third"),
+                          "open('figures/fig2.png', 'wb').write(b'new-2')\nprint('REPLOTTED: fig2.png')")
     assert fine["layout_missed"] == [] and eng._route_after_replot({**STATE, **fine}) == "check"  # type: ignore[arg-type]
 
 
