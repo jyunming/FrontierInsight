@@ -37,9 +37,10 @@ something and forgets it, so keeping it current is part of finishing the feature
 ## The LLM wiki (`wiki/`)
 
 The project keeps a compiled, cross-referenced wiki at `wiki/` (the Karpathy LLM-wiki pattern:
-<https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f>), maintained with the `llm-wiki` skill
-(`documentation@roboco-plugins`, installed in personal config). The point is to **compile understanding once and
-reuse it**, not to re-read the source every time.
+<https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f>), maintained by the maintainer with an `llm-wiki` skill that is not part of this repo. The point is to **compile
+understanding once and reuse it**, not to re-read the source every time. Without that skill, read the wiki the same
+way, and when a page is missing fall back to `dev/registry.md`, `docs/capabilities-reference.md` and the source;
+grow the wiki by hand (compiled pages, `[[...]]` links, an entry in `wiki/log.md`, never hand-editing `wiki/index.md`).
 
 - **Check the wiki first.** Before answering a question or starting a task, look for the relevant page in
   `wiki/index.md` and follow `[[wiki-link]]`s out to about two hops for context.
@@ -85,7 +86,7 @@ External prerequisites are all optional and feature-gated:
 **Provider layer** (`core/provider.py`): four transports, one `LLMClient.chat(messages) -> str` surface.
 - **HTTP direct** (`codex`/`openai`/`gemini`/`ollama`/`vllm`) — `httpx.AsyncClient` against a `base_url`.
 - **HTTP via proxy** (`claude_code`/`github_copilot_cli`/`github_copilot_vscode`) — `ProxySupervisor` spawns the proxy on a free port, ref-counted across quests; readiness probed via `GET /v1/models`. The two `github_copilot_*` providers emit a one-time warning at engine init (third-party `copilot-api` proxy, abuse-detection risk).
-- **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli` and `codex_cli` and `gemini_cli` are chat-style. **`copilot_cli` is agentic**: it interprets FI's node prompts as user coding tasks and replies conversationally; the engine emits a loud warning when it's selected. For Copilot use `vscode_extension` instead.
+- **CLI exec** (`claude_cli`/`codex_cli`/`copilot_cli`/`gemini_cli`/`antigravity_cli`) — `LLMClient` spawns the local CLI binary per chat call via `asyncio.create_subprocess_exec`. No proxy. Reuses the CLI's own OAuth. Spawn details in `_CLI_SPECS`. `claude_cli`, `codex_cli`, `gemini_cli` and `antigravity_cli` are chat-style. **`copilot_cli` is agentic**: it interprets FI's node prompts as user coding tasks and replies conversationally; the engine emits a loud warning when it's selected. For Copilot use `vscode_extension` instead.
 - **VSCode bridge** (`vscode_extension`). `VSCodeBridgeClient` sends newline-delimited JSON over a localhost TCP socket the FI VSCode extension spawned us with via `--vscode-bridge-port N`. The extension makes the actual `vscode.lm.selectChatModels` + `model.sendRequest` call and streams chunks back. 180 s inactivity timeout + 6-attempt Python-side retry (cumulative ~2 min backoff) protects against Copilot HTTP/2 stalls.
 
 **Execution layer** (`core/execution.py`): `Executor` protocol with two implementations. `make_executor(sandbox, ...)` is the constructor used by `Engine`. `VenvExecutor` resolves Python at `Scripts/python.exe` on Windows and `bin/python` on POSIX. `DockerExecutor` mounts `<quest_root>` at `/work` with networking disabled.
@@ -105,9 +106,12 @@ External prerequisites are all optional and feature-gated:
 - **No process-global state.** Avoid module-level singletons; multiple Engines in one process must not collide. `ProxySupervisor` is the one piece of intentional shared state and is explicitly ref-counted.
 - **Provider proxies have caveats.** `copilot-api` carries an explicit GitHub abuse-detection warning; FI defaults `--rate-limit 60 --wait`. `claude-code-openai-wrapper` has no PyPI package — `FI_CLAUDE_CODE_WRAPPER_DIR` points at a clone with `poetry install` already run.
 - **Rust is deferred.** Don't add `maturin` / PyO3 / a `frontier_insight._fast` Rust crate until profiling identifies a real hot spot. The 2026 benchmark cited in `docs/plan.md` shows ~5% Rust win on LLM-network-bound work — within noise.
-- **No PR-number / Phase-letter refs in user-facing docs** (`README.md`, `docs/**` outside `docs/audits/`, `vscode-frontier-insight/README.md`, and this file). Describe features in their own terms; keep "PR #N" / "Phase X" lineage in commit messages, PR descriptions, and `docs/audits/` (which IS the historical record). Memory files (`.claude/projects/.../memory/`) and audit reports can keep them.
+- **No PR-number / Phase-letter refs in user-facing docs** (`README.md`, `docs/**` outside `docs/audits/`, `vscode-frontier-insight/README.md`, and this file). Describe features in their own terms; keep "PR #N" / "Phase X" lineage in commit messages, PR descriptions, and `docs/audits/` (which IS the historical record).
 
 ## Before opening a PR
+
+For coding agents working in this repo (human contributors: see CONTRIBUTING.md; these steps are recommended, not
+merge requirements for you).
 
 - **Docs pass first.** Re-check every doc the branch touches (README, `docs/**`, `vscode-frontier-insight/README.md`) for correctness and readability before opening, not as a follow-up — a doc edited three commits ago can go stale from a later commit in the same branch.
 - **One external code review of the diff, always.** Every PR gets at least one review from a tool outside this session (Codex CLI, another Claude session, or `agy`) before it opens, even though it slows the PR down — that slowdown is accepted, not a reason to skip it. Write the diff/prompt to a file and have the reviewer produce a written report, not a verbal summary; read it and decide, finding by finding, what to fix.
