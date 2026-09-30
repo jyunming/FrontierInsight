@@ -37,7 +37,11 @@ def _quest(tmp_path: Path, *, audits: bool = True, protocol_status: str | None =
     if protocol_status:
         (root / "needs" / "PROTOCOL_CHECK.json").write_text(json.dumps({"status": protocol_status}), encoding="utf-8")
     if oracle_status:
-        (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": oracle_status, "judged_by": "engine"}), encoding="utf-8")
+        # A passing record is what the gate writes: the engine measured the oracle by running the simulation and passed it.
+        judged = [{"name": "closed form", "value": 1.0, "passed_by_engine": True, "measured_by": "engine"}]
+        (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
+            "status": oracle_status, "judged_by": "engine", "contract": "trial", "attempts": [{"judged": judged}],
+        }), encoding="utf-8")
     if warnings is not None:
         (root / "needs" / "NUMERIC_WARNINGS.json").write_text(json.dumps(warnings), encoding="utf-8")
     if receipts:  # the evidence gate, the design audit and the claim check ran and passed, on what the state holds
