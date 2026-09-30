@@ -4327,14 +4327,9 @@ class Engine:
                 changed = [n for n, o in after.items() if before.get(n) != o]
                 removed = [n for n in before if n not in after]
                 if read_already and (changed or removed):
-                    earlier = self._oracles_added_read() or {}
-                    carried = [] if earlier.get("shown") else [str(n) for n in earlier.get("oracles") or []]
-                    self._oracles_added_write({
-                        "oracles": list(dict.fromkeys([*carried, *changed])), "removed": removed, "shown": False,
-                        "at": _frozen.now(), "reason": (
-                            "FI put the checks in their kinds' numeric form after you read the plan: "
-                            + "; ".join(_forms.describe_changes(before, after)) + "."),
-                    })
+                    self._note_engine_change(changed, removed, reason=(
+                        "FI put the checks in their kinds' numeric form after you read the plan: "
+                        + "; ".join(_forms.describe_changes(before, after)) + "."))
                 parsed = _plan.parse(path.read_text(encoding="utf-8"))
                 if parsed.design is None:
                     self._pause_for_plan(error=parsed.error or "no design")
@@ -4681,7 +4676,8 @@ class Engine:
         # record carries the gap instead.
         if gaps and stop and self.config.rigor_profile == "research" and _plan.plan_path(self.quest_root).is_file():
             added = self._oracles_added_read()
-            if (added and not added.get("shown") and added.get("oracles")
+            if (added and not added.get("shown") and added.get("oracles") and not added.get("removed")
+                    and not added.get("reason")  # a change, not an addition: that stop does not say what changed
                     and all(any(repr(str(n)) in why for why in gaps) for n in added["oracles"])):
                 # This stop names every check the engine added (each lacks a source), so the person reads them here:
                 # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
@@ -8089,12 +8085,23 @@ class Engine:
         after = self._planned_oracles()
         changed = [name for name, oracle in after.items() if before.get(name) != oracle]
         if changed:
-            earlier = self._oracles_added_read() or {}
-            carried = [] if earlier.get("shown") else [str(n) for n in earlier.get("oracles") or []]
-            self._oracles_added_write({
-                "oracles": list(dict.fromkeys([*carried, *changed])), "shown": False, "at": _frozen.now(),
-            })
+            self._note_engine_change(changed)
         return True
+
+    def _note_engine_change(self, changed: list[str], removed: list[str] | None = None, reason: str = "") -> None:
+        """Record checks the engine added, changed or removed in plan.md after it was written, merged with what is
+        recorded and not yet shown, so the stop before the freeze (``_hold_added_oracles``) names all of them and the
+        freeze record never says a person approved one they were not shown."""
+        earlier = self._oracles_added_read() or {}
+        unseen = not earlier.get("shown")
+        carried = [str(n) for n in earlier.get("oracles") or []] if unseen else []
+        gone = [str(n) for n in earlier.get("removed") or []] if unseen else []
+        reasons = [str(earlier["reason"])] if unseen and earlier.get("reason") else []
+        merged = " ".join([*reasons, reason]).strip()
+        self._oracles_added_write({
+            "oracles": list(dict.fromkeys([*carried, *changed])), "removed": list(dict.fromkeys([*gone, *(removed or [])])),
+            "shown": False, "at": _frozen.now(), **({"reason": merged} if merged else {}),
+        })
 
     def _planned_oracles(self) -> dict[str, dict[str, Any]]:
         """The oracles of the protocol in ``plan.md``, by name."""
@@ -8194,30 +8201,45 @@ class Engine:
         if before is None or after is None:
             return ""
 
-        def without_checks(block: dict[str, Any]) -> dict[str, Any]:
+        def part(block: dict[str, Any], key: str) -> list[Any]:
             protocol = block.get("protocol") if isinstance(block.get("protocol"), dict) else {}
-            return {**block, "protocol": {k: v for k, v in protocol.items() if k != "oracles"}}
+            items = protocol.get(key)
+            return items if isinstance(items, list) else []
 
-        if without_checks(before) != without_checks(after):
-            new_checks = (after.get("protocol") or {}).get("oracles") if isinstance(after.get("protocol"), dict) else None
+        def named(items: list[Any]) -> dict[str, Any]:
+            return {str(o.get("name") if isinstance(o, dict) else o).strip(): o for o in items}
 
-            def keep(block: dict[str, Any]) -> dict[str, Any]:
-                protocol = dict(block.get("protocol") or {})
-                if new_checks is None:
-                    protocol.pop("oracles", None)
-                else:
-                    protocol["oracles"] = new_checks
-                return {**block, "protocol": protocol}
+        old_checks, new_checks = named(part(before, "oracles")), named(part(after, "oracles"))
+        # The checks that changed (added, removed, renamed or edited): a criterion that reads one of them may change
+        # with it (its number changed meaning); every other criterion stays as it was.
+        touched = {n.lower() for n in {*old_checks, *new_checks} if old_checks.get(n) != new_checks.get(n)}
 
-            kept = _plan.edit_design_block(before_text, keep)
-            if kept is not None:
-                kept = _plan.refresh_model_section(kept)
-                path.write_text(kept, encoding="utf-8")
-                _plan.record_version(self.quest_root, kept, by="engine",
-                                     note="only the changes to the checks were kept from the plan's rewrite")
-                self._log.warning("[oracle] the plan's rewrite changed more than the checks; only the checks were kept")
-        else:
-            path.write_text(_plan.refresh_model_section(after_text), encoding="utf-8")
+        def reads_touched(c: Any) -> bool:
+            return isinstance(c, dict) and str(c.get("oracle") or "").strip().lower() in touched
+
+        criteria = ([c for c in part(before, "criteria") if not reads_touched(c)]
+                    + [c for c in part(after, "criteria") if reads_touched(c)])
+
+        def keep(block: dict[str, Any]) -> dict[str, Any]:
+            protocol = dict(block.get("protocol") or {})
+            protocol["oracles"] = part(after, "oracles")
+            if criteria or "criteria" in protocol:
+                protocol["criteria"] = criteria
+            return {**block, "protocol": protocol}
+
+        # The plan as it was, with only the checks (and the criteria reading them) from the rewrite: nothing else in
+        # the design, and no prose the rewrite dropped (FI's own sentences about the checks among it), is lost.
+        kept = _plan.edit_design_block(before_text, keep)
+        if kept is None:
+            return ""
+        kept = _plan.refresh_model_section(kept)
+        if _plan.raw_design_block(kept) != after or _plan.parse(kept).design is None:
+            self._log.warning("[oracle] the plan's rewrite changed more than the checks; only the checks were kept")
+        if _plan.parse(kept).design is None:
+            path.write_text(before_text, encoding="utf-8")
+            return "the plan's rewrite of the checks could not be read"
+        path.write_text(kept, encoding="utf-8")
+        _plan.record_version(self.quest_root, kept, by="engine", note="the plan's changes to its checks")
         return ""
 
     async def _hold_oracle_forms(self, path: Path, *, fi_runs: bool = True) -> dict[str, Any]:
@@ -8292,7 +8314,8 @@ class Engine:
         # pass is said as exactly that, so a person checks its reason, not its result.
         returned = {str(c.get("name") or "").strip(): c.get("returned") for c in record.get("checks") or []
                     if isinstance(c, dict) and c.get("measured_by") == "engine"}
-        fits = [n for n in changed if _forms.passes_on(after[n], returned.get(n)) is True]
+        fits = [n for n in changed
+                if _forms.passes_on(after[n], returned.get(n), (before.get(n) or {}).get("case")) is True]
         path = _plan.plan_path(self.quest_root)
         try:
             self._write_plan_section(path, [
@@ -8316,16 +8339,11 @@ class Engine:
             return False
         # The engine changed the plan after it was written: a person reads that before the freeze, or the freeze record
         # says nobody approved it (as for a check the gate adds).
-        earlier = self._oracles_added_read() or {}
-        carried = [] if earlier.get("shown") else [str(n) for n in earlier.get("oracles") or []]
-        self._oracles_added_write({
-            "oracles": list(dict.fromkeys([*carried, *changed])), "removed": removed, "shown": False,
-            "at": _frozen.now(),
-            "reason": ("A test run of the checks before the study measured numbers that did not fit their definitions, "
-                       "and the plan was asked once to look at them: " + "; ".join(changes) + "."
-                       + (f" With the change, {', '.join(repr(n) for n in fits)} pass on the test run's own numbers: "
-                          "check the reason for the change, not the result." if fits else "")),
-        })
+        self._note_engine_change(changed, removed, reason=(
+            "A test run of the checks before the study measured numbers that did not fit their definitions, and the "
+            "plan was asked once to look at them: " + "; ".join(changes) + "."
+            + (f" With the change, {', '.join(repr(n) for n in fits)} pass on the test run's own numbers: check the "
+               "reason for the change, not the result." if fits else "")))
         return True
 
     async def _repair_script_for_oracle(
@@ -16680,7 +16698,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
 
 `model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
 
-Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, min, max, sum, hypot (and pi). FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
+Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
 `criteria` are how a later version of the code will be judged better or worse: two to five checks of correctness that FI computes itself after every run, never the study's own finding. A criterion on a number in `metrics` or `precision` is refused, because judging the code by its result would reward bending the code towards the result. Each takes its number from exactly one of: an oracle above, by its name (`"use": "error"` for how far it lands from its expected value, such as the gap between an observed and a claimed convergence order; `"use": "value"` for the measured value, such as the worst drift of a conserved quantity), best one with a `case` so that FI runs it itself (a number the script's own `oracle()` reports is shown but never counts); or `"trials": "<a number every trial returns>"` in place of `oracle`, whose value is how fast the standard error of its mean shrinks as trials are added (use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more). Give each its own `tolerance`, from the method's known error or the noise of the measurement. Leave `criteria` out only when nothing FI can compute says whether the code is right.
 

@@ -509,3 +509,57 @@ async def test_a_plan_read_at_the_old_plan_stop_shows_what_the_look_changed_befo
     assert _oracle_in_plan(engine)["expected"] == 0
     added = engine._oracles_added_read()
     assert added["oracles"] == ["power_conservation"] and added["shown"] is False and "after you read" in added["reason"]
+
+
+def test_a_formula_that_takes_nothing_from_the_simulation_is_not_a_measurement(tmp_path: Path) -> None:
+    for constant in ("0", "abs(pi - pi)"):
+        got = of.enforce({"oracles": [{**CONSERVATION, "expected": 0.0, "measure": constant}]})
+        assert "takes nothing the simulation returns" in got.requests[0], constant
+    checks, problems = _measure(tmp_path, [{**CONSERVATION, "expected": 0.0, "measure": "0"}])
+    assert checks == [] and "not a measurement of the simulation" in problems[0]
+
+
+def test_every_record_of_an_engine_change_keeps_what_is_not_yet_shown(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    engine._note_engine_change(["a"], ["gone"], reason="first reason.")
+    engine._note_engine_change(["b"])  # the gate adding a check afterwards, as _declare_oracles does
+    added = engine._oracles_added_read()
+    assert added["oracles"] == ["a", "b"] and added["removed"] == ["gone"] and added["reason"] == "first reason."
+    engine._oracles_added_write({**added, "shown": True})
+    engine._note_engine_change(["c"])
+    fresh = engine._oracles_added_read()
+    assert fresh["oracles"] == ["c"] and fresh["removed"] == [] and "reason" not in fresh
+
+
+@pytest.mark.asyncio
+async def test_a_criterion_that_reads_a_changed_check_may_change_with_it_and_no_other(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    reads_value = {"name": "kept", "oracle": "power_conservation", "use": "value", "direction": "target", "target": 1.0,
+                   "tolerance": 1e-6}
+    other = {"name": "other", "oracle": "rk", "direction": "lower", "target": 2e-6, "tolerance": 1e-7}
+    rk = {"name": "rk", "kind": "special_case", "expected": 0.0, "tolerance": 1e-6, "case": {"n": 4}, "measure": "err"}
+
+    class _Both(_Model):
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            prompt = messages[-1]["content"]
+            if "You are revising the plan" in prompt:
+                self.revisions.append(prompt)
+                current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
+
+                def change(b: dict[str, Any]) -> dict[str, Any]:
+                    oracles = [{**o, "measure": "abs(ratio - 1)", "expected": 0} if o["name"] == "power_conservation" else o
+                               for o in b["protocol"]["oracles"]]
+                    criteria = [{**c, "direction": "lower", "target": 1e-6} for c in b["protocol"]["criteria"]]
+                    return {**b, "protocol": {**b["protocol"], "oracles": oracles, "criteria": criteria}}
+
+                return plan.edit_design_block(current, change)
+            return await super().chat(messages, **kw)
+
+    model = _Both({"grid": {"n": [4, 8]}, "oracles": [{**CONSERVATION, "measure": "ratio"}, rk],
+                   "criteria": [reads_value, other]})
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    criteria = {c["name"]: c for c in plan.load_design(engine.quest_root)[0]["protocol"]["criteria"]}
+    assert criteria["kept"]["direction"] == "lower", "the criterion on the changed check changed with it"
+    assert criteria["other"]["target"] == 2e-6, "a criterion on an unchanged check is put back"
+    assert "change those criteria too" in model.revisions[0]

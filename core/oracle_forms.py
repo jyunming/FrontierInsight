@@ -307,6 +307,12 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforce
                 f"`measure` with {LANGUAGE}."
             )
             continue
+        if measure and has_case and problem(measure) is None and not names(measure):
+            out.requests.append(
+                f"The check {name!r} computes its number as `{measure}`, which takes nothing the simulation returns, so "
+                "it would pass or fail without the simulation: write `measure` from the names the simulation returns."
+            )
+            continue
         if kind in VIOLATION_KINDS and expected is not None and expected != 0:
             what = _describe(kind)
             formula = has_case and measure and not is_name(measure) and problem(measure) is None
@@ -332,7 +338,7 @@ def enforce(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> Enforce
                 continue
             if users:
                 how = (f"the criteria {', '.join(repr(u) for u in users)} are judged on its number, so FI did not "
-                       "rewrite it")
+                       "rewrite it (change those criteria too, so they say the same thing of the new number)")
             elif why_not:
                 how = why_not
             elif not has_case:
@@ -439,7 +445,8 @@ def request(requests: list[str]) -> str:
         "special or limiting case, a published value, or a convergence rate is measured as the quantity itself and "
         "expects its known value. These checks do not fit:\n"
         + "\n".join(f"- {r}" for r in requests)
-        + "\nChange only these checks, and nothing else in the plan."
+        + "\nChange only these checks (and a criterion that reads one of them, when its number changes meaning), and "
+        "nothing else in the plan."
     )
 
 
@@ -519,11 +526,12 @@ def mismatches(oracles: list[dict[str, Any]], checks: list[dict[str, Any]] | Non
     return out
 
 
-def passes_on(oracle: dict[str, Any], returned: Any) -> bool | None:
+def passes_on(oracle: dict[str, Any], returned: Any, case: Any = None) -> bool | None:
     """Whether ``oracle`` (as the plan now states it) passes on the values the simulation returned at the test run
-    (``None`` when that cannot be told: no values kept, a formula they do not answer, no numbers to judge by). A change
-    to a check that makes the test run's own number pass is shown to the person as exactly that."""
-    if not isinstance(returned, dict) or not returned:
+    on ``case`` (``None`` when that cannot be told: no values kept, a check now run on another case, a formula they do
+    not answer, no numbers to judge by). A change to a check that makes the test run's own number pass is shown to the
+    person as exactly that."""
+    if not isinstance(returned, dict) or not returned or oracle.get("case") != case:
         return None
     measure = oracle.get("measure")
     if not isinstance(measure, str) or not measure.strip():
@@ -547,6 +555,7 @@ def dry_run_request(found: list[str]) -> str:
         "wrong, correct it and keep the kind's form (the worst violation expecting 0 for an invariant, a symmetry or a "
         "second implementation; the quantity itself for the others), and say in `reference` how the expected value "
         "follows. If the definition is right, leave the check exactly as it is: the simulation is then what gets "
-        "repaired. Never set an expected value to the number measured here. Change only these checks, and nothing else "
-        "in the plan."
+        "repaired. Never set an expected value to the number measured here, and never make a check pass by changing "
+        "its case or by computing its number from nothing the simulation returns. Change only these checks (and a "
+        "criterion that reads one of them, when its number changes meaning), and nothing else in the plan."
     )

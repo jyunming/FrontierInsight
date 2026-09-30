@@ -771,6 +771,11 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         # engine (core/oracle_forms.py): the script never decides the representation.
         got = _forms.evaluate(measure, values)
         returned = ", ".join(sorted(values)) or "nothing"
+        if not got.unreadable and not _forms.names(measure):
+            # A number that takes nothing from the simulation (`0`, `pi - pi`) is not a measurement of it.
+            problems.append(f"the oracle {name!r}: its number is computed as `{measure}`, which takes nothing the "
+                            "simulation returns, so it is not a measurement of the simulation")
+            continue
         if got.unreadable or (got.missing and _forms.is_name(measure)):
             problems.append(
                 f"the oracle {name!r}: the simulation returned {returned} but the oracle measures {measure!r} (the "

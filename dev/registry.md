@@ -59,7 +59,9 @@ same PR that adds, splits or renames one.
   `Engine._guide_oracles` / `_hold_oracle_forms` (plan time, from `_node_plan`, once per quest:
   `.fi/oracle_guidance.json`) and `Engine._revise_after_dry_run` (from `_oracle_gate`, once: `.fi/oracle_dry_run.json`;
   its changes and removals go through `_oracles_added_write` with a `reason` and `removed` to the plan stop before the
-  freeze); both ask the plan through `Engine._revise_checks_only`, which keeps only the changes to `protocol.oracles`.
+  freeze, merged by `Engine._note_engine_change`, which `_declare_oracles` uses too); both ask the plan through
+  `Engine._revise_checks_only`, which keeps only the changes to `protocol.oracles` and the criteria reading them.
+  `core/rerun_from.py` moves both markers aside with the plan (and the test-run one with the design).
   The plan.md section is `HEADING`; `plan.raw_design_block` / `plan.edit_design_block` read and edit the block as
   written, `plan.add_to_section` / `plan.refresh_model_section` keep the prose in step.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of

@@ -731,12 +731,19 @@ def refresh_model_section(text: str) -> str:
     """``text`` with its *The model behind the numbers* section shown again from its design block, after the engine
     edited the block (the section is shown from it and never read back). Unchanged when either cannot be found."""
     parsed = parse(text)
+    if parsed.design is None:
+        return text
     found = re.search(rf"^##\s+{re.escape(MODEL_HEADING)}\s*$", text or "", re.MULTILINE)
-    if parsed.design is None or not found:
-        return text
     lines = _model_lines(parsed.design.get("protocol"))
+    if not found:
+        # Checks the plan had none of before: the section goes where render puts it (before the criteria, or the design).
+        anchor = (re.search(rf"^##\s+{re.escape(CRITERIA_HEADING)}\s*$", text, re.MULTILINE)
+                  or _HEADING_RE.search(text))
+        if not lines or anchor is None:
+            return text
+        return text[:anchor.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[anchor.start():]
     if not lines:
-        return text
+        lines = [f"## {MODEL_HEADING}", "", "- (the plan no longer has a model or any check against a known answer)", ""]
     after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
     end = found.end() + after.start() if after else len(text)
     return text[:found.start()] + "\n".join(lines).rstrip("\n") + "\n\n" + text[end:]
