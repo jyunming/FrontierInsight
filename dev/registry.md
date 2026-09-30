@@ -171,8 +171,9 @@ same PR that adds, splits or renames one.
   CLI-tools surfaces.
 - `web/quest_launcher.py` — the subprocess pool for quests started from the web UI. Its children (and the quest page's
   Resume) run with `FI_WEB_ANSWERS=1`, so `launch.py` `_web_page_clarify_callback` asks the setup questions on the
-  quest page (`.fi/clarify_questions.json` → `.fi/clarify_answer.json`); `POST /api/quests/{id}/clarify` says
-  `run_waiting` when that child is still running, so the page does not start a second run.
+  quest page (`.fi/clarify_questions.json` → `.fi/clarify_answer.json`, with `.fi/clarify_waiting.json` holding the
+  waiting child's pid); `web/server.py` `_clarify_run_waiting` reads that file, so `POST /api/quests/{id}/clarify`
+  says `run_waiting` and `POST .../resume` refuses (409) while the child waits, even after a server restart.
 - `vscode-frontier-insight/src/extension.ts` — the `@fi` chat participant and every slash command.
 - `vscode-frontier-insight/src/bridge.ts`, `persistent-bridge.ts` — the `vscode.lm.*` bridge a spawned `launch.py`
   talks to over a local socket; `lm_done` carries `served_model` (`lm-messages.ts` `servedModel`), which

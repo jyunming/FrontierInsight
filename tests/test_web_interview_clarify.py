@@ -109,22 +109,23 @@ async def test_web_launched_quest_asks_on_the_page_and_uses_the_answers(
     questions_file = engine.fi_dir / "clarify_questions.json"
     await _wait_for(questions_file)
 
-    app = make_app(tmp_path / "out")
-    app.state.launcher.job_state = lambda qid: {"alive": qid == engine.quest_id}  # the child is still running
-    client = TestClient(app)
+    # A freshly started server (its launcher knows no child, as after a restart) still sees the waiting run.
+    client = TestClient(make_app(tmp_path / "out"))
     qid = engine.quest_id
 
-    def page() -> tuple[dict, dict, dict]:
+    def page() -> tuple[dict, dict, int, dict]:
         status = client.get(f"/api/quests/{qid}").json()
         shown = client.get(f"/api/quests/{qid}/clarify").json()
+        second_run = client.post(f"/api/quests/{qid}/resume").status_code
         posted = client.post(f"/api/quests/{qid}/clarify",
                              json={"answers": {"title": "Energy drift of Verlet steps"}})
         assert posted.status_code == 200, posted.text
-        return status, shown, posted.json()
+        return status, shown, second_run, posted.json()
 
-    status, shown, posted = await asyncio.to_thread(page)
+    status, shown, second_run, posted = await asyncio.to_thread(page)
     assert status["pending_clarify"] is True
     assert shown["pending"] is True and "budget" in shown["questions"]
+    assert second_run == 409, "a run waiting for its answers is never started a second time"
     # The running quest reads the answers itself: the page must not start a second run.
     assert posted["run_waiting"] is True
 
@@ -134,6 +135,7 @@ async def test_web_launched_quest_asks_on_the_page_and_uses_the_answers(
     assert state["title"] == "Energy drift of Verlet steps"
     assert state.get("title_confirmed") is True
     assert not questions_file.exists() and not (engine.fi_dir / "clarify_answer.json").exists()
+    assert not (engine.fi_dir / "clarify_waiting.json").exists()
 
 
 async def test_nobody_answers_and_the_setting_is_unset_the_run_answers_for_itself(
@@ -147,6 +149,24 @@ async def test_nobody_answers_and_the_setting_is_unset_the_run_answers_for_itsel
                                timeout=90)
     assert stop_after_clarify["state"]["clarify_done"] is True
     assert not (engine.fi_dir / "clarify_questions.json").exists()
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "waiting for your answers" in log, "it asked on the page before answering for itself"
+    assert "nobody answered the setup questions" in log
+    assert not (engine.fi_dir / "clarify_waiting.json").exists()
+
+
+async def test_an_answer_written_as_the_wait_runs_out_is_used(tmp_path: Path, monkeypatch, stop_after_clarify) -> None:
+    cfg = _cfg(tmp_path)
+    engine = Engine(cfg)
+    engine.human_feedback_timeout_s = 1
+
+    async def answered_too_late(questions):  # noqa: ANN001
+        (engine.fi_dir / "clarify_answer.json").write_text(json.dumps({"title": "Just in time"}), encoding="utf-8")
+        await asyncio.sleep(3600)
+
+    with pytest.raises(_Reached):
+        await asyncio.wait_for(engine.run(clarify_callback=answered_too_late), timeout=90)
+    assert stop_after_clarify["state"]["title"] == "Just in time"
 
 
 async def test_nobody_answers_under_ask_the_quest_waits_and_a_resume_uses_the_page_answers(
@@ -158,6 +178,7 @@ async def test_nobody_answers_under_ask_the_quest_waits_and_a_resume_uses_the_pa
     await asyncio.wait_for(engine.run(clarify_callback=launch._pick_clarify_callback(cfg, engine, False)), timeout=90)
     assert "state" not in stop_after_clarify, "an unanswered 'ask' stops and waits"
     assert (engine.fi_dir / "clarify_questions.json").is_file()
+    assert "waiting for your answers" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
 
     client = TestClient(make_app(tmp_path / "out"))  # nothing running: the page stages the answer and resumes
     posted = await asyncio.to_thread(lambda: client.post(
@@ -166,9 +187,16 @@ async def test_nobody_answers_under_ask_the_quest_waits_and_a_resume_uses_the_pa
 
     # The web Resume runs the quest again as a web child: it takes the staged answers without asking again.
     resumed = Engine(cfg, resume_quest_id=engine.quest_id)
+    page_callback = launch._pick_clarify_callback(cfg, resumed, False)
+    returned: list = []
+
+    async def spy(questions):  # noqa: ANN001
+        returned.append(await page_callback(questions))
+        return returned[-1]
+
     with pytest.raises(_Reached):
-        await asyncio.wait_for(
-            resumed.run(clarify_callback=launch._pick_clarify_callback(cfg, resumed, False)), timeout=90)
+        await asyncio.wait_for(resumed.run(clarify_callback=spy), timeout=90)
+    assert returned == [{"title": "Verlet drift, answered later"}], "the page callback took the staged answers"
     assert stop_after_clarify["state"]["title"] == "Verlet drift, answered later"
 
 

@@ -1219,7 +1219,10 @@ class Engine:
                                 payload = Command(resume={"clarify_answers": answers or {}})
                                 continue
                             except asyncio.TimeoutError:
-                                if self.config.pauses.clarify is None:
+                                if clarify_answer_path.is_file():
+                                    # An answer written just as the wait ran out is used below, never dropped.
+                                    pass
+                                elif self.config.pauses.clarify is None:
                                     # Nobody set "ask": an unattended start must not stall, so answer for itself.
                                     self._log.warning(
                                         "[run] nobody answered the setup questions within %ss — using the defaults",
