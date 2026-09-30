@@ -687,6 +687,43 @@ def test_the_improve_loop_may_change_the_models_package(tmp_path: Path) -> None:
     assert improve.check_edit(files, outside, allowed, tried=set(), expected=[])[0] is None
 
 
+def test_a_copy_saved_before_the_package_leaves_the_package_alone(tmp_path: Path) -> None:
+    from core import improve
+
+    quest = tmp_path / "q"
+    code = quest / "code"
+    _write_tool(code)
+    improve.save_snapshot(quest, "original", {"simulate.py": SIM_PKG})  # the older flat shape
+    improve.restore(quest, improve.load_snapshot(quest, "original"))
+    assert (code / PKG / "model.py").is_file(), "the package is not removed by a copy that never held it"
+
+
+def test_the_kept_copies_never_follow_a_link(tmp_path: Path) -> None:
+    import os
+    import subprocess as sp
+
+    from core import improve
+
+    quest = tmp_path / "q"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "precious.py").write_text("KEEP = 1\n", encoding="utf-8")
+    best = quest / improve.SNAPSHOTS / "best"
+    best.mkdir(parents=True)
+    link = best / PKG
+    try:
+        if os.name == "nt":
+            sp.run(["cmd", "/c", "mklink", "/J", str(link), str(victim)], check=True, capture_output=True)
+        else:
+            os.symlink(victim, link, target_is_directory=True)
+    except (OSError, sp.CalledProcessError):
+        pytest.skip("no link can be made here")
+    assert improve.load_snapshot(quest, "best") == {}, "nothing is read through the link"
+    improve.save_snapshot(quest, "best", {"simulate.py": SIM_PKG, f"{PKG}/model.py": MODEL_PY})
+    assert (victim / "precious.py").is_file() and not (victim / "model.py").exists()
+    assert improve.load_snapshot(quest, "best")[f"{PKG}/model.py"] == MODEL_PY
+
+
 def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:
     import hashlib
 

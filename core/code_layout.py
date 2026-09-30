@@ -241,7 +241,7 @@ fenced Python block whose first line is `# file: <path>`:
 - simulate.py keeps run_trial / run_cell (and oracle) exactly as the contract above says: it reads the setting from
   `cell` and computes it by calling the package (`from {package} import model`). The scenario is in simulate.py, the
   mathematics in the package.
-- experiment.py does not import the package: it reads only FI's record of the trials, as the contract above says.
+- experiment.py never imports the package: it reads only the records FI hands it, as the contract above says.
 Do not write tests, a README or a command-line entry: FI writes the unit tests from the plan's checks
 (`tests/{TEST_NAME}`), the equation list (`{METHODS_NAME}`) and `run.py` itself.
 """

@@ -125,15 +125,24 @@ def snapshot(quest_root: Path) -> dict[str, str]:
 
 def restore(quest_root: Path, files: dict[str, str]) -> None:
     """``code/`` back to ``files``: each written as it was, and a ``.py`` file that was not there removed (directly in
-    ``code/`` or in the model's package)."""
+    ``code/``, and in the model's package when ``files`` holds the package: a copy saved before the package was part of
+    it leaves the package alone). Never written through a link: a link left in place of a file or of the package's
+    folder is removed first, and a ``code/`` that is itself a link is not written at all."""
     code = Path(quest_root) / "code"
-    present = [*(p.name for p in code.glob("*.py")), *_package_files(code)] if code.is_dir() else []
+    if _is_link(code):
+        return
+    with_package = any("/" in k for k in files)
+    present: list[str] = []
+    if code.is_dir():
+        present = [p.name for p in code.glob("*.py")] + (_package_files(code) if with_package else [])
     for rel in present:
         if rel not in files:
             (code / rel).unlink(missing_ok=True)
     for name, text in files.items():
         path = code / name
         data = text.encode("utf-8", "surrogateescape")
+        if path.parent != code and _is_link(path.parent):
+            _remove_link(path.parent)  # the package's folder replaced by a link: never written through
         if _is_link(path):
             _remove_link(path)  # a link the run left in place of a file: never written through
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -162,10 +171,21 @@ def forget_bytecode(quest_root: Path) -> None:
 
 
 def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
+    """Keep ``files`` as the copy ``name``. What the copy held before is removed without following a link: a link (or a
+    junction) inside it is removed itself, never what it points at."""
+    import shutil
+
     folder = Path(quest_root) / SNAPSHOTS / name
+    if _is_link(folder):
+        _remove_link(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    for old in folder.rglob("*.py"):
-        old.unlink(missing_ok=True)
+    for old in list(folder.iterdir()):
+        if _is_link(old):
+            _remove_link(old)
+        elif old.is_dir():
+            shutil.rmtree(old, ignore_errors=True)
+        elif old.suffix == ".py":
+            old.unlink(missing_ok=True)
     for file, text in files.items():
         (folder / file).parent.mkdir(parents=True, exist_ok=True)
         (folder / file).write_bytes(text.encode("utf-8", "surrogateescape"))
@@ -173,10 +193,11 @@ def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
 
 def load_snapshot(quest_root: Path, name: str) -> dict[str, str] | None:
     folder = Path(quest_root) / SNAPSHOTS / name
-    if not folder.is_dir():
+    if not folder.is_dir() or _is_link(folder):
         return None
+    files, _links = _walk(folder)  # never into a link
     return {p.relative_to(folder).as_posix(): p.read_bytes().decode("utf-8", "surrogateescape")
-            for p in sorted(folder.rglob("*.py"))}
+            for p in sorted(files) if p.suffix == ".py"}
 
 
 # --- the edit --------------------------------------------------------------------------------------------------------

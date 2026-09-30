@@ -9260,7 +9260,10 @@ class Engine:
         """A resume after the stop for a check that got worse: no more changes; the version in code/ goes on (run once
         more in full when it is not the one the last full run used)."""
         original = _improve.load_snapshot(self.quest_root, "original")
-        rerun = original is not None and _improve.snapshot(self.quest_root) != original
+        now = _improve.snapshot(self.quest_root)
+        if original is not None and not any("/" in k for k in original):
+            now = {k: v for k, v in now.items() if "/" not in k}  # a copy saved before the package was part of it
+        rerun = original is not None and now != original
         record.update(blocked=False, resumed=_improve._now(), rerun=rerun)
         if rerun:
             record["kept_from"] = ("round " + str(record["best_round"]) if record.get("best_round")
