@@ -143,6 +143,10 @@ jobs:
     # "no slow-tagged tests" exit). It runs alongside the fast tier rather than after it: the PR's checks gate the
     # merge whatever order the jobs run in, and waiting for the fast tier only added its time to every PR's.
     name: pytest (slow tier, ubuntu only)
+    # The same skip rule as the fast tier (it used to follow from `needs: [fast]`).
+    if: |
+      !contains(github.event.pull_request.title, '[ext-only]') &&
+      !startsWith(github.event.head_commit.message, 'chore(vsix):')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

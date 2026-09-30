@@ -63,7 +63,8 @@ def pytest_collection_modifyitems(config, items):
 
     CI splits the fast tier across parallel jobs this way; together the ``n`` shards run every test exactly once.
     Whole files stay together (as with ``--dist loadfile``). The hash is ``zlib.crc32`` of the file's path relative
-    to the repo with ``/`` separators, so every xdist worker and both OSes pick the same files. Unset: no-op.
+    to the repo with ``/`` separators, so every xdist worker picks the same files and the ``n`` shards of one OS
+    together cover every file once. Unset: no-op.
     """
     import os
     import zlib
