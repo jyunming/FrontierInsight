@@ -584,6 +584,21 @@ def test_a_generator_the_caller_can_replace_is_not_a_problem_but_one_made_at_loa
     assert set(__import__("core.engine").engine.unseeded_rng_calls(fallback)) and cl.fallback_rng_lines(fallback) >= {5}
     ignores = "import numpy as np\n\n\ndef step(y, seed):\n    gen = np.random.default_rng()\n    return y\n"
     assert 5 not in cl.fallback_rng_lines(ignores), "a function that takes a seed and ignores it is still reported"
+    idioms = [
+        "    self_rng = rng if rng is not None else np.random.default_rng()\n",
+        "    g = np.random.default_rng(seed) if seed is not None else np.random.default_rng()\n",
+        "    return rng if rng is not None else np.random.default_rng()\n",
+        "    gen = rng or np.random.default_rng()\n",
+        "    return g(y, rng or np.random.default_rng())\n",
+        "    if rng is None:\n        rng = np.random.default_rng()\n",
+    ]
+    for body in idioms:
+        src = f"import numpy as np\n\n\ndef f(y, rng=None, seed=None):\n{body}"
+        found = __import__("core.engine").engine.unseeded_rng_calls(src)
+        assert all(line in cl.fallback_rng_lines(src) for line, _ in found), body
+    nested = ("import numpy as np\n\n\ndef f(y, rng=None):\n    def inner():\n        rng = np.random.default_rng()\n"
+              "        return rng\n    return inner()\n")
+    assert 6 not in cl.fallback_rng_lines(nested), "a nested function is judged on its own"
     other_if = "import numpy as np\nif __name__ != '__main__':\n    R = np.random.default_rng()\n"
     assert cl.module_level_randomness(other_if) == [3]
     main = "import numpy as np\n\n\ndef f(y):\n    return y\n\n\nif __name__ == '__main__':\n    np.random.default_rng()\n"

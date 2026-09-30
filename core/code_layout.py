@@ -764,26 +764,47 @@ _RNG_PARAMS = {"rng", "seed", "generator", "random_state", "prng"}
 
 def fallback_rng_lines(source: str) -> set[int]:
     """Lines where a function that takes the generator or the seed as an argument (``rng``, ``seed``, ...) makes a
-    generator for a caller that passed none, assigning it to that same argument (``rng = rng or np.random.default_rng()``,
-    or ``if rng is None: rng = np.random.default_rng()``): the shape the package is asked for, not a generator that
-    ignores FI's seed. A generator assigned to anything else in such a function is still reported."""
+    generator only as the fallback for a caller that passed none: inside an ``or`` or a conditional expression that also
+    reads that argument (``rng or np.random.default_rng()``, ``rng if rng is not None else ...``,
+    ``default_rng(seed) if seed is not None else default_rng()``), or in the body of ``if <argument> is None:``. That is
+    the shape the package is asked for, not a generator that ignores FI's seed; a generator made anywhere else in such a
+    function (one that takes a seed and never uses it) is still reported. Nested functions are judged on their own."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
         return set()
     out: set[int] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+
+    def span(node: ast.AST) -> range:
+        return range(node.lineno, (getattr(node, "end_lineno", None) or node.lineno) + 1)
+
+    def reads(node: ast.AST, params: set[str]) -> bool:
+        return any(isinstance(n, ast.Name) and n.id in params for n in ast.walk(node))
+
+    def own_nodes(fn: ast.AST):
+        """The nodes of ``fn``'s body, not those of a function (or class) defined inside it."""
+        stack = list(ast.iter_child_nodes(fn))
+        while stack:
+            node = stack.pop()
+            yield node
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                stack.extend(ast.iter_child_nodes(node))
+
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        params = {a.arg for a in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]} & _RNG_PARAMS
+        params = {a.arg for a in [*fn.args.posonlyargs, *fn.args.args, *fn.args.kwonlyargs]} & _RNG_PARAMS
         if not params:
             continue
-        for stmt in ast.walk(node):
-            if not isinstance(stmt, (ast.Assign, ast.AnnAssign)) or stmt.value is None:
-                continue
-            targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
-            if any(isinstance(t, ast.Name) and t.id in params for t in targets):
-                out.update(range(stmt.lineno, (getattr(stmt, "end_lineno", None) or stmt.lineno) + 1))
+        for node in own_nodes(fn):
+            if isinstance(node, ast.BoolOp) and isinstance(node.op, ast.Or) and reads(node, params):
+                out.update(span(node))
+            elif isinstance(node, ast.IfExp) and reads(node.test, params):
+                out.update(span(node))
+            elif (isinstance(node, ast.If) and isinstance(node.test, ast.Compare) and reads(node.test, params)
+                  and any(isinstance(op, (ast.Is, ast.Eq)) for op in node.test.ops)):
+                for stmt in node.body:
+                    out.update(span(stmt))
     return out
 
 
