@@ -16,7 +16,7 @@ A one-script study whose script has no random source is treated as deterministic
 
 ## Equation labels
 
-The plan's [[Model behind the numbers]] lists the equations that produce the numbers (E1, E2, ...). Each of them must be marked in the simulation code with a comment or docstring such as `# E1` or `# E1-E3`.
+The plan's [[The model behind the numbers]] lists the equations that produce the numbers (E1, E2, ...). Each of them must be marked in the simulation code with a comment or docstring such as `# E1` or `# E1-E3`.
 
 - At the end of the code step FI asks once for missing labels and keeps the answer only if the code itself did not change.
 - Before the oracle check, a missing label is a warning and holds the result below independently validated. Under `rigor_profile: research` the quest pauses and asks for it.
