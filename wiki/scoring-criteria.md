@@ -23,7 +23,7 @@ A criterion may not take its number from the script's own result file, may not d
 3. The criteria are frozen and hashed with the protocol; changing them is an amendment.
 4. After **every** run FI computes them and appends a row to `.fi/criteria_history.jsonl` (run number, protocol version and hash, code commit, each value and whether it is met), and writes a `[criteria]` line to `run.log`.
 
-Only a value FI measured itself counts: an oracle with a `case`, run through a simulation FI can call (one with a `run_trial` or `run_cell` function, see [[Engine-callable simulations]]); one the script measured itself is shown but not counted. Nothing is decided from the history yet.
+Only a value FI measured itself counts: a per-trial measure from the trials FI ran, or an oracle with a `case`, run through a simulation FI can call (one with a `run_trial` or `run_cell` function, see [[Engine-callable simulations]]); one the script measured itself is shown but not counted. Nothing is decided from the history yet.
 
 ## Interfaces
 
