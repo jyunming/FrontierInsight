@@ -229,6 +229,11 @@ def test_the_node_a_quest_stopped_in_is_now_even_when_it_is_not_a_step() -> None
     # A node on the other path is never where a quest stopped: the last reached step is used instead.
     nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature"}), at=["wait_for_data"])}
     assert nodes["literature"]["status"] == "now" and nodes["wait_for_data"]["status"] == "off"
+    # On the data path the same pause is where the quest stopped.
+    nodes = {n["node"]: n for n in rerun_from.node_map(_steps({"ideas", "literature", "plan", "design", "skills", "run"}),
+                                                       no_simulation=True, at=["wait_for_data"])}
+    assert nodes["wait_for_data"]["status"] == "now" and nodes["auto_collect_data"]["status"] == "done"
+    assert nodes["data_load"]["status"] == "todo"
 
 
 def _quest_on_disk(tmp_path: Path, name: str) -> tuple[Engine, Path]:
@@ -277,6 +282,7 @@ async def test_a_quest_with_no_checkpoint_is_not_finished(tmp_path: Path) -> Non
     assert await engine.stopped_at() == (False, [])
 
 
+@pytest.mark.slow
 async def test_a_quest_paused_at_the_review_is_not_finished_until_it_is_accepted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -322,6 +328,23 @@ async def test_a_quest_paused_at_the_review_is_not_finished_until_it_is_accepted
     await asyncio.wait_for(Engine(cfg, resume_quest_id=quest_id).run(), timeout=300)
     done = await cli_map()
     assert done["finished"] is True and {n["status"] for n in done["nodes"]} == {"done", "off"}
+
+    # Run again from the writing, and the writing fails: the outputs were moved aside, so the quest is not finished,
+    # and it stopped in the writing, not at the end of the line it left.
+    async def broken_write(self, state):  # noqa: ANN001
+        raise RuntimeError("the writer broke")
+
+    monkeypatch.setattr(Engine, "_node_write", broken_write)
+    again = Engine(cfg, resume_quest_id=quest_id)
+    with pytest.raises(Exception):
+        await asyncio.wait_for(again.run(from_step="writing"), timeout=300)
+    assert list((quest_root / ".fi" / "previous").iterdir())
+    assert await again.stopped_at() == (False, ["write"])
+    # A run stopped (killed) in that node leaves no failure note: still not finished, still in the writing.
+    (quest_root / "quest_failed.md").unlink(missing_ok=True)
+    assert await again.stopped_at() == (False, ["write"])
+    failed = await cli_map()
+    assert failed["finished"] is False and {n["node"]: n["status"] for n in failed["nodes"]}["write"] == "now"
 
 
 @pytest.mark.parametrize("flag", ["no_simulation", "survey_mode", "analyze_local_first"])

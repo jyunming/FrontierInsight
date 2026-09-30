@@ -867,6 +867,13 @@ class Engine:
                                   f"back where they were and the quest was not run again. Close whatever holds those files "
                                   f"and try `--resume {self.quest_id} --from {from_step}` again.")
                             return self._collect_artifacts({})
+                        if not (_rerun_from.needs_approval(from_step) or _rerun_from.picks_skills(from_step)):
+                            # Make the fork the thread's newest checkpoint now (a copy of it, about to run the same
+                            # step), as the steps above already do by writing state: LangGraph saves nothing until the
+                            # step's first node finishes, so until then the quest's map read the old line's end and
+                            # showed a quest whose outputs were just moved aside as finished (and did so for good when
+                            # the run was stopped or failed in that node).
+                            fork_config = await graph.aupdate_state(fork_config, None, as_node="__copy__")
                         extra_audit: dict[str, Any] = {}
                         if _rerun_from.needs_approval(from_step):
                             extra_audit = {"approved_by": approved_by, "replaced_protocol_sha256": replaced_sha}
@@ -1987,9 +1994,13 @@ class Engine:
         # Read-only, and with the tables taken as there: the quest may be running in another process, and the saver's
         # own setup would write to its database.
         conn = await aiosqlite.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
-        saver = AsyncSqliteSaver(conn)
-        saver.is_setup = True
-        return self._build_graph().compile(checkpointer=saver), conn
+        try:
+            saver = AsyncSqliteSaver(conn)
+            saver.is_setup = True
+            return self._build_graph().compile(checkpointer=saver), conn
+        except BaseException:
+            await conn.close()
+            raise
 
     async def _reached_steps(self) -> list[str]:
         opened = await self._open_readonly_graph()

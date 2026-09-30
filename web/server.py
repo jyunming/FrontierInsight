@@ -1134,7 +1134,6 @@ def make_app(
         if not yaml_path.is_file() or not (quest_root / ".fi" / "state.sqlite").is_file():
             return JSONResponse({"quest_id": quest_id, "steps": [], "nodes": [], "blocks": [],
                                  "config_path": str(yaml_path)})
-        from core import rerun_from as _rerun_from
         from core.config import Config
         from core.engine import Engine, _close_quest_logger
 
