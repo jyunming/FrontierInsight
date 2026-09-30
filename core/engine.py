@@ -90,6 +90,7 @@ from . import receipts as _receipts
 from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
+from . import optimisation_plan as _optim
 from . import protocol_check as _protocol
 from . import split_run as _split_run
 from . import stats as _stats
@@ -2715,6 +2716,10 @@ class Engine:
         _spell_out_title_options(questions)
         if self.config.title:
             questions.pop("title", None)
+        # Measure, or find the best design: asked only when the topic's words leave it open (core/optimisation_plan.py).
+        if _optim.add_study_type_question(questions, state["topic"]):
+            self._log.info("[clarify] the topic does not say whether it measures or looks for the best design: that "
+                           "question is added")
 
         if mode == "auto":
             agent_answers = {
@@ -4233,7 +4238,7 @@ class Engine:
                 self._pause_for_plan(no_criteria=no_criteria)
             return {}
 
-        prompt = self._design_prompt(state) + _PLAN_DIRECTIVE
+        prompt = self._design_prompt(state) + _PLAN_DIRECTIVE + _STUDY_TYPE_DIRECTIVE + self._study_type_note(state)
         text = await self._chat(prompt, node="plan")
         obj = _parse_json_lenient(text) or {}
         extra = obj.pop("plan", None) if isinstance(obj, dict) else None
@@ -4263,6 +4268,7 @@ class Engine:
         if normalized is None:
             self._log.warning("[plan] the drafted design is not usable (%s); the design step will draft it again", why)
             return {}
+        study_notes = self._settle_study_type(state, design, normalized)
         # How the code will be judged (core/criteria.py): a draft that names no criterion gets one search of the
         # literature for how such studies are checked, and one more question to the model.
         no_criteria = False
@@ -4306,6 +4312,7 @@ class Engine:
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
         audit += repaired_notes
+        audit += study_notes
         audit += self._critique_summary()
         # What the topic sets and the protocol leaves out: said in the plan, where a person reads it before compute is spent.
         audit += _protocol.plan_notes(state.get("topic") or self.config.topic, normalized.get("protocol"))
@@ -4386,6 +4393,95 @@ class Engine:
         for note in notes:
             self._log.warning("[criteria] %s", note)
         return kept, notes
+    @staticmethod
+    def _study_type_asked(state: QuestState) -> str | None:
+        """The kind of study the person named at the clarify step (``measure`` / ``find_best_design``), or ``None``."""
+        return _optim.resolve_answer((state.get("clarify_answers") or {}).get("study_type"))
+
+    def _study_type_note(self, state: QuestState) -> str:
+        """For the plan prompt: the person's own answer on the kind of study, which the plan follows."""
+        asked = self._study_type_asked(state)
+        if asked is None:
+            return ""
+        return (f"\n\nThe person answered that this study should {_optim.STUDY_TYPES[asked]}: write "
+                f"`\"study_type\": \"{asked}\"`"
+                + (" and give the protocol an `optimisation` block, not a `grid`." if asked == "find_best_design"
+                   else " and give the protocol a `grid`, not an `optimisation` block.") + "\n")
+
+    def _settle_study_type(self, state: QuestState, draft: Any, design: dict[str, Any]) -> list[str]:
+        """Make the plan's ``study_type`` say what was asked for, so a search for the best design is never written down
+        (and later run) as a plain sweep. ``design`` is changed in place; the sentences say what was changed, for the
+        plan's *Checks already made*."""
+        notes: list[str] = []
+        protocol = draft.get("protocol") if isinstance(draft, dict) else None
+        if (design.get("study_type") is None and isinstance(protocol, dict) and protocol.get("optimisation") is not None
+                and not _optim.has_block(design)):
+            design["study_type"] = "find_best_design"
+            notes.append("The draft asked for a search for the best design, but its optimisation block could not be used "
+                         "(see above); the plan keeps `study_type: find_best_design` so it is not run as a plain sweep. "
+                         "Write the block again, or set `study_type: measure` and give a `grid`.")
+        asked = self._study_type_asked(state)
+        kind = _optim.study_type_of(design)
+        if asked == "find_best_design" and kind != "find_best_design":
+            design["study_type"] = "find_best_design"
+            notes.append("You answered that this study should find the best design, but the draft is a measurement over "
+                         "chosen settings; the plan says `study_type: find_best_design`. Give it an `optimisation` block, "
+                         "or set `study_type: measure` if a measurement is what you want.")
+        elif asked == "measure" and kind != "measure":
+            notes.append("You answered that this study should measure how the result changes, but the draft searches for "
+                         "the best design; replace its `optimisation` block with a `grid` and set `study_type: measure` "
+                         "if a measurement is what you want.")
+        return notes
+
+    def _stop_for_best_design_search(self, state: QuestState, design: Any) -> None:
+        """Stop before anything runs when the design is a search for the best design: this version of FI writes and checks
+        such a plan but cannot run the search itself, and running the plan as a plain sweep would answer a different
+        question. Every resume checks again (no once-only marker), so the quest goes on only once the plan is a
+        measurement. A no-op for a measurement, and for a quest that runs no experiment of its own."""
+        if not self._runs_code(state):
+            return
+        explicit = isinstance(design, dict) and design.get("study_type") is not None
+        asked = self._study_type_asked(state) == "find_best_design" and not explicit
+        if _optim.study_type_of(design) != "find_best_design" and not asked:
+            return
+        path = _plan.plan_path(self.quest_root)
+        # Read back through the check, since a design drafted at this step has not been through it.
+        block, _why = _optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design) else (None, None)
+        goal = ""
+        if block is not None:
+            objective = block["objective"]
+            goal = (f" (make {objective['quantity']} as {'low' if objective['direction'] == 'minimise' else 'high'} as "
+                    f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
+        missing = _optim.missing_parts(design) if not asked else [
+            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+        where = (f"In `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”," if path.is_file()
+                 else "This quest has no plan.md (its plan could not be written); in the quest's topic,")
+        steps = [
+            f"Nothing was run. This quest is a search for the best design{goal}. This version of FI writes and checks a plan "
+            "like this, but cannot yet run the search itself, and running the plan as a plain sweep over fixed settings "
+            "would answer a different question, so the quest stops here.",
+            *[f"Also missing from the plan: {m}." for m in missing],
+            f"To measure how the result changes over settings you choose instead: {where} set `study_type: measure` and "
+            "replace the `optimisation` block with a `grid` of the settings to run, then resume: "
+            f"`python launch.py --config <quest.yaml> --resume {self.quest_id}`. Or ask FI to make that change: "
+            f"`--resume {self.quest_id} --revise-plan \"make this a measurement over ...\"` (the quest page's Plan box on "
+            "the web, `@fi /plan` in VS Code).",
+            "Or keep the plan as it is: it is saved, and resuming with a version of FI that can run the search goes on "
+            "from here.",
+        ]
+        self._log.warning("[design] the design is a search for the best design, which this version cannot run; stopping")
+        print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, which this version of FI cannot "
+              "run yet; nothing was run (see NEXT_STEP.md)")
+        self._pause_for_human(
+            kind="plan",
+            interaction="supply",
+            headline="the search for the best design is not available yet",
+            steps=steps,
+            recommended="Keep the plan and resume later, or make it a measurement over settings you choose (steps below).",
+            alternatives=["Set `study_type: measure` and give a `grid` in plan.md, then resume.",
+                          "Ask for that change in words: `--revise-plan \"<what to change>\"`."],
+            payload={"quest_id": self.quest_id, "plan_file": str(path), "best_design_stage": True},
+        )
 
     def _runs_code(self, state: QuestState) -> bool:
         """Whether the quest runs an experiment of its own (not the no-simulation path, a survey or ``--analyze``)."""
@@ -4571,6 +4667,9 @@ class Engine:
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
 
+        # A search for the best design never runs as a plain sweep: every design, from the plan or drafted here, passes
+        # this point before anything is implemented or run (core/optimisation_plan.py).
+        self._stop_for_best_design_search(state, design)
         await self._audit_the_design_that_runs(state, design)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
@@ -16025,6 +16124,44 @@ Mistakes that stop a run, each seen in real quests:
 Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """
 
+# The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan
+# directive, so the rules above stay as they are for a measurement.
+_STUDY_TYPE_DIRECTIVE = """
+
+## A measurement, or a search for the best design?
+
+Add a design key `study_type` (a sibling of `hypothesis`, NOT inside `plan` or `protocol`):
+- `measure` when the topic asks how a result changes, or which of some fixed alternatives does better, over settings you choose (the protocol has a `grid`);
+- `find_best_design` when it asks for the design, setting or parameter values that make one result as low or as high as possible, perhaps within limits: the fin spacing and thickness that give the lowest heat-sink temperature, the lightest truss cross-section whose stress stays under a limit, the controller gain with the least overshoot.
+
+A search for the best design has NO top-level `grid`: its protocol has an `optimisation` block instead (`oracles` and `model` are still required, as above):
+
+"optimisation": {
+  "objective": {"quantity": "<the name the simulation returns it under, e.g. max_base_temperature>", "direction": "<minimise | maximise>", "unit": "<K>", "meaning": "<what it is, in words>"},
+  "design_variables": [{"name": "<e.g. fin_spacing>", "low": <number>, "high": <number>, "unit": "<mm>", "kind": "<continuous | integer | choice>", "values": [<only for a choice: the values it may take>]}],
+  "fixed": {"<a condition the simulation needs that the search may not change, e.g. heat_load_W>": <value>},
+  "constraints": [{"quantity": "<e.g. mass_g>", "limit": "<'<= 120' or '>= 3'>", "unit": "<g>"}],
+  "baseline": {"values": {"<every design variable>": <its value>}, "source": "<where this design comes from: a design in a source listed above by its [n], a standard design, or the one in use now>"},
+  "numerical_settings": {"<a mesh size, a time step, a number of elements>": {"search": <the value the search uses>, "check": [<finer values the best designs and the baseline are recomputed at>], "finer": "<smaller | larger>"}},
+  "evaluation_budget": {"starts": <whole number of starting points>, "per_start": <whole number of evaluations each>, "seconds_per_evaluation": <your estimate of one evaluation, or leave out>},
+  "search_method": "<bounded_local | global_then_local | exhaustive | scipy:<function> | optuna:<sampler>>",
+  "grid": {"<design variable>": [<a coarse scan run before the search, plotted; leave out when not wanted>]},
+  "improvement_tolerance": {"value": <number>, "mode": "<absolute | relative>"},
+  "target": <the value of the objective the person hopes to reach, only when the topic names one>
+}
+
+Rules for the block:
+- There is ONE objective. A second goal is written as a constraint: the lightest truss whose stress stays under 250 MPa minimises mass with the constraint stress <= 250.
+- Each design variable's range has a physical meaning and lies where the model holds (`model.holds_for`).
+- The baseline is a real, feasible design (it meets every constraint): it gives a value for every design variable, inside its range, and says where it comes from. Make one oracle check the baseline design.
+- The search and the check use the same model; what differs is that the check recomputes the best designs and the baseline at finer numerical settings (and, with randomness, with new seeds), so an improvement that is only a numerical error does not count. `check` values must be really finer than `search`, each level at least 1.1 times finer than the one before (a mesh size of 0.5 is checked at 0.25 and 0.125). Leave `check` out and FI uses half, then a quarter, of the search value.
+- Leave out `improvement_tolerance` unless the topic or the field says how much better counts: a design then counts as better only when it beats the baseline by more than the numerical error of the two designs.
+- `search_method`: name a built-in one unless the topic asks for a library; a `scipy:` or `optuna:` method is used only when the quest's environment has that library. A coarse `grid` goes with `global_then_local`.
+- For a study with randomness, add `runs_per_evaluation` (runs per evaluation during the search) and `check_runs` (new runs for each design at the check).
+
+Do not write `study_type: find_best_design` without an `optimisation` block (the quest stops until it has one), nor an `optimisation` block beside a top-level `grid` (that grid is then moved into the block as its coarse scan). A measurement leaves `optimisation` out.
+"""
+
 _SPLIT_REPLY_REMINDER = """
 
 ## Your last reply did not hold both scripts
@@ -16703,6 +16840,7 @@ _CLARIFY_LABELS = {
     "study_depth": "Study depth",
     "paper_venue": "Paper venue / template",
     "topic_shape": "Topic shape",
+    "study_type": "Measure, or find the best design (the person's answer)",
 }
 
 
@@ -16718,6 +16856,8 @@ def _format_clarify(state: QuestState) -> str:
         if key not in answers:
             continue
         value = answers[key]
+        if key == "study_type":
+            value = _optim.answer_label(value)
         if isinstance(value, list):
             value = ", ".join(str(v) for v in value) or "(empty)"
         lines.append(f"- **{label}**: {value}")

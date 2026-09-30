@@ -299,6 +299,11 @@ def protocol_numbers(protocol: dict[str, Any] | None) -> list[tuple[float, str]]
         for name, v in thresholds.items():
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 out.append((float(v), f"threshold {name}"))
+    if isinstance(protocol.get("optimisation"), dict):
+        # A search for the best design keeps the topic's numbers in its ranges, limits, baseline and budget.
+        from . import optimisation_plan
+
+        out.extend(optimisation_plan.numbers(protocol["optimisation"]))
     return out
 
 
