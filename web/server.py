@@ -49,6 +49,7 @@ from core import audit_log as fi_audit
 from core import evidence as fi_evidence
 from core import quest_title as fi_quest_title
 from core import frozen_protocol as fi_frozen
+from core import accepted_checks as fi_accepted
 from core import plan as fi_plan
 from core import todo as fi_todo
 from core.engine import PROGRESS_LOG_NAME, Engine, _aggregate_cost_rows
@@ -1430,6 +1431,33 @@ def make_app(
             raise HTTPException(400, message)
         return JSONResponse({"quest_id": quest_id, "approved": True, "message": message, **_amendment_view(quest_root)})
 
+    @app.get("/api/quests/{quest_id}/plan/unsourced")
+    async def get_unsourced_checks(quest_id: str) -> JSONResponse:
+        """The checks the quest stopped for because they do not say where their expected value comes from (``pending``,
+        null when it is not stopped for them), and the choice to go on with some as they are (``accepted``)."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        return JSONResponse({"quest_id": quest_id, "pending": fi_accepted.pending(quest_root),
+                             "accepted": fi_accepted.accepted(quest_root)})
+
+    @app.post("/api/quests/{quest_id}/plan/accept-checks")
+    async def accept_unsourced_checks(quest_id: str, request: Request) -> JSONResponse:
+        """A person chooses to go on with the checks the quest stopped for, as they are: an act of its own, with their
+        name (the web surface of ``launch.py --accept-checks <quest> --approve-as <you>``). Resume the quest after it."""
+        if not _QUEST_ID_RE.match(quest_id):
+            raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
+        quest_root = _resolve_quest_root(app.state.output_root, quest_id)
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        who = str(body.get("who") or "").strip() if isinstance(body, dict) else ""
+        ok, message = fi_accepted.accept(quest_root, who, via="web")
+        if not ok:
+            raise HTTPException(400, message)
+        return JSONResponse({"quest_id": quest_id, "accepted": True, "message": message})
+
     @app.post("/api/quests/{quest_id}/title")
     async def rename_quest(quest_id: str, request: Request) -> JSONResponse:
         """Change a finished or paused quest's title (core/quest_title.py): the web surface of ``fi tools rename``.
@@ -2436,6 +2464,9 @@ def make_app(
             "evidence": fi_evidence.read(quest_root),
             # The frozen protocol and any amendment waiting for a person (core/frozen_protocol.py).
             "amendment": _amendment_view(quest_root),
+            # The checks the quest stopped for because they do not say where their expected value comes from, which a
+            # person may choose to go on with as they are (core/accepted_checks.py); null when it is not stopped for them.
+            "unsourced_checks": fi_accepted.pending(quest_root),
             "source_failures": source_failures,
             # How each output's visual check went (.fi/visual_check.json).
             "visual_check": report_summary(quest_root),

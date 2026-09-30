@@ -162,16 +162,105 @@ _KIND_WORDS = {
     "convergence": "convergence_rate", "convergence_order": "convergence_rate", "order_of_accuracy": "convergence_rate",
     "benchmark": "published_value", "published_benchmark": "published_value", "benchmark_value": "published_value",
     "literature_value": "published_value",
+    # Words a real plan wrote for a check whose kind is one of the six (a normalised source integrates to 1 whatever
+    # the parameters: an invariant; a source symmetric about x = 0 has a zero x-centroid: a symmetry).
+    "normalization": "invariant", "normalisation": "invariant", "normalized": "invariant", "normalised": "invariant",
+    "sum_rule": "invariant", "unit_integral": "invariant", "mass_balance": "invariant", "energy_balance": "invariant",
+    "balance": "invariant", "conserved": "invariant", "invariance": "invariant",
+    "symmetric": "symmetry", "antisymmetry": "symmetry", "antisymmetric": "symmetry", "mirror": "symmetry",
+    "reflection": "symmetry", "reciprocity": "symmetry", "isotropy": "symmetry", "self_similarity": "symmetry",
+    "exact": "special_case", "closed": "special_case", "analytic_solution": "special_case",
+    "analytical_solution": "special_case", "limiting": "special_case", "asymptotic": "special_case",
+    "cross_check": "second_implementation", "independent": "second_implementation",
+    "order": "convergence_rate", "grid_convergence": "convergence_rate", "mesh_convergence": "convergence_rate",
+    "published": "published_value", "literature": "published_value", "reference_value": "published_value",
+    "experimental_value": "published_value", "measured_value": "published_value",
 }
+# Words that name a kind only as a whole ("independent_implementation"), never as one word of a longer name: a
+# grid-independence check is not a second implementation, and a "zeroth order limit" is not a convergence rate.
+_WHOLE_ONLY = frozenset({"independent", "order"})
+# The keys a model writes an oracle's kind under, and its reference under, besides `kind` and `reference`: read as
+# them, never renamed in the plan (a protocol frozen with them must hash as it was written).
+_KIND_KEYS = ("kind", "type", "oracle_type", "check_type", "category")
+_REFERENCE_KEYS = ("reference", "ref", "references", "citation", "justification", "provenance", "expected_source",
+                   "expected_from")
+# Keys that often mean something else on a check (the illumination `source`, a `basis` of functions): read as the
+# reference only when what they hold looks like one ([n], a DOI, a derivation, an equation of the model).
+_MAYBE_REFERENCE_KEYS = ("source", "sources", "basis")
+# What such a value must START with: a citation ([2], [1, 3]), a DOI, a derivation, or an equation id (E1, case as written).
+_LOOKS_LIKE_REFERENCE_RE = re.compile(
+    r"^\s*(?:\[\s*W?\d+\s*(?:[,–-]\s*W?\d+\s*)*\]|(?:https?://(?:dx\.)?doi\.org/|doi:\s*)?10\.\d{4,9}/"
+    r"|(?i:derivation|derived)\b|E\d+\b)")
+# A reference written inside the check's own text: "... (derivation: the integral of q over the domain = 1)". Not
+# "source:", which in optics or acoustics is the thing being simulated.
+_IN_CHECK_RE = re.compile(r"(?:^|[\s(;,.])(derivation|derived|reference)\s*:\s*", re.IGNORECASE)
+
+
+def _text(value: Any) -> str:
+    """``value`` as one line of text: a list joined with ``;``, a mapping as ``key: value`` pairs, a number as written."""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (list, tuple)):
+        return "; ".join(t for t in (_text(v) for v in value) if t)
+    if isinstance(value, dict):
+        return "; ".join(f"{k}: {t}" for k, t in ((k, _text(v)) for k, v in value.items()) if t)
+    return " ".join(str(value).split())
 
 
 def kind_of(oracle: dict[str, Any]) -> str | None:
-    """The oracle's kind as one of :data:`KINDS` (an older or looser name read as the kind it means); ``None`` when it
-    names none of them. The plan keeps what was written: only what the engine reads is mapped."""
-    word = re.sub(r"[\s\-/]+", "_", str(oracle.get("kind") or "").strip().lower()).strip("_")
+    """The oracle's kind as one of :data:`KINDS` (an older or looser name read as the kind it means, a kind written in
+    more words by the first word that names one, ``type`` or ``category`` read as ``kind``); ``None`` when it names none
+    of them. The plan keeps what was written: only what the engine reads is mapped."""
+    written = next((t for t in (_text(oracle.get(k)) for k in _KIND_KEYS) if t), "")
+    word = re.sub(r"[\s\-/]+", "_", written.strip().lower()).strip("_")
     if not word:
         return None
-    return word if word in KINDS else _KIND_WORDS.get(word)
+    if word in KINDS or word in _KIND_WORDS:
+        return word if word in KINDS else _KIND_WORDS[word]
+    # "horizontal_symmetry", "mass conservation check", "closed-form limit": the first word that names a kind.
+    for token in (t for t in re.split(r"[^a-z]+", word) if t and t not in _WHOLE_ONLY):
+        if token in KINDS or token in _KIND_WORDS:
+            return token if token in KINDS else _KIND_WORDS[token]
+    return None
+
+
+def kind_written(oracle: dict[str, Any]) -> str:
+    """The kind as the plan wrote it (under ``kind``, ``type``, ...), or ``""``."""
+    return next((t for t in (_text(oracle.get(k)) for k in _KIND_KEYS) if t), "")
+
+
+def reference_of(oracle: dict[str, Any]) -> str:
+    """Where the oracle says its expected value comes from, as one line: its ``reference``, or the same thing written
+    under another key (``source``, ``basis``, ``derivation`` ...), or written inside its ``check`` ("... (derivation:
+    ...)"). ``""`` when it says nowhere. Read, never written back: the plan keeps what was written."""
+    for key in _REFERENCE_KEYS:
+        text = _text(oracle.get(key))
+        if text:
+            return text
+    for key in _MAYBE_REFERENCE_KEYS:
+        text = _text(oracle.get(key))
+        if text and _LOOKS_LIKE_REFERENCE_RE.search(text):
+            return text
+    derivation = _text(oracle.get("derivation"))
+    if derivation:
+        return derivation if _DERIVATION_RE.match(derivation) else f"derivation: {derivation}"
+    check = _text(oracle.get("check"))
+    found = _IN_CHECK_RE.search(check)
+    if found:
+        rest = check[found.end():]
+        # Up to the parenthesis it is written in, when it is written in one.
+        if found.group(0).lstrip().startswith("("):
+            depth, end = 1, len(rest)
+            for i, ch in enumerate(rest):
+                depth += 1 if ch == "(" else -1 if ch == ")" else 0
+                if depth == 0:
+                    end = i
+                    break
+            rest = rest[:end]
+        rest = rest.strip()
+        if rest:
+            return f"derivation: {rest}" if found.group(1).lower().startswith("deriv") else rest
+    return ""
 
 
 def _doi(text: Any) -> str:
@@ -232,8 +321,16 @@ _NOT_SHARED_RE = re.compile(
     r"|independent(?:ly)? of the simulation(?:'s)?(?: code)?|written from scratch",
     re.IGNORECASE,
 )
-# A derivation shorter than this names one; it does not write its steps.
+# A derivation shorter than this names one; it does not write its steps ("error = 1.637e-08" is a value recalled, not
+# worked out). A fact true by definition or by construction may be shorter ("S = 1 by definition").
 _MIN_STEPS = 20
+_MIN_DEFINITION = 12
+_BY_DEFINITION_RE = re.compile(r"\bby (?:definition|construction)\b", re.IGNORECASE)
+#: What a derivation must hold, in the words a person reads when one does not: at least one equation showing how the
+#: expected value follows. The example is not tied to any one field.
+DERIVATION_RULE = ("write at least one equation (with `=`, or a relation such as `≈` or `<`) that shows how the "
+                   "expected value follows (for example `integral of S over the domain = 1, because S is normalised`, "
+                   "or `x-centroid = 0 by the symmetry S(-x) = S(x)`)")
 # A title shorter than this (in words) is too generic to count as naming a source ("Monte Carlo Methods").
 _MIN_TITLE_WORDS = 5
 
@@ -281,10 +378,116 @@ def _cites(text: str, sources: list[dict[str, str]]) -> tuple[list[str], list[st
     return list(dict.fromkeys(found)), list(dict.fromkeys(missing))
 
 
+# The keys a model writes each part of the model behind the numbers under, besides the ones the plan asks for. Read as
+# them, never renamed in the plan (a protocol frozen with them must hash as it was written).
+_SUMMARY_KEYS = ("summary", "description", "what_produces_the_numbers", "overview", "statement", "model")
+# Read as the summary only when they hold a phrase (three words or more), not a bare label such as "Hopkins".
+_LABEL_KEYS = ("name", "title", "type")
+# Equations written as one text: a new line starts one, and so does a `;` followed by an id (`; E2: ...`); a `;` inside a
+# formula (f(x; t)) does not.
+_EQ_SPLIT_RE = re.compile(r"\n+|;\s*(?=\(?E\d+\s*[:)=])")
+_ASSUMPTION_KEYS = ("assumptions", "assumption", "assumes", "hypotheses")
+_HOLDS_KEYS = ("holds_for", "valid_for", "validity", "valid_range", "range_of_validity", "regime", "applicability",
+               "domain", "holds", "limits")
+_EQUATION_KEYS = ("equations", "governing_equations", "key_equations", "core_equations", "equation", "formulas",
+                  "formulae")
+_FORMULA_KEYS = ("formula", "equation", "expression", "eq", "latex")
+_EQ_SOURCE_KEYS = ("source", "reference", "ref", "citation", "sources")
+# "E1: q(x) = ...", "E2 = ...", "(E3) ..." at the start of an equation written as text.
+_EQ_ID_RE = re.compile(r"^\s*\(?\s*(E\d+)\s*\)?\s*[:.)\-–—]\s*", re.IGNORECASE)
+
+
+def equation_items(value: Any) -> list[dict[str, Any]]:
+    """The equations of a model as the engine reads them, each a mapping with an ``id`` (E1, E2 ... given in order to
+    one written without), a ``formula``, a ``role`` and a ``source``, from the shapes a model writes: a list of mappings,
+    a list of lines of text ("E1: y = x"), a mapping of id to formula, or one text with a line per equation."""
+    if isinstance(value, str):
+        value = [part for part in _EQ_SPLIT_RE.split(value) if part.strip()]
+    if isinstance(value, dict):
+        if value and all(re.match(r"^\s*E?\d+\s*$", str(k), re.IGNORECASE) for k in value):
+            value = [{**v, "id": k} if isinstance(v, dict) else {"id": k, "formula": v} for k, v in value.items()]
+        else:
+            value = [value]
+    if not isinstance(value, list):
+        return []
+    from .plan import _ROLE_WORDS  # noqa: PLC0415 -- plan imports this module lazily, so no cycle at import time
+
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, str) or (not isinstance(item, dict) and isinstance(item, (int, float))):
+            text = _text(item)
+            found = _EQ_ID_RE.match(text)
+            item = {"id": found.group(1).upper(), "formula": text[found.end():]} if found else {"formula": text}
+        if not isinstance(item, dict):
+            continue
+        eq = dict(item)
+        if not _text(eq.get("formula")):
+            eq["formula"] = next((t for t in (_text(item.get(k)) for k in _FORMULA_KEYS) if t), "")
+        if not _text(eq.get("source")):
+            eq["source"] = next((t for t in (_text(item.get(k)) for k in _EQ_SOURCE_KEYS) if t), "")
+        role = _text(eq.get("role")).lower()
+        if role:
+            eq["role"] = _ROLE_WORDS.get(role, role)
+        if not _text(eq.get("formula")) and not _text(eq.get("id")):
+            continue
+        out.append(eq)
+    taken = {_text(e.get("id")).upper() for e in out if _text(e.get("id"))}
+    n = 1
+    for eq in out:
+        if not _text(eq.get("id")):
+            while f"E{n}" in taken:
+                n += 1
+            eq["id"] = f"E{n}"
+            taken.add(eq["id"])
+        eq["id"] = _text(eq["id"])
+        if eq["id"].isdigit():
+            eq["id"] = f"E{eq['id']}"
+        elif re.fullmatch(r"e\d+", eq["id"]):
+            eq["id"] = eq["id"].upper()
+    return out
+
+
+def model_view(model: Any) -> dict[str, Any] | None:
+    """The model behind the numbers as the engine reads it: ``summary``, ``assumptions`` (a list), ``holds_for`` and
+    ``equations`` (:func:`equation_items`), each taken from the key the plan asks for or the one a model wrote instead
+    (``description``, ``governing_equations`` ...). ``None`` when the plan has no model. The plan keeps what was written."""
+    if isinstance(model, str) and model.strip():
+        return {"summary": " ".join(model.split()), "assumptions": [], "holds_for": "", "equations": []}
+    if not isinstance(model, dict):
+        return None
+
+    def first(keys: tuple[str, ...]) -> Any:
+        return next((model[k] for k in keys if _text(model.get(k))), None)
+
+    assumptions = first(_ASSUMPTION_KEYS)
+    if isinstance(assumptions, str):
+        assumptions = [a for a in re.split(r"[\n;]+", assumptions) if a.strip()]
+    elif isinstance(assumptions, dict):
+        assumptions = [f"{k}: {_text(v)}" for k, v in assumptions.items() if _text(v)]
+    summary = _text(first(_SUMMARY_KEYS)) or next(
+        (t for t in (_text(model.get(k)) for k in _LABEL_KEYS) if len(t.split()) >= 3), "")
+    return {
+        "summary": summary,
+        "assumptions": [t for t in (_text(a) for a in assumptions or []) if t] if isinstance(assumptions, list) else [],
+        "holds_for": _text(first(_HOLDS_KEYS)),
+        "equations": equation_items(first(_EQUATION_KEYS)),
+    }
+
+
+def model_missing(protocol: dict[str, Any] | None) -> list[str]:
+    """What the model behind the numbers leaves out, in words a person reads: what produces the numbers, what it
+    assumes, its equations (all three when the plan has no model). Empty when all are there."""
+    view = model_view(protocol.get("model") if isinstance(protocol, dict) else None)
+    if view is None:
+        return ["what produces the numbers", "what it assumes", "its equations"]
+    return [label for label, present in (("what produces the numbers", view["summary"]),
+                                         ("what it assumes", view["assumptions"]),
+                                         ("its equations", view["equations"])) if not present]
+
+
 def _equations(protocol: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    model = protocol.get("model") if isinstance(protocol, dict) else None
-    items = model.get("equations") if isinstance(model, dict) else None
-    items = items if isinstance(items, list) else []
+    view = model_view(protocol.get("model") if isinstance(protocol, dict) else None)
+    items = view["equations"] if view else []
     return {str(e.get("id")).strip().upper(): e for e in items if isinstance(e, dict) and str(e.get("id") or "").strip()}
 
 
@@ -317,10 +520,9 @@ def _label_texts(source: str) -> list[str]:
 def generating_equations(protocol: dict[str, Any] | None) -> list[str]:
     """The ids of the plan's equations whose role is ``generates`` (the simulation computes the data with them), as the
     plan writes them."""
-    model = protocol.get("model") if isinstance(protocol, dict) else None
-    items = model.get("equations") if isinstance(model, dict) else None
-    out = []
-    for eq in items if isinstance(items, list) else []:
+    view = model_view(protocol.get("model") if isinstance(protocol, dict) else None)
+    out: list[str] = []
+    for eq in view["equations"] if view else []:
         if isinstance(eq, dict) and str(eq.get("role") or "").strip().lower() == "generates":
             eid = str(eq.get("id") or "").strip()
             if eid and eid not in out:
@@ -377,8 +579,9 @@ def _derivation_steps(text: str) -> str | None:
 def _steps_problem(steps: str, sources: list[dict[str, str]]) -> str | None:
     """Why the steps of a derivation are not steps a reader can follow (too short, only a pointer elsewhere, nothing to
     compute with, or a source the quest did not retrieve), or ``None``."""
-    if len(steps) < _MIN_STEPS or not _MATH_RE.search(steps):
-        return "does not write its steps (a relation such as y(1) = exp(-1) = 0.3679)"
+    shortest = _MIN_DEFINITION if _BY_DEFINITION_RE.search(steps) else _MIN_STEPS
+    if len(steps) < shortest or not _MATH_RE.search(steps):
+        return f"does not show how the value follows: {DERIVATION_RULE}"
     found, missing = _cites(steps, sources)
     if missing:
         return f"rests on {', '.join(missing)}, which this quest did not retrieve"
@@ -393,7 +596,7 @@ def _steps_problem(steps: str, sources: list[dict[str, str]]) -> str | None:
 def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str | None:
     """Why an equation of the model has no source a reader can check, or ``None`` when it has one."""
     eid = str(eq.get("id") or "?").strip()
-    source = " ".join(str(eq.get("source") or "").split())
+    source = _text(eq.get("source")) or next((t for t in (_text(eq.get(k)) for k in _EQ_SOURCE_KEYS) if t), "")
     if not source:
         return (f"equation {eid} names no source: give the [n] of a source this quest retrieved, or `derivation` with "
                 "the steps written in `derivation`")
@@ -414,7 +617,7 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
                       sources: list[dict[str, str]]) -> str | None:
     """Why the oracle's expected value has no source a reader can check, or ``None`` when it has one."""
     name = str(oracle.get("name") or "?").strip()
-    ref = " ".join(str(oracle.get("reference") or "").split())
+    ref = reference_of(oracle)
     if not ref:
         return f"the check {name!r} does not say where its expected value comes from (its `reference` is empty)"
     steps = _derivation_steps(ref)
@@ -450,20 +653,44 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
 def empty_references(protocol: dict[str, Any] | None) -> list[str]:
     """The sentence :func:`reference_problem` gives each declared oracle whose ``reference`` is empty: the one judgement
     that needs no list of the quest's sources."""
-    return [reference_problem(o, protocol, []) or "" for o in declared(protocol)
-            if not " ".join(str(o.get("reference") or "").split())]
+    # Only the `reference` itself: this judges quests frozen before their sources were kept, and must judge them as it
+    # always did (a key read as a reference since then must not take their gap away).
+    return [why for _name, why in empty_reference_pairs(protocol)]
+
+
+def empty_reference_pairs(protocol: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """``(name, why)`` for each declared oracle whose ``reference`` key itself is empty (see :func:`empty_references`)."""
+    out = []
+    for oracle in declared(protocol):
+        if not " ".join(str(oracle.get("reference") or "").split()):
+            name = str(oracle["name"]).strip()
+            out.append((name, f"the check {name!r} does not say where its expected value comes from (its `reference` "
+                              "is empty)"))
+    return out
 
 
 #: How an expected value may be sourced, for the sentences a person reads when one is not.
 SOURCE_FORMS = (
-    "give its `reference` as `derivation: <the steps>`, a source this quest retrieved by its number in the plan's list of retrieved sources ([2]), an "
-    "equation of the model behind the numbers (E1), or, for a second implementation, what code it does not share"
+    "give its `reference` as `derivation: <how the value follows, with at least one equation using =>` (for example "
+    "`derivation: integral of S over the domain = 1, because S is normalised`), a source this quest retrieved by its "
+    "number in the plan's list of retrieved sources ([2]), an equation of the model behind the numbers (E1), or, for a "
+    "second implementation, what code it does not share"
 )
+
+
+def unsourced(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> list[tuple[str, str]]:
+    """``(name, why)`` for each declared oracle whose expected value has no source a reader can check."""
+    out = []
+    for oracle in declared(protocol):
+        why = reference_problem(oracle, protocol, sources)
+        if why:
+            out.append((str(oracle["name"]).strip(), why))
+    return out
 
 
 def source_gaps(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> list[str]:
     """One sentence per declared oracle whose expected value has no source a reader can check (empty when each has one)."""
-    return [why for why in (reference_problem(o, protocol, sources) for o in declared(protocol)) if why]
+    return [why for _name, why in unsourced(protocol, sources)]
 
 
 def model_notes(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) -> list[str]:
@@ -483,10 +710,12 @@ def model_notes(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) 
             "comes from the model or from the code."
         )
     else:
-        if not str(model.get("summary") or "").strip():
+        view = model_view(model) or {}
+        if not view.get("summary"):
             notes.append("The model behind the numbers does not say, in a sentence, what model produces them (`summary`).")
-        items = model.get("equations")
-        equations = [e for e in items if isinstance(e, dict)] if isinstance(items, list) else []
+        if not view.get("assumptions"):
+            notes.append("The model behind the numbers does not say what it assumes (`assumptions`).")
+        equations = view.get("equations") or []
         if not equations:
             notes.append("The model behind the numbers lists no equation: write its core equations, each with its source.")
         for eq in equations:
@@ -501,7 +730,7 @@ def model_notes(protocol: dict[str, Any] | None, sources: list[dict[str, str]]) 
                 notes.append(why[0].upper() + why[1:] + ".")
     for oracle in declared(protocol):
         if kind_of(oracle) is None:
-            written = str(oracle.get("kind") or "").strip()
+            written = kind_written(oracle)
             notes.append(
                 f"The check {str(oracle['name']).strip()!r} "
                 + (f"has the kind {written!r}, which is none of the six" if written else "does not say its kind")

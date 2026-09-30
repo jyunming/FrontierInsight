@@ -63,7 +63,7 @@ def test_the_model_is_kept_in_the_protocol_and_placed_last() -> None:
 
 @pytest.mark.parametrize("bad, needle", [
     (42, "protocol.model"),
-    ({"summary": "x", "equations": "E1: y = x"}, "protocol.model"),
+    ({"summary": "x", "equations": 7}, "protocol.model"),
     ({"summary": "x", "equations": [{"id": "E1"}]}, "formula"),
     ({"summary": ["x"]}, "protocol.model"),
 ])
@@ -155,7 +155,7 @@ def test_a_derivation_with_its_steps_written_is_a_source() -> None:
 
 def test_a_derivation_named_without_its_steps_is_not() -> None:
     (gap,) = _gaps("derivation")
-    assert "rk4 error" in gap and "steps" in gap
+    assert "rk4 error" in gap and "at least one equation (with `=`" in gap
 
 
 def test_an_empty_reference_is_a_gap() -> None:
@@ -356,11 +356,11 @@ def test_a_doi_with_parentheses_or_a_prefix_is_matched_as_written() -> None:
 
 def test_a_derivation_that_only_points_to_a_recalled_source_is_not_a_derivation() -> None:
     (gap,) = _gaps("derived from Butcher (2008), Numerical Methods, table 5.2")
-    assert "Butcher" in gap or "steps" in gap
+    assert "Butcher" in gap or "equation" in gap
     (gap,) = _gaps("Derivation: see Butcher 2008 p. 99 for the constant")
-    assert "steps" in gap or "Butcher" in gap
+    assert "equation" in gap or "Butcher" in gap
     (gap,) = _gaps("derivation: the constant is in the textbook we all know well")
-    assert "steps" in gap
+    assert "equation" in gap
     eq = {"id": "E1", "formula": "a = b", "role": "generates", "source": "derived", "derivation": "from Hairer's book, recalled"}
     assert oracle_check.equation_problem(eq, SOURCES)
 

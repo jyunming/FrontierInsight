@@ -20,3 +20,9 @@ Pages created (17):
 
 Sources: core/oracle_check.py, core/trial_runner.py, core/evidence.py, core/criteria.py, core/optimisation_plan.py, core/phased.py, core/code_project.py, core/plan.py, core/rerun_from.py, core/quest_title.py, core/number_provenance.py, core/data_shape.py, core/thinking_capture.py, core/provider.py, core/skills/, core/engine.py, core/config.py, launch.py, web/, vscode-frontier-insight/src/. Audit: docs/audits/docs-sync-2026-09-30.md.
 
+
+## 2026-09-30 — the checks' sources: read more shapes, fill once, three ways on
+
+Pages updated: [[oracle-provenance|Oracle provenance]] (a derivation needs an equation with `=`; shapes read at read time; FI fills once under research; the three ways on at the stop; going on as it is, with a name), [[model-behind-the-numbers|The model behind the numbers]] (parts under other names are read; the section is shown again after a rewrite).
+
+Sources: core/oracle_check.py, core/plan.py, core/accepted_checks.py, core/engine.py, agents/plan_revise.md, launch.py, web/server.py, web/static/quest.html, vscode-frontier-insight/src/extension.ts, vscode-frontier-insight/src/skills.ts.

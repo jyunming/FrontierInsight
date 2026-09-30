@@ -93,6 +93,7 @@ from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
+from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
 from . import protocol_check as _protocol
@@ -4301,7 +4302,9 @@ class Engine:
         return parsed.design, sha
 
     def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None,
-                        unsourced: list[str] | None = None, no_criteria: bool = False, reason: str = "") -> None:
+                        unsourced: list[str] | None = None, no_criteria: bool = False, reason: str = "",
+                        unsourced_checks: list[dict[str, Any]] | None = None,
+                        model_missing: list[str] | None = None) -> None:
         """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
         supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
 
@@ -4331,6 +4334,11 @@ class Engine:
             except OSError as e:
                 self._log.warning("[plan] couldn't write pause marker %s: %r", marker, e)
         path = _plan.plan_path(self.quest_root)
+        # The person reads the plan at this stop, including any source FI wrote into a check after they last read it.
+        try:
+            (self.fi_dir / _FILLED_AFTER_READ).unlink(missing_ok=True)
+        except OSError:
+            pass
         if added is not None:
             names = ", ".join(f"“{n}”" for n in added) or "(none named)"
             checks_on = self.config.engine.oracle_check != "off"
@@ -4372,26 +4380,80 @@ class Engine:
             "Or resume without one: the quest goes on, and no run of it can be shown to be better than another.",
         ] if no_criteria else []
         if unsourced:
+            checks = list(unsourced_checks or [{"name": "", "why": why} for why in unsourced])
+            history = _plan.history(self.quest_root)
+            version = int(history[-1].get("version") or 0) if history else None
+            record = _accepted.write_pending(self.quest_root, checks, plan_version=version,
+                                             model_missing=model_missing)
+            previous = record.get("previous") or {}
+            listed = "\n".join(
+                f"  - {c['why']}" + (f" (it expects {c['expected']})" if c.get("expected") is not None else "")
+                for c in checks)
+            since = [r for r in history if previous and int(r.get("version") or 0) > int(previous.get("plan_version") or 0)]
+            if previous and since:
+                change = since[-1]
+                said = f": “{str(change.get('note') or '')[:160]}”" if change.get("note") else ""
+                who = {"request": "Your change to the plan", "user": "Your edit of plan.md",
+                       "engine": "FI's change to the plan"}.get(str(change.get("by")), "The change to the plan")
+                intro = (f"{who} (version {change.get('version')}{said}) was applied, but these checks still do not say "
+                         "where their expected value comes from:")
+            elif previous:
+                intro = ("The plan has not changed since the quest last stopped here, so these checks still do not say "
+                         "where their expected value comes from:")
+            else:
+                intro = ("The quest stopped at the plan: the value a check against a known answer expects has to come "
+                         "from somewhere a reader can check, and for these it does not:")
+            fixed_since = [str(c.get("name")) for c in previous.get("checks") or []
+                           if str(c.get("name") or "") and str(c.get("name")).lower() not in
+                           {str(x.get("name") or "").lower() for x in checks}]
+            asked = (self.fi_dir / _FILL_MARKER).is_file()
+            first = (intro + "\n" + listed
+                     + (f"\n  These now say where their value comes from: {', '.join(repr(n) for n in fixed_since)}."
+                        if fixed_since else "")
+                     + ("\n  (FI already asked the model once to fill these in, before this stop.)" if asked else "")
+                     + (f"\n  The model behind the numbers also leaves out {', '.join(model_missing)} "
+                        "(`protocol.model`: `summary`, `assumptions`, `equations`)." if model_missing else ""))
+            fill = "fill in where each check's expected value comes from"
             steps = [
-                "The quest stopped at the plan: the value a check against a known answer expects has to come from "
-                "somewhere a reader can check, and for these it does not:\n"
-                + "\n".join(f"  - {why}" for why in unsourced),
-                "A wrong expected value makes a correct simulation fail its check, or a wrong one pass it. In `plan.md` "
-                f"({path}), under “{_plan.DESIGN_HEADING}”, for each check in the `oracles` list of the protocol, "
-                f"{_oracle.SOURCE_FORMS}. A source counts only if this quest found it (it is listed under "
-                "“The sources this quest found” in plan.md); one recalled from memory does not.",
-                "Or ask for a change and let FI rewrite it: "
-                f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
-                "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
+                first,
+                "Why it matters: a wrong expected value makes a correct simulation fail its check, or a wrong one pass it. "
+                f"Each check needs one of these: {_oracle.SOURCE_FORMS}. A source counts only if this quest found it "
+                "(it is listed under “The sources this quest found” in plan.md); one recalled from memory does not.",
+                (f"Let FI fill it in: `python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan "
+                 f"\"{fill}\"` (the quest page's Plan box on the web; `@fi /plan {self.quest_id} {fill}` in VS Code). FI "
+                 "writes, for each check, how its value follows (an equation) or which source it found says so. Then "
+                 "resume.") if not asked else
+                (f"Let FI fill it in, in your words: FI already asked once and these are still missing, so say how each "
+                 f"value follows: `python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan "
+                 "\"<check>: <how its value follows, e.g. the weights sum to 1 by definition>\"` (the quest page's Plan "
+                 f"box on the web; `@fi /plan {self.quest_id} <the same words>` in VS Code). Then resume."),
+                f"Or change it yourself: in `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”, give each check in the "
+                "`oracles` list its `reference`; or say what to change in words with `--revise-plan \"...\"`. Then "
+                "resume.",
+                f"Or go on as it is: `python launch.py --accept-checks {self.quest_id} --approve-as <your name>`, then "
+                f"resume (the web: *Go on as it is* on this card; VS Code: `@fi /accept-checks {self.quest_id}`). The "
+                f"checks still run and are still judged; each is marked “{_accepted.NOT_CONFIRMED}”, and the result and "
+                "the paper say so. Your name is recorded with the choice.",
                 *criteria_steps,
-                "Then resume. (This stop comes from `rigor_profile: research`. Without it FI notes the problem in the "
-                "plan and in run.log and goes on, and the result is not counted as checked against known answers.)",
+                "(This stop comes from `rigor_profile: research`. Without it FI notes the problem in the plan and in "
+                "run.log and goes on, and the result is not counted as checked against known answers.)",
             ]
             self._pause_for_human(
                 kind="plan",
                 interaction="supply",
                 headline="say where the plan's expected values come from",
                 steps=steps,
+                recommended=(f"Let FI fill it in: `--revise-plan \"{fill}\"`, then resume." if not asked else
+                             "Let FI fill it in, saying how each value follows in your own words (FI already asked "
+                             "once and these are still missing, so the same request may give the same result): "
+                             "`--revise-plan \"<check>: <how its value follows, e.g. the weights sum to 1 by "
+                             "definition>\"`, then resume."),
+                alternatives=[
+                    "Change it yourself: edit each check's `reference` in plan.md, or say what to change in words "
+                    "(`--revise-plan \"...\"`), then resume.",
+                    f"Go on as it is: `--accept-checks {self.quest_id} --approve-as <your name>`, then resume. The "
+                    f"checks are marked “{_accepted.NOT_CONFIRMED}”, and the result says so.",
+                ],
                 payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
                          "unsourced": list(unsourced)},
             )
@@ -4462,8 +4524,8 @@ class Engine:
             protocol = parsed.design.get("protocol")
             no_criteria = (ask and self._runs_code(state) and isinstance(protocol, dict)
                            and self._split_on({**state, "design": parsed.design}) and not _criteria.countable(protocol))
-            self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None,
-                                     no_criteria=no_criteria)
+            await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
+                                            no_criteria=no_criteria)
             if ask:
                 self._pause_for_plan(no_criteria=no_criteria)
             return {}
@@ -4579,8 +4641,8 @@ class Engine:
         if isinstance(guided, dict):
             normalized = guided
         protocol = normalized.get("protocol")
-        self._check_plan_sources(state, stop=True, protocol=protocol if isinstance(protocol, dict) else None,
-                                 no_criteria=no_criteria and ask)
+        await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
+                                        no_criteria=no_criteria and ask)
         if ask:
             self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
@@ -4797,9 +4859,36 @@ class Engine:
         gaps, _notes = self._plan_source_findings(state, protocol)
         for why in gaps:
             self._log.warning("[plan] %s: %s", why, _oracle.SOURCE_FORMS)
+        if not gaps:
+            _accepted.clear_pending(self.quest_root)
         # Only a plan a person can edit can be stopped for: without plan.md (the draft could not be used) the evidence
         # record carries the gap instead.
         if gaps and stop and self.config.rigor_profile == "research" and _plan.plan_path(self.quest_root).is_file():
+            current = self._plan_protocol(protocol)
+            try:
+                named = _oracle.unsourced(current, self._retrieved_sources(state)) if current else []
+                missing = _oracle.model_missing(current) if current else []
+            except Exception as e:  # noqa: BLE001 -- the stop still says what it can
+                self._log.warning("[plan] which checks lack a source could not be listed: %r", e)
+                named, missing = [], []
+            by_name = {str(o["name"]).strip(): o for o in _oracle.declared(current)} if current else {}
+            # The person chose to go on with exactly these checks as they are now, numbers included (``--accept-checks``):
+            # no stop. The gap stays in the evidence, marked "source not confirmed", and the paper is told to say so.
+            choice = (_accepted.covers(self.quest_root, [by_name.get(n) or {"name": n} for n, _why in named])
+                      if named else None)
+            if choice is not None:
+                self._go_on_unsourced(choice, [n for n, _why in named])
+                return gaps
+            checks = [{"name": n, "why": why + ("; you chose to go on with it before, and its numbers have changed since"
+                                                if _accepted.changed_since(self.quest_root, by_name.get(n) or {"name": n})
+                                                else ""),
+                       "expected": (by_name.get(n) or {}).get("expected"),
+                       "fingerprint": _accepted.fingerprint(by_name[n]) if n in by_name else ""} for n, why in named]
+            # A hand edit made while the quest was stopped is its own version, so the stop can say what changed since.
+            try:
+                _plan.note_edit(self.quest_root, _plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
+            except OSError:
+                pass
             added = self._oracles_added_read()
             if (added and not added.get("shown") and added.get("oracles") and not added.get("removed")
                     and not added.get("reason")  # a change, not an addition: that stop does not say what changed
@@ -4807,12 +4896,160 @@ class Engine:
                 # This stop names every check the engine added (each lacks a source), so the person reads them here:
                 # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
                 self._oracles_added_write({**added, "shown": True})
-            self._pause_for_plan(unsourced=gaps, no_criteria=no_criteria)
+            self._pause_for_plan(unsourced=gaps, no_criteria=no_criteria, unsourced_checks=checks or None,
+                                 model_missing=missing)
         elif gaps and not self.__dict__.get("_said_unsourced"):
             self._said_unsourced = True
             print(f"[FI] {len(gaps)} check(s) in the plan do not say where their expected value comes from, or cite a "
                   "source this quest did not find; see plan.md and .fi/run.log")
         return gaps
+
+    def _plan_protocol(self, protocol: Any = None) -> dict[str, Any] | None:
+        """``protocol`` when given, else the protocol of the design block in ``plan.md`` (``None`` when there is none)."""
+        if not isinstance(protocol, dict):
+            planned, _why = _plan.load_design(self.quest_root)
+            protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        return protocol if isinstance(protocol, dict) else None
+
+    def _go_on_unsourced(self, choice: dict[str, Any], names: list[str]) -> None:
+        """The person chose to go on with these checks as they are: say so once (run.log, the console, the audit trace),
+        and take the stop's record away so no surface offers the choice again."""
+        _accepted.clear_pending(self.quest_root)
+        if self.__dict__.get("_went_on_unsourced"):
+            return
+        self._went_on_unsourced = True
+        listed = ", ".join(repr(n) for n in names)
+        self._log.warning("[plan] going on with %d check(s) whose expected value has no stated source (%s): %s chose to "
+                          "go on (%s); each is marked %r in the evidence", len(names), listed, choice.get("by"),
+                          choice.get("via"), _accepted.NOT_CONFIRMED)
+        print(f"[FI] going on with {len(names)} check(s) whose expected value has no stated source ({listed}), as "
+              f"{choice.get('by')} chose; the result says their source is not confirmed")
+        self._audit_check("oracle_sources", self.quest_root / "needs" / _accepted.ACCEPTED_NAME,
+                          status="accepted_without_source",
+                          summary=f"{choice.get('by')} chose to go on with {listed} as they are ({_accepted.NOT_CONFIRMED})",
+                          problems=names)
+
+    def _fill_request(self, named: list[tuple[str, str]], missing: list[str]) -> str:
+        """The one request FI makes of the plan step before it stops for the checks' sources: fill in exactly what is
+        missing, and nothing else."""
+        parts = ["Fill in where each check's expected value comes from, and the model behind the numbers, IN THE DESIGN "
+                 "BLOCK (`protocol.oracles` and `protocol.model`): the section *The model behind the numbers* above it is "
+                 "only shown from the block and is not read."]
+        if named:
+            parts.append("These checks do not yet say where their expected value comes from:\n"
+                         + "\n".join(f"- {why}" for _n, why in named))
+            parts.append(
+                "For each, write `reference` in one of these forms: " + _REFERENCE_FORMS + " A derivation must "
+                + _oracle.DERIVATION_RULE + ". A value true by definition is written the same way (`derivation: sum of "
+                "the normalised weights = 1 by definition`). Also give each check a `kind`, one of: "
+                + ", ".join(_oracle.KINDS) + ".")
+        if missing:
+            parts.append(f"The model behind the numbers leaves out {', '.join(missing)}: fill `protocol.model` with "
+                         "`summary` (one sentence: what produces the numbers), `assumptions` (a list) and `equations` "
+                         "(a list, each with `id` E1, E2 ..., `formula`, `role` generates or analyses, and `source`: the "
+                         "[n] of a source in the plan's list of the sources this quest found, or `derivation` with the "
+                         "steps in `derivation`).")
+        parts.append("Do not change any check's `name`, `expected`, `tolerance`, `tolerance_mode`, `case` or `measure`, "
+                     "and change nothing else in the plan.")
+        return "\n\n".join(parts)
+
+    async def _settle_plan_sources(self, state: QuestState, *, protocol: Any = None, no_criteria: bool = False) -> list[str]:
+        """:meth:`_check_plan_sources` after FI has asked the plan step, once per quest, to fill in what is missing
+        (:meth:`_fill_plan_sources`): a stop comes only when the model could not."""
+        filled = await self._fill_plan_sources(state, protocol)
+        return self._check_plan_sources(state, stop=True, protocol=filled, no_criteria=no_criteria)
+
+    async def _fill_plan_sources(self, state: QuestState, protocol: Any = None) -> Any:
+        """Under ``rigor_profile: research``, before the quest stops because a check does not say where its expected
+        value comes from (or the model behind the numbers is left empty), ask the plan step ONCE to fill exactly that in.
+        A rewrite that changes anything else (a check's numbers, the grid, the hypothesis) is put back: filling in a
+        source must never bend the check. Returns the protocol to check (the rewritten one when it was kept)."""
+        if (self.config.rigor_profile != "research" or _frozen.load(self.quest_root) is not None
+                or self._client is None or not self._runs_code(state)
+                # A later pass checks the design it made, not plan.md: a rewrite of plan.md would not reach it.
+                or int(state.get("iteration", 0) or 0) > 0):
+            return protocol
+        path = _plan.plan_path(self.quest_root)
+        marker = self.fi_dir / _FILL_MARKER
+        if not path.is_file() or marker.is_file():
+            return protocol
+        before_text = path.read_text(encoding="utf-8")
+        before = _plan.parse(before_text).design
+        if not isinstance(before, dict) or not isinstance(before.get("protocol"), dict):
+            return protocol  # a plan that cannot be read is not rewritten: its stop says why
+        current = before["protocol"]
+        try:
+            sources = self._retrieved_sources(state)
+            named = _oracle.unsourced(current, sources)
+            missing = _oracle.model_missing(current)
+        except Exception as e:  # noqa: BLE001 -- the check that follows says what it can
+            self._log.warning("[plan] what the plan leaves out could not be read: %r", e)
+            return protocol
+        if not named and not missing:
+            return protocol
+        by_name = {str(o["name"]).strip(): o for o in _oracle.declared(current)}
+        if named and not missing and _accepted.covers(self.quest_root, [by_name.get(n) or {"name": n} for n, _w in named]):
+            return protocol  # the person already chose to go on with these checks as they are
+        self._log.info("[plan] %d check(s) do not say where their expected value comes from%s; asking the plan step "
+                       "once to fill that in before stopping", len(named),
+                       f", and the model behind the numbers leaves out {', '.join(missing)}" if missing else "")
+        self._progress("Asking the model to say where each check's expected value comes from")
+
+        def asked(outcome: str) -> None:
+            # Written once the model has answered (used or not), so the stop can truthfully say FI already asked.
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                marker.write_text(json.dumps({"at": _frozen.now(), "checks": [n for n, _why in named],
+                                              "model_missing": missing, "outcome": outcome}) + "\n", encoding="utf-8")
+            except OSError as e:
+                self._log.warning("[plan] couldn't record that FI asked for the checks' sources: %r", e)
+
+        try:
+            await self._rewrite_plan(self._fill_request(named, missing), path, by="engine")
+        except _ModelAnswerProblem as e:
+            # A cut-off or withheld answer to a step the person never asked for is not a stop of its own: the stop for
+            # the sources follows and says what is missing, and a resume asks again.
+            self._log.warning("[plan] the plan step's answer to fill in the checks' sources was not complete: %s", e)
+            return protocol
+        except ValueError as e:
+            asked("not usable")
+            self._log.warning("[plan] the plan step could not fill in the checks' sources: %s", e)
+            return protocol
+        except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing; a resume asks again
+            self._log.warning("[plan] the plan step could not be asked to fill in the checks' sources: %s", e)
+            return protocol
+        after_text = path.read_text(encoding="utf-8")
+        after = _plan.parse(after_text).design
+        why_not = _fill_changed_more(before, after)
+        if why_not:
+            asked("put back")
+            path.write_text(before_text, encoding="utf-8")
+            _plan.record_version(self.quest_root, before_text, by="engine",
+                                 note=f"put back: the rewrite that was to fill in the checks' sources {why_not}")
+            self._log.warning("[plan] the rewrite that was to fill in the checks' sources %s; it was put back", why_not)
+            return protocol
+        asked("kept")
+        filled = (after or {}).get("protocol")
+        filled = filled if isinstance(filled, dict) else None
+        try:
+            still = _oracle.unsourced(filled, sources) if filled else named
+        except Exception:  # noqa: BLE001
+            still = named
+        self._log.info("[plan] the plan step filled in the sources of %d of %d check(s)%s", len(named) - len(still),
+                       len(named), "" if not _oracle.model_missing(filled) else "; the model behind the numbers is "
+                       "still incomplete")
+        # A person who already read the plan at its stop did not read what this rewrite wrote (the checks' numbers are
+        # as they read them): the freeze record says so.
+        if (self.fi_dir / "paused_at_plan.flag").is_file():
+            was = {str(o["name"]): _oracle.reference_of(o) for o in _oracle.declared(current)}
+            written = [str(o["name"]) for o in _oracle.declared(filled) if was.get(str(o["name"])) != _oracle.reference_of(o)]
+            if written:
+                try:
+                    (self.fi_dir / _FILLED_AFTER_READ).write_text(json.dumps({"checks": written, "at": _frozen.now()}) + "\n",
+                                                                   encoding="utf-8")
+                except OSError:
+                    pass
+        return filled if filled is not None else protocol
 
     async def _connect_llm(self) -> None:
         """Resolve the provider and build the LLM client (with its fallback chain), as a quest run does."""
@@ -4888,7 +5125,7 @@ class Engine:
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
         prompt = self._prompts["plan_revise"].substitute(
-            topic=self.config.topic, plan_md=current, request=request,
+            topic=self.config.topic, plan_md=current, request=request, checks=_plan_checks_note(current),
         )
         why = ""
         revised = ""
@@ -4908,6 +5145,9 @@ class Engine:
             why = parsed.error or "no design"
         if why:
             raise ValueError(f"the revised plan could not be used ({why}); plan.md is unchanged")
+        # The model section is shown from the block and never read back: shown again from the block as rewritten, so the
+        # plan never shows a model or a check's source the block does not hold (or leaves out one it does).
+        revised = _plan.refresh_model_section(revised)
         path.write_text(revised, encoding="utf-8")
         entry = _plan.record_version(self.quest_root, revised, by=by, note=request[:300])
         self._log.info("[plan] revised %s: version %d",
@@ -6890,9 +7130,29 @@ class Engine:
                 # The person read plan.md; exploration then changed the design, so they did not read this protocol.
                 approved_by = ("auto: exploration changed the design after the person read the plan "
                                f"(pauses.plan={mode}), and nobody approved the protocol it settled on")
+        unsourced_note = ""
+        gone_on = self._not_confirmed_names(state, protocol)
+        if gone_on:
+            chosen = _accepted.accepted(self.quest_root) or {}
+            who = sorted({str(((chosen.get("chosen") or {}).get(" ".join(n.split()).lower()) or {}).get("by")
+                              or chosen.get("by")) for n in gone_on})
+            unsourced_note = (f"; the checks {', '.join(repr(n) for n in gone_on)} say nowhere where their expected "
+                              f"value comes from ({_accepted.NOT_CONFIRMED}): {' and '.join(who)} chose to go on "
+                              "without one")
+        try:
+            filled = json.loads((self.fi_dir / _FILLED_AFTER_READ).read_text(encoding="utf-8")).get("checks") or []
+        except (OSError, ValueError, AttributeError):
+            filled = []
+        filled = [str(n) for n in filled if str(n) in {str(o["name"]) for o in _oracle.declared(
+            protocol if isinstance(protocol, dict) else None)}]
+        if filled and approved_by.startswith("human"):
+            unsourced_note += (f"; FI wrote where the expected value of {', '.join(repr(n) for n in filled)} comes from "
+                               "after the plan was read (their numbers are as read)")
+        approved_by += unsourced_note
         replaced = _frozen.open_replacement(self.quest_root)
         if replaced is not None:
-            approved_by = f"human: {replaced.get('approved_by')} approved replacing the protocol (--approve-as)"
+            approved_by = (f"human: {replaced.get('approved_by')} approved replacing the protocol (--approve-as)"
+                           + unsourced_note)
             if engine_added:
                 # They approved going back to a step, before these oracles existed: say what they did not see.
                 approved_by += f"; {oracle_note}"
@@ -7513,18 +7773,37 @@ class Engine:
         the ones the freeze recorded, numbered as the plan cited them (the paper later cites a subset under new numbers).
         A protocol frozen before the freeze recorded them (or one whose record of them was edited) is judged only on
         what needs no list: an empty ``reference``."""
+        pairs, extra = self._unsourced_oracles(state, protocol)
+        # A check the person chose to go on with as it is stays a gap, and says so ("source not confirmed", and who).
+        out = []
+        for oracle, why in pairs:
+            who = _accepted.chose(self.quest_root, oracle)
+            out.append(f"{why} ({_accepted.NOT_CONFIRMED}: {who} chose to go on without one)" if who else why)
+        return out + extra
+
+    def _unsourced_oracles(self, state: QuestState, protocol: Any) -> tuple[list[tuple[dict[str, Any], str]], list[str]]:
+        """``([(oracle, why)], other gaps)``: each check of ``protocol`` whose expected value has no source a reader can
+        check, judged as :meth:`_oracle_source_gaps` says."""
         if not isinstance(protocol, dict) or not self._runs_code(state):
-            return []
+            return [], []
+        by_name = {str(o["name"]).strip(): o for o in _oracle.declared(protocol)}
         frozen = _frozen.load(self.quest_root)
         if frozen is None:
-            return _oracle.source_gaps(protocol, self._retrieved_sources(state))
-        sources = frozen.get("sources")
-        if isinstance(sources, list) and not frozen.get("sources_problem"):
-            return _oracle.source_gaps(protocol, sources)
-        gaps = _oracle.empty_references(protocol)
-        if frozen.get("sources_problem"):
-            gaps.append(str(frozen["sources_problem"]))
-        return gaps
+            named = _oracle.unsourced(protocol, self._retrieved_sources(state))
+        elif isinstance(frozen.get("sources"), list) and not frozen.get("sources_problem"):
+            named = _oracle.unsourced(protocol, frozen["sources"])
+        else:
+            named = _oracle.empty_reference_pairs(protocol)
+        extra = [str(frozen["sources_problem"])] if frozen is not None and frozen.get("sources_problem") else []
+        return [(by_name.get(n) or {"name": n}, why) for n, why in named], extra
+
+    def _not_confirmed_names(self, state: QuestState, protocol: Any) -> list[str]:
+        """The checks that still have no stated source and that a person chose to go on with as they are."""
+        try:
+            pairs, _extra = self._unsourced_oracles(state, protocol)
+        except Exception:  # noqa: BLE001 -- a record must never stop a quest
+            return []
+        return [str(o.get("name")) for o, _why in pairs if _accepted.chose(self.quest_root, o)]
 
     def _simulation_sources(self, state: QuestState) -> tuple[Path, dict[str, str]]:
         """The script that computes the data and the text of it and of its helper modules in ``code/``: ``simulate.py``
@@ -7575,7 +7854,8 @@ class Engine:
             if not missing:
                 return None
             before = main.read_text(encoding="utf-8")
-            equations = [e for e in ((self._protocol_block(state) or {}).get("model") or {}).get("equations") or []
+            view = _oracle.model_view((self._protocol_block(state) or {}).get("model")) or {}
+            equations = [e for e in view.get("equations") or []
                          if isinstance(e, dict) and str(e.get("id") or "").strip() in missing]
             listed = "\n".join(f"- {e.get('id')}: {e.get('formula') or ''}" for e in equations) or "\n".join(
                 f"- {m}" for m in missing)
@@ -8709,8 +8989,9 @@ class Engine:
             request = (
                 "These declared oracles cannot be judged by the engine: " + " ".join(incomplete) + " Give each of them a numeric "
                 "`expected` (worked out from the closed form, the limit or the invariant; 0 for an invariant's worst violation or for the difference between two implementations) and "
-                "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0), and a "
-                f"`reference` saying where the expected value comes from: {_REFERENCE_FORMS} Change nothing else."
+                "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0), a `kind` "
+                "(one of special_case, invariant, symmetry, second_implementation, convergence_rate, published_value) "
+                f"and a `reference` saying where the expected value comes from: {_REFERENCE_FORMS} Change nothing else."
             )
         else:
             request = (
@@ -9802,7 +10083,7 @@ class Engine:
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
-        self._check_plan_sources(state, stop=True, protocol=self._draft_protocol(state))
+        await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
@@ -9822,7 +10103,7 @@ class Engine:
                 oracle_code = on_disk
         # A check's expected value must say where it comes from before the freeze: the gate may have added checks to the
         # plan since it was read, and a person may have edited it (rigor_profile: research stops here until it says).
-        self._check_plan_sources(state, stop=True, protocol=self._draft_protocol(state))
+        await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
         self._hold_added_oracles()
         # From here on the protocol is what the record says (core/frozen_protocol.py).
@@ -12123,6 +12404,10 @@ class Engine:
         amended = _frozen.disclosure(self.quest_root)
         if amended:
             evidence_note = f"{evidence_note}\n\n{amended}".strip()
+        not_confirmed = _accepted.disclosure(
+            self.quest_root, self._not_confirmed_names(state, self._protocol_block(state)))
+        if not_confirmed:
+            evidence_note = f"{evidence_note}\n\n{not_confirmed}".strip()
         if _phased.enabled(self.config):
             evidence_note = f"{evidence_note}\n\n{_phased.write_note(self.quest_root)}".strip()
         improved = _improve.write_note(self.quest_root)
@@ -17526,10 +17811,120 @@ the record. The rules above still hold, with these differences:
 
 # How an oracle's expected value may be sourced, for a request to rewrite the plan (core/oracle_check.py reads it).
 _REFERENCE_FORMS = (
-    "`derivation: <the steps that give the number>`, a source from the plan's list of the sources this quest found, by its [n], an equation "
+    "`derivation: <how the number follows, with at least one equation using =>`, a source from the plan's list of the sources this quest found, by its [n], an equation "
     "of the plan's `model` by its id (E1), or, for a second implementation, what it is and that it shares no code with "
     "the simulation. A source that is not in that list does not count."
 )
+
+# Written once FI has asked the plan step to fill in where the checks' expected values come from (``_fill_plan_sources``).
+_FILL_MARKER = "plan_sources_asked.json"
+# The checks whose source that rewrite wrote after the person had read the plan (the freeze record says so).
+_FILLED_AFTER_READ = "plan_sources_filled.json"
+# What a rewrite that fills in the checks' sources may change: where each value comes from and its kind (under any of
+# the keys the engine reads them from). The words of a check only by adding to them (a "(derivation: ...)" at its end),
+# and the model behind the numbers only in the parts it left out.
+_FILL_FREE_KEYS = frozenset({*_oracle._KIND_KEYS, *_oracle._REFERENCE_KEYS, "derivation", "check"})
+
+
+def _plan_checks_note(plan_md: str) -> str:
+    """For a request to rewrite the plan: what FI reads in the design block's checks and model, and, when the plan has
+    them, what is still missing (each check whose expected value has no source a reader can check, the parts of the model
+    left out). Empty for a plan with neither checks nor a model. A request that says only "look at the literature and the
+    formulas" is then answered where FI reads it: in the block, not in the section shown from it."""
+    parsed = _plan.parse(plan_md)
+    protocol = (parsed.design or {}).get("protocol") if parsed.design else None
+    if not isinstance(protocol, dict) or not (protocol.get("oracles") or protocol.get("model")):
+        return ""
+    lines = [
+        "# The checks and the model (FI reads these in the design block)",
+        "",
+        "- *The model behind the numbers* above the block is only SHOWN from the block and is never read: a change to a "
+        "check or to the model is made in the block (`protocol.oracles`, `protocol.model`), and the section is shown "
+        "again from it.",
+        f"- Each check's `kind` is one of: {', '.join(_oracle.KINDS)}.",
+        f"- Each check's `reference` says where its `expected` value comes from: {_REFERENCE_FORMS} A derivation must "
+        f"{_oracle.DERIVATION_RULE}.",
+        "- `model` has `summary` (one sentence: what produces the numbers), `assumptions` (a list), `holds_for`, and "
+        "`equations` (a list, each with `id` E1, E2 ..., `formula`, `role` generates or analyses, and `source`: a [n] from "
+        "the plan's list of the sources this quest found, or `derivation` with the steps in `derivation`).",
+        "- Keep each check's `name`, `expected`, `tolerance`, `case` and `measure` unless the request is about them.",
+    ]
+    try:
+        named = _oracle.unsourced(protocol, _plan.listed_sources(plan_md))
+        missing = _oracle.model_missing(protocol)
+    except Exception:  # noqa: BLE001 -- the rules above are still worth saying
+        named, missing = [], []
+    if named or missing:
+        lines += ["", "Missing right now (fill these in if the request is about the checks, their sources or the model):"]
+        lines += [f"- {why}" for _n, why in named]
+        if missing:
+            lines.append(f"- the model behind the numbers leaves out {', '.join(missing)}")
+    return "\n".join(lines) + "\n"
+
+
+def _fill_changed_more(before: Any, after: Any) -> str:
+    """Why a rewrite that was only to fill in the checks' sources changed more than that (``""`` when it did not): the
+    design outside ``protocol.model``, and each check except for its source and kind, must be as before (a check's words
+    may only be added to); a part of the model that was already written must be as it was."""
+    if not isinstance(before, dict):
+        return "was made on a plan whose design block could not be read"
+    if not isinstance(after, dict):
+        return "left a design block that cannot be read"
+    old_p = before.get("protocol") if isinstance(before.get("protocol"), dict) else None
+    new_p = after.get("protocol") if isinstance(after.get("protocol"), dict) else None
+    old_checks = {str(o.get("name")): " ".join(str(o.get("check") or "").split()) for o in _oracle.declared(old_p)}
+    for o in _oracle.declared(new_p):
+        old = old_checks.get(str(o.get("name")))
+        if old is not None and not " ".join(str(o.get("check") or "").split()).startswith(old):
+            return f"rewrote what the check {str(o.get('name'))!r} measures"
+    old_model = _oracle.model_view((old_p or {}).get("model")) or {}
+    new_model = _oracle.model_view((new_p or {}).get("model")) or {}
+    for part in ("summary", "assumptions", "holds_for"):
+        if old_model.get(part) and old_model.get(part) != new_model.get(part):
+            return f"changed a part of the model behind the numbers that was already written ({part})"
+    kept = {str(e.get("id")).upper(): (e.get("formula"), e.get("role")) for e in new_model.get("equations") or []}
+    for eq in old_model.get("equations") or []:
+        if kept.get(str(eq.get("id")).upper()) != (eq.get("formula"), eq.get("role")):
+            return f"changed or removed equation {eq.get('id')} of the model behind the numbers"
+    # The model's other keys (its parameters, say) are not the fill's to change.
+    raw_old = (old_p or {}).get("model")
+    raw_new = (new_p or {}).get("model")
+    if isinstance(raw_old, dict):
+        parts = {*_oracle._SUMMARY_KEYS, *_oracle._LABEL_KEYS, *_oracle._ASSUMPTION_KEYS, *_oracle._HOLDS_KEYS,
+                 *_oracle._EQUATION_KEYS}
+        for key, value in raw_old.items():
+            if key not in parts and (raw_new.get(key) if isinstance(raw_new, dict) else None) != value:
+                return f"changed `{key}` of the model behind the numbers"
+    # `source`, `sources` and `basis` on a check may mean the thing simulated: free only where they were empty or
+    # already held a reference.
+    free_maybe = {str(o.get("name")): {k for k in _oracle._MAYBE_REFERENCE_KEYS
+                                       if not _oracle._text(o.get(k))
+                                       or _oracle._LOOKS_LIKE_REFERENCE_RE.search(_oracle._text(o.get(k)))}
+                  for o in _oracle.declared(old_p)}
+
+    def core(design: dict[str, Any]) -> Any:
+        out = json.loads(json.dumps(design, default=str))
+        protocol = out.get("protocol")
+        if isinstance(protocol, dict):
+            protocol.pop("model", None)
+            if isinstance(protocol.get("oracles"), list):
+                protocol["oracles"] = [
+                    {k: v for k, v in o.items()
+                     if k not in _FILL_FREE_KEYS and k not in free_maybe.get(str(o.get("name")), set())}
+                    if isinstance(o, dict) else o for o in protocol["oracles"]]
+        return out
+
+    was, now = core(before), core(after)
+    if was == now:
+        return ""
+    old_o = {str(o.get("name")): o for o in ((was.get("protocol") or {}).get("oracles") or []) if isinstance(o, dict)}
+    new_o = {str(o.get("name")): o for o in ((now.get("protocol") or {}).get("oracles") or []) if isinstance(o, dict)}
+    if set(old_o) != set(new_o):
+        return "added, removed or renamed a check"
+    moved = [n for n in old_o if old_o[n] != new_o[n]]
+    if moved:
+        return f"changed {', '.join(repr(n) for n in moved)} beyond where the expected value comes from and its kind"
+    return "changed the plan beyond the checks' sources and the model"
 
 _PLAN_DIRECTIVE = """
 
