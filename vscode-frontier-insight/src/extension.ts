@@ -44,7 +44,7 @@ import {
 import { keepAuthorLine, runInterview, writeInterviewYaml } from "./interview";
 import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
-import { openQuestMap } from "./quest-map";
+import { openQuestMap, tabAreaColumn } from "./quest-map";
 import { runFollow, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
 
 
@@ -665,14 +665,14 @@ async function runResume(
             // No request: open the file. Editing it is editing the design that will run.
             stream.markdown(
                 `📋 The plan of \`${chosenId}\` is \`${path.relative(workDir, planPath).split(path.sep).join("/")}\`. ` +
-                `I opened it beside the chat.\n\n` +
+                `I opened it in the editor, next to your other tabs.\n\n` +
                 `- **Edit it** and save: the block under *The design (used as written)* is what runs, exactly.\n` +
                 `- **Or ask for a change**: \`@fi /plan ${chosenId} <what to change>\` rewrites it.\n` +
                 `- **When it says what you want**: \`@fi /resume ${chosenId}\`.\n`,
             );
             try {
                 const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
-                await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+                await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn() });
             } catch {
                 stream.markdown(`(Could not open it in the editor; open \`${planPath}\` yourself.)\n`);
             }
@@ -1236,7 +1236,7 @@ async function runQuest(
         );
         try {
             const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(planPath));
-            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: tabAreaColumn() });
         } catch { /* the message above names the command that opens it */ }
     } else if (exitCode === 0) {
         const outDirSetting = cfg.get<string>("outputDir") || "outputs";
