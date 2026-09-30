@@ -46,9 +46,11 @@ _RUN_WORDS = {
 # because BOOTSTRAP_REPLICATES = 2000 sat beside a protocol of 300 runs per setting.
 # Only a SAMPLING word beside a re-draw word is skipped; a name that also says runs, trials or realizations
 # (N_MCMC_RUNS, bootstrap_trials) is always read as runs. Words that only ever mean re-drawing from results
-# (bootstrap, resample, jackknife) skip with any sampling word; words that can also name the study itself (mcmc,
-# posterior, burn-in, warm-up) skip only beside samples/sample (a chain's length), not beside reps/replicates/repeats
-# (an MCMC simulation study's repetitions). Whole tokens, so boot-time or surrogate/shuffle/permutation studies are read.
+# (bootstrap, boot, resample, jackknife) skip with any sampling word; words that can also name the study itself (mcmc,
+# posterior, and the joined forms burnin / warmup) skip only beside samples/sample (a chain's length), not beside
+# reps/replicates/repeats (an MCMC simulation study's repetitions). Whole tokens, so boot-time, surrogate, shuffle and
+# permutation studies are read. A permutation test's count (N_PERMUTATION_REPS) is therefore still read as runs: a
+# deliberate trade-off, since skipping a name can only hide a real mismatch while reading one can stop a quest.
 _SAMPLING_RUN_WORDS = {"samples", "sample", "replicates", "replicate", "reps", "repeats"}
 _DRAW_ONLY = {"samples", "sample"}
 _STRONG_RESAMPLE = re.compile(r"^n?(bootstraps?|boots?|resamples?|resampling|jackknife|jackknifes)\d*$")
