@@ -234,19 +234,84 @@ class RetrievedDoc:
 # ---------------------------------------------------------------------------
 
 
+#: The waits before asking a search source again after it said "too many requests" (HTTP 429), one per retry. A
+#: keyless Semantic Scholar or a busy Crossref often answers the same query a few seconds later; on one real quest they
+#: refused five of the literature step's searches, each asked only once.
+_RATE_LIMIT_WAITS_S = (2.0, 5.0)
+#: A ``Retry-After`` longer than this is not waited for: the source is out of its budget for the day (OpenAlex without a
+#: key), not busy, and the quest goes on without it.
+_RATE_LIMIT_MAX_WAIT_S = 10.0
+
+
+def _rate_limit_sleep(seconds: float) -> None:
+    """The wait between tries (tests replace it)."""
+    time.sleep(seconds)
+
+
+def _retry_after_s(response: Any) -> float | None:
+    """The seconds a 429 answer's ``Retry-After`` asks for (a number of seconds or an HTTP date); None without one."""
+    raw = str((getattr(response, "headers", None) or {}).get("retry-after") or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        from email.utils import parsedate_to_datetime
+        try:
+            when = parsedate_to_datetime(raw)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when is None:
+            return None
+        import datetime as _dt
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=_dt.timezone.utc)
+        seconds = (when - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+    if seconds != seconds:  # NaN
+        return None
+    return max(0.0, seconds)
+
+
+def _budget_spent(response: Any) -> bool:
+    """A 429 that says the allowance is used up (``X-RateLimit-Remaining: 0``, as OpenAlex sends once its daily budget
+    is spent), not that the server is busy: asking again seconds later only spends more requests."""
+    raw = str((getattr(response, "headers", None) or {}).get("x-ratelimit-remaining") or "").strip()
+    try:
+        return raw != "" and float(raw) <= 0
+    except ValueError:
+        return False
+
+
 def _http_get_json(
     url: str, params: dict | None, timeout_s: float, *, source: str = "",
     headers: dict | None = None,
 ) -> dict | None:
-    try:
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0", **(headers or {})})
-            r.raise_for_status()
-            return r.json()
-    except Exception as e:
-        _log.info("http GET %s failed: %s", url, _sf.redact(e))
-        _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
-        return None
+    """GET ``url`` and parse its JSON; ``None`` on any failure, which is recorded against ``source``. A "too many
+    requests" answer is asked again after a short wait (:data:`_RATE_LIMIT_WAITS_S`), unless the source asks for a
+    longer one than :data:`_RATE_LIMIT_MAX_WAIT_S` or says its allowance is used up; only the last failure is
+    recorded."""
+    waits = list(_RATE_LIMIT_WAITS_S)
+    while True:
+        try:
+            with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
+                r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0", **(headers or {})})
+                if getattr(r, "status_code", None) == 429 and waits:
+                    asked = _retry_after_s(r)
+                    planned = waits.pop(0)
+                    # A short Retry-After is the server's own word that a retry will do; without one, an allowance
+                    # reported as used up means asking again only spends more requests.
+                    if (asked is not None and asked <= _RATE_LIMIT_MAX_WAIT_S) or (
+                            asked is None and not _budget_spent(r)):
+                        wait = planned if asked is None else max(asked, 0.5)
+                        _log.info("http GET %s: too many requests, asking again in %.1fs", url, wait)
+                        _rate_limit_sleep(wait)
+                        continue
+                r.raise_for_status()
+                return r.json()
+        except Exception as e:
+            _log.info("http GET %s failed: %s", url, _sf.redact(e))
+            _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
+            return None
 
 
 # OpenAlex's id for the arXiv repository ("arXiv (Cornell University)").

@@ -205,7 +205,12 @@ $env:BRAVE_API_KEY = "BSA...your-key..."
 
 Or drop it in a **`.env`** file at the repo root (FI loads `.env` at
 startup; real environment variables still win over it, and `.env` is
-git-ignored):
+git-ignored). FI reads the `.env` in the folder it runs in and then the one
+in its own folder, so a key kept next to `launch.py` also reaches a quest the
+VS Code extension runs in another workspace folder. Everything in FI's own
+`.env` therefore applies to every quest, wherever it runs; when both files set
+the same key, the one in the folder it runs in wins, and a blank line
+(`KEY=`) sets nothing:
 
 ```env
 BRAVE_API_KEY=BSA...your-key...
@@ -241,7 +246,14 @@ environment variable wins over YAML. Prefer the environment or `.env`: a key
 written into a quest YAML is copied into that quest's `config.yaml`. Both
 keys travel in request headers, never in a URL, so they stay out of the
 request lines a quest logs; a rate-limited source shows up in the quest's
-source failure report (`.fi/source_failures.json`).
+source failure report (`.fi/source_failures.json`). A search refused with
+HTTP 429 is asked again twice, a few seconds apart, before it counts as
+failed (not when the source says to wait longer than ten seconds or that its
+allowance is used up, as OpenAlex does once its daily budget is spent). After
+the literature step, `run.log` says why sources came back without their full
+text: how many are not marked free to read, how many are free but gave no
+download link, how many free ones FI did not get, which requests failed and
+where, and, when OpenAlex was searched, whether `OPENALEX_API_KEY` is unset.
 
 **CORE, OpenAIRE and DOAJ** — the open-access sources FI uses for humanities
 and social-science topics — need no key. A free CORE key
