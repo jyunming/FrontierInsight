@@ -27,8 +27,11 @@ concurrency:
 
 jobs:
   # ---- Python pytest (fast tier) -----------------------------------
+  # Split into shards that run side by side: tests/conftest.py keeps, for FI_TEST_SHARD=k/n, only the test files
+  # whose path hashes to shard k, so the n shards of one OS together run every fast-tier test exactly once. Windows
+  # is the slower runner, so it gets more shards.
   fast:
-    name: pytest (fast tier)
+    name: pytest (fast tier, ${{ matrix.os }}, shard ${{ matrix.shard }}/${{ matrix.shards }})
     # Skip when the change is extension-only — the `extension` job
     # below handles TS PRs on its own.
     if: |
@@ -39,16 +42,22 @@ jobs:
       # specific quirks (file locks) we want to see independently.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.11"]
+        include:
+          - { os: ubuntu-latest, shard: 0, shards: 2 }
+          - { os: ubuntu-latest, shard: 1, shards: 2 }
+          - { os: windows-latest, shard: 0, shards: 3 }
+          - { os: windows-latest, shard: 1, shards: 3 }
+          - { os: windows-latest, shard: 2, shards: 3 }
     runs-on: ${{ matrix.os }}
+    env:
+      FI_TEST_SHARD: ${{ matrix.shard }}/${{ matrix.shards }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
 
       # ``[docker]`` extra is needed because ``tests/test_docker_executor.py``
@@ -66,12 +75,7 @@ jobs:
       #   - tests/test_self_correction_e2e.py
       #   - tests/test_web_e2e.py
       #   - any test tagged @pytest.mark.slow
-      # Coverage floor guards against a change that silently deletes tested
-      # behaviour. Fast-tier line coverage of core+generation+launch measured
-      # at 74%; the gate is set to 65% — comfortably below, so normal OS /
-      # skipif variance doesn't flake CI, while a real coverage collapse
-      # (a whole module going untested) still fails the build. Ratchet up as
-      # coverage improves.
+      # Each shard records coverage; the `coverage` job below joins one OS's shards and applies the floor.
       - name: Run pytest (fast tier)
         run: >-
           pytest -q -m "not slow" -n auto --dist loadfile --durations=25
@@ -79,18 +83,80 @@ jobs:
           --ignore=tests/test_self_correction_e2e.py
           --ignore=tests/test_web_e2e.py
           --cov=core --cov=generation --cov=launch
-          --cov-report=term-missing:skip-covered
-          --cov-fail-under=65
+          --cov-report=
+
+      # A name without the leading dot: upload-artifact leaves hidden files out.
+      - name: Keep this shard's coverage data
+        shell: bash
+        run: mv .coverage "coverage-data-${{ matrix.os }}-${{ matrix.shard }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
+          path: coverage-data-${{ matrix.os }}-${{ matrix.shard }}
+          if-no-files-found: error
+          retention-days: 1
+          # A re-run (e.g. "Re-run all jobs") uploads the same name again.
+          overwrite: true
+
+  # ---- Fast-tier coverage floor, per OS ------------------------------
+  # Coverage floor guards against a change that silently deletes tested
+  # behaviour. Fast-tier line coverage of core+generation+launch measured
+  # at 74%; the gate is set to 65% — comfortably below, so normal OS /
+  # skipif variance doesn't flake CI, while a real coverage collapse
+  # (a whole module going untested) still fails the build. Ratchet up as
+  # coverage improves. It is applied to the joined data of all of one OS's
+  # shards (the same number a single unsplit run gives), on that OS so the
+  # recorded file paths match the checkout.
+  coverage:
+    name: coverage floor (fast tier, ${{ matrix.os }})
+    needs: [fast]
+    strategy:
+      fail-fast: false
+      matrix:
+        # `shards` must match the fast job's matrix for that OS; the join below refuses a different count.
+        include:
+          - { os: ubuntu-latest, shards: 2 }
+          - { os: windows-latest, shards: 3 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install coverage
+        run: python -m pip install coverage
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-data-${{ matrix.os }}-*
+          path: covdata
+          merge-multiple: true
+
+      - name: Join the shards and apply the coverage floor
+        shell: bash
+        run: |
+          found=$(ls covdata | wc -l)
+          if [ "$found" -ne "${{ matrix.shards }}" ]; then
+            echo "::error::expected ${{ matrix.shards }} shards' coverage data, found $found"; ls covdata; exit 1
+          fi
+          python -m coverage combine covdata/*
+          python -m coverage report --show-missing --skip-covered --fail-under=65
 
   # ---- Python pytest (slow tier) -----------------------------------
   slow:
     # Runs on every PR so the slow tier gates the merge. A post-merge-only gate misses regressions that only fail
     # in the slow tier (e.g. mode-reducer mismatches, or the rc=5
-    # "no slow-tagged tests" exit). The wall-clock cost is +5-10 min
-    # per PR, accepted to keep main green by construction.
+    # "no slow-tagged tests" exit). It runs alongside the fast tier rather than after it: the PR's checks gate the
+    # merge whatever order the jobs run in, and waiting for the fast tier only added its time to every PR's.
     name: pytest (slow tier, ubuntu only)
+    # The same skip rule as the fast tier (it used to follow from `needs: [fast]`).
+    if: |
+      !contains(github.event.pull_request.title, '[ext-only]') &&
+      !startsWith(github.event.head_commit.message, 'chore(vsix):')
     runs-on: ubuntu-latest
-    needs: [fast]
     steps:
       - uses: actions/checkout@v4
 
@@ -111,19 +177,19 @@ jobs:
       # be excluded by the fast tier's `-m "not slow"` filter AND
       # missed by the slow tier's file allowlist — never running
       # anywhere. Windows is excluded — the e2e venv-build tests
-      # have a known file-lock issue tracked separately.
+      # have a known file-lock issue tracked separately. Both steps run
+      # in parallel workers; the e2e step spreads single tests (three
+      # files would keep only three workers busy).
       - name: Run pytest (slow tier — e2e files)
-        run: pytest -q tests/test_engine_smoke.py tests/test_self_correction_e2e.py tests/test_web_e2e.py
-      # Treat pytest exit code 5 ("no tests collected") as success — the
-      # repo currently has no ``@pytest.mark.slow``-tagged tests outside
-      # the three e2e files (those land in the prior step). Without this
-      # guard the step fails with rc=5 even though zero tests ran. When
-      # someone adds the first slow-tagged test outside e2e, this step
-      # will start exercising it automatically.
+        run: pytest -q -n auto --dist load --durations=15 tests/test_engine_smoke.py tests/test_self_correction_e2e.py tests/test_web_e2e.py
+      # Treat pytest exit code 5 ("no tests collected") as success — if no
+      # ``@pytest.mark.slow``-tagged test is left outside the three e2e
+      # files (those land in the prior step), the step would otherwise
+      # fail with rc=5 even though nothing is wrong.
       - name: Run pytest (slow tier — marker-tagged tests outside e2e files)
         run: |
           rc=0
-          pytest -q -m slow --ignore=tests/test_engine_smoke.py --ignore=tests/test_self_correction_e2e.py --ignore=tests/test_web_e2e.py || rc=$?
+          pytest -q -m slow -n auto --dist loadfile --durations=15 --ignore=tests/test_engine_smoke.py --ignore=tests/test_self_correction_e2e.py --ignore=tests/test_web_e2e.py || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 5 ]; then exit "$rc"; fi
 
   # ---- VSCode extension compile + package (PRs touching extension only) ------
