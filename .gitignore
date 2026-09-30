@@ -55,10 +55,6 @@ poster.pdf
 # Scratch clones of external skill sources, made by scripts/import_scientist_skills.py
 .skill-sources/
 
-# Local-only project guidance for Claude Code (auto-loaded from the repo root). Not shared repo content — see
-# dev/registry.md instead for the checked-in, contributor-facing module index.
-/CLAUDE.md
-
 # Personal scratch quest configs (kept out of the repo; shipped examples live in examples/)
 /*.yaml
 
