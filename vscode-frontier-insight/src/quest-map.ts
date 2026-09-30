@@ -149,7 +149,7 @@ export async function openQuestMap(context: vscode.ExtensionContext, questIdArg?
 
     const media = vscode.Uri.joinPath(context.extensionUri, "media");
     const panel = vscode.window.createWebviewPanel("frontierInsight.questMap", `Quest map: ${questId}`,
-        tabAreaColumn(), { enableScripts: true, localResourceRoots: [media] });
+        { viewColumn: tabAreaColumn(), preserveFocus: true }, { enableScripts: true, localResourceRoots: [media] });
     panel.webview.html = pageHtml(panel.webview, media, questId);
     const configPath = path.join(outputRoot, questId, "config.yaml");
 
