@@ -151,8 +151,24 @@ script.
 - After all review fixes (at `3034c93`), the same selection widened to `split_run`, `attempt_records`, `todo` and
   `code_layout` (60 files) plus `test_engine_smoke.py` and `test_web_e2e.py`, `-n 4`: **1739 passed, 1 skipped,
   0 failed** (71 min).
-- `tests/test_code_layout.py` at the final commit (`6c49597`, which only narrowed the random-generator exemption after
-  that run): **33 passed**.
+- After the rebase onto the optimisation runner (`03ebd79`), the selection widened again to the optimisation and
+  oracle-form tests (69 files) plus `test_engine_smoke.py` and `test_web_e2e.py`, `-n 4`: **2183 passed, 5 skipped,
+  0 failed** (66 min).
+- After the rebase onto the improve loop (`f8d2b2e`) and the improve-loop fixes up to `fbdd8fb`, the same selection
+  plus every test touching `improve` (76 files) and the two e2e files, `-n 4`: **2391 passed, 5 skipped, 0 failed**
+  (35 min).
+- The later commits change only the improve loop's handling of its own copies (links, a moved `.fi`) and add tests:
+  every test file touching `improve` or `code_layout` (13 files) plus `test_engine_smoke.py`,
+  `test_self_correction_e2e.py` and `test_research_acceptance.py`, `-n 4`: **730 passed, 1 skipped, 0 failed**; and
+  `tests/test_improve.py` with `tests/test_code_layout.py` at the final commit: **73 passed**.
+
+**The improve loop and the package** (added after the rebase onto `f8d2b2e`). The loop that changes the simulation one
+step at a time saw only the top-level scripts; it now sees and may edit the package's modules (by their path in
+`code/`), and its kept copies, undo and resume include them. External reviews of that (four more targeted passes)
+found and had fixed: a kept copy was cleared and read through a link or junction inside it or one level up (which could
+delete files outside the quest), a copy saved before the package existed deleted the package on restore, a moved `.fi`
+went unnoticed by the tamper guard, and a `.fi` link loop crashed the quest instead of stopping the loop. A `.fi` a
+person keeps elsewhere through a link is used as it is.
 
 ## What is unverified
 
@@ -178,3 +194,8 @@ script.
 - Added locally: the execute_reflect path where the repair fixes only the package, and its ledger entry, are covered by
   code reading and the oracle-path test, not by a test of their own.
 - Added locally: no quest was run with a real model, locally either; the Windows runs above use the fake-model tests.
+- Added locally: the improve loop's handling of links was probed on Windows with junctions only (this machine cannot
+  make symlinks) and the Docker case was reasoned from the code, not run. After the guard detects a moved `.fi`, the
+  loop stops, but the rest of the quest still writes to `.fi` wherever it now leads (that predates this branch; whether
+  such a quest should stop entirely is a decision left open). The engine-level path where the abort cannot write its
+  copies back is covered by code reading and review probes, not by a test of its own.
