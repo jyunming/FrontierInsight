@@ -25,7 +25,7 @@ NOT_A_STEP = {"clarify", "pause_after_literature", "wait_for_data", "execute_ref
 MOVES = {
     "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json", "code", "paper.md"],
     "literature": ["data/literature", "plan.md", "needs/FROZEN_PROTOCOL.json", "results.json", "slides.pdf"],
-    "plan": ["plan.md", ".fi/paused_at_plan.flag", "needs/FROZEN_PROTOCOL.json",
+    "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", "needs/FROZEN_PROTOCOL.json",
              "needs/receipts/design_audit.json", "code", "paper"],
     "design": ["needs/FROZEN_PROTOCOL.json",
                "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json", "needs/DESIGN_CRITIQUE.json",
@@ -40,7 +40,7 @@ STAYS = {
     "ideas": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", ".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "literature": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", ".fi/literature_queries.json", ".fi/audit.jsonl", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "plan": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
-    "design": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "plan.md", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
+    "design": ["needs/protocol_versions/v1.json", "needs/PROTOCOL_AMENDMENT_1.json", "plan.md", ".fi/oracles_added.json", "data/literature", ".fi/approved_plan.json", "needs/DESIGN_HISTORY.json"],
     "figures": ["code/experiment.py", "results.json", "raw", "plan.md", "needs/FROZEN_PROTOCOL.json"],
     "crosscheck": ["code/experiment.py", "results.json", "figures", "needs/FROZEN_PROTOCOL.json", "needs/ORACLE_CHECK.json"],
     "evidence": ["code/experiment.py", "results.json", "figures", "needs/FROZEN_PROTOCOL.json"],

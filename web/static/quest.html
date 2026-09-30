@@ -611,7 +611,7 @@
     document.getElementById('plan-error-text').textContent = d.design_error
       ? 'The design block cannot be read: ' + d.design_error + '. The quest will stop until it is fixed.' : '';
     const last = (d.versions || [])[(d.versions || []).length - 1];
-    const who = { model: 'written by FI', request: 'rewritten on your request', user: 'edited by you' };
+    const who = { model: 'written by FI', request: 'rewritten on your request', engine: 'checks added by FI', user: 'edited by you' };
     document.getElementById('plan-version').textContent = last
       ? 'Version ' + last.version + ' · ' + (who[last.by] || last.by) : '';
     if (planEditing) return;          // never replace what someone is typing

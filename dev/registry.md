@@ -12,7 +12,10 @@ same PR that adds, splits or renames one.
   biggest file in the repo; read `docs/architecture.md` before adding a node here.
 - `core/protocol.py` — the typed `ResearchProtocol` a quest's design may declare.
 - `core/frozen_protocol.py` — freezing a protocol before the first run, and the amendment approve/apply/decline flow
-  (also used, unmodified, for the tamper-recovery restore — see `propose_tamper_recovery`).
+  (also used, unmodified, for the tamper-recovery restore — see `propose_tamper_recovery`). Who approved the frozen
+  protocol (`approved_by`) is decided in `Engine._freeze_protocol_if_due`; an oracle the oracle gate had added to the
+  plan (`Engine._declare_oracles`) is recorded in `.fi/oracles_added.json`, and `Engine._hold_added_oracles` stops the
+  quest again (the `plan` pause, `_pause_for_plan(added=...)`) before the freeze under `pauses.plan: ask`.
 - `core/protocol_check.py` — static check: does the experiment's source hold to the frozen protocol?
 - `core/run_manifest.py` — runtime check: does what the simulation says it ran (`run_manifest.json`) match the
   protocol's exact Cartesian product? Also the two-script split-analysis lint, and the strata of a `given` mean
@@ -22,7 +25,8 @@ same PR that adds, splits or renames one.
   about a check (`proposals`, never applied without a person) and the note that carries the engine's verdicts to
   `analyze` (`analysis_note`). An oracle that names a `case` and a `measure` is measured by the engine, not the script
   (`case_of`); `loose_tolerance` warns when the tolerance would pass a lower-order method than the oracle claims
-  (`order`); `script_measured` lists the values that are still the script's own word; `with_run_problems` merges the
+  (`order`); `script_measured` lists the values that are still the script's own word (`core/evidence.py` never counts them toward
+  `independently_validated`, one script or two); `with_run_problems` merges the
   reasons a value could not be measured.
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.

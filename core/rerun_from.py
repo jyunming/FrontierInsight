@@ -145,9 +145,10 @@ _OWN: dict[str, list[str]] = {
     "skills": ["code", "figures", "raw", "results.json", *_RUN_RECORDS, *_PAPER],
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
-    "plan": ["plan.md", ".fi/paused_at_plan.flag", "needs/receipts/design_audit.json", *_FROM_DESIGN],
-    "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", *_FROM_DESIGN],
-    "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", *_FROM_DESIGN],
+    # The record of the oracles the engine added to plan.md goes with plan.md: a design rerun keeps both.
+    "plan": ["plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", "needs/receipts/design_audit.json", *_FROM_DESIGN],
+    "literature": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_FROM_DESIGN],
+    "ideas": ["data/literature", "plan.md", ".fi/paused_at_plan.flag", ".fi/oracles_added.json", *_FROM_DESIGN],
 }
 # A step redoes everything after it, so it moves aside everything the later steps write too (a rerun that stops halfway
 # must not leave the old receipts for the evidence level to read).

@@ -1037,7 +1037,8 @@ class Engine:
                                 "then run `fi --resume %s`",
                                 "run's numeric warnings" if intr_value.get("numeric_stage")
                                 else "oracle checks" if intr_value.get("oracle_stage")
-                                else "protocol" if intr_value.get("protocol_stage") else "plan",
+                                else "protocol" if intr_value.get("protocol_stage")
+                                else "checks FI added to the plan" if intr_value.get("oracles_added") else "plan",
                                 intr_value.get("plan_file", "plan.md"),
                                 self.quest_id,
                             )
@@ -3930,18 +3931,48 @@ class Engine:
         self._log.info("[design] using the design block of plan.md (sha256 %s)", sha[:12])
         return parsed.design, sha
 
-    def _pause_for_plan(self, *, error: str = "") -> None:
+    def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None) -> None:
         """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
-        supply pauses), unless the file cannot be read: then every resume stops again, with the reason."""
+        supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
+
+        ``added`` names the oracles the engine wrote into the plan after the person read it (the caller keeps its own
+        once-per-addition record): the stop then says so first, since the protocol is frozen right after it."""
         marker = self.fi_dir / "paused_at_plan.flag"
-        if not error and marker.is_file():
+        if not error and added is None and marker.is_file():
             return
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            marker.write_text("plan", encoding="utf-8")
-        except OSError as e:
-            self._log.warning("[plan] couldn't write pause marker %s: %r", marker, e)
+        if added is None:
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                marker.write_text("plan", encoding="utf-8")
+            except OSError as e:
+                self._log.warning("[plan] couldn't write pause marker %s: %r", marker, e)
         path = _plan.plan_path(self.quest_root)
+        if added is not None:
+            names = ", ".join(f"“{n}”" for n in added) or "(none named)"
+            checks_on = self.config.engine.oracle_check != "off"
+            steps = [
+                f"After you read the plan, FI added checks against known answers (oracles) to it, or filled in their "
+                f"numbers: {names}. The plan had no such check, or its checks had no numbers to compare against. You "
+                "have not seen these yet, and the plan is fixed for the run once the quest goes on.",
+                f"Read them in `plan.md` ({path}), in the `oracles` list of the protocol under "
+                f"“{_plan.DESIGN_HEADING}”: what each one checks, the value it expects and how close is close "
+                "enough. Edit any you disagree with (a plan left with no check at all gets one added again).",
+                "Or ask for a change and let FI rewrite it: "
+                f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
+                "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
+                ("Then resume: the checks run again on what the plan says, and the plan is fixed for the run."
+                 if checks_on else
+                 "Then resume: the plan is fixed for the run (the checks themselves are off: `engine.oracle_check: off`)."),
+            ]
+            self._pause_for_human(
+                kind="plan",
+                interaction="supply",
+                headline="read the checks FI added to the plan",
+                steps=steps,
+                payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
+                         "oracles_added": list(added)},
+            )
+            return
         steps = [
             *([f"`plan.md` could not be used: {error}. Fix it, then resume."] if error else []),
             f"Read `plan.md` in the quest folder ({path}): what the literature says, the gap, and the design the "
@@ -4086,7 +4117,7 @@ class Engine:
                 " -> ".join(self.config.provider.fallback),
             )
 
-    async def revise_plan(self, request: str) -> dict[str, Any]:
+    async def revise_plan(self, request: str, *, by: str = "request") -> dict[str, Any]:
         """Rewrite ``plan.md`` as the person asked (``--revise-plan``): the whole file goes to the model with the
         request, and the reply replaces it only if its design block can be used (one retry with the reason).
         The quest stays where it was; resuming runs the revised design. Every version is kept.
@@ -4105,7 +4136,7 @@ class Engine:
         if connected_here:
             await self._connect_llm()
         try:
-            return await self._rewrite_plan(request, path)
+            return await self._rewrite_plan(request, path, by=by)
         finally:
             if connected_here and self._client is not None:
                 await self._client.aclose()
@@ -4113,7 +4144,7 @@ class Engine:
                     await self.supervisor.release(self.config.provider.name)
                 self._client = None
 
-    async def _rewrite_plan(self, request: str, path: Path) -> dict[str, Any]:
+    async def _rewrite_plan(self, request: str, path: Path, *, by: str = "request") -> dict[str, Any]:
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
         prompt = self._prompts["plan_revise"].substitute(
@@ -4138,8 +4169,9 @@ class Engine:
         if why:
             raise ValueError(f"the revised plan could not be used ({why}); plan.md is unchanged")
         path.write_text(revised, encoding="utf-8")
-        entry = _plan.record_version(self.quest_root, revised, by="request", note=request[:300])
-        self._log.info("[plan] revised on request: version %d", entry["version"])
+        entry = _plan.record_version(self.quest_root, revised, by=by, note=request[:300])
+        self._log.info("[plan] revised %s: version %d",
+                       "by the engine for its oracle check" if by == "engine" else "on request", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
 
     async def _node_design(self, state: QuestState) -> QuestState:
@@ -6040,16 +6072,44 @@ class Engine:
             return
         protocol = self._draft_protocol(state)
         mode = self.config.pauses.plan
+        # A person approved the plan only if the quest actually stopped for them to read it (the plan stop leaves its
+        # marker), not merely because ``pauses.plan`` says ``ask`` now: the setting can change between the two.
+        held = mode == "ask" and (self.fi_dir / "paused_at_plan.flag").is_file()
         approved_by = (
             "human: the plan was held for the person to read and edit (pauses.plan=ask)"
-            if mode == "ask"
+            if held
             else f"auto: nobody approved this protocol before the run (pauses.plan={mode})"
         )
+        # The oracles the gate had written into the plan after it was read (``_declare_oracles``) that are still in the
+        # protocol being frozen: a person approved them only if the quest stopped again for them (``_hold_added_oracles``).
+        added = self._oracles_added_read() or {}
+        frozen_names = {str(o["name"]) for o in _oracle.declared(protocol if isinstance(protocol, dict) else None)}
+        engine_added = [str(n) for n in added.get("oracles") or [] if str(n) in frozen_names]
+        oracle_note = ""
+        if engine_added:
+            names = ", ".join(f"'{n}'" for n in engine_added)
+            oracle_note = (
+                f"the oracles {names} were added by the engine after the plan was written and held for the person to read"
+                if added.get("shown") else
+                f"the oracles {names} were added by the engine after the plan was written and nobody approved them"
+            )
+            if not added.get("shown"):
+                approved_by = f"auto: {oracle_note}; " + (
+                    "the rest of the plan was held for the person to read (pauses.plan=ask)" if held
+                    else f"nobody approved the rest of the protocol either (pauses.plan={mode})"
+                )
+            elif held:
+                approved_by += f"; {oracle_note} too"
+            else:
+                approved_by = f"auto: nobody approved the rest of this protocol (pauses.plan={mode}); {oracle_note}"
         iteration = int(state.get("iteration", 0) or 0)
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
         replaced = _frozen.open_replacement(self.quest_root)
         if replaced is not None:
             approved_by = f"human: {replaced.get('approved_by')} approved replacing the protocol (--approve-as)"
+            if engine_added:
+                # They approved going back to a step, before these oracles existed: say what they did not see.
+                approved_by += f"; {oracle_note}"
             source = f"{replaced.get('source')}; it replaces the one frozen before (amendment {replaced.get('n')})"
             record = _frozen.freeze(
                 self.quest_root, protocol, approved_by=approved_by, source=source,
@@ -7056,12 +7116,65 @@ class Engine:
             "check claims an order of accuracy, give `order` too. The engine judges the measurement against these numbers. "
             "Change nothing else."
             )
+        before = self._planned_oracles()
         try:
-            await self.revise_plan(request)
+            await self.revise_plan(request, by="engine")
         except (FileNotFoundError, ValueError) as e:
             self._log.warning("[oracle] the plan could not be rewritten with an oracle: %s", e)
             return False
+        # An oracle this rewrite added, or whose numbers it changed, is the engine's, not what a person read at the plan
+        # stop: it is recorded, so the freeze never says a person approved it unless they were shown it.
+        after = self._planned_oracles()
+        changed = [name for name, oracle in after.items() if before.get(name) != oracle]
+        if changed:
+            earlier = self._oracles_added_read() or {}
+            carried = [] if earlier.get("shown") else [str(n) for n in earlier.get("oracles") or []]
+            self._oracles_added_write({
+                "oracles": list(dict.fromkeys([*carried, *changed])), "shown": False, "at": _frozen.now(),
+            })
         return True
+
+    def _planned_oracles(self) -> dict[str, dict[str, Any]]:
+        """The oracles of the protocol in ``plan.md``, by name."""
+        planned, _why = _plan.load_design(self.quest_root)
+        protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        return {str(o["name"]): o for o in _oracle.declared(protocol if isinstance(protocol, dict) else None)}
+
+    def _oracles_added_path(self) -> Path:
+        return self.fi_dir / "oracles_added.json"
+
+    def _oracles_added_read(self) -> dict[str, Any] | None:
+        """What the oracle gate added to the plan's protocol after the plan was written (``None`` when it added nothing)."""
+        try:
+            record = json.loads(self._oracles_added_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def _oracles_added_write(self, record: dict[str, Any]) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            self._oracles_added_path().write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[oracle] couldn't record the oracles added to the plan: %r", e)
+
+    def _hold_added_oracles(self) -> None:
+        """With ``pauses.plan: ask``, stop again for the person to read the oracles the engine added to the plan after
+        they read it: the protocol is frozen next, and the record says a person approved it. Once per addition (a
+        later addition stops again); a no-op once the protocol is frozen, or when the plan stop is off (the freeze
+        record then says nobody approved those oracles)."""
+        if self.config.pauses.plan != "ask" or _frozen.load(self.quest_root) is not None:
+            return
+        added = self._oracles_added_read()
+        if added is None or added.get("shown") or not added.get("oracles"):
+            return
+        # Only the added checks still in the plan: one the person renamed or removed at an earlier stop they have seen.
+        planned = self._planned_oracles()
+        still = [str(n) for n in added.get("oracles") or [] if str(n) in planned]
+        # Written before the stop: the stop never returns, and the resume must go on to the freeze.
+        self._oracles_added_write({**added, "oracles": still, "shown": True})
+        if still:
+            self._pause_for_plan(added=still)
 
     async def _repair_script_for_oracle(
         self, state: QuestState, path: Path, oracles: list[dict[str, Any]], found: list[str], stderr_tail: str = "",
@@ -7624,6 +7737,18 @@ class Engine:
         # The oracles the plan's protocol declares are answered before anything is run for real (or a quest
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
+        if oracle_code is None and seed_path == code_path and state.get("code"):
+            # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
+            # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
+            # so it is what later repairs must start from.
+            try:
+                on_disk = code_path.read_text(encoding="utf-8")
+            except OSError:
+                on_disk = None
+            if on_disk and on_disk != state.get("code"):
+                oracle_code = on_disk
+        # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
+        self._hold_added_oracles()
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
 

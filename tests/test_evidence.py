@@ -324,9 +324,11 @@ async def test_a_finished_quest_leaves_its_evidence_and_says_what_is_missing(
 
 
 @pytest.mark.asyncio
-async def test_a_quest_that_held_to_a_protocol_and_passed_an_oracle_reaches_validated(
+async def test_a_one_script_quest_whose_oracle_value_the_script_printed_is_not_independently_validated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The engine judged the oracle, but the value it judged is the one the script printed under FI_ORACLE=1: a script
+    that prints the closed form without simulating would pass. That is not independent evidence, on one script or two."""
     ok_script = (
         "import os, json\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
         "if os.environ.get('FI_ORACLE') == '1':\n"
@@ -350,8 +352,13 @@ async def test_a_quest_that_held_to_a_protocol_and_passed_an_oracle_reaches_vali
     engine = Engine(_cfg(tmp_path, isolated=True))
     await engine.run()
     record = json.loads((engine.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
-    assert "protocol_runtime_matched" not in record["all_gaps"] and "independently_validated" not in record["all_gaps"], record["all_gaps"]
-    assert record["levels"]["independently_validated"] == record["levels"]["internally_reconciled"]
+    assert "protocol_runtime_matched" not in record["all_gaps"], record["all_gaps"]
+    assert record["levels"]["protocol_runtime_matched"] == record["levels"]["internally_reconciled"]
+    oracle = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert oracle["status"] == "ok" and oracle["judged_by"] == "engine" and "contract" not in oracle
+    assert record["levels"]["independently_validated"] is False
+    gaps = record["all_gaps"]["independently_validated"]
+    assert len(gaps) == 1 and "closed form" in gaps[0] and "execution.split_analysis: true" in gaps[0], gaps
 
 
 def test_the_quest_page_the_cli_summary_and_the_chat_carry_it() -> None:
