@@ -152,6 +152,10 @@ def _hermetic_arxiv_gate(tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(arxiv_gate, "MIN_INTERVAL_S", 0.0)
     arxiv_gate._PAUSED_QUESTS.clear()
+    # A search source that says "too many requests" is asked again after a few seconds; no test waits for them.
+    from core import knowledge
+
+    monkeypatch.setattr(knowledge, "_rate_limit_sleep", lambda seconds: None)
 
 
 @pytest.fixture(autouse=True)

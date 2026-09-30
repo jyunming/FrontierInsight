@@ -6053,6 +6053,24 @@ def _list_drafts(output_root: Path) -> int:
     return 0
 
 
+def _load_dotenvs() -> None:
+    """The ``.env`` in the folder FI runs in, then the one in FI's own folder (next to this file), when they differ.
+
+    The VS Code extension runs a quest in the workspace folder, which need not be the FrontierInsight folder, and the
+    CLI can be run from anywhere; a key kept in FI's own ``.env`` (docs/INSTALL.md says "at the repo root") was then
+    never read, and OpenAlex went on at a tenth of its budget without saying why. A key set in the working folder's
+    ``.env`` wins over FI's, and a real environment variable wins over both."""
+    here = Path(".env")
+    _load_dotenv(str(here))
+    own = Path(__file__).resolve().parent / ".env"
+    try:
+        same = here.is_file() and own.is_file() and here.resolve() == own.resolve()
+    except OSError:
+        same = False
+    if not same:
+        _load_dotenv(str(own))
+
+
 def _load_dotenv(path: str = ".env") -> None:
     """Minimal zero-dependency ``.env`` loader. Reads ``KEY=VALUE`` lines
     from a ``.env`` in the working directory (if present) into
@@ -6128,7 +6146,7 @@ def main() -> int:
     # brave_api_key / openalex_api_key / semantic_scholar_api_key / offline
     # defaults resolve BRAVE_API_KEY / OPENALEX_API_KEY /
     # SEMANTIC_SCHOLAR_API_KEY / FI_* at Config construction time).
-    _load_dotenv()
+    _load_dotenvs()
     args = parse_args()
     # Hold the coroutine so we can close() it if asyncio.run never consumes
     # it (e.g. a KeyboardInterrupt during loop startup). Without this, an

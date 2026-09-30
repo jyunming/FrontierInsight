@@ -3738,13 +3738,23 @@ class Engine:
         )
         qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
         full_n = qualities.get("full_text", 0)
+        # "Nothing fetched" is not "no abstract": a search record from OpenAlex / Crossref / Semantic Scholar carries
+        # the paper's abstract. The line used to call all of those "snippet only", which read as if not even the
+        # abstract had come back.
+        not_fetched = [e for e in merged
+                       if ((e.get("metadata") or {}).get("content_quality") or "snippet_only") == "snippet_only"]
+        with_abstract = sum(1 for e in not_fetched if _search_record_has_abstract(e.get("content") or ""))
         self._log.info(
             "[literature] full-text coverage: %d/%d sources have real full text (%d by OCR of a scanned PDF); "
-            "%d abstract only, %d a preview or table of contents, %d snippet only",
+            "%d have the abstract only (from the search, nothing downloaded), %d only a title or a one-line snippet, "
+            "%d a download that held little more than the abstract, %d a preview or table of contents",
             full_n, len(merged), sum(1 for e in merged if (e.get("metadata") or {}).get("full_text_ocr")),
+            with_abstract, len(not_fetched) - with_abstract,
             qualities.get("abstract_only", 0), qualities.get("preview_only", 0),
-            len(merged) - full_n - qualities.get("abstract_only", 0) - qualities.get("preview_only", 0),
         )
+        why = _literature_text_gaps(merged, _sf_snapshot(self.quest_id))
+        if why:
+            self._log.info("[literature] why the full text is missing: %s", why)
 
         # Pause-for-user-papers gate. Fires only when the user opted in
         # AND we have abstract-only hits (heuristic: content shorter
@@ -20987,6 +20997,93 @@ def _content_quality(content: str, meta: dict[str, Any]) -> str:
     if len(body.strip()) < max(4000, 3 * len(snippet.strip())):
         return "abstract_only"
     return "full_text"
+
+
+def _search_record_has_abstract(content: str) -> bool:
+    """Whether a search record's text holds more than its title: an index's abstract (OpenAlex rebuilds it from its
+    word index) runs to hundreds of characters; a title, or a search engine's one-line snippet, does not."""
+    _title, _sep, rest = str(content or "").partition("\n")
+    return len(rest.strip()) >= 200
+
+
+def _sf_snapshot(quest_id: str) -> dict[str, Any]:
+    from core import source_failures
+    try:
+        return source_failures.snapshot(quest_id)
+    except Exception:  # noqa: BLE001 -- the report is extra; a quest never stops on it
+        return {}
+
+
+#: The scholarly search sources (``core.knowledge._SOURCE_REGISTRY``); any other source in the failure ledger is a
+#: download (a free copy, a publisher PDF, a web page).
+_SEARCH_SOURCE_NAMES = frozenset({
+    "openalex", "arxiv", "crossref", "semantic_scholar", "pubmed", "core", "openaire", "doaj", "google_scholar",
+})
+_FAILURE_WORDS = {
+    "http_429": "too many requests", "http_4xx": "refused", "http_5xx": "server error", "timeout": "timed out",
+    "network": "unreachable", "parse": "unreadable answer",
+}
+
+
+def _literature_text_gaps(entries: list[dict[str, Any]], snap: dict[str, Any]) -> str:
+    """One plain line on why the kept sources lack their full text: how many are not free to read, how many are free
+    with no download link, how many free downloads failed (and where), which searches were refused or timed out, and
+    whether the OpenAlex key is missing. ``""`` when every scholarly source has its full text."""
+    from core.knowledge import has_free_route, is_open_access
+
+    paywalled = free_no_link = free_failed = 0
+    for e in entries:
+        md = e.get("metadata") or {}
+        if (md.get("content_quality") or "snippet_only") == "full_text":
+            continue
+        kind = str(md.get("kind") or "")
+        if (md.get("source") in ("local_paper", "user_supplied", "web_search")
+                or kind in _FI_INTERNAL_KINDS or kind.startswith("fi_")):
+            continue
+        if not is_open_access(md):
+            paywalled += 1
+        elif not has_free_route(md):
+            free_no_link += 1
+        else:
+            free_failed += 1
+    parts: list[str] = []
+    if paywalled:
+        parts.append(f"{paywalled} are not confirmed free to read (the publisher charges for them), so FI did not "
+                     "download them and a person has to")
+    if free_no_link:
+        parts.append(f"{free_no_link} are marked free to read but the index gave no download link, only the "
+                     "publisher's DOI page, which FI does not fetch")
+    examples = list(snap.get("examples") or [])
+    if free_failed:
+        where: list[str] = []
+        for ex in examples:
+            if ex.get("source") in _SEARCH_SOURCE_NAMES or not ex.get("host"):
+                continue
+            word = _FAILURE_WORDS.get(str(ex.get("kind")), str(ex.get("kind") or "failed"))
+            if ex.get("status") and str(ex.get("kind", "")).startswith("http_"):
+                word += f" (HTTP {ex['status']})"
+            item = f"{ex['host']} {word}"
+            if item not in where:
+                where.append(item)
+        parts.append(f"{free_failed} are free to read but the download failed"
+                     + (f" ({', '.join(where[:4])})" if where else ""))
+    searches: list[str] = []
+    for source, kinds in (snap.get("by_source") or {}).items():
+        if source not in _SEARCH_SOURCE_NAMES:
+            continue
+        said = ", ".join(f"{n} {_FAILURE_WORDS.get(k, k)}" for k, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
+        searches.append(f"{source} ({said})")
+    if searches:
+        line = "searches that failed, so fewer records and free links to choose from: " + "; ".join(searches)
+        refused = {s for s, kinds in (snap.get("by_source") or {}).items() if "http_429" in kinds}
+        if "semantic_scholar" in refused and not os.environ.get("SEMANTIC_SCHOLAR_API_KEY", "").strip():
+            line += " (no SEMANTIC_SCHOLAR_API_KEY is set; without one Semantic Scholar shares a busy public limit)"
+        parts.append(line)
+    if not os.environ.get("OPENALEX_API_KEY", "").strip():
+        parts.append("no OPENALEX_API_KEY is set, so OpenAlex allows only about 100 searches a day (docs/INSTALL.md)")
+    if not (paywalled or free_no_link or free_failed):
+        return ""
+    return "; ".join(parts)
 
 
 def _literature_entry(

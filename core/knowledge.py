@@ -234,19 +234,55 @@ class RetrievedDoc:
 # ---------------------------------------------------------------------------
 
 
+#: The waits before asking a search source again after it said "too many requests" (HTTP 429), one per retry. A
+#: keyless Semantic Scholar or a busy Crossref often answers the same query a few seconds later; on one real quest they
+#: refused five of the literature step's searches, each asked only once.
+_RATE_LIMIT_WAITS_S = (2.0, 5.0)
+#: A ``Retry-After`` longer than this is not waited for: the source is out of its budget for the day (OpenAlex without a
+#: key), not busy, and the quest goes on without it.
+_RATE_LIMIT_MAX_WAIT_S = 10.0
+
+
+def _rate_limit_sleep(seconds: float) -> None:
+    """The wait between tries (tests replace it)."""
+    time.sleep(seconds)
+
+
+def _retry_after_s(response: Any) -> float | None:
+    """The seconds a 429 answer's ``Retry-After`` asks for, when it gives a number of seconds."""
+    raw = str((getattr(response, "headers", None) or {}).get("retry-after") or "").strip()
+    try:
+        return max(0.0, float(raw)) if raw else None
+    except ValueError:
+        return None
+
+
 def _http_get_json(
     url: str, params: dict | None, timeout_s: float, *, source: str = "",
     headers: dict | None = None,
 ) -> dict | None:
-    try:
-        with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
-            r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0", **(headers or {})})
-            r.raise_for_status()
-            return r.json()
-    except Exception as e:
-        _log.info("http GET %s failed: %s", url, _sf.redact(e))
-        _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
-        return None
+    """GET ``url`` and parse its JSON; ``None`` on any failure, which is recorded against ``source``. A "too many
+    requests" answer is asked again after a short wait (:data:`_RATE_LIMIT_WAITS_S`), unless the source asks for a
+    longer one than :data:`_RATE_LIMIT_MAX_WAIT_S`; only the last failure is recorded."""
+    waits = list(_RATE_LIMIT_WAITS_S)
+    while True:
+        try:
+            with httpx.Client(timeout=timeout_s, follow_redirects=True) as c:
+                r = c.get(url, params=params, headers={"User-Agent": "FrontierInsight/1.0", **(headers or {})})
+                if getattr(r, "status_code", None) == 429 and waits:
+                    asked = _retry_after_s(r)
+                    planned = waits.pop(0)
+                    if asked is None or asked <= _RATE_LIMIT_MAX_WAIT_S:
+                        wait = planned if asked is None else max(asked, 0.5)
+                        _log.info("http GET %s: too many requests, asking again in %.0fs", url, wait)
+                        _rate_limit_sleep(wait)
+                        continue
+                r.raise_for_status()
+                return r.json()
+        except Exception as e:
+            _log.info("http GET %s failed: %s", url, _sf.redact(e))
+            _sf.record_exception(source or _sf.source_for_url(url, url), e, url=url)
+            return None
 
 
 # OpenAlex's id for the arXiv repository ("arXiv (Cornell University)").
