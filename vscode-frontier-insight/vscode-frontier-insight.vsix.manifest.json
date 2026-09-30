@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "218bf3a86068d254bfac6360caac93b54e8efce45d053112369db5e84bcd87d4",
+  "vsix_sha256": "fa8568e6413436f51add9d9f0c2990d0b5afe7129c4ce0d534343afae654ee68",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -54,8 +54,8 @@
       "bytes": 2087
     },
     "extension/out/interview-core.js": {
-      "sha256": "502d6f3eab89f2bed90345f26152812fc6dea4f02701ad9edba68ed675ffa870",
-      "bytes": 26853
+      "sha256": "af91810c00070b79898c598b9c5a98f5e24dd1b128017869a15261839571f1ce",
+      "bytes": 26870
     },
     "extension/out/interview.js": {
       "sha256": "0434b317671b8d2070f6894d185b0d28ff847adf1335019dad07620de447d7c6",
@@ -114,8 +114,8 @@
       "bytes": 14965
     },
     "extension/readme.md": {
-      "sha256": "e57983d0bd9888f4bb91c6a15e4a40e4b5b2c52a8cde82156149bd5640b47dd8",
-      "bytes": 78184
+      "sha256": "0cd01abbb85fd57342e9fabfc6634ba727a5999e2b249df9a348a040e553398d",
+      "bytes": 78531
     }
   }
 }
