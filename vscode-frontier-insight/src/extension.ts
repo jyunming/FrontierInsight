@@ -23,6 +23,7 @@ import { spawn } from "child_process";
 import {
     runApproveAllSkills,
     runApproveAmendment,
+    runAcceptChecks,
     runApproveSkill,
     runImportSkill,
     runListSkills,
@@ -32,6 +33,7 @@ import {
     runTeachSkill,
 } from "./skills";
 import { Bridge } from "./bridge";
+import { splitRevisePlan, unknownResumeFlags } from "./resume-args";
 import { forgetFoundFi, rootsForCommand, workFolderForCommand } from "./roots-config";
 import type { Roots } from "./roots";
 import { PersistentBridge } from "./persistent-bridge";
@@ -358,6 +360,13 @@ async function handleRequest(
         await runApproveAmendment(prompt, stream, token);
         return;
     }
+    if (cmd === "accept-checks") {
+        // A quest stopped because some checks do not say where their expected value comes from: go on as it is,
+        // with the person's name (`launch.py --accept-checks`), then resume it.
+        const questId = await runAcceptChecks(prompt, stream, token);
+        if (questId && !token.isCancellationRequested) await runResume(questId, stream, token, userPickedModel);
+        return;
+    }
     if (cmd === "revoke-skill") {
         await runRevokeSkill(prompt, stream, token);
         return;
@@ -449,6 +458,7 @@ function helpText(): string {
         "- `@fi /scan-skill <name> [--config <quest.yaml>]` — statically review a skill before approving it: injection phrasing, hidden characters, network access, `eval`. Nothing is imported or run.",
         "- `@fi /approve-skill <name> [--config <quest.yaml>]` — approve a skill for use. Shows the review first, then asks who is approving; a high-severity finding needs an extra confirmation. Approval binds to that exact content.",
         "- `@fi /approve-amendment <quest_id>` — approve the change to a quest's frozen protocol that it stopped to ask about. Shows what changes and why, asks who is approving, and records it; resuming the quest without approving keeps the frozen protocol. If the results had already been seen, the run is archived and the paper says the change was post-hoc.",
+        "- `@fi /accept-checks <quest_id>` — go on as it is when a quest stopped because some of its checks do not say where their expected value comes from. Shows the checks, asks your name, records the choice and resumes. The checks still run; each is marked *source not confirmed*, and the result and the paper say so. To fill them in instead: `@fi /plan <quest_id> fill in where each check's expected value comes from`.",
         "- `@fi /approve-all-skills` — approve every skill that passes its gates at once, optionally pip-installing what quarantined skills are missing first. Still asks who is approving; a failing self-test is still refused.",
         "- `@fi /revoke-skill <name> [--config <quest.yaml>]` — withdraw approval, returning the skill to proposed.",
         "- `@fi /remove-skill <name> [--config <quest.yaml>]` — remove a skill from FI: deleted if it is in FI's own folder, hidden if another tool installed it.",
@@ -497,6 +507,31 @@ async function runResume(
     plan = false,
 ): Promise<void> {
     if (token.isCancellationRequested) return;
+
+    // `/resume <quest_id> --revise-plan "<what to change>"` is the CLI's spelling of `/plan <quest_id> <what to change>`.
+    // It used to be read as a plain resume (only the first word, the id, was kept), which ran the quest into the same
+    // stop again with the plan unchanged: it now rewrites the plan as asked, and runs nothing else, as the CLI does.
+    const revise = !plan && !watch ? splitRevisePlan(promptArgs) : null;
+    if (revise) {
+        if (!revise.questId || !revise.request) {
+            stream.markdown("Name the quest and say what to change after `--revise-plan`, for example: " +
+                "`@fi /resume <quest_id> --revise-plan \"fill in where each check's expected value comes from\"`.\n");
+            return;
+        }
+        await runResume(`${revise.questId} ${revise.request}`.trim(), stream, token, userPickedModel, false, true);
+        return;
+    }
+    // Any other flag is said, not dropped: a resume that silently ignored what was asked ran into the same stop again.
+    const unknown = !plan && !watch ? unknownResumeFlags(promptArgs) : [];
+    if (unknown.length) {
+        stream.markdown(
+            `❌ \`/resume\` does not understand ${unknown.map((f) => `\`${f}\``).join(", ")}, so nothing was run. ` +
+            "It takes a quest id, `--from <step>` (redo from a step) and `--revise-plan \"<what to change>\"` " +
+            "(rewrite the plan). To go on with checks that do not say where their expected value comes from: " +
+            "`@fi /accept-checks <quest_id>`.\n",
+        );
+        return;
+    }
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const roots = await rootsForCommand();

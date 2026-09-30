@@ -328,6 +328,7 @@ While a quest is running, or after
   --why QUEST_ID [ABOUT] Why it stopped, why the review asked for a revision, why the evidence is at its level.
   --update QUEST_ID      Re-open the setup questions for a running quest's editable answers.
   --approve-amendment QUEST_ID   Approve a change to a quest's frozen protocol that it stopped to ask about.
+  --accept-checks QUEST_ID       Go on with checks that do not say where their expected value comes from (needs --approve-as).
 
 Skills (what FI has learned about driving one piece of software on this machine)
   --skills               List them, and whether each is approved.
@@ -709,6 +710,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "protocol. Then resume the quest.",
     )
     mode.add_argument(
+        "--accept-checks",
+        metavar="QUEST",
+        default="",
+        help="Go on as it is when a quest stopped because some of its checks do not say where their expected value "
+             "comes from (the stop lists them in needs/UNSOURCED_CHECKS.json). The checks still run and are still "
+             "judged; each is marked 'source not confirmed', and the result and the paper say so. QUEST is the quest id "
+             "(looked up under --output-root) or its folder. Pair with --approve-as: your name is recorded with the "
+             "choice. Then resume the quest.",
+    )
+    mode.add_argument(
         "--trace",
         metavar="QUEST",
         default="",
@@ -885,7 +896,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         metavar="WHO",
         default="",
         help="Who is approving (recorded in the ledger). Required with "
-             "--approve-skill and --approve-amendment: the gate exists so a "
+             "--approve-skill, --approve-amendment and --accept-checks: the gate exists so a "
              "person decides, so there is no anonymous approver.",
     )
     mode.add_argument(
@@ -2370,7 +2381,48 @@ async def _revise_plan_once(
         "[FI] read it, edit it, or ask again with --revise-plan; "
         f"when it says what you want: python launch.py --config <yaml> --resume {quest_id}"
     )
+    # Last, so the one line the web page shows of this command is whether the checks now say where their values come from.
+    status = _plan_sources_status(Path(done["path"]))
+    for line in status[1:] + status[:1]:
+        print(f"[FI] {line}")
     return 0
+
+
+def _plan_sources_status(path: Path) -> list[str]:
+    """After a rewrite of the plan: whether each check now says where its expected value comes from, read the way the
+    quest reads it on resume (against the sources plan.md lists), so a rewrite that did not fill it in is known now and
+    not at the next stop. Empty for a plan with no checks."""
+    try:
+        return _plan_sources_lines(path)
+    except Exception:  # noqa: BLE001 -- the plan was already rewritten; a report of it must not fail the command
+        return []
+
+
+def _plan_sources_lines(path: Path) -> list[str]:
+    from core import accepted_checks, oracle_check, plan as _plan_mod
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    design = _plan_mod.parse(text).design
+    protocol = (design or {}).get("protocol") if design else None
+    oracles = oracle_check.declared(protocol if isinstance(protocol, dict) else None)
+    if not oracles:
+        return []
+    still = dict(oracle_check.unsourced(protocol, _plan_mod.listed_sources(text)))
+    lines = []
+    for oracle in oracles:
+        name = str(oracle["name"]).strip()
+        lines.append(f"  still missing: {still[name]}" if name in still
+                     else f"  the check {name!r} says where its expected value comes from: {oracle_check.reference_of(oracle)[:120]}")
+    missing = oracle_check.model_missing(protocol)
+    stopped = accepted_checks.pending(path.parent) is not None
+    head = ("every check now says where its expected value comes from" if not still else
+            f"{len(still)} of {len(oracles)} check(s) still do not say where their expected value comes from (ask "
+            "again, or edit plan.md" + (", or go on as it is with --accept-checks <quest> --approve-as <you>"
+                                        if stopped else "") + ")")
+    return [head, *lines, *([f"the model behind the numbers still leaves out {', '.join(missing)}"] if missing else [])]
 
 
 def _visual_check_line(report: dict) -> str:
@@ -2839,6 +2891,7 @@ async def main_async(args: argparse.Namespace) -> int:
         # Rewriting plan.md is one model call and makes no Axon call.
         or getattr(args, "revise_plan", None) is not None
         or bool(getattr(args, "approve_amendment", ""))
+        or bool(getattr(args, "accept_checks", ""))
         or bool(getattr(args, "trace", ""))
         or bool(getattr(args, "why", None))
         or bool(getattr(args, "rename", None))
@@ -2918,6 +2971,9 @@ async def main_async(args: argparse.Namespace) -> int:
 
         if args.approve_amendment:
             return _approve_amendment(args.approve_amendment, args.approve_as, args.output_root)
+
+        if args.accept_checks:
+            return _accept_checks(args.accept_checks, args.approve_as, args.output_root)
 
         if args.trace:
             if args.follow:
@@ -6037,6 +6093,27 @@ def _approve_amendment(quest: str, approved_by: str, output_root: Path) -> int:
     if not ok:
         return 2 if not (approved_by or "").strip() else 1
     print(f"[FI] now resume the quest: python launch.py --config <its yaml> --resume {root.name}")
+    return 0
+
+
+def _accept_checks(quest: str, approved_by: str, output_root: Path) -> int:
+    """Record a person's choice to go on with the checks a quest stopped for (their expected values say nowhere where
+    they come from), as they are."""
+    from core import accepted_checks
+
+    root = next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)
+    if root is None:
+        # Its id, full or shortened, among every quest FI has run on this computer (a quest in another folder).
+        found = _locate_quest(quest, output_root)
+        root = found if found is not None and (found / ".fi").is_dir() else None
+    if root is None:
+        print(f"[FI] no quest {quest!r} (looked at {Path(quest)} and {output_root / quest}); pass its folder, or --output-root.")
+        return 1
+    ok, message = accepted_checks.accept(root, approved_by, via="cli")
+    print(f"[FI] {message}")
+    if not ok:
+        return 2 if not (approved_by or "").strip() else 1
+    print(f"[FI] now resume the quest: python launch.py --resume {root.name}")
     return 0
 
 

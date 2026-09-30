@@ -660,3 +660,64 @@ export async function runApproveAmendment(
         stream.markdown(`Approval failed (exit ${res.code}):\n\n\`\`\`\n${(res.stdout || res.stderr).slice(-800)}\n\`\`\`\n`);
     }
 }
+
+/**
+ * `@fi /accept-checks <quest_id>` — go on as it is when a quest stopped because some of its checks do not say where
+ * their expected value comes from (`rigor_profile: research`).
+ *
+ * The checks the stop named are shown first, then the person's name is asked for: typed, never filled in silently.
+ * The checks still run and are still judged; each is marked "source not confirmed", and the result and the paper say
+ * so. The choice is written by the same `launch.py --accept-checks` the CLI uses; then the quest is resumed.
+ */
+export async function runAcceptChecks(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<string | undefined> {
+    const questId = promptArgs.trim().split(/\s+/)[0] || "";
+    if (!questId) {
+        stream.markdown("Which quest? Example: `@fi /accept-checks 1790003131-my-quest`\n");
+        return undefined;
+    }
+    const env = await resolveRepo(stream);
+    if (!env || token.isCancellationRequested) return undefined;
+    const cfg = vscode.workspace.getConfiguration("frontierInsight");
+    const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
+    const outputsDir = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(env.workDir, outputDirSetting);
+
+    const pendingFile = path.join(outputsDir, questId, "needs", "UNSOURCED_CHECKS.json");
+    let pending: any = null;
+    try {
+        pending = JSON.parse(await fs.readFile(pendingFile, "utf8"));
+    } catch {
+        // A quest in another folder (FI finds it by its id): FI lists its checks and refuses if it is not stopped for them.
+        pending = null;
+    }
+    const checks: any[] = pending && Array.isArray(pending.checks) ? pending.checks : [];
+    stream.markdown(
+        `**These checks of \`${questId}\` do not say where their expected value comes from:**\n\n` +
+            (checks.length ? checks.map((c) => `- ${String(c.why || c.name)}`).join("\n")
+                : "- (listed in the quest's `needs/UNSOURCED_CHECKS.json`; FI refuses if the quest is not stopped for them)") +
+            "\n\nGoing on as it is: the checks still run and are still judged; each is marked *source not confirmed*, " +
+            "and the result and the paper say so. Your name is recorded with the choice. (Or fill it in instead: " +
+            `\`@fi /plan ${questId} fill in where each check's expected value comes from\`.)\n\n`,
+    );
+    const who = await vscode.window.showInputBox({
+        title: `Go on as it is: ${questId}`,
+        prompt: "Enter your name. The choice to go on without a stated source is recorded against it.",
+        value: cfg.get<string>("approveAs") || "",
+        ignoreFocusOut: true,
+        validateInput: (v) => (v.trim() ? null : "The choice is recorded with a name: there is no anonymous one."),
+    });
+    if (!who || !who.trim()) {
+        stream.markdown("Nothing recorded — no name given. The quest stays stopped.\n");
+        return undefined;
+    }
+    const res = await runLaunch(env, ["--accept-checks", questId, "--approve-as", who.trim(), "--output-root", outputsDir]);
+    if (res.code !== 0) {
+        stream.markdown(`Could not record it (exit ${res.code}):\n\n\`\`\`\n${(res.stdout || res.stderr).slice(-800)}\n\`\`\`\n`);
+        return undefined;
+    }
+    stream.markdown(`✅ Recorded as \`${who.trim()}\`. Going on with the quest…\n\n`);
+    return questId;
+}

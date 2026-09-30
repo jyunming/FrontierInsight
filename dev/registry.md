@@ -39,6 +39,34 @@ same PR that adds, splits or renames one.
   numbered then (`sources` and its own `sources_sha256` in `needs/FROZEN_PROTOCOL.json`; `load` sets
   `sources_problem` on an edit), and `Engine._oracle_source_gaps` (called by `_write_evidence`; a record frozen
   without `sources` is judged only on `empty_references`) passes the gaps to `evidence.assess(oracle_source_gaps=...)`.
+  What the engine reads is mapped at read time, never renamed in the plan (a frozen protocol hashes as written):
+  `oracle_check.reference_of` / `kind_of` / `kind_written` (a reference under `source`/`basis`/`derivation` or inside
+  the check's text; a kind under `type`, or in words such as "normalization"), `model_view` / `equation_items` /
+  `model_missing` (the model's parts under other names; equations as lines or an id->formula mapping), `unsourced`
+  (`(name, why)` per check), `DERIVATION_RULE` (a derivation needs at least one equation with `=`).
+  `plan.normalize_model` / `normalize_protocol` convert only shapes they used to refuse (equations as text or a mapping,
+  a kind/reference written as a list); `plan.repair_protocol` leaves out one unreadable check, not the list;
+  `plan.listed_sources` reads *The sources this quest found* back from `plan.md`; `plan.refresh_model_section` shows the
+  model section again from the block after a rewrite. Under research, `Engine._settle_plan_sources` (all four call
+  sites) first runs `_fill_plan_sources`: once per quest (`.fi/plan_sources_asked.json`, written once the model has
+  answered; not on a later pass, nor on a plan.md that cannot be read) a targeted
+  `_rewrite_plan(_fill_request(...), by="engine")`, put back when `_fill_changed_more` finds anything but sources,
+  kinds and the model changed. `_rewrite_plan` gives every rewrite `_plan_checks_note` (what FI reads and what is
+  missing, `$checks` in `agents/plan_revise.md`). The stop (`_pause_for_plan(unsourced_checks=...)`) offers three ways
+  on and writes `needs/UNSOURCED_CHECKS.json`.
+- `core/accepted_checks.py` — going on with checks whose expected value has no stated source: `write_pending` /
+  `pending` / `clear_pending` (what the stop named, and what the stop before named, so the next stop says what changed),
+  `accept(root, who, via=...)` (`needs/UNSOURCED_CHECKS_ACCEPTED.json`; a name is required), `fingerprint` (a choice
+  binds to a check's name and numbers: expected, tolerance, case, measure), `covers` / `chose` / `changed_since` (the
+  engine goes on only when every unsourced check was chosen as it is now; `Engine._unsourced_oracles` and
+  `_not_confirmed_names` mark the evidence gap "source not confirmed" in `_oracle_source_gaps` and the freeze's
+  `approved_by`, for checks still without a source), `disclosure(root, names)` (the writer's note). A source the fill
+  wrote after the person read the plan is named in the freeze too (`.fi/plan_sources_filled.json`). Surfaces:
+  `launch.py --accept-checks <quest> --approve-as <you>` (`_accept_checks`), `POST /api/quests/{id}/plan/accept-checks`
+  and `GET .../plan/unsourced` (the quest page's *Go on as it is*), `@fi /accept-checks` (`skills.ts::runAcceptChecks`).
+  `vscode-frontier-insight/src/resume-args.ts` (no VS Code import, run by a test with node): `splitRevisePlan` (`/resume
+  <id> --revise-plan "..."` goes the `/plan` way) and `unknownResumeFlags` (any other flag is said, and nothing runs).
+  `launch._plan_sources_status` prints, after `--revise-plan`, which checks still lack a source.
   `sources_block` is the numbered list plan.md shows (*The sources this quest found*). The model block's shape (`protocol.model`) is `core/plan.py`'s
   (`normalize_model`, `repair_model`, the *The model behind the numbers* section of `render`). Also owns the equation
   labels: `generating_equations` (the model's `generates` ids), `unlabelled_equations` (those no comment or docstring

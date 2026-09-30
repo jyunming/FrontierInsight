@@ -139,6 +139,15 @@
         <button onclick="document.getElementById('plan-section').scrollIntoView({ behavior: 'smooth', block: 'start' })" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Go to the plan ↓</button>
         <button onclick="resumeQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume with this plan</button>
       </div>
+      <!-- The plan's checks do not say where their expected values come from: the person may go on as it is, with their name. -->
+      <div id="next-step-accept" class="hidden flex flex-col gap-2 pt-2 border-t border-white/10">
+        <span class="text-on-surface-variant text-body-sm">Or go on as it is: the checks still run and are still judged, each is marked <em>source not confirmed</em>, and the result and the paper say so. Your name is recorded with the choice.</span>
+        <div class="flex flex-wrap items-center gap-3">
+          <input id="accept-checks-who" type="text" placeholder="your name" class="bg-surface-low border border-white/10 rounded px-3 py-2 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none"/>
+          <button id="accept-checks-btn" onclick="acceptChecks()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Go on as it is</button>
+          <span id="accept-checks-status" class="text-on-surface-variant text-body-sm"></span>
+        </div>
+      </div>
       <!-- SUPPLY pauses: drop files straight into the named folder(s) + Resume. -->
       <div id="next-step-supply" class="hidden flex flex-wrap items-center gap-3">
         <input id="next-step-file" type="file" multiple class="text-on-surface text-body-sm"/>
@@ -493,6 +502,7 @@
     renderVisualCheck(data.visual_check);
     renderEvidence(data.evidence);
     renderAmendment(data.amendment);
+    renderUnsourcedChecks(data.unsourced_checks);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -1243,6 +1253,34 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     }
   }
   document.getElementById('amendment-approve').addEventListener('click', approveAmendment);
+
+  // The quest stopped because some checks do not say where their expected value comes from: offer "Go on as it is".
+  function renderUnsourcedChecks(pending) {
+    const box = document.getElementById('next-step-accept');
+    if (!box) return;
+    box.classList.toggle('hidden', !(pending && (pending.checks || []).length));
+    try { const who = localStorage.getItem('fi_approver'); const el = document.getElementById('accept-checks-who'); if (who && !el.value) el.value = who; } catch (e) { /* no storage */ }
+  }
+  async function acceptChecks() {
+    const who = document.getElementById('accept-checks-who').value.trim();
+    const status = document.getElementById('accept-checks-status');
+    if (!who) { status.textContent = 'Say who is choosing to go on: the choice is recorded with a name.'; return; }
+    try { localStorage.setItem('fi_approver', who); } catch (e) { /* no storage */ }
+    try {
+      const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/plan/accept-checks`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({who}),
+      });
+      const body = await res.json();
+      if (!res.ok) { status.textContent = body.detail || 'Could not record it.'; return; }
+      status.textContent = 'Recorded. Going on…';
+      // Go on from where the quest stopped, never from a step picked for a redo.
+      const menu = document.getElementById('rerun-from');
+      if (menu) menu.value = '';
+      resumeQuest();
+    } catch (e) {
+      status.textContent = 'Could not reach the server.';
+    }
+  }
 
   function renderVisualCheck(vc) {
     const banner = document.getElementById('visual-check-banner');

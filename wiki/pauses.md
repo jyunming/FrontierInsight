@@ -43,6 +43,7 @@ A decision is accept, reject, or refine *with* notes. Anything else (a closed pr
 ## Plan
 
 - CLI: `--resume <id> --revise-plan "<change>"` changes the plan only; `--resume <id>` runs it.
-- Web: the Plan panel. VS Code: `@fi /plan <id> [<change>]`.
+- Web: the Plan panel. VS Code: `@fi /plan <id> [<change>]` (or `@fi /resume <id> --revise-plan "<change>"`).
+- A plan stop because a check does not say where its expected value comes from (research) offers three ways on: let FI fill it in, change it yourself, or go on as it is with your name (`--accept-checks <id> --approve-as <you>`, the web *Go on as it is* button, `@fi /accept-checks <id>`). See [[oracle-provenance|Oracle provenance]].
 
 Related: [[quest-map|Quest map]] (a paused quest shows where it stopped), [[model-behind-the-numbers|The model behind the numbers]], [[provider-outages|Waiting out provider outages]] (a provider outage is waited out, not turned into a pause).

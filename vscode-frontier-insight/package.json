@@ -142,6 +142,10 @@
             "description": "Approve the change to a quest's frozen protocol that it stopped to ask about. Shows what changes and why, asks who is approving. Resuming without approving keeps the frozen protocol."
           },
           {
+            "name": "accept-checks",
+            "description": "Go on as it is when a quest stopped because some checks do not say where their expected value comes from. Shows the checks, asks your name, then resumes. The checks still run; each is marked 'source not confirmed', and the result says so."
+          },
+          {
             "name": "approve-all-skills",
             "description": "Approve every skill that passes its gates at once, optionally installing the Python packages quarantined skills are missing first. Still asks who is approving."
           },
