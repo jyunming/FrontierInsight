@@ -31,7 +31,7 @@ import {
     runTeachSkill,
 } from "./skills";
 import { Bridge } from "./bridge";
-import { rootsForCommand, workFolderForCommand } from "./roots-config";
+import { forgetFoundFi, rootsForCommand, workFolderForCommand } from "./roots-config";
 import type { Roots } from "./roots";
 import { PersistentBridge } from "./persistent-bridge";
 import { persistentBridgePath } from "./bridge-path";
@@ -185,6 +185,11 @@ export function activate(context: vscode.ExtensionContext): void {
             openQuestMap(context, typeof questId === "string" ? questId : undefined)),
     );
     context.subscriptions.push(participant);
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
+        if (e.affectsConfiguration("frontierInsight.pythonPath") || e.affectsConfiguration("frontierInsight.repoPath")) {
+            forgetFoundFi();
+        }
+    }));
 
     // Probe the Axon sidecar on activation. We don't auto-launch from
     // the extension — VSCode users are expected to keep an Axon

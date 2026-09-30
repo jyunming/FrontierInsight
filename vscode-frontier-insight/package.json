@@ -195,7 +195,7 @@
         "frontierInsight.workingDir": {
           "type": "string",
           "default": "",
-          "description": "The folder quests run in: your YAML, example files and the relative outputs/ all mean this folder. Defaults to the open workspace folder (or the FrontierInsight folder when that is the workspace). Relative values are resolved against the workspace."
+          "description": "The folder quests run in: your YAML, example files and the relative outputs/ all mean this folder. Defaults to the open folder (or the FrontierInsight folder when that is the one open). With several folders open: the folder holding the YAML the command names, else the folder of the file you are editing, else the first that is not the FrontierInsight folder. Relative values are resolved against that folder."
         },
         "frontierInsight.outputDir": {
           "type": "string",

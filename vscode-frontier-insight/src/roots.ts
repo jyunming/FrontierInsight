@@ -13,6 +13,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { execFile } from "child_process";
+import { fiHome } from "./fi-home";
 
 export interface Roots {
     /** The folder containing FI's `launch.py`. */
@@ -92,9 +93,9 @@ export interface LocateInput {
     writeText?: (p: string, text: string) => void;
 }
 
-/** Where a picked FI folder is remembered, beside FI's other per-person files (profile.json, skills/). */
-export function savedLocationFile(home: string = os.homedir()): string {
-    return path.join(home, ".frontier-insight", "fi_location.json");
+/** Where a picked FI folder is remembered, beside FI's other per-person files (`fiHome()`: FI_HOME, else ~/.frontier-insight). */
+export function savedLocationFile(): string {
+    return path.join(fiHome(), "fi_location.json");
 }
 
 /** A folder holds `launch.py` (all a `frontierInsight.repoPath` someone typed is checked for). */
@@ -209,7 +210,8 @@ export function askPythonWhereFiIs(pythonPath: string, timeoutMs = 8000): Promis
                 pythonPath, ["-c", PYTHON_WHERE_IS_FI],
                 {
                     // The extension's own folder: Windows looks for a bare `python` in the current
-                    // folder first, so not one anyone writes to. UTF-8 out so C:\Users\張三 survives.
+                    // folder first, and nothing but the extension goes there (unlike a temp folder).
+                    // UTF-8 out so a path like C:\Users\張三 survives.
                     cwd: __dirname, timeout: timeoutMs, windowsHide: true, encoding: "utf-8",
                     env: { ...process.env, PYTHONIOENCODING: "utf-8" },
                 },

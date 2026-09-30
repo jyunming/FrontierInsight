@@ -18,6 +18,11 @@ import {
 let found: string | undefined;
 let searching: Promise<Located> | undefined;
 
+/** Look again on the next command (the Python or FI's folder setting changed). */
+export function forgetFoundFi(): void {
+    found = undefined;
+}
+
 async function findFi(cfg: vscode.WorkspaceConfiguration, folders: string[]): Promise<Located> {
     const setting = (cfg.get<string>("repoPath") || "").trim();
     // An open FI checkout always wins (cheap to check, so before the session's answer).

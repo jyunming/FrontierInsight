@@ -38,6 +38,7 @@ def _run(tmp_path: Path, **arg) -> dict:  # noqa: ANN003
         # A picked FI folder is remembered under the home folder: never the real one.
         "HOME": str(tmp_path / "home"),
         "USERPROFILE": str(tmp_path / "home"),
+        "FI_HOME": str(tmp_path / "home" / ".frontier-insight"),
     }
     # Unless a test says otherwise, the Python knows nothing of FI (the machine's own may).
     arg["settings"] = {"pythonPath": str(tmp_path / "no-such-python"), **arg.get("settings", {})}
