@@ -18,7 +18,7 @@ After a refine the writer answers what the text can answer and ends its reply wi
 | figures arranged, resized or redrawn | layout redraw | the figures are redrawn from the saved data, without re-running |
 | a genuinely different study | experiment | back to the design |
 
-If any point needs a different experiment, that route wins and missing-number points go with it. A refine with empty notes counts as accept. A refine is always honoured, even past `engine.max_iterations`. The route is recorded in the trace.
+If any point needs a different experiment, that route wins and missing-number points go with it. A refine with no notes is not a decision: `--refine ""` and the web page refuse it, and the quest stays paused (see [[Pauses]]). Only at the terminal prompt and the VS Code input box does an empty refine confirmed with Enter mean accept, as those prompts say. A refine is always honoured, even past `engine.max_iterations`. The route is recorded in the trace.
 
 ## Missing number: extend the script
 

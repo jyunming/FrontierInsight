@@ -21,13 +21,13 @@ One of six kinds: a special or limiting case with a known answer, an invariant (
 
 - The **plan** supplies the oracle, its expected value, tolerance and source. You can edit it in `plan.md`.
 - The **simulation** supplies only the measured value.
-- **FI** supplies the verdict: |value − expected| ≤ tolerance, with both numbers taken from the plan. A pass/fail, expected value or tolerance the script prints about itself is ignored.
+- **FI** supplies the verdict: |value − expected| ≤ tolerance (or ≤ tolerance × |expected| with `tolerance_mode: relative`), with both numbers taken from the plan. A pass/fail, expected value or tolerance the script prints about itself is ignored.
 
 ## When and how the checks run
 
 Before the pilot and the main run:
 
-1. For a simulation FI can call (the default two scripts, see [[Engine-callable simulations]]) FI runs the simulation on each oracle's `case` in its own process, with exactly the settings a real trial gets, so the simulation cannot tell it is being checked. That value is recorded as measured by FI.
+1. For a simulation FI can call (one with a `run_trial` or `run_cell` function, which the default two scripts give; see [[Engine-callable simulations]]) FI runs the simulation on each oracle's `case` in its own process, with the environment a real trial gets (never `FI_ORACLE`), so the simulation cannot tell it is being checked. That value is recorded as measured by FI.
 2. An oracle without a case, and every oracle in a one-script quest (`execution.split_analysis: false`), is answered by the script itself (its `oracle()` function, or a run with `FI_ORACLE=1`). That value is recorded as measured by the script.
 3. A missing value, a value outside the tolerance, a crash or a timeout is a problem. With `engine.oracle_check: block` (the default, and always under the research profile) the quest stops before the main run. With `warn` it logs and continues; with `off` there is no check.
 
@@ -35,7 +35,7 @@ The result is in `needs/ORACLE_CHECK.json`.
 
 ## Repairs never bend the check
 
-A failing check asks the model to repair the script, up to `engine.oracle_repair_attempts` times (default 2). It is told to find out whether the simulation, the measurement or the check is wrong, and never to loosen, skip or hard-code a check. If it concludes the *check* is wrong (a miscalculated expected value, or a tolerance smaller than the method's own error), it may only **propose** new numbers. Its code is set aside and the correct script is kept. The quest stops with the proposal and the exact `--revise-plan` command to accept it. Nothing changes without you.
+A failing check asks the model to repair the script, up to `engine.oracle_repair_attempts` times (default 2). It is told to find out whether the simulation, the measurement or the check is wrong, and never to loosen, skip or hard-code a check. If it concludes the *check* is wrong (a miscalculated expected value, or a tolerance smaller than the method's own error), it may only **propose** new numbers. Its code is set aside and the script on disk is kept as it is. With `engine.oracle_check: block` the quest then stops with the proposal: before the protocol is frozen, you accept it by editing the oracle in `plan.md` or asking for the change with `--revise-plan`; after the freeze the stop explains how to ask for an amendment instead (and a quest under the research profile cannot change the check inside that quest at all). With `warn` the run goes on with the failure recorded. Nothing changes without you.
 
 ## What counts as independent evidence
 

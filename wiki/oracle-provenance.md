@@ -8,7 +8,7 @@ updated: 2026-09-30
 Where each oracle's expected value comes from. A check against a number the model made up is not a check, so each oracle's `reference` must be one of:
 
 - **a derivation**: `derivation: <steps>` with real steps (at least 20 characters that state a relation, with `=`, `<`, `≈`, `→`, ...). "From Butcher 2008", "see the handbook" or "well-known value" do not count;
-- **a source this quest retrieved**: its number `[n]` (also `[1, 3]` or `[1-3]`), its DOI or its full title;
+- **a source this quest retrieved**: its number `[n]` (also `[1, 3]` or `[1-3]`), its DOI or its title (five words or more);
 - **an equation of the [[The model behind the numbers]]** (`E1`) whose own source counts;
 - for a second implementation: a statement of what code it does not share with the simulation. This is required but not verified.
 

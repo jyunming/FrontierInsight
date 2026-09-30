@@ -12,7 +12,7 @@ Each quest's `code/` folder can be copied out and run without FI:
 - `README.md`, `requirements.txt` (the exact versions that were installed), `run.py` (runs the simulation for every setting, then the analysis, with only the Python standard library) and `study.json` (the frozen grid).
 - It has its own git history: every change (a run, a [[Refine]], an extension) is one commit and one `CHANGELOG.md` entry, kept across a [[Doing a step again|run from a step]].
 - Before the paper is written FI checks, once per code version, that the project runs in a clean environment (`needs/CODE_PROJECT_CHECK.json`). This check only warns, and runs only with the venv sandbox and without background jobs.
-- A file you edited by hand is never overwritten. With `pauses.review: ask` FI stops and asks; otherwise it logs a warning.
+- A project file FI keeps up to date (`README.md`, `requirements.txt`, `run.py`, `study.json`) that you edited by hand is never overwritten: with `pauses.review: ask` FI stops and asks; otherwise it keeps your version and logs a warning. The scripts themselves are rewritten when FI repairs or extends them.
 
 The web download zip leaves out `run_output/`.
 

@@ -32,7 +32,7 @@ How to answer:
 
 ## Review
 
-A decision is accept, reject, or refine *with* notes. Anything else (a closed prompt, an empty answer file, refine with no notes) is not a decision: the quest stops cleanly and asks again on resume. It is never taken as accept.
+A decision is accept, reject, or refine *with* notes. Anything else (a closed prompt, an empty answer file, refine with no notes) is not a decision: the quest stops cleanly and asks again on resume. It is never taken as accept. The one exception is the prompt itself: at the terminal prompt and the VS Code input box, an empty refine confirmed with Enter means accept, as the prompt says.
 
 - CLI: `--resume <id> --accept`, `--reject` or `--refine "notes"`; or `--interactive`.
 - Web: the review banner on the quest page.

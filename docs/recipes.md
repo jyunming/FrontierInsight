@@ -177,7 +177,7 @@ There are five places it can stop, all configured in one place — the `pauses:`
 
 | When it stops | Kind | What it wants | Turn it on with |
 |---|---|---|---|
-| **clarify** (start) | ANSWER | answer the setup questions (what you want to see, the title, the baseline, ...) | on by default when someone can answer (the terminal with `--interactive`, the web quest page, VS Code); `pauses.clarify: ask` always stops, `auto` lets the agent answer, `off` skips ([USAGE.md](USAGE.md#setup-questions)) |
+| **clarify** (start) | ANSWER | answer the setup questions (what you want to see, the title, the baseline, ...) | on by default when someone can answer (the terminal with `--interactive`, the web quest page, VS Code for a quest on the VS Code chat model); `pauses.clarify: ask` always stops, `auto` lets the agent answer, `off` skips ([USAGE.md](USAGE.md#setup-questions)) |
 | **literature** | SUPPLY | download the paywalled papers it lists (open-access sources never trigger this — see below), or resume without them: they are read from their abstracts and not asked for again | `pauses.papers: true` (the default; `false` turns it off) |
 | **after the literature** | SUPPLY | the literature is saved; add papers, files or change the config, then the experiment is designed with it in hand (no second search) | `pauses.supply: after_literature` |
 | **the plan** | SUPPLY | read `plan.md` (what the literature says, the gap, the design), edit it or ask for a change (`--revise-plan`); the design block in it is what runs | `pauses.plan: ask` |

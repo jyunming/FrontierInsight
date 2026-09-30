@@ -12,7 +12,7 @@ Every plan says which of two kinds of study it is (`study_type` in the plan's de
 
 ## What a best-design plan must say
 
-The plan's "What is being optimised" section lists the objective (a quantity to minimise or maximise), the design variables with their ranges, what stays fixed, the constraints (`quantity <= limit`), a baseline with its source, the numerical settings for the search and for the finer check levels, the evaluation budget, the search method (FI picks exhaustive, global-then-local or bounded local from the budget when none is given) and how much better a design must be to count as better (by default: more than the numerical error of the two designs). See [[Scoring criteria]] for the separate question of whether the code itself got better.
+The plan's "What is being optimised" section lists the objective (a quantity to minimise or maximise), the design variables with their ranges, what stays fixed, the constraints (`quantity <= limit`), a baseline with its source, the numerical settings for the search and the finer settings the best designs are checked again at, the evaluation budget, the search method (when none is given FI picks one from the budget: try every combination when the variables take few values, search the whole range first and then locally from the best point found, or search locally inside the ranges from several starting points) and how much better a design must be to count as better (by default: more than the numerical error of the two designs). See [[Scoring criteria]] for the separate question of whether the code itself got better.
 
 ## How the type is decided
 
@@ -20,7 +20,7 @@ The plan's "What is being optimised" section lists the objective (a quantity to 
 2. At the plan step FI sets the type to find-the-best-design when you answered so, or when the topic plainly asks for a best design.
 3. At the design step a quest that runs code with a best-design plan **stops before anything is written or run**, on every resume. The search runner is not built yet, so FI never quietly runs a search as a sweep.
 
-`engine.clarify_overrides.study_type` in the YAML sets the answer in advance.
+`engine.clarify_overrides.study_type` in the YAML answers it in advance when the agent answers the setup questions itself; when you are asked them, it only fills in the suggested answer (and only if that question is asked), and with `pauses.clarify: off` it is not used.
 
 ## Turning a best-design plan into a measurement
 

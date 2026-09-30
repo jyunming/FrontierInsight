@@ -120,6 +120,7 @@ Conditional edges visible in the graph:
 | `write → implement` | only after a person's refine: a point only lacks a number (`NEEDS_DATA:`); the existing script is extended and run again (with no simulation: `write → auto_collect_data`) | none (a person asked for it) |
 | `write → replot_layout` | only after a person's refine: a point only asks for the figures to be arranged or drawn differently (`NEEDS_LAYOUT:`); they are redrawn from the saved numbers | none (a person asked for it) |
 | `replot_layout → write` | the redraw could not carry out a layout note, so the paper says so | once per refine; otherwise `replot_layout → claim_check` |
+| `design → web_figures` | a literature survey (no experiment and no data to collect): the quest skips the code and the data collection, draws illustrative figures and goes on to the analysis | none |
 | `design → auto_collect_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `auto_collect_data → wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 
 ## Key contracts
