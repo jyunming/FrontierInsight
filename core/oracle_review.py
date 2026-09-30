@@ -41,7 +41,8 @@ def _yes(value: Any) -> bool | None:
         return value
     word = str(value or "").lower()
     if (" ".join(word.split()).rstrip(".") in _NOTHING - {"no"}
-            or re.match(r"\s*(no verdict|yes\s*/\s*no|no\s*/\s*yes)\b", word)):
+            or re.match(r"\s*(no (verdict|opinion|answer|idea|judgement|judgment)|yes\s*/\s*no|no\s*/\s*yes|n\s*/\s*a\b"
+                        r"|n\.a\.)", word)):
         return None  # "N/A", "none", "no verdict", "yes/no": no answer given
     match = re.match(r"\s*(yes|no|true|false|y|n)(?![/\w])", word)
     return None if match is None else match.group(1) in ("yes", "true", "y")
@@ -197,7 +198,7 @@ def request(found: list[str]) -> str:
 
 
 def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model: bool | None, research: bool,
-               reported: bool = True, error: str = "") -> list[str]:
+               reported: bool = True, error: str = "", sent: bool = True) -> list[str]:
     """What plan.md says about the second opinion, in plain words (never read back). ``same_model`` is ``None`` when
     it cannot be told whether the two were different models (a provider default FI cannot name)."""
     asked = "" if reported else " (the connection did not say which model answered)"
@@ -211,6 +212,9 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
                "second opinion" + (". This quest is set up for research, where a different model should read them: set "
                                    "one under `provider: node_models: oracle_review: <another model your provider "
                                    "offers>`." if research else "."))
+    if review is None and not sent:
+        return ["", f"- No second reader looked at the checks ({error or 'nothing to show'}), so nothing was changed "
+                "for it."]
     if review is None:
         return ["", f"- The checks were sent to {reviewer} for a second reading, but its answer could not be used "
                 f"({error or 'it named none of the plan checks'}), so nothing was changed for it."]

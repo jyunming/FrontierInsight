@@ -8346,7 +8346,8 @@ class Engine:
             "reported": bool(answered.get("reported")), "findings": found,
             "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
                                         same_model=same, research=research,
-                                        reported=bool(answered.get("reported")), error=error),
+                                        reported=bool(answered.get("reported")), error=error,
+                                        sent=not oracles_text.lstrip().startswith("[]")),
             **({"verdicts": review.checks, "add": review.add, "summary": review.summary} if review is not None else {}),
             **({"error": error} if error else {}),
         }
@@ -8389,8 +8390,9 @@ class Engine:
             # The request went out in a run that stopped before its answer was read: it is not made again, and the plan
             # says so.
             self._write_plan_section(path, [
-                "", "- FI asked the plan once to change its checks, and the quest stopped before the answer was read; "
-                "it was not asked again. Read the checks in the block below before the run."],
+                "", "- FI asked the plan once to change its checks, and the quest stopped before an answer to it could "
+                "be used; it was not asked again. Read the checks in the block below before the run.",
+                *[f"- Still not in its kind's form (read it before the run): {r}" for r in requests]],
                 note="the checks against known answers: a request whose answer was not read")
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "

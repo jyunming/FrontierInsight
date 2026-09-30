@@ -337,7 +337,11 @@ async def test_a_request_whose_answer_was_never_read_is_said_and_not_made_again(
     (engine.fi_dir / "oracle_guidance.json").unlink()
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(model.reviews) == 1 and len(model.revisions) == 1
-    assert "the quest stopped before the answer was read" in _section(engine)
+    assert "the quest stopped before an answer to it could be used" in _section(engine)
+    assert orv.plan_lines(None, reviewer="m", planner="m", same_model=True, research=False,
+                          error="too long", sent=False)[1].startswith("- No second reader looked at the checks")
+    for nothing in ("no opinion", "N / A", "n.a.", "no verdicts given"):
+        assert orv._yes(nothing) is None, nothing
 
 
 def test_a_rewrite_is_fi_s_own_version_even_if_the_run_stops_during_the_reading(tmp_path: Path) -> None:
