@@ -60,6 +60,7 @@ _MAX_RETRY_WAIT_S = 10.0
 _USER_AGENT = "FrontierInsight/1.0"
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
 _ARXIV_PREFIX = "10.48550/"
+ARXIV_WHY = "an arXiv preprint: Crossref holds no arXiv record"
 #: What the notices' ``source`` field says, in words a reader knows.
 _SOURCE_NAMES = {"retraction-watch": "Retraction Watch", "publisher": "the publisher"}
 _UNREADABLE_DOI = "the DOI could not be read"
@@ -120,6 +121,18 @@ def _verdict(item: dict[str, Any]) -> dict[str, Any]:
     return {"status": RETRACTED, "why": why, "notices": notices}
 
 
+def _network_failure(e: BaseException) -> str:
+    """A failed request in words: a certificate problem, a proxy, or no connection; another failure by its name."""
+    text = str(e).lower()
+    if "certificate" in text or "ssl" in text:
+        return "a certificate problem"
+    if isinstance(e, httpx.ProxyError) or "proxy" in text:
+        return "the proxy refused the request"
+    if isinstance(e, httpx.ConnectError):
+        return "no connection"
+    return f"a network error ({type(e).__name__})"
+
+
 async def _ask(client: httpx.AsyncClient, batch: list[str]) -> tuple[dict[str, dict[str, Any]] | None, str, bool]:
     """Crossref's records for ``batch`` by DOI; or ``None``, why there is no answer, and whether Crossref could not be
     reached at all (the batches after it are then not tried)."""
@@ -129,11 +142,11 @@ async def _ask(client: httpx.AsyncClient, batch: list[str]) -> tuple[dict[str, d
     for attempt in (1, 2):
         try:
             r = await client.get(CROSSREF_WORKS, params=params)
-        except httpx.TimeoutException as e:
-            return None, f"Crossref did not answer in time ({type(e).__name__})", True
+        except httpx.TimeoutException:
+            return None, "Crossref did not answer in time", True
         except Exception as e:  # noqa: BLE001 -- a lookup never stops a quest
-            # The kind of failure (a refused connection, a proxy, a certificate) is what tells a network apart.
-            return None, f"Crossref could not be reached ({type(e).__name__})", True
+            # The kind of failure (no connection, a proxy, a certificate) is what tells a network apart.
+            return None, f"Crossref could not be reached: {_network_failure(e)}", True
         if r.status_code == 429 and attempt == 1:
             try:
                 wait = float(r.headers.get("retry-after") or _RETRY_WAIT_S)
@@ -166,7 +179,7 @@ async def check_dois(
     ask = []
     for doi in wanted:
         if doi.startswith(_ARXIV_PREFIX):
-            out[doi] = _not_checked("an arXiv preprint: Crossref holds no arXiv record")
+            out[doi] = _not_checked(ARXIV_WHY)
         else:
             ask.append(doi)
     if not ask:
@@ -272,11 +285,16 @@ def summary_line(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     by = {s: [r for r in rows if r.get("status") == s] for s in (RETRACTED, NOT_RETRACTED, NOT_CHECKED, NO_DOI)}
-    looked = len(rows) - len(by[NO_DOI])
+    # arXiv preprints are not sent (Crossref holds none): said apart, so they never hide why the others failed.
+    arxiv = [r for r in by[NOT_CHECKED] if r.get("why") == ARXIV_WHY]
+    by[NOT_CHECKED] = [r for r in by[NOT_CHECKED] if r.get("why") != ARXIV_WHY]
+    looked = len(rows) - len(by[NO_DOI]) - len(arxiv)
     n_none = len(by[NO_DOI])
     tail = f"; {n_none} without a DOI {'was' if n_none == 1 else 'were'} not looked up" if n_none else ""
+    if arxiv:
+        tail += f"; {len(arxiv)} arXiv preprint{'s' if len(arxiv) != 1 else ''} not looked up (Crossref holds none)"
     if not looked:
-        return f"No source had a DOI to check for retractions ({len(rows)} source(s))"
+        return f"No source had a DOI that Crossref could check for retractions ({len(rows)} source(s))"
     reasons = Counter(str(r.get("why") or "no answer") for r in by[NOT_CHECKED])
     reason = ""
     if reasons:

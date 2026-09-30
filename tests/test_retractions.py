@@ -555,7 +555,28 @@ def test_an_undated_retraction_counts_as_the_latest() -> None:
 
 def test_the_reason_names_the_kind_of_network_failure() -> None:
     out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=_down()))
-    assert out[CLEAN_DOI.lower()]["why"] == "Crossref could not be reached (ConnectError)"
+    assert out[CLEAN_DOI.lower()]["why"] == "Crossref could not be reached: no connection"
+
+    def proxy(request: httpx.Request) -> httpx.Response:
+        raise httpx.ProxyError("407 Proxy Authentication Required", request=request)
+
+    def cert(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed", request=request)
+
+    for handler, words in ((proxy, "the proxy refused the request"), (cert, "a certificate problem")):
+        out = asyncio.run(retractions.check_dois([CLEAN_DOI], transport=httpx.MockTransport(handler)))
+        assert out[CLEAN_DOI.lower()]["why"] == f"Crossref could not be reached: {words}"
+
+
+def test_arxiv_preprints_are_said_apart_and_never_hide_why_the_rest_failed() -> None:
+    arxiv = [{"title": f"A{i}", "status": "not_checked", "why": retractions.ARXIV_WHY} for i in range(10)]
+    down = [{"title": f"D{i}", "status": "not_checked", "why": "Crossref could not be reached: no connection"}
+            for i in range(5)]
+    assert retractions.summary_line(arxiv + down) == (
+        "Could not check 5 sources for retractions (Crossref could not be reached: no connection); "
+        "10 arXiv preprints not looked up (Crossref holds none)")
+    assert retractions.summary_line(arxiv[:1]) == (
+        "No source had a DOI that Crossref could check for retractions (1 source(s))")
 
 
 def test_an_empty_answer_from_the_check_is_still_a_failure_when_a_rule_adds_claims(tmp_path: Path) -> None:
