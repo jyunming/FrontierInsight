@@ -436,6 +436,11 @@ class QuestState(TypedDict, total=False):
     # The layout notes whose redraw failed on both tries (the figures are as they were): the review gate tells the
     # person their request was not applied, and clears this once they answer.
     layout_not_redrawn: list[str]
+    # A script extended for a refine: what was asked (``asked``) and the result names the results held before it
+    # (``before``), so each write after the run can check that what it added is in the paper. ``extend_unreported``:
+    # what the paper still leaves out after the writer was asked once more; the review pause says so.
+    extend_check: dict[str, Any]
+    extend_unreported: list[str]
     refine_scope: str
     # Names of pause-points the engine has already paused at on this
     # quest (e.g., ``"after_design"`` / ``"after_paper"``). Used as a
@@ -5967,6 +5972,12 @@ class Engine:
             prompt += _rerun_directive(state.get("review") or {}, rerun_for)
             if self._split_on(state):
                 prompt += _SPLIT_RERUN_NOTE
+            kept_asks = [str(p) for p in (state.get("extend_check") or {}).get("asked") or [] if str(p).strip()]
+            if kept_asks and not extend:
+                # The script was extended for a person's request; this rerun must not drop what was added for it.
+                prompt += ("\n\nThe script was extended earlier for the reader's request: "
+                           + "; ".join(p[:200] for p in kept_asks)
+                           + ". Keep what was added for it, and keep its results in RESULT_JSON.\n")
         if extend:
             self._log.info("[implement] extending the existing script for: %s", "; ".join(p[:80] for p in extend))
             prompt += _extend_directive(self._scripts_on_disk(), extend, self._submit_on_disk())
@@ -6026,7 +6037,7 @@ class Engine:
             )
             disk = self._scripts_on_disk().get("experiment.py", "")
             return {**_FRESH_SCRIPT, "code": disk, "deps": list(state.get("deps") or []), "refine_extend": [],
-                    "extend_missed": extend}
+                    "extend_missed": extend, "extend_check": {}, "extend_unreported": []}
         extracted = bool(code)
         if not code:
             # Empty-code path: log the LLM head so the user can see WHAT
@@ -6096,7 +6107,20 @@ class Engine:
         else:
             note = "code written"
         await self._refresh_code_project(state, deps, note)
-        return {**_FRESH_SCRIPT, "code": code, "deps": deps, "refine_extend": [], "extend_missed": []}
+        from core import number_provenance
+
+        out: QuestState = {**_FRESH_SCRIPT, "code": code, "deps": deps, "refine_extend": [], "extend_missed": []}
+        if extend:
+            # What the results held before the extension, by name: what it adds is then known, and each write after
+            # the run checks that it is in the paper (``_node_write``).
+            out["extend_check"] = {"asked": extend, "before": number_provenance.result_paths(state.get("result_json"))}
+            out["extend_unreported"] = []
+        elif not rerun_for:
+            # A script written from the design: an earlier extension's results are not what this run computes. A rerun
+            # the review asked for is told to keep the extension (above) and keeps the check, so the paper written
+            # after it is still checked for the number asked for.
+            out["extend_check"], out["extend_unreported"] = {}, []
+        return out
 
     async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "") -> None:
         """Keep ``code/`` a project that runs on its own (README, requirements, run.py) and, with a ``note``, record
@@ -10254,7 +10278,9 @@ class Engine:
                     "redesign": True}
         return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
 
-    async def _write_whole_paper(self, state: QuestState, persona_block: str, *, refine_round: bool = False) -> str:
+    async def _write_whole_paper(
+        self, state: QuestState, persona_block: str, *, refine_round: bool = False, extra_note: str = "",
+    ) -> str:
         """The paper's markdown as the writer gives it: the whole paper, written
         from the study, with the review of an earlier draft (when there is one)
         in the prompt. A first draft always comes from here, and so does a revise
@@ -10285,6 +10311,8 @@ class Engine:
                 "figures, or there was nothing to redraw from). If the text can do it, do it in the text; otherwise say "
                 "plainly (in the limitations) that it was not done."
             ).strip()
+        if extra_note:
+            evidence_note = f"{evidence_note}\n\n{extra_note}".strip()
         prompt = self._prompts["write"].substitute(
             persona_block=persona_block,
             topic=state["topic"],
@@ -10400,6 +10428,10 @@ class Engine:
             else:
                 what = " in the text; the experiment stands"
             self._log.info("[write] answered the person's notes%s", what)
+        unreported: list[str] = []
+        reasked = False
+        if not refine_round:
+            markdown, unreported, reasked = await self._report_what_the_extension_added(state, persona_block, markdown)
         from generation._keywords import keep_one_keywords_form
 
         # A scientific paper shows its keywords; a persona's paper keeps them
@@ -10466,7 +10498,12 @@ class Engine:
         }
         if reported:
             out["extend_missed"], out["layout_missed"] = [], []
+        # A new refine starts over: an extension it asks for records its own check (``_node_implement``).
+        out["extend_unreported"] = unreported
+        if reasked:
+            out["extend_check"] = {**(state.get("extend_check") or {}), "reasked": True}
         if refine_round:
+            out["extend_check"] = {}
             out["refine_written_for"] = _refine_count(state)
             out["refine_scope"] = ("experiment" if needs_experiment else "data" if extend
                                    else "layout" if layout else "paper")
@@ -10476,6 +10513,67 @@ class Engine:
                 # A rewrite for a note the review said the paper leaves unanswered: flagged again, it goes to the design.
                 out["feedback_rewrite_for"] = _refine_count(state)
         return out
+
+    async def _report_what_the_extension_added(
+        self, state: QuestState, persona_block: str, markdown: str,
+    ) -> tuple[str, list[str], bool]:
+        """The paper, what it still leaves out, and whether the writer was asked again, after a script was extended
+        for a person's refine.
+
+        The results the extension added for the request must be in the paper (``number_provenance.unreported_results``,
+        no model call). A draft that leaves them out is written once more with the missing results named (once per
+        extension: ``extend_check["reasked"]``); when that one leaves them out too, the run log and the review pause say
+        so plainly instead of leaving it to the review (a real quest computed the number and its paper never said it;
+        the review sent the whole round back to the person). Nothing happens without an extension, or when the paper
+        has what was asked."""
+        check = state.get("extend_check")
+        result = state.get("result_json")
+        if not isinstance(check, dict) or not check.get("asked") or not isinstance(result, dict) or not result:
+            return markdown, [], False
+        from core import number_provenance
+
+        asked = [str(p).strip() for p in check.get("asked") or [] if str(p).strip()]
+        before = check.get("before") or {}
+        missing = number_provenance.unreported_results(markdown, result, before, asked)
+        if not missing:
+            return markdown, [], False
+        request = "; ".join(p[:200] for p in asked)
+
+        def said(names: list[str]) -> list[str]:
+            return [f'Your request "{request[:300]}" was computed ({", ".join(names)}) but is not in the paper']
+
+        if check.get("reasked"):
+            # The writer was asked once for this extension already: say it, without another model call.
+            self._log.warning("[write] %s; the values are in the run's results", said(missing)[0])
+            return markdown, said(missing), False
+        groups, _grown, _old = number_provenance.added_results(result, before)
+        computed = "; ".join(_extension_values(g, groups.get(g) or []) for g in missing)
+        self._log.info(
+            "[write] the paper leaves out what the person asked for and the run computed (%s); asking the writer "
+            "once more", ", ".join(missing),
+        )
+        note = (
+            f"The reader asked for this: {request}. The experiment was extended and run again, and it computed it: "
+            f"{computed}. Your draft does not report it. Report these values in the paper (as a table when there are "
+            "several), rounded as the results allow, and say in a sentence what they show. If they equal values the "
+            "paper already reports under another name, say so in words."
+        )
+        still = missing
+        try:
+            again = await self._write_whole_paper(state, persona_block, extra_note=note)
+            still = number_provenance.unreported_results(again, result, before, asked)
+            if len(still) < len(missing):
+                markdown = again
+            else:
+                still = missing  # no better: the first draft stays
+        except Exception as exc:  # noqa: BLE001 -- the draft that exists is kept; what it leaves out is said below
+            self._log.warning("[write] the writer could not be asked again (%s); the draft is kept", exc)
+        if not still:
+            return markdown, [], True
+        self._log.warning(
+            "[write] %s, also after the writer was asked again; the values are in the run's results", said(still)[0],
+        )
+        return markdown, said(still), True
 
     async def _patch_flagged_passages(self, state: QuestState, persona_block: str) -> str | None:
         """The earlier draft with the passages the review named edited, or
@@ -12574,6 +12672,8 @@ class Engine:
             # iterations. Surfaced to the human-review UI so a
             # reviewer can see what was asked for last time.
             "feedback_history": list(state.get("feedback_history") or []),
+            # What a refine asked for that the run computed and the paper still leaves out (``_node_write``).
+            "not_in_paper": list(state.get("extend_unreported") or []),
         }
         # A figure request of the person's last refine that the redraw could not carry out (it failed twice).
         not_redrawn = [str(n) for n in state.get("layout_not_redrawn") or [] if str(n).strip()]
@@ -12601,6 +12701,9 @@ class Engine:
                 *([f"Your figure request was NOT applied: {'; '.join(n[:200] for n in not_redrawn)}. Two tries at "
                    "redrawing the figures did not work, so they are as they were (the error is in .fi/run.log). Refine again to "
                    "retry, or say it another way."] if not_redrawn else []),
+                *(f"{item}; the values are in the run's results. Refine again to have them written in, or accept "
+                  "without them."
+                  for item in state.get("extend_unreported") or []),
                 "Accept, reject, or refine the paper in the panel "
                 "(Web / VSCode), or at the CLI prompt.",
                 "Headless run? "
@@ -17674,10 +17777,12 @@ def _names_a_verdict(reply: Any) -> bool:
 
 def _auto_accepts(snapshot: dict[str, Any]) -> bool:
     """Whether ``auto_accept_on_pass`` may accept this human-review snapshot for the person: a reviewer's own accept
-    (``review_status`` "ok") with no must-flag hit. A stand-in accept is never accepted automatically."""
+    (``review_status`` "ok") with no must-flag hit. A stand-in accept is never accepted automatically, and neither is a
+    paper that leaves out a number the person asked for and the run computed (``not_in_paper``)."""
     return (
         snapshot.get("verdict") == "accept"
         and not (snapshot.get("must_flag_hits") or [])
+        and not (snapshot.get("not_in_paper") or [])
         and snapshot.get("review_status", "ok") == "ok"
         # A figure request the redraw could not apply is told to the person, not accepted for them.
         and not (snapshot.get("layout_not_redrawn") or [])
@@ -18180,6 +18285,13 @@ def _take_refine_points(markdown: str) -> tuple[str, dict[str, list[str]]]:
     cleaned = _REFINE_POINT_RE.sub("", markdown)
     cleaned = _strip_outer_fence(re.sub(r"\n{3,}", "\n\n", cleaned).strip())
     return cleaned.rstrip() + "\n", points
+
+
+def _extension_values(group: str, values: list[float]) -> str:
+    """``max_abs_errors = 0.02714, 0.01321``: one result an extension added, as the writer is shown it (cut to a
+    readable length)."""
+    text = ", ".join(f"{v:.6g}" for v in values) or "(see the results)"
+    return f"{group} = {text[:600]}{' ...' if len(text) > 600 else ''}"
 
 
 def _refine_round(state: QuestState) -> bool:
