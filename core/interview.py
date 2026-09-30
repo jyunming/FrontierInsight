@@ -226,8 +226,14 @@ STUDY_DEPTHS: tuple[Choice, ...] = (
 )
 
 
+# "when_present" is the interview's way of leaving ``pauses.clarify`` unset: it is never written to the YAML, so the
+# run decides (ask when someone can answer while it runs, else the agent answers for itself; core/engine.py).
+CLARIFY_WHEN_PRESENT = "when_present"
 CLARIFY_MODES: tuple[Choice, ...] = (
-    Choice("auto", "Agent self-clarifies (recommended)",
+    Choice(CLARIFY_WHEN_PRESENT, "Ask me if I'm there, otherwise answer for itself (recommended)",
+           "The quest asks you when it can reach you while it runs (VS Code, or the terminal with --interactive); "
+           "a run nobody is watching answers the questions itself."),
+    Choice("auto", "Agent self-clarifies",
            "Agent generates the questionnaire AND auto-answers it from the topic. Pinned interview answers still win."),
     Choice("interactive", "Pause for me to answer",
            "Engine pauses; you confirm/edit each clarify slot. Highest quality, most interruption."),
@@ -653,7 +659,7 @@ QUESTIONS: tuple[Question, ...] = (
         prompt="Whether the engine pauses to confirm clarify slots. Pinned interview answers win regardless.",
         kind="single",
         choices=CLARIFY_MODES,
-        default="auto",
+        default=CLARIFY_WHEN_PRESENT,
         mid_quest_editable=True,
         tier=2,
     ),
@@ -1109,10 +1115,10 @@ def smart_default_title(partial: dict[str, Any]) -> str:
 
 
 def smart_default_clarify_mode(_partial: dict[str, Any]) -> str:
-    """Auto-clarify covers ~95% of cases — the engine self-generates
-    AND auto-answers the clarify questionnaire from the topic, with
-    interview-pinned slots winning."""
-    return "auto"
+    """Leave the choice to the run: the quest talks the topic over when someone can answer while it runs and answers
+    for itself when nobody can. Writing ``auto`` here would switch that discussion off for everyone who accepted the
+    defaults."""
+    return CLARIFY_WHEN_PRESENT
 
 
 def smart_default_review_panel(partial: dict[str, Any]) -> list[str]:
@@ -1872,9 +1878,11 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
     # Values use the coherent `pauses.*` vocabulary; legacy interview answers
     # are translated here (interactive→ask, after_design→before_build, …).
     lines.append("pauses:")
-    lines.append(
-        f"{indent}clarify: {json.dumps(_CLARIFY_TO_PAUSE.get(answers.clarify_mode, answers.clarify_mode))}"
-    )
+    if answers.clarify_mode and answers.clarify_mode != CLARIFY_WHEN_PRESENT:
+        # Only a choice the person made is written; unset lets the run ask when someone is there to answer.
+        lines.append(
+            f"{indent}clarify: {json.dumps(_CLARIFY_TO_PAUSE.get(answers.clarify_mode, answers.clarify_mode))}"
+        )
     _supply = _SUPPLY_TO_PAUSE.get(
         answers.pause_for_user_input, answers.pause_for_user_input
     )

@@ -306,8 +306,8 @@ export class Bridge {
      * Accept / Reject / Refine. Refine then opens a freeform input
      * for the user's feedback text. The user can press Esc on either
      * modal to cancel; we then send `human_review_cancelled` and the
-     * Python side raises BridgeError (engine catches → falls back to
-     * accept).
+     * Python side raises BridgeError (the engine stops the quest and
+     * waits for a decision; it never takes a cancel as accept).
      */
     private async handleHumanReviewRequest(
         req: HumanReviewRequest,
@@ -386,7 +386,7 @@ export class Bridge {
         if (!pick) {
             this.send({ type: "human_review_cancelled", id: req.id });
             this.opts.progress.markdown(
-                "\n— human-review cancelled by user; engine falls back to accept.\n\n",
+                "\n— review closed without a decision; the quest stops here. Decide later with `@fi /resume` (see NEXT_STEP.md in the quest folder).\n\n",
             );
             return;
         }
@@ -404,7 +404,7 @@ export class Bridge {
             if (fb === undefined) {
                 this.send({ type: "human_review_cancelled", id: req.id });
                 this.opts.progress.markdown(
-                    "\n— refine cancelled by user; engine falls back to accept.\n\n",
+                    "\n— refine closed without notes; the quest stops here. Decide later with `@fi /resume` (see NEXT_STEP.md in the quest folder).\n\n",
                 );
                 return;
             }

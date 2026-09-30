@@ -293,8 +293,8 @@ class VSCodeBridgeClient:
         ``{"action": "...", "feedback": "..."}``.
 
         Raises ``BridgeError`` if the user cancelled or the bridge
-        dropped — the engine's caller should catch that and fall back
-        to ``accept`` (today's default) rather than crashing the quest.
+        dropped — the engine then stops the quest cleanly (NEXT_STEP.md
+        says how to decide) instead of taking the cancel as ``accept``.
         """
         if self._writer is None:
             await self.connect()
@@ -459,9 +459,9 @@ class VSCodeBridgeClient:
             fut = self._pending.get(req_id)
             if fut is None or fut.done():
                 return
-            action = str(msg.get("action") or "accept").lower()
-            if action not in ("accept", "reject", "refine"):
-                action = "accept"
+            # Passed on as sent: a missing or unknown action is no decision, and the engine stops for one rather
+            # than taking it as "accept".
+            action = str(msg.get("action") or "").strip().lower()
             feedback = str(msg.get("feedback") or "")
             fut.set_result({"action": action, "feedback": feedback})
         elif mtype == "human_review_cancelled":

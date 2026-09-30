@@ -1667,7 +1667,9 @@ def _pick_human_feedback_callback(
                 "_pick_human_feedback_callback was called before "
                 "Engine.run() created the LLMClient"
             )
-            bridge = engine._client._bridge
+            # getattr: a fallback client has no ``_bridge``; an AttributeError here would crash the run where a
+            # closed prompt now stops it cleanly.
+            bridge = getattr(engine._client, "_bridge", None)
             if bridge is None:
                 from core.vscode_bridge import VSCodeBridgeClient
                 bridge = VSCodeBridgeClient(host="127.0.0.1", port=port)
@@ -1770,17 +1772,28 @@ async def _cli_human_feedback_callback(
     print()
     print("Choose: accept (finalise), reject (abandon), refine (your notes go to the writing step first; "
           "the design only if a point needs a new experiment)")
-    try:
-        raw = input("  action [accept]: ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        raw = "accept"
-    action = raw if raw in ("accept", "reject", "refine") else "accept"
+    while True:
+        try:
+            raw = input("  action [accept]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            # Nobody chose: the quest stops and waits for a decision (NEXT_STEP.md), never accepts for the person.
+            print()
+            print("  (no decision — the quest stops here; NEXT_STEP.md says how to decide)")
+            print("=" * 72)
+            return {}
+        if raw in ("", "accept", "reject", "refine"):
+            break
+        print("  please type accept, reject or refine (Enter = accept)")
+    action = raw or "accept"
     feedback = ""
     if action == "refine":
         try:
             feedback = input("  feedback (one line): ").strip()
         except (EOFError, KeyboardInterrupt):
-            feedback = ""
+            print()
+            print("  (no decision — the quest stops here; NEXT_STEP.md says how to decide)")
+            print("=" * 72)
+            return {}
         if not feedback:
             print("  (empty feedback — falling back to accept)")
             action = "accept"
@@ -1800,6 +1813,11 @@ def _apply_review_decision(args: argparse.Namespace, output_dir: Path) -> None:
     elif getattr(args, "reject", False):
         decision = {"action": "reject", "feedback": ""}
     elif getattr(args, "refine", None) is not None:
+        if not str(args.refine).strip():
+            # An empty refine would be taken as an accept that none of the checks below guard.
+            print("[FI] --refine needs your notes (what should change). To accept the result, use --accept.",
+                  file=sys.stderr)
+            sys.exit(2)
         decision = {"action": "refine", "feedback": args.refine}
     else:
         return

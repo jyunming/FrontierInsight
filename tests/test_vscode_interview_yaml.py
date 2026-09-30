@@ -72,6 +72,15 @@ def test_vscode_emitter_writes_the_author_line_and_poster_size(tmp_path: Path) -
     assert cfg.output.poster_size == "landscape_48x36"
 
 
+def test_vscode_emitter_leaves_clarify_unset_unless_chosen(tmp_path: Path) -> None:
+    """Same rule as core/interview.py: the default choice writes nothing, so the run asks when VS Code can answer."""
+    yaml_text, cfg = _emit(tmp_path, clarify_mode="when_present")
+    assert "clarify:" not in yaml_text.split("pauses:", 1)[1].split("\n\n", 1)[0]
+    assert cfg.pauses.clarify is None
+    _yaml, cfg = _emit(tmp_path, clarify_mode="interactive")
+    assert cfg.pauses.clarify == "ask"
+
+
 def test_vscode_emitter_writes_reasoning_effort_only_when_set(tmp_path: Path) -> None:
     yaml_text, cfg = _emit(tmp_path, reasoning_effort="high")
     assert 'reasoning_effort: "high"' in yaml_text

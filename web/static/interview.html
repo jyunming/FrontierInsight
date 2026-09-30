@@ -792,7 +792,8 @@
       // screen + payload consistent with the runtime invariant.
       no_simulation: PROSE_FORMATS.has(tier1.paper_format) || looksLikeSurvey(tier1.topic),
       survey_mode: looksLikeSurvey(tier1.topic),
-      clarify_mode: 'auto',
+      // Left to the run (never written to the YAML): it asks when someone can answer, else answers for itself.
+      clarify_mode: questionDefault('clarify_mode') || 'when_present',
       // Match the Python smart default: a 3-persona panel. An empty list
       // means single-reviewer and silently disables must-flag enforcement
       // (the methodologist owns the non-bypassable rules), so web users

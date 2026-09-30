@@ -1114,9 +1114,24 @@ class Engine:
                                         )
                                     else:
                                         answer = await human_feedback_callback(snap)
-                                    _consume_snapshot()
-                                    payload = Command(resume=answer)
-                                    continue
+                                    if _review_decision(answer):
+                                        _consume_snapshot()
+                                        payload = Command(resume=answer)
+                                        continue
+                                    # No decision in the answer (``{}``, ``None``, a missing or unknown action):
+                                    # stop and ask again rather than guess. Resuming with ``{}`` re-fired this pause
+                                    # forever (LangGraph reads it as "resume nothing") and ``None`` crashed the run.
+                                    self._log.warning(
+                                        "[run] the review answer had no decision in it (accept, reject or refine) "
+                                        "— the quest stops here; NEXT_STEP.md says how to decide",
+                                    )
+                                except BridgeError as e:
+                                    # The person closed the VS Code review prompt without choosing: stop and wait
+                                    # for a decision, never take it as "accept".
+                                    self._log.warning(
+                                        "[run] the review prompt was closed without a decision (%s) — the quest "
+                                        "stops here; NEXT_STEP.md says how to decide", e,
+                                    )
                                 except asyncio.TimeoutError:
                                     # Orphaned UI prompt (e.g. a VSCode QuickPick
                                     # tied to a stale chat turn) — stop waiting and
@@ -1139,7 +1154,7 @@ class Engine:
                                         answer_path, e,
                                     )
                                     answer = None
-                                if isinstance(answer, dict) and "action" in answer:
+                                if _review_decision(answer):
                                     self._log.info(
                                         "[run] consuming pre-staged human-review answer "
                                         "(action=%s)", answer.get("action"),
@@ -1147,6 +1162,17 @@ class Engine:
                                     _consume_snapshot()
                                     payload = Command(resume=answer)
                                     continue
+                                if answer is not None:
+                                    # A staged answer with no decision in it is not "accept"; drop it so the next
+                                    # resume does not read it again, and say why.
+                                    self._log.warning(
+                                        "[run] %s has no decision in it (accept, reject or refine) — ignoring it; "
+                                        "the quest stops here", answer_path,
+                                    )
+                                    try:
+                                        answer_path.unlink(missing_ok=True)
+                                    except OSError:
+                                        pass
                             data_paused = True
                             self._log.info(
                                 "[FI] paused for human review. Decide with ONE command:\n"
@@ -12403,7 +12429,7 @@ class Engine:
         action = "accept"
         feedback = ""
         if isinstance(payload, dict):
-            raw_action = str(payload.get("action") or "accept").lower()
+            raw_action = str(payload.get("action") or "accept").strip().lower()
             if raw_action in ("accept", "reject", "refine"):
                 action = raw_action
             feedback = str(payload.get("feedback") or "").strip()
@@ -17440,6 +17466,18 @@ def _auto_accepts(snapshot: dict[str, Any]) -> bool:
         and not (snapshot.get("must_flag_hits") or [])
         and snapshot.get("review_status", "ok") == "ok"
     )
+
+
+def _review_decision(answer: Any) -> bool:
+    """Whether a human-review answer (from a callback or a staged answer file) carries a decision: a dict whose
+    ``action`` is accept, reject or refine (a refine with its notes). Anything else is no decision, and the quest
+    stops for one instead of taking it as an accept (a refine with no notes would otherwise become one)."""
+    if not isinstance(answer, dict):
+        return False
+    action = str(answer.get("action") or "").strip().lower()
+    if action == "refine":
+        return bool(str(answer.get("feedback") or "").strip())
+    return action in ("accept", "reject")
 
 
 def _review_was_real(review: dict[str, Any] | None) -> bool:
