@@ -243,6 +243,13 @@ name a second provider in `provider.fallback`: while that provider is
 working, FI does not wait out the outage but moves on to it after the four
 quick attempts.
 
+These waits are built in; no setting changes them. The CLI providers and the
+VS Code extension keep their own retries: a CLI makes four attempts (30–90
+seconds apart when it reports that its model's server has no capacity), and
+the VS Code connection six, at most a minute apart. The same
+applies whichever interface started the quest: the command line, the web page
+or VS Code with a YAML that names one of these providers.
+
 ## Retry model escalation (opt-in)
 
 By default a retried call uses the same model as the first attempt. FI
@@ -324,7 +331,7 @@ with `knowledge.source_routing: manual` and slides and a poster:
 
 | Quest shape | Requests |
 |---|---|
-| Default engine settings (`clarify_mode: off`, single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
+| Engine settings of the measured runs (`clarify_mode: off`, single reviewer, `cross_check_per_finding_k: 3`) | 21–26 |
 | Slides, poster, talk script | +1 each |
 | Design through review running a second time | 27–33 in four runs of the same quest on older engine versions, not counting slides and poster |
 | `knowledge.source_routing: auto` (the default) | +1 per literature pass, +1 per cross-check lookup |

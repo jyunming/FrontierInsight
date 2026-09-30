@@ -60,12 +60,15 @@ for the layered design see [`architecture.md`](architecture.md).
   picked idea before design begins.
 
 ### Clarify
-- 7-slot pre-flight questionnaire (`comparative_baseline`,
-  `empirical_vs_theoretical`, `success_metric`, `budget`,
-  `output_kinds`, `study_depth`, `paper_venue`).
-- `clarify_mode: off | auto | interactive`. `auto` lets the agent
-  self-fill defaults; `interactive` pauses the graph and reads
-  answers from the user via the terminal or the VSCode bridge.
+- Pre-flight questionnaire (`want_to_see`, `title`,
+  `comparative_baseline`, `empirical_vs_theoretical`, `simulatability`,
+  `success_metric`, `budget`, `output_kinds`, `study_depth`,
+  `paper_venue`, `topic_shape`; `study_type` when the topic leaves it open).
+- `pauses.clarify: off | auto | ask` (old name `engine.clarify_mode`,
+  `interactive` = `ask`). `auto` lets the agent self-fill defaults; `ask`
+  pauses the graph for the user's answers (terminal, web quest page or
+  the VSCode bridge). Unset, it asks when someone can answer and is
+  `auto` otherwise.
 - Answers flow into every downstream prompt as `$clarify_block`.
 
 ### Provider transports

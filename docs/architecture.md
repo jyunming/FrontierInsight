@@ -115,7 +115,12 @@ Conditional edges visible in the graph:
 | `human_feedback → design` | a reopened quest with no new notes to answer | none |
 | `evidence_gate → literature` | the evidence check found the evidence too thin (a `broaden` verdict); only when retrieval is on and the run is not `--analyze` | `engine.evidence_gate_max_broaden` (default 1) |
 | `evidence_gate → design` | the experiment produced no results at all (simulate path only) | once, while an iteration is left |
+| `evidence_gate → execute` | only with `engine.phased: true` (explore, then confirm): exploration ended on an accepted result, so the protocol is frozen and the frozen design runs once more on the held-back data or new seeds; in the confirm stage the gate only writes | once per quest (the edge is added to the graph only when `engine.phased` is on) |
 | `write → design` | only after a person's refine: the writer named a point that needs a new or different experiment | none (a person asked for it) |
+| `write → implement` | only after a person's refine: a point only lacks a number (`NEEDS_DATA:`); the existing script is extended and run again (with no simulation: `write → auto_collect_data`) | none (a person asked for it) |
+| `write → replot_layout` | only after a person's refine: a point only asks for the figures to be arranged or drawn differently (`NEEDS_LAYOUT:`); they are redrawn from the saved numbers | none (a person asked for it) |
+| `replot_layout → write` | the redraw could not carry out a layout note, so the paper says so | once per refine; otherwise `replot_layout → claim_check` |
+| `design → web_figures` | a literature survey (no experiment and no data to collect): the quest skips the code and the data collection, draws illustrative figures and goes on to the analysis | none |
 | `design → auto_collect_data` | `state.no_simulation_resolved is True` (decided at clarify or by YAML, see `_route_after_design`) | `engine.max_iterations` — `no_simulation_resolved` is sticky across the run, so when `cross_check` or `review` routes back to `design`, the re-entry still flows through `auto_collect_data → wait_for_data → data_load` instead of `implement → execute`. Same outer iteration budget as the simulate path. |
 
 ## Key contracts
