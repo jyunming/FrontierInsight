@@ -44,16 +44,25 @@ _RUN_WORDS = {
 # A count of re-draws from results the experiment already produced (a bootstrap, a permutation test, a posterior
 # sample) is not a number of runs of the experiment: a GPT-6 quest was stopped as "the script differs from the plan"
 # because BOOTSTRAP_REPLICATES = 2000 sat beside a protocol of 300 runs per setting.
-# Only a SAMPLING word beside a re-draw word is skipped (BOOTSTRAP_REPLICATES, n_boot_samples, mcmc_samples); a name that
-# says runs, trials or realizations (N_MCMC_RUNS, bootstrap_trials) is still read as runs. Stems, so glued or inflected
-# forms match too (NBootSamples -> "nboot", n_bootstrap2_samples -> "bootstrap2"); "perm" is left out (permeability).
+# Only a SAMPLING word beside a re-draw word is skipped; a name that also says runs, trials or realizations
+# (N_MCMC_RUNS, bootstrap_trials) is always read as runs. Words that only ever mean re-drawing from results
+# (bootstrap, resample, jackknife) skip with any sampling word; words that can also name the study itself (mcmc,
+# posterior, burn-in, warm-up) skip only beside samples/sample (a chain's length), not beside reps/replicates/repeats
+# (an MCMC simulation study's repetitions). Whole tokens, so boot-time or surrogate/shuffle/permutation studies are read.
 _SAMPLING_RUN_WORDS = {"samples", "sample", "replicates", "replicate", "reps", "repeats"}
-_RESAMPLE_STEM = re.compile(r"^n?(boot|resampl|subsampl|permut|shuffl|jackknif|surrogat|posterior|mcmc|hmc|burnin|warmup)")
+_DRAW_ONLY = {"samples", "sample"}
+_STRONG_RESAMPLE = re.compile(r"^n?(bootstraps?|boots?|resamples?|resampling|jackknife|jackknifes)\d*$")
+_WEAK_RESAMPLE = re.compile(r"^n?(mcmc|hmc|posterior|burnin|warmup)\d*$")
+_ALWAYS_RUNS = {"runs", "run", "trials", "trial", "realizations", "realisations", "simulations", "simulation", "sims"}
 
 
 def _is_resample_count(name: str) -> bool:
-    tokens = _tokens(name)
-    return bool(set(tokens) & _SAMPLING_RUN_WORDS) and any(_RESAMPLE_STEM.match(t) for t in tokens)
+    tokens = set(_tokens(name))
+    if tokens & _ALWAYS_RUNS:
+        return False
+    if tokens & _SAMPLING_RUN_WORDS and any(_STRONG_RESAMPLE.match(t) for t in tokens):
+        return True
+    return bool(tokens & _DRAW_ONLY) and any(_WEAK_RESAMPLE.match(t) for t in tokens)
 # Words that make a name a list of the axis's values (R0_LIST, dose_values) rather than something else about it
 # (dose_response, temperature_history).
 _LIST_WORDS = {
