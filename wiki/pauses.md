@@ -14,7 +14,7 @@ A pause is FI stopping because it needs a person. It is not a failure. Every pau
 | Plan | `pauses.plan` (off; `ask` under the research profile) | read or change `plan.md` |
 | Review | `pauses.review` (ask) | accept, reject or [[Refine]] the result |
 
-Some checks also stop the quest, such as a failing [[How FI judges correctness|oracle]], a best-design plan ([[Study types]]) or a missing equation label under the research profile.
+Some checks also stop the quest, such as a failing [[How FI judges correctness|oracle]], a best-design plan whose search cannot start ([[Study types]]) or a missing equation label under the research profile.
 
 ## Setup questions (clarify)
 

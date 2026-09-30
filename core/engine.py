@@ -91,6 +91,7 @@ from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import optimisation_plan as _optim
+from . import optimise as _optimise
 from . import protocol_check as _protocol
 from . import split_run as _split_run
 from . import stats as _stats
@@ -1612,6 +1613,8 @@ class Engine:
         "needs/receipts/claim_check.json", "needs/ENVIRONMENT.json", "needs/RUN_MANIFEST_CHECK.json",
         "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json", "raw/ledger.jsonl", "raw/trials.json",
         ".fi/trials/run.json", "paper/claims.json",
+        # FI's record of a search for the best design (core/optimise.py).
+        "raw/optimisation_ledger.jsonl", "results/best_design.json", ".fi/optimisation/run.json",
         # What the quest tried (core/attempt_records.py): anchored in the trace, so an edit after the fact shows.
         ".fi/attempts.jsonl", ".fi/branch_ledger.jsonl",
         # The search queries used: a change between steps shows in the trace, the seal covers the rest.
@@ -4512,11 +4515,13 @@ class Engine:
                          "if a measurement is what you want.")
         return notes
 
-    def _stop_for_best_design_search(self, state: QuestState, design: Any) -> None:
-        """Stop before anything runs when the design is a search for the best design: this version of FI writes and checks
-        such a plan but cannot run the search itself, and running the plan as a plain sweep would answer a different
-        question. Every resume checks again (no once-only marker), so the quest goes on only once the plan is a
-        measurement. A no-op for a measurement, and for a quest that runs no experiment of its own."""
+    def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
+        """Stop before anything runs when the design is a search for the best design that FI cannot start: the plan lacks
+        what a search needs (the ``optimisation`` block, its budget), the simulation is not a script of its own
+        (``execution.split_analysis: false``), or the trials go to a cluster (``execution.background_jobs``: the search
+        runs here, one design after another). Such a plan is never run as a plain sweep instead. Every resume checks
+        again (no once-only marker). A no-op for a measurement, for a search that can start (the engine runs it:
+        :mod:`core.optimise`), and for a quest that runs no experiment of its own."""
         if not self._runs_code(state):
             return
         explicit = isinstance(design, dict) and design.get("study_type") is not None
@@ -4527,7 +4532,8 @@ class Engine:
             return
         path = _plan.plan_path(self.quest_root)
         # Read back through the check, since a design drafted at this step has not been through it.
-        block, _why = _optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design) else (None, None)
+        block, block_why = (_optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design)
+                            else (None, None))
         goal = ""
         if block is not None:
             objective = block["objective"]
@@ -4535,32 +4541,46 @@ class Engine:
                     f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
         missing = _optim.missing_parts(design) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+        if block_why:
+            missing.append(f"its optimisation block cannot be used ({block_why})")
+        setup: list[str] = []
+        if not self._split_on(state):
+            setup.append("the search calls the simulation as a function of its own, but this quest keeps one script "
+                         "(`execution.split_analysis: false`): set it to `auto` in the quest's config and resume")
+        if self.config.execution.background_jobs:
+            setup.append("the search runs here, one design after another, not as a job array on a cluster "
+                         "(`execution.background_jobs` is on): turn it off in the quest's config and resume")
+        if not missing and not setup:
+            return
         where = (f"In `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”," if path.is_file()
                  else "This quest has no plan.md (its plan could not be written); in the quest's topic,")
         steps = [
-            f"Nothing was run. This quest is a search for the best design{goal}. This version of FI writes and checks a plan "
-            "like this, but cannot yet run the search itself, and running the plan as a plain sweep over fixed settings "
-            "would answer a different question, so the quest stops here.",
-            *[f"Also missing from the plan: {m}." for m in missing],
-            f"To measure how the result changes over settings you choose instead: {where} set `study_type: measure` and "
-            "replace the `optimisation` block with a `grid` of the settings to run, then resume: "
-            f"`python launch.py --config <quest.yaml> --resume {self.quest_id}`. Or ask FI to make that change: "
-            f"`--resume {self.quest_id} --revise-plan \"make this a measurement over ...\"` (the quest page's Plan box on "
-            "the web, `@fi /plan` in VS Code).",
-            "Or keep the plan as it is: it is saved, and resuming with a version of FI that can run the search goes on "
-            "from here.",
+            f"Nothing was run. This quest is a search for the best design{goal}, and the search cannot start yet. "
+            "Running the plan as a plain sweep over fixed settings would answer a different question, so the quest "
+            "stops here.",
+            *[f"Missing from the plan: {m}." for m in missing],
+            *[f"In the quest's setup: {s}." for s in setup],
         ]
-        self._log.warning("[design] the design is a search for the best design, which this version cannot run; stopping")
-        print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, which this version of FI cannot "
-              "run yet; nothing was run (see NEXT_STEP.md)")
+        if missing:
+            steps.append(
+                f"{where} complete the `optimisation` block (what to make as low or as high as possible, what may change "
+                "and over what range, the design to beat, and `evaluation_budget`), then resume: "
+                f"`python launch.py --config <quest.yaml> --resume {self.quest_id}`. Or ask FI to make the change: "
+                f"`--resume {self.quest_id} --revise-plan \"<what to change>\"` (the quest page's Plan box on the web, "
+                "`@fi /plan` in VS Code). To measure over settings you choose instead, set `study_type: measure` and "
+                "give a `grid`.")
+        reason = missing[0] if missing else setup[0].split(" (`")[0]
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping", reason)
+        print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but the search cannot start "
+              f"({reason}); nothing was run (see NEXT_STEP.md)")
         self._pause_for_human(
             kind="plan",
             interaction="supply",
-            headline="the search for the best design is not available yet",
+            headline="the search for the best design cannot start",
             steps=steps,
-            recommended="Keep the plan and resume later, or make it a measurement over settings you choose (steps below).",
+            recommended="Complete the plan (or the quest's setup) as the steps below say, then resume.",
             alternatives=["Set `study_type: measure` and give a `grid` in plan.md, then resume.",
-                          "Ask for that change in words: `--revise-plan \"<what to change>\"`."],
+                          "Ask for a change in words: `--revise-plan \"<what to change>\"`."],
             payload={"quest_id": self.quest_id, "plan_file": str(path), "best_design_stage": True},
         )
 
@@ -4749,8 +4769,9 @@ class Engine:
             design = self._hold_design_to_frozen(state, design)
 
         # A search for the best design never runs as a plain sweep: every design, from the plan or drafted here, passes
-        # this point before anything is implemented or run (core/optimisation_plan.py).
-        self._stop_for_best_design_search(state, design)
+        # this point before anything is implemented or run, and one the engine cannot search stops here
+        # (core/optimisation_plan.py; the search itself: core/optimise.py).
+        self._stop_if_the_search_cannot_start(state, design)
         await self._audit_the_design_that_runs(state, design)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
@@ -6754,6 +6775,10 @@ class Engine:
         protocol = self._protocol_block(state)
         if protocol is None or not _run_manifest.checkable(protocol):
             return "not_applicable", []
+        if _optimise.block_of(protocol) is not None:
+            # A search for the best design has no grid of settings to count: FI ran every evaluation itself, within the
+            # budget it counted, and wrote their record (core/optimise.py).
+            return "not_applicable", []
         if not split:
             # One script (split_analysis: false, a reply that held one, or a quest begun before every simulation got its
             # own script): no manifest. That is a gap for a stochastic study; a deterministic one (an ODE sweep) has no
@@ -7322,13 +7347,14 @@ class Engine:
     def _simulation_sources(self, state: QuestState) -> tuple[Path, dict[str, str]]:
         """The script that computes the data and the text of it and of its helper modules in ``code/``: ``simulate.py``
         when the quest runs two scripts, else ``experiment.py`` (a ``simulate.py`` left beside a one-script quest is not
-        what runs). The analysis, the cluster's submit script and FI's own ``run.py`` are not the simulation."""
+        what runs). The analysis, the cluster's submit script and FI's own ``run.py`` and ``fi_search.py`` are not the
+        simulation."""
         code = self.quest_root / "code"
         simulate = code / _split_run.SIMULATE_NAME
         split = self._split_on(state) and simulate.is_file()
         main = simulate if split else code / "experiment.py"
         skip = {"experiment.py" if split else _split_run.SIMULATE_NAME, _trial_runner.SUBMIT_NAME, "run.py",
-                "replot_figures.py", "replot_layout.py"}
+                _code_project.SEARCH, "replot_figures.py", "replot_layout.py", "web_plots.py"}
         texts: dict[str, str] = {}
         for path in [main, *sorted(p for p in code.glob("*.py") if p != main and p.name not in skip)]:
             try:
@@ -7733,9 +7759,14 @@ class Engine:
                 # The trial contract. An oracle with a case is measured by the ENGINE: it calls the simulation function on
                 # that case in its own process and reads the measure from what comes back, so no number of the script's own
                 # making stands in for the simulation. The rest fall back to the script's oracle().
+                # A search for the best design calls the simulation with the conditions held fixed and the search's
+                # numerical settings: an oracle's case (the baseline, say) is run with them too.
+                run_oracles = [{**o, "case": _optimise.complete_case(protocol, o["case"])}
+                               if _optimise.block_of(protocol) is not None and isinstance(o.get("case"), dict) else o
+                               for o in oracles]
                 try:
                     checks, trial_problems, _ = await _trial_runner.measure_oracles(
-                        self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(), oracles,
+                        self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(), run_oracles,
                         timeout_s=timeout, env=env,
                         thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
                         case_env=dict(_replicate_env(exec_env, 0, stride)),
@@ -8430,6 +8461,15 @@ class Engine:
         # what protects a `--resume` that continues straight into execute without design re-running
         # (design's own tamper check, in `_hold_design_to_frozen`, only fires when design executes).
         self._resolved_frozen()
+        # A search for the best design that cannot run (the setup changed since the design, or a resume past it) stops
+        # here too: it is never run as a plain script instead (core/optimise.py).
+        design_now = state.get("design")
+        frozen_block = _optimise.block_of(self._protocol_block(state))
+        if frozen_block is not None and not _optim.has_block(design_now):
+            # The frozen protocol is a search even when the design in the state no longer says so.
+            design_now = {**(design_now if isinstance(design_now, dict) else {}),
+                          "protocol": {**((design_now or {}).get("protocol") or {}), "optimisation": frozen_block}}
+        self._stop_if_the_search_cannot_start(state, design_now)
         await self._shadow("execute", state, taken="ran the experiment")
         # Docker sandbox: the selected, approved external skills are mounted
         # read-only in every container this node starts (a thread: resolving
@@ -8514,7 +8554,17 @@ class Engine:
         trial_entries = _trial_runner.entries(simulate_path) if split else set()
         self._trial_mode = bool(trial_entries & {"run_trial", "run_cell"})
         self._trial_entries = set(trial_entries)
-        if split and self._trial_mode:
+        # A search for the best design (core/optimise.py): FI runs the search and calls the simulation for each design it
+        # tries. A simulate.py that defines no function to call is sent back to be repaired by the runner itself, and a
+        # reply that held one script is a failed run: neither is ever run as a script that searches by itself.
+        searching = self._split_on(state) and (_optim.has_block(state.get("design"))
+                                               or _optimise.block_of(self._protocol_block(state)) is not None)
+        if searching:
+            runner = _optimise.OptimisationRunner(
+                self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
+                simulate=simulate_path, analysis=code_path, log=self._log,
+            )
+        elif split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
@@ -8919,9 +8969,10 @@ class Engine:
         # single-seed code paths are unchanged.
         # Replicates would submit the job again, once per seed.
         replicates_n = (
-            1 if self.config.execution.background_jobs or getattr(self, "_trial_mode", False)
+            1 if self.config.execution.background_jobs or getattr(self, "_trial_mode", False) or searching
             else max(1, int(self.config.engine.execute_replicates))
-        )  # under the trial contract runs_per_setting is every trial of a setting, each with its own seed
+        )  # under the trial contract runs_per_setting is every trial of a setting, each with its own seed; a search
+        # for the best design is run once, within its budget
         result_json_replicates: list[dict[str, Any]] = []
         deterministic = False
         # Whether the script can respond to the seed at all, whether it hands
@@ -9229,13 +9280,14 @@ class Engine:
         # back to its honest single-run behaviour on its own.
         # A deterministic simulation (run_cell) ran once per setting: there is one measurement per setting and no trials
         # to pool, so no interval or replicate statistics are computed for it.
+        # A search's result is one best design, not trials to pool (core/optimise.py).
         patch["result_json_trials"] = bool(getattr(self, "_trial_mode", False)) and bool(result_json) and "run_trial" in (
-            getattr(self, "_trial_entries", None) or set())
+            getattr(self, "_trial_entries", None) or set()) and not searching
         if patch["result_json_trials"]:
             # The trial contract: the one result holds every trial of every setting FI ran, each with its own seed; the
             # intervals, precision targets and metric statistics are computed from it (pooled counts and values).
             patch["result_json_replicates"] = [{"_seed": 0, **result_json}]
-        elif getattr(self, "_trial_mode", False):
+        elif getattr(self, "_trial_mode", False) or searching:
             # No result this pass: the previous pass's pooled trials must not stand in for it.
             patch["result_json_replicates"] = []
         elif len(result_json_replicates) > 1 and not seed_ignored:
@@ -9758,7 +9810,10 @@ class Engine:
                 )
             elif repair_simulation:
                 script_code = simulate_path.read_text(encoding="utf-8")
-                split_note = _SPLIT_REFLECT_SIMULATE
+                split_note = _SPLIT_REFLECT_SIMULATE + (_SEARCH_REFLECT_SIMULATE if _optim.has_block(state.get("design"))
+                                                        else "")
+            elif _optim.has_block(state.get("design")):
+                split_note = _SEARCH_REFLECT_ANALYSIS
             else:
                 raw_root = _split_run.raw_root_of(self.quest_root, self.config.execution.raw_dir)
                 split_note = _SPLIT_REFLECT_ANALYSIS.format(
@@ -14659,7 +14714,9 @@ class Engine:
         ``execution.split_analysis`` is off."""
         if not self._split_on(state):
             return ""
-        return _SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
+        search = _optim.has_block(state.get("design")) and not self.config.execution.background_jobs
+        return (_SPLIT_PROTOCOL + (_CLUSTER_PROTOCOL if self.config.execution.background_jobs else "")
+                + (_SEARCH_PROTOCOL if search else ""))
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
         """The experiment reported its job as pending. Record what is being
@@ -16261,6 +16318,32 @@ If an outline is given, it describes the whole experiment as one program: put th
 `run_cell`) and the statistics, figure and `RESULT_JSON` code in experiment.py, keeping every name and signature.
 """
 
+_SEARCH_PROTOCOL = """
+## This study is a search for the best design, and FI runs the search (the plan's `optimisation` block)
+
+FI, not the scripts, searches for the design that makes the objective as low or as high as possible: it decides which
+design to try next, calls the simulation for each one, counts every call against the plan's evaluation budget and keeps
+the record. The rules above still hold, with these differences:
+- `cell` is ONE design: a value for every design variable (whole numbers for an integer variable), every condition the
+  plan holds fixed, and each numerical setting at the value the search uses. Read them all from `cell` by name; do not
+  write any of them into the script as a number of its own, and do not choose a mesh, a time step or a tolerance
+  yourself.
+- The returned dict holds the objective and every constrained quantity, under the exact names the plan gives them
+  (`objective.quantity`, each `constraints[].quantity`), plus anything else the analysis wants.
+- simulate.py never searches, optimises or loops over designs itself (no `scipy.optimize`, no Optuna, no grid of
+  designs): one call computes one design.
+- experiment.py does not read `FI_TRIALS` for the search. It reads FI's record: `json.load(open(os.environ["FI_BEST_DESIGN"]))`
+  gives `{"best": {"design": {...}, "objective": ..., "constraints": {...}} or null, "baseline": {"design": {...},
+  "objective": ..., "feasible": ...}, "improvement": {"value": ..., "relative": ...} or null, "evaluations": {"search":
+  n, "budget": m, "stopped_because": "..."}, "method": {"used": "..."}, ...}`, and the file `os.environ["FI_OPTIMISATION"]`
+  names holds one JSON object per line; those with `"event": "evaluation"` are the evaluations in order (`n`, `stage`,
+  `start`, `design`, `objective`, `constraints`, `feasible`, `status`). Draw the best objective found so far against
+  the evaluation number (one line per starting point, `start`), and a table of the baseline against the best design.
+  When the plan has a coarse scan (`optimisation.grid`), `FI_TRIALS` names its per-setting results as described above:
+  draw them as a map. Its `RESULT_JSON` reports the best design, its objective, the baseline's and the improvement,
+  read from that file; a best of null means no design met every limit, and it says so. It never writes either file.
+"""
+
 # How an oracle's expected value may be sourced, for a request to rewrite the plan (core/oracle_check.py reads it).
 _REFERENCE_FORMS = (
     "`derivation: <the steps that give the number>`, a source from the plan's list of the sources this quest found, by its [n], an equation "
@@ -16396,6 +16479,15 @@ SPLIT EXPERIMENT: this script is simulate.py, the simulation half of a two-scrip
 _SPLIT_REFLECT_ANALYSIS = """\
 SPLIT EXPERIMENT: this script is experiment.py, the analysis half of a two-script experiment. FI has already run the trials; this script reads FI's per-setting results from the file the environment variable FI_TRIALS names (in the folder FI_RAW_DIR names) and must not run the simulation again. Fix experiment.py and return the whole of it. The files there are:
 {listing}
+"""
+
+
+_SEARCH_REFLECT_SIMULATE = """\
+THIS STUDY IS A SEARCH FOR THE BEST DESIGN: FI calls run_cell(cell) (or run_trial) once for each design it tries; `cell` holds the design variables, the conditions the plan holds fixed and the search's numerical settings, by name. The function returns the objective and every constrained quantity under the plan's own names, and never searches or loops over designs itself.
+"""
+
+_SEARCH_REFLECT_ANALYSIS = """\
+SPLIT EXPERIMENT, A SEARCH FOR THE BEST DESIGN: this script is experiment.py, the analysis. FI has already run the search; this script reads FI's record of it (the file FI_BEST_DESIGN names: the best design, the baseline and the improvement; the file FI_OPTIMISATION names: one JSON object per line, the lines with "event": "evaluation" in order; with a coarse scan, FI_TRIALS names its per-setting results), must not run the simulation again, and never writes either file. Fix experiment.py and return the whole of it.
 """
 
 
@@ -20452,7 +20544,8 @@ def _is_degenerate_result(rj: dict[str, Any]) -> bool:
             for x in v:
                 _walk(x)
 
-    _walk(rj)
+    # FI's own numbers of a search for the best design (core/optimise.py::with_fi_record) are not the script's result.
+    _walk({k: v for k, v in rj.items() if k != "fi_search"})
     if len(nums) < 2:
         return False
     return all(abs(n) <= 1e-12 for n in nums)

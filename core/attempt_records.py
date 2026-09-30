@@ -222,8 +222,9 @@ def _folder_manifest(folder: Path, limit: int = _INPUT_FILES_LIMIT, cache: dict 
 
 
 def _generated_project_files(quest_root: Path) -> set[str]:
-    """The README, requirements and run.py FI wrote into ``code/`` (core/code_project.py) and a person has not
-    edited: they describe the code, they are not the code an attempt ran."""
+    """The README, requirements, run.py and fi_search.py (FI's own search for the best design) FI wrote into ``code/``
+    (core/code_project.py) and a person has not edited: they describe or repeat what FI did, they are not the code an
+    attempt ran."""
     try:
         record = json.loads((quest_root / ".fi" / "code_project.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -231,7 +232,7 @@ def _generated_project_files(quest_root: Path) -> set[str]:
     if not isinstance(record, dict):
         return set()
     out: set[str] = set()
-    for name in ("README.md", "requirements.txt", "run.py"):
+    for name in ("README.md", "requirements.txt", "run.py", "fi_search.py"):
         try:
             text = (quest_root / "code" / name).read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError):

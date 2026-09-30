@@ -67,9 +67,28 @@ same PR that adds, splits or renames one.
   evaluation count worked out at plan time (`budget`), the *What is being optimised* section of plan.md
   (`plan_lines`), the topic's numbers in the block (`numbers`, read by `protocol_check.plan_notes`), and the one
   clarify question for an ambiguous topic (`classify_topic`, `add_study_type_question`, `resolve_answer`; added in
-  `Engine._node_clarify_questions`, the plan prompt's `_STUDY_TYPE_DIRECTIVE` and `Engine._settle_study_type`). The
-  search itself is not built: `Engine._stop_for_best_design_search` (in `_node_design`) stops every such quest before
-  anything is implemented or run.
+  `Engine._node_clarify_questions`, the plan prompt's `_STUDY_TYPE_DIRECTIVE` and `Engine._settle_study_type`).
+  `Engine._stop_if_the_search_cannot_start` (in `_node_design`) stops a search that cannot start (no block or budget,
+  `split_analysis: false`, `background_jobs`) before anything is implemented or run.
+- `core/optimise.py` — the engine runs the search for the best design: `OptimisationRunner` (the executor stand-in
+  `_node_execute` picks when the design has an `optimisation` block and two scripts, instead of
+  `trial_runner.TrialsRunner`; it runs the search, then `experiment.py` with `FI_OPTIMISATION` / `FI_BEST_DESIGN`, and
+  `FI_TRIALS` for the coarse scan), `run_search` (the coarse scan through `trial_runner.run_trials`, each design through
+  the trial harness in its own process with a nonce, a library method's steps through `.fi/optimisation/optimise_search.py --drive`
+  in the quest's Python, the budget and `execution.timeout_s`, the run key cache in `.fi/optimisation/run.json`),
+  the record FI alone writes (`raw/optimisation_ledger.jsonl`, `results/best_design.json`; `restore` / `read` put
+  FI's copy back), `summary_lines` (run.log; `CHECKS_AT_FINER_SETTINGS` is the switch the finer check will flip), and
+  `complete_case` (an oracle's case gets the fixed conditions, search settings and baseline, in `Engine._oracle_gate`),
+  `with_fi_record` (FI's numbers added to the analysis's RESULT_JSON as `fi_search`), `searches_itself` (an optimiser in
+  the simulation's code: a warning). `Engine._node_execute` calls `_stop_if_the_search_cannot_start` too.
+  `Engine._run_manifest_problems` returns `not_applicable` for a search; replicate seeds are not run for it; the
+  code-writing prompt gets `_SEARCH_PROTOCOL` (via `_split_block`) and the repair prompts `_SEARCH_REFLECT_*`.
+- `core/optimise_search.py` — which design comes next, standard library only and importing nothing from FI (copied
+  into `.fi/optimisation/` and into `code/fi_search.py`): `search` (a generator of evaluate / drive requests; `bounded_local`,
+  `global_then_local`, `exhaustive`, and a scipy / Optuna method replayed step by step by `drive`), `run_sync` (the
+  same search driven in one process: `code/run.py`, the tests), `judge` (feasibility and failures), `best_design`
+  (the record), `ledger_lines`, `scan_grid` / `scan_rows` (the coarse scan as trial-runner cells), and copies of
+  `optimisation_plan.effective_method` / `check_levels` that `tests/test_optimise_runner.py` keeps equal.
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
 - `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).
@@ -149,7 +168,7 @@ same PR that adds, splits or renames one.
 - `core/experiment_deps.py` — what a quest environment is given before a run: requested packages minus the quest's
   own files, the selected skills' `pip_requires`, library skills on `PYTHONPATH`, one-at-a-time install fallback,
   skill names pip cannot install explained as the skill, the repair note for what could not be installed.
-- `core/code_project.py` — `refresh` keeps `code/` a runnable project (README, requirements.txt, `run.py`, and `study.json` for the trial contract; `run.py` repeats FI's trial runner for seed 0, one process per setting, stdlib only, working in `run_output/`); `.fi/installed_deps.json` (written by `_node_execute`) is the requirements source; `attempt_records.script_hashes` skips the unedited generated files; called by `Engine._refresh_code_project` at the end of `implement` and the start of `analyze`; `record_change` makes one git commit + one `CHANGELOG.md` entry per change inside `code/` (`rerun_from.back_up` carries `code/.git` over a re-run; `script_hashes` ignore `.git` and CHANGELOG.md); `pin` gives the installed versions for requirements.txt; `verify` (called by `Engine._check_code_project` before `write`, once per code version) runs `run.py` in a clean venv and writes `needs/CODE_PROJECT_CHECK.json`, warning only; `unasked_conflicts` / `mark_asked` feed `Engine._ask_about_edited_project_files` (a `code_project` pause when `pauses.review` is `ask`); a file whose hash differs from `.fi/code_project.json` (a person's edit) is never overwritten.
+- `core/code_project.py` — `refresh` keeps `code/` a runnable project (README, requirements.txt, `run.py`, and `study.json` for the trial contract; `run.py` repeats FI's trial runner for seed 0, one process per setting, stdlib only, working in `run_output/`; for a search for the best design `study.json` holds the optimisation block and `fi_search.py` is `core/optimise_search.py`, so `run.py` repeats FI's search, one process per design); `.fi/installed_deps.json` (written by `_node_execute`) is the requirements source; `attempt_records.script_hashes` skips the unedited generated files; called by `Engine._refresh_code_project` at the end of `implement` and the start of `analyze`; `record_change` makes one git commit + one `CHANGELOG.md` entry per change inside `code/` (`rerun_from.back_up` carries `code/.git` over a re-run; `script_hashes` ignore `.git` and CHANGELOG.md); `pin` gives the installed versions for requirements.txt; `verify` (called by `Engine._check_code_project` before `write`, once per code version) runs `run.py` in a clean venv and writes `needs/CODE_PROJECT_CHECK.json`, warning only; `unasked_conflicts` / `mark_asked` feed `Engine._ask_about_edited_project_files` (a `code_project` pause when `pauses.review` is `ask`); a file whose hash differs from `.fi/code_project.json` (a person's edit) is never overwritten.
 - `Engine._save_run_data` (called in `_node_execute` only once the run is accepted: exit 0 and the run manifest not
   stopped, pending or repairing; again after the replicate seeds for the raw copy only) copies the data tables the run
   wrote in the quest folder (`_RUN_DATA_SUFFIXES`, each up to `_RUN_DATA_MAX_BYTES`, never the secret/setup names in
