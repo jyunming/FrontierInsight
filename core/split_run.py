@@ -37,7 +37,7 @@ import os
 import re
 import shutil
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .execution import ExecutionResult
@@ -89,6 +89,21 @@ def sha256_of(path: Path) -> str:
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
+    return digest.hexdigest()
+
+
+def simulation_sha(simulate: Path) -> str:
+    """The hash that decides whether raw files are still this simulation's: ``simulate.py``'s own, and, when the model's
+    equations are in a package beside it (core/code_layout.py), that package's files with it, so a changed equation runs
+    the simulation again. Without a package it is ``simulate.py``'s hash, as before."""
+    from . import code_layout as _code_layout
+
+    package = _code_layout.package_sources(Path(simulate).parent)
+    if not package:
+        return sha256_of(simulate)
+    digest = hashlib.sha256(Path(simulate).read_bytes())
+    for rel, body in sorted(package.items()):
+        digest.update(f"\n{rel}\n{body}".encode("utf-8"))
     return digest.hexdigest()
 
 
@@ -177,10 +192,22 @@ def parse_split_response(text: str, fence: re.Pattern[str]) -> dict[str, str] | 
     is the engine's own pattern for a fenced Python block."""
     blocks = [m.group(1).strip("\n") for m in fence.finditer(text or "")]
     named: dict[str, str] = {}
-    for block in blocks:
+    markers = [_FILE_MARKER.match(next((line for line in b.splitlines() if line.strip()), "")) for b in blocks]
+    # Folders the reply writes a Python package into (``<pkg>/__init__.py``, ``<pkg>/model.py``; core/code_layout.py): a
+    # ``<pkg>/simulate.py`` there is a module of that package, not the script FI runs.
+    def _path(m: Any) -> PurePosixPath:
+        rel = m.group(1).replace("\\", "/").strip("/")
+        return PurePosixPath(rel[len("code/"):] if rel.startswith("code/") else rel)
+
+    packages = {_path(m).parent.as_posix() for m in markers
+                if m and _path(m).name.lower() in ("__init__.py", "model.py")} - {".", ""}
+    # Only when the same script also comes outside those folders: a reply that puts everything in one folder is read.
+    outside = {_path(m).name.lower() for m in markers if m and _path(m).parent.as_posix() not in packages}
+    for block, marker in zip(blocks, markers):
         first = next((line for line in block.splitlines() if line.strip()), "")
-        marker = _FILE_MARKER.match(first)
         if not marker:
+            continue
+        if _path(marker).parent.as_posix() in packages and _path(marker).name.lower() in outside:
             continue
         name = Path(marker.group(1).replace("\\", "/")).name.lower()
         body = "\n".join(block.splitlines()[block.splitlines().index(first) + 1:]).strip("\n")
@@ -244,7 +271,7 @@ class SplitRunner:
         label = "the first run" if index == 0 else f"replicate {index} (seed {seed})"
 
         sim: ExecutionResult | None = None
-        simulate_sha = sha256_of(self.simulate)
+        simulate_sha = simulation_sha(self.simulate)
         why = stale_reason(raw_dir, simulate_sha=simulate_sha, seed=seed)
         if why is None:
             self.reused += 1

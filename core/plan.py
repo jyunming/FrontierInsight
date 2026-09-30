@@ -687,9 +687,10 @@ def _criteria_lines(protocol: Any) -> list[str]:
 
 
 def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], audit: list[str] | None = None,
-           sources: list[dict[str, str]] | None = None) -> str:
+           sources: list[dict[str, str]] | None = None, code_layout: list[str] | None = None) -> str:
     """The text of ``plan.md``: the prose the model wrote around ``design``, and ``design`` itself in the block
-    that is used as written."""
+    that is used as written. ``code_layout``: the lines saying how the code will be laid out and what that costs
+    (``core/code_layout.py``)."""
     from . import optimisation_plan
 
     extra = extra if isinstance(extra, dict) else {}
@@ -721,6 +722,7 @@ def render(topic: str, extra: dict[str, Any] | None, design: dict[str, Any], aud
         *optimisation_plan.plan_lines(design),
         *_model_lines(design.get("protocol") if isinstance(design, dict) else None),
         *_criteria_lines(design.get("protocol") if isinstance(design, dict) else None),
+        *(code_layout or []),
         "## Success criteria",
         "",
         _bullets(extra.get("success_criteria"), "- (not written)"),

@@ -637,12 +637,17 @@ RUN_RECORD = Path(".fi") / "trials" / "run.json"
 
 
 def _run_key(simulate: Path, grid: Any, runs: int, base: int, deterministic: bool) -> str:
-    """What decides a set of trials: the simulation's text, the protocol (``grid``: the whole of it is passed), the
+    """What decides a set of trials: the simulation's text (with its model package), the protocol (``grid``: the whole of it is passed), the
     count, the base seed and whether each setting runs once (``run_cell``)."""
     try:
         text = Path(simulate).read_bytes()
     except OSError:
         text = b""
+    # The model's package beside it (core/code_layout.py) is part of the simulation: other equations are other trials.
+    from . import code_layout as _code_layout
+
+    package = "".join(f"\n{rel}\n{body}" for rel, body in sorted(_code_layout.package_sources(Path(simulate).parent).items()))
+    text += package.encode("utf-8")
     return hashlib.sha256(text + json.dumps([grid, runs, base, deterministic], sort_keys=True, default=str).encode()).hexdigest()
 
 

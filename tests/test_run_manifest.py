@@ -896,7 +896,8 @@ async def test_the_older_contract_under_research_is_sent_back_for_the_trial_cont
     prompts: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat",
                         _fake(calls, implement=_reply(SIM_OK), repair=SIM_TRIAL, prompts=prompts))
-    cfg = _cfg(tmp_path).model_copy(update={"rigor_profile": "research"})
+    # Two scripts alone: the research-tool layout (core/code_layout.py) would stop this quest first, for its own reason.
+    cfg = _cfg(tmp_path, execution={"code_package": False}).model_copy(update={"rigor_profile": "research"})
     engine = Engine(cfg)
     await engine.run()
     reflect = [p for p in prompts if _classify(p) == "ExecuteReflect"]

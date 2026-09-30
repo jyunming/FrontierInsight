@@ -86,38 +86,70 @@ def _fmt(value: Any) -> str:
 # --- the simulation's files ------------------------------------------------------------------------------------------
 
 
+def _package_files(code: Path) -> list[str]:
+    """``<package>/<module>.py`` for each module of the model's package in ``code/`` (core/code_layout.py: a folder with
+    an ``__init__.py``, the tests aside): the equations the simulation computes with are part of it."""
+    out: list[str] = []
+    if not code.is_dir():
+        return out
+    for folder in sorted(code.iterdir()):
+        if (folder.is_dir() and not _is_link(folder) and folder.name not in ("tests", "__pycache__", ".git")
+                and (folder / "__init__.py").is_file()):
+            out += [f"{folder.name}/{f.name}" for f in sorted(folder.glob("*.py")) if f.is_file() and not _is_link(f)]
+    return out
+
+
 def editable(quest_root: Path) -> list[str]:
-    """The files of ``code/`` an edit may change: the simulation (``simulate.py``) and the helper modules beside it."""
+    """The files of ``code/`` an edit may change: the simulation (``simulate.py``), the helper modules beside it and the
+    modules of the model's package (``<package>/model.py``), by their path in ``code/``."""
     code = Path(quest_root) / "code"
     names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE) if code.is_dir() else []
-    return sorted(names, key=lambda n: (n != "simulate.py", n))
+    names += _package_files(code)
+    return sorted(names, key=lambda n: (n != "simulate.py", "/" not in n, n))
 
 
 def snapshot(quest_root: Path) -> dict[str, str]:
-    """Every ``.py`` file directly in ``code/``, by name."""
+    """Every ``.py`` file directly in ``code/``, and the modules of the model's package, by their path in ``code/``."""
     code = Path(quest_root) / "code"
     out: dict[str, str] = {}
-    for p in sorted(code.glob("*.py")) if code.is_dir() else []:
+    paths = [*(sorted(code.glob("*.py")) if code.is_dir() else []), *(code / rel for rel in _package_files(code))]
+    for p in paths:
         try:
             # As it is on disk, byte for byte: line endings untouched, and bytes that are not UTF-8 (a file saved in
             # another encoding) carried through unchanged rather than dropped.
-            out[p.name] = p.read_bytes().decode("utf-8", "surrogateescape")
+            out[p.relative_to(code).as_posix()] = p.read_bytes().decode("utf-8", "surrogateescape")
         except OSError:
             continue
     return out
 
 
 def restore(quest_root: Path, files: dict[str, str]) -> None:
-    """``code/`` back to ``files``: each written as it was, and a ``.py`` file that was not there removed."""
+    """``code/`` back to ``files``: each written as it was, and a ``.py`` file that was not there removed (directly in
+    ``code/``, and in the model's package when ``files`` holds the package: a copy saved before the package was part of
+    it leaves the package alone). Never written through a link: a link left in place of a file or of the package's
+    folder is removed first, and a ``code/`` that is itself a link is not written at all."""
     code = Path(quest_root) / "code"
-    for p in code.glob("*.py") if code.is_dir() else []:
-        if p.name not in files:
-            p.unlink(missing_ok=True)
+    if _is_link(code):
+        return
+    with_package = any("/" in k for k in files)
+    present: list[str] = []
+    if code.is_dir():
+        present = [p.name for p in code.glob("*.py")] + (_package_files(code) if with_package else [])
+    for rel in present:
+        if rel not in files:
+            (code / rel).unlink(missing_ok=True)
     for name, text in files.items():
+        if name.count("/") > 1 or ".." in name.split("/"):
+            continue  # the loop keeps only code/ and the package's own modules: anything deeper is not its copy
         path = code / name
         data = text.encode("utf-8", "surrogateescape")
+        if path.parent != code and _is_link(path.parent):
+            _remove_link(path.parent)  # the package's folder replaced by a link: never written through
         if _is_link(path):
             _remove_link(path)  # a link the run left in place of a file: never written through
+        if _is_link(path) or (path.parent != code and _is_link(path.parent)):
+            continue  # a link that could not be removed: nothing is written through it
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
             if not path.is_file() or path.read_bytes() != data:
                 path.write_bytes(data)
@@ -142,20 +174,72 @@ def forget_bytecode(quest_root: Path) -> None:
         dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git") and not _is_link(Path(base) / d)]
 
 
-def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
-    folder = Path(quest_root) / SNAPSHOTS / name
+def own_dir(quest_root: Path, name: str, *, clear_links: bool = True, fi_real: Path | None = None) -> Path | None:
+    """``.fi/improve/<name>``, the loop's own copy, reached without going through a link: a link (or junction) in place of
+    ``.fi/improve`` or the copy itself is removed (only the link, never what it points at), or, with
+    ``clear_links=False``, makes this ``None``. ``None`` too when a link cannot be removed: nothing is then read or
+    written there. ``.fi`` itself is the quest's own folder wherever it is kept (a person may keep it on another disk
+    through a link), so a link there is left as it is; but when ``fi_real`` (where ``.fi`` was when the engine started)
+    is given and ``.fi`` no longer leads there, a run has moved it: ``None``, and nothing is touched."""
+    root = Path(quest_root)
+    if fi_real is not None:
+        try:
+            # realpath, not resolve(): a link loop makes resolve() raise RuntimeError, realpath gives a path back.
+            if Path(os.path.realpath(root / SNAPSHOTS.parts[0])) != Path(fi_real):
+                return None
+        except (OSError, RuntimeError):
+            return None
+    path = root / SNAPSHOTS / name
+    step = root / SNAPSHOTS.parts[0]
+    for part in path.relative_to(step).parts:
+        step = step / part
+        if _is_link(step):
+            if not clear_links:
+                return None
+            _remove_link(step)
+            if _is_link(step):
+                return None
+    return path
+
+
+def clear_own_dir(quest_root: Path, name: str, *, fi_real: Path | None = None) -> None:
+    """Remove the loop's copy ``.fi/improve/<name>`` without following a link anywhere on the way."""
+    import shutil
+
+    path = own_dir(quest_root, name, fi_real=fi_real)
+    if path is not None and path.is_dir():
+        shutil.rmtree(path, ignore_errors=True)  # Python does not follow a link or junction inside it
+
+
+def save_snapshot(quest_root: Path, name: str, files: dict[str, str], *, fi_real: Path | None = None) -> None:
+    """Keep ``files`` as the copy ``name``. What the copy held before is removed without following a link: a link (or a
+    junction) inside it is removed itself, never what it points at."""
+    import shutil
+
+    folder = own_dir(quest_root, name, fi_real=fi_real)
+    if folder is None:
+        raise OSError(f"the loop's copy {Path(quest_root) / SNAPSHOTS / name} is reached through a link that could not "
+                      "be removed")
     folder.mkdir(parents=True, exist_ok=True)
-    for old in folder.glob("*.py"):
-        old.unlink(missing_ok=True)
+    for old in list(folder.iterdir()):
+        if _is_link(old):
+            _remove_link(old)
+        elif old.is_dir():
+            shutil.rmtree(old, ignore_errors=True)
+        elif old.suffix == ".py":
+            old.unlink(missing_ok=True)
     for file, text in files.items():
+        (folder / file).parent.mkdir(parents=True, exist_ok=True)
         (folder / file).write_bytes(text.encode("utf-8", "surrogateescape"))
 
 
-def load_snapshot(quest_root: Path, name: str) -> dict[str, str] | None:
-    folder = Path(quest_root) / SNAPSHOTS / name
-    if not folder.is_dir():
+def load_snapshot(quest_root: Path, name: str, *, fi_real: Path | None = None) -> dict[str, str] | None:
+    folder = own_dir(quest_root, name, clear_links=False, fi_real=fi_real)
+    if folder is None or not folder.is_dir():
         return None
-    return {p.name: p.read_bytes().decode("utf-8", "surrogateescape") for p in sorted(folder.glob("*.py"))}
+    files, _links = _walk(folder)  # never into a link
+    return {p.relative_to(folder).as_posix(): p.read_bytes().decode("utf-8", "surrogateescape")
+            for p in sorted(files) if p.suffix == ".py"}
 
 
 # --- the edit --------------------------------------------------------------------------------------------------------
@@ -353,6 +437,12 @@ def _asks_for_a_setting(old: str, new: str, settings: dict[str, list[Any]]) -> l
     return found
 
 
+def edited_path(edit: Edit) -> str:
+    """The file an edit changes, by its path in ``code/`` (``simulate.py``, ``<package>/model.py``)."""
+    name = str(edit.file).replace("\\", "/").strip("/")
+    return name[len("code/"):] if name.startswith("code/") else name
+
+
 def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: set[str],
                expected: list[float], measures: set[str] | None = None,
                settings: dict[str, list[Any]] | None = None) -> tuple[str | None, str]:
@@ -360,8 +450,8 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     the normalized forms of the versions already run (the first one included). ``expected``: the values the checks
     expect (and the criteria's targets); ``measures``: the names of the numbers the checks read from what the simulation
     returns; ``settings``: the values of each setting the checks run on, by the setting's name."""
-    name = edit.file.split("/")[-1]
-    if edit.file not in (name, f"code/{name}") or name not in allowed:
+    name = edited_path(edit)
+    if name not in allowed:
         return None, (f"it changes {edit.file!r}, which is not part of the simulation (only "
                       f"{', '.join(allowed) or 'none'} may be changed)")
     old = files.get(name)
@@ -491,6 +581,14 @@ def guard_hashes(quest_root: Path) -> dict[str, str]:
     where it points: making one is a change."""
     root = Path(quest_root)
     out = {name: _hash(path) for name, path in guard_files(root).items()}
+    for folder in (root / SNAPSHOTS.parts[0], root / SNAPSHOTS):
+        # Whether the quest's .fi (and the loop's own folder) is a folder or a link, and to where: a run that swaps one
+        # for a link to a copy changes nothing else FI hashes.
+        try:
+            out[folder.relative_to(root).as_posix() + "/"] = (f"link:{os.readlink(folder)}" if _is_link(folder)
+                                                             else "folder" if folder.is_dir() else "absent")
+        except OSError:
+            out[folder.relative_to(root).as_posix() + "/"] = "link:?"
     code_files, code_links = _code_entries(root)
     own_files, own_links = _walk(root / SNAPSHOTS)
     for p in [*code_files, *own_files]:

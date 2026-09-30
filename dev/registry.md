@@ -293,6 +293,29 @@ same PR that adds, splits or renames one.
   can draw a random number at all; none (and the seed ignored) makes it a deterministic study
   (`result_json_no_random_source`): the remaining replicates are skipped and the analysis is told to report one run,
   not an interval.
+- `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
+  a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
+  `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
+  same seed as `trial_runner.run_case`) and `METHODS.md` (`equation_map` / `methods_text`, each `generates` equation to the
+  function carrying its label), both written by FI through `code_project.refresh(extra_files=...)`. The cost over two
+  scripts is worked out at plan time (`estimate`), decided against `execution.code_package_max_extra_lines` /
+  `code_package_max_extra_calls` (`decide`) and shown in plan.md (`plan_lines`, section *How the code will be laid
+  out*, via `plan.render(code_layout=...)`). Engine hooks: `Engine._code_layout` (None off the two-script path),
+  `_plan_code_layout` (in `_node_plan`), `_code_package_reply` (in `_node_implement`: reads the package from the reply,
+  asks once more, else keeps two scripts and says so), `_package_in_use`, `_check_code_layout` (in `_node_execute`
+  beside `_check_equation_labels` and again after an oracle repair: `check` plus `unseeded_rng_calls` over the package, a warning, a stop only under research through the `code_layout` pause, `todo._ADVICE["code_layout"]`).
+  `_code_layout` is `None` for code written before the quest decided a layout (no `.fi/code_layout.json` beside an
+  existing simulate.py). The request limit is a quest-wide budget (`calls_left` / `spend_call`, counted in the record);
+  `_adopt_reply_package` keeps a package the reply named itself when simulate.py imports it; `split_run.simulation_sha`
+  and `attempt_records.script_hashes` (FI-written METHODS.md / tests left out) know the package.
+  `improve.editable` / `snapshot` / `restore` / the kept-version snapshots include the package's modules by their
+  path in code/ (`improve.edited_path`), so the improve loop can change an equation there.
+  `trial_runner._run_key` and `Engine._simulation_sources` read the package as part of the simulation.
+  Where simulate.py is rewritten the package goes with it: `Engine._package_shown` (shown by `_extend_directive`; an
+  extension's package file missing functions it had is not written, `dropped_functions`), `_package_repair_note` /
+  `_apply_package_repair` (`repair_note` / `repair_files`: the reflect and oracle repairs of simulate.py may return
+  `package_files`), `_package_snapshot` / `_restore_package` (the oracle gate's undo of a repair bent to a disputed
+  check), `_label_target` (labels asked for in `model.py`); `code_project.requirements_for` scans the package's imports.
 - `core/split_run.py` — the two-script contract (`simulate.py` / `experiment.py`), raw-dir naming, replicate seeding.
   Whether a quest gets it is `Engine._split_on`: under `split_analysis: auto` every quest that runs a simulation
   (`_runs_code`), deterministic (`run_cell`) or stochastic (`run_trial`); `design_is_stochastic` only decides whether

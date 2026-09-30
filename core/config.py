@@ -1124,6 +1124,20 @@ class ExecutionConfig(BaseModel):
     # analysis-only rerun. ``block``: the quest stops with the reason, and a resume asks for the scripts again; nothing is
     # degraded.
     split_failure: Literal["warn", "block"] = "warn"
+    # Lay a simulation's code out as a small research tool (the default): the model's equations in a package of their
+    # own (``code/<package>/``, each function labelled with its equation, no scenario values), ``simulate.py`` running
+    # one setting with it (still the file FI calls), the plan's checks as unit tests (``code/tests/test_oracles.py``) and
+    # ``code/METHODS.md`` saying which function computes each equation; FI writes the tests and METHODS.md itself.
+    # What it adds is estimated at plan time and shown in plan.md; when it would need more than
+    # ``code_package_max_extra_lines`` more lines of code, the quest keeps two scripts and says so in plan.md and run.log.
+    # ``code_package_max_extra_calls`` is how many more requests to the model the layout may make in the whole quest (a
+    # reply that leaves the package out is asked for again); once they are spent the quest keeps the code it has and says
+    # so. ``false`` keeps two scripts for every quest. A quest whose code was written before it decided a layout (begun
+    # before this existed) keeps its code as it is.
+    # Only for a quest that keeps two scripts (``split_analysis``). The layout is in core/code_layout.py.
+    code_package: bool = True
+    code_package_max_extra_lines: int = Field(default=400, ge=0)
+    code_package_max_extra_calls: int = Field(default=3, ge=0)
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy
