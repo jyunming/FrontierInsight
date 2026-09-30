@@ -384,7 +384,9 @@ def assess(
         named = ", ".join(repr(n) for n in unpassed)
         valid_gaps.append(
             f"the oracle {named} has no measured value, or its value is outside the tolerance, although the oracle check "
-            "recorded it as passed (see needs/ORACLE_CHECK.json)"
+            "recorded it as passed (see needs/ORACLE_CHECK.json)" if len(unpassed) == 1 else
+            f"the oracles {named} have no measured value, or their values are outside the tolerance, although the oracle "
+            "check recorded them as passed (see needs/ORACLE_CHECK.json)"
         )
     elif protocol is not None and not _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record)):
         # "ok" with nothing judged checked nothing: at least one value FI measured by running the simulation must have passed.
@@ -394,13 +396,17 @@ def assess(
         )
     elif protocol is not None and (unmeasured := [
         str(o["name"]).strip() for o in _oracle_check.declared(protocol)
-        if str(o["name"]).strip().lower() not in {n.strip().lower() for n in _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record))}
+        if str(o["name"]).strip().lower() not in {
+            n.strip().lower() for n in _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record))
+        }
     ]):
         # Each oracle the protocol declares must have been measured and passed, not just one of them (a record written
         # before an oracle was added to the plan does not cover it).
+        one = len(unmeasured) == 1
         valid_gaps.append(
-            f"the oracle check did not measure {', '.join(repr(n) for n in unmeasured)}: FI never ran the simulation on its "
-            "case and compared the value (run the experiment again so FI checks it)"
+            f"the oracle check did not measure {', '.join(repr(n) for n in unmeasured)}: FI never ran the simulation on "
+            f"{'its case' if one else 'their cases'} and compared the {'value' if one else 'values'} "
+            "(run the experiment again so FI checks them)"
         )
     validated = matched and not valid_gaps
 

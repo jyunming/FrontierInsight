@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from core import evidence, frozen_protocol, oracle_check as oc, plan, trial_runner
+from core import evidence, oracle_check as oc, plan, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 _COMMON = '''
@@ -256,6 +256,13 @@ def test_every_declared_oracle_must_be_measured_not_just_one(tmp_path: Path) -> 
     got = evidence.assess(root, _state(design=design), settings=ON)
     assert got["levels"]["independently_validated"] is False
     assert any("did not measure 'limit'" in g for g in got["all_gaps"]["independently_validated"]), got["all_gaps"]
+    # Both measured and passed (the name matched regardless of case and surrounding spaces): validated.
+    both = {"status": "ok", "judged_by": "engine", "contract": "trial", "attempts": [{"judged": [
+        {"name": "closed form", "value": 0.0, "passed_by_engine": True, "measured_by": "engine"},
+        {"name": " LIMIT ", "value": 1.0, "passed_by_engine": True, "measured_by": "engine"},
+    ]}]}
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(both), encoding="utf-8")
+    assert evidence.assess(root, _state(design=design), settings=ON)["levels"]["independently_validated"] is True
 
 
 def test_one_engine_measured_pass_among_several_oracles_is_still_needed_and_enough(tmp_path: Path) -> None:
