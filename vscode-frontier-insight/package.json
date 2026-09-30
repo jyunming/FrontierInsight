@@ -190,7 +190,7 @@
         "frontierInsight.repoPath": {
           "type": "string",
           "default": "",
-          "description": "Absolute path to the FrontierInsight folder (the one containing launch.py). Leave empty when the open workspace IS that folder; otherwise set it, and quests run in your workspace folder instead."
+          "description": "Leave empty: FrontierInsight is found by itself (the open folder when it is the FrontierInsight folder, else the Python above when FI is pip-installed in it, else the folder you picked once, remembered in ~/.frontier-insight/fi_location.json). Set it only to force one FrontierInsight folder (the one containing launch.py). Quests always run in your open folder."
         },
         "frontierInsight.workingDir": {
           "type": "string",

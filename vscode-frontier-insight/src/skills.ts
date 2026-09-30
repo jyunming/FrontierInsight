@@ -18,7 +18,7 @@ import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
-import { rootsFromConfig } from "./roots-config";
+import { rootsForCommand } from "./roots-config";
 import { configArgs, configHint, splitSkillArgs } from "./skill-args";
 
 export interface SkillRow {
@@ -50,11 +50,11 @@ interface SkillsEnv {
 }
 
 /** Resolve (python, FI folder, work folder) or explain to the user why we cannot. */
-function resolveRepo(
+async function resolveRepo(
     stream: vscode.ChatResponseStream,
-): SkillsEnv | null {
+): Promise<SkillsEnv | null> {
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error + "\n");
         return null;
@@ -123,7 +123,7 @@ export async function runListSkills(
         stream.markdown(error + "\n");
         return;
     }
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     stream.progress("Reading the skill library…");
@@ -210,7 +210,7 @@ export async function runScanSkill(
         );
         return;
     }
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     stream.progress(`Reviewing ${name}…`);
@@ -279,7 +279,7 @@ export async function runApproveSkill(
         );
         return;
     }
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     const scanRes = await runLaunch(env, [
@@ -372,7 +372,7 @@ export async function runApproveAllSkills(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
@@ -467,7 +467,7 @@ export async function runRevokeSkill(
         stream.markdown("Which skill? Example: `@fi /revoke-skill <name>`\n");
         return;
     }
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     const res = await runLaunch(env, ["--revoke-skill", name, ...configArgs(config)]);
@@ -492,7 +492,7 @@ export async function runRemoveSkill(
         stream.markdown("Which skill? Example: `@fi /remove-skill <name>`\n");
         return;
     }
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     const res = await runLaunch(env, ["--remove-skill", name, ...configArgs(config)]);
@@ -507,7 +507,7 @@ export async function runImportSkill(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     let source = promptArgs.trim();
@@ -556,7 +556,7 @@ export async function runTeachSkill(
     stream: vscode.ChatResponseStream,
     token: vscode.CancellationToken,
 ): Promise<void> {
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
 
     const parts = promptArgs.trim().split(/\s+/).filter(Boolean);
@@ -618,7 +618,7 @@ export async function runApproveAmendment(
         stream.markdown("Which quest? Example: `@fi /approve-amendment 1790003131-my-quest`\n");
         return;
     }
-    const env = resolveRepo(stream);
+    const env = await resolveRepo(stream);
     if (!env || token.isCancellationRequested) return;
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";

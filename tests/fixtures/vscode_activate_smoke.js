@@ -18,6 +18,7 @@ const deep = () =>
 
 const participants = [];
 const opened = [];
+let out_picker_calls = 0;
 const vscodeMock = new Proxy(
   {
     __esModule: true,
@@ -34,6 +35,12 @@ const vscodeMock = new Proxy(
       showWarningMessage: async () => undefined,
       showErrorMessage: async () => undefined,
       showQuickPick: async (items) => items[0],
+      // The "Where is FrontierInsight?" folder picker: answers `arg.picked`, or is cancelled.
+      showOpenDialog: async () => {
+        out_picker_calls += 1;
+        return arg.picked ? [{ fsPath: arg.picked }] : undefined;
+      },
+      activeTextEditor: undefined,
       showTextDocument: async (doc) => {
         opened.push(doc.path);
       },
@@ -80,6 +87,7 @@ Module._load = function (request, ...rest) {
     out.replies[cmd] = said.join(" ");
   }
   out.opened = opened;
+  out.pickerCalls = out_picker_calls;
   ext.deactivate();
   process.stdout.write(JSON.stringify(out));
   process.exit(0);

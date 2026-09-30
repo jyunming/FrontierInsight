@@ -35,7 +35,12 @@ def _run(tmp_path: Path, **arg) -> dict:  # noqa: ANN003
         # a running VSCode may be holding.
         "USERNAME": f"fi_smoke_{os.getpid()}",
         "XDG_RUNTIME_DIR": str(tmp_path),
+        # A picked FI folder is remembered under the home folder: never the real one.
+        "HOME": str(tmp_path / "home"),
+        "USERPROFILE": str(tmp_path / "home"),
     }
+    # Unless a test says otherwise, the Python knows nothing of FI (the machine's own may).
+    arg["settings"] = {"pythonPath": str(tmp_path / "no-such-python"), **arg.get("settings", {})}
     done = subprocess.run(
         [node, str(SMOKE), str(BUNDLE), json.dumps(arg)],
         capture_output=True, text=True, encoding="utf-8", timeout=90, env=env,
@@ -70,10 +75,10 @@ def test_declared_chat_commands_are_all_routed(tmp_path: Path) -> None:
     assert not missing, f"declared in package.json but never handled: {missing}"
 
 
-def test_without_a_workspace_the_commands_say_what_is_missing(tmp_path: Path) -> None:
+def test_when_fi_cannot_be_found_the_commands_say_how_to_fix_it(tmp_path: Path) -> None:
     got = _run(tmp_path, commands=["watch", "resume", "plan", "skills"], workspace=None, settings={})
     for cmd, reply in got["replies"].items():
-        assert "No workspace open" in reply, (cmd, reply)
+        assert "FrontierInsight was not found" in reply and "pip install -e" in reply, (cmd, reply)
 
 
 def test_a_project_workspace_uses_its_own_outputs_not_fis(tmp_path: Path, folders) -> None:
@@ -100,12 +105,32 @@ def test_watch_lists_only_quests_that_are_waiting_on_a_job(tmp_path: Path, folde
     assert "waiting on a background job" in got["replies"]["watch"]
 
 
-def test_a_workspace_that_is_not_fi_and_names_no_fi_folder_is_told_how_to_fix_it(
+def test_a_project_folder_finds_fi_with_no_setting_and_asks_at_most_once(
     tmp_path: Path, folders,
 ) -> None:
+    """Nothing set: the one folder picker is the last resort, its answer is remembered in
+    ~/.frontier-insight/fi_location.json (not a VS Code setting), and the quests are the
+    open folder's."""
+    got = _run(
+        tmp_path, commands=["resume", "watch"], workspace=str(folders["project"]), settings={},
+        picked=str(folders["fi"]),
+    )
+    assert got["pickerCalls"] == 1, "asked once for the whole session, not once per command"
+    for cmd in ("resume", "watch"):
+        assert str(folders["project"] / "outputs") in got["replies"][cmd], got["replies"][cmd]
+    saved = tmp_path / "home" / ".frontier-insight" / "fi_location.json"
+    assert json.loads(saved.read_text(encoding="utf-8")) == {"path": str(folders["fi"])}
+    # A new window (a second study folder) finds it without asking.
+    other = tmp_path / "study_b"
+    other.mkdir()
+    got = _run(tmp_path, commands=["resume"], workspace=str(other), settings={})
+    assert got["pickerCalls"] == 0 and str(other / "outputs") in got["replies"]["resume"]
+
+
+def test_a_cancelled_picker_is_told_how_to_fix_it(tmp_path: Path, folders) -> None:
     got = _run(tmp_path, commands=["resume"], workspace=str(folders["project"]), settings={})
-    assert "no `launch.py`" in got["replies"]["resume"]
-    assert "frontierInsight.repoPath" in got["replies"]["resume"]
+    assert "FrontierInsight was not found" in got["replies"]["resume"]
+    assert got["pickerCalls"] == 1
 
 
 def test_plan_lists_only_quests_that_have_written_a_plan(tmp_path: Path, folders) -> None:

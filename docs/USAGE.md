@@ -150,6 +150,22 @@ fi --config quest.yaml --resume <quest_id> --from writing   # write the paper ag
 fi --serve                                               # the web UI watches ./outputs and starts quests from this folder
 ```
 
+### Running several studies at once
+
+Give each study its own folder and run it from there: a relative `output.output_dir` (the default `./outputs`) means the folder the command runs in, so each study's results stay in its own folder.
+
+```bash
+cd ~/study_a && fi --config a.yaml      # one terminal per study
+cd ~/study_b && fi --config b.yaml
+fi --fleet a.yaml b.yaml --max-concurrent 2 --memory-cap-mb 4096   # or several YAMLs from one command
+```
+
+A fleet writes every quest under the folder it runs from, unless a YAML gives an absolute `output_dir`. In VS Code, open each study folder in its own window (*File → New Window*) and use `@fi /new` or `@fi /start <yaml>` in each: every quest has its own connection to VS Code, and a window's quest lists (`/resume`, `/watch`, `/map`, …) show only its folder's quests. With several folders in one window, a command works in the folder holding the YAML it names, else the folder of the file you are editing, else the first folder.
+
+The extension finds FrontierInsight without a setting, in this order: the open folder when it is the FrontierInsight folder; the Python in `frontierInsight.pythonPath` when FI is installed in it with `pip install -e`; the folder you picked before; else it asks once, *"Where is FrontierInsight?"*, and remembers the answer in `~/.frontier-insight/fi_location.json` for every window. `frontierInsight.repoPath` still forces one folder when set.
+
+What FI keeps for you across studies (`~/.frontier-insight/`: installed packages, paper downloads, the Axon library's current project) is shared safely: FI takes turns on it. Studies running at the same time share the model account's rate limit (a Copilot quota, a provider's requests per minute), so they may wait or retry; two or three at once is a sensible start.
+
 ### Doing a step again
 
 `--resume <quest_id> --from <step>` does a quest again from one of its steps and keeps everything decided before it. What that step and the later ones made is moved to `.fi/previous/<time>/` first, so the old and the new outputs can be compared. `--from` with no step lists the steps that quest reached, which are the only ones it can be done again from, each with one sentence saying what redoing it does; the raw graph names (`ideate`, `cross_check`, `evidence_gate`, `claim_check`, `web_plots`, ...) work as step names too. `figures` exists only for a quest with no simulation. Some parts of the pipeline are not steps: the first question round (`clarify`; that is a new quest), the pauses, the repair of a crashed script (part of `run`) and the human review decision. Beyond this, the web quest page's menu beside **Resume** shows the same list (also while the quest waits for your review decision or setup answers; choosing a step turns the button into **Redo**), and so does `@fi /resume <quest_id> --from` in VSCode.
@@ -187,7 +203,7 @@ fi tools rename <quest_id> Energy Drift of Symplectic Integrators at Large Step 
 
 This changes the title line of the paper, the `title` in the quest's `config.yaml`, the summary and the saved state a resume reads, and records the change in the quest's trace. Results, data and code are not touched. It is refused while the quest is running, and the title must be one line of at most 200 characters. A PDF, slides, poster or talk script already made still show the old title: the command lists them with the command that makes each again from the same paper, for example `python launch.py --resume <quest_id> --emit paper_pdf` (no re-run of the research). A rerun with `--from <step>` (the writing included) starts from before the rename and may choose another title; rename again afterwards. A title that starts with `-` goes in as `--title="-..."`. Renaming a finished quest does not lower its evidence level: the change is recorded after the trace's seal with the paper's fingerprint before and after. On the web quest page, use **Rename** beside the title (it offers to make the outputs again); in VS Code, `@fi /rename <quest_id> <new title>`.
 
-`--resume` looks under the folder's `output.output_dir`; if it does not find the quest it says exactly where it looked. In VSCode, open your project folder and set `frontierInsight.repoPath` to the FrontierInsight folder; quests then run in the project (`frontierInsight.workingDir` overrides that). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
+`--resume` looks under the folder's `output.output_dir`; if it does not find the quest it says exactly where it looked. In VSCode, open your project folder; quests run in it (`frontierInsight.workingDir` overrides that), and FrontierInsight is found without a setting (see *Running several studies at once*). Skills kept in your project (`.claude/skills`, `.agents/skills`, `./skills`) are found from there too.
 
 ### All `fi` flags
 

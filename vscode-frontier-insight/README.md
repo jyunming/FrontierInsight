@@ -14,7 +14,7 @@ Five steps, then everything below is reference you can look up when you need it.
 1. Install **GitHub Copilot Chat** in VSCode and sign in.
 2. Clone the FrontierInsight repo and install it into the Python the extension will use: `python -m pip install -e .` (that interpreter is the setting `frontierInsight.pythonPath`).
 3. Install this extension: build the `.vsix` and use *Install from VSIX...*, then reload the window (details in *One-time setup* below), or press **F5** in this folder to try it without installing.
-4. Open your project folder in VSCode. If FrontierInsight is somewhere else, set `frontierInsight.repoPath` to it.
+4. Open your project folder in VSCode. Nothing to set: the extension finds FrontierInsight by itself (through the Python from step 2), and if it ever can't, it asks you once for the folder and remembers it.
 5. In Copilot Chat type **`@fi /new`** and answer the questions. When a quest stops for you (a `paused` message in the chat), read what it asks and continue with **`@fi /resume`**.
 
 The finished paper is in `outputs/<quest id>/paper/paper.md` in your project folder. Words you do not know are in the [glossary](../docs/glossary.md); a first run outside VSCode is in [first-quest.md](../docs/first-quest.md).
@@ -155,10 +155,13 @@ length.
    press **F5**. That launches an "Extension Development Host" window
    with the extension active. Every code edit + F5 picks up the
    latest source — no install/reload cycle needed.
-4. **Open the FrontierInsight repo** as your workspace, OR — the usual case — open **your own project
-   folder** and set `frontierInsight.repoPath` to the FrontierInsight folder (the one containing
-   `launch.py`). Quests then run in your project folder: your YAML, example files and the relative
-   `outputs/` all mean that folder, and nothing is written into FI's checkout.
+4. **Open your own project folder** (the usual case) or the FrontierInsight repo. Quests run in the
+   folder you open: your YAML, example files and the relative `outputs/` all mean that folder, and
+   nothing is written into FI's checkout. FrontierInsight itself is found without a setting, in this
+   order: the open folder when it is the FrontierInsight folder; else the Python in
+   `frontierInsight.pythonPath`, when FI is installed in it with `pip install -e`; else the folder you
+   picked before; else the extension asks once, *"Where is FrontierInsight?"*, and remembers your
+   answer in `~/.frontier-insight/fi_location.json` for every window and every later session.
 
 ## Settings
 
@@ -167,8 +170,8 @@ length.
 | Setting | Default | What it does |
 |---|---|---|
 | `frontierInsight.pythonPath` | `"python"` | Interpreter for the FI engine, and the one quest code runs on. Install FI's dependencies into this same interpreter (`<that python> -m pip install -e .`); a plain `pip` may belong to a different Python. `run.log` starts with `[env] python=<path>` so you can see which one ran. Use a venv path if you don't want FI cluttering your global packages. The CLI's own self-setup (`python launch.py` creating a `.venv/` on a missing dependency) is off for every command this extension runs, so a missing dependency here is always this setting to fix, not a different environment appearing on its own. |
-| `frontierInsight.repoPath` | `""` | Absolute path to the FrontierInsight folder (the one containing `launch.py`). Leave empty when the open workspace IS that folder. |
-| `frontierInsight.workingDir` | `""` | The folder quests run in. Defaults to the open workspace folder (FI's own folder when that is the workspace). Relative values are resolved against the workspace. |
+| `frontierInsight.repoPath` | `""` | Leave empty: FrontierInsight is found by itself (see *One-time setup*, step 4). Set it only to force one FrontierInsight folder (the one containing `launch.py`). |
+| `frontierInsight.workingDir` | `""` | The folder quests run in. Defaults to the open folder (FI's own folder when that is the one open). With several folders open in one window, the folder holding the YAML the command names, else the folder of the file you are editing, else the first. Relative values are resolved against that folder. |
 | `frontierInsight.outputDir` | `"outputs"` | Where finished quests are written (relative to the working folder, or absolute). |
 | `frontierInsight.axonStartupWaitSec` | `600` | How long to keep watching for the Axon sidecar after the editor starts, before saying none was found. Axon loads its embedding model and indexes before it serves, and you may start it well after opening VS Code — so the wait is long and silent. A sidecar that appears at any point during it produces no notification at all. `0` never shows the notice. |
 | `frontierInsight.axonUrl` | `""` | Base URL of the Axon sidecar, e.g. `http://127.0.0.1:8420`. Empty means discover it automatically. Set it only when Axon runs somewhere discovery can't see — another machine, a container. Plain HTTP only. It pins the extension to that one instance rather than acting as a first guess, since two Axon instances hold different corpora. |
@@ -301,6 +304,37 @@ All quests share the same VSCode bridge, but each carries its own
 `provider.node_models` so they can use different Copilot models from
 the same subscription. The chat panel multiplexes — each line is tagged
 with the quest's node + iteration so you can follow along.
+
+### Running several studies at once
+
+Give each study its own folder, and open each folder in its own VS Code window
+(*File → New Window*, then open the folder). In each window, `@fi /new` or
+`@fi /start <yaml>` runs that study; the windows do not get in each other's way:
+
+- Each quest talks to VS Code over its own connection, so two or three quests run side by side,
+  in one window or in several, and each chat shows only its own quest.
+- A window's quest lists (`/resume`, `/watch`, `/plan`, `/map`, …) show only the quests in that
+  window's folder (its `outputs/`).
+- FrontierInsight is found the same way in every window; if you were asked for its folder once,
+  no other window asks again.
+- The files FI keeps for you across studies (`~/.frontier-insight/`: installed packages, paper
+  downloads, the Axon library's current project) are shared safely: FI takes turns on them.
+
+The same from a terminal, one per study folder:
+
+```
+cd study_a && fi --config a.yaml
+cd study_b && fi --config b.yaml
+```
+
+A relative `output_dir` in the YAML (the default `./outputs`) means the folder you run the command
+from, so each study's results stay in its own folder. To run several YAMLs from one command:
+`fi --fleet a.yaml b.yaml --max-concurrent 2 --memory-cap-mb 4096` (they all write under the
+folder you run it from, unless a YAML gives an absolute `output_dir`).
+
+Studies running at once all call the same model account, so they share its rate limit: a
+Copilot quota or a provider's requests-per-minute cap runs out faster, and a study may wait or
+retry. Two or three at a time is a sensible start.
 
 ### Resume a crashed quest
 

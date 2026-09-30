@@ -31,7 +31,8 @@ import {
     runTeachSkill,
 } from "./skills";
 import { Bridge } from "./bridge";
-import { rootsFromConfig } from "./roots-config";
+import { rootsForCommand, workFolderForCommand } from "./roots-config";
+import type { Roots } from "./roots";
 import { PersistentBridge } from "./persistent-bridge";
 import { persistentBridgePath } from "./bridge-path";
 import {
@@ -161,6 +162,15 @@ async function waitForChildExit(
 }
 
 let persistentBridge: PersistentBridge | null = null;
+
+/**
+ * The bridge address for a Python this window starts in a terminal: this window's own
+ * (a second window open at the same time listens somewhere else than the first), else
+ * the per-user one.
+ */
+function thisWindowsBridge(): string {
+    return persistentBridge?.boundPath ?? persistentBridgePath();
+}
 
 export function activate(context: vscode.ExtensionContext): void {
     const participant = vscode.chat.createChatParticipant(
@@ -482,7 +492,7 @@ async function runResume(
     if (token.isCancellationRequested) return;
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -686,6 +696,7 @@ async function runResume(
         await runQuest(
             relYaml, /*fleet*/ false, stream, token, userPickedModel,
             /*resumeQuestId*/ chosenId, /*watch*/ false, /*revisePlan*/ planRequest,
+            /*fromStep*/ undefined, roots,
         );
         return;
     }
@@ -711,6 +722,7 @@ async function runResume(
         /*watch*/ watch,
         /*revisePlan*/ undefined,
         /*fromStep*/ fromStep,
+        roots,
     );
 }
 
@@ -758,7 +770,7 @@ async function runTerminalCommand(
     // command; the user sees the live output there.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -793,7 +805,7 @@ async function runUpdate(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -879,7 +891,7 @@ async function runUpdate(
         // look there too; launch.py would otherwise default to
         // ./outputs and reject a quest the picker just listed.
         outputRoot: outputsDir,
-        bridgeSocket: persistentBridgePath(),
+        bridgeSocket: thisWindowsBridge(),
         shell: currentShell(),
     }));
 }
@@ -900,7 +912,7 @@ async function runGenerate(
     if (token.isCancellationRequested) return;
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -990,7 +1002,7 @@ async function runGenerate(
         yamlPath,
         questId,
         kind,
-        bridgeSocket: persistentBridgePath(),
+        bridgeSocket: thisWindowsBridge(),
         shell: currentShell(),
     }));
 }
@@ -1017,7 +1029,7 @@ async function runInterviewAndQuest(
 
     // Resolve repo path the same way runQuest does.
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -1057,7 +1069,10 @@ async function runInterviewAndQuest(
 
     // Hand off to the existing runQuest path. We pass the workspace-
     // relative path so the spawned Python's cwd resolves correctly.
-    await runQuest(rel, /*fleet*/ false, stream, token, userPickedModel);
+    await runQuest(
+        rel, /*fleet*/ false, stream, token, userPickedModel,
+        undefined, false, undefined, undefined, roots,
+    );
 }
 
 async function runQuest(
@@ -1070,6 +1085,7 @@ async function runQuest(
     watch = false,
     revisePlan?: string,
     fromStep?: string,
+    knownRoots?: Roots,
 ): Promise<void> {
     const paths = promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
@@ -1087,7 +1103,8 @@ async function runQuest(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    // With several folders open, the study's folder is the one holding its YAML.
+    const roots = knownRoots ?? await rootsForCommand(paths[0]);
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -1252,7 +1269,8 @@ async function runQuest(
             const finishedId = resumeQuestId ?? questIdSeen;
             if (finishedId) await surfaceWorthALook(outputsDir, stream, finishedId);
         }
-        await surfaceWantedPapers(outputsDir, stream, resumeQuestId, !!card);
+        // This run's quest, never another one running beside it in the same folder.
+        await surfaceWantedPapers(outputsDir, stream, resumeQuestId ?? questIdSeen ?? card?.questId, !!card, startedAt);
     } else {
         const tail = stderrTail.join("\n");
         stream.markdown(
@@ -1340,6 +1358,7 @@ async function surfaceWantedPapers(
     stream: vscode.ChatResponseStream,
     knownQuestId?: string,
     waiting = true,
+    since = 0,
 ): Promise<void> {
     try {
         let questId: string | null = null;
@@ -1350,8 +1369,8 @@ async function surfaceWantedPapers(
                 questId = knownQuestId;
             } catch { return; }
         } else {
-            // /new: the engine assigned the id — pick the quest whose
-            // WANTED_PAPERS.md was written most recently (this run's).
+            // /fleet: no one id — pick the quest whose WANTED_PAPERS.md was
+            // written most recently, and only by this run (not an older quest's).
             const entries = await fsPromises.readdir(outputsDir, { withFileTypes: true });
             let best: { id: string; mtime: number } | null = null;
             for (const e of entries) {
@@ -1359,6 +1378,7 @@ async function surfaceWantedPapers(
                 const wanted = path.join(outputsDir, e.name, "needs", "WANTED_PAPERS.md");
                 try {
                     const st = await fsPromises.stat(wanted);
+                    if (st.mtimeMs < since - CLOCK_SLACK_MS) { continue; }
                     if (!best || st.mtimeMs > best.mtime) { best = { id: e.name, mtime: st.mtimeMs }; }
                 } catch { /* no needs file in this quest */ }
             }
@@ -1467,7 +1487,7 @@ async function runSummarize(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand(folderArg);
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -1623,7 +1643,7 @@ async function runDigest(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -1729,7 +1749,7 @@ async function runPortfolio(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -1855,7 +1875,7 @@ async function runCritique(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -2141,7 +2161,7 @@ async function runListDrafts(
     if (token.isCancellationRequested) return;
     const fs = require("node:fs") as typeof import("node:fs");
     const pathMod = require("node:path") as typeof import("node:path");
-    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const ws = workFolderForCommand();
     if (!ws) {
         stream.markdown("Open a folder in VSCode first (the workspace root is where `outputs/_drafts/` lives).\n");
         return;
@@ -2223,7 +2243,7 @@ async function runProposal(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand();
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
@@ -2373,7 +2393,7 @@ async function runAnalyze(
 
     const cfg = vscode.workspace.getConfiguration("frontierInsight");
     const pythonPath = cfg.get<string>("pythonPath") || "python";
-    const roots = rootsFromConfig(cfg);
+    const roots = await rootsForCommand(dataPath);
     if ("error" in roots) {
         stream.markdown(roots.error);
         return;
