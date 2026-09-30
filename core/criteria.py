@@ -27,7 +27,8 @@ it counts as worse. A number the script measured itself (an oracle with no case,
 The criteria live inside the protocol, so they are frozen with it, covered by its hash and changed only by an amendment
 (:mod:`core.frozen_protocol`). After every run the engine computes each one and appends a row to
 ``.fi/criteria_history.jsonl``: the protocol's run and version, the commit of ``code/`` that ran, and each criterion's
-value, whether it was met and whether it counts. Nothing is decided from the rows yet.
+value, whether it was met and whether it counts. The improve loop (:mod:`core.improve`) decides from them: it changes
+the simulation one step at a time and keeps a version only when no criterion got worse beyond its own tolerance.
 """
 
 from __future__ import annotations
@@ -421,11 +422,13 @@ def history(quest_root: Path) -> list[dict[str, Any]]:
 
 def record(quest_root: Path, *, run: str, code_commit: str | None, results: list[dict[str, Any]],
            code_changed: bool | None = None, protocol_version: int | None = None, protocol_sha256: str | None = None,
-           attempt: str | None = None, protocol_problem: str | None = None) -> dict[str, Any]:
+           attempt: str | None = None, protocol_problem: str | None = None,
+           improve: dict[str, Any] | None = None) -> dict[str, Any]:
     """Append one row to ``.fi/criteria_history.jsonl`` and return it. ``n`` counts the rows (one per run of the code);
     ``run`` is the frozen protocol's run (``run_1`` until an amendment), so rows are compared only within one
     ``protocol_sha256``. ``attempt`` is the id of this run's record in ``.fi/attempts.jsonl``. ``results`` empty is
-    recorded as "no criterion"."""
+    recorded as "no criterion". ``improve``: for a round of the improve loop (:mod:`core.improve`), the round, whether
+    its version was kept as the best, and the criteria that got better or worse against the version kept before it."""
     row: dict[str, Any] = {
         "n": len(history(quest_root)) + 1, "run": run, "protocol_version": protocol_version,
         "protocol_sha256": protocol_sha256, "attempt": attempt,
@@ -436,6 +439,8 @@ def record(quest_root: Path, *, run: str, code_commit: str | None, results: list
         row["code_changed_since_commit"] = code_changed
     if protocol_problem:
         row["protocol_problem"] = protocol_problem
+    if improve:
+        row["improve"] = improve
     if not results:
         row["note"] = "no criterion"
     try:

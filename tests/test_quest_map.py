@@ -47,7 +47,7 @@ def test_every_block_holds_nodes_in_graph_order() -> None:
 
 def test_the_loops_the_graph_has_are_noted() -> None:
     loops = {n: m["loop"] for n, m in rerun_from.NODES.items() if m.get("loop")}
-    assert set(loops) == {"execute_reflect", "analyze", "review"}
+    assert set(loops) == {"execute_reflect", "improve", "analyze", "review"}
     assert all("Run it" in loops["execute_reflect"] or "Design" in v for v in loops.values())
 
 

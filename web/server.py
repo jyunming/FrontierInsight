@@ -525,7 +525,7 @@ _NODE_TAG_RE = re.compile(r"\[([a-z_]+)\]")
 # normally — `_current_node_from_log` filters on this set.
 _KNOWN_NODES = frozenset({
     "clarify", "ideate", "literature", "plan", "design", "design_self_critique",
-    "implement_outline", "implement", "execute", "execute_reflect",
+    "implement_outline", "implement", "execute", "execute_reflect", "improve",
     "analyze", "cross_check", "evidence_gate", "write", "claim_check",
     "review", "human_feedback", "select_skills", "pause_after_literature",
     # No-simulation routing: triggered when ``simulatability == "no"``.

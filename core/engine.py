@@ -85,6 +85,7 @@ from . import paper_patch
 from . import paper_trim
 from . import plan as _plan
 from . import criteria as _criteria
+from . import improve as _improve
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
 from . import experiment_deps as _experiment_deps
@@ -428,6 +429,12 @@ class QuestState(TypedDict, total=False):
     # The engine's own tally of the model calls it made, per step (``node`` key), for the quest's whole life: the record
     # of its calls (.fi/model_calls.jsonl) must hold at least this many lines per step (core/attempt_records.py).
     model_call_counts: dict[str, int]
+    # The improve loop (core/improve.py): the rounds spent in this quest (one budget, ``engine.improve_rounds``, shared by
+    # every pass), whether the next run is the kept version's full run (``improve_rerun``), and what the loop did.
+    improve_rounds_used: int
+    improve_rerun: bool
+    improve_fell_back: bool
+    improve_summary: dict[str, Any]
     feedback_rewrite_for: int
     refine_needs_experiment: list[str]
     # The points of a refine that only need a number the study lacks (``refine_extend``: the existing script is extended
@@ -870,6 +877,10 @@ class Engine:
                         forget_papers_asked(self.fi_dir, declined=False)
                         if _rerun_from.picks_skills(from_step):
                             fork_config = await self._repick_skills(graph, fork_config)
+                        try:
+                            await asyncio.to_thread(self._improve_undo_unfinished)
+                        except Exception as exc:  # noqa: BLE001 -- the rerun goes on; the log says what was not undone
+                            self._log.warning("[improve] could not undo a loop cut short before the rerun: %r", exc)
                         try:
                             where, moved = _rerun_from.back_up(self.quest_root, from_step)
                         except OSError as exc:
@@ -2062,6 +2073,9 @@ class Engine:
         g.add_node("execute", self._audited("execute", self._node_execute))
         # execute → execute_reflect (loops back to execute on failure)
         g.add_node("execute_reflect", self._audited("execute_reflect", self._node_execute_reflect))
+        # execute_reflect → improve: the simulation changed one step at a time against its checks of correctness
+        # (core/improve.py); a passthrough unless the protocol has criteria FI measures and one is not met.
+        g.add_node("improve", self._audited("improve", self._node_improve))
         g.add_node("analyze", self._audited("analyze", self._node_analyze))
         # analyze → cross_check (always) → write OR design
         g.add_node("cross_check", self._audited("cross_check", self._node_cross_check))
@@ -2130,7 +2144,14 @@ class Engine:
         g.add_conditional_edges(
             "execute_reflect",
             self._audited_route("execute_reflect", self._route_after_execute_reflect),
-            {"retry": "execute", "proceed": "analyze"},
+            {"retry": "execute", "proceed": "improve"},
+        )
+        # improve → execute once, when it kept a changed version: that version runs the ordinary way (every check, the
+        # full set of trials), and its run is the one analysed. It then comes back here and goes on.
+        g.add_conditional_edges(
+            "improve",
+            self._audited_route("improve", self._route_after_improve),
+            {"rerun": "execute", "proceed": "analyze"},
         )
         # auto_collect_data: best-effort Axon retrieval that
         # writes hits into <quest_root>/data/auto_collected/<idx>_<slug>.md
@@ -2298,6 +2319,11 @@ class Engine:
         if int(state.get("exec_reflect_iter", 0) or 0) + 1 >= self.config.engine.exec_reflect_max_iterations:
             return []
         return _figure_overlap_findings(state)
+
+    def _route_after_improve(self, state: QuestState) -> str:
+        """``rerun`` when the improve loop kept a changed version (it is run once more, the ordinary way), else
+        ``proceed`` to the analysis."""
+        return "rerun" if state.get("improve_rerun") else "proceed"
 
     def _route_after_execute_reflect(self, state: QuestState) -> str:
         """Route based on whether the reflect node patched the
@@ -8120,6 +8146,537 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- a record of the criteria must never stop a quest
             self._log.warning("[criteria] could not be computed this run: %r", e)
 
+    # ---- the improve loop and the ratchet (core/improve.py) ---------------------------------------------------------
+
+    def _improve_trial_mode(self, state: QuestState) -> bool:
+        """Whether FI runs the simulation's trials itself: from this run, or read from the code after a resume."""
+        known = self.__dict__.get("_trial_mode")
+        if known is not None:
+            return bool(known)
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        return (self._split_on(state) and simulate.is_file()
+                and bool(_trial_runner.entries(simulate) & {"run_trial", "run_cell"}))
+
+    def _improve_skip(self, state: QuestState) -> str | None:
+        """Why the improve loop does not run after this run, or ``None`` when it may."""
+        limit = int(self.config.engine.improve_rounds or 0)
+        if limit <= 0:
+            return "engine.improve_rounds is 0"
+        if state.get("no_simulation_resolved") or state.get("survey_mode_resolved"):
+            return "this quest runs no simulation"
+        if _phased.enabled(self.config) and _phased.stage(self.quest_root) in (_phased.CONFIRM, _phased.CONFIRMED):
+            return "this is the confirm run, which runs the frozen design as it is"
+        if self.config.execution.background_jobs:
+            return "the simulation runs as a background job"
+        if _optim.has_block(state.get("design")) or _optimise.block_of(self._protocol_block(state)) is not None:
+            return "this study is a search for the best design, whose runs FI's search makes itself"
+        result = state.get("exec_result") or {}
+        if state.get("exec_give_up_reason") or result.get("returncode", 1) != 0 or not state.get("result_json"):
+            return "the run did not produce a result"
+        if not self._improve_trial_mode(state):
+            return ("FI does not run the simulation's trials itself (one script, or a simulation without run_trial / "
+                    "run_cell), so it cannot measure the checks between changes")
+        used = int(state.get("improve_rounds_used") or 0)
+        if used >= limit:
+            return f"the {limit} round(s) of engine.improve_rounds were used earlier in this quest"
+        return None
+
+    async def _node_improve(self, state: QuestState) -> QuestState:
+        """After a run with a result: change the simulation one step at a time against the protocol's checks of
+        correctness (core/criteria.py), keeping a version only when no check got worse beyond its own tolerance
+        (core/improve.py). A passthrough when there is nothing to do; the log says why."""
+        record = _improve.load(self.quest_root)
+        # The last full run's row: a round's own row (with its ``improve`` block) is never the starting point.
+        runs = [r for r in _criteria.history(self.quest_root) if not r.get("improve")]
+        last = runs[-1] if runs else {}
+        unfinished = bool(record) and (record.get("blocked") or not record.get("stopped"))
+        if unfinished and not state.get("improve_rerun") and record.get("baseline_n") != last.get("n"):
+            # A stop or a loop cut short over code that has run again since (a rerun from an earlier step): it is not
+            # this code's, and nothing it kept is put back.
+            record.update(blocked=False, stopped=record.get("stopped") or "set aside: the code ran again from an earlier "
+                                                                           "step before the loop finished")
+            self._improve_save(record)
+            shutil.rmtree(self.quest_root / _improve.SNAPSHOTS / "raw", ignore_errors=True)  # that code's trial record
+            self._log.info("[improve] an earlier loop's record belongs to code that has run again since; set aside")
+        if record.get("blocked"):
+            return await self._improve_resume_after_block(state, record)
+        if state.get("improve_rerun"):
+            return await self._improve_after_rerun(state, record)
+        spent = 0
+        if record.get("started") and not record.get("stopped"):
+            # A loop cut short (the process stopped mid-round): the version the last full run used and FI's record of
+            # its trials go back before anything else, so a half-finished round can never stand in for them. Its rounds
+            # stay spent.
+            spent = await self._improve_put_back_first(record)
+        done: QuestState = {"improve_rerun": False}
+        if spent > int(state.get("improve_rounds_used") or 0):
+            state = {**state, "improve_rounds_used": spent}
+            done["improve_rounds_used"] = spent
+        why = self._improve_skip(state)
+        protocol = _frozen.protocol_of(self.quest_root) or self._draft_protocol(state)
+        if why is None and not (isinstance(protocol, dict) and _criteria.countable(protocol)):
+            why = "the plan has no check of correctness FI measures itself (`criteria` in the protocol)"
+        baseline = [r for r in last.get("criteria") or [] if isinstance(r, dict)]
+        if why is None and not _improve.counted(baseline):
+            why = "no check of correctness was measured by FI in this run"
+        if why is None and _improve.all_met(baseline):
+            why = "every check of correctness is already met"
+        if why is not None:
+            self._log.info("[improve] no change to the simulation: %s", why)
+            return done
+        return await self._improve_loop(state, protocol, baseline, baseline_n=last.get("n"), earlier=record)
+
+    def _improve_undo_unfinished(self) -> None:
+        """Before a rerun from a step moves the loop's record aside: a loop cut short left a round's version in code/,
+        which the rerun would otherwise run as the study's code. The version the last full run used goes back first."""
+        record = _improve.load(self.quest_root)
+        if not record.get("started") or record.get("stopped") or record.get("blocked"):
+            return
+        if record.get("baseline_n") != self._improve_last_run_n():
+            return  # a loop over code that has run again since: nothing of it is put back
+        original = _improve.load_snapshot(self.quest_root, "original")
+        if original is None:
+            return
+        _improve.restore(self.quest_root, original)
+        if record.get("raw_saved"):
+            self._improve_put_back_raw()
+        record.update(stopped=_improve.STOP_CUT_SHORT, ended=_improve._now())
+        self._improve_save(record)
+        _code_project.record_change(self.quest_root, "improve: the loop was cut short; back to the version the last "
+                                    "full run used", log=self._log)
+        self._log.warning("[improve] a loop cut short left a changed version in code/; the version the last full run "
+                          "used is back before the rerun")
+
+    def _improve_last_run_n(self) -> Any:
+        runs = [r for r in _criteria.history(self.quest_root) if not r.get("improve")]
+        return runs[-1].get("n") if runs else None
+
+    def _improve_save(self, record: dict[str, Any]) -> None:
+        if not _improve.save(self.quest_root, record):
+            self._log.warning("[improve] could not write %s; the loop's record on disk is out of date", _improve.RECORD)
+
+    def _improve_fresh_run(self) -> QuestState:
+        """What a run of a changed version starts with: the repair counters of a new script, and no cached trials (a
+        kept change to a helper module leaves simulate.py's text, and so the key of the trials already run, unchanged)."""
+        (self.quest_root / _trial_runner.RUN_RECORD).unlink(missing_ok=True)
+        return dict(_FRESH_SCRIPT)
+
+    def _improve_raw_files(self) -> list[Path]:
+        root = self.quest_root
+        return [root / _trial_runner.RAW_DIRNAME / _trial_runner.LEDGER_NAME,
+                root / _trial_runner.RAW_DIRNAME / _trial_runner.SUMMARY_NAME, root / _trial_runner.RUN_RECORD]
+
+    def _improve_save_raw(self) -> None:
+        """FI's record of the last full run's trials, copied to ``.fi/improve/raw/`` before a round runs trials of its
+        own (on disk, so a loop cut short can still put it back)."""
+        folder = self.quest_root / _improve.SNAPSHOTS / "raw"
+        shutil.rmtree(folder, ignore_errors=True)
+        folder.mkdir(parents=True, exist_ok=True)
+        kept: dict[str, bool] = {}
+        for i, path in enumerate(self._improve_raw_files()):
+            kept[str(i)] = path.is_file()
+            if path.is_file():
+                shutil.copyfile(path, folder / f"{i}.bin")
+        (folder / "kept.json").write_text(json.dumps(kept), encoding="utf-8")
+
+    def _improve_put_back_raw(self, saved: dict[Path, bytes | None] | None = None) -> None:
+        """FI's record of the last full run's trials back in place: from ``saved`` (the bytes held in memory while the
+        loop ran, which no round's run can reach) or, for a loop cut short, from the copy on disk."""
+        folder = self.quest_root / _improve.SNAPSHOTS / "raw"
+        if saved is None:
+            try:
+                kept = json.loads((folder / "kept.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            saved = {}
+            for i, path in enumerate(self._improve_raw_files()):
+                try:
+                    saved[path] = (folder / f"{i}.bin").read_bytes() if kept.get(str(i)) else None
+                except OSError:
+                    return
+        for path, data in saved.items():
+            try:
+                if data is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+            except OSError:
+                pass
+        shutil.rmtree(folder, ignore_errors=True)
+
+    async def _improve_put_back_first(self, record: dict[str, Any]) -> int:
+        """Undo a loop cut short; returns the rounds it had spent in this quest."""
+        original = _improve.load_snapshot(self.quest_root, "original")
+        if original is not None:
+            _improve.restore(self.quest_root, original)
+        if record.get("raw_saved"):
+            self._improve_put_back_raw()
+        spent = int(record.get("rounds_used_before") or 0) + len(record.get("rounds") or [])
+        record.update(stopped=_improve.STOP_CUT_SHORT, ended=_improve._now(), rerun=False, best_round=0,
+                      rounds_used=spent)
+        self._improve_save(record)
+        await asyncio.to_thread(
+            _code_project.record_change, self.quest_root,
+            "improve: the loop was cut short; back to the version the last full run used", log=self._log)
+        self._log.warning("[improve] an earlier improve loop was cut short: the version the last full run used, and FI's "
+                          "record of its trials, are back before the loop starts again (%d round(s) stay spent)", spent)
+        return spent
+
+    async def _improve_measure(self, protocol: dict[str, Any], oracles: list[dict[str, Any]],
+                               trial_names: set[str]) -> tuple[list[dict[str, Any]], list[str]]:
+        """Each criterion of the version in ``code/``, computed by FI: the known-answer cases the criteria name, run by
+        the engine (the check's own record, needs/ORACLE_CHECK.json, is not touched), and every trial of the protocol
+        when a criterion is about the trials. Never the script's own report."""
+        root = self.quest_root
+        py = self.executor.python_path(root)
+        stride = max(1, int(self.config.engine.replicate_seed_stride))
+        env = _replicate_env(self.__dict__.get("_last_exec_env"), 0, stride)
+        if _phased.enabled(self.config):
+            env = _phased.seed_env(root, env)
+        # Each round's version is imported fresh: no compiled copy of an earlier version is read or left behind.
+        env = {**env, "PYTHONDONTWRITEBYTECODE": "1"}
+        _improve.forget_bytecode(root)
+        simulate = f"code/{_split_run.SIMULATE_NAME}"
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+        judged: list[dict[str, Any]] = []
+        series: dict[str, dict[str, list[float]]] = {}
+        problems: list[str] = []
+        why_missing: dict[str, str] = {}
+        if oracles:
+            try:
+                checks, found, _timed_out = await _trial_runner.measure_oracles(
+                    self.executor, py, root, simulate, oracles,
+                    timeout_s=max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac)),
+                    env=env, thresholds=thresholds, case_env=dict(env),
+                )
+                problems += found
+                judged = _oracle.judged(oracles, {"checks": checks, "engine_measured": True})
+            except Exception as e:  # noqa: BLE001 -- a round that cannot run is a round that measured nothing
+                problems.append(f"the known-answer cases could not be run: {e!r}"[:300])
+                why_missing["oracle"] = "the known-answer cases could not be run"
+        if trial_names:
+            grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+            entries = _trial_runner.entries(root / simulate)
+            try:
+                run = await _trial_runner.run_trials(
+                    self.executor, py, root, simulate, grid,
+                    runs_per_setting=int(protocol.get("runs_per_setting") or 1),
+                    base_seed=int(env.get("FI_REPLICATE_SEED") or 0), deterministic="run_trial" not in entries,
+                    timeout_s=self.config.execution.timeout_s, env=env, thresholds=thresholds,
+                    paired=any(isinstance(m, dict) and m.get("paired") for m in protocol.get("metrics") or []),
+                )
+                series = _improve.series_of(run, trial_names)
+                if run.ok_trials == 0:
+                    problems.append("no trial ran successfully")
+            except Exception as e:  # noqa: BLE001
+                problems.append(f"the trials could not be run: {e!r}"[:300])
+                why_missing["trials"] = "the trials could not be run"
+        rows = _criteria.evaluate(_criteria.declared(protocol), judged=judged, series=series, why_missing=why_missing)
+        return rows, problems
+
+    async def _improve_loop(self, state: QuestState, protocol: dict[str, Any], baseline: list[dict[str, Any]], *,
+                            baseline_n: Any = None, earlier: dict[str, Any] | None = None) -> QuestState:
+        root = self.quest_root
+        limit = int(self.config.engine.improve_rounds)
+        used = int(state.get("improve_rounds_used") or 0)
+        research = getattr(self.config, "rigor_profile", "default") == "research"
+        countable = _criteria.countable(protocol)
+        oracle_names = {c["oracle"] for c in countable if c.get("oracle")}
+        oracles = [o for o in _oracle.declared(protocol) if str(o["name"]).strip() in oracle_names]
+        trial_names = {c["trials"] for c in countable if c.get("trials")}
+        # What an edit must not write in (the values the checks expect, the criteria's targets), what it must not change
+        # the computation of (the numbers the checks read), and what it must not test for (the checks' own settings).
+        expected = [v for v in (_improve._num(x) for x in [*(o.get("expected") for o in oracles),
+                                                           *(c.get("target") for c in countable
+                                                             if c.get("direction") == "target")]) if v is not None]
+        measures = {str(case[1]) for case in (_oracle.case_of(o) for o in oracles) if case} | set(trial_names)
+        settings: dict[str, list[Any]] = {}
+        for case in (_oracle.case_of(o) for o in oracles):
+            for key, value in (case[0].items() if case else []):
+                if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+                    settings.setdefault(str(key), []).append(value)
+        original = _improve.snapshot(root)
+        _improve.save_snapshot(root, "original", original)
+        _improve.save_snapshot(root, "best", original)
+        best: dict[str, Any] = {"round": 0, "rows": baseline, "files": dict(original)}
+        record: dict[str, Any] = {
+            "started": _improve._now(), "limit": limit, "rounds_used_before": used, "rounds": [], "best_round": 0,
+            "research": research, "baseline": _improve.values_line(baseline), "baseline_n": baseline_n,
+            # The loop's earlier passes in this quest (a redesign, a loop cut short), for the paper's note.
+            "earlier": ([*(earlier.get("earlier") or []), {k: v for k, v in earlier.items() if k != "earlier"}]
+                        if earlier and earlier.get("stopped") else []),
+            # One hash per result: enough to say later whether the study's results changed, never their values.
+            "headline_before": _improve.headline_digest(state.get("result_json")),
+        }
+        self._improve_save(record)
+        tried = {_improve.fingerprint(original)}
+        # FI's record of the first run's trials: held in memory (what is put back) and on disk (for a loop cut short).
+        raw_saved: dict[Path, bytes | None] | None = None
+        if trial_names:
+            raw_saved = {p: (p.read_bytes() if p.is_file() else None) for p in self._improve_raw_files()}
+            self._improve_save_raw()
+            record["raw_saved"] = True
+            self._improve_save(record)
+        stopped, calls = _improve.STOP_BUDGET, 0
+        self._log.info(
+            "[improve] %s; changing the simulation one step at a time, keeping a change only when no check gets worse "
+            "beyond its own tolerance (%d round(s) left of engine.improve_rounds: %d)",
+            _improve.values_line(baseline), limit - used, limit,
+        )
+        try:
+            while used < limit:
+                used += 1
+                self._progress(f"[improve] Changing the simulation to meet its checks of correctness (round {used} of "
+                               f"{limit}).")
+                files = _improve.snapshot(root)
+                allowed = _improve.editable(root)
+                prompt = self._prompts["improve"].substitute(
+                    criteria_block=_improve.criteria_block(countable, protocol),
+                    values_block="\n".join(f"- {part}" for part in _improve.values_line(best["rows"]).split("; ")),
+                    history_block=_improve.history_block(record["rounds"]),
+                    editable=", ".join(allowed) or "(none)",
+                    code_block=_improve.code_block(files, allowed),
+                    rounds_left=f"This is round {used} of {limit}.",
+                )
+                entry: dict[str, Any] = {"round": used, "at": _improve._now()}
+                record["rounds"].append(entry)
+                self._improve_save(record)  # counted before the model is asked: a stop now still spends it
+                try:
+                    reply = await self._chat(prompt, node="improve")
+                    calls += 1
+                except _ModelAnswerProblem:
+                    raise
+                except Exception as e:  # noqa: BLE001 -- no answer is no change
+                    entry.update(outcome="not asked", reason=_improve.one_line(repr(e), 200))
+                    self._log.warning("[improve] round %d: the model could not be asked for a change: %r", used, e)
+                    stopped = _improve.STOP_NO_MODEL
+                    break
+                edit, why = _improve.parse_edit(_parse_json_lenient(reply, node="improve"))
+                new_text = None
+                if edit is not None:
+                    new_text, why = _improve.check_edit(files, edit, allowed, tried=tried, expected=expected,
+                                                        measures=measures, settings=settings)
+                if edit is None or new_text is None:
+                    entry.update(outcome="refused", reason=why, why=edit.why if edit else "")
+                    self._log.warning("[improve] round %d: the change was refused before it ran: %s", used, why)
+                    self._audit("check_result", check="improve_round", status="refused", summary=why[:300])
+                    await asyncio.to_thread(
+                        _code_project.record_note, root,
+                        f"improve round {used} refused before it ran ({why}); nothing was changed", log=self._log)
+                    self._improve_save(record)
+                    continue
+                name = edit.file.split("/")[-1]
+                candidate = {**files, name: new_text}
+                tried.add(_improve.fingerprint(candidate))
+                entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit), ran=True)
+                _improve.restore(root, candidate)
+                saved = _improve.guard_bytes(root)
+                tree = _improve.tree_bytes(root)  # code/ as the round starts, git's settings and hooks included
+                before = _improve.guard_hashes(root)
+                rows, problems = await self._improve_measure(protocol, oracles, trial_names)
+                touched = _improve.changed(before, _improve.guard_hashes(root))
+                if touched:
+                    # The run wrote into what FI judges by (the protocol, a record, FI's own code) or into its own
+                    # source: nothing it measured is believed, and no further round is run. The code as the run left it
+                    # is committed first, as the record of what was tried.
+                    shown = ", ".join(touched[:8]) + (f" and {len(touched) - 8} more" if len(touched) > 8 else "")
+                    # Whatever the run wrote into code/ (git's settings and hooks, links included) goes before any
+                    # commit; a history the run replaced is not committed into at all.
+                    history_ok = _improve.put_back_tree(root, tree)
+                    if history_ok:
+                        await asyncio.to_thread(
+                            _code_project.record_change, root,
+                            f"improve round {used} aborted ({edit.why}): its run changed {shown}, which FI judges the "
+                            "code by (the change it ran is committed here; what the run wrote is not)", log=self._log)
+                    _improve.put_back(root, saved)
+                    _improve.restore(root, best["files"])
+                    # The loop's own copies, from memory: the run may have changed them too.
+                    _improve.save_snapshot(root, "original", original)
+                    _improve.save_snapshot(root, "best", best["files"])
+                    entry.update(outcome="aborted", reason="its run changed " + shown)
+                    own = [t for t in touched if t.startswith("FI's own")]
+                    self._log.warning(
+                        "[improve] round %d aborted: its run changed %s, which FI judges the code by; the quest's records "
+                        "and the version kept so far are back, and no more changes are tried%s", used, shown,
+                        (f". FI's own files ({', '.join(own)}) were changed on this machine and cannot be put back by "
+                         "FI: reinstall FI before trusting any quest") if own else "")
+                    self._audit("check_result", check="improve_round", status="fail",
+                                summary=f"round {used} aborted: its run changed {shown}"[:300])
+                    if history_ok:
+                        await asyncio.to_thread(
+                            _code_project.record_change, root,
+                            f"improve round {used} aborted: back to "
+                            + (f"round {best['round']}'s version" if best["round"] else "the first version"), log=self._log)
+                    else:
+                        self._log.warning("[improve] the run replaced code/'s git history (code/.git); FI makes no commit "
+                                          "into it")
+                    stopped = _improve.STOP_TAMPERED
+                    break
+                comparison = _improve.compare(best["rows"], rows)
+                verdict = _improve.verdict(comparison)
+                values = _improve.values_line(rows, comparison)
+                kept = bool(verdict["best"])
+                entry.update(values=values, better=verdict["better"], worse=verdict["worse"], broken=verdict["broken"])
+                if problems:
+                    entry["problems"] = problems[:5]
+                # The commit of the version that ran, named with its values.
+                await asyncio.to_thread(
+                    _code_project.record_change, root,
+                    f"improve round {used}: {edit.why} | {values} | "
+                    + ("kept as the best version so far" if kept else "not kept"), log=self._log)
+                commit, _dirty = await asyncio.to_thread(_code_project.head, root)
+                frozen = _frozen.load(root)
+                _criteria.record(
+                    root, run=_frozen.run_id(root), code_commit=commit, results=rows,
+                    protocol_version=int(frozen.get("version", 1) or 1) if frozen else None,
+                    protocol_sha256=str(frozen.get("sha256")) if frozen else None,
+                    improve={"round": used, "kept": kept, "compared_with_round": best["round"],
+                             "better": verdict["better"], "worse": verdict["worse"], "broken": verdict["broken"]},
+                )
+                if kept:
+                    best = {"round": used, "rows": rows, "files": candidate}
+                    _improve.save_snapshot(root, "best", candidate)
+                    record["best_round"] = used
+                    entry["outcome"] = "kept"
+                    self._log.info("[improve] round %d kept (%s): %s", used, edit.why, values)
+                    self._audit("check_result", check="improve_round", status="pass",
+                                summary=f"round {used} kept: {values}"[:300])
+                else:
+                    back = f"round {best['round']}'s version" if best["round"] else "the first version"
+                    if verdict["broken"]:
+                        reason = ("the change stopped the simulation from running its checks"
+                                  + (f" ({_improve.one_line('; '.join(problems), 200)})" if problems else ""))
+                    elif verdict["worse"]:
+                        reason = f"it made {', '.join(verdict['worse'])} worse by more than the tolerance"
+                    else:
+                        reason = "it made no check better by more than its tolerance"
+                    entry.update(outcome="not kept", reason=reason)
+                    _improve.restore(root, best["files"])
+                    await asyncio.to_thread(
+                        _code_project.record_change, root,
+                        f"improve round {used} not kept ({reason}): back to {back}", log=self._log)
+                    if verdict["worse"]:
+                        self._log.warning(
+                            "[improve] round %d made %s worse by more than the tolerance (%s); %s is kept%s", used,
+                            ", ".join(verdict["worse"]), values, back,
+                            ", and the quest stops for you because it is set up for research" if research else
+                            " (a warning only: rigor_profile: research would stop the quest here)")
+                        self._audit("check_result", check="improve_regression", status="fail" if research else "warn",
+                                    summary=f"round {used} made {', '.join(verdict['worse'])} worse: {values}"[:300])
+                    else:
+                        self._log.info("[improve] round %d not kept: %s (%s)", used, reason, values)
+                        self._audit("check_result", check="improve_round", status="not_kept",
+                                    summary=f"round {used}: {reason}"[:300])
+                self._improve_save(record)
+                if verdict["worse"] and research:
+                    self._improve_stop_for_regression(record, entry, best["round"], used)
+                if kept and _improve.all_met(best["rows"]):
+                    stopped = _improve.STOP_ALL_MET
+                    break
+                if not verdict["better"]:
+                    stopped = _improve.STOP_PLATEAU
+                    break
+        finally:
+            if raw_saved is not None:  # FI's record of the trials of the run the paper may still use
+                self._improve_put_back_raw(raw_saved)
+        _improve.restore(root, best["files"])
+        rerun = best["round"] > 0
+        record.update(stopped=stopped, ended=_improve._now(), rounds_used=used, model_calls=calls, rerun=rerun)
+        if not rerun:
+            record["result_n"] = baseline_n  # the results the paper is written from are the first run's
+        self._improve_save(record)
+        kept_text = f"the version from round {best['round']}" if rerun else "the first version"
+        self._log.info(
+            "[improve] stopped: %s. Kept %s (%s). %d of engine.improve_rounds: %d round(s) spent in this quest; %d model "
+            "call(s) in this pass (FI has no spending limit to count them against; each one is in .fi/model_calls.jsonl "
+            "under the step `improve`).", stopped, kept_text, _improve.values_line(best["rows"]), used, limit, calls)
+        self._progress(f"[improve] Stopped: {stopped}. Kept {kept_text}"
+                       + ("; running it once more in full." if rerun else "."))
+        self._audit("check_result", check="improve_loop", status="ok",
+                    summary=f"stopped: {stopped}; kept {kept_text}"[:300])
+        return {**(self._improve_fresh_run() if rerun else {}), "improve_rounds_used": used, "improve_rerun": rerun,
+                "improve_fell_back": False,
+                "improve_summary": {"stopped": stopped, "best_round": best["round"], "rounds_used": used,
+                                    "model_calls": calls, "summary": _improve.summary(record)}}
+
+    def _improve_stop_for_regression(self, record: dict[str, Any], entry: dict[str, Any], best_round: int,
+                                     used: int) -> None:
+        """Under ``rigor_profile: research``, a change that made a check worse stops the quest for a person. The version
+        kept so far is already back in code/; a resume goes on with it and makes no more changes in this pass."""
+        back = f"round {best_round}'s version" if best_round else "the first version"
+        record.update(blocked=True, stopped=_improve.STOP_REGRESSION, rounds_used=used, ended=_improve._now())
+        self._improve_save(record)
+        self._pause_for_contract(
+            kind="improve",
+            headline="a change to the simulation made a check of correctness worse",
+            steps=[
+                f"Round {entry['round']} changed the simulation ({entry.get('why')}) and made "
+                f"{', '.join(entry.get('worse') or [])} worse by more than its own tolerance: {entry.get('values')}.",
+                f"FI put back {back}: it is what is in code/ now. code/CHANGELOG.md and .fi/criteria_history.jsonl hold "
+                "every round's values.",
+                "Resume to go on with that version; FI makes no more changes to the simulation in this pass. If a check "
+                "itself is wrong, the protocol is frozen: start a new quest whose plan states the right one.",
+            ],
+            problems=[f"round {entry['round']}: {', '.join(entry.get('worse') or [])} worse"],
+        )
+
+    async def _improve_resume_after_block(self, state: QuestState, record: dict[str, Any]) -> QuestState:
+        """A resume after the stop for a check that got worse: no more changes; the version in code/ goes on (run once
+        more in full when it is not the one the last full run used)."""
+        original = _improve.load_snapshot(self.quest_root, "original")
+        rerun = original is not None and _improve.snapshot(self.quest_root) != original
+        record.update(blocked=False, resumed=_improve._now(), rerun=rerun)
+        if rerun:
+            record["kept_from"] = ("round " + str(record["best_round"]) if record.get("best_round")
+                                   else "edited by hand during the stop")
+        else:
+            record["result_n"] = record.get("baseline_n")
+        self._improve_save(record)
+        self._log.warning("[improve] resumed after the stop for a check that got worse: no more changes are made%s",
+                          "; the version kept runs once more in full" if rerun else "")
+        return {**(self._improve_fresh_run() if rerun else {}),
+                "improve_rounds_used": int(record.get("rounds_used") or state.get("improve_rounds_used") or 0),
+                "improve_rerun": rerun,
+                "improve_summary": {"stopped": record.get("stopped"), "best_round": record.get("best_round"),
+                                    "rounds_used": record.get("rounds_used"), "summary": _improve.summary(record)}}
+
+    async def _improve_after_rerun(self, state: QuestState, record: dict[str, Any]) -> QuestState:
+        """Back from the kept version's full run. If it produced no result, the first version is put back and run once
+        more. Otherwise, whether the study's results changed is written in code/CHANGELOG.md, by name only: they were
+        never what chose the version."""
+        root = self.quest_root
+        result = state.get("exec_result") or {}
+        failed = bool(state.get("exec_give_up_reason")) or result.get("returncode", 1) != 0 or not state.get("result_json")
+        if failed and not (record.get("fell_back") or state.get("improve_fell_back")):
+            original = _improve.load_snapshot(root, "original")
+            if original is not None:
+                _improve.restore(root, original)
+                record.update(fell_back=record.get("kept_from") or f"round {record.get('best_round')}", best_round=0)
+                self._improve_save(record)
+                self._log.warning("[improve] the kept version produced no result in its full run; the first version is "
+                                  "back and runs once more")
+                await asyncio.to_thread(
+                    _code_project.record_change, root,
+                    "improve: the kept version produced no result in its full run; the first version is back", log=self._log)
+                return {**self._improve_fresh_run(), "improve_rerun": True, "improve_fell_back": True}
+        before = record.get("headline_before") if isinstance(record.get("headline_before"), dict) else {}
+        after = _improve.headline_digest(state.get("result_json"))
+        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        record["headline_changed"] = changed
+        record["result_n"] = self._improve_last_run_n()  # the results the paper is written from are this run's
+        self._improve_save(record)
+        if changed and not record.get("fell_back"):
+            shown = ", ".join(changed[:12]) + (f" and {len(changed) - 12} more" if len(changed) > 12 else "")
+            await asyncio.to_thread(
+                _code_project.record_note, root,
+                f"improve: the study's results changed after the kept change ({shown}). Reported here only as changed; "
+                "they were not used to choose the version", log=self._log)
+        self._log.info("[improve] the %s full run is done; the study's results %s (they did not choose the version)",
+                       "first version's" if record.get("fell_back") else "kept version's",
+                       f"changed: {', '.join(changed[:12])}" if changed else "did not change")
+        return {"improve_rerun": False, "improve_fell_back": False}
+
     def _oracle_record_clear(self) -> None:
         """Remove a record this run did not write: when the gate does not run, an earlier run's verdicts must not reach the
         analysis or count as numbers this run computed."""
@@ -9192,6 +9749,8 @@ class Engine:
 
         if list_inputs(self.quest_root):
             exec_env = {**(exec_env or os.environ), _INPUT_ENV: str(examples_dir(self.quest_root))}
+        # The improve loop runs the simulation in the same environment (its skills' paths, its example inputs).
+        self._last_exec_env = exec_env
 
         # Venv warmup: invoke the freshly-installed Python and import the
         # declared deps before the real experiment. This consumes the
@@ -11566,6 +12125,9 @@ class Engine:
             evidence_note = f"{evidence_note}\n\n{amended}".strip()
         if _phased.enabled(self.config):
             evidence_note = f"{evidence_note}\n\n{_phased.write_note(self.quest_root)}".strip()
+        improved = _improve.write_note(self.quest_root)
+        if improved:
+            evidence_note = f"{evidence_note}\n\n{improved}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -15911,6 +16473,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
         "execute_reflect", "analyze",
+        "improve",              # one change to the simulation against its checks of correctness
         "cross_check",
         "cross_check_verify",   # CoVe-style second-pass verification
         "claim_check",          # ground each paper claim to evidence

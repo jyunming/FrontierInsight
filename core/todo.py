@@ -92,6 +92,12 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "Fix the script, then go on.",
         ["Change the check's expected value or tolerance in the plan: `--revise-plan \"...\"`."],
     ),
+    "improve": (
+        "A change FI made to the simulation made a check of correctness worse. Go on with the version kept so far?",
+        "Read code/CHANGELOG.md (every round and its values), then go on: the version kept so far is in code/ and FI "
+        "makes no more changes to it.",
+        ["Change the simulation yourself first (code/ is yours to edit), then go on: your version is run in full."],
+    ),
     "equation_labels": (
         "The simulation does not say where it implements each equation of the plan. Label it?",
         "Add a comment with each missing equation's id (`# E1`) above the code that computes it, then go on.",
@@ -185,6 +191,11 @@ _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
         True: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "
               "and the two scripts are asked for again.",
     },
+    "improve": dict.fromkeys(
+        (False, True),
+        "This quest is set up for research, so a change that made a check of correctness worse stops it: the version "
+        "kept so far is back in code/; resume to go on with it.",
+    ),
     "equation_labels": dict.fromkeys(
         (False, True),
         "This quest is set up for research, so the simulation must say where it implements each equation of the plan: "
