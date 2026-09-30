@@ -9101,7 +9101,7 @@ class Engine:
                         f"improve round {used} refused before it ran ({why}); nothing was changed", log=self._log)
                     self._improve_save(record)
                     continue
-                name = edit.file.split("/")[-1]
+                name = _improve.edited_path(edit)  # `simulate.py`, or `<package>/model.py` for the model's package
                 candidate = {**files, name: new_text}
                 tried.add(_improve.fingerprint(candidate))
                 entry.update(why=edit.why, file=name, diff=_improve.diff_text(edit), ran=True)

@@ -86,38 +86,57 @@ def _fmt(value: Any) -> str:
 # --- the simulation's files ------------------------------------------------------------------------------------------
 
 
+def _package_files(code: Path) -> list[str]:
+    """``<package>/<module>.py`` for each module of the model's package in ``code/`` (core/code_layout.py: a folder with
+    an ``__init__.py``, the tests aside): the equations the simulation computes with are part of it."""
+    out: list[str] = []
+    if not code.is_dir():
+        return out
+    for folder in sorted(code.iterdir()):
+        if (folder.is_dir() and not _is_link(folder) and folder.name not in ("tests", "__pycache__", ".git")
+                and (folder / "__init__.py").is_file()):
+            out += [f"{folder.name}/{f.name}" for f in sorted(folder.glob("*.py")) if f.is_file() and not _is_link(f)]
+    return out
+
+
 def editable(quest_root: Path) -> list[str]:
-    """The files of ``code/`` an edit may change: the simulation (``simulate.py``) and the helper modules beside it."""
+    """The files of ``code/`` an edit may change: the simulation (``simulate.py``), the helper modules beside it and the
+    modules of the model's package (``<package>/model.py``), by their path in ``code/``."""
     code = Path(quest_root) / "code"
     names = sorted(p.name for p in code.glob("*.py") if p.is_file() and p.name not in NOT_EDITABLE) if code.is_dir() else []
-    return sorted(names, key=lambda n: (n != "simulate.py", n))
+    names += _package_files(code)
+    return sorted(names, key=lambda n: (n != "simulate.py", "/" not in n, n))
 
 
 def snapshot(quest_root: Path) -> dict[str, str]:
-    """Every ``.py`` file directly in ``code/``, by name."""
+    """Every ``.py`` file directly in ``code/``, and the modules of the model's package, by their path in ``code/``."""
     code = Path(quest_root) / "code"
     out: dict[str, str] = {}
-    for p in sorted(code.glob("*.py")) if code.is_dir() else []:
+    paths = [*(sorted(code.glob("*.py")) if code.is_dir() else []), *(code / rel for rel in _package_files(code))]
+    for p in paths:
         try:
             # As it is on disk, byte for byte: line endings untouched, and bytes that are not UTF-8 (a file saved in
             # another encoding) carried through unchanged rather than dropped.
-            out[p.name] = p.read_bytes().decode("utf-8", "surrogateescape")
+            out[p.relative_to(code).as_posix()] = p.read_bytes().decode("utf-8", "surrogateescape")
         except OSError:
             continue
     return out
 
 
 def restore(quest_root: Path, files: dict[str, str]) -> None:
-    """``code/`` back to ``files``: each written as it was, and a ``.py`` file that was not there removed."""
+    """``code/`` back to ``files``: each written as it was, and a ``.py`` file that was not there removed (directly in
+    ``code/`` or in the model's package)."""
     code = Path(quest_root) / "code"
-    for p in code.glob("*.py") if code.is_dir() else []:
-        if p.name not in files:
-            p.unlink(missing_ok=True)
+    present = [*(p.name for p in code.glob("*.py")), *_package_files(code)] if code.is_dir() else []
+    for rel in present:
+        if rel not in files:
+            (code / rel).unlink(missing_ok=True)
     for name, text in files.items():
         path = code / name
         data = text.encode("utf-8", "surrogateescape")
         if _is_link(path):
             _remove_link(path)  # a link the run left in place of a file: never written through
+        path.parent.mkdir(parents=True, exist_ok=True)
         try:
             if not path.is_file() or path.read_bytes() != data:
                 path.write_bytes(data)
@@ -145,9 +164,10 @@ def forget_bytecode(quest_root: Path) -> None:
 def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
     folder = Path(quest_root) / SNAPSHOTS / name
     folder.mkdir(parents=True, exist_ok=True)
-    for old in folder.glob("*.py"):
+    for old in folder.rglob("*.py"):
         old.unlink(missing_ok=True)
     for file, text in files.items():
+        (folder / file).parent.mkdir(parents=True, exist_ok=True)
         (folder / file).write_bytes(text.encode("utf-8", "surrogateescape"))
 
 
@@ -155,7 +175,8 @@ def load_snapshot(quest_root: Path, name: str) -> dict[str, str] | None:
     folder = Path(quest_root) / SNAPSHOTS / name
     if not folder.is_dir():
         return None
-    return {p.name: p.read_bytes().decode("utf-8", "surrogateescape") for p in sorted(folder.glob("*.py"))}
+    return {p.relative_to(folder).as_posix(): p.read_bytes().decode("utf-8", "surrogateescape")
+            for p in sorted(folder.rglob("*.py"))}
 
 
 # --- the edit --------------------------------------------------------------------------------------------------------
@@ -353,6 +374,12 @@ def _asks_for_a_setting(old: str, new: str, settings: dict[str, list[Any]]) -> l
     return found
 
 
+def edited_path(edit: Edit) -> str:
+    """The file an edit changes, by its path in ``code/`` (``simulate.py``, ``<package>/model.py``)."""
+    name = str(edit.file).replace("\\", "/").strip("/")
+    return name[len("code/"):] if name.startswith("code/") else name
+
+
 def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: set[str],
                expected: list[float], measures: set[str] | None = None,
                settings: dict[str, list[Any]] | None = None) -> tuple[str | None, str]:
@@ -360,8 +387,8 @@ def check_edit(files: dict[str, str], edit: Edit, allowed: list[str], *, tried: 
     the normalized forms of the versions already run (the first one included). ``expected``: the values the checks
     expect (and the criteria's targets); ``measures``: the names of the numbers the checks read from what the simulation
     returns; ``settings``: the values of each setting the checks run on, by the setting's name."""
-    name = edit.file.split("/")[-1]
-    if edit.file not in (name, f"code/{name}") or name not in allowed:
+    name = edited_path(edit)
+    if name not in allowed:
         return None, (f"it changes {edit.file!r}, which is not part of the simulation (only "
                       f"{', '.join(allowed) or 'none'} may be changed)")
     old = files.get(name)

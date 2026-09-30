@@ -305,6 +305,8 @@ same PR that adds, splits or renames one.
   existing simulate.py). The request limit is a quest-wide budget (`calls_left` / `spend_call`, counted in the record);
   `_adopt_reply_package` keeps a package the reply named itself when simulate.py imports it; `split_run.simulation_sha`
   and `attempt_records.script_hashes` (FI-written METHODS.md / tests left out) know the package.
+  `improve.editable` / `snapshot` / `restore` / the kept-version snapshots include the package's modules by their
+  path in code/ (`improve.edited_path`), so the improve loop can change an equation there.
   `trial_runner._run_key` and `Engine._simulation_sources` read the package as part of the simulation.
   Where simulate.py is rewritten the package goes with it: `Engine._package_shown` (shown by `_extend_directive`; an
   extension's package file missing functions it had is not written, `dropped_functions`), `_package_repair_note` /

@@ -662,6 +662,31 @@ async def test_simulate_importing_a_package_that_is_not_there_is_said_plainly(tm
     assert "simulate.py imports the package `ghost`, but code/ghost/ was not written" in log
 
 
+def test_the_improve_loop_may_change_the_models_package(tmp_path: Path) -> None:
+    from core import improve
+
+    quest = tmp_path / "q"
+    code = quest / "code"
+    _write_tool(code)
+    (code / "experiment.py").write_text(ANALYSIS, encoding="utf-8")
+    allowed = improve.editable(quest)
+    assert allowed[0] == "simulate.py" and f"{PKG}/model.py" in allowed and "experiment.py" not in allowed
+    assert not any(a.startswith("tests/") for a in allowed), "FI's unit tests are not the simulation"
+    files = improve.snapshot(quest)
+    on_disk = (code / PKG / "model.py").read_bytes().decode("utf-8")
+    assert files[f"{PKG}/model.py"] == on_disk
+    edit = improve.Edit(file=f"code/{PKG}/model.py", find="return -y", replace="return -1.0 * y", why="E1")
+    new, why = improve.check_edit(files, edit, allowed, tried={improve.fingerprint(files)}, expected=[])
+    assert new is not None and why == "" and improve.edited_path(edit) == f"{PKG}/model.py"
+    improve.save_snapshot(quest, "original", files)
+    improve.restore(quest, {**files, f"{PKG}/model.py": new})
+    assert "-1.0 * y" in (code / PKG / "model.py").read_text(encoding="utf-8")
+    improve.restore(quest, improve.load_snapshot(quest, "original"))
+    assert (code / PKG / "model.py").read_bytes().decode("utf-8") == on_disk
+    outside = improve.Edit(file=f"code/{PKG}/../experiment.py", find="x", replace="y", why="")
+    assert improve.check_edit(files, outside, allowed, tried=set(), expected=[])[0] is None
+
+
 def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:
     import hashlib
 
