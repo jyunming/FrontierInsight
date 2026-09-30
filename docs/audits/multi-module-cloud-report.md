@@ -4,8 +4,7 @@
 - **pwd:** `/home/user/FrontierInsight`
 - **branch:** `feat/multi-module-default`, from `origin/main` at `8338c30`
 - **Python:** 3.11.15, fresh `.venv` (pip/setuptools/wheel upgraded, `pip install -r requirements.txt`, `pip install -e .`)
-- **status:** IN PROGRESS: code and the new tests are in; docs and the long regression runs follow (this file is
-  updated at the end).
+- **status:** done: code, tests and docs pushed; not merged, no PR.
 
 ## Design summary
 
@@ -64,11 +63,47 @@ the package is asked for once more; if it still does not, the quest keeps two sc
 - `core/trial_runner.py`: `_run_key` includes the package.
 - `core/code_project.py`: `refresh(..., extra_files=..., readme_files=...)`; files in subfolders; README lists them.
 - `tests/test_code_layout.py` (new).
+- `tests/test_research_acceptance.py`: its fake model now answers the package request (adds `<package>/model.py` and
+  the import in `simulate.py`), as a real model would under the new default; the gates it checks are unchanged.
+- `tests/test_run_manifest.py`: `test_the_older_contract_under_research_is_sent_back_for_the_trial_contract` sets
+  `execution.code_package: false`: it tests the older-contract send-back, which the layout stop would otherwise
+  pre-empt under research.
+- Docs: `docs/USAGE.md`, `docs/capabilities-reference.md`, `docs/rigor.md`, `dev/registry.md`.
 
 ## Tests run
 
-(to be filled in)
+All with `--basetemp ./.pytest_tmp/<unique>`; no test calls a real model.
+
+- Failing first: with `core/code_layout.py` absent, `tests/test_code_layout.py` failed at collection; with the module
+  but before the engine/config hooks, 8 failed and 7 passed.
+- `tests/test_code_layout.py`: **15 passed**.
+- Required suites (`test_engine_smoke.py`, `test_self_correction_e2e.py`, `test_research_acceptance.py`,
+  `test_web_e2e.py`): first run **34 passed, 14 failed**. All 14 failures were in `test_research_acceptance.py`, which
+  now stopped at the layout check because its fake reply had no package. After the fake was updated,
+  `test_research_acceptance.py` alone: **22 passed**. The other three files (26 passed in the first run) do not depend on
+  that change. Together: **48 passed, 0 failed**.
+- Related suites (`test_code_layout`, `test_engine_callable_simulation`, `test_split_analysis`, `test_oracle_gate`,
+  `test_run_manifest`, `test_split_run`, `test_engine_measured_oracle`, `test_quest_data_saved`,
+  `test_replicate_seed_repair`, `test_evidence`, `test_criteria`): **382 passed, 1 failed**. The 1 failure was the
+  `test_run_manifest` research test above; after the fix it passed alone (**1 passed**).
+- `test_docs_claims`, `test_config*`, `test_plan*`, `test_code_project*`, `test_trial_runner*`: **251 passed**.
+- Every other test file (260 files, `-n 3`): **5659 passed, 220 skipped, 7 failed**. The 7 are environment failures that
+  fail identically on `origin/main` in this VM (checked in a separate worktree): `test_execution.py::
+  test_lock_pins_a_requested_package_the_venv_inherited`, `test_bootstrap.py::test_this_interpreter_is_not_itself_a_venv`,
+  `test_office_pdf.py::test_a_real_deck_exports_one_pdf_page_per_slide`, three `test_pptx_slides.py` LibreOffice tests
+  (LibreOffice exports no PDF here), `test_pdf_text.py::test_a_scanned_page_is_read_by_ocr`.
 
 ## What is unverified
 
-(to be filled in)
+- No run against a real model: whether a real model writes a package that keeps the scenario out of `model.py` is only
+  asked for in the prompt, not checked (the check verifies the package exists, is used by `simulate.py`, and labels
+  every equation on a function).
+- The line estimate is a rough formula, not calibrated against real quests; the default caps (400 lines, 3 requests)
+  are a first choice.
+- The cluster path (`background_jobs`) with a package was not run: the job-array tasks load `simulate.py` through the
+  same harness, so the package should import, but no test covers it.
+- The Docker sandbox with a package was not run.
+- The research acceptance, split and related suites were not rerun as one combined run after the last test fixes;
+  each fixed file was rerun on its own.
+- The concurrent improve-loop branch was not merged in; the engine changes are kept to new methods plus one-line hooks
+  so a merge should be local.
