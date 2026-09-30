@@ -621,6 +621,9 @@ class Engine:
         # for every downstream consumer.
         self.quest_root: Path = (config.output.output_dir / self.quest_id).resolve()
         self.fi_dir: Path = self.quest_root / ".fi"
+        # Where .fi leads now (it may be kept elsewhere through a link): the improve loop touches its own copies only
+        # while .fi still leads here, so a run that moves .fi cannot steer those writes (core/improve.py:own_dir).
+        self._fi_real: Path = self.fi_dir.resolve()
         self._clarify_answerable = False
         self.supervisor = supervisor or ProxySupervisor()
         self.executor = make_executor(
@@ -8831,7 +8834,7 @@ class Engine:
             record.update(blocked=False, stopped=record.get("stopped") or "set aside: the code ran again from an earlier "
                                                                            "step before the loop finished")
             self._improve_save(record)
-            _improve.clear_own_dir(self.quest_root, "raw")  # that code's trial record
+            _improve.clear_own_dir(self.quest_root, "raw", fi_real=getattr(self, "_fi_real", None))  # that code's trial record
             self._log.info("[improve] an earlier loop's record belongs to code that has run again since; set aside")
         if record.get("blocked"):
             return await self._improve_resume_after_block(state, record)
@@ -8869,7 +8872,7 @@ class Engine:
             return
         if record.get("baseline_n") != self._improve_last_run_n():
             return  # a loop over code that has run again since: nothing of it is put back
-        original = _improve.load_snapshot(self.quest_root, "original")
+        original = _improve.load_snapshot(self.quest_root, "original", fi_real=getattr(self, "_fi_real", None))
         if original is None:
             return
         _improve.restore(self.quest_root, original)
@@ -8904,8 +8907,8 @@ class Engine:
     def _improve_save_raw(self) -> None:
         """FI's record of the last full run's trials, copied to ``.fi/improve/raw/`` before a round runs trials of its
         own (on disk, so a loop cut short can still put it back)."""
-        _improve.clear_own_dir(self.quest_root, "raw")
-        folder = _improve.own_dir(self.quest_root, "raw")
+        _improve.clear_own_dir(self.quest_root, "raw", fi_real=getattr(self, "_fi_real", None))
+        folder = _improve.own_dir(self.quest_root, "raw", fi_real=getattr(self, "_fi_real", None))
         if folder is None:
             raise OSError(f"the loop's copy of the trial record ({self.quest_root / _improve.SNAPSHOTS / 'raw'}) is "
                           "reached through a link that could not be removed")
@@ -8921,7 +8924,7 @@ class Engine:
         """FI's record of the last full run's trials back in place: from ``saved`` (the bytes held in memory while the
         loop ran, which no round's run can reach) or, for a loop cut short, from the copy on disk."""
         if saved is None:
-            folder = _improve.own_dir(self.quest_root, "raw", clear_links=False)
+            folder = _improve.own_dir(self.quest_root, "raw", clear_links=False, fi_real=getattr(self, "_fi_real", None))
             if folder is None:
                 return  # reached through a link: nothing is read from it
             try:
@@ -8943,11 +8946,11 @@ class Engine:
                     path.write_bytes(data)
             except OSError:
                 pass
-        _improve.clear_own_dir(self.quest_root, "raw")
+        _improve.clear_own_dir(self.quest_root, "raw", fi_real=getattr(self, "_fi_real", None))
 
     async def _improve_put_back_first(self, record: dict[str, Any]) -> int:
         """Undo a loop cut short; returns the rounds it had spent in this quest."""
-        original = _improve.load_snapshot(self.quest_root, "original")
+        original = _improve.load_snapshot(self.quest_root, "original", fi_real=getattr(self, "_fi_real", None))
         if original is not None:
             _improve.restore(self.quest_root, original)
         if record.get("raw_saved"):
@@ -9037,8 +9040,8 @@ class Engine:
                 if isinstance(value, (int, float, str)) and not isinstance(value, bool):
                     settings.setdefault(str(key), []).append(value)
         original = _improve.snapshot(root)
-        _improve.save_snapshot(root, "original", original)
-        _improve.save_snapshot(root, "best", original)
+        _improve.save_snapshot(root, "original", original, fi_real=getattr(self, "_fi_real", None))
+        _improve.save_snapshot(root, "best", original, fi_real=getattr(self, "_fi_real", None))
         best: dict[str, Any] = {"round": 0, "rows": baseline, "files": dict(original)}
         record: dict[str, Any] = {
             "started": _improve._now(), "limit": limit, "rounds_used_before": used, "rounds": [], "best_round": 0,
@@ -9133,8 +9136,8 @@ class Engine:
                     _improve.restore(root, best["files"])
                     # The loop's own copies, from memory: the run may have changed them too.
                     try:
-                        _improve.save_snapshot(root, "original", original)
-                        _improve.save_snapshot(root, "best", best["files"])
+                        _improve.save_snapshot(root, "original", original, fi_real=getattr(self, "_fi_real", None))
+                        _improve.save_snapshot(root, "best", best["files"], fi_real=getattr(self, "_fi_real", None))
                     except OSError as e:  # the loop stops here all the same; a resume then never uses those copies
                         self._log.warning("[improve] could not write the loop's copies back: %s", e)
                     entry.update(outcome="aborted", reason="its run changed " + shown)
@@ -9179,7 +9182,7 @@ class Engine:
                 )
                 if kept:
                     best = {"round": used, "rows": rows, "files": candidate}
-                    _improve.save_snapshot(root, "best", candidate)
+                    _improve.save_snapshot(root, "best", candidate, fi_real=getattr(self, "_fi_real", None))
                     record["best_round"] = used
                     entry["outcome"] = "kept"
                     self._log.info("[improve] round %d kept (%s): %s", used, edit.why, values)
@@ -9267,7 +9270,7 @@ class Engine:
     async def _improve_resume_after_block(self, state: QuestState, record: dict[str, Any]) -> QuestState:
         """A resume after the stop for a check that got worse: no more changes; the version in code/ goes on (run once
         more in full when it is not the one the last full run used)."""
-        original = _improve.load_snapshot(self.quest_root, "original")
+        original = _improve.load_snapshot(self.quest_root, "original", fi_real=getattr(self, "_fi_real", None))
         now = _improve.snapshot(self.quest_root)
         if original is not None and not any("/" in k for k in original) and any("/" in k for k in now):
             # A copy saved before the package was part of it cannot tell whether the package was edited during the
@@ -9298,7 +9301,7 @@ class Engine:
         result = state.get("exec_result") or {}
         failed = bool(state.get("exec_give_up_reason")) or result.get("returncode", 1) != 0 or not state.get("result_json")
         if failed and not (record.get("fell_back") or state.get("improve_fell_back")):
-            original = _improve.load_snapshot(root, "original")
+            original = _improve.load_snapshot(root, "original", fi_real=getattr(self, "_fi_real", None))
             if original is not None:
                 _improve.restore(root, original)
                 record.update(fell_back=record.get("kept_from") or f"round {record.get('best_round')}", best_round=0)

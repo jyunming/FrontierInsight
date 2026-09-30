@@ -174,13 +174,20 @@ def forget_bytecode(quest_root: Path) -> None:
         dirs[:] = [d for d in dirs if d not in ("__pycache__", ".git") and not _is_link(Path(base) / d)]
 
 
-def own_dir(quest_root: Path, name: str, *, clear_links: bool = True) -> Path | None:
+def own_dir(quest_root: Path, name: str, *, clear_links: bool = True, fi_real: Path | None = None) -> Path | None:
     """``.fi/improve/<name>``, the loop's own copy, reached without going through a link: a link (or junction) in place of
     ``.fi/improve`` or the copy itself is removed (only the link, never what it points at), or, with
     ``clear_links=False``, makes this ``None``. ``None`` too when a link cannot be removed: nothing is then read or
     written there. ``.fi`` itself is the quest's own folder wherever it is kept (a person may keep it on another disk
-    through a link), so a link there is left as it is."""
+    through a link), so a link there is left as it is; but when ``fi_real`` (where ``.fi`` was when the engine started)
+    is given and ``.fi`` no longer leads there, a run has moved it: ``None``, and nothing is touched."""
     root = Path(quest_root)
+    if fi_real is not None:
+        try:
+            if (root / SNAPSHOTS.parts[0]).resolve() != Path(fi_real):
+                return None
+        except OSError:
+            return None
     path = root / SNAPSHOTS / name
     step = root / SNAPSHOTS.parts[0]
     for part in path.relative_to(step).parts:
@@ -194,21 +201,21 @@ def own_dir(quest_root: Path, name: str, *, clear_links: bool = True) -> Path | 
     return path
 
 
-def clear_own_dir(quest_root: Path, name: str) -> None:
+def clear_own_dir(quest_root: Path, name: str, *, fi_real: Path | None = None) -> None:
     """Remove the loop's copy ``.fi/improve/<name>`` without following a link anywhere on the way."""
     import shutil
 
-    path = own_dir(quest_root, name)
+    path = own_dir(quest_root, name, fi_real=fi_real)
     if path is not None and path.is_dir():
         shutil.rmtree(path, ignore_errors=True)  # Python does not follow a link or junction inside it
 
 
-def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
+def save_snapshot(quest_root: Path, name: str, files: dict[str, str], *, fi_real: Path | None = None) -> None:
     """Keep ``files`` as the copy ``name``. What the copy held before is removed without following a link: a link (or a
     junction) inside it is removed itself, never what it points at."""
     import shutil
 
-    folder = own_dir(quest_root, name)
+    folder = own_dir(quest_root, name, fi_real=fi_real)
     if folder is None:
         raise OSError(f"the loop's copy {Path(quest_root) / SNAPSHOTS / name} is reached through a link that could not "
                       "be removed")
@@ -225,8 +232,8 @@ def save_snapshot(quest_root: Path, name: str, files: dict[str, str]) -> None:
         (folder / file).write_bytes(text.encode("utf-8", "surrogateescape"))
 
 
-def load_snapshot(quest_root: Path, name: str) -> dict[str, str] | None:
-    folder = own_dir(quest_root, name, clear_links=False)
+def load_snapshot(quest_root: Path, name: str, *, fi_real: Path | None = None) -> dict[str, str] | None:
+    folder = own_dir(quest_root, name, clear_links=False, fi_real=fi_real)
     if folder is None or not folder.is_dir():
         return None
     files, _links = _walk(folder)  # never into a link
@@ -573,6 +580,14 @@ def guard_hashes(quest_root: Path) -> dict[str, str]:
     where it points: making one is a change."""
     root = Path(quest_root)
     out = {name: _hash(path) for name, path in guard_files(root).items()}
+    for folder in (root / SNAPSHOTS.parts[0], root / SNAPSHOTS):
+        # Whether the quest's .fi (and the loop's own folder) is a folder or a link, and to where: a run that swaps one
+        # for a link to a copy changes nothing else FI hashes.
+        try:
+            out[folder.relative_to(root).as_posix() + "/"] = (f"link:{os.readlink(folder)}" if _is_link(folder)
+                                                             else "folder" if folder.is_dir() else "absent")
+        except OSError:
+            out[folder.relative_to(root).as_posix() + "/"] = "link:?"
     code_files, code_links = _code_entries(root)
     own_files, own_links = _walk(root / SNAPSHOTS)
     for p in [*code_files, *own_files]:

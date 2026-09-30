@@ -741,6 +741,47 @@ def test_the_kept_copies_never_follow_a_link(tmp_path: Path) -> None:
     assert not (other / "best" / "simulate.py").exists() and improve.load_snapshot(quest, "best") == {"simulate.py": SIM_PKG}
 
 
+def test_a_quest_folder_kept_elsewhere_is_used_but_a_moved_one_is_not(tmp_path: Path) -> None:
+    import os
+    import subprocess as sp
+
+    from core import improve
+
+    quest = tmp_path / "q"
+    quest.mkdir()
+    elsewhere = tmp_path / "fi_elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "state.sqlite").write_text("x", encoding="utf-8")
+    try:
+        if os.name == "nt":
+            sp.run(["cmd", "/c", "mklink", "/J", str(quest / ".fi"), str(elsewhere)], check=True, capture_output=True)
+        else:
+            os.symlink(elsewhere, quest / ".fi", target_is_directory=True)
+    except (OSError, sp.CalledProcessError):
+        pytest.skip("no link can be made here")
+    before = improve.guard_hashes(quest)
+    real = (quest / ".fi").resolve()
+    improve.save_snapshot(quest, "best", {"simulate.py": "A = 1\n"}, fi_real=real)
+    assert (elsewhere / "state.sqlite").is_file() and (quest / ".fi").exists(), ".fi kept elsewhere stays as it is"
+    assert improve.load_snapshot(quest, "best", fi_real=real) == {"simulate.py": "A = 1\n"}
+    # .fi moved (by a run) to another place: the loop touches nothing there, and the guard sees the move.
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    if os.name == "nt":
+        sp.run(["cmd", "/c", "rmdir", str(quest / ".fi")], check=True, capture_output=True)
+        sp.run(["cmd", "/c", "mklink", "/J", str(quest / ".fi"), str(moved)], check=True, capture_output=True)
+    else:
+        (quest / ".fi").unlink()
+        os.symlink(moved, quest / ".fi", target_is_directory=True)
+    assert improve.load_snapshot(quest, "best", fi_real=real) is None
+    with pytest.raises(OSError):
+        improve.save_snapshot(quest, "best", {"simulate.py": "B = 1\n"}, fi_real=real)
+    assert not any(moved.iterdir()), "nothing was written where .fi was moved to"
+    assert ".fi/" in improve.changed(before, improve.guard_hashes(quest))
+    if os.name == "nt":
+        sp.run(["cmd", "/c", "rmdir", str(quest / ".fi")], check=True, capture_output=True)
+
+
 def test_the_files_fi_writes_are_not_the_code_an_attempt_ran(tmp_path: Path) -> None:
     import hashlib
 
