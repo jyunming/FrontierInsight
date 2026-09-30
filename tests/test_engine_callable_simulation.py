@@ -394,6 +394,33 @@ async def test_a_run_cell_is_held_to_one_run_per_setting_only_when_fi_finds_no_r
     assert engine._run_manifest_problems({}, True, ok, ("", "", ""))[0] == "differs"
 
 
+def test_a_method_call_that_samples_is_a_source_of_random_numbers(tmp_path: Path) -> None:
+    from core.engine import _random_source_found
+
+    script = tmp_path / "simulate.py"
+    script.write_text("def run_cell(cell):\n    return {'x': float(cell['df'].sample(frac=0.5).sum())}\n", encoding="utf-8")
+    assert _random_source_found(script) == "`sample` in simulate.py"
+    script.write_text("def run_cell(cell):\n    return {'x': gen . normal (0, 1)}\n", encoding="utf-8")
+    assert _random_source_found(script) == "`normal` in simulate.py"
+    script.write_text("def run_cell(cell):\n    return {'x': cell['a'] * 2}\n", encoding="utf-8")
+    assert _random_source_found(script) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_second_call_that_raises_holds_the_run_to_the_protocol_and_does_not_end_the_quest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import trial_runner
+
+    async def raises(*a, **kw):  # noqa: ANN002, ANN003
+        raise PermissionError("oracle.out.jsonl is locked")
+
+    monkeypatch.setattr(trial_runner, "run_cell_again", raises)
+    engine = _one_trial_per_setting(tmp_path, monkeypatch)
+    source, checked, without = await engine._run_cell_randomness({}, "python", None)
+    assert "could not call it a second time" in source and "PermissionError" in source and "resume" in without
+
+
 @pytest.mark.asyncio
 async def test_run_cell_again_compares_a_second_call_with_the_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from core import trial_runner

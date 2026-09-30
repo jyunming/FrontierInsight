@@ -7238,14 +7238,16 @@ class Engine:
         FI's record of the trials is the same one (an analysis repaired on the same trials does not call them again)."""
         protocol = self._protocol_block(state) or {}
         runs = protocol.get("runs_per_setting")
-        if (not self._runs_once_per_setting() or not isinstance(runs, (int, float)) or isinstance(runs, bool)
-                or runs <= 1):
+        if (not self._runs_once_per_setting() or not _run_manifest.checkable(protocol)
+                or not isinstance(runs, (int, float)) or isinstance(runs, bool) or runs <= 1):
             return "", "", ""
         simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
         found = _random_source_found(simulate)
-        if found:
+        if found.startswith("`"):
             return (f"FI found {found}, a source of random numbers", "",
                     "take that out of the code (a docstring or a string counts too)")
+        if found:
+            return found, "", "make sure the code can be read, then resume"
         if self.config.execution.background_jobs:
             return "", "none in its code; a cluster job's settings are not run again to check", ""
         try:
@@ -7258,11 +7260,14 @@ class Engine:
             return cached[1]
         self._log.info("[run_manifest] the protocol asks for %g runs per setting and simulate.py defines run_cell: "
                        "calling a setting again to check that it returns the same numbers", runs)
-        same, why = await self._await_with_heartbeat(_trial_runner.run_cell_again(
-            self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
-            timeout_s=self.config.execution.timeout_s, env=env,
-            thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-        ), label="calling a setting of simulate.py again")
+        try:
+            same, why = await self._await_with_heartbeat(_trial_runner.run_cell_again(
+                self.executor, python, self.quest_root, f"code/{_split_run.SIMULATE_NAME}",
+                timeout_s=self.config.execution.timeout_s, env=env,
+                thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+            ), label="calling a setting of simulate.py again")
+        except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
+            same, why = None, f"{type(e).__name__}: {e}"[:300]
         if same:
             answer = ("", "none in its code, and settings run a second time returned the same numbers", "")
         elif same is False:
@@ -7271,7 +7276,7 @@ class Engine:
                       "that samples)")
         else:
             answer = (f"FI could not call it a second time to check that it returns the same numbers ({why})", "",
-                      "make sure run_cell can be called on its own for one setting")
+                      "make sure run_cell can be called on its own for one setting, or resume so that FI checks again")
         if key and same is not None:
             self._run_cell_again_cache = (key, answer)
         return answer
@@ -19048,7 +19053,8 @@ _RANDOM_SOURCE_PATTERN = re.compile(
     r"|barabasi_albert|torch|tensorflow|keras|\bjax\b"
     # Library calls that sample unless given a seed, with no random word in their name.
     r"|differential_evolution|dual_annealing|basinhopping|kmeans|train_test_split|spring_layout|\buuid"
-    r"|\.(rand|normal|uniform|binomial|poisson|exponential|choice|choices|sample|integers|standard_normal)\(",
+    # The source is scanned with its tokens joined by spaces (``_without_comments``): ``df.sample(`` reads ``df . sample (``.
+    r"|\.\s*(rand|normal|uniform|binomial|poisson|exponential|choice|choices|sample|integers|standard_normal)\s*\(",
     re.IGNORECASE,
 )
 
@@ -19108,11 +19114,11 @@ def _random_source_found(code_path: Path) -> str:
             text = path.read_text(encoding="utf-8", errors="replace")
             hit = _RANDOM_SOURCE_PATTERN.search(_without_comments(text))
             if hit is not None:
-                return f"`{hit.group(0).strip('.(')}` in {path.name}"
+                return f"`{hit.group(0).strip('.( ')}` in {path.name}"
             try:
                 tree = ast.parse(text)
             except (SyntaxError, ValueError):
-                return f"{path.name}, which could not be read as Python"
+                return f"{path.name} could not be read as Python to check it"
             for name in _imported_module_names(tree):
                 stem = folder.joinpath(*name.split("."))
                 for candidate in (stem.with_suffix(".py"), stem / "__init__.py"):
@@ -19120,7 +19126,7 @@ def _random_source_found(code_path: Path) -> str:
                         todo.append(candidate)
         return ""
     except OSError:
-        return f"{path.name}, which could not be read"
+        return f"{path.name} could not be read to check it"
 
 
 def _own_modules(code_path: Path) -> list[Path]:

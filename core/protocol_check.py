@@ -463,8 +463,8 @@ _RANDOM_WORDS = re.compile(
     # Words a deterministic ODE or PDE design uses too ("on the interval", "time evolution", "temperature
     # distribution", "sampling interval", "proportional") are matched only in their random sense.
     r"random|stochastic|monte[- ]?carlo|gillespie|mcmc|markov|metropolis|langevin|brownian|\bnois[ey]|"
-    r"\bsampl(e|es|ed|ing)\b(?! (interval|rate|time|step|point))|seed|bootstrap|probabilit|likelihood|"
-    r"agent[- ]based|replicat|draws?\b|shuffl|permut|jitter|poisson|gaussian|probability distribution|"
+    r"\bsampl(e|es|ed|ing)\b(?!\s+(interval|rate|time|step|point))|sampler|resampl|subsampl|gibbs|seed|bootstrap|"
+    r"probabilit|likelihood|agent[- ]based|replicat|\bdraws?\b|shuffl|permut|jitter|poisson|gaussian|"
     r"distribution of (outcomes|results|runs)|fluctuat|uncertaint|ensemble|genetic (drift|algorithm)|evolutionary|"
     r"anneal|swarm|dropout|variance|confidence interval|error bar|standard error|\bproportions?\b|outbreak|extinct",
     re.IGNORECASE,
@@ -490,9 +490,10 @@ def run_count_notes(design: dict[str, Any] | None, *, fi_runs: bool = True) -> l
         return []
     return [
         f"The protocol asks for {int(runs)} runs per setting, but the design's description names nothing random. If the "
-        "simulation turns out to have no randomness (FI checks its code and runs a setting twice), FI runs each setting "
-        "once: repeating the same calculation returns the same numbers, so the repeats are not counted as missing. If "
-        "the study is meant to be random, say what varies from run to run."
+        "simulation is written as run_cell and FI finds no randomness in it (it checks the code, and calls a setting "
+        "twice unless the run is a cluster job), FI runs each setting once: repeating the same calculation returns the "
+        "same numbers, so the repeats are not counted as missing. If the study is meant to be random, say what varies "
+        "from run to run."
     ]
 
 

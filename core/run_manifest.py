@@ -980,8 +980,9 @@ def directive(found: list[str], protocol: dict[str, Any], *, trial_mode: bool = 
     if trial_mode:
         return head + (
             "\n\nFI runs the trials itself and keeps their record: every setting of that grid, `runs_per_setting` trials "
-            "each. Rewrite simulate.py so that what FI runs matches that design: run_trial(cell, trial_id, seed) for a "
-            "study with randomness (drawing only from a generator made from `seed`), or run_cell(cell) for one with none; "
+            "each for run_trial, once each for run_cell. Rewrite simulate.py so that what FI runs matches that design: "
+            "run_trial(cell, trial_id, seed) for a study with randomness (drawing only from a generator made from "
+            "`seed`), or run_cell(cell) for one with none (FI checks that it has none); "
             "the function returns a dict of numbers for one trial and raises on a failed one, with no loop over settings, "
             "no files and no RESULT_JSON. Keep everything else."
         )
