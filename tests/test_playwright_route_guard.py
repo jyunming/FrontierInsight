@@ -1,10 +1,16 @@
 """The headless-render navigation guard must not print a traceback when the page closed under it.
 
 A render's page (or the Playwright driver connection) can close while a route handler is still
-answering a request — the render finished or timed out. Playwright then raises from
-``route.abort()`` / ``continue_()`` / ``fulfill()``, and because the handler runs inside
-Playwright's event dispatcher the error is printed to the console as a full traceback, which
-reads as if FI crashed. The guard ignores exactly that closed-page case and nothing else.
+answering a request — the render finished, timed out, or the driver died. Playwright then raises
+from ``route.abort()`` / ``continue_()`` / ``fulfill()``, and because the handler runs inside
+Playwright's event dispatcher the error was printed to the console as a full traceback
+("Error occurred in event listener"), which reads as if FI crashed.
+
+The fix marks the page's route handlers "ignore errors" (what Playwright's own
+``unroute_all(behavior="ignoreErrors")`` does) and lets the error propagate: Playwright then drops it
+silently. Swallowing it inside the handler instead was tried against a real Playwright driver and
+printed a CancelledError traceback at shutdown, because Playwright keeps waiting for the route to be
+answered. Unrelated errors are left alone.
 """
 from __future__ import annotations
 
@@ -31,7 +37,7 @@ class _Resp:
 
 
 class _Route:
-    """A fake Playwright route whose calls raise ``exc`` (when given)."""
+    """A fake Playwright route whose answering calls raise ``exc`` (when given)."""
 
     def __init__(self, *, exc: BaseException | None = None, fetch_exc: BaseException | None = None,
                  resp: _Resp | None = None):
@@ -61,6 +67,31 @@ class _Route:
         return self.resp
 
 
+class _RouteHandler:
+    """Stands in for Playwright's internal RouteHandler: the flag Playwright checks before printing."""
+
+    def __init__(self):
+        self._ignore_exception = False
+
+
+class _PageImpl:
+    def __init__(self):
+        self._routes = [_RouteHandler()]
+
+
+class _Page:
+    def __init__(self):
+        self._impl_obj = _PageImpl()
+        self.unroute_calls: list[str] = []
+
+    def unroute_all(self, behavior=None):
+        self.unroute_calls.append(behavior)
+
+    @property
+    def quieted(self) -> bool:
+        return all(h._ignore_exception for h in self._impl_obj._routes)
+
+
 def _deny(url: str) -> bool:
     return False
 
@@ -69,40 +100,70 @@ def _allow(url: str) -> bool:
     return True
 
 
-def test_abort_after_driver_closed_is_ignored():
-    guard = kn._make_navigation_guard(_deny)
+def test_abort_after_driver_closed_quiets_the_page():
+    page = _Page()
+    guard = kn._make_navigation_guard(_deny, page)
     route = _Route(exc=Exception(_DRIVER_CLOSED))
-    guard(route, _Req("https://refused.example/"))  # must not raise
+    with pytest.raises(Exception, match="Connection closed"):
+        guard(route, _Req("https://refused.example/"))
     assert route.calls == ["abort"]
+    assert page.quieted
+    # The driver is gone: no call that would need it (unroute_all asks the driver to update).
+    assert page.unroute_calls == []
 
 
-def test_fetch_and_abort_after_driver_closed_is_ignored():
+def test_fetch_and_abort_after_driver_closed_quiets_the_page():
     # The traceback seen in a real quest: fetch failed because the driver was gone, then the
     # fallback abort failed for the same reason.
-    guard = kn._make_navigation_guard(_allow)
-    route = _Route(exc=Exception(_DRIVER_CLOSED), fetch_exc=Exception("Route.fetch: Connection closed while reading from the driver"))
-    guard(route, _Req("https://ok.example/"))
+    page = _Page()
+    guard = kn._make_navigation_guard(_allow, page)
+    route = _Route(exc=Exception(_DRIVER_CLOSED),
+                   fetch_exc=Exception("Route.fetch: Connection closed while reading from the driver"))
+    with pytest.raises(Exception):
+        guard(route, _Req("https://ok.example/"))
     assert route.calls == ["fetch", "abort"]
+    assert page.quieted
 
 
-def test_continue_and_fulfill_after_target_closed_are_ignored():
-    closed = Exception("Route.continue_: Target page, context or browser has been closed")
-    kn._make_navigation_guard(_allow)(_Route(exc=closed), _Req("https://ok.example/x.js", nav=False))
-    route = _Route(exc=Exception("Route.fulfill: Target page, context or browser has been closed"))
-    kn._make_navigation_guard(_allow)(route, _Req("https://ok.example/"))
-    assert route.calls == ["fetch", "fulfill"]
-
-
-def test_playwright_target_closed_error_type_is_ignored():
+def test_target_closed_error_type_quiets_the_page_on_continue_and_fulfill():
     errors = pytest.importorskip("playwright._impl._errors")
-    guard = kn._make_navigation_guard(_deny)
-    guard(_Route(exc=errors.TargetClosedError()), _Req("https://refused.example/"))
+    page = _Page()
+    route = _Route(exc=errors.TargetClosedError())
+    with pytest.raises(errors.TargetClosedError):
+        kn._make_navigation_guard(_allow, page)(route, _Req("https://ok.example/x.js", nav=False))
+    assert route.calls == ["continue"] and page.quieted
+
+    page = _Page()
+    route = _Route(exc=errors.TargetClosedError())
+    with pytest.raises(errors.TargetClosedError):
+        kn._make_navigation_guard(_allow, page)(route, _Req("https://ok.example/"))
+    assert route.calls == ["fetch", "fulfill"] and page.quieted
 
 
-def test_unrelated_error_still_raises():
-    guard = kn._make_navigation_guard(_deny)
+def test_unrelated_error_is_not_quieted():
+    page = _Page()
+    guard = kn._make_navigation_guard(_deny, page)
     with pytest.raises(ValueError):
         guard(_Route(exc=ValueError("something else broke")), _Req("https://refused.example/"))
+    assert not page.quieted
+
+
+def test_driver_message_on_a_subclass_is_not_treated_as_closed():
+    # Only Playwright's own plain Exception carries the driver-closed meaning.
+    class Other(Exception):
+        pass
+
+    assert not kn._is_playwright_closed_error(Other("connection closed while reading from the driver"))
+    assert kn._is_playwright_closed_error(Exception(_DRIVER_CLOSED))
+
+
+def test_falls_back_to_public_unroute_all_when_internals_change():
+    page = _Page()
+    page._impl_obj = object()  # a future Playwright without the internals
+    guard = kn._make_navigation_guard(_deny, page)
+    with pytest.raises(Exception):
+        guard(_Route(exc=Exception(_DRIVER_CLOSED)), _Req("https://refused.example/"))
+    assert page.unroute_calls == ["ignoreErrors"]
 
 
 def test_redirect_to_refused_address_is_still_aborted():
@@ -112,7 +173,86 @@ def test_redirect_to_refused_address_is_still_aborted():
     assert route.calls == ["fetch", "abort"]
 
 
+def test_redirect_to_allowed_address_is_fulfilled():
+    route = _Route(resp=_Resp(302, "https://ok.example/next"))
+    kn._make_navigation_guard(_allow)(route, _Req("https://ok.example/"))
+    assert route.calls == ["fetch", "fulfill"]
+
+
+def test_fetch_failure_is_aborted_not_fulfilled():
+    route = _Route(fetch_exc=RuntimeError("net::ERR_FAILED"))
+    kn._make_navigation_guard(_allow)(route, _Req("https://ok.example/"))
+    assert route.calls == ["fetch", "abort"]
+
+
+def test_address_check_that_raises_refuses():
+    def boom(url):
+        raise RuntimeError("check broke")
+
+    route = _Route()
+    kn._make_navigation_guard(boom)(route, _Req("https://ok.example/"))
+    assert route.calls == ["abort"]
+
+
 def test_allowed_navigation_is_fulfilled():
     route = _Route()
     kn._make_navigation_guard(_allow)(route, _Req("https://ok.example/"))
     assert route.calls == ["fetch", "fulfill"]
+
+
+_REAL_DRIVER_KILL = r'''
+import http.server, os, sys, threading, time
+import psutil
+sys.path.insert(0, sys.argv[1])
+import core.knowledge as kn
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        time.sleep(4)  # keep route.fetch in flight while the driver is killed
+        try:
+            self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
+            self.wfile.write(b"<html><body>slow</body></html>")
+        except Exception:
+            pass
+    def log_message(self, *a):
+        pass
+
+srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+def killer():
+    time.sleep(2.0)
+    for c in psutil.Process(os.getpid()).children(recursive=True):
+        if "node" in c.name().lower():
+            c.kill()
+
+threading.Thread(target=killer, daemon=True).start()
+out = kn._playwright_fetch_html(f"http://127.0.0.1:{srv.server_port}/", timeout_s=15, allow=lambda u: True)
+print("RENDER", out)
+'''
+
+
+@pytest.mark.slow
+def test_real_driver_death_mid_route_prints_no_traceback(tmp_path):
+    """Kill the real Playwright driver while the guard is fetching a navigation.
+
+    Before the fix this printed "Error occurred in event listener" + a Route.abort traceback."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("psutil")
+    sync_api = pytest.importorskip("playwright.sync_api")
+    try:
+        with sync_api.sync_playwright() as p:
+            p.chromium.launch(headless=True).close()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Chromium for Playwright is not installed: {exc}")
+    script = tmp_path / "kill_driver.py"
+    script.write_text(_REAL_DRIVER_KILL, encoding="utf-8")
+    repo = str(Path(kn.__file__).resolve().parent.parent)
+    proc = subprocess.run([sys.executable, str(script), repo], capture_output=True, text=True, timeout=120)
+    out = proc.stdout + proc.stderr
+    assert "RENDER None" in out, out
+    for marker in ("Traceback", "Error occurred in event listener", "never retrieved"):
+        assert marker not in out, out

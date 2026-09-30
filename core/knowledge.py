@@ -1921,66 +1921,98 @@ def _is_paywall_or_stub(html: str, text: str) -> bool:
 _HEADLESS_RENDER_LOCK = threading.Lock()
 
 
-# What Playwright says when a route is answered after its page, context, browser or driver
-# connection is already gone (the render finished or timed out while a request was in flight).
-# The driver-connection case is raised as a plain ``Exception``, so the message is what identifies it.
-_PLAYWRIGHT_CLOSED_MARKERS = (
-    "connection closed while reading from the driver",
-    "target page, context or browser has been closed",
-    "target closed",
-    "browser has been closed",
-)
+# What Playwright raises when the Node driver it talks to has gone away — as a plain ``Exception``
+# (playwright/_impl/_transport.py), so the message is the only thing that identifies it. A closed
+# page, context or browser raises ``TargetClosedError`` instead, matched by type.
+_PLAYWRIGHT_DRIVER_CLOSED = "connection closed while reading from the driver"
 
 
 def _is_playwright_closed_error(exc: BaseException) -> bool:
     """True when ``exc`` only says the page / browser / driver closed under a route handler."""
     try:
+        # Private module: TargetClosedError is not exported from playwright.sync_api.
         from playwright._impl._errors import TargetClosedError  # type: ignore[import-not-found]
     except Exception:
         TargetClosedError = None  # type: ignore[assignment]
     if TargetClosedError is not None and isinstance(exc, TargetClosedError):
         return True
-    msg = str(exc).lower()
-    return any(m in msg for m in _PLAYWRIGHT_CLOSED_MARKERS)
+    return type(exc) is Exception and _PLAYWRIGHT_DRIVER_CLOSED in str(exc).lower()
 
 
-def _route_call(route, action: str, **kwargs) -> None:
-    """Answer ``route`` with ``action``; ignore the error when the page has already closed.
+def _quiet_remaining_routes(page) -> None:
+    """Tell Playwright to drop, without printing, any error still raised by this page's route handlers.
 
-    A route handler runs inside Playwright's event dispatcher, which prints any error it raises as a
-    full traceback — a person watching the console would read a closed page as FI crashing.
-    Any other error is raised as before."""
+    This is the first half of Playwright's own ``page.unroute_all(behavior="ignoreErrors")``: mark each
+    of the page's route handlers "ignore errors". The public call is not used because it also removes
+    the routes and asks the driver to update its interception; when the driver is already gone, that
+    request fails in a background task Playwright never collects, which prints a traceback of its own.
+    Marking the handlers needs no driver. If a future Playwright renames these internals, the public
+    call is used instead."""
+    if page is None:
+        return
+    handlers = getattr(getattr(page, "_impl_obj", None), "_routes", None)
+    if isinstance(handlers, list) and all(hasattr(h, "_ignore_exception") for h in handlers):
+        for h in handlers:
+            h._ignore_exception = True
+        return
+    try:
+        page.unroute_all(behavior="ignoreErrors")
+    except Exception:  # noqa: BLE001 — the page or driver is already closed; nothing left to quiet
+        pass
+
+
+def _route_call(route, action: str, page=None, **kwargs) -> None:
+    """Answer ``route`` with ``action`` (``abort`` / ``continue_`` / ``fulfill``).
+
+    A route handler runs inside Playwright's event dispatcher, which prints any error the handler raises
+    as a full traceback — a person watching the console would read a render whose page had closed as FI
+    crashing. When the error only says the page or driver is gone, the page's routes are first marked
+    "ignore errors" and the error is then raised as before: Playwright drops it silently. (Swallowing it
+    here instead would leave Playwright waiting for an answer that never comes, and print a different
+    traceback when the render shuts down.) A request answered this way is never let through — it simply
+    dies with its page. Any other error is raised unchanged."""
     try:
         getattr(route, action)(**kwargs)
     except Exception as exc:  # noqa: BLE001 — narrowed just below
-        if not _is_playwright_closed_error(exc):
-            raise
-        _log.debug("playwright: route.%s skipped, page already closed (%s)", action, exc)
+        if _is_playwright_closed_error(exc):
+            _log.debug("playwright: route.%s after the page closed (%s)", action, exc)
+            _quiet_remaining_routes(page)
+        raise
 
 
-def _make_navigation_guard(allow):
-    """The route handler that asks ``allow(url)`` about every page navigation, a redirect included."""
+def _make_navigation_guard(allow, page=None):
+    """The route handler that asks ``allow(url)`` about every page navigation, a redirect included.
+
+    ``page`` is the page the handler is installed on; it is only used to quiet the page's routes when
+    the page closes under a request (see ``_route_call``)."""
+    def _allowed(url: str) -> bool:
+        try:
+            return bool(allow(url))
+        except Exception:  # noqa: BLE001 — a check that fails refuses; never let the request through
+            _log.debug("playwright: address check failed for %s; refusing it", url, exc_info=True)
+            return False
+
     def _guard(route, request):
         # Chromium follows a server redirect inside its network stack without asking the
         # route again, so the hop is fetched here without following it: a redirect to a
         # refused address is aborted BEFORE any request reaches that server.
         if not request.is_navigation_request():
-            _route_call(route, "continue_")
-        elif not allow(request.url):
-            _route_call(route, "abort")
+            _route_call(route, "continue_", page)
+        elif not _allowed(request.url):
+            _route_call(route, "abort", page)
         else:
             try:
                 resp = route.fetch(max_redirects=0)
             except Exception:
-                _route_call(route, "abort")
+                _route_call(route, "abort", page)
                 return
             loc = resp.headers.get("location")
             if 300 <= resp.status < 400 and loc:
                 from urllib.parse import urljoin
-                if not allow(urljoin(request.url, loc)):
-                    _route_call(route, "abort")
+                if not _allowed(urljoin(request.url, loc)):
+                    _route_call(route, "abort", page)
                     return
-            _route_call(route, "fulfill", response=resp)
+            _route_call(route, "fulfill", page, response=resp)
     return _guard
 
 
@@ -2038,6 +2070,7 @@ def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | N
                     # so a JS challenge is more likely to auto-clear.
                     args=["--disable-blink-features=AutomationControlled"],
                 )
+                page = None
                 try:
                     ctx = browser.new_context(
                         user_agent=_BROWSER_HEADERS["User-Agent"],
@@ -2046,7 +2079,7 @@ def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | N
                     )
                     page = ctx.new_page()
                     if allow is not None:
-                        page.route("**/*", _make_navigation_guard(allow))
+                        page.route("**/*", _make_navigation_guard(allow, page))
                     nav = page.goto(url, timeout=timeout_s * 1000, wait_until="domcontentloaded")
                     if allow is not None and not allow(page.url):
                         return None
@@ -2076,6 +2109,10 @@ def _playwright_fetch_html(url: str, *, timeout_s: float, allow=None) -> str | N
                         return None
                     return html
                 finally:
+                    # Routes still in flight (a sub-resource the render did not wait for) would
+                    # otherwise print a traceback when the browser closes under them.
+                    if allow is not None:
+                        _quiet_remaining_routes(page)
                     browser.close()
         finally:
             _HEADLESS_RENDER_LOCK.release()
