@@ -290,6 +290,18 @@ same PR that adds, splits or renames one.
   can draw a random number at all; none (and the seed ignored) makes it a deterministic study
   (`result_json_no_random_source`): the remaining replicates are skipped and the analysis is told to report one run,
   not an interval.
+- `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
+  a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
+  `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
+  same seed as `trial_runner.run_case`) and `METHODS.md` (`equation_map` / `methods_text`, each `generates` equation to the
+  function carrying its label), both written by FI through `code_project.refresh(extra_files=...)`. The cost over two
+  scripts is worked out at plan time (`estimate`), decided against `execution.code_package_max_extra_lines` /
+  `code_package_max_extra_calls` (`decide`) and shown in plan.md (`plan_lines`, section *How the code will be laid
+  out*, via `plan.render(code_layout=...)`). Engine hooks: `Engine._code_layout` (None off the two-script path),
+  `_plan_code_layout` (in `_node_plan`), `_code_package_reply` (in `_node_implement`: reads the package from the reply,
+  asks once more, else keeps two scripts and says so), `_package_in_use`, `_check_code_layout` (in `_node_execute`
+  beside `_check_equation_labels`: `check`, a warning, a stop only under research through the `split` contract pause).
+  `trial_runner._run_key` and `Engine._simulation_sources` read the package as part of the simulation.
 - `core/split_run.py` — the two-script contract (`simulate.py` / `experiment.py`), raw-dir naming, replicate seeding.
   Whether a quest gets it is `Engine._split_on`: under `split_analysis: auto` every quest that runs a simulation
   (`_runs_code`), deterministic (`run_cell`) or stochastic (`run_trial`); `design_is_stochastic` only decides whether
