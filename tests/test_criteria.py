@@ -33,14 +33,16 @@ def _proto(*items: dict[str, Any]) -> dict[str, Any]:
 
 
 def test_each_kind_of_criterion_is_read_and_put_in_one_form() -> None:
-    fixed, why = cr.normalize([ERR, DRIFT, CASE, SE], _proto())
+    fixed, why = cr.normalize([ERR, DRIFT, SE, {**SE, "name": "text numbers", "tolerance": "1e-8", "target": "0.5"}],
+                              _proto())
     assert why is None, why
     by = {c["name"]: c for c in fixed}
     assert by["rk4 error small"]["use"] == "error" and by["rk4 error small"]["direction"] == "lower"
     # The oracle is named as the protocol names it, and a direction in words is read as the word it means.
     assert by["energy kept"]["oracle"] == "energy drift" and by["energy kept"]["direction"] == "lower"
-    assert by["error at dt 0.05"]["case"] == {"dt": 0.05} and by["error at dt 0.05"]["measure"] == "error"
     assert by["error bars shrink"]["trials"] == "final_size" and by["error bars shrink"]["target"] == 0.5
+    # YAML reads 1e-8 as text: it is still the number it says.
+    assert by["text numbers"]["tolerance"] == 1e-8 and by["text numbers"]["target"] == 0.5
 
 
 @pytest.mark.parametrize("bad, why", [
@@ -52,7 +54,8 @@ def test_each_kind_of_criterion_is_read_and_put_in_one_form() -> None:
     ({**ERR, "use": "square"}, "`use`"),
     ({"name": "x", "direction": "lower", "tolerance": 0.1}, "what FI measures"),
     ({**ERR, "trials": "y"}, "only one"),
-    ({**CASE, "measure": None}, "`measure`"),
+    (CASE, "names a run of its own"),
+    ({**ERR, "measure": "error"}, "names a run of its own"),
     ({**ERR, "name": ""}, "no `name`"),
     ({"name": "from results", "result": "mean_error", "direction": "lower", "tolerance": 0.1}, "the script's own results"),
 ])
@@ -63,12 +66,18 @@ def test_a_criterion_that_cannot_be_computed_by_fi_is_refused_with_the_reason(ba
 
 @pytest.mark.parametrize("bad", [
     {"name": "headline", "trials": "outbreak_probability", "direction": "higher", "tolerance": 0.01},
-    {"name": "headline", "case": {"dt": 0.1}, "measure": "OUTBREAK_PROBABILITY", "direction": "higher", "tolerance": 0.01},
+    {"name": "headline", "trials": "Outbreak-Probability", "direction": "higher", "tolerance": 0.01},
     {"name": "outbreak_probability", "oracle": "rk4 error", "direction": "lower", "tolerance": 0.01},
 ])
 def test_a_criterion_on_the_studys_headline_number_is_refused(bad: dict[str, Any]) -> None:
     fixed, why = cr.normalize([bad], _proto())
     assert fixed is None and "headline" in (why or ""), why
+
+
+def test_a_per_trial_number_a_headline_is_built_on_is_not_the_headline() -> None:
+    # A trials criterion measures how the standard error shrinks, not the finding; and a common word is not a headline.
+    fixed, why = cr.normalize([{**SE, "trials": "outbreak"}, {**SE, "name": "size", "trials": "size"}], _proto())
+    assert why is None, why
 
 
 def test_the_headline_named_by_the_precision_target_is_refused_too() -> None:
@@ -85,9 +94,9 @@ def test_more_than_five_is_refused_and_two_names_alike_are_refused() -> None:
 
 def test_a_draft_keeps_the_usable_criteria_and_says_which_were_left_out() -> None:
     headline = {"name": "headline", "trials": "outbreak_probability", "direction": "higher", "tolerance": 0.01}
-    kept, notes = cr.repair([ERR, headline, {**CASE, "measure": None}, *[{**DRIFT, "name": f"d{i}"} for i in range(5)]], _proto())
+    kept, notes = cr.repair([ERR, headline, CASE, *[{**DRIFT, "name": f"d{i}"} for i in range(5)]], _proto())
     assert [c["name"] for c in kept] == ["rk4 error small", "d0", "d1", "d2", "d3"]
-    assert len(notes) == 3 and any("headline" in n for n in notes) and any("`measure`" in n for n in notes)
+    assert len(notes) == 3 and any("headline" in n for n in notes) and any("run of its own" in n for n in notes)
     assert any("at most 5" in n and "d4" in n for n in notes)
 
 
@@ -104,11 +113,17 @@ def test_the_protocol_reads_criteria_strictly_and_a_draft_is_repaired_one_entry_
 
 
 def test_the_plan_notes_a_criterion_on_a_check_the_script_measures_itself_and_fewer_than_two() -> None:
-    notes = cr.plan_notes(_proto(DRIFT))
+    notes = cr.plan_notes(_proto(ERR, DRIFT))
     assert any("energy drift" in n and "measured by the script" in n for n in notes)
-    assert any("only one" in n for n in notes)
+    assert any("only one" in n for n in cr.plan_notes(_proto(ERR)))
     assert cr.plan_notes(_proto(ERR, SE)) == []
-    assert any("no criterion" in n.lower() for n in cr.plan_notes({"oracles": [ORACLE]}))
+    # None, or only ones FI cannot measure itself, is the same: nothing counts.
+    for protocol in ({"oracles": [ORACLE]}, _proto(DRIFT)):
+        assert any("no criterion FI can measure itself" in n for n in cr.plan_notes(protocol))
+    # One script: FI runs none of the checks itself, whatever the plan names.
+    assert cr.countable(_proto(ERR), fi_runs=False) == []
+    assert any("one script" in n for n in cr.plan_notes(_proto(ERR, SE), fi_runs=False))
+    assert cr.countable(_proto(DRIFT)) == [] and [c["name"] for c in cr.countable(_proto(ERR, DRIFT))] == ["rk4 error small"]
 
 
 # --- the plan shows them -------------------------------------------------------------------------------------------
@@ -165,40 +180,64 @@ def _judged(name: str, value: float, expected: float, by: str = "engine") -> dic
 
 
 def test_each_criterion_is_computed_from_what_fi_measured_and_met_is_judged_by_its_direction() -> None:
-    crit = cr.normalize([ERR, DRIFT, CASE, SE], _proto())[0]
+    crit = cr.normalize([ERR, DRIFT, SE], _proto())[0]
     rng = random.Random(1)
-    series = {"final_size": {"R0=2": [rng.gauss(0, 1) for _ in range(64)]}}
+    series = {"final_size": {"R0=2": [rng.gauss(0, 1) for _ in range(256)], "R0=3": [rng.gauss(5, 2) for _ in range(256)]}}
     rows = cr.evaluate(crit, judged=[_judged("rk4 error", 3e-7, 0.0), _judged("energy drift", 2e-9, 0.0, by="script")],
-                       case_values={"error at dt 0.05": 2e-8}, series=series)
+                       series=series)
     by = {r["name"]: r for r in rows}
     assert by["rk4 error small"]["value"] == pytest.approx(3e-7) and by["rk4 error small"]["met"] is True
     assert by["rk4 error small"]["counts"] is True
     # A value the script's own code measured is shown, never counted.
     assert by["energy kept"]["value"] == 2e-9 and by["energy kept"]["counts"] is False
-    assert by["error at dt 0.05"]["value"] == 2e-8 and by["error at dt 0.05"]["met"] is None  # no bar was set
+    assert by["energy kept"]["met"] is None  # no bar was set, only its change is tracked
     assert by["error bars shrink"]["value"] == pytest.approx(0.5, abs=0.15) and by["error bars shrink"]["met"] is True
+
+
+def test_the_standard_error_rate_is_half_for_independent_trials_whatever_the_seed() -> None:
+    rates = []
+    for seed in range(40):
+        rng = random.Random(seed)
+        rates.append(cr.se_rate([[rng.gauss(0, 1) for _ in range(256)]]))
+    assert all(abs(r - 0.5) <= 0.15 for r in rates), sorted(rates)
+    assert abs(sum(rates) / len(rates) - 0.5) < 0.03  # no lean either way
 
 
 def test_trials_that_are_copies_of_each_other_do_not_shrink_the_error_bar() -> None:
     rng = random.Random(2)
-    copied = [v for v in (rng.gauss(0, 1) for _ in range(16)) for _ in range(4)]  # each value four times in a row
-    rate = cr.se_rate(copied)
+    copied = [v for v in (rng.gauss(0, 1) for _ in range(64)) for _ in range(4)]  # each value four times in a row
+    rate = cr.se_rate([copied])
     assert rate is not None and rate < 0.35, rate
-    assert cr.se_rate([1.0] * 64) is None and cr.se_rate([1.0, 2.0, 3.0]) is None
+    assert cr.se_rate([[1.0] * 300]) is None and cr.se_rate([[1.0, 2.0, 3.0]]) is None
+    rng = random.Random(3)
+    assert cr.se_rate([[rng.gauss(0, 1) for _ in range(100)]]) is None, "too few trials to judge by"
+    # Many small settings: 256 trials in all, but no setting large enough to give three batch sizes.
+    small = {f"c{i}": [rng.gauss(0, 1) for _ in range(16)] for i in range(16)}
+    assert cr.se_rate(list(small.values())) is None
+    (row,) = cr.evaluate(cr.normalize([SE], _proto())[0], judged=[], series={"final_size": small})
+    assert "256 trial(s)" in row["why"] and "0 of them in settings of 32 or more" in row["why"], row["why"]
+    # Settings of 32 are enough when there are eight of them.
+    rates = []
+    for s in range(20):
+        rng = random.Random(100 + s)
+        rates.append(cr.se_rate([[rng.gauss(0, 1) for _ in range(32)] for _ in range(8)]))
+    assert all(r is not None and abs(r - 0.5) <= 0.2 for r in rates), rates
 
 
 def test_a_criterion_with_nothing_measured_says_why_and_is_not_met() -> None:
-    crit = cr.normalize([ERR, CASE, SE], _proto())[0]
-    rows = cr.evaluate(crit, judged=[], case_values={}, series={}, why_missing={"case": "the trials are not run by FI"})
-    assert all(r["value"] is None and r["met"] is None and r["why"] for r in rows)
-    assert "not run by FI" in {r["name"]: r for r in rows}["error at dt 0.05"]["why"]
+    crit = cr.normalize([ERR, SE], _proto())[0]
+    rows = cr.evaluate(crit, judged=[{"name": "rk4 error", "value": 1.0, "expected": None, "measured_by": "engine"}],
+                       series={}, why_missing={"trials": "the trials are not run by FI"})
+    assert all(r["value"] is None and r["met"] is None and r["why"] and r["counts"] is False for r in rows)
+    assert "not run by FI" in {r["name"]: r for r in rows}["error bars shrink"]["why"]
 
 
 def test_the_history_row_and_the_log_line(tmp_path: Path) -> None:
     crit = cr.normalize([ERR, DRIFT], _proto())[0]
     rows = cr.evaluate(crit, judged=[_judged("rk4 error", 3e-4, 0.0), _judged("energy drift", 1e-9, 0.0, by="script")],
-                       case_values={}, series={})
-    row = cr.record(tmp_path, run="run_1", code_commit="abc123", results=rows)
+                       series={})
+    row = cr.record(tmp_path, run="run_1", code_commit="abc123", results=rows, protocol_version=1, protocol_sha256="f00",
+                    attempt="a1")
     again = cr.record(tmp_path, run="run_1", code_commit="def456", results=[])
     history = cr.history(tmp_path)
     assert [h["n"] for h in history] == [1, 2] and history[0]["code_commit"] == "abc123" and row["n"] == 1
@@ -207,4 +246,15 @@ def test_the_history_row_and_the_log_line(tmp_path: Path) -> None:
     assert "0 of 1" in line and "not met" in line and "rk4 error small" in line and "energy kept" in line
     assert "the script" in line
     assert "no criterion" in cr.summary_line([]).lower()
+    assert history[0]["protocol_sha256"] == "f00" and history[0]["attempt"] == "a1"
+    only_script = [r for r in rows if not r["counts"]]
+    assert cr.summary_line(only_script).startswith("none of the checks of correctness was measured by FI itself")
     assert math.isfinite(history[0]["criteria"][0]["value"])
+
+
+def test_the_methodology_audit_vouches_for_the_design_not_for_the_criteria_added_after_it() -> None:
+    from core import receipts
+
+    design = {"hypothesis": "h", "protocol": {**BASE, "criteria": [ERR]}, "rationale": "x"}
+    assert receipts.design_core(design) == receipts.design_core({"hypothesis": "h", "protocol": BASE})
+    assert receipts.design_core(design) != receipts.design_core({"hypothesis": "h", "protocol": {**BASE, "grid": {"dt": [1]}}})

@@ -10,11 +10,13 @@ bending the code towards the answer. So the plan's protocol declares ``criteria`
   convergence-rate check that is the gap between the observed and the claimed order; for an invariant, the worst
   violation); ``use: value`` is the measured value itself. No second way of measuring: the number is the one the oracle
   gate recorded in ``needs/ORACLE_CHECK.json``.
-* ``case`` + ``measure``: one run of the simulation on ``case`` that FI makes itself (the trial contract's
-  ``run_trial``/``run_cell``, as for an oracle with a case), and the number ``measure`` that run returns.
+  A run of the simulation that FI makes itself is an oracle with a ``case`` (:func:`core.oracle_check.case_of`): its
+  expected value and where that value comes from are the protocol's, so a number the simulation computes about itself
+  (an ``error`` against a reference it holds) is never the yardstick. A criterion has no case of its own.
 * ``trials``: a number every trial returns (a key of ``run_trial``'s dict), read from FI's own record of the trials; the
-  value is the rate at which its standard error shrinks with the number of trials (batch means: 0.5 for independent
-  trials, less when trials repeat or depend on each other).
+  value is the rate at which the standard error of its mean shrinks with the number of trials (batch means pooled over
+  the settings: 0.5 for independent trials, less when trials repeat or depend on each other). It needs at least
+  :data:`MIN_TRIALS` trials in settings of :data:`MIN_PER_SETTING` or more.
 
 Each has a ``direction`` (``lower`` or ``higher`` is better, or ``target``: closest to ``target`` is best), an optional
 ``target`` (for ``lower`` the most it may be, for ``higher`` the least, for ``target`` the value aimed at) and its own
@@ -24,8 +26,8 @@ it counts as worse. A number the script measured itself (an oracle with no case,
 
 The criteria live inside the protocol, so they are frozen with it, covered by its hash and changed only by an amendment
 (:mod:`core.frozen_protocol`). After every run the engine computes each one and appends a row to
-``.fi/criteria_history.jsonl``: the run, the commit of ``code/`` that ran, and each criterion's value and whether it was
-met. Nothing is decided from the rows yet.
+``.fi/criteria_history.jsonl``: the protocol's run and version, the commit of ``code/`` that ran, and each criterion's
+value, whether it was met and whether it counts. Nothing is decided from the rows yet.
 """
 
 from __future__ import annotations
@@ -39,6 +41,11 @@ from pathlib import Path
 from typing import Any
 
 MIN, MAX = 2, 5
+#: The trials (over all settings) the standard-error rate needs before it is steady enough to judge by: at 256, 1 run in
+#: 250 of independent trials lands more than 0.15 from 0.5; at 64 it is 1 in 6.
+MIN_TRIALS = 256
+#: Trials one setting needs to count towards it: three batch sizes of at least 8 batches each.
+MIN_PER_SETTING = 32
 HISTORY = ".fi/criteria_history.jsonl"
 
 #: The three directions, and how the plan says each.
@@ -62,22 +69,38 @@ def _num(value: Any) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
+def _number_or_text(value: Any) -> float | None:
+    """A number, or text that is one: YAML reads ``1e-8`` (no point before the ``e``) as text."""
+    if isinstance(value, str):
+        try:
+            value = float(value.strip())
+        except ValueError:
+            return None
+    return _num(value)
+
+
+def _key(name: Any) -> str:
+    """A name as the headline check compares it: lower case, without spaces, dashes or underscores."""
+    return re.sub(r"[\s_\-]+", "", str(name or "").lower())
+
+
 def _fmt(value: Any) -> str:
     return f"{value:g}" if isinstance(value, float) else str(value)
 
 
 def headline_names(protocol: dict[str, Any] | None) -> set[str]:
-    """The study's headline numbers (lower case): the ids of ``protocol.metrics`` and the metric the precision target names."""
+    """The study's headline numbers (as :func:`_key` writes them): the ids of ``protocol.metrics`` and the metric the
+    precision target names."""
     if not isinstance(protocol, dict):
         return set()
     names = set()
     metrics = protocol.get("metrics")
     for item in metrics if isinstance(metrics, list) else [metrics] if isinstance(metrics, dict) else []:
         if isinstance(item, dict) and str(item.get("id") or "").strip():
-            names.add(str(item["id"]).strip().lower())
+            names.add(_key(item["id"]))
     precision = protocol.get("precision")
     if isinstance(precision, dict) and str(precision.get("metric") or "").strip():
-        names.add(str(precision["metric"]).strip().lower())
+        names.add(_key(precision["metric"]))
     return names
 
 
@@ -97,12 +120,16 @@ def _one(item: Any, index: int, protocol: dict[str, Any] | None) -> tuple[dict[s
     label = f"`protocol.criteria` entry {name!r}"
     if any(item.get(k) not in (None, "") for k in _SCRIPT_KEYS):
         return None, (f"{label} takes its number from the script's own results; a criterion must be one FI computes "
-                      "itself: a declared check (`oracle`), a run FI makes (`case` and `measure`) or FI's record of the "
-                      "trials (`trials`)")
-    sources = [k for k in ("oracle", "case", "trials") if item.get(k) not in (None, "", {})]
+                      "itself: a declared check against a known answer (`oracle`) or FI's record of the trials (`trials`)")
+    if item.get("case") not in (None, "", {}) or item.get("measure") not in (None, ""):
+        return None, (f"{label} names a run of its own (`case`, `measure`); a run FI makes is declared as a check against "
+                      "a known answer (an oracle with that `case`, `measure`, `expected` value and `reference`) and the "
+                      "criterion names that check in `oracle`, so the number it is judged against is the protocol's, "
+                      "never one the simulation computes about itself")
+    sources = [k for k in ("oracle", "trials") if item.get(k) not in (None, "", {})]
     if not sources:
-        return None, (f"{label} does not say what FI measures: name a declared check (`oracle`), a run FI makes "
-                      "(`case` and `measure`) or a number every trial returns (`trials`)")
+        return None, (f"{label} does not say what FI measures: name a declared check against a known answer (`oracle`) "
+                      "or a number every trial returns (`trials`)")
     if len(sources) > 1:
         return None, f"{label} names {' and '.join(f'`{s}`' for s in sources)}; give only one of them"
     out: dict[str, Any] = {"name": name}
@@ -121,22 +148,17 @@ def _one(item: Any, index: int, protocol: dict[str, Any] | None) -> tuple[dict[s
         if use not in _USES:
             return None, f"{label}: `use` must be `error` (how far from the expected value) or `value` (the value itself)"
         out.update(oracle=known[ref.lower()], use=use)
-    elif source == "case":
-        if not isinstance(item.get("case"), dict):
-            return None, f"{label}: `case` must be the settings of one run, such as {{dt: 0.05}}"
-        measure = item.get("measure")
-        if not isinstance(measure, str) or not measure.strip():
-            return None, f"{label} names a `case` but no `measure` (the number that run returns)"
-        measured = measure.strip()
-        out.update(case=dict(item["case"]), measure=measured)
     else:
         trials = item.get("trials")
         if not isinstance(trials, str) or not trials.strip():
             return None, f"{label}: `trials` must be the name of a number every trial returns"
         measured = trials.strip()
         out.update(trials=measured)
+    # A criterion that names a headline number, written in any case or with spaces, dashes or underscores. (A per-trial
+    # number that a headline is only built on, `final_size` under `mean_final_size`, is not refused: a trials criterion
+    # measures how its standard error shrinks, not the finding.)
     for word in (measured, name):
-        if word and word.lower() in headline:
+        if word and _key(word) in headline:
             return None, (f"{label} is about {word!r}, a headline number of the study (`protocol.metrics`): judging the "
                           "code by the study's own finding would reward bending the code towards it. Use a check of "
                           "correctness instead (a check against a known answer, a convergence order, an invariant)")
@@ -145,17 +167,17 @@ def _one(item: Any, index: int, protocol: dict[str, Any] | None) -> tuple[dict[s
         return None, f"{label}: `direction` must be `lower`, `higher` or `target` (closest to `target` is best)"
     out["direction"] = direction
     target = item.get("target")
-    if target is not None and _num(target) is None:
-        return None, f"{label}: `target` must be a number"
+    if target is not None and _number_or_text(target) is None:
+        return None, f"{label}: `target` must be a number (write 1.0e-6, not 1e-6)"
     if direction == "target" and target is None:
         return None, f"{label}: a `target` direction needs the number aimed at in `target`"
     if target is not None:
-        out["target"] = target
-    tolerance = _num(item.get("tolerance"))
+        out["target"] = _number_or_text(target) if isinstance(target, str) else target
+    tolerance = _number_or_text(item.get("tolerance"))
     if tolerance is None or tolerance < 0:
-        return None, (f"{label} needs its own `tolerance`, a number of 0 or more: how close to the target counts as met, "
-                      "and how much a later version may change before it counts as worse")
-    out["tolerance"] = item["tolerance"]
+        return None, (f"{label} needs its own `tolerance`, a number of 0 or more (write 1.0e-8, not 1e-8): how close to "
+                      "the target counts as met, and how much a later version may change before it counts as worse")
+    out["tolerance"] = tolerance if isinstance(item.get("tolerance"), str) else item["tolerance"]
     return out, None
 
 
@@ -231,12 +253,10 @@ def describe(criterion: dict[str, Any], protocol: dict[str, Any] | None = None) 
                 if criterion.get("use") == "error" else f"the value the check “{criterion['oracle']}” measures")
         if _script_measured(protocol, criterion):
             what += " (measured by the script's own code, so shown but not counted: give that check a case FI can run)"
-    elif criterion.get("case") is not None:
-        settings = ", ".join(f"{k}={_fmt(v)}" for k, v in criterion["case"].items())
-        what = f"{criterion['measure']} from one run FI makes itself at {settings or 'the default settings'}"
     else:
         what = (f"how fast the standard error of {criterion['trials']} shrinks as trials are added "
-                "(0.5 when the trials are independent)")
+                f"(0.5 when the trials are independent; needs {MIN_TRIALS} trials or more, in settings of "
+                f"{MIN_PER_SETTING} or more)")
     direction, target, tol = criterion["direction"], criterion.get("target"), criterion["tolerance"]
     if direction == "target":
         bar = f"closest to {_fmt(target)} is best; met within {_fmt(tol)} of {_fmt(target)}"
@@ -250,14 +270,29 @@ def describe(criterion: dict[str, Any], protocol: dict[str, Any] | None = None) 
     return f"{lead}{what}; {bar}; a change smaller than {_fmt(tol)} counts as no change."
 
 
-def plan_notes(protocol: dict[str, Any] | None) -> list[str]:
+def countable(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> list[dict[str, Any]]:
+    """The protocol's criteria whose number FI can measure itself (not one resting on a check the script answers).
+    ``fi_runs``: whether FI runs the simulation itself (two scripts, the trial contract); when it does not, it measures
+    none of them."""
+    if not fi_runs:
+        return []
+    return [c for c in declared(protocol) if not _script_measured(protocol, c)]
+
+
+def plan_notes(protocol: dict[str, Any] | None, *, fi_runs: bool = True) -> list[str]:
     """What *Checks already made* says about the criteria: none, only one, or one the script measures itself."""
     if not isinstance(protocol, dict):
         return []
     items = declared(protocol)
-    if not items:
-        return ["The plan has no criterion for judging whether the code got better (`criteria` in the protocol): every "
-                "run is recorded as having no criterion, and a later change to the code cannot be shown to be better."]
+    if not fi_runs:
+        return ["This quest runs its experiment as one script, so FI runs none of its checks itself: whatever criteria "
+                "the plan names are shown after each run but none counts, and no run can be shown to be better than "
+                "another. Two scripts (`execution.split_analysis: true`, as `rigor_profile: research` sets) let FI "
+                "run the simulation and measure them."]
+    if not countable(protocol):
+        return ["The plan has no criterion FI can measure itself for judging whether the code got better (`criteria` in "
+                "the protocol, each naming a check against a known answer that FI runs, or a number every trial "
+                "returns): no run can be shown to be better than another."]
     notes = []
     if len(items) < MIN:
         notes.append(f"The plan has only one criterion for judging whether the code got better; {MIN} to {MAX} "
@@ -272,28 +307,42 @@ def plan_notes(protocol: dict[str, Any] | None) -> list[str]:
 # --- computing them after a run ------------------------------------------------------------------------------------
 
 
-def se_rate(values: list[float]) -> float | None:
-    """How fast the standard error of the mean of ``values`` (in trial order) shrinks as trials are added: the slope of
-    log(spread of batch means) against log(batch size), sign flipped. 0.5 for independent trials; lower when trials repeat
-    or depend on each other. ``None`` with fewer than 16 values or no spread."""
-    xs = [v for v in (_num(x) for x in values) if v is not None]
-    if len(xs) < 16:
+def se_rate(cells: list[list[float]] | list[float]) -> float | None:
+    """How fast the standard error of a mean shrinks as trials are added, from ``cells`` (one list of values per setting,
+    each in trial order; a setting with fewer than :data:`MIN_PER_SETTING` is left out): the slope of log(spread of batch means) against log(batch size), sign flipped, with the spread
+    pooled over the settings (each around its own mean), every point made of at least 8 batches, corrected for the bias
+    of a log of a spread, and weighted by its degrees of freedom. 0.5 for independent trials; lower when trials repeat or
+    depend on each other. ``None`` with fewer than :data:`MIN_TRIALS` values in all (in those settings), or no spread."""
+    if cells and not isinstance(cells[0], list):
+        cells = [cells]  # type: ignore[list-item]
+    series = [[v for v in (_num(x) for x in xs) if v is not None] for xs in cells]  # type: ignore[union-attr]
+    series = [xs for xs in series if len(xs) >= MIN_PER_SETTING]
+    if sum(len(xs) for xs in series) < MIN_TRIALS:
         return None
-    points: list[tuple[float, float]] = []
+    points: list[tuple[float, float, int]] = []
     size = 1
-    while len(xs) // size >= 4:
-        count = len(xs) // size
-        means = [statistics.fmean(xs[i * size:(i + 1) * size]) for i in range(count)]
-        spread = statistics.stdev(means)
-        if spread > 0:
-            points.append((math.log(size), math.log(spread)))
+    while True:
+        squares, dof = 0.0, 0
+        for xs in series:
+            count = len(xs) // size
+            if count < 8:
+                continue
+            means = [statistics.fmean(xs[i * size:(i + 1) * size]) for i in range(count)]
+            centre = statistics.fmean(means)
+            squares += sum((m - centre) ** 2 for m in means)
+            dof += count - 1
+        if dof < 7:
+            break
+        if squares > 0:
+            points.append((math.log(size), 0.5 * math.log(squares / dof) + 1 / (2 * dof), dof))
         size *= 2
     if len(points) < 3:
         return None
-    mx = statistics.fmean(p[0] for p in points)
-    my = statistics.fmean(p[1] for p in points)
-    den = sum((p[0] - mx) ** 2 for p in points)
-    return -sum((p[0] - mx) * (p[1] - my) for p in points) / den if den else None
+    weight = sum(p[2] for p in points)
+    mx = sum(p[0] * p[2] for p in points) / weight
+    my = sum(p[1] * p[2] for p in points) / weight
+    den = sum(p[2] * (p[0] - mx) ** 2 for p in points)
+    return -sum(p[2] * (p[0] - mx) * (p[1] - my) for p in points) / den if den else None
 
 
 def meets(criterion: dict[str, Any], value: float | None) -> bool | None:
@@ -309,12 +358,11 @@ def meets(criterion: dict[str, Any], value: float | None) -> bool | None:
     return value <= target if criterion["direction"] == "lower" else value >= target
 
 
-def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], case_values: dict[str, float],
-             series: dict[str, dict[str, list[float]]], why_missing: dict[str, str] | None = None) -> list[dict[str, Any]]:
+def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], series: dict[str, dict[str, list[float]]],
+             why_missing: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """Each criterion's value after a run, from what FI measured: ``judged`` (the oracle gate's verdicts, as in
-    ``needs/ORACLE_CHECK.json``), ``case_values`` (criterion name -> the number FI's own run of its case returned) and
-    ``series`` (a trial number's values per setting, in trial order, from FI's record). ``why_missing`` says, per source
-    (``oracle``, ``case``, ``trials``), why nothing could be measured."""
+    ``needs/ORACLE_CHECK.json``) and ``series`` (a trial number's values per setting, in trial order, from FI's record).
+    ``why_missing`` says, per source (``oracle``, ``trials``), why nothing could be measured."""
     why_missing = why_missing or {}
     by_name = {str(j.get("name")).strip(): j for j in judged if isinstance(j, dict)}
     out = []
@@ -330,16 +378,17 @@ def evaluate(items: list[dict[str, Any]], *, judged: list[dict[str, Any]], case_
             else:
                 value = v if c.get("use") == "value" else (abs(v - e) if e is not None else None)
                 why = "" if value is not None else f"the check {c['oracle']!r} has no expected value"
-                measured_by = "FI" if j.get("measured_by") == "engine" else "the script"
-        elif c.get("case") is not None:
-            value = _num(case_values.get(c["name"]))
-            why = "" if value is not None else (why_missing.get("case") or f"FI's run of the case did not return {c['measure']!r}")
-            measured_by = "FI" if value is not None else None
+                if value is not None:
+                    measured_by = "FI" if j.get("measured_by") == "engine" else "the script"
         else:
-            rates = [r for r in (se_rate(vs) for vs in (series.get(c["trials"]) or {}).values()) if r is not None]
-            value = statistics.median(rates) if rates else None
-            why = "" if value is not None else (why_missing.get("trials") or
-                                               f"FI's record has too few trials of {c['trials']!r} (16 per setting are needed)")
+            cells = list((series.get(c["trials"]) or {}).values())
+            value = se_rate(cells)
+            if value is None and not why_missing.get("trials"):
+                usable = sum(len(xs) for xs in cells if len(xs) >= MIN_PER_SETTING)
+                why = (f"FI's record has {sum(len(xs) for xs in cells)} trial(s) of {c['trials']!r}, {usable} of them in "
+                       f"settings of {MIN_PER_SETTING} or more; {MIN_TRIALS} in such settings are needed, and they must vary")
+            else:
+                why = "" if value is not None else why_missing["trials"]
             measured_by = "FI" if value is not None else None
         row = {"name": c["name"], "value": value, "met": meets(c, value), "counts": measured_by == "FI",
                "measured_by": measured_by, "direction": c["direction"], "target": c.get("target"),
@@ -371,15 +420,22 @@ def history(quest_root: Path) -> list[dict[str, Any]]:
 
 
 def record(quest_root: Path, *, run: str, code_commit: str | None, results: list[dict[str, Any]],
-           code_changed: bool | None = None) -> dict[str, Any]:
-    """Append one row to ``.fi/criteria_history.jsonl`` and return it. ``results`` empty is recorded as "no criterion"."""
+           code_changed: bool | None = None, protocol_version: int | None = None, protocol_sha256: str | None = None,
+           attempt: str | None = None, protocol_problem: str | None = None) -> dict[str, Any]:
+    """Append one row to ``.fi/criteria_history.jsonl`` and return it. ``n`` counts the rows (one per run of the code);
+    ``run`` is the frozen protocol's run (``run_1`` until an amendment), so rows are compared only within one
+    ``protocol_sha256``. ``attempt`` is the id of this run's record in ``.fi/attempts.jsonl``. ``results`` empty is
+    recorded as "no criterion"."""
     row: dict[str, Any] = {
-        "n": len(history(quest_root)) + 1, "run": run,
+        "n": len(history(quest_root)) + 1, "run": run, "protocol_version": protocol_version,
+        "protocol_sha256": protocol_sha256, "attempt": attempt,
         "written": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "code_commit": code_commit, "criteria": results,
     }
     if code_changed is not None:
         row["code_changed_since_commit"] = code_changed
+    if protocol_problem:
+        row["protocol_problem"] = protocol_problem
     if not results:
         row["note"] = "no criterion"
     try:
@@ -399,6 +455,8 @@ def summary_line(results: list[dict[str, Any]]) -> str:
                 "compared with a later one")
     counted = [r for r in results if r.get("counts")]
     met = [r for r in counted if r.get("met") is True]
+    lead = (f"{len(met)} of {len(counted)} checks of correctness that FI measured itself are met; " if counted else
+            "none of the checks of correctness was measured by FI itself this run, so none counts; ")
     parts = []
     for r in results:
         if r.get("value") is None:
@@ -409,5 +467,4 @@ def summary_line(results: list[dict[str, Any]]) -> str:
             if not r.get("counts"):
                 state += ", measured by the script itself so not counted"
         parts.append(f"{r['name']}: {state}")
-    return (f"{len(met)} of {len(counted)} checks of correctness that FI measured itself are met; "
-            + "; ".join(parts))
+    return lead + "; ".join(parts)

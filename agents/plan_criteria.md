@@ -26,9 +26,8 @@ Return ONE JSON object and nothing else:
 
 Each criterion takes its number from exactly one of:
 
-- `"oracle": "<the name of a check in the protocol's oracles>"`, with `"use": "error"` (how far the check's measured value lands from the value it expects, the default) or `"use": "value"` (the measured value itself, such as an observed convergence order);
-- `"case": {<the settings of one run>}, "measure": "<a number the simulation's run_trial or run_cell already returns for this study>"`: FI runs the simulation on that case itself;
-- `"trials": "<a number every trial returns>"`: FI reads its own record of the trials and measures how fast that number's standard error shrinks as trials are added (0.5 when trials are independent; use `"direction": "target", "target": 0.5`).
+- `"oracle": "<the name of a check in the protocol's oracles>"`, with `"use": "error"` (how far the check's measured value lands from the value it expects, the default) or `"use": "value"` (the measured value itself, such as an observed convergence order). Prefer a check that names a `case`: FI runs the simulation on it itself; a number the script's own `oracle()` reports is shown but never counts;
+- `"trials": "<a number every trial returns>"`: FI reads its own record of the trials and measures how fast the standard error of that number's mean shrinks as trials are added (0.5 when trials are independent; use `"direction": "target", "target": 0.5`; it needs 256 trials or more, in settings of 32 trials or more).
 
 Rules:
 

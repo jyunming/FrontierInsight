@@ -15,7 +15,6 @@ import pytest
 from core import criteria as cr, frozen_protocol as fp, plan
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, PausesConfig, ProviderConfig
 from core.engine import Engine
-from core.execution import SharedInterpreterExecutor
 from core.knowledge import RetrievedDoc
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 from tests.test_oracle_gate import ORACLE as SCRIPT_ORACLE, _PASSING, _cfg as _gate_cfg, _fake as _gate_fake
@@ -26,24 +25,13 @@ CASE_ORACLE = {"name": "rk4 error", "kind": "special_case", "check": "error at t
 PROTOCOL = {"grid": {"dt": [0.1, 0.05]}, "oracles": [CASE_ORACLE]}
 CRITERION = {"name": "rk4 error small", "oracle": "rk4 error", "direction": "lower", "target": 1e-5, "tolerance": 1e-7}
 
-SIMULATE = '''
-import math
-
-def run_cell(cell):
-    y, dt = 1.0, cell["dt"]
-    for _ in range(int(round(1.0 / dt))):
-        k1 = -y; k2 = -(y + dt * k1 / 2); k3 = -(y + dt * k2 / 2); k4 = -(y + dt * k3)
-        y += dt * (k1 + 2 * k2 + 2 * k3 + k4) / 6
-    return {"error": abs(y - math.exp(-1.0))}
-'''
-
-
 def _config(tmp_path: Path, plan_pause: str = "off") -> Config:
     return Config(
         topic="RK4 on y' = -y", title="criteria", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1,
                             pilot_run=False),
-        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
+        # Two scripts: FI runs the checks itself, so a criterion can count.
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
         pauses=PausesConfig(plan=plan_pause, papers=False),
     )
@@ -103,8 +91,8 @@ async def test_a_draft_with_no_criterion_searches_once_asks_again_and_the_plan_c
     search = _Search()
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", search.fn)
     engine = Engine(_config(tmp_path))
-    model = _Model(PROTOCOL, [CRITERION, {"name": "headline", "trials": "error", "direction": "lower", "tolerance": 1,
-                                          "result": "score"}])
+    model = _Model({**PROTOCOL, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}]},
+                   [CRITERION, {"name": "headline", "trials": "Error-Rate", "direction": "lower", "tolerance": 1}])
     engine._client = model
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert len(search.queries) == 1 and "correctness" in search.queries[0]
@@ -114,7 +102,7 @@ async def test_a_draft_with_no_criterion_searches_once_asks_again_and_the_plan_c
     section = text.split(f"## {plan.CRITERIA_HEADING}", 1)[1].split("\n## ", 1)[0]
     assert "**rk4 error small**" in section
     # The one the model got wrong is named in the plan, not dropped in silence.
-    assert "'headline' takes its number from the script's own results" in text
+    assert "'headline' is about 'Error-Rate', a headline number of the study" in text
 
 
 @pytest.mark.asyncio
@@ -132,7 +120,7 @@ async def test_still_none_and_no_plan_pause_warns_plainly_and_records_that_there
     assert "criteria" not in plan.parse(text).design["protocol"], "no criterion is faked"
     section = text.split(f"## {plan.CRITERIA_HEADING}", 1)[1].split("\n## ", 1)[0]
     assert "(none" in section
-    assert "has no criterion for judging whether the code got better" in text  # Checks already made
+    assert "has no criterion FI can measure itself for judging whether the code got better" in text  # Checks already made
     assert not (engine.fi_dir / "pause.json").exists()
 
 
@@ -174,7 +162,7 @@ def _trial_record(root: Path, values: list[float]) -> None:
     """FI's run record and ledger for one setting whose trials returned ``values`` (hash-matched, as FI writes them)."""
     rows, ledger = [], []
     for i, v in enumerate(values):
-        vals = {"outbreak": v}
+        vals = {"infected": v}
         digest = hashlib.sha256(json.dumps(vals, sort_keys=True, allow_nan=True).encode("utf-8")).hexdigest()
         rows.append({"trial": i, "status": "ok", "values": vals})
         ledger.append({"event": "trial", "status": "ok", "cell": "R0=2", "trial": i, "values_sha256": digest})
@@ -194,57 +182,116 @@ async def test_after_a_run_each_criterion_is_computed_from_what_fi_measured_and_
     engine = Engine(_config(tmp_path))
     root = engine.quest_root
     (root / "code").mkdir(parents=True, exist_ok=True)
-    (root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
+    (root / "code" / "simulate.py").write_text("def run_trial(cell, trial_id, seed):\n    return {}\n", encoding="utf-8")
     protocol = plan.normalize_protocol({**PROTOCOL, "criteria": [
-        CRITERION,
-        {"name": "finer step", "case": {"dt": 0.05}, "measure": "error", "direction": "lower", "target": 1e-6,
-         "tolerance": 1e-9},
-        {"name": "error bars shrink", "trials": "outbreak", "direction": "target", "target": 0.5, "tolerance": 0.2},
+        CRITERION, {"name": "error bars shrink", "trials": "infected", "direction": "target", "target": 0.5, "tolerance": 0.15},
     ]})[0]
-    fp.freeze(root, protocol, approved_by="human: test", source="plan.md")
+    record = fp.freeze(root, protocol, approved_by="human: test", source="plan.md")
     (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({"status": "ok", "attempts": [{"judged": [
         {"name": "rk4 error", "value": 3.3e-7, "expected": 0.0, "measured_by": "engine", "passed_by_engine": True}]}]}),
         encoding="utf-8")
     rng = random.Random(7)
-    _trial_record(root, [float(rng.random() < 0.5) for _ in range(256)])
+    _trial_record(root, [float(rng.random() < 0.5) for _ in range(512)])
     has_git = shutil.which("git") is not None
     if has_git:
         from core import code_project
 
         assert code_project.record_change(root, "code written")
-        (root / "code" / "simulate.py").write_text(SIMULATE + "\n# repaired\n", encoding="utf-8")
-    engine.executor = SharedInterpreterExecutor(python_version="3.11")
+        (root / "code" / "simulate.py").write_text("def run_trial(cell, trial_id, seed):\n    return {'x': 1}\n",
+                                                   encoding="utf-8")
     engine._trial_mode = True
-    await engine._record_criteria({}, sys.executable, None, root / "code" / "simulate.py")
+    await engine._record_criteria({}, attempt="attempt-7")
 
     (row,) = cr.history(root)
     by = {c["name"]: c for c in row["criteria"]}
     assert by["rk4 error small"]["value"] == pytest.approx(3.3e-7) and by["rk4 error small"]["met"] is True
-    assert by["finer step"]["counts"] is True and 0 < by["finer step"]["value"] < 1e-6, by["finer step"]
-    assert by["error bars shrink"]["value"] == pytest.approx(0.5, abs=0.2) and by["error bars shrink"]["counts"] is True
-    assert row["run"] == "run_1"
+    assert by["error bars shrink"]["value"] == pytest.approx(0.5, abs=0.15) and by["error bars shrink"]["counts"] is True
+    assert row["run"] == "run_1" and row["protocol_sha256"] == record["sha256"] and row["protocol_version"] == 1
+    assert row["attempt"] == "attempt-7"
     if has_git:
         # The repair made after the code was recorded is recorded too, so the row names the code that ran.
         from core import code_project
 
         assert row["code_commit"] == code_project.head(root)[0] and row["code_changed_since_commit"] is False
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "[criteria] run 1: 3 of 3 checks of correctness that FI measured itself are met" in log
+    assert "[criteria] run 1: 2 of 2 checks of correctness that FI measured itself are met" in log
 
 
 @pytest.mark.asyncio
-async def test_without_a_trial_contract_a_case_and_a_trial_record_are_named_as_not_measured(tmp_path: Path) -> None:
+async def test_without_fis_own_trial_record_a_trials_criterion_is_named_as_not_measured(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
     root = engine.quest_root
     protocol = plan.normalize_protocol({**PROTOCOL, "criteria": [
-        {"name": "finer step", "case": {"dt": 0.05}, "measure": "error", "direction": "lower", "tolerance": 1e-9},
-        {"name": "error bars shrink", "trials": "outbreak", "direction": "target", "target": 0.5, "tolerance": 0.2},
+        {"name": "error bars shrink", "trials": "infected", "direction": "target", "target": 0.5, "tolerance": 0.2},
     ]})[0]
     fp.freeze(root, protocol, approved_by="human: test", source="plan.md")
-    await engine._record_criteria({}, sys.executable, None, root / "code" / "experiment.py")
+    await engine._record_criteria({})
     (row,) = cr.history(root)
-    assert all(c["value"] is None and c["why"] for c in row["criteria"])
-    assert "run_trial or run_cell" in row["criteria"][0]["why"] and "runs them itself" in row["criteria"][1]["why"]
+    assert all(c["value"] is None and c["why"] and c["counts"] is False for c in row["criteria"])
+    assert "runs them itself" in row["criteria"][0]["why"]
+
+
+@pytest.mark.asyncio
+async def test_a_criterion_frozen_on_a_headline_is_not_computed_and_the_log_says_why(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    protocol = {**PROTOCOL, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}],
+                "criteria": [CRITERION, {"name": "h", "trials": "error_rate", "direction": "lower", "tolerance": 1}]}
+    fp.freeze(engine.quest_root, protocol, approved_by="human: test", source="plan.md")
+    await engine._record_criteria({})
+    (row,) = cr.history(engine.quest_root)
+    assert [c["name"] for c in row["criteria"]] == ["rk4 error small"]
+    assert "[criteria] not computed:" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_an_amendment_that_only_adds_a_headline_criterion_changes_nothing_and_does_not_stop(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    frozen = {**PROTOCOL, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}],
+              "criteria": [{**CRITERION, "direction": "lower is better"}]}
+    fp.freeze(engine.quest_root, frozen, approved_by="human: test", source="plan.md")
+    asked = {**frozen, "criteria": [*frozen["criteria"],
+                                    {"name": "h", "trials": "error_rate", "direction": "lower", "tolerance": 1}]}
+    stops: list[Any] = []
+    engine._pause_for_amendment = lambda pending: stops.append(pending)  # type: ignore[method-assign]
+    engine._hold_design_to_frozen({"iteration": 1}, {"hypothesis": "x", "protocol_amendment": {"protocol": asked}})
+    assert stops == [] and fp.load_pending(engine.quest_root) is None
+
+
+def test_an_amendment_asking_for_a_headline_criterion_leaves_it_out_and_says_so(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path))
+    frozen = plan.normalize_protocol({**PROTOCOL, "criteria": [CRITERION]})[0]
+    fp.freeze(engine.quest_root, frozen, approved_by="human: test", source="plan.md")
+    asked = {**frozen, "metrics": [{"id": "error_rate", "estimand": "e", "kind": "mean", "unit": "run"}],
+             "criteria": [CRITERION, {"name": "h", "trials": "error_rate", "direction": "lower", "tolerance": 1}]}
+    engine._pause_for_amendment = lambda pending: None  # type: ignore[method-assign]
+    engine._hold_design_to_frozen({"iteration": 1}, {"hypothesis": "x", "protocol_amendment": {"protocol": asked,
+                                                                                                "reason": "more"}})
+    pending = fp.load_pending(engine.quest_root)
+    assert [c["name"] for c in pending["proposed_protocol"]["criteria"]] == ["rk4 error small"]
+    assert "headline" in pending["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_person_who_resumes_without_writing_a_criterion_is_not_stopped_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.knowledge.Knowledge.asearch", _Search().fn)
+    engine = Engine(_config(tmp_path, plan_pause="ask"))
+    engine._client = _Model(PROTOCOL, [])
+    stops: list[dict[str, Any]] = []
+
+    class Stopped(Exception):
+        pass
+
+    def pause(**kw: Any) -> None:
+        stops.append(kw)
+        raise Stopped
+
+    engine._pause_for_human = pause  # type: ignore[method-assign]
+    with pytest.raises(Stopped):
+        await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert stops[-1]["payload"].get("no_criteria") is True
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})  # the resume: plan.md is there
+    assert len(stops) == 1, "the person saw the request once; a resume without one goes on"
 
 
 @pytest.mark.asyncio
@@ -267,5 +314,5 @@ async def test_a_quest_run_through_the_graph_records_its_criteria_after_the_run(
     result = rows[-1]["criteria"][0]
     assert result["value"] is not None and result["counts"] is False and result["measured_by"] == "the script"
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "[criteria] run 1: 0 of 0 checks of correctness that FI measured itself are met" in log
+    assert "[criteria] run 1: none of the checks of correctness was measured by FI itself" in log
     assert "measured by the script itself so not counted" in log
