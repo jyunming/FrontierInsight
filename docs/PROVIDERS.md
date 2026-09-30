@@ -211,6 +211,38 @@ building this: `antigravity_cli` rejected `gemini-2.5-flash` outright
 model-list command before setting a cheap-tier override, rather than
 copying a model name from elsewhere.
 
+## When the provider's server is down or busy
+
+A provider sometimes answers with a server error for a few minutes (an HTTP
+5xx such as 502, 503 or 504, or 520–529 from the Cloudflare front many
+providers sit behind) or asks FI to slow down (HTTP 429). For every
+provider except the CLI ones and the VS Code extension (so `openai`, `codex`,
+`gemini`, `ollama`, `vllm`, any OpenAI-compatible `base_url` such as
+Moonshot/Kimi, and the local proxies `claude_code` and `github_copilot_*`),
+FI then tries the call up to six times, waiting about 10, 20, 40, 60 and 90
+seconds in between (each wait varied a little, so parallel quests do not all
+come back at once): three to four and a half minutes of waiting before the
+step fails. When the provider says how long to wait (its `Retry-After`
+answer, if it is two minutes or less), FI waits that long instead after a
+429, and at least that long after a server error; one call never waits more
+than five minutes in all. Each wait leaves one line in the quest's `run.log`,
+for example:
+
+```
+[execute_reflect] the model call failed (kimi over HTTP, model kimi-k3), attempt 2 of 6: the provider's server is down or busy (HTTP 521): ...; trying again in 21s
+```
+
+A dropped connection or a read timeout on its own keeps the shorter budget
+(four attempts, at most 20 seconds apart); so does a request that took longer
+than the Cloudflare front allows (HTTP 524), since the same request is as
+slow next time. A request the provider rejects (HTTP 400–499 other than 429)
+and a 429 that says the account's quota, credit or monthly allowance is used
+up are not tried again: waiting cannot fix them, so the step fails at once
+with the provider's message. To keep a quest going through a longer outage,
+name a second provider in `provider.fallback`: while that provider is
+working, FI does not wait out the outage but moves on to it after the four
+quick attempts.
+
 ## Retry model escalation (opt-in)
 
 By default a retried call uses the same model as the first attempt. FI

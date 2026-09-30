@@ -576,10 +576,13 @@ async def test_chat_error_note_explains_a_401_403_or_402(status: int, expect: st
     assert "openai" in notes
 
 
-async def test_chat_error_note_says_nothing_extra_for_an_ordinary_5xx() -> None:
+async def test_chat_error_note_says_nothing_extra_for_an_ordinary_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     """A transient 502/503 is not an auth/quota problem — no second note, and retrying is still
     the right call (``_retry_http_error`` already handles that separately)."""
     import httpx
+
+    # A 5xx waits minutes between attempts (a provider outage); not in a unit test.
+    monkeypatch.setattr("core.provider._http_outage_wait_s", lambda *a: 0.0)
 
     ep = ResolvedEndpoint(
         base_url="https://api.openai.com/v1", model="gpt-5",
