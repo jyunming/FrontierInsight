@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "c7528cf01a7740741ac6c32dbf98ffe9a8feb9a30720c056ed4bd716da7945d5",
+  "vsix_sha256": "554bd2b2b202a73c145bc3050aab5a8507757fce44cac45e0e3da0d22e46b5fb",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -38,16 +38,20 @@
       "bytes": 20019
     },
     "extension/out/bridge-path.js": {
-      "sha256": "1c41a5d81404ac6e51b7add395280bdff37efec3d862f06b7339557f95782310",
-      "bytes": 3245
+      "sha256": "6f8b1884d8336f631167d17ca068cb719ddf5956e7773a8e85e0349c810fae7a",
+      "bytes": 3626
     },
     "extension/out/bridge.js": {
       "sha256": "924b4efa4b7cdb9e01ec2bbbc21e3fa9aa772c11ff33c419f88d2ffda1392426",
       "bytes": 35526
     },
     "extension/out/extension.js": {
-      "sha256": "c58657b6ca897564b09b768665d3c1adb8f7b4ab8a713b7bc87ed0b4b0e793fc",
-      "bytes": 104142
+      "sha256": "91444e04b5e6f510cd278dad74e5e9a242e3a07e4af91a8a7b6a71e15292aa6d",
+      "bytes": 105221
+    },
+    "extension/out/fi-home.js": {
+      "sha256": "ae836799badc78f90e5899bfd8e598d03e1d0f830777c51917ddf4292c1980f0",
+      "bytes": 2087
     },
     "extension/out/interview-core.js": {
       "sha256": "502d6f3eab89f2bed90345f26152812fc6dea4f02701ad9edba68ed675ffa870",
@@ -62,32 +66,32 @@
       "bytes": 6404
     },
     "extension/out/persistent-bridge.js": {
-      "sha256": "eebbc3d52dc4e1f37667b704e00b7be4e9fe0ad891ce43c68da9e6524e0be5a2",
-      "bytes": 24752
+      "sha256": "500daedd3fef4c3b9ea92f7a9c332c2ffc6fabb072d813f8efade2fd445134c6",
+      "bytes": 25917
     },
     "extension/out/probe.js": {
       "sha256": "83f33fe220bbf749d6d1e1413e8773cf0e0c98718a6726348b6950024b988bd4",
       "bytes": 21679
     },
     "extension/out/quest-map.js": {
-      "sha256": "20f94f9d2e5b92b38eafc71bb36d08bde14a9ae3806981e1041fa1508a9360d8",
-      "bytes": 10309
+      "sha256": "1178ba28b91cb09f718369a70890026583dbe91642b931fd12f584bfda4901c7",
+      "bytes": 10312
     },
     "extension/out/roots-config.js": {
-      "sha256": "c818847d5849cf4a207e125d6986238d2ded806ad3abaea1f02448c1fce1f9da",
-      "bytes": 1948
+      "sha256": "ce2a452a810331b21523175ab820c478cfd2f1b2df677b1aba665977f30b88b4",
+      "bytes": 5589
     },
     "extension/out/roots.js": {
-      "sha256": "fbc73fa21ee5cd8159574c19fcb122a85de64ebd3a3dd95c675052f10b003648",
-      "bytes": 3536
+      "sha256": "3e20660452605c02d3676911d52714abebdb48da5d092050fbfe02c1f9be59d8",
+      "bytes": 11341
     },
     "extension/out/skill-args.js": {
       "sha256": "8a5032dd52542fdc0aa25d9a3152743762e6fb0935f4cc4da97902ee0dcf8c40",
       "bytes": 2329
     },
     "extension/out/skills.js": {
-      "sha256": "5c5f2efd96851967111652e703c01d5e268746a7bf86e2ffe1ab845daea32691",
-      "bytes": 24792
+      "sha256": "57f297dfb5c465a7d496a37a5d0321756807addcf256fd8b313fd4857b0649e0",
+      "bytes": 24855
     },
     "extension/out/terminal-command.js": {
       "sha256": "93ad8b7ae61222ec9469c2070360f842d4f10c5d6817a4e9b14c62651435c9e3",
@@ -98,16 +102,16 @@
       "bytes": 2756
     },
     "extension/out/trace.js": {
-      "sha256": "23850c5e3e919bcc445e338d7224de107d6ee6b060d1684ee487973df112bffd",
-      "bytes": 13375
+      "sha256": "df747af000e95abbb3f9f848d6fb4dc466164570d85bb7ee4230b783f8c075b4",
+      "bytes": 13411
     },
     "extension/package.json": {
-      "sha256": "64f74240ba0f4eeb3667a04911680a5d22e844f3134ab8e88700375a870f8b7f",
-      "bytes": 14601
+      "sha256": "3fbafd89982b4ed29e186b3241526cc92b196bbaf7995847a6bffb3748f4a234",
+      "bytes": 14965
     },
     "extension/readme.md": {
-      "sha256": "f4fc52aeb06ac5f187dcbb918fea8212c15d7453212faea718f37400254da3ca",
-      "bytes": 74667
+      "sha256": "4023a13dd4278952280b057b4fff387d60f0e774e8f9c62357fabc2ac2bfd103",
+      "bytes": 77067
     }
   }
 }
