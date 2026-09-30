@@ -723,6 +723,35 @@
       "ask_if": null
     },
     {
+      "id": "phased",
+      "label": "Confirm the result on data it never saw",
+      "prompt": "Let the model try designs and look at results first, then freeze the design and run it once more on data or seeds it never saw? Only that last run's numbers can be publication-ready.",
+      "kind": "single",
+      "choices": [
+        {
+          "value": false,
+          "label": "No (default)",
+          "description": "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs."
+        },
+        {
+          "value": true,
+          "label": "Yes: explore first, then confirm once",
+          "description": "The model may try designs and look at results first. Then the design is frozen and run once more on data or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. For a study that runs an experiment; a literature survey stays exploratory."
+        }
+      ],
+      "placeholder": "",
+      "default": false,
+      "mid_quest_editable": false,
+      "frontends": [
+        "cli",
+        "vscode",
+        "serve"
+      ],
+      "allow_other": false,
+      "tier": 3,
+      "ask_if": null
+    },
+    {
       "id": "comparative_baseline",
       "label": "Comparative baseline",
       "prompt": "What existing method / dataset / regime should this study be compared against? Topic-tuned default suggested by the preflight clarify call.",

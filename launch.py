@@ -3922,6 +3922,7 @@ async def _run_new(
         web_research=bool(derived.get("web_research", True)),
         supply_papers=bool(advanced.get("supply_papers", True)),
         pause_for_plan=bool(advanced.get("pause_for_plan", False)),
+        phased=bool(advanced.get("phased", False)),
         result_use=str(partial.get("result_use") or "research"),
         second_reviewer_model=str(partial.get("second_reviewer_model") or ""),
         # Advanced (tier 3): off unless the person opened Advanced and named the models.

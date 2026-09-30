@@ -244,3 +244,13 @@ def test_vscode_emitter_writes_the_plan_pause_only_when_asked(tmp_path: Path) ->
     ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
     assert '{ label: "Stop to read and edit the plan", value: "pause_for_plan" }' in ts
     assert 'case "pause_for_plan"' in ts
+
+
+def test_vscode_emitter_writes_explore_then_confirm_only_when_chosen(tmp_path: Path) -> None:
+    ts = (EXT / "src" / "interview.ts").read_text(encoding="utf-8")
+    assert '{ label: "Confirm the result on data it never saw", value: "phased" }' in ts
+    assert 'which.value === "phased"' in ts
+    yaml_text, cfg = _emit(tmp_path, phased=True)
+    assert "  phased: true" in yaml_text.splitlines() and cfg.engine.phased is True
+    yaml_text, cfg = _emit(tmp_path, phased=False)
+    assert "phased" not in yaml_text and cfg.engine.phased is False

@@ -811,6 +811,8 @@ class Engine:
             await asyncio.to_thread(self._stage_example_inputs)
             if _phased.enabled(self.config):
                 await asyncio.to_thread(self._phased_prepare)
+            elif _phased.record_path(self.quest_root).exists():
+                await asyncio.to_thread(self._phased_turned_off)
             await self.executor.setup(self.quest_root)
             await self._record_environment()
 
@@ -1552,8 +1554,8 @@ class Engine:
             except ValueError:
                 pass
             # Explore, then confirm: outside a running quest inputs/data/ holds the person's whole files (the next
-            # start holds the same rows back again).
-            if _phased.enabled(self.config):
+            # start holds the same rows back again). Also when it was turned off: a part must never stay in place.
+            if _phased.enabled(self.config) or _phased.record_path(self.quest_root).exists():
                 self._phased_restore_inputs()
             _close_quest_logger(self.quest_id)
 
@@ -2415,12 +2417,14 @@ class Engine:
 
     def _phased_prepare(self) -> None:
         """At every start: the exploration stage begins, or takes in the data supplied since (a part held back)."""
-        # Turned on after the experiment already ran: every row was seen, so nothing can be held back. Without the
-        # decision trace (engine.audit_trace off) a saved state is taken to mean it may have run.
+        # Turned on after the experiment already ran: every row was seen, so nothing can be held back. Any step of the
+        # experiment in the decision trace counts, a paused or failed one too (a background job reads the data when it
+        # is submitted, before the step pauses). Without the trace (engine.audit_trace off) a saved state is taken to
+        # mean it may have run.
         already_ran = False
         if _phased.load(self.quest_root) is None and not (self.fi_dir / _phased.RECORD).exists():
             if self.audit.path.is_file():
-                already_ran = any(e.get("kind") == "node_completed" and e.get("node") == "execute"
+                already_ran = any(str(e.get("kind") or "").startswith("node_") and e.get("node") == "execute"
                                   for e in _audit_log.read(self.audit.path))
             else:
                 already_ran = (self.fi_dir / "state.sqlite").is_file()
@@ -2433,6 +2437,15 @@ class Engine:
             return
         self._phased_log(lines)
 
+    def _phased_turned_off(self) -> None:
+        """A start with engine.phased off on a quest that ran with it on: the whole files back in inputs/data/, and
+        what it means for confirming said in run.log."""
+        try:
+            self._phased_log(_phased.turned_off(self.quest_root))
+        except OSError as e:
+            self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
+                              "kept in %s", e, _phased.store_dir(self.quest_root))
+
     def _phased_restore_inputs(self) -> None:
         """When a run stops (finished, paused or failed): the person's whole files back in inputs/data/. Not while a
         background job the run submitted is waiting: its tasks read inputs/data/ when they start."""
@@ -2441,10 +2454,75 @@ class Engine:
                            "may see until the quest is resumed")
             return
         try:
-            _phased.restore_inputs(self.quest_root)
+            for line in _phased.restore_inputs(self.quest_root):
+                self._log.warning("[phased] %s", line)
         except OSError as e:
             self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
-                              "kept in .fi/phased/original/", e)
+                              "kept in %s", e, _phased.store_dir(self.quest_root) / "original")
+
+    def _phased_seed_gap(self, state: QuestState) -> str:
+        """Why a confirm run on new seeds could not differ from exploration's run (empty when it can). What the runs
+        showed decides first: identical results whatever the seed (a deterministic study, or a script that ignores the
+        seed), as ``_node_execute`` recorded. Then the code: a deterministic trial contract (``run_cell``), or no file
+        in ``code/`` that reads ``FI_REPLICATE_SEED`` while the experiment draws random numbers only from fixed seeds (a
+        generator built without a seed draws new numbers on every run, so that one does differ). Under ``run_trial`` FI
+        hands every trial its seed itself."""
+        deterministic = ("the study has no randomness (every run gives the same numbers), so a run on new seeds only "
+                         "repeats exploration's run")
+        code = self.quest_root / "code"
+        simulate = code / _split_run.SIMULATE_NAME
+        entries = _trial_runner.entries(simulate) if simulate.is_file() else set()
+        if "run_trial" in entries:
+            return ""
+        if "run_cell" in entries or state.get("result_json_deterministic") or state.get("result_json_no_random_source"):
+            return deterministic
+        script = simulate if simulate.is_file() else code / "experiment.py"
+        if not script.is_file():
+            return ""
+        if state.get("result_json_replicate_seed_ignored"):
+            return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
+                    "same numbers, so a run on new seeds would repeat exploration's run")
+        replicates = list(state.get("result_json_replicates") or [])
+        this_pass = bool(replicates) and isinstance(replicates[0], dict) and \
+            {k: v for k, v in replicates[0].items() if k != "_seed"} == (state.get("result_json") or {})
+        if len(replicates) > 1 and this_pass:
+            # Runs on different seeds already gave different numbers (the list is this pass's: its seed 0 is the result
+            # in hand, not an earlier script's left on the state): new seeds change the result.
+            return ""
+        # The seed read in the script or a module it imports from code/ (a multi-module project reads it in a helper);
+        # FI's own helpers there (run.py sets a default seed) do not count.
+        modules = _own_modules(script)
+        if any(_unseeded_rng_calls(p) for p in modules):
+            return ""  # a generator built without a seed draws new numbers on every run
+        if any(_script_reads_replicate_seed(p) for p in modules):
+            if self.config.execution.background_jobs or not _seeds_only_constants(modules):
+                return ""  # a background job's driver passes the seed on to the job, not to a generator of its own
+            return (f"code/{script.name} names FI_REPLICATE_SEED but seeds every random generator with a fixed number, "
+                    "so a run on new seeds would repeat exploration's run")
+        if not self.config.execution.background_jobs and not any(_script_has_random_source(p) for p in modules):
+            return deterministic
+        return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), so a run on new seeds "
+                "would repeat exploration's run")
+
+    def _phased_fresh_background_job(self) -> None:
+        """The confirm run of a background job (not FI's own job array, which plans new tasks for the new seeds): the
+        job exploration submitted is set aside (``job/state.explore.json``), so the driver submits a new one with the
+        confirm run's seeds and data instead of reporting exploration's job as done."""
+        if not self.config.execution.background_jobs:
+            return
+        if (self.quest_root / "code" / _trial_runner.SUBMIT_NAME).is_file():
+            return
+        state_file = self.quest_root / "job" / "state.json"
+        if state_file.is_file():
+            try:
+                state_file.replace(state_file.with_name("state.explore.json"))
+            except OSError as e:
+                self._log.warning("[phased] exploration's background job record could not be set aside (%r); nothing "
+                                  "in this quest can be confirmed", e)
+                _phased.mark_compromised(self.quest_root, f"exploration's background job could not be set aside ({e!r})")
+                return
+            self._log.info("[phased] confirm stage: exploration's background job is set aside (job/state.explore.json), "
+                           "so the confirm run submits its own")
 
     def _phased_confirming(self) -> bool:
         return _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.CONFIRM
@@ -2454,16 +2532,25 @@ class Engine:
         ends exploration: the protocol is frozen and the frozen design runs once more (``confirm``). In the confirm
         stage the confirm run's result is recorded and the quest writes it up, never going back to change the design
         (that would choose on data meant only for confirming)."""
-        current = _phased.stage(self.quest_root)
+        record = _phased.load(self.quest_root)
+        current = str(record.get("stage")) if record else None
         if current is None:
             self._log.warning("[phased] the record of the two stages is missing or cannot be read; nothing is "
                               "confirmed, so the paper is written from exploration and says its numbers are exploratory")
+            return route
+        if record and (record.get("compromised") or record.get("not_confirmable")):
+            # Nothing can be confirmed any more (said in run.log when it happened): the quest goes on as it would
+            # without explore-then-confirm (its protocol frozen before it writes), and the paper says its numbers are
+            # exploratory.
+            if route == "write" and current == _phased.EXPLORE:
+                self._freeze_protocol_if_due(state, at_confirm=True)
             return route
         if current == _phased.CONFIRM and not _phased.confirm_run_started(self.quest_root):
             # The confirm stage began but its run has not (a stop before this step was saved): run it now, rather
             # than take the exploration result in hand for the confirm result.
             self._log.info("[phased] confirm stage: the confirm run has not been made yet; running it now")
-            return "confirm"
+            self._phased_fresh_background_job()
+            return "write" if (_phased.load(self.quest_root) or {}).get("compromised") else "confirm"
         if current == _phased.CONFIRM and route != "write":
             self._log.info("[phased] confirm stage: the frozen design is run once, so the evidence gate's %s is not "
                            "followed; the confirm result is written up as it is", route)
@@ -2476,6 +2563,12 @@ class Engine:
                                "written from exploration and says its numbers are exploratory")
                 return "write"
             self._freeze_protocol_if_due(state, at_confirm=True)
+            seed_gap = self._phased_seed_gap(state) if (record or {}).get("strategy") == _phased.FRESH_SEEDS else ""
+            if seed_gap:
+                self._log.warning("[phased] %s; no data was held back either, so this quest cannot be confirmed and the "
+                                  "paper says its numbers are exploratory", seed_gap)
+                _phased.mark_unconfirmable(self.quest_root, seed_gap)
+                return "write"
             frozen = _frozen.load(self.quest_root)
             explore_runs = sum(1 for e in _audit_log.read(self.audit.path)
                                if e.get("kind") == "node_completed" and e.get("node") == "execute") \
@@ -2493,7 +2586,10 @@ class Engine:
                 _phased.mark_compromised(self.quest_root, f"the held-back data could not be put in place ({e!r})")
                 return "write"
             self._phased_log(lines)
-            return "confirm"
+            if (_record or {}).get("compromised"):
+                return "write"
+            self._phased_fresh_background_job()
+            return "write" if (_phased.load(self.quest_root) or {}).get("compromised") else "confirm"
         try:
             _record, lines = _phased.record_confirm(
                 self.quest_root,
@@ -6719,7 +6815,8 @@ class Engine:
         ``engine.phased`` it is frozen when exploration ends instead (``at_confirm``), before the confirm run."""
         if _frozen.load(self.quest_root) is not None:
             return
-        if not at_confirm and _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.EXPLORE:
+        if (not at_confirm and _phased.enabled(self.config) and _phased.stage(self.quest_root) == _phased.EXPLORE
+                and not _phased.unconfirmable(self.quest_root)):
             self._log.info("[phased] exploration stage: the protocol is not frozen yet (the design may still change); "
                            "it is frozen when exploration ends, before the confirm run")
             return
@@ -6762,7 +6859,7 @@ class Engine:
         iteration = int(state.get("iteration", 0) or 0)
         source = "plan.md" if iteration == 0 else f"design at iteration {iteration} (a quest begun before the protocol was frozen)"
         if at_confirm:
-            source = f"the design exploration settled on ({source}), frozen when exploration ended, before the confirm run"
+            source = f"the design exploration settled on ({source}), frozen when exploration ended"
             if iteration > 0 and approved_by.startswith("human"):
                 # The person read plan.md; exploration then changed the design, so they did not read this protocol.
                 approved_by = ("auto: exploration changed the design after the person read the plan "
@@ -6784,7 +6881,7 @@ class Engine:
                                     sources=self._retrieved_sources(state))
         self._log.info(
             "[protocol] frozen %s (%s, sha256 %s, run %s)%s",
-            "at the end of exploration, before the confirm run" if at_confirm else "before the first full run",
+            "at the end of exploration" if at_confirm else "before the first full run",
             record["source"], str(record["sha256"])[:12], record["run_id"],
             "" if protocol else " -- there is no protocol: nothing holds the experiment to a grid, runs or thresholds",
         )
@@ -9674,6 +9771,9 @@ class Engine:
             "result_json": result_json or {},
             "exec_patch_pending": False,
         }
+        if _phased.enabled(self.config):
+            # Explore, then confirm: the result the confirm run produced is the only one the gate may record.
+            _phased.note_confirm_result(self.quest_root, patch["result_json"])
         if broken_skills:
             gone = {sk.name for sk, _ in broken_skills}
             selection = dict(state.get("skill_selection") or {})
@@ -9752,6 +9852,9 @@ class Engine:
         # A search's result is one best design, not trials to pool (core/optimise.py).
         patch["result_json_trials"] = bool(getattr(self, "_trial_mode", False)) and bool(result_json) and "run_trial" in (
             getattr(self, "_trial_entries", None) or set()) and not searching
+        # Written on every pass (set below only when this pass's seeds showed it): a pass whose extra seeds did not run
+        # must not keep an earlier script's "every seed agreed".
+        patch["result_json_deterministic"] = False
         if patch["result_json_trials"]:
             # The trial contract: the one result holds every trial of every setting FI ran, each with its own seed; the
             # intervals, precision targets and metric statistics are computed from it (pooled counts and values).
@@ -15127,7 +15230,10 @@ class Engine:
         contract with the two-script one instead (:meth:`_split_block`)."""
         if not self.config.execution.background_jobs:
             return ""
-        return "" if state is not None and self._split_on(state) else _JOB_PROTOCOL
+        if state is not None and self._split_on(state):
+            return ""
+        # Explore, then confirm: the confirm run's job must draw new random numbers, so the driver passes the seed on.
+        return _JOB_PROTOCOL + (_JOB_SEED_PROTOCOL if _phased.enabled(self.config) else _JOB_NO_SEED_PROTOCOL)
 
     _RUN_DATA_SUFFIXES = frozenset({
         ".csv", ".tsv", ".json", ".npy", ".npz", ".parquet", ".feather", ".pkl", ".pickle", ".h5", ".hdf5", ".xlsx", ".txt", ".dat",
@@ -15225,8 +15331,11 @@ class Engine:
         )
         detail = job_watch.describe(info)
         self._log.info("[execute] the job is pending (%s)", detail)
-        # Explore, then confirm: the job's tasks read inputs/data/ when they start, so it keeps this stage's part.
+        # Explore, then confirm: the job's tasks read inputs/data/ when they start, so it keeps this stage's part; and a
+        # resume that checks on the confirm run's own job is that run going on, not a second run on the confirm data.
         self._phased_job_pending = True
+        if _phased.enabled(self.config):
+            _phased.note_job_pending(self.quest_root)
         self._pause_for_human(
             kind="results",
             interaction="supply",
@@ -16729,8 +16838,18 @@ The real simulation runs on a cluster or takes longer than the wall-time limit, 
 3. Every later run: read `job/state.json` and check the job. Still running: print the same pending line with an updated `note` and exit 0. Never submit a second job.
 4. Job finished: read its outputs, draw the figures into `figures/` as usual, and print the real `RESULT_JSON: {...}` (no `fi_job` key) in the format this prompt asks for results.
 5. Job failed: print the reason on stderr and exit non-zero.
-Never sleep-wait for the job. Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate run is made for a background job.
-"""
+Never sleep-wait for the job. """
+
+# Appended to _JOB_PROTOCOL (same line), so the prompt with engine.phased off is exactly what it always was.
+_JOB_NO_SEED_PROTOCOL = "Ignore FI_PILOT and FI_REPLICATE_SEED: no pilot or replicate run is made for a background job.\n"
+
+# engine.phased only: the confirm run's job is given a seed exploration never used, and must use it.
+_JOB_SEED_PROTOCOL = (
+    "Ignore FI_PILOT: no pilot or replicate run is made for a background job. When you submit, read the integer in the "
+    "environment variable FI_REPLICATE_SEED (0 when unset), pass it to the job and build every random generator the "
+    "job uses from it (a task may add its own index to it); save it in `job/state.json` with the job id. FI gives a "
+    "later run of the same study a different value, so its job draws new random numbers.\n"
+)
 
 _CLUSTER_PROTOCOL = """\
 
@@ -17933,6 +18052,91 @@ def _script_has_random_source(code_path: Path) -> bool:
         return False
     except OSError:
         return True
+
+
+def _own_modules(code_path: Path) -> list[Path]:
+    """The script and the modules it imports from its own folder, followed as ``_script_has_random_source`` does
+    (not the whole folder, which also holds FI's own helpers such as ``run.py``). An unparsable file ends the walk
+    there."""
+    folder = code_path.parent
+    seen: list[Path] = []
+    todo = [code_path]
+    while todo and len(seen) < 100:
+        path = todo.pop()
+        if path in seen or not path.is_file():
+            continue
+        seen.append(path)
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            continue
+        stems = [folder.joinpath(*name.split(".")) for name in _imported_module_names(tree)]
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.level > 0:
+                # A relative import inside a package of the project: resolved from the importing file's own folder.
+                base = path.parent
+                for _ in range(node.level - 1):
+                    base = base.parent
+                parts = node.module.split(".") if node.module else []
+                stems.append(base.joinpath(*parts) if parts else base)
+                stems += [base.joinpath(*parts, a.name) for a in node.names]
+        root = folder.resolve()
+        for stem in stems:
+            todo += [c for c in (stem.with_suffix(".py"), stem / "__init__.py")
+                     if c.is_file() and root in c.resolve().parents]  # never outside code/
+    return seen
+
+
+# Calls that seed a random generator (the name of what is called, its last part).
+_SEEDING_CALLS = frozenset({"seed", "manual_seed", "default_rng", "RandomState", "Random", "SeedSequence",
+                            "PCG64", "PCG64DXSM", "MT19937", "Philox", "SFC64", "PRNGKey", "key"})
+# Keyword arguments that carry a seed (``Random(x=)``, ``random.seed(a=)``, ``SeedSequence(entropy=)``, scikit-learn and
+# scipy's ``random_state=``).
+_SEED_KEYWORDS = frozenset({"seed", "x", "a", "entropy", "random_state"})
+
+
+def _constant_expr(node: ast.AST | None) -> bool:
+    """A literal number, or arithmetic on literals only (``42``, ``-1``, ``2**31 - 1``)."""
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, (int, float)) and not isinstance(node.value, bool)
+    if isinstance(node, ast.UnaryOp):
+        return _constant_expr(node.operand)
+    if isinstance(node, ast.BinOp):
+        return _constant_expr(node.left) and _constant_expr(node.right)
+    return False
+
+
+def _seeds_only_constants(paths: list[Path]) -> bool:
+    """Whether every call in these files that seeds a random generator is given a literal number (``Random(42)``,
+    ``np.random.seed(0)``), so the seed FI gives the run can reach none of them. A seed it cannot tell (a variable, a
+    function's argument, a value worked out) is not a constant: only a certainly fixed seed counts. No seeding call at
+    all is not "only constants" either."""
+    seeded = 0
+    for path in paths:
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, SyntaxError, ValueError):
+            return False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else func.id if isinstance(func, ast.Name) else ""
+            # A seed handed to anything by keyword (``random_state=seed`` for scikit-learn or scipy, ``entropy=``): not
+            # a constant, so not "only constants". ``x=`` and ``a=`` are seeds only for a seeding call
+            # (``random.seed(a=s)``, ``Random(x=s)``; ``plt.axvline(x=mu)`` is not one).
+            carriers = _SEED_KEYWORDS if name in _SEEDING_CALLS else _SEED_KEYWORDS - {"x", "a"}
+            if any(k.arg in carriers and not _constant_expr(k.value) for k in node.keywords):
+                return False
+            if name not in _SEEDING_CALLS:
+                continue
+            arg = node.args[0] if node.args else next((k.value for k in node.keywords if k.arg in _SEED_KEYWORDS), None)
+            if arg is None:
+                continue  # built without a seed: draws from the operating system (handled apart)
+            if not _constant_expr(arg):
+                return False
+            seeded += 1
+    return seeded > 0
 
 
 # Generators that draw from OS entropy when they are handed no seed.

@@ -302,6 +302,7 @@ export const VSCODE_ASKED_QUESTIONS: readonly string[] = [
     "web_research",
     "supply_papers",
     "pause_for_plan",
+    "phased",
     "result_use",
     "second_reviewer_model",
     "audience",
@@ -489,6 +490,8 @@ export async function runInterview(
         supply_papers: true,
         // The plan is always written; stopping for it is opt-in (unattended runs).
         pause_for_plan: false,
+        // Explore first, then confirm once (engine.phased): off unless chosen under the advanced fields.
+        phased: false,
         result_use: resultUse,
         second_reviewer_model: secondReviewer,
         rigor_profile: rigorProfileFor(resultUse),
@@ -630,6 +633,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
         || (a.paper_style !== undefined && a.paper_style !== "latex")
         || a.max_iterations !== 2
+        || a.phased === true
         || typeof a.page_limit === "number"
     );
     if (hasOverride) {
@@ -649,6 +653,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
             lines.push(`  • paper style: ${a.paper_style}`);
         }
         if (a.max_iterations !== 2) lines.push(`  • iteration budget: ${a.max_iterations}`);
+        if (a.phased === true) lines.push("  • explore first, then confirm once on data or seeds it never saw");
         if (typeof a.page_limit === "number") lines.push(`  • page limit: ${a.page_limit} pages`);
     }
     lines.push("");
@@ -1340,6 +1345,7 @@ async function editTier3Field(a: InterviewAnswers, edited: Set<string> = new Set
             { label: "Paper style", value: "paper_style" },
             { label: "Reasoning effort", value: "reasoning_effort" },
             { label: "Design-revise iteration budget", value: "max_iterations" },
+            { label: "Confirm the result on data it never saw", value: "phased" },
             { label: "Page limit", value: "page_limit" },
             { label: "Multi-model ensemble (and its models)", value: "ensemble" },
         ],
@@ -1387,6 +1393,27 @@ async function editTier3Field(a: InterviewAnswers, edited: Set<string> = new Set
             { title: "Paper style", ignoreFocusOut: true },
         );
         if (v) a.paper_style = v.value;
+        return;
+    }
+    if (which.value === "phased") {
+        // engine.phased (core/phased.py). Same wording as core/interview.py:PHASED_CHOICES. Fixed for the quest:
+        // `@fi /update` does not offer it.
+        const v = await vscode.window.showQuickPick(
+            [
+                {
+                    label: "No (default)",
+                    description: "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs.",
+                    value: false,
+                },
+                {
+                    label: "Yes: explore first, then confirm once",
+                    description: "The model may try designs and look at results first. Then the design is frozen and run once more on data or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. For a study that runs an experiment; a literature survey stays exploratory.",
+                    value: true,
+                },
+            ],
+            { title: "Confirm the result on data it never saw", ignoreFocusOut: true },
+        );
+        if (v) a.phased = v.value;
         return;
     }
     if (which.value === "max_iterations") {
