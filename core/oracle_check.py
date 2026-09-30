@@ -171,6 +171,20 @@ def script_measured(judged_list: list[dict[str, Any]]) -> list[str]:
     return [str(j["name"]) for j in judged_list if j.get("measured_by") != "engine" and j.get("value") is not None]
 
 
+def engine_passed(judged_list: list[dict[str, Any]]) -> list[str]:
+    """The names of the judged oracles the engine measured itself (by running the simulation on the oracle's case), got a
+    number for, and passed. An oracle check counts as independent evidence only when this is not empty."""
+    return [
+        str(j["name"]) for j in judged_list
+        if j.get("measured_by") == "engine" and _num(j.get("value")) is not None and j.get("passed_by_engine") is True
+    ]
+
+
+def not_passed(judged_list: list[dict[str, Any]]) -> list[str]:
+    """The names of the judged oracles that got no verdict or failed (``passed_by_engine`` not ``True``)."""
+    return [str(j["name"]) for j in judged_list if j.get("passed_by_engine") is not True]
+
+
 def last_judged(record: Any) -> list[dict[str, Any]]:
     """The engine's verdicts from the last attempt of a ``needs/ORACLE_CHECK.json`` record that let the main run go on
     (``ok`` or ``warned``); empty for anything else."""

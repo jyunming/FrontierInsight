@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from core import evidence, frozen_protocol, oracle_check as oc, plan, trial_runner
+from core import evidence, oracle_check as oc, plan, trial_runner
 from core.execution import SharedInterpreterExecutor
 
 _COMMON = '''
@@ -215,3 +215,65 @@ def test_a_value_the_script_reported_is_not_independent_on_a_one_script_quest_ei
     unmarked = {"status": "ok", "judged_by": "engine",
                 "attempts": [{"judged": [{"name": "closed form", "value": 0.0, "passed_by_engine": True}]}]}
     assert evidence.assess(_root(tmp_path / "u", unmarked), _state(), settings=ON)["levels"]["independently_validated"] is False
+
+
+@pytest.mark.parametrize("attempts", [
+    None,  # no attempts at all
+    [],
+    [{"judged": []}],  # the last attempt judged nothing
+    [{"judged": [{"name": "closed form", "value": None, "passed_by_engine": None, "measured_by": "engine"}]}],  # no value
+    [{"judged": [{"name": "closed form", "value": 0.0, "passed_by_engine": False, "measured_by": "engine"}]}],  # it failed
+    [{"judged": [{"name": "closed form", "value": None, "passed_by_engine": None, "measured_by": "script"}]}],  # script, no value
+    [{"judged": [{"value": 0.0, "passed_by_engine": True, "measured_by": "engine"}]}],  # an entry with no name is not read
+    # an earlier attempt judged a value; the last one, the one the run went on from, judged nothing
+    [{"judged": [{"name": "closed form", "value": 0.0, "passed_by_engine": True, "measured_by": "engine"}]}, {"judged": []}],
+])
+def test_an_ok_oracle_check_that_judged_no_value_is_not_independent_evidence(tmp_path: Path, attempts: Any) -> None:
+    """An oracle record that says ``ok`` but holds no value the engine measured and passed checked nothing against the
+    simulation: it must not reach independently validated, and the gap says so in plain words."""
+    from tests.test_evidence import ON, _state
+    record: dict[str, Any] = {"status": "ok", "judged_by": "engine", "contract": "trial"}
+    if attempts is not None:
+        record["attempts"] = attempts
+    got = evidence.assess(_root(tmp_path, record), _state(), settings=ON)
+    assert got["levels"]["independently_validated"] is False
+    gaps = got["all_gaps"]["independently_validated"]
+    if any(j.get("name") for j in (attempts or [{}])[-1].get("judged", [])):
+        assert any("'closed form' has no measured value, or its value is outside" in g for g in gaps), gaps
+    else:
+        assert any("judged no value" in g for g in gaps), gaps
+
+
+def test_every_declared_oracle_must_be_measured_not_just_one(tmp_path: Path) -> None:
+    """A record that covers only some of the protocol's oracles (written before one was added to the plan) does not validate
+    the ones it never measured."""
+    from tests.test_evidence import ON, _quest, _state
+    protocol = {"runs_per_setting": 300, "oracles": [{"name": "closed form"}, {"name": "limit"}]}
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok", protocol=protocol)
+    design = {"hypothesis": "h", "protocol": protocol}
+    from tests.test_evidence import _write_passes
+    _write_passes(root, design)
+    got = evidence.assess(root, _state(design=design), settings=ON)
+    assert got["levels"]["independently_validated"] is False
+    assert any("did not measure 'limit'" in g for g in got["all_gaps"]["independently_validated"]), got["all_gaps"]
+    # Both measured and passed (the name matched regardless of case and surrounding spaces): validated.
+    both = {"status": "ok", "judged_by": "engine", "contract": "trial", "attempts": [{"judged": [
+        {"name": "closed form", "value": 0.0, "passed_by_engine": True, "measured_by": "engine"},
+        {"name": " LIMIT ", "value": 1.0, "passed_by_engine": True, "measured_by": "engine"},
+    ]}]}
+    (root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(both), encoding="utf-8")
+    assert evidence.assess(root, _state(design=design), settings=ON)["levels"]["independently_validated"] is True
+
+
+def test_one_engine_measured_pass_among_several_oracles_is_still_needed_and_enough(tmp_path: Path) -> None:
+    """Every value the engine measured and passed counts; an oracle with no value beside one that passed does not hide it,
+    and a failed one beside a pass is a gap."""
+    from tests.test_evidence import ON, _state
+    passed = {"name": "closed form", "value": 0.0, "passed_by_engine": True, "measured_by": "engine"}
+    failed = {"name": "limit", "value": 2.0, "passed_by_engine": False, "measured_by": "engine"}
+    ok = {"status": "ok", "judged_by": "engine", "contract": "trial", "attempts": [{"judged": [passed]}]}
+    assert evidence.assess(_root(tmp_path / "a", ok), _state(), settings=ON)["levels"]["independently_validated"] is True
+    mixed = {**ok, "attempts": [{"judged": [passed, failed]}]}
+    got = evidence.assess(_root(tmp_path / "b", mixed), _state(), settings=ON)
+    assert got["levels"]["independently_validated"] is False
+    assert any("limit" in g for g in got["all_gaps"]["independently_validated"])

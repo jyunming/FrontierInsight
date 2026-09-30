@@ -12,7 +12,8 @@ checks behind it prove:
 * ``protocol_runtime_matched`` — and the protocol was frozen before the run and is intact, the script held to it, the run's own
   manifest says it did what the protocol fixed, and no warning from its own numerics was accepted;
 * ``independently_validated`` — and the engine ran the simulation on each oracle's case and judged what it measured against
-  the protocol's expected values and tolerances (a value the script reported itself never counts, on one script or two);
+  the protocol's expected values and tolerances, and every one passed (a value the script reported itself never
+  counts, on one script or two);
 * ``statistically_adequate`` — and every headline metric has a declared estimator matched to its data, the contrasts carry
   engine-computed p-values, and every precision target was reached;
 * ``publication_ready`` — and the review accepted the paper with no must-fix finding, the protocol was not amended after the
@@ -71,7 +72,7 @@ INFO: dict[str, dict[str, Any]] = {
         "assurance_claim": (
             "The engine ran the simulation on each oracle's case and judged what it returned against the protocol's expected "
             "values and tolerances. A value the script reported itself (an oracle without a case, or a one-script quest's "
-            "FI_ORACLE run) is judged too, but never counts toward this level."
+            "FI_ORACLE run) is judged too, but never counts toward this level, and a check that judged no value does not reach it."
         ),
         "known_blind_spots": [
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
@@ -378,6 +379,35 @@ def assess(
                 "simulation script then defines `run_cell`, or `run_trial` for a study with randomness), and the oracle "
                 "needs a `case` and a `measure`"
             )
+    elif protocol is not None and (unpassed := _oracle_check.not_passed(_oracle_check.last_judged(oracle_record))):
+        # The gate only writes "ok" when every oracle it judged passed; a record that says otherwise is not taken on its word.
+        named = ", ".join(repr(n) for n in unpassed)
+        valid_gaps.append(
+            f"the oracle {named} has no measured value, or its value is outside the tolerance, although the oracle check "
+            "recorded it as passed (see needs/ORACLE_CHECK.json)" if len(unpassed) == 1 else
+            f"the oracles {named} have no measured value, or their values are outside the tolerance, although the oracle "
+            "check recorded them as passed (see needs/ORACLE_CHECK.json)"
+        )
+    elif protocol is not None and not _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record)):
+        # "ok" with nothing judged checked nothing: at least one value FI measured by running the simulation must have passed.
+        valid_gaps.append(
+            "the oracle check judged no value: FI did not measure and pass any oracle by running the simulation, so nothing "
+            "independent of the script was checked (see needs/ORACLE_CHECK.json)"
+        )
+    elif protocol is not None and (unmeasured := [
+        str(o["name"]).strip() for o in _oracle_check.declared(protocol)
+        if str(o["name"]).strip().lower() not in {
+            n.strip().lower() for n in _oracle_check.engine_passed(_oracle_check.last_judged(oracle_record))
+        }
+    ]):
+        # Each oracle the protocol declares must have been measured and passed, not just one of them (a record written
+        # before an oracle was added to the plan does not cover it).
+        one = len(unmeasured) == 1
+        valid_gaps.append(
+            f"the oracle check did not measure {', '.join(repr(n) for n in unmeasured)}: FI never ran the simulation on "
+            f"{'its case' if one else 'their cases'} and compared the {'value' if one else 'values'} "
+            "(run the experiment again so FI checks them)"
+        )
     validated = matched and not valid_gaps
 
     # statistically adequate
