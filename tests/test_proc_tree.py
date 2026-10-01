@@ -62,7 +62,10 @@ def _wait_for(path: Path, timeout: float = 90.0) -> None:
 
 def _beats(folder: Path) -> int:
     beat = folder / "beat"
-    return beat.stat().st_size if beat.exists() else 0
+    if not beat.exists():
+        return 0
+    with open(beat, "rb") as fh:  # the open file's own length, not a directory entry that may lag
+        return fh.seek(0, os.SEEK_END)
 
 
 def _wait_until_beating(folder: Path, timeout: float = 90.0) -> None:

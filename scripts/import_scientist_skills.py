@@ -295,7 +295,7 @@ def _git(argv: list[str], *, timeout: float) -> GitResult:
     except FileNotFoundError:
         return GitResult(127, f"{argv[0]} was not found on PATH: install git, or put it on PATH")
     except OSError as exc:
-        return GitResult(126, f"{argv[0]} could not be started: {exc}")
+        return GitResult(126, f"{argv[0]} failed: {exc}")
     return GitResult(-1 if timed_out else tree.proc.returncode, text, timed_out)
 
 
