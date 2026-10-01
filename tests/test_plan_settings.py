@@ -34,7 +34,7 @@ def test_differences_name_each_setting_in_plain_words(tmp_path: Path) -> None:
     before = plan_settings.settings_of(_cfg(tmp_path))
     after = plan_settings.settings_of(_cfg(tmp_path, oracle_check="warn", review_panel=["methodologist"]))
     lines = plan_settings.differences(before, after)
-    assert any("what a failed reference check does (`engine.oracle_check`)" in ln and "now warn" in ln for ln in lines)
+    assert any("what a failed known-answer check does (`engine.oracle_check`)" in ln and "now warn" in ln for ln in lines)
     assert any("the reviewers (`engine.review_panel`)" in ln and "now methodologist" in ln for ln in lines)
     assert plan_settings.differences(before, before) == []
 

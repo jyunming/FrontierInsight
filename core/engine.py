@@ -72,6 +72,7 @@ from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
+from . import oracle_card as _oracle_card
 from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
@@ -1115,6 +1116,16 @@ class Engine:
                                     "frozen protocol)",
                                     intr_value.get("amendment_file", "needs/PROTOCOL_AMENDMENT_PENDING.json"),
                                     self.quest_root, self.quest_id,
+                                )
+                                break
+                            if intr_value.get("oracle_stage"):
+                                # Not "edit plan.md": the script may have crashed, and the check may be fine. The
+                                # card (NEXT_STEP.md, and printed when the run ends) says which, with the numbers.
+                                self._log.info(
+                                    "[FI] paused: %s (%s). See NEXT_STEP.md, then run `fi --resume %s`",
+                                    (intr_value.get("pause") or {}).get("headline")
+                                    or "the known-answer checks did not pass",
+                                    "; ".join(intr_value.get("problems") or [])[:240], self.quest_id,
                                 )
                                 break
                             self._log.info(
@@ -5964,14 +5975,16 @@ class Engine:
         steps: list[str],
         recommended: str | None = None,
         alternatives: list[str] | None = None,
+        card: dict[str, Any] | None = None,
     ) -> "_todo.Item":
         """Write the to-do card (``NEXT_STEP.md`` and ``.fi/todo.json``, :mod:`core.todo`) whenever the quest stops for
         the person: why it stopped, what there is to decide, the recommendation, the alternatives, what to do, and
         everything else waiting, then how to go on. ``interaction`` (answer / supply) is kept in ``pause.json``.
-        Best-effort; a write failure never stops a quest."""
+        ``card``: the structured "why it stopped" card (core/oracle_card.py), when the stop has one. Best-effort; a
+        write failure never stops a quest."""
         item = _todo.pause_item(kind, headline, steps, recommended=recommended, alternatives=alternatives,
                                 profile=getattr(self.config, "rigor_profile", "default"),
-                                frozen=_frozen.load(self.quest_root) is not None)
+                                frozen=_frozen.load(self.quest_root) is not None, card=card)
         _todo.write(self.quest_root, self.fi_dir, self.quest_id, item)
         return item
 
@@ -5986,6 +5999,7 @@ class Engine:
         upload_targets: list[str] | None = None,
         recommended: str | None = None,
         alternatives: list[str] | None = None,
+        card: dict[str, Any] | None = None,
     ) -> Any:
         """The single way the engine stops for a human. Writes the unified
         ``NEXT_STEP.md``, logs a consistent line, then fires LangGraph's
@@ -6006,9 +6020,9 @@ class Engine:
         self._audit("pause_requested", pause=kind, interaction=interaction, headline=headline)
         item = self._write_next_step(
             kind=kind, interaction=interaction, headline=headline, steps=steps,
-            recommended=recommended, alternatives=alternatives,
+            recommended=recommended, alternatives=alternatives, card=card,
         )
-        descriptor = {
+        descriptor: dict[str, Any] = {
             "kind": kind,
             "interaction": interaction,
             "headline": headline,
@@ -6024,6 +6038,13 @@ class Engine:
             # data/). Empty for an ANSWER pause (the web reveals the form).
             "upload_targets": list(upload_targets or []),
         }
+        if item.card:
+            # The structured "why it stopped" card: the web page and VS Code show the same card and offer its actions.
+            descriptor["card"] = item.card
+        for key in ("problems", "proposed_changes"):
+            # What a check found and what a repair proposed, for the surfaces that cannot read the interrupt payload.
+            if isinstance(payload.get(key), list) and payload[key]:
+                descriptor[key] = list(payload[key])
         # Authoritative on-disk descriptor so the web can render the right
         # affordance for a subprocess quest (the in-process payload below isn't
         # visible across processes). Cleared with NEXT_STEP.md on completion.
@@ -9407,6 +9428,9 @@ class Engine:
                 passing=[str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True],
             )
             attempts[-1]["repair"] = outcome
+            if getattr(self, "_oracle_patch_summary", ""):
+                # What the repair said it changed: the card's "what FI already tried" reads it from the record.
+                attempts[-1]["patch_summary"] = self._oracle_patch_summary
             package_after = self._package_snapshot()
             if package_after != package_before:
                 # A fix in the model's package: the files it changed, by their new hash.
@@ -9462,10 +9486,13 @@ class Engine:
             )
             return new_code
         all_disputed = bool(disputed_failing) and not _oracle.undisputed(found, disputed_failing)
+        for duplicate in _oracle.duplicate_names(oracles, {"checks": attempts[-1].get("checks") or []}):
+            self._log.warning("[oracle] %s", duplicate)
         self._pause_for_oracle(
             found, seed_path, list(self._oracle_proposals.values()), attempts[-1].get("judged") or [], oracles,
             kept=("as_it_was" if not any(a.get("repair") == "applied" for a in attempts) else "for_disputed")
             if all_disputed else None,
+            attempts=attempts, disputed=disputed_failing, stderr_tail=stderr_tail,
         )
         return new_code  # not reached: the pause exits the run
 
@@ -10585,11 +10612,14 @@ class Engine:
         check, and code written by a repair that believes the check is wrong is code bent towards (or around) it. A
         proposal about a check that passes is recorded, and its fix for the rest is still used."""
         code = path.read_text(encoding="utf-8")
+        self._oracle_patch_summary = ""
         already = {str(n).strip().lower() for n in [*(disputed or []), *(passing or [])]}
         prompt = self._prompts["execute_reflect"].substitute(
             previous_code=code,
             returncode="(the oracle run did not pass)",
-            stdout_tail=_oracle.directive(oracles, found, disputed=disputed)
+            # The contract of the layout this quest has: a two-script quest's simulation is a function FI calls, with
+            # no FI_ORACLE run and no ORACLE_JSON line (saying both contracts sent repairs to write a branch nothing reads).
+            stdout_tail=_oracle.directive(oracles, found, disputed=disputed, trial=bool(getattr(self, "_trial_mode", False)))
             + (_TRIAL_ORACLE_NOTE if getattr(self, "_trial_mode", False) else "")
             # A check against a known answer tests the equations, which may be in the model's package.
             + (self._package_repair_note(state) if path.name == _split_run.SIMULATE_NAME else ""),
@@ -10609,6 +10639,7 @@ class Engine:
         parsed: dict[str, Any] = {}
         if _strip_outer_fence(text).lstrip().startswith("{"):
             parsed = _parse_json_lenient(text, node="implement_oracle") or {}
+        self._oracle_patch_summary = " ".join(str(parsed.get("patch_summary") or "").split())[:300]
         newly_disputed = False
         for proposal in _oracle.proposals(parsed.get("oracle_change"), oracles):
             self._oracle_proposals[proposal["name"]] = proposal
@@ -10659,87 +10690,43 @@ class Engine:
     def _pause_for_oracle(
         self, found: list[str], seed_path: Path, proposed: list[dict[str, Any]] | None = None,
         judged: list[dict[str, Any]] | None = None, oracles: list[dict[str, Any]] | None = None, kept: str | None = None,
+        *, attempts: list[dict[str, Any]] | None = None, disputed: list[str] | None = None, stderr_tail: str = "",
     ) -> None:
-        """Stop before the main sweep: the oracles did not pass after the repairs. When a repair judged a check itself
-        wrong, its proposal is shown beside what the script measured, and whether accepting it would simply let this run
-        pass -- the person decides; nothing here applies it. ``kept``: every check still failing is one a repair called
-        wrong, so the script was not rewritten towards it (``as_it_was``: no repair changed it at all; ``for_disputed``:
-        a repair fixed something else)."""
+        """Stop before the main sweep: the known-answer checks (oracles) did not pass after the repairs. The stop shows
+        the "why it stopped" card (core/oracle_card.py): each check's expected value and where it comes from, the
+        measured value and who measured it, the tolerance and the gap, the case, where in the script the number is
+        computed, the most likely causes from what FI already has, what FI tried, and two or three ways on. When a repair
+        judged a check itself wrong, its proposal is shown beside the measured value, and whether accepting it would
+        simply let this run pass -- the person decides; nothing here applies it. ``kept``: every check still failing is
+        one a repair called wrong, so the script was not rewritten towards it (``as_it_was``: no repair changed it at
+        all; ``for_disputed``: a repair fixed something else)."""
         frozen = _frozen.load(self.quest_root) is not None
         research = getattr(self.config, "rigor_profile", "default") == "research"
-        # After the freeze an oracle changes only through an amendment, and a quest stopped here never reaches the review
-        # where one is asked for: going on with the failure recorded is the way there. A research quest cannot relax
-        # the check, so for it the oracle cannot change inside this quest at all.
-        amend = (
-            "The protocol is frozen and this quest is set up for research, so an oracle cannot be changed or relaxed "
-            "inside it: if the oracle itself is wrong, start a new quest whose plan states the right one."
-        ) if research else (
-            "The protocol is frozen, so editing plan.md does not change it. To change an oracle: set "
-            "`engine.oracle_check: warn` in the quest's YAML and resume, so the run goes on with this failure recorded, "
-            "then ask for the change when the quest is refined at the review and approve the amendment it asks for."
+        oracles = list(oracles or [])
+        card = _oracle_card.build(
+            quest_id=self.quest_id, quest_root=self.quest_root, script=seed_path, found=found, oracles=oracles,
+            judged=judged, attempts=attempts, proposals=proposed, disputed=disputed,
+            trial=bool(getattr(self, "_trial_mode", False)), frozen=frozen, research=research,
+            # A quest the interview wrote holds its checks' settings to what was approved (core/plan_settings.py):
+            # changing `engine.oracle_check` there needs `--update`, or the resume stops again to ask.
+            interview_made=(self.fi_dir / _plan_settings.NAME).is_file(),
+            repairs=int(self.config.engine.oracle_repair_attempts), kept=kept, stderr_tail=stderr_tail,
         )
-        steps = [
-            "The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + ".",
-            *([
-                ("The script was kept as it was" if kept == "as_it_was" else "After the repair disputed the failing "
-                 "check(s), the script was not changed for them")
-                + ": the repair says those checks are what is wrong, not the script. Its proposed numbers and reasons are "
-                "below; if you think the script is what is wrong instead, fix it."
-            ] if kept else []),
-            (
-                f"Fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
-                "declared oracle check and prints an `ORACLE_JSON:` line, then resume: the oracle checks run again before "
-                f"anything else. {amend}"
-            ) if frozen else (
-                f"Either fix the script (`{seed_path}`) so that, run with the environment variable FI_ORACLE=1, it runs each "
-                "declared oracle check and prints an `ORACLE_JSON:` line, or, if the plan is what should change, edit the "
-                f"oracles in the protocol of `{_plan.plan_path(self.quest_root)}` (or ask for a change: `--revise-plan`). "
-                "Then resume: the oracle checks run again before anything else."
-            ),
-        ]
-        declared = {str(o.get("name")): o for o in oracles or []}
-        measured = {str(j.get("name")): j.get("value") for j in judged or []}
-        for p in proposed or []:
-            before = declared.get(p["name"], {})
-            value = measured.get(p["name"])
-            verdict = ""
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                expected, limit, _mode = _oracle.limit_of(p)
-                if expected is not None and limit is not None:
-                    passes = abs(float(value) - expected) <= limit
-                    verdict = (
-                        f" The script measured {value:g}: accepting this makes that measurement pass, so check the reason, "
-                        "not the result." if passes else f" The script measured {value:g}, which would still fail it."
-                    )
-            how = (
-                "This research quest cannot take that change (its protocol is frozen); to use it, start a new quest "
-                f"whose plan states it: {_oracle.proposal_request(p)}"
-                if frozen and research else
-                "Accepting it needs an amendment (above): ask, at the review, for this change: "
-                f"{_oracle.proposal_request(p)}"
-                if frozen else
-                f"To accept it: `python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan "
-                f"\"{_oracle.proposal_request(p)}\"` (or the same request in the quest page's Plan box, or `@fi /plan` in "
-                "VSCode), then resume. To decline, resume after fixing the script or editing plan.md yourself."
-            )
-            steps.append(
-                f"The repair judged the check `{p['name']}` itself wrong (declared: expected {before.get('expected')}, "
-                f"tolerance {before.get('tolerance')} {before.get('tolerance_mode') or 'absolute'}) and proposes expected "
-                f"{p['expected']:g}, tolerance {p['tolerance']:g} {p['tolerance_mode']}"
-                + (f", check: {p['check']}" if p.get("check") else "")
-                + f". Its reason: {p['reason']}.{verdict} {how}"
-            )
+        statuses = {c["status"] for c in card["checks"]}
+        headline = (
+            "the plan has no known-answer check to judge the script by" if not oracles else
+            "a known-answer check has no number to compare with" if statuses == {"cannot_judge"} else
+            "the known-answer checks could not be measured" if statuses and "failed" not in statuses else
+            "the script has not passed its known-answer checks"
+        )
         self._pause_for_human(
             kind="oracle",
             interaction="supply",
-            headline="the script has not passed its oracle checks",
-            steps=steps,
-            # After the freeze the plan no longer changes an oracle: only going on with the failure recorded, and an
-            # amendment later, does.
-            alternatives=[
-                "Set `engine.oracle_check: warn` and go on: the failure is recorded, and the oracle can be changed "
-                "later through an amendment approved at the review.",
-            ] if frozen and not research else [_todo.research_instead("oracle", frozen=True)] if frozen else None,
+            headline=headline,
+            # What each check found, as the record says it; the card above is what a person reads.
+            steps=["The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + "."],
+            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"][1:]],
+            card=card,
             payload={
                 "oracle_stage": True, "quest_id": self.quest_id, "problems": found,
                 "plan_file": str(_plan.plan_path(self.quest_root)),

@@ -30,7 +30,7 @@ def test_the_card_puts_the_pause_first_then_everything_else_waiting(tmp_path: Pa
     card = (root / "NEXT_STEP.md").read_text(encoding="utf-8")
     assert card.startswith("# Action needed — the run's numerics warned")
     for part in ("## What to decide", "## Recommended", "## Or", "## What to do", "## Also waiting for you",
-                 "the oracle checks", "WANTED_PAPERS", "## Then go on", "--resume q1"):
+                 "the known-answer checks", "WANTED_PAPERS", "## Then go on", "--resume q1"):
         assert part in card, part
     assert [i.kind for i in items] == ["numeric", "warned", "papers"]
     saved = json.loads((fi / todo.TODO_NAME).read_text(encoding="utf-8"))

@@ -76,6 +76,41 @@ def _fmt(value: Any) -> str:
     return f"{value:g}" if isinstance(value, float) else str(value)
 
 
+def digits_for(values: list[Any], scale: Any = None) -> int:
+    """How many significant digits show ``values`` side by side so that a difference of ``scale`` (the gap, or the
+    tolerance) is visible: six (what ``%g`` shows) unless more are needed, at most fifteen. A measured 0.36788 against an
+    expected 0.367879 with a tolerance of 1e-12 looks like agreement at six digits; it is not."""
+    target = _num(scale)
+    digits = 6
+    if target is None or target <= 0:
+        return digits
+    for value in values:
+        number = _num(value)
+        if number is None or number == 0:
+            continue
+        digits = max(digits, math.ceil(math.log10(abs(number) / target)) + 1 if abs(number) > target else 1)
+    return min(digits, 15)
+
+
+def fmt_digits(value: Any, digits: int = 6) -> str:
+    """``value`` to ``digits`` significant digits (a non-number as written)."""
+    number = _num(value)
+    if number is None:
+        return str(value)
+    return f"{number:.{digits}g}"
+
+
+def fmt_pair(value: Any, expected: Any, limit: Any) -> tuple[str, str]:
+    """A measured value and its expected value, each to enough significant digits that their difference is visible at
+    the scale of the tolerance (``limit``) or of the gap, whichever is smaller."""
+    v, e, lim = _num(value), _num(expected), _num(limit)
+    gap = abs(v - e) if v is not None and e is not None else None
+    scale = min(x for x in (gap, lim) if x is not None and x > 0) if any(
+        x is not None and x > 0 for x in (gap, lim)) else None
+    digits = digits_for([v, e], scale)
+    return fmt_digits(value, digits), fmt_digits(expected, digits)
+
+
 def _num(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
@@ -775,6 +810,29 @@ def judged(oracles: list[dict[str, Any]], reported: dict[str, Any] | None) -> li
     return out
 
 
+def duplicate_names(oracles: list[dict[str, Any]], reported: dict[str, Any] | None = None) -> list[str]:
+    """One sentence per name that two checks share (names are compared without case): two declared checks, or two
+    values the script reported under one name. A value is matched to its check by name, so one of the two is then judged
+    against the other's expected value (a real quest compared an RK4 order of 4.01 with the Euler check's expected 1).
+    Said, never a verdict: the record and the card name it."""
+    out: list[str] = []
+    seen: dict[str, int] = {}
+    for oracle in oracles:
+        key = str(oracle.get("name") or "").strip().lower()
+        seen[key] = seen.get(key, 0) + 1
+    out += [f"the plan declares {n} known-answer checks named {name!r}: FI matches a value to its check by name, so it "
+            "cannot tell them apart" for name, n in seen.items() if name and n > 1]
+    checks = (reported or {}).get("checks") if isinstance(reported, dict) else None
+    counted: dict[str, int] = {}
+    for check in checks if isinstance(checks, list) else []:
+        if isinstance(check, dict):
+            key = str(check.get("name") or "").strip().lower()
+            counted[key] = counted.get(key, 0) + 1
+    out += [f"the script reported {n} values named {name!r}: FI judged only the last one, so one of them may have been "
+            "compared with another check's expected value" for name, n in counted.items() if name and n > 1]
+    return out
+
+
 def script_measured(judged_list: list[dict[str, Any]]) -> list[str]:
     """The names of the judged oracles whose value the script reported (not one the engine measured by running the simulation)."""
     return [str(j["name"]) for j in judged_list if j.get("measured_by") != "engine" and j.get("value") is not None]
@@ -869,9 +927,14 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
         else:
             value = _num(check.get("value"))
             if abs(value - expected) > limit:  # type: ignore[operator]
+                # Who measured it (FI, by running the simulation on the check's case, or the script itself): a person
+                # told "the script measured" goes to change the script's oracle(), which FI never read.
+                by_fi = bool(reported.get("engine_measured")) and check.get("measured_by") == "engine"
+                shown, shown_expected = fmt_pair(value, expected, limit)
                 out.append(
-                    f"the oracle {name!r} failed: the script measured {_fmt(value)}, the protocol expects {_fmt(expected)} "
-                    f"within {_fmt(limit)} ({mode} tolerance {_fmt(_num(oracle.get('tolerance')))})"
+                    f"the oracle {name!r} failed: {'FI measured' if by_fi else 'the script measured'} {shown}, the "
+                    f"protocol expects {shown_expected} within {_fmt(limit)} ({mode} tolerance "
+                    f"{_fmt(_num(oracle.get('tolerance')))})"
                 )
             elif check.get("passed") is False:
                 out.append(f"the oracle {name!r} is within its tolerance, but the script reports the check as failed itself: find out why")
@@ -914,9 +977,34 @@ def disputed_failing(judged_list: list[dict[str, Any]], disputed: Any) -> list[s
     return [str(j["name"]) for j in judged_list if str(j.get("name")) in names and j.get("passed_by_engine") is False]
 
 
-def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[str] | None = None) -> str:
+#: How the script is checked when FI runs it with FI_ORACLE=1 (one script, no simulation function FI can call).
+_SCRIPT_CONTRACT = (
+    "The contract: when FI_ORACLE is 1 the script must NOT run its sweep. It MEASURES each declared oracle on a small, fast "
+    "case (seconds) and prints ONE line `ORACLE_JSON: {\"checks\": [{\"name\": <the declared name>, \"value\": <the "
+    "number it measured>, \"diagnostics\": {...}}, ...]}`, then exits 0. It does NOT decide pass or fail and it does not "
+    "state the expected value or the tolerance: the engine judges the value against the `expected` and `tolerance` the "
+    "protocol fixes above (for an invariant the value is the worst violation observed, and the expected value is 0).\n\n"
+)
+#: How the simulation is checked when it is a function FI calls itself (the two-script layout). There is no FI_ORACLE
+#: run and no ORACLE_JSON line there; saying otherwise sent repairs (and people) to write a branch nothing reads.
+_TRIAL_CONTRACT = (
+    "The contract: FI checks the simulation itself. For an oracle that names a `case` and a `measure`, FI calls the "
+    "simulation function (run_trial or run_cell in simulate.py) on that case and computes the `measure` (one returned "
+    "name, or a formula of them) from the dict it returns, so that function must return every name the measure uses, "
+    "computed by the real simulation. An oracle without a `case` is read from `def oracle() -> dict` in simulate.py, "
+    "which computes each such check with the same simulation code and returns its value keyed by the check's name. "
+    "There is no FI_ORACLE variable and no ORACLE_JSON line. Nothing the script writes decides pass or fail: the "
+    "engine judges each value against the `expected` and `tolerance` the protocol fixes above (for an invariant the "
+    "value is the worst violation observed, and the expected value is 0).\n\n"
+)
+
+
+def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[str] | None = None, *,
+              trial: bool = False) -> str:
     """What stands where a traceback would in the repair request. ``disputed``: the checks an earlier repair called wrong
-    (their proposals wait for a person); they are left out of what to fix, and the script is not to be changed for them."""
+    (their proposals wait for a person); they are left out of what to fix, and the script is not to be changed for them.
+    ``trial``: the simulation is a function FI calls itself (the two-script layout), so the request states that
+    contract and never the FI_ORACLE / ORACLE_JSON one, which does not exist there."""
     declared_block = json.dumps(oracles, indent=2)
     set_aside = (
         "Checks an earlier repair already said are wrong themselves: " + ", ".join(repr(str(n)) for n in disputed) + ". "
@@ -925,17 +1013,20 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "values): they go on failing until a person decides. If one of them is listed below as not checked or not a "
         "number, restore its honest measurement, nothing more. Fix only what is listed below.\n\n"
     ) if disputed else ""
-    return (
+    opening = (
+        "This simulation has NOT run its experiment yet: FI first checked its oracles by calling the simulation function "
+        "on each oracle's case (or `oracle()` for an oracle without a case), and that check did not pass. The account of "
+        "a crash above does not apply.\n\n"
+    ) if trial else (
         "This script has NOT run its experiment yet: it was run with the environment variable FI_ORACLE=1 to check its "
         "oracles, and that check did not pass. The account of a crash above does not apply.\n\n"
+    )
+    return (
+        opening +
         "The oracles the design declares (independent of the script's own numbers):\n" + declared_block + "\n\n"
         + set_aside +
         "What went wrong:\n" + "\n".join(f"- {p}" for p in found) + "\n\n"
-        "The contract: when FI_ORACLE is 1 the script must NOT run its sweep. It MEASURES each declared oracle on a small, fast "
-        "case (seconds) and prints ONE line `ORACLE_JSON: {\"checks\": [{\"name\": <the declared name>, \"value\": <the "
-        "number it measured>, \"diagnostics\": {...}}, ...]}`, then exits 0. It does NOT decide pass or fail and it does not "
-        "state the expected value or the tolerance: the engine judges the value against the `expected` and `tolerance` the "
-        "protocol fixes above (for an invariant the value is the worst violation observed, and the expected value is 0).\n\n"
+        + (_TRIAL_CONTRACT if trial else _SCRIPT_CONTRACT) +
         "If a value is outside its tolerance, find out which is wrong before changing anything: the simulator or estimator (fix "
         "it) or the way the value is measured (fix that), and say which in `patch_summary`. Never make a check pass by "
         "measuring something else, skipping it or hard-coding its value: a check the script can always pass is not an oracle. If "
@@ -952,9 +1043,13 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
         "`oracle_change` for a check not already listed as disputed is not used (it cannot be told apart from code bent to "
         "that check); when other problems need a fix too, you are asked for it again without the disputed check. A person "
         "decides whether to accept the change; nothing changes without them.\n\n"
-        "Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT and "
-        "FI_REPLICATE_SEED, and the same final RESULT_JSON line. When you fix the script, return the whole script in "
-        "`code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty."
+        + ("Keep everything else unchanged: the same functions and the values they return, and every comment that marks "
+           "where an equation of the plan's model is computed (`# E1`). When you fix the simulation, return the whole of "
+           "simulate.py in `code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty."
+           if trial else
+           "Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT and "
+           "FI_REPLICATE_SEED, and the same final RESULT_JSON line. When you fix the script, return the whole script in "
+           "`code`; always give one sentence in `patch_summary`, and leave `give_up_reason` empty.")
     )
 
 

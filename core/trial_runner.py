@@ -718,9 +718,28 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
         if row.get("status") == "ok":
             return dict(row.get("values") or {}), ""
         if row.get("status") == "failed":
-            return None, str(row.get("reason") or f"{label} failed")
+            where = last_frame(str(row.get("traceback") or ""), quest_root)
+            return None, str(row.get("reason") or f"{label} failed") + (f" (at {where})" if where else "")
     return None, (f"{label} ran out of time" if getattr(result, "timed_out", False)
                   else f"{label} did not report (exit code {result.returncode})")
+
+
+_FRAME_RE = re.compile(r'File "([^"]+)", line (\d+)')
+
+
+def last_frame(traceback_text: str, quest_root: Path | str | None = None) -> str:
+    """``<file> line <n>`` of the last frame of a Python traceback that is in the quest's own code (``code/...``), the
+    place a person opens to fix it; ``""`` when the traceback names none (the error was raised inside a library and
+    no frame of the quest's code is in what was kept)."""
+    root = str(Path(quest_root)).replace("\\", "/").rstrip("/") + "/" if quest_root else ""
+    found = ""
+    for match in _FRAME_RE.finditer(traceback_text or ""):
+        path = match.group(1).replace("\\", "/")
+        if "/code/" not in f"/{path}" and not path.startswith("code/"):
+            continue
+        rel = path[len(root):] if root and path.startswith(root) else path[path.rfind("/code/") + 1:] if "/code/" in path else path
+        found = f"{rel} line {match.group(2)}"
+    return found
 
 
 async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,

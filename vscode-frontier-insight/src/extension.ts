@@ -34,6 +34,7 @@ import {
 } from "./skills";
 import { Bridge } from "./bridge";
 import { splitRevisePlan, unknownResumeFlags } from "./resume-args";
+import { cardButtons, cardOf } from "./stop-card";
 import { chatModelArgs, servedModel } from "./lm-messages";
 import { forgetFoundFi, rootsForCommand, workFolderForCommand } from "./roots-config";
 import type { Roots } from "./roots";
@@ -1555,6 +1556,7 @@ async function reportQuestEnd(
         const card = await readNextStep(outputsDir, questId, startedAt);
         if (card) {
             stream.markdown(`\n\n---\n\n⏸ **The quest is waiting for you.**\n\n${card.markdown}\n`);
+            await offerCardButtons(outputsDir, card.questId, stream);
         } else {
             stream.markdown(`\n✅ ${fleet ? "Fleet" : "Quest"} finished cleanly.`);
             if (questId) await surfaceWorthALook(outputsDir, stream, questId);
@@ -1614,6 +1616,24 @@ async function readNextStep(
         const markdown = await fsPromises.readFile(path.join(outputsDir, questId, "NEXT_STEP.md"), "utf-8");
         return { questId, markdown };
     } catch { return null; }
+}
+
+/**
+ * The buttons under a "why it stopped" card (a known-answer check stopped the quest): one per way on the card in
+ * `.fi/pause.json` names (./stop-card), each putting its `@fi` command in the chat box. Best-effort: no card, no buttons.
+ */
+async function offerCardButtons(outputsDir: string, questId: string, stream: vscode.ChatResponseStream): Promise<void> {
+    try {
+        const raw = await fsPromises.readFile(path.join(outputsDir, questId, ".fi", "pause.json"), "utf-8");
+        for (const b of cardButtons(cardOf(JSON.parse(raw)), questId)) {
+            stream.button({
+                command: "workbench.action.chat.open",
+                title: b.title,
+                tooltip: b.tooltip,
+                arguments: [{ query: b.query, isPartialQuery: !b.send }],
+            });
+        }
+    } catch { /* no pause.json, or no card in it */ }
 }
 
 /**

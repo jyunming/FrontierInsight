@@ -94,8 +94,8 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
          "holding to its protocol."],
     ),
     "oracle": (
-        "The script has not passed its oracle checks (a result with a known answer). Fix the script, or the check?",
-        "Fix the script, then go on.",
+        "A known-answer check did not pass. Is the simulation wrong, or the check?",
+        "Compare the measured value with the expected one and where it comes from, fix whichever is wrong, then go on.",
         ["Change the check's expected value or tolerance in the plan: `--revise-plan \"...\"`."],
     ),
     "improve": (
@@ -177,6 +177,9 @@ class Item:
     alternatives: list[str] = field(default_factory=list)
     steps: list[str] = field(default_factory=list)
     blocking: bool = False
+    # The "why it stopped" card (core/oracle_card.py): one structured payload, rendered here into NEXT_STEP.md and the
+    # terminal, and shown by the web page and VS Code from .fi/pause.json. ``None`` for a pause that has none.
+    card: dict[str, Any] | None = None
 
 
 def advice(kind: str) -> tuple[str, str, list[str]]:
@@ -194,10 +197,10 @@ _SETTING_RE = re.compile(r"`(?:(?P<section>engine|execution|pauses)\.)?(?P<key>\
 #: a stop before the review, so after the freeze nothing here points at the plan.
 _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
     "oracle": {
-        False: "This quest is set up for research, so the oracle check cannot be relaxed: fix the script and resume, "
-               "or, if the oracle itself is wrong, change it in the plan (`--revise-plan`) and resume.",
-        True: "This quest is set up for research and its protocol is frozen, so the oracle check cannot be relaxed or "
-              "its oracle changed inside this quest: fix the script and resume, or, if the oracle itself is wrong, "
+        False: "This quest is set up for research, so the known-answer checks cannot be relaxed: fix the script and "
+               "resume, or, if a check itself is wrong, change it in the plan (`--revise-plan`) and resume.",
+        True: "This quest is set up for research and its protocol is frozen, so the known-answer checks cannot be "
+              "relaxed or changed inside this quest: fix the script and resume, or, if a check itself is wrong, "
               "start a new quest whose plan states the right one.",
     },
     "split": {
@@ -282,7 +285,8 @@ def _without_refused(lines: list[str], profile: str) -> tuple[list[str], bool]:
 
 
 def pause_item(kind: str, headline: str, steps: list[str], *, recommended: str | None = None,
-               alternatives: list[str] | None = None, profile: str = "default", frozen: bool = False) -> Item:
+               alternatives: list[str] | None = None, profile: str = "default", frozen: bool = False,
+               card: dict[str, Any] | None = None) -> Item:
     """The item for the pause that stopped the quest. Under ``profile`` ``research`` no line suggests a setting the
     profile refuses (it would be refused when the quest is resumed); what the person can do instead is said, for this
     kind of pause and whether the protocol is ``frozen``."""
@@ -299,7 +303,8 @@ def pause_item(kind: str, headline: str, steps: list[str], *, recommended: str |
         rec, dropped_alts = instead, True
     elif dropped_steps or dropped_alts:
         alts.append(instead)
-    return Item(kind=kind, why=headline, decide=decide, recommended=rec, alternatives=alts, steps=steps, blocking=True)
+    return Item(kind=kind, why=headline, decide=decide, recommended=rec, alternatives=alts, steps=steps, blocking=True,
+                card=card)
 
 
 def _read_json(path: Path) -> Any:
@@ -335,7 +340,7 @@ def waiting(quest_root: Path) -> list[Item]:
                                      f"change(s), needs/PROTOCOL_AMENDMENT_PENDING.json).",
                         decide=_ADVICE["amendment"][0], recommended=_ADVICE["amendment"][1],
                         alternatives=list(_ADVICE["amendment"][2])))
-    for name, what in (("PROTOCOL_CHECK.json", "the plan's protocol"), ("ORACLE_CHECK.json", "the oracle checks"),
+    for name, what in (("PROTOCOL_CHECK.json", "the plan's protocol"), ("ORACLE_CHECK.json", "the known-answer checks"),
                        ("RUN_MANIFEST_CHECK.json", "the run's record against the plan")):
         record = _read_json(needs / name)
         if isinstance(record, dict) and record.get("status") == "warned":
@@ -394,13 +399,103 @@ def resume_lines(quest_id: str) -> list[str]:
     ]
 
 
+def _check_lines(c: dict[str, Any], *, markdown: bool) -> list[str]:
+    """One check of a "why it stopped" card: what it is, its numbers, where they come from and where in the script."""
+    kind = f", {c['kind_words'] or c['kind']}" if (c.get("kind_words") or c.get("kind")) else ""
+    head = (f"### Check “{c.get('name') or c.get('id')}” (`{c.get('id')}`{kind})" if markdown else
+            f"Check “{c.get('name') or c.get('id')}” ({c.get('id')}{kind})")
+    rows: list[str] = []
+    if c.get("expected_text"):
+        rows.append(f"Expected: {c['expected_text']} — from: {c.get('reference') or 'the check does not say'}")
+    if c.get("measured_text"):
+        rows.append(f"Measured: {c['measured_text']} — by {c.get('measured_by_text')}")
+    elif c.get("status") == "not_measured":
+        rows.append("Measured: nothing (the value could not be measured)")
+    elif c.get("status") == "cannot_judge":
+        rows.append("Measured: not run (the check gives no number to compare with)")
+    if c.get("limit_text"):
+        mode = c.get("tolerance_mode") or "absolute"
+        tol = c.get("tolerance")
+        rows.append(f"Tolerance: ±{c['limit_text']} ({mode}" + (f", {tol:g} of the expected value" if mode == "relative"
+                                                                  and isinstance(tol, (int, float)) else "") + ")")
+    if c.get("gap"):
+        rows.append(f"Gap: {c['gap']['text']}")
+    if c.get("disputed"):
+        rows.append("FI's repair disputes this check's expected value (nobody has approved a change, so it counts as "
+                    "failed).")
+    case = ", ".join(f"{k}={v}" for k, v in (c.get("case") or {}).items())
+    if case or c.get("measure"):
+        rows.append("Case: " + (case or "none (the script's own value)")
+                    + (f"; measure: `{c['measure']}`" if c.get("measure") else ""))
+    if c.get("error"):
+        rows.append(f"Error: {c['error']}" + (f" (at {c['error_at']})" if c.get("error_at") else ""))
+    where = c.get("where")
+    if where:
+        rows.append(f"In the script: {where['file']} line {where['line']} — {where['what']}")
+    out = [head]
+    out += [f"- {r}" for r in rows] if markdown else [f"  {r}" for r in rows]
+    if where and where.get("excerpt") and markdown:
+        out += ["", "  ```python", *(f"  {line}" for line in where["excerpt"]), "  ```"]
+    return out
+
+
+def card_lines(card: dict[str, Any], *, markdown: bool = True) -> list[str]:
+    """The "why it stopped" card (core/oracle_card.py) as lines: Markdown for NEXT_STEP.md (``markdown``) or plain text
+    for a terminal. One rendering of one payload, so every surface says the same thing."""
+    if not isinstance(card, dict):
+        return []
+    checks = [c for c in card.get("checks") or [] if isinstance(c, dict)]
+    causes = [c for c in card.get("causes") or [] if isinstance(c, dict)]
+    actions = [a for a in card.get("actions") or [] if isinstance(a, dict)]
+    out: list[str] = []
+    if markdown:
+        out += ["## Why it stopped", str(card.get("summary") or ""), ""]
+        for c in checks:
+            out += [*_check_lines(c, markdown=True), ""]
+        if causes:
+            out += ["## Most likely cause", *(f"{n}. {c.get('text')} {c.get('evidence') or ''}".rstrip()
+                                              for n, c in enumerate(causes, 1)), ""]
+        if card.get("tried"):
+            out += ["## What FI already tried", *(f"- {t}" for t in card["tried"]), ""]
+        if actions:
+            out += ["## What you can do"]
+            for n, a in enumerate(actions, 1):
+                ways = [f"CLI: `{a['cli']}`" if a.get("cli") else "", f"web: **{a['web']}**" if a.get("web") else "",
+                        f"VS Code: `{a['vscode']}`" if a.get("vscode") else ""]
+                out.append(f"{n}. **{a.get('label')}.** {a.get('detail') or ''} ({'; '.join(w for w in ways if w)})")
+            out.append("")
+        if card.get("notes"):
+            out += [*(f"> {n}" for n in card["notes"]), ""]
+        return out
+    out.append(str(card.get("summary") or ""))
+    for c in checks:
+        out += _check_lines(c, markdown=False)
+    if causes:
+        out += ["Most likely: " + causes[0].get("text", "") + " " + (causes[0].get("evidence") or "")]
+        out += [f"  also: {c.get('text')}" for c in causes[1:3]]
+    if card.get("tried"):
+        out += ["FI already tried: " + " ".join(card["tried"])]
+    if actions:
+        out += ["You can:"]
+        for n, a in enumerate(actions, 1):
+            out.append(f"  {n}. {a.get('label')}: {a.get('detail') or ''}"
+                       + (f" `{a['cli']}`" if a.get("cli") and a.get("id") != "edit" else ""))
+    out += [f"Note: {n}" for n in card.get("notes") or []]
+    return out
+
+
 def render(quest_id: str, items: list[Item]) -> str:
     """The card as Markdown: the pause first (why, what to decide, the recommendation, the alternatives, what to do),
-    then everything else waiting, then how to go on."""
+    then everything else waiting, then how to go on. A pause with a "why it stopped" card shows the card instead of
+    the generic parts (its actions are the recommendation and the alternatives, with their commands)."""
     blocking = [i for i in items if i.blocking]
     rest = [i for i in items if not i.blocking]
     lines: list[str] = []
-    if blocking:
+    if blocking and blocking[0].card:
+        first = blocking[0]
+        lines += [f"# Action needed — {first.why}", "", f"Quest **{quest_id}** is paused and waiting for you.", ""]
+        lines += card_lines(first.card, markdown=True)
+    elif blocking:
         first = blocking[0]
         lines += [f"# Action needed — {first.why}", "", f"Quest **{quest_id}** is paused and waiting for you.", ""]
         if first.decide:
@@ -457,7 +552,12 @@ def text(fi_dir: Path) -> str:
         return ""
     out: list[str] = []
     for item in items:
-        if item.get("blocking"):
+        if item.get("blocking") and isinstance(item.get("card"), dict):
+            # The numbers a person needs to decide, here and not only in a file (NEXT_STEP.md has the same card).
+            out += [f"[FI] Waiting for you: {item.get('why')}"]
+            out += [f"     {line}" for line in card_lines(item["card"], markdown=False)]
+            out += ["     (The same card, with the script excerpt: NEXT_STEP.md)"]
+        elif item.get("blocking"):
             out += [f"[FI] Waiting for you: {item.get('why')}"]
             if item.get("decide"):
                 out += [f"     To decide: {item['decide']}"]
