@@ -55,8 +55,10 @@ def _config(root: Path, **over: Any) -> Config:
     data: dict[str, Any] = {
         "topic": "smoke topic for the research acceptance run", "title": "research-acceptance",
         "rigor_profile": "research",
-        # Research needs one reviewer on another model; the fake model answers the same whatever it is called.
-        "provider": {"name": "openai", "node_models": {"review_panel.statistician": "m-other"}},
+        # Research needs one reviewer on another model; the fake model answers the same whatever it is called. The
+        # plan's checks, too, count only when a second, different model read them (`oracle_review`).
+        "provider": {"name": "openai", "node_models": {"review_panel.statistician": "m-other",
+                                                       "oracle_review": "m-reviewer"}},
         # No auto_accept_on_pass: an accept no person made stays one level below publication_ready, so a person
         # accepts at the review pause (``_run_through_pauses``), as `--resume <id> --accept yes` stages it.
         "engine": {"max_iterations": 1, "review_loop": False, "execute_replicates": 3, "pilot_run": False},
@@ -83,6 +85,10 @@ def _fake(protocol: dict[str, Any], simulate: str, analysis: str, calls: list[st
             return _with_package(_reply(simulate, analysis), prompt)
         if prompt.lstrip().startswith("**Persona:"):  # a review-panel member
             return _FAKE_RESPONSES["review"]
+        if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the plan's checks
+            return json.dumps({"checks": [{"name": o["name"], "appropriate": "yes", "discriminating": "yes",
+                                           "well_defined": "yes"} for o in protocol.get("oracles") or []],
+                               "summary": "the checks test the model"})
         return _fake_response_for(prompt)
 
     return fake_chat
@@ -198,6 +204,11 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert artifacts.paper_md is not None
     # The oracle passed before the main run; FI ran every trial and wrote the ledger itself.
     assert json.loads((root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))["status"] == "ok"
+    # A second model read the checks, and the record of the calls shows it was not the one that wrote them. The one
+    # check is a special case, which has no setting of FI's own (core/hidden_check.py), so no hidden check ran.
+    review = json.loads((root / ".fi" / "oracle_review.json").read_text(encoding="utf-8"))
+    assert review["verdicts"] and review.get("call_id") and "error" not in review
+    assert not (root / "needs" / "HIDDEN_CHECK.json").exists()
     trials = [json.loads(line) for line in (root / "raw" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
     trials = [t for t in trials if t.get("event") == "trial"]
     assert len(trials) == 900 and len({t["seed"] for t in trials}) == 900

@@ -56,7 +56,8 @@ NOT_EDITABLE = frozenset({"experiment.py", "run.py", "submit.py", "replot_layout
 _ENGINE_FILES = ("criteria.py", "oracle_check.py", "trial_runner.py", "improve.py")
 #: The quest's records a round's run must not change.
 _QUEST_FILES = (Path("needs") / "FROZEN_PROTOCOL.json", Path(".fi") / "criteria_history.jsonl",
-                Path("needs") / "ORACLE_CHECK.json", Path("plan.md"))  # plan.md: the protocol before it is frozen
+                Path("needs") / "ORACLE_CHECK.json", Path("needs") / "HIDDEN_CHECK.json",
+                Path("plan.md"))  # plan.md: the protocol before it is frozen
 _CODE_CAP = 24000
 
 STOP_ALL_MET = "every criterion is met"

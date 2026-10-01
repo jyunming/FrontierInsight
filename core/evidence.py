@@ -79,9 +79,15 @@ INFO: dict[str, dict[str, Any]] = {
         "assurance_claim": (
             "The engine ran the simulation on each oracle's case and judged what it returned against the protocol's expected "
             "values and tolerances. A value the script reported itself (an oracle without a case, or a one-script quest's "
-            "FI_ORACLE run) is judged too, but never counts toward this level, and a check that judged no value does not reach it."
+            "FI_ORACLE run) is judged too, but never counts toward this level, and a check that judged no value does not reach it. "
+            "Under rigor_profile: research, a second model, shown by the record of the quest's model calls to be "
+            "different from the one that wrote the checks, read them and gave a usable answer, and each invariant, "
+            "symmetry or second-implementation check also passed at a setting of FI's choosing the code never saw."
         ),
         "known_blind_spots": [
+            "The second model reads the checks; it does not work their expected values out again. A special or limiting "
+            "case, a published value and a convergence rate are not run at a hidden setting (their expected value "
+            "belongs to their own setting).",
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
             "simulator that agrees with it. The engine checks that each one says where it comes from (a derivation with "
             "its steps, a source this quest retrieved, an equation of the plan's model, or a second implementation that "
@@ -91,7 +97,7 @@ INFO: dict[str, dict[str, Any]] = {
             "A tolerance looser than the gap between the claimed method and a cruder one passes both; the record warns when the "
             "case names an order, and does not when it does not.",
         ],
-        "artifacts": ["needs/ORACLE_CHECK.json"],
+        "artifacts": ["needs/ORACLE_CHECK.json", ".fi/oracle_review.json", "needs/HIDDEN_CHECK.json"],
     },
     "statistically_adequate": {
         "assurance_claim": (
@@ -315,6 +321,7 @@ def assess(
     quest_root: Path, state: dict[str, Any], *, precision_missed: list[str] | None = None,
     settings: dict[str, str] | None = None, statistics_gaps: list[str] | None = None,
     oracle_source_gaps: list[str] | None = None, equation_label_gaps: list[str] | None = None,
+    independence_gaps: list[str] | None = None,
 ) -> dict[str, Any]:
     """The quest's evidence status, the ladder with what each level guarantees, and the gaps below the next level.
 
@@ -323,7 +330,11 @@ def assess(
     (:func:`core.metric_spec.coverage_gaps`); ``oracle_source_gaps`` names each oracle whose expected value has no
     source a reader can check (:func:`core.oracle_check.source_gaps`), a gap below ``independently_validated``; ``equation_label_gaps`` says which equations of the plan's model the
     simulation does not mark where it implements them (a comment ``# E1``), a gap at the same level: the oracles test the
-    code against the model, and without the labels nobody can tell which code an equation's check tests; ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
+    code against the model, and without the labels nobody can tell which code an equation's check tests;
+    ``independence_gaps`` (``rigor_profile: research`` only) says why the checks are not shown to be independent of the
+    model that wrote them: no usable second reading by a different model (:func:`core.oracle_review.independence_gaps`),
+    or a check that failed or was not run at a setting the code never saw (:func:`core.hidden_check.evidence_gaps`), a
+    gap at the same level; ``settings`` holds ``protocol_check``, ``oracle_check``, ``numeric_warnings``,
     ``run_manifest_check`` and ``rigor_profile`` as the run had them (a check that was turned off is a gap, not a pass), and
     ``evidence_gate`` / ``claim_check`` / ``design_audit`` as ``off`` or ``not_applicable`` when the run had them so."""
     settings = settings or {}
@@ -486,6 +497,8 @@ def assess(
         # Which code implements which equation of the model: an oracle that rests on E1 checks the code the simulation
         # says is E1. Only the labels are read, not the mathematics behind them.
         valid_gaps.extend(equation_label_gaps or [])
+        # Under research: a second, different model read the checks, and the checks held at a setting the code never saw.
+        valid_gaps.extend(independence_gaps or [])
     valid_gaps.extend(optimum_gaps.get("independently_validated", []))
     validated = matched and not valid_gaps
 

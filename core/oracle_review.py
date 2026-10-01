@@ -13,6 +13,13 @@ equations no check tests. Its findings go back to the plan once, together with a
 Under ``rigor_profile: research`` the reviewer should be a different model from the one that wrote the plan: the
 ``provider.node_models`` entry ``oracle_review``, as the review panel's personas are given theirs. When none is set,
 or it is the planner's own model, the review is still made and the plan says it was the same model's second look.
+
+Under research the review is also a condition of the evidence level ``independently_validated``
+(:func:`independence_gaps`): it counts only when it gave a usable answer AND the quest's own record of its model calls
+(``.fi/model_calls.jsonl``) shows that the model that answered it is not a model that wrote the plan's checks (the
+models as the connection named them on each call, never the config's wish; the same model under another name, a dated
+id or another provider counts as the same). Anything else is a plain gap. A review that could not be had still never
+stops the quest.
 """
 
 from __future__ import annotations
@@ -27,6 +34,15 @@ from . import oracle_check as _oracle
 
 #: The node a model is named for in ``provider.node_models``.
 NODE = "oracle_review"
+#: The steps whose answers write the plan's checks: the plan, every rewrite of it (FI's own requests about the checks
+#: included), and the design step of a quest with no plan.md.
+WRITER_NODES = ("plan", "plan_revise", "design")
+#: How a person gives the review another model (the key that already names a step's model; nothing new).
+HOW_TO_NAME_ANOTHER = ("set `oracle_review: <another model your provider offers>` under `provider: node_models:` in "
+                       "the quest's config.yaml; it reads the checks when the plan is written (for this quest, do the "
+                       "plan again: `--resume <quest_id> --from plan --approve-as <you>`)")
+#: The gap's first words, the same whatever the reason.
+NOT_REVIEWED = "the plan's checks were not reviewed by a second, different model"
 #: How much of the plan the reviewer is shown (whole checks only: a check cut in half is not shown at all).
 _MAX_MODEL_CHARS, _MAX_CHECK_CHARS = 8000, 12000
 #: The keys a proposed check may carry (as the plan writes one).
@@ -212,13 +228,16 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
                "second opinion" + (". This quest is set up for research, where a different model should read them: set "
                                    "one under `provider: node_models: oracle_review: <another model your provider "
                                    "offers>`." if research else "."))
+    # Under research a second reading counts only from another model, with a usable answer (independence_gaps).
+    below = (" Under research this keeps the result below *independently validated*."
+             if research and (review is None or same_model is not False or not reported) else "")
     if review is None and not sent:
         return ["", f"- No second reader looked at the checks ({error or 'nothing to show'}), so nothing was changed "
-                "for it."]
+                f"for it.{below}"]
     if review is None:
         return ["", f"- The checks were sent to {reviewer} for a second reading, but its answer could not be used "
-                f"({error or 'it named none of the plan checks'}), so nothing was changed for it."]
-    rows = ["", f"- {who}" + (f" Its summary: {review.summary}" if review.summary else "")]
+                f"({error or 'it named none of the plan checks'}), so nothing was changed for it.{below}"]
+    rows = ["", f"- {who}" + (f" Its summary: {review.summary}" if review.summary else "") + below]
     for c in review.checks:
         verdict = [
             {True: "tests the model", False: "may not test the model", None: "no verdict on what it tests"}[c["appropriate"]],
@@ -235,3 +254,61 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
     if review.partial:
         rows.append("  - The plan has more checks than the reader was shown; it did not judge the rest.")
     return rows
+
+
+# --- whether the second reading counts as independent (rigor_profile: research) ------------------------------------
+
+#: What a connection adds to a model's name without making it another model: a date or a version stamp, ``preview``,
+#: ``latest`` (``gpt-5.6-luna-2026-09`` is ``gpt-5.6-luna``; ``claude-opus-4-5-20251101`` is ``claude-opus-4-5``).
+_STAMP_RE = re.compile(r"(?:[-_.@](?:\d{4}[\d.-]*|\d{2}-\d{2}|preview|latest))+$")
+
+
+def canonical_model(name: Any) -> str:
+    """A model's name as one model: lower case, without a vendor or folder prefix (``openai/gpt-5``, ``models/gemini``),
+    without an ``:latest`` tag, a date or a ``-preview``/``-latest`` stamp, and with ``.`` and ``_`` read as ``-``. Two
+    names that differ only in these are the same model."""
+    text = str(name or "").strip().lower().rsplit("/", 1)[-1]
+    text = re.sub(r":latest$", "", text)
+    text = _STAMP_RE.sub("", text) or text
+    return re.sub(r"[._]", "-", text)
+
+
+def same_model(a: Any, b: Any) -> bool:
+    """Whether two model names, as connections reported them, are one model (:func:`canonical_model`)."""
+    first, second = canonical_model(a), canonical_model(b)
+    return bool(first) and first == second
+
+
+def independence_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]], *, configured: bool) -> list[str]:
+    """Under ``rigor_profile: research``: why the second reading of the plan's checks does not count, one plain sentence
+    (empty when it counts). It counts only when it gave a usable answer (``record``, ``.fi/oracle_review.json``) and the
+    quest's record of its model calls (``calls``, ``.fi/model_calls.jsonl``) names, for the call that gave it and for
+    every call of a step that writes the plan's checks (:data:`WRITER_NODES`), the model that answered, and the model of
+    the reading is none of the writers' (:func:`same_model`). ``configured``: ``provider.node_models.oracle_review`` is
+    set; when it is not, the sentence says how to set it."""
+    record = record if isinstance(record, dict) else {}
+    how = f"; to have another model read them, {HOW_TO_NAME_ANOTHER}" if not configured else ""
+    if not record.get("lines") and not record.get("error") and not record.get("verdicts"):
+        return [f"{NOT_REVIEWED}: no second reading of them is recorded{how}"]
+    if record.get("error") or not record.get("verdicts"):
+        why = str(record.get("error") or "it judged none of the checks")
+        return [f"{NOT_REVIEWED}: the second reading gave no usable answer ({why[:200]}){how}"]
+    ok = [r for r in calls if isinstance(r, dict) and r.get("outcome") == "ok"]
+    call_id = record.get("call_id")
+    reading = next((r for r in ok if call_id and r.get("call_id") == call_id and r.get("node") == NODE), None)
+    if reading is None:  # a record written before the call's id was kept: the latest answered reading
+        reading = next((r for r in reversed(ok) if r.get("node") == NODE), None)
+    writers = [r for r in ok if r.get("node") in WRITER_NODES]
+    if reading is None or not writers:
+        missing = "read" if reading is None else "wrote"
+        return [f"{NOT_REVIEWED}: the quest's record of its model calls does not show which model {missing} them"]
+    unnamed = "read" if not (reading.get("reported") and reading.get("served_model")) else (
+        "wrote" if any(not (w.get("reported") and w.get("served_model")) for w in writers) else "")
+    if unnamed:
+        return [f"{NOT_REVIEWED}: the connection did not say which model {unnamed} them, so they are not shown to be "
+                "two different models (an HTTP API and the claude command-line tool name the model that answered)"]
+    model = str(reading["served_model"])
+    if any(same_model(w["served_model"], model) for w in writers):
+        tail = how or "; the model set for `oracle_review` is the one that wrote the plan, so name another"
+        return [f"{NOT_REVIEWED}: {model} wrote them and read them again{tail}"]
+    return []

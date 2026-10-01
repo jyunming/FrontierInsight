@@ -100,6 +100,7 @@ from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
+from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
@@ -1697,6 +1698,7 @@ class Engine:
         ".fi/approved_plan.json", "needs/receipts/evidence_gate.json", "needs/receipts/design_audit.json",
         "needs/receipts/claim_check.json", "needs/ENVIRONMENT.json", "needs/RUN_MANIFEST_CHECK.json",
         "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json", "raw/ledger.jsonl", "raw/trials.json",
+        "needs/HIDDEN_CHECK.json", ".fi/oracle_review.json",
         ".fi/trials/run.json", "paper/claims.json",
         # FI's record of a search for the best design (core/optimise.py).
         "raw/optimisation_ledger.jsonl", "results/best_design.json", ".fi/optimisation/run.json",
@@ -9048,9 +9050,16 @@ class Engine:
             except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
                 self._log.warning("[evidence] where the simulation implements the plan's equations could not be checked: %r", e)
                 label_gaps = [f"where the simulation implements the plan's equations could not be checked ({type(e).__name__})"]
+            try:
+                independence_gaps = self._independence_gaps(_frozen.protocol_of(self.quest_root) or protocol_now)
+            except Exception as e:  # noqa: BLE001 -- a report about the quest must never touch it
+                self._log.warning("[evidence] whether the checks are independent of their writer could not be checked: %r", e)
+                independence_gaps = [f"whether the checks are independent of the model that wrote them could not be "
+                                     f"checked ({type(e).__name__})"]
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
+                independence_gaps=independence_gaps,
                 settings={
                     "protocol_check": self.config.engine.protocol_check,
                     "oracle_check": self.config.engine.oracle_check,
@@ -10355,6 +10364,39 @@ class Engine:
         _plan.record_version(self.quest_root, kept, by="engine", note="the plan's changes to its checks")
         return ""
 
+    async def _hidden_check(self, state: QuestState, python: Path | str, env: dict[str, str] | None) -> None:
+        """Under ``rigor_profile: research``, after a run: FI's own check at a setting the code never saw
+        (core/hidden_check.py), kept in ``needs/HIDDEN_CHECK.json``. Never stops the quest; a check that fails there
+        is a gap in the evidence."""
+        protocol = self._protocol_block(state)
+        if protocol is None or self.config.engine.oracle_check == "off" or not _hidden.candidates(protocol):
+            return
+        timeout = max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
+        try:
+            record = await self._await_with_heartbeat(_hidden.run(
+                self.executor, python, self.quest_root, protocol, timeout_s=timeout, env=env,
+                engine_callable=bool(getattr(self, "_trial_mode", False))), label="checking a setting the code never saw")
+            _hidden.write(self.quest_root, record)
+        except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
+            self._log.warning("[oracle] the check at a setting the code never saw could not be made: %r", e)
+            return
+        for gap in _hidden.evidence_gaps(self.quest_root, protocol):
+            self._log.warning("[oracle] %s", gap)
+        if record.get("status") == "passed":
+            self._log.info("[oracle] %d check(s) also passed at a setting the code never saw", len(record["cases"]))
+
+    def _independence_gaps(self, protocol: dict[str, Any] | None) -> list[str]:
+        """Under ``rigor_profile: research``: why the checks are not shown independent of the model that wrote them (a
+        usable second reading by another model, core/oracle_review.py; the checks at a setting the code never saw,
+        core/hidden_check.py). Empty outside research, with no checks, or with the checks off (its own gap)."""
+        if (self.config.rigor_profile != "research" or self.config.engine.oracle_check == "off"
+                or not _oracle.declared(protocol)):
+            return []
+        calls = _attempts.read(self.fi_dir, _attempts.MODEL_CALLS)
+        return [*_review.independence_gaps(self._oracle_review_read(), calls,
+                                           configured=bool(self._model_for_node(_review.NODE))),
+                *_hidden.evidence_gaps(self.quest_root, protocol)]
+
     def _oracle_review_path(self) -> Path:
         return self.fi_dir / "oracle_review.json"
 
@@ -10423,21 +10465,26 @@ class Engine:
         else:
             same = None
         research = self.config.rigor_profile == "research"
+        below = "; under research this keeps the result below independently validated" if research else ""
         if same is not False and not error:
             (self._log.warning if research else self._log.info)(
                 "[oracle] the checks were read a second time by %s (%s)%s",
                 "the model that wrote the plan" if same else "what may be the model that wrote the plan",
                 planner or "the provider's default model",
-                "; for a second opinion from another model set provider.node_models.oracle_review" if research else "")
+                f"{below}; for a second opinion from another model set provider.node_models.oracle_review"
+                if research else "")
         found = _review.findings(review) if review is not None else []
         for f in found:
             self._log.info("[oracle] the second reader of the checks: %s", f)
         if error:
-            self._log.warning("[oracle] the second reading of the checks could not be used: %s", error)
+            # Never a stop: the quest goes on, and under research the evidence level keeps the gap.
+            self._log.warning("[oracle] the second reading of the checks could not be used: %s%s", error, below)
         default = "the provider's default model"
         record = {
             "reviewer": reviewer or default, "planner": planner or default, "same_model": same,
             "reported": bool(answered.get("reported")), "findings": found,
+            # The line of .fi/model_calls.jsonl that holds this reading: the evidence level reads who answered from there.
+            **({"call_id": answered["call_id"]} if answered.get("call_id") and not error else {}),
             "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
                                         same_model=same, research=research,
                                         reported=bool(answered.get("reported")), error=error,
@@ -11407,6 +11454,8 @@ class Engine:
                                if split and result.returncode == 0 and self.config.engine.run_manifest_check != "off"
                                else None)
             manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
+            if split and result.returncode == 0 and self.config.rigor_profile == "research":
+                await self._hidden_check(state, py, primary_env)
         manifest_attempts_next = 0
         if manifest_found:
             mode = self.config.engine.run_manifest_check
