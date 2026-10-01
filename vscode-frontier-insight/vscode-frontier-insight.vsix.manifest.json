@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "0a8d08eb0142b2980677fac8c8904cb220f9bc22928f0a7f074f3dc4577d9c07",
+  "vsix_sha256": "0d501ba844440d36e6629810a94467c1dbc68080cbc53a3b3b42a60437da8c3a",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -42,8 +42,8 @@
       "bytes": 3626
     },
     "extension/out/bridge.js": {
-      "sha256": "3772641a4571393b68ecb74d329877b55689b8109af86835db4d694ceae67aca",
-      "bytes": 37898
+      "sha256": "bc0f01db280960565e35bf9f0b40c711bad24984e2b6dc2b2dcc15e4a33bb7ac",
+      "bytes": 41466
     },
     "extension/out/extension.js": {
       "sha256": "68071f77fac648cb42fb452bf3381c0206f3c8f17b309eadc28cf8484b64507e",
@@ -118,8 +118,8 @@
       "bytes": 15345
     },
     "extension/readme.md": {
-      "sha256": "40672024498cc8c63f649e83b1ab39d25ff0d0dfbe89add947268204973153f2",
-      "bytes": 82501
+      "sha256": "320fece7d964c965acd04fadd2cfc49a994570c7983ac8f0e8e4a6719015514e",
+      "bytes": 82914
     }
   }
 }
