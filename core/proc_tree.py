@@ -234,7 +234,7 @@ class ProcessTree:
     def real(self) -> bool:
         """A process ``subprocess.Popen`` started, not a test's stand-in (a test that patches ``subprocess.Popen``).
         A stand-in gets no job and no process group: ``kill()`` only calls its own ``kill()``."""
-        return type(self.proc) is _REAL_POPEN
+        return issubclass(type(self.proc), _REAL_POPEN)  # type(), not isinstance: a spec mock fakes __class__
 
     def kill(self) -> None:
         """Stop the program and everything it started, and wait (up to a few seconds) until all of it is gone."""
@@ -491,4 +491,4 @@ class AsyncProcessTree:
 
 def _is_real(proc: Any) -> bool:
     """A process asyncio started, not a test's stand-in (``MagicMock(spec=Process)`` passes ``isinstance``)."""
-    return type(proc) is asyncio.subprocess.Process
+    return issubclass(type(proc), asyncio.subprocess.Process)
