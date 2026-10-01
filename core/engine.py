@@ -423,8 +423,9 @@ class QuestState(TypedDict, total=False):
     # on the next revise loop. Pre-resume the dict is empty.
     human_feedback: dict[str, Any]
     # Who accepted the result (core/acceptance.py): a person's receipt {"by": "person", "via": <interface>, "who",
-    # "at", "question", "answer", "note", "evidence_sha256", "limits_shown", "paper_sha256"} or {"by": "automatic",
-    # "via": ...}. Set by ``_node_human_feedback`` on an accept, cleared on a refine; none
+    # "at", "question", "answer", "note", "evidence_sha256", "limits_shown", "paper_sha256"; and, when the record worked
+    # out on resume differs from the one shown, "evidence_sha256_at_accept" and "limits_at_accept"} or
+    # {"by": "automatic", "via": ...}. Set by ``_node_human_feedback`` on an accept, cleared on a refine; none
     # (no review pause) counts as automatic, which keeps the evidence one level below publication_ready.
     acceptance: dict[str, Any]
     # Cumulative refinement asks across the quest's revise iterations.

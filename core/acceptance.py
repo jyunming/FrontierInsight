@@ -46,8 +46,8 @@ NOT_CHECKED_GAP = "no person reviewed the evidence before accepting"
 #: How the gap a person's "partly" leaves begins (:func:`partly_gap` adds the note).
 PARTLY_GAP = "a person accepted the result only in part"
 #: The gap an accept given in answer to an earlier question leaves (it did not say the evidence was reviewed).
-EARLIER_QUESTION_GAP = ("the person who accepted it answered an earlier question, not whether they reviewed the "
-                        "evidence: accept it again")
+EARLIER_QUESTION_GAP = ("the person who accepted it answered an earlier question (whether the numbers matched what "
+                        "they expected), not whether they reviewed the evidence")
 #: Why a "partly" without its note is not an accept.
 NOTE_NEEDED = ("\"partly\" needs a short note saying what you do not accept, so the result was not accepted: give "
                "what you do not accept with the answer")
@@ -133,10 +133,13 @@ def receipt(answer: dict[str, Any], via: str, snapshot: dict[str, Any] | None = 
     """The receipt of a person's accept: who (the name the interface gives: ``--approve-as`` or the login name at the
     terminal, the name typed on the web page, the login name in VS Code; "not given" when it gives none), when, through
     which interface (the one the answer names, else the engine's own name for the path it came by), the question, the
-    answer and its note, and what the person was shown with the question: the fingerprint of the evidence record
-    (``evidence_sha256``) and the limits listed, word for word (``limits_shown``), both from the review ``snapshot``
-    the engine handed the interface. The paper it covers (``paper_sha256``) is added where the paper is read
-    (``Engine._node_human_feedback``). Whatever ``by`` the answer claims is never taken."""
+    answer and its note (kept only with "partly"), and what the person was shown with the question: the fingerprint of
+    the evidence record (``evidence_sha256``: the one the interface sends back as ``shown_evidence_sha256``, else the
+    one in the review ``snapshot`` handed to it) and the limits listed, word for word (``limits_shown``, from that
+    snapshot). When the fingerprint sent back differs from the snapshot's (the record was worked out again on resume
+    and came out different), the snapshot's is kept as ``evidence_sha256_at_accept`` and its limits as
+    ``limits_at_accept``, and ``limits_shown`` is left empty. The paper it covers (``paper_sha256``) is added where
+    the paper is read (``Engine._node_human_feedback``). Whatever ``by`` the answer claims is never taken."""
     block = (snapshot or {}).get("before_accept") if isinstance(snapshot, dict) else None
     block = block if isinstance(block, dict) else None
     who = " ".join(str(answer.get("who") or "").split())[:_MAX_WHO]
@@ -158,8 +161,11 @@ def receipt(answer: dict[str, Any], via: str, snapshot: dict[str, Any] | None = 
         "limits_shown": lines(block),
     }
     if shown_then and shown_now and shown_then != shown_now:
-        # The evidence was worked out again when the quest resumed and came out different from what was shown.
+        # The evidence was worked out again when the quest resumed and came out different from what was shown: the
+        # limits worked out now are not the ones the person read, so they are kept under their own name.
         out["evidence_sha256_at_accept"] = shown_now
+        out["limits_at_accept"] = out.pop("limits_shown")
+        out["limits_shown"] = []
     return out
 
 

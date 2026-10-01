@@ -250,6 +250,8 @@ def test_the_receipt_keeps_the_fingerprint_that_was_shown_and_says_when_it_chang
     moved = acceptance.stamp({"action": "accept", "answer": "yes", "shown_evidence_sha256": other}, "x", snap)
     assert moved["acceptance"]["evidence_sha256"] == other
     assert moved["acceptance"]["evidence_sha256_at_accept"] == block["evidence_sha256"]
+    # The limits worked out now are not the ones the person read: kept under their own name.
+    assert moved["acceptance"]["limits_shown"] == [] and moved["acceptance"]["limits_at_accept"] == acceptance.lines(block)
     # Not a fingerprint: the one handed to the interface is kept.
     junk = acceptance.stamp({"action": "accept", "answer": "yes", "shown_evidence_sha256": "x"}, "x", snap)
     assert junk["acceptance"]["evidence_sha256"] == block["evidence_sha256"]
@@ -282,6 +284,16 @@ def test_the_interactive_prompt_records_the_approve_as_name(monkeypatch: pytest.
     monkeypatch.setattr("builtins.input", lambda *_a: next(replies))
     callback = launch._pick_human_feedback_callback(None, None, True, "Ada Lovelace")  # type: ignore[arg-type]
     assert asyncio.run(callback({"verdict": "accept"}))["who"] == "Ada Lovelace"
+
+
+def test_a_note_with_yes_is_refused_rather_than_dropped(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    import launch
+
+    fi = _paused(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        launch._apply_review_decision(_args(accept=["yes", "table 2 is wrong"]), tmp_path)
+    assert exc.value.code == 2 and not (fi / "human_review_answer.json").exists()
+    assert '--accept partly "table 2 is wrong"' in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("words", [["not", "checked"], ["I", "did", "not", "check"]])
@@ -572,6 +584,7 @@ def test_the_interactive_prompt_stops_to_look_again_after_no(monkeypatch: pytest
     ({"action": "accept", "feedback": ""}, 400),                    # no answer: refused
     ({"action": "accept", "feedback": "", "answer": "no"}, 400),    # "no" does not accept
     ({"action": "accept", "feedback": "", "answer": "partly"}, 400),  # "partly" needs its note
+    ({"action": "accept", "feedback": "", "answer": "yes", "note": "table 2"}, 400),  # a note only with partly
     ({"action": "accept", "feedback": "", "answer": "not_checked"}, 200),
     ({"action": "accept", "feedback": "", "answer": "partly", "note": " table 2 ", "who": "ada"}, 200),
 ])
@@ -598,6 +611,23 @@ def test_the_web_accept_needs_an_answer_and_records_it(tmp_path: Path, body: dic
             assert "refine" in r.text
         if body.get("answer") == "partly":
             assert "what you do not accept" in r.text
+
+
+def test_the_web_accept_sends_back_the_fingerprint_it_showed(tmp_path: Path) -> None:
+    from fastapi.testclient import TestClient
+
+    from tests.test_web_server import _mk_quest_dir
+    from web.server import make_app
+
+    q = _mk_quest_dir(tmp_path, "qfp")
+    (q / ".fi" / "human_review.json").write_text(json.dumps({"verdict": "accept"}), encoding="utf-8")
+    r = TestClient(make_app(tmp_path)).post("/api/quests/qfp/human-review", json={
+        "action": "accept", "feedback": "", "answer": "yes", "shown_evidence_sha256": "b" * 64})
+    assert r.status_code == 200, r.text
+    staged = json.loads((q / ".fi" / "human_review_answer.json").read_text(encoding="utf-8"))
+    assert staged["shown_evidence_sha256"] == "b" * 64
+    page = (Path(__file__).resolve().parents[1] / "web" / "static" / "quest.html").read_text(encoding="utf-8")
+    assert "shown_evidence_sha256: (humanReviewBeforeAccept && humanReviewBeforeAccept.evidence_sha256)" in page
 
 
 def test_the_web_review_panel_asks_before_it_accepts() -> None:
@@ -632,6 +662,9 @@ def test_the_vscode_bridge_passes_the_answer_on_and_names_the_interface() -> Non
     assert not _review_decision(asyncio.run(go({"action": "accept", "feedback": ""})))
     # ... nor a "partly" with no note.
     assert not _review_decision(asyncio.run(go({"action": "accept", "feedback": "", "answer": "partly"})))
+    # The fingerprint of the evidence record the chat showed goes back with the accept.
+    sent = asyncio.run(go({"action": "accept", "feedback": "", "answer": "yes", "shown_evidence_sha256": "c" * 64}))
+    assert sent["shown_evidence_sha256"] == "c" * 64
 
 
 def test_the_vscode_review_asks_the_question_and_no_does_not_accept() -> None:
@@ -642,3 +675,4 @@ def test_the_vscode_review_asks_the_question_and_no_does_not_accept() -> None:
     assert '"Look again"' in src and "human_review_cancelled" in src
     # "Partly" asks for the note and will not take an empty one; the login name goes with the answer.
     assert 'picked.id === "partly"' in src and "validateInput" in src and "os.userInfo().username" in src
+    assert "shown_evidence_sha256: snap.before_accept?.evidence_sha256" in src

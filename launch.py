@@ -2181,6 +2181,12 @@ def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> t
         print(f"[FI] {_acceptance.NOT_ACCEPTED_ON_NO}\n      --resume {quest_id} --refine \"what is wrong\"",
               file=sys.stderr)
         sys.exit(2)
+    if answer is not None and answer != "partly" and note.strip():
+        # A reservation given with "yes" or "I did not check" would be dropped: nothing is accepted instead.
+        print(f"[FI] only \"partly\" keeps a note, so nothing was accepted. To keep \"{' '.join(note.split())}\": "
+              f"--resume {quest_id} --accept partly \"{' '.join(note.split())}\"; otherwise leave the note out.",
+              file=sys.stderr)
+        sys.exit(2)
     try:
         snapshot = json.loads((fi_dir / "human_review.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -2194,7 +2200,7 @@ def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> t
             "[FI] Before you accept, read what this result does not guarantee and its gaps:",
             *(shown or ["  - (see needs/EVIDENCE.json)"]),
             f"[FI] Then answer: {_acceptance.QUESTION}",
-            *([f"[FI] \"partly\" needs a short note saying what you do not accept."] if needs_note else []),
+            *(["[FI] \"partly\" needs a short note saying what you do not accept."] if needs_note else []),
             f"      --resume {quest_id} --accept yes | --accept partly \"what you do not accept\" | "
             "--accept not-checked",
             f"      If you do not accept them: --resume {quest_id} --refine \"what is wrong\", or read the paper "
@@ -2219,8 +2225,6 @@ def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> t
             print("[FI] \"partly\" needs a short note saying what you do not accept — nothing was accepted.",
                   file=sys.stderr)
             sys.exit(2)
-    if answer != "partly" and note.strip():
-        print(f"[FI] only \"partly\" keeps a note; \"{' '.join(note.split())}\" was not recorded.", file=sys.stderr)
     print(f"  {_acceptance.QUESTION} {_acceptance.LABELS[answer]}")
     return answer, (" ".join(note.split()) if answer == "partly" else ""), shown_hash
 

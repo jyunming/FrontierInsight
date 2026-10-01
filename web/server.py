@@ -2733,6 +2733,9 @@ def make_app(
             refused = _acceptance.problem(body)
             if refused:
                 raise HTTPException(400, refused)
+            if checked != "partly" and _acceptance.note_of(body):
+                # A reservation given with "yes" or "I did not check" would be dropped: refused, as on the page.
+                raise HTTPException(400, "only \"partly\" keeps a note: answer partly to keep it, or leave it out")
             # Who: the name typed on the page ("" when none was); when: now, as the server receives it; and the
             # fingerprint of the evidence record whose limits the page showed.
             answer = {**answer, "answer": checked, "note": _acceptance.note_of(body) if checked == "partly" else "",
