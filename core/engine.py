@@ -109,7 +109,7 @@ from .config import (
     SCIENTIFIC_PAPER_FORMATS,
     resolve_page_limit,
 )
-from .execution import ExecutionResult, make_executor, pip_failure_summary
+from .execution import DockerLimits, ExecutionResult, make_executor, pip_failure_summary
 from .knowledge import (
     FOUNDATIONAL_MAX_SUGGESTED,
     FOUNDATIONAL_SUGGESTED,
@@ -633,15 +633,17 @@ class Engine:
         self._fi_real: Path = Path(os.path.realpath(self.fi_dir))  # realpath: a link loop does not raise
         self._clarify_answerable = False
         self.supervisor = supervisor or ProxySupervisor()
+        self._log = _quest_logger(self.quest_id, self.fi_dir)
         self.executor = make_executor(
             config.execution.sandbox,
             python_version=config.execution.python_version,
             docker_image=config.execution.docker_image,
             system_site_packages=config.execution.system_site_packages,
             shared_interpreter=config.execution.shared_interpreter,
+            docker_limits=DockerLimits.from_config(config.execution),
+            log=self._log,  # a container stopped by a limit says so in run.log
         )
         self.knowledge = Knowledge(config.knowledge)
-        self._log = _quest_logger(self.quest_id, self.fi_dir)
         self.audit = _audit_log.AuditLog(self.fi_dir / "audit.jsonl", self.quest_id, enabled=config.engine.audit_trace)
         self._audit_node = ""       # the node running now, for events written from inside it
         self._audit_pause = ""      # the pause kind a node is stopping for

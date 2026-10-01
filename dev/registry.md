@@ -309,7 +309,12 @@ same PR that adds, splits or renames one.
 ## Execution / sandboxing
 
 - `core/execution.py` — `Executor` protocol, `VenvExecutor` / `SharedInterpreterExecutor` / `DockerExecutor`,
-  `make_executor`.
+  `make_executor`. `DockerLimits` (from `execution.docker_memory_gb` / `docker_cpus` / `docker_max_processes`)
+  and the container's isolation (`DockerExecutor._create_kwargs`: no network, the limits, `cap_drop=ALL`,
+  `no-new-privileges`; limits Docker cannot apply left out), the container environment (`_env_for`: host system/Python paths dropped (`_HOST_ONLY_VARS`), quest paths
+  as `/work`, thread counts; `_to_container` for command arguments too), the
+  non-root user choice checked by a write in the quest folder (`_user_candidates` / `_resolve_user`, in `setup`;
+  `_warn_root_owned`), and the plain `[FI]` line for a run stopped by a cap (`_limit_note`).
 - `core/experiment_deps.py` — what a quest environment is given before a run: requested packages minus the quest's
   own files, the selected skills' `pip_requires`, library skills on `PYTHONPATH`, one-at-a-time install fallback,
   skill names pip cannot install explained as the skill, the repair note for what could not be installed. Also the one
