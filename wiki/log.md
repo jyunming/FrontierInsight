@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-01 — a changed design is disclosed and is a gap
+
+Updated by hand: [[explore-then-confirm|Explore then confirm]] (a design changed after the first run keeps the result below publication-ready unless a confirm run came after the last change, read from `.fi/phased.json`; FI's own methods paragraph on how the result was reached). Sources: core/disclosure.py, core/evidence.py, core/phased.py, core/engine.py.
+
 ## 2026-10-01 — research quests explore first, then confirm once
 
 Updated by hand: [[explore-then-confirm|Explore then confirm]] (on by default under `rigor_profile: research`, an explicit `phased: false` kept and said; older research quests go on as they began; `not_applicable` for a quest with no experiment of its own, rows held back put back; the plan's cost line; the interview default follows what the result is for; the stale "YAML only" and `.fi/phased/original/` statements corrected). Sources: core/config.py, core/phased.py, core/engine.py, core/interview.py, core/plan.py, core/plan_settings.py.

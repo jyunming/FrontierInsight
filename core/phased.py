@@ -547,6 +547,15 @@ def _result_digest(result: Any) -> str:
     return _sha(json.dumps(result, sort_keys=True, default=str).encode("utf-8"))
 
 
+def _design_versions(quest_root: Path) -> int:
+    """How many versions of the design ``needs/DESIGN_HISTORY.json`` holds (0 when there is none or it cannot be read)."""
+    try:
+        history = json.loads((Path(quest_root) / "needs" / "DESIGN_HISTORY.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    return len(history) if isinstance(history, list) else 0
+
+
 def enter_confirm(quest_root: Path, *, explore_result: Any, frozen_sha256: str | None, stride: int,
                   replicates: int, explore_runs: int) -> tuple[dict[str, Any], list[str]]:
     """End exploration: record what it produced, choose the confirm seed base, and (``held_back_data``) put the held-back
@@ -573,7 +582,10 @@ def enter_confirm(quest_root: Path, *, explore_result: Any, frozen_sha256: str |
     record.update(stage=CONFIRM, confirm_started_at=_now(), confirm_seed_base=base, seed_stride=max(1, int(stride)),
                   frozen_sha256=frozen_sha256, explore_runs=max(int(explore_runs), int(record.get("explore_runs") or 0)),
                   explore_result_sha256=_result_digest(explore_result) if explore_result else None,
-                  explore_result=explore_result, confirm_executions=0, confirm_run_result_sha256=None)
+                  explore_result=explore_result, confirm_executions=0, confirm_run_result_sha256=None,
+                  # How many versions of the design there were when exploration ended: a later one was made after the
+                  # confirm run began, which then no longer confirms it (core/disclosure.py).
+                  design_revisions_at_confirm=_design_versions(quest_root))
     # The stage is saved before the held-back part replaces exploration's: a start after a stop in between gives the
     # run the held-back part (``prepare`` in the confirm stage), never exploration's part again as new data.
     _save(quest_root, record)

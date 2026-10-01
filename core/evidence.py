@@ -17,8 +17,9 @@ checks behind it prove:
 * ``statistically_adequate`` — and every headline metric has a declared estimator matched to its data, the contrasts carry
   engine-computed p-values, and every precision target was reached;
 * ``publication_ready`` — and the review accepted the paper with no must-fix finding, the protocol was not amended after the
-  results were seen, and the evidence gate, the design methodology audit and the claim check each left a receipt that says it
-  passed (core/receipts.py; a missing one is a gap).
+  results were seen, a design revised after the experiment had run was confirmed by a run on data or seeds never seen
+  after its last change (core/disclosure.py), and the evidence gate, the design methodology audit and the claim check
+  each left a receipt that says it passed (core/receipts.py; a missing one is a gap).
 
 ``gaps`` lists, one sentence each, what stands between the quest and the next level. This module reads the quest's records and
 the final state; it needs no model.
@@ -31,6 +32,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import disclosure as _disclosure
 from . import frozen_protocol as _frozen
 from . import optimise as _optimise
 from . import optimum_check as _optimum_check
@@ -99,9 +101,10 @@ INFO: dict[str, dict[str, Any]] = {
     "publication_ready": {
         "assurance_claim": (
             "The review accepted the paper with no must-fix finding, the protocol was not amended after the results were "
-            "seen, and the evidence gate, the design methodology audit and the claim check each ran and passed, the claim "
-            "check on the final draft (each left a record saying so; a check that is missing, was turned off or could not "
-            "judge is not a pass)."
+            "seen, a design revised after the experiment had run was confirmed by a run on data or seeds never seen "
+            "after its last change, and the evidence gate, the design methodology audit and the claim check each ran "
+            "and passed, the claim check on the final draft (each left a record saying so; a check that is missing, was "
+            "turned off or could not judge is not a pass)."
         ),
         "known_blind_spots": ["The review is a model's opinion (and a person's decision when one was asked for); it does not re-run anything."],
         "artifacts": ["needs/DESIGN_HISTORY.json", "paper/review.json", "needs/receipts/evidence_gate.json",
@@ -557,6 +560,13 @@ def assess(
     phased_gap = _PHASED_GAPS.get(str(settings.get("phased") or ""))
     if phased_gap:
         ready_gaps.append(phased_gap)
+    else:
+        # A design revised after the experiment had run keeps the numbers exploratory unless a confirm run on data or
+        # seeds never seen came after the last change: read from the records (.fi/phased.json), not the setting.
+        revised = _disclosure.unconfirmed_gap(quest_root, no_simulation=bool(state.get("no_simulation_resolved")),
+                                              survey=bool(state.get("survey_mode_resolved")))
+        if revised:
+            ready_gaps.append(revised)
     # Under rigor_profile: research the hash-chained trace is what the quest's decisions are audited from: missing, or
     # no longer checking out, the result cannot be shown to have come about as its records say.
     if settings.get("rigor_profile") == "research":
