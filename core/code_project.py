@@ -450,7 +450,7 @@ def _readme(code_dir: Path, *, title: str, question: str, study: dict[str, Any] 
                   "scipy or Optuna method runs only when that package is installed)."]
     lines += ["- `run.py`: the one command that runs it all.",
               "- `requirements.txt`: the packages it needs, with the versions FI used.",
-              "- `CHANGELOG.md`: what changed each time the code was changed, and why."]
+              "- `CHANGELOG.md`: what changed each time the code was changed, why, and whether the results changed."]
     if study or not two and (code_dir / _split_run.SIMULATE_NAME).is_file():
         lines += ["- `study.json`: the settings `run.py` uses (from the plan's frozen protocol)."]
     lines += ["", "## Changes and older versions", "",
@@ -619,12 +619,22 @@ def _git(code_dir: Path, *args: str) -> Any:
     )
 
 
-def record_change(quest_root: Path, note: str, *, log: Any = None) -> bool:
+def record_change(quest_root: Path, note: str, *, category: str = "changed", results: str | None = None,
+                  undo_pending: str | None = None, log: Any = None) -> bool:
     """One commit in ``code/``'s own git history, and one entry in ``code/CHANGELOG.md``, when the folder changed since
-    the last one (your own edits included). Returns whether it recorded a change. Best effort; without git it says so."""
+    the last one (your own edits included). Returns whether it made a commit (a change to CHANGELOG.md alone is
+    committed with no entry about itself). Best effort; without git it says so.
+
+    ``category`` is the kind of change (:data:`core.changelog.CATEGORIES`), decided by the step that made it; a change
+    to ``README.md`` alone is always ``tidied``. ``results`` is the entry's "Did the results change" line when it is
+    known now (:mod:`core.changelog`); without it the line says "not measured yet" until :func:`fill_pending`.
+    ``undo_pending``: this change puts back a version that ran before, so every earlier entry still waiting for its run
+    says it was not measured, and why."""
     import shutil
     import subprocess
     import time
+
+    from . import changelog as _changelog
 
     code_dir = Path(quest_root) / "code"
     if not code_dir.is_dir():
@@ -649,15 +659,37 @@ def record_change(quest_root: Path, note: str, *, log: Any = None) -> bool:
         _git(code_dir, "add", "-A")
         changed = _git(code_dir, "diff", "--cached", "--quiet").returncode
         if changed != 1:
-            if changed != 0 and log is not None:
-                log.warning("[code] git could not compare code/ with its last version (code %s)", changed)
+            if changed != 0:
+                if log is not None:
+                    log.warning("[code] git could not compare code/ with its last version (code %s)", changed)
+            elif undo_pending:
+                fill_pending(quest_root, _changelog.not_measured(undo_pending), together=False, log=log)
             return False
         files = _git(code_dir, "diff", "--cached", "--name-status").stdout.split("\n")
+        changed_files = [ln.split("\t")[-1].strip() for ln in files if ln.strip() and "CHANGELOG.md" not in ln]
+        if not changed_files:
+            # Only CHANGELOG.md (a person's note in it, or a fill-in that could not be committed): committed as it is,
+            # with no entry about itself.
+            done = _git(code_dir, "commit", "-q", "-m", "CHANGELOG.md")
+            if done.returncode != 0:
+                if log is not None:
+                    log.warning("[code] could not commit code/CHANGELOG.md: %s", (done.stderr or "").strip()[-200:])
+                return False
+            if undo_pending:
+                fill_pending(quest_root, _changelog.not_measured(undo_pending), together=False, log=log)
+            return True  # a new commit (of the same code): whoever asked reads the commit again
         names = ", ".join(ln.split("\t", 1)[-1].strip() for ln in files if ln.strip() and "CHANGELOG.md" not in ln)
-        entry = f"## {time.strftime('%Y-%m-%d %H:%M')} - {note}\n\nFiles: {names or 'none'}\n\n"
+        kind = _changelog.category(category, log=log)
+        line = results if results is not None else _changelog.PENDING
+        if _changelog.documentation_only(changed_files):
+            kind, line = "tidied", _changelog.documentation_line(changed_files)
+        entry = (f"{_changelog.heading(time.strftime('%Y-%m-%d %H:%M'), kind, note)}\n\n"
+                 f"Files: {names or 'none'}\n\n{line}\n\n")
         changelog = code_dir / "CHANGELOG.md"
         before = changelog.read_bytes() if changelog.is_file() else None
-        head = before.decode("utf-8") if before is not None else "# What changed in this code\n\n"
+        head = before.decode("utf-8") if before is not None else _changelog.HEADER
+        if undo_pending:
+            head = head.replace(_changelog.PENDING, _changelog.not_measured(undo_pending))
         changelog.write_bytes((head + entry).encode("utf-8"))
         _git(code_dir, "add", "-A")
         done = _git(code_dir, "commit", "-q", "-m", note)
@@ -685,13 +717,15 @@ def record_note(quest_root: Path, note: str, *, log: Any = None) -> bool:
     import subprocess
     import time
 
+    from . import changelog as _changelog
+
     code_dir = Path(quest_root) / "code"
     if not (code_dir / ".git").exists() or shutil.which("git") is None:
         return False
     changelog = code_dir / "CHANGELOG.md"
     try:
-        head_text = changelog.read_bytes().decode("utf-8") if changelog.is_file() else "# What changed in this code\n\n"
-        changelog.write_bytes((head_text + f"## {time.strftime('%Y-%m-%d %H:%M')} - {note}\n\n").encode("utf-8"))
+        head_text = changelog.read_bytes().decode("utf-8") if changelog.is_file() else _changelog.HEADER
+        changelog.write_bytes((head_text + f"## {time.strftime('%Y-%m-%d %H:%M')} - Note: {note}\n\n").encode("utf-8"))
     except OSError as exc:
         if log is not None:
             log.warning("[code] could not add a note to code/CHANGELOG.md: %s", exc)
@@ -704,6 +738,56 @@ def record_note(quest_root: Path, note: str, *, log: Any = None) -> bool:
             log.warning("[code] could not record the note in code/'s history: %s", exc)
         return False
     return done.returncode == 0
+
+
+def fill_pending(quest_root: Path, line: str, *, together: bool = True, log: Any = None) -> int:
+    """Put ``line`` (a "Did the results change" line, :mod:`core.changelog`) in place of every entry of
+    ``code/CHANGELOG.md`` still waiting for its run, and commit only that file. With ``together``, an entry measured with
+    others by the same run says so. Returns how many entries were filled; best effort, never raises."""
+    import shutil
+    import subprocess
+
+    from . import changelog as _changelog
+
+    code_dir = Path(quest_root) / "code"
+    changelog = code_dir / "CHANGELOG.md"
+    if not changelog.is_file() or not (code_dir / ".git").exists() or shutil.which("git") is None:
+        return 0
+    before: bytes | None = None
+    try:
+        before = changelog.read_bytes()
+        text = before.decode("utf-8")
+        count = text.count(_changelog.PENDING)
+        if not count:
+            return 0
+        filled = _changelog.together(line, count - 1) if together else line
+        changelog.write_bytes(text.replace(_changelog.PENDING, filled).encode("utf-8"))
+        # Only CHANGELOG.md is committed: anything else changed in code/ is left for the next recorded change.
+        _git(code_dir, "add", "--", "CHANGELOG.md")
+        done = _git(code_dir, "commit", "-q", "-m", "CHANGELOG: whether the results changed, from the run that followed",
+                    "--", "CHANGELOG.md")
+        if done.returncode != 0:
+            changelog.write_bytes(before)
+            _git(code_dir, "reset", "-q", "--", "CHANGELOG.md")
+            if log is not None:
+                log.warning("[code] could not record in code/CHANGELOG.md whether the results changed: %s",
+                            (done.stderr or "").strip()[-200:])
+            return 0
+        return count
+    except (OSError, UnicodeDecodeError, subprocess.SubprocessError) as exc:
+        # Put the file back as it was committed: an uncommitted CHANGELOG.md would read as a change to the code.
+        if before is not None:
+            try:
+                changelog.write_bytes(before)
+            except OSError:
+                pass
+            try:
+                _git(code_dir, "reset", "-q", "--", "CHANGELOG.md")
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if log is not None:
+            log.warning("[code] could not record in code/CHANGELOG.md whether the results changed: %s", exc)
+        return 0
 
 
 def head(quest_root: Path) -> tuple[str | None, bool | None]:

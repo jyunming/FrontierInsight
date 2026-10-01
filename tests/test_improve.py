@@ -314,7 +314,18 @@ async def test_a_round_that_makes_one_check_worse_is_not_kept_and_only_warns_by_
     kept = [r["improve"]["kept"] for r in cr.history(root)[1:]]
     assert kept == [False, True]
     if HAS_GIT:
-        assert "improve round 1 not kept (it made no bias added worse by more than the tolerance)" in _changelog(engine)
+        text = _changelog(engine)
+        assert "improve round 1 not kept (it made no bias added worse by more than the tolerance)" in text
+        # A round is a change to the computation; one not kept says what its checks measured, and was never run in full.
+        entries = text.split("\n## ")
+        round_1 = next(e for e in entries if "Changed: improve round 1: " in e)
+        assert "Did the results change: not measured: this version was not kept, so the study's results were never" in round_1
+        assert "no bias added: from " in round_1
+        back = next(e for e in entries if "Changed: improve round 1 not kept" in e)
+        assert "Did the results change: no: this puts back the first version, which a full run already measured." in back
+        # The version kept waits for the full run after the loop.
+        round_2 = next(e for e in entries if "Changed: improve round 2: " in e)
+        assert "Did the results change: not measured yet" in round_2
 
 
 @pytest.mark.asyncio
@@ -580,6 +591,11 @@ async def test_a_kept_version_that_fails_its_full_run_gives_way_to_the_first_ver
     assert out["improve_rerun"] is True and out["improve_fell_back"] is True and out["exec_reflect_iter"] == 0
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SIM
     assert "the first version is back and runs once more" in _log(engine)
+    if HAS_GIT:
+        # The kept round never produced results: its entry says it was undone, and nothing waits for a run any more.
+        text = _changelog(engine)
+        assert "Did the results change: not measured yet" not in text
+        assert "Did the results change: not measured: undone: this version's full run produced no result" in text
     # If the first version fails too, the quest goes on: never a third run, even when the record on disk lost the mark
     # (the quest's state holds it too).
     record = improve.load(engine.quest_root)

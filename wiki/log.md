@@ -56,3 +56,10 @@ Sources: core/optimum_check.py, core/optimise.py, core/evidence.py, core/optimis
 Pages updated: [[pauses|Pauses]] (before an accept every interface shows what the result does not guarantee and its main gaps and asks one question; the answer is recorded; "no" does not accept), [[how-fi-judges-correctness|How FI judges correctness]] (an accept no person made stays one level below publication ready).
 
 Sources: core/acceptance.py, core/evidence.py, core/engine.py, core/audit_log.py, core/todo.py, core/vscode_bridge.py, launch.py, web/server.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.
+
+
+## 2026-09-30 — CHANGELOG kinds of change and "Did the results change"
+
+Pages updated: [[code-project-and-run-data|The code project and run data]] (each `code/CHANGELOG.md` entry is Added / Changed / Fixed / Tidied, decided by the step that made it; each has a line saying whether the results changed, "not measured yet" until a run of that code finishes with results).
+
+Sources: core/changelog.py, core/code_project.py, core/criteria.py, core/engine.py.

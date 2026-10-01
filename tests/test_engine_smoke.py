@@ -202,6 +202,18 @@ async def test_engine_runs_with_fake_llm(smoke_config: Config, monkeypatch: pyte
     assert artifacts.figures_dir is not None
     assert (artifacts.figures_dir / "result.png").exists()
     assert artifacts.raw_state.get("review", {}).get("verdict") == "accept"
+    import shutil
+
+    if shutil.which("git") is not None:
+        # code/CHANGELOG.md through the real run: the first code is "Added", and the run that followed filled in whether
+        # the results changed (nothing is left waiting: the versions pinned into requirements.txt are only "Tidied").
+        from core import changelog, criteria
+
+        text = (engine.quest_root / "code" / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert " - Added: code written" in text, text
+        assert changelog.PENDING not in text, text
+        assert "Did the results change: not compared: no earlier run's results are on record." in text, text
+        assert any(r.get("result_digest") for r in criteria.history(engine.quest_root))
 
 
 @pytest.mark.asyncio

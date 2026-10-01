@@ -73,6 +73,7 @@ from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
 from . import code_layout as _code_layout
+from . import changelog as _changelog
 from . import code_project as _code_project
 from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
@@ -7428,13 +7429,16 @@ class Engine:
             # With the model's package, the labels go in it: a package written again this pass runs its trials again anyway.
             if (not sim_kept or package_written) and await self._label_equations(state) == code_path:
                 code = code_path.read_text(encoding="utf-8")  # a one-script quest: the labelled script is the one that runs
+        # The kind of change for code/CHANGELOG.md, from what this step knows (core/changelog.py).
         if extend:
-            note = "added what a refine asked for: " + "; ".join(extend)[:200]
+            note, kind = "added what a refine asked for: " + "; ".join(extend)[:200], "added"
+        elif rerun_for:
+            note, kind = f"what the review found wrong in {rerun_for} (a number the run computes)"[:300], "fixed"
         elif int(state.get("iteration", 0) or 0) > 0:
-            note = f"revised after review (round {int(state.get('iteration', 0) or 0)})"
+            note, kind = f"revised after review (round {int(state.get('iteration', 0) or 0)})", "changed"
         else:
-            note = "code written"
-        await self._refresh_code_project(state, deps, note)
+            note, kind = "code written", "added"
+        await self._refresh_code_project(state, deps, note, category=kind)
         from core import number_provenance
 
         out: QuestState = {**_FRESH_SCRIPT, "code": code, "deps": deps, "refine_extend": [], "extend_missed": []}
@@ -7450,9 +7454,11 @@ class Engine:
             out["extend_check"], out["extend_unreported"] = {}, []
         return out
 
-    async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "") -> None:
+    async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "", *,
+                                    category: str = "changed") -> None:
         """Keep ``code/`` a project that runs on its own (README, requirements, run.py) and, with a ``note``, record
-        what changed in its history and CHANGELOG.md; never stops a quest."""
+        what changed in its history and CHANGELOG.md (as ``category``: added / changed / fixed / tidied); never stops
+        a quest."""
         try:
             idea = state.get("chosen_idea") if isinstance(state.get("chosen_idea"), dict) else {}
             question = str(idea.get("question") or idea.get("title") or state.get("topic") or "")[:500]
@@ -7468,7 +7474,8 @@ class Engine:
                 readme_files=_code_layout.readme_lines(package) if package else None,
             )
             if note:
-                await asyncio.to_thread(_code_project.record_change, self.quest_root, note, log=self._log)
+                await asyncio.to_thread(_code_project.record_change, self.quest_root, note, category=category,
+                                        log=self._log)
         except Exception as exc:  # noqa: BLE001 -- these files are a convenience, not part of the result
             self._log.warning("[code] could not update the runnable project in code/: %s", exc)
 
@@ -9221,11 +9228,15 @@ class Engine:
         )
         return new_code  # not reached: the pause exits the run
 
-    async def _record_criteria(self, state: QuestState, *, attempt: str | None = None) -> None:
+    async def _record_criteria(self, state: QuestState, *, attempt: str | None = None, result: Any = None,
+                               repaired: bool = False) -> None:
         """Compute each of the frozen protocol's criteria (core/criteria.py) from what FI measured in this run, and append
         a row to ``.fi/criteria_history.jsonl`` with the commit of ``code/`` that ran. Numbers FI measured only: the oracle
         gate's verdicts (a value the script's own ``oracle()`` gave is shown, not counted) and FI's own record of the
-        trials; never the script's results, and no run of its own. Records, decides nothing, and never stops a quest."""
+        trials; never the script's results, and no run of its own. Records, decides nothing, and never stops a quest.
+        ``result``: the study's results when the run produced them; the entries of code/CHANGELOG.md waiting for a run
+        then say whether the results changed (core/changelog.py). ``repaired``: FI repaired the script since it was last
+        recorded (a crash fix, the check against known answers), so an unrecorded change is a fix."""
         try:
             frozen = _frozen.load(self.quest_root)
             protocol = _frozen.protocol_of(self.quest_root) or self._draft_protocol(state)
@@ -9251,16 +9262,23 @@ class Engine:
             if changed:
                 # A repair rewrote the code after it was recorded (the check against known answers, or a person): the
                 # row names the commit of the code that actually ran.
-                if await asyncio.to_thread(_code_project.record_change, self.quest_root,
-                                           "the code as it ran (changed since it was last recorded)", log=self._log):
+                if await asyncio.to_thread(
+                        _code_project.record_change, self.quest_root,
+                        "the code as it ran (changed since it was last recorded)",
+                        category="fixed" if repaired else "changed", log=self._log):
                     commit, changed = await asyncio.to_thread(_code_project.head, self.quest_root)
+            digest = _improve.headline_digest(result)
             row = _criteria.record(
                 self.quest_root, run=_frozen.run_id(self.quest_root), code_commit=commit, results=results,
                 code_changed=changed, protocol_version=int(frozen.get("version", 1) or 1) if frozen else None,
                 protocol_sha256=str(frozen.get("sha256")) if frozen else None,
                 protocol_problem=str(frozen.get("problem") or "") or None if frozen else None,
-                attempt=attempt,
+                attempt=attempt, result_digest=digest or None,
             )
+            if digest:
+                # The changes this run measured: their "Did the results change" line, against the last run with results.
+                line = _changelog.run_line(_criteria.history(self.quest_root), row)
+                await asyncio.to_thread(_code_project.fill_pending, self.quest_root, line, log=self._log)
             line = _criteria.summary_line(results)
             if results or self.__dict__.get("_said_no_criteria"):
                 self._log.info("[criteria] run %s: %s", row["n"], line)
@@ -9367,7 +9385,10 @@ class Engine:
         record.update(stopped=_improve.STOP_CUT_SHORT, ended=_improve._now())
         self._improve_save(record)
         _code_project.record_change(self.quest_root, "improve: the loop was cut short; back to the version the last "
-                                    "full run used", log=self._log)
+                                    "full run used", category="changed",
+                                    results=_changelog.put_back("the version the last full run used"),
+                                    undo_pending="undone before a run finished (the improve loop was cut short)",
+                                    log=self._log)
         self._log.warning("[improve] a loop cut short left a changed version in code/; the version the last full run "
                           "used is back before the rerun")
 
@@ -9447,7 +9468,9 @@ class Engine:
         self._improve_save(record)
         await asyncio.to_thread(
             _code_project.record_change, self.quest_root,
-            "improve: the loop was cut short; back to the version the last full run used", log=self._log)
+            "improve: the loop was cut short; back to the version the last full run used", category="changed",
+            results=_changelog.put_back("the version the last full run used"),
+            undo_pending="undone before a run finished (the improve loop was cut short)", log=self._log)
         self._log.warning("[improve] an earlier improve loop was cut short: the version the last full run used, and FI's "
                           "record of its trials, are back before the loop starts again (%d round(s) stay spent)", spent)
         return spent
@@ -9617,7 +9640,11 @@ class Engine:
                         await asyncio.to_thread(
                             _code_project.record_change, root,
                             f"improve round {used} aborted ({edit.why}): its run changed {shown}, which FI judges the "
-                            "code by (the change it ran is committed here; what the run wrote is not)", log=self._log)
+                            "code by (the change it ran is committed here; what the run wrote is not)",
+                            category="changed",
+                            results=_changelog.not_measured("this round's run changed what FI judges the code by, so "
+                                                            "nothing it measured is believed; this version was not kept"),
+                            log=self._log)
                     _improve.put_back(root, saved)
                     _improve.restore(root, best["files"])
                     # The loop's own copies, from memory: the run may have changed them too.
@@ -9636,10 +9663,11 @@ class Engine:
                     self._audit("check_result", check="improve_round", status="fail",
                                 summary=f"round {used} aborted: its run changed {shown}"[:300])
                     if history_ok:
+                        back = f"round {best['round']}'s version" if best["round"] else "the first version"
                         await asyncio.to_thread(
-                            _code_project.record_change, root,
-                            f"improve round {used} aborted: back to "
-                            + (f"round {best['round']}'s version" if best["round"] else "the first version"), log=self._log)
+                            _code_project.record_change, root, f"improve round {used} aborted: back to {back}",
+                            category="changed", results=_changelog.put_back(back, ran_in_full=not best["round"]),
+                            log=self._log)
                     else:
                         self._log.warning("[improve] the run replaced code/'s git history (code/.git); FI makes no commit "
                                           "into it")
@@ -9652,11 +9680,13 @@ class Engine:
                 entry.update(values=values, better=verdict["better"], worse=verdict["worse"], broken=verdict["broken"])
                 if problems:
                     entry["problems"] = problems[:5]
-                # The commit of the version that ran, named with its values.
+                # The commit of the version that ran, named with its values. A version kept waits for the full run after
+                # the loop to say whether the study's results changed; one not kept never runs in full.
                 await asyncio.to_thread(
                     _code_project.record_change, root,
                     f"improve round {used}: {edit.why} | {values} | "
-                    + ("kept as the best version so far" if kept else "not kept"), log=self._log)
+                    + ("kept as the best version so far" if kept else "not kept"), category="changed",
+                    results=None if kept else _changelog.round_not_kept(best["rows"], rows), log=self._log)
                 commit, _dirty = await asyncio.to_thread(_code_project.head, root)
                 frozen = _frozen.load(root)
                 _criteria.record(
@@ -9687,7 +9717,8 @@ class Engine:
                     _improve.restore(root, best["files"])
                     await asyncio.to_thread(
                         _code_project.record_change, root,
-                        f"improve round {used} not kept ({reason}): back to {back}", log=self._log)
+                        f"improve round {used} not kept ({reason}): back to {back}", category="changed",
+                        results=_changelog.put_back(back, ran_in_full=not best["round"]), log=self._log)
                     if verdict["worse"]:
                         self._log.warning(
                             "[improve] round %d made %s worse by more than the tolerance (%s); %s is kept%s", used,
@@ -9796,7 +9827,10 @@ class Engine:
                                   "back and runs once more")
                 await asyncio.to_thread(
                     _code_project.record_change, root,
-                    "improve: the kept version produced no result in its full run; the first version is back", log=self._log)
+                    "improve: the kept version produced no result in its full run; the first version is back",
+                    category="changed", results=_changelog.put_back("the first version, which the last full run used"),
+                    undo_pending="undone: this version's full run produced no result, so the first version was put "
+                                 "back", log=self._log)
                 return {**self._improve_fresh_run(), "improve_rerun": True, "improve_fell_back": True}
         before = record.get("headline_before") if isinstance(record.get("headline_before"), dict) else {}
         after = _improve.headline_digest(state.get("result_json"))
@@ -10959,8 +10993,12 @@ class Engine:
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
-        if (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (
-                self._package_snapshot() != package_before_gate):
+        # FI's own repair: of either script or of the model's package (a script found changed on disk below may be a
+        # person's edit during a stop, so it is not counted here).
+        gate_rewrote = (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (
+            self._package_snapshot() != package_before_gate)
+        gate_repaired = oracle_code is not None or gate_rewrote
+        if gate_rewrote:
             # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
             self._check_equation_labels(state)
             self._check_code_layout(state)
@@ -11558,7 +11596,9 @@ class Engine:
         self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
-        await self._record_criteria(state, attempt=run_record_id)
+        await self._record_criteria(
+            state, attempt=run_record_id, result=patch["result_json"] if run_accepted else None,
+            repaired=gate_repaired or int(state.get("exec_reflect_iter", 0) or 0) > 0)
         # Only populate ``result_json_replicates`` when replication
         # actually ran AND produced more than the primary entry. This
         # keeps the field absent on default single-seed quests so
@@ -12551,7 +12591,8 @@ class Engine:
         self._log.info("[analyze] interpreting results")
         await self._refresh_code_project(
             state, list(state.get("deps") or []),
-            "changes made after it was written (a crash fix, or your own edits)",
+            "changes since the code was last recorded (the project files FI keeps, or your own edits)",
+            category="changed",
         )
         self._ask_about_edited_project_files()
         exec_result = state.get("exec_result") or {}
