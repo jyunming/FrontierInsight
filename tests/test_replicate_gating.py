@@ -5,10 +5,10 @@ flat-JSON fixtures could not:
 
 * Replicates ran BEFORE the plausibility gate, so every futile repair
   iteration paid for three runs instead of one.
-* A deterministic experiment was replicated in full. Honouring
-  ``FI_REPLICATE_SEED`` is not the same as consuming randomness: the observed
-  script seeded numpy and then integrated an ODE, so all three runs were byte
-  identical and the only possible aggregate was ``std=0`` everywhere.
+* A deterministic experiment was replicated in full. A script with no source
+  of random numbers at all now stops after two agreeing seeds. One that can
+  draw random numbers runs every seed: two of its seeds agreeing (a yes/no
+  outcome, a rare event) does not prove the third will.
 * The aggregator scanned top-level keys only, so a crossed design
   (``by_h`` x integrator) aggregated **nothing** -- reported as
   ``0 numeric keys``, which reads like a broken aggregator.
@@ -147,15 +147,19 @@ async def test_replicates_run_when_no_repair_attempt_is_left(tmp_path: Path) -> 
     assert patch["exec_patch_pending"] is False
 
 
-# --- determinism: stop once two seeds agree ----------------------------------
+# --- determinism: only a script with no random source stops after two seeds --
 
 @pytest.mark.asyncio
-async def test_identical_seeds_stop_replication_early(tmp_path: Path) -> None:
+async def test_identical_seeds_of_a_script_that_can_draw_random_numbers_run_every_seed(tmp_path: Path) -> None:
+    """Changed expectation: this used to stop after two seeds. FAKE_SEEDED_SCRIPT reads
+    FI_REPLICATE_SEED, so it counts as able to draw random numbers, and two seeds agreeing
+    does not prove it cannot differ on the next one: every configured seed runs. The flag
+    still says every seed agreed."""
     eng = _engine(tmp_path, replicates=5)
     eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
         return_value=_er(_rj('{"rmse": 0.25}')))
     patch = await eng._node_execute({"deps": []})
-    assert eng.executor.execute.await_count == 2, "should stop after seeds 0 and 1"
+    assert eng.executor.execute.await_count == 5, "every configured seed runs"
     assert patch["result_json_deterministic"] is True
 
 
@@ -176,14 +180,51 @@ async def test_differing_seeds_replicate_in_full(tmp_path: Path) -> None:
 async def test_determinism_is_judged_on_values_not_the_seed_tag(
     tmp_path: Path,
 ) -> None:
-    """``_seed`` differs by construction; it must not mask agreement."""
+    """``_seed`` differs by construction; it must not mask agreement. (Changed expectation:
+    the seeds no longer stop at two for a script that reads its seed.)"""
     eng = _engine(tmp_path, replicates=4)
     eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
         return_value=_er(_rj('{"a": {"b": 1.0}}')))
     patch = await eng._node_execute({"deps": []})
-    assert eng.executor.execute.await_count == 2
+    assert eng.executor.execute.await_count == 4
     seeds = [r["_seed"] for r in patch["result_json_replicates"]]
-    assert seeds == [0, 1]
+    assert seeds == [0, 1, 2, 3]
+    assert patch["result_json_deterministic"] is True
+
+
+@pytest.mark.asyncio
+async def test_two_equal_random_outcomes_do_not_stop_before_the_seed_that_differs(tmp_path: Path) -> None:
+    """The re-audit's counterexample. A script that draws random numbers can give the same
+    result on two seeds by chance (a Bernoulli outcome, a rare event, a count, a rounded
+    metric) and a different one on the third. Two identical results never prove that such a
+    script is deterministic, so every configured seed runs and the spread is reported."""
+    eng = _engine(tmp_path, replicates=3)
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"event": 0}')), _er(_rj('{"event": 0}')), _er(_rj('{"event": 1}')),
+    ])
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 3, "the third seed must run"
+    assert patch["result_json_deterministic"] is False
+    assert patch["result_json_replicate_seed_ignored"] is False
+    assert [r["event"] for r in patch["result_json_replicates"]] == [0, 0, 1]
+
+
+@pytest.mark.asyncio
+async def test_two_equal_outcomes_from_an_unseeded_generator_are_still_samples(tmp_path: Path) -> None:
+    """A script that never reads the seed but builds its generator without one draws new
+    numbers on every run: two runs agreeing is chance, not one run repeated."""
+    eng = _engine(tmp_path, replicates=3)
+    (eng.quest_root / "code" / "experiment.py").write_text(
+        "import numpy as np\nrng = np.random.default_rng()\nprint(int(rng.random() < 0.1))\n", encoding="utf-8")
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"event": 0}')), _er(_rj('{"event": 0}')), _er(_rj('{"event": 1}')),
+    ])
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 3
+    assert patch["result_json_replicate_seed_ignored"] is False
+    assert len(patch["result_json_replicates"]) == 3
 
 
 # --- aggregation: nested results ---------------------------------------------
@@ -323,7 +364,9 @@ async def test_identical_runs_of_a_seed_ignoring_script_are_not_replicates(
         return_value=_er(_rj('{"major_outbreak_probability": 0.667}')))
     patch = await eng._node_execute({"deps": []})
 
-    assert eng.executor.execute.await_count == 2, "one extra run settles it"
+    # Changed expectation (was 2): the script draws random numbers, so every seed runs before
+    # the runs are judged to be one run repeated.
+    assert eng.executor.execute.await_count == 3, "every configured seed runs"
     assert not patch.get("result_json_replicates"), "a repeated run is not replicates"
     assert patch["result_json_deterministic"] is False, "unreplicated, not deterministic"
     assert patch["result_json_replicate_seed_ignored"] is True
@@ -336,16 +379,18 @@ async def test_a_seeded_script_whose_runs_agree_is_still_deterministic(
     tmp_path: Path,
 ) -> None:
     """Do not weaken the honest case. A script that DOES read the seed and
-    still computes the same answer every time (integrating an ODE, say) keeps
-    exactly its previous behaviour."""
+    still computes the same answer every time (integrating an ODE, say) is
+    reported as every seed agreeing. Changed expectation: it now runs all five
+    seeds (it was stopped after two), because two agreeing seeds of a script
+    that can draw random numbers prove nothing about the third."""
     eng = _engine(tmp_path, replicates=5)
     eng.executor.execute = AsyncMock(  # type: ignore[method-assign]
         return_value=_er(_rj('{"rmse": 0.25}')))
     patch = await eng._node_execute({"deps": []})
 
-    assert eng.executor.execute.await_count == 2
+    assert eng.executor.execute.await_count == 5
     assert patch["result_json_deterministic"] is True
-    assert len(patch["result_json_replicates"]) == 2
+    assert len(patch["result_json_replicates"]) == 5
     assert patch["result_json_replicate_seed_ignored"] is False
 
 

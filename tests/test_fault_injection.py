@@ -102,13 +102,15 @@ async def test_a_script_that_names_but_discards_the_replicate_seed_is_no_longer_
     that hardcodes its seed from one that genuinely computes the same answer every time -- both merely mention the
     variable name. The runtime decision now also asks ``replicate_seed_reaches_rng``: does that value actually flow
     into a call that seeds a generator. It does not here (the RNG is seeded from a hardcoded constant instead), so
-    agreement between seeds 0 and 1 is now treated the same as "never reads the seed at all" -- one run repeated,
+    agreement between every seed is now treated the same as "never reads the seed at all" -- one run repeated,
     not evidence of determinism."""
     eng = _engine(tmp_path, replicates=5, script=SEED_NAMED_BUT_DISCARDED_SCRIPT)
     eng.executor.execute = AsyncMock(return_value=_er(_rj('{"rmse": 0.25}')))  # type: ignore[method-assign]
     patch = await eng._node_execute({"deps": []})
 
-    assert eng.executor.execute.await_count == 2, "one extra run settles it, same as before"
+    # Changed expectation (was 2): the script draws random numbers, so every configured seed runs before the
+    # runs are judged to be one run repeated.
+    assert eng.executor.execute.await_count == 5, "every configured seed runs"
     assert patch["result_json_deterministic"] is False, "no longer fooled: the seed never reaches a generator"
     assert patch["result_json_replicate_seed_ignored"] is True
     assert not patch.get("result_json_replicates"), "one run repeated is not replicates, same as the seed-truly-ignored case"
@@ -133,7 +135,9 @@ async def test_a_genuinely_seeded_script_is_still_called_deterministic(tmp_path:
 
     assert patch["result_json_deterministic"] is True
     assert patch["result_json_replicate_seed_ignored"] is False
-    assert len(patch["result_json_replicates"]) == 2
+    # Changed expectation (was 2): a seeded generator can agree on two seeds by chance, so all five run.
+    assert eng.executor.execute.await_count == 5
+    assert len(patch["result_json_replicates"]) == 5
 
 
 # --- P1-4: the self-critique checklist's report cap has no code behind it -----------------------------------------
