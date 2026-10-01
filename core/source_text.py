@@ -58,10 +58,12 @@ _INVISIBLE_IN_WORD_MIN = 3
 #: Unicode tag characters (U+E0000-U+E007F) spell ASCII no reader sees and a model may read ("ASCII smuggling").
 _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]+")
 
-#: The flag emoji of Scotland, England and Wales: a black flag, four to seven tag letters or digits (a region code
-#: such as "gbsct") and a cancel tag. Ordinary text; anything longer, or with spaces or capitals, still counts.
+#: The flag emoji of England, Scotland and Wales, the only standard ones built from tag characters: a black flag,
+#: the region code spelt in tag letters, and a cancel tag. Ordinary text; any other tag run still counts.
 _SUBDIVISION_FLAG = re.compile(
-    f"{chr(0x1F3F4)}[{chr(0xE0061)}-{chr(0xE007A)}{chr(0xE0030)}-{chr(0xE0039)}]{{4,7}}{chr(0xE007F)}")
+    chr(0x1F3F4) + "(?:"
+    + "|".join("".join(chr(0xE0000 + ord(c)) for c in code) for code in ("gbeng", "gbsct", "gbwls"))
+    + ")" + chr(0xE007F))
 
 #: Text a PDF drew in white or at a tiny size (core/pdf_text.py) counts from this many words: a white "A" labelling
 #: a dark figure panel is not hidden text.
@@ -78,7 +80,7 @@ _NOT_REPORTED = (r"(?<!were told to )(?<!was told to )(?<!were asked to )(?<!was
                  r"(?<!were instructed to )(?<!was instructed to )")
 #: An order that opens its sentence ("Ignore the instructions above."), not a clause of one ("if you installed with
 #: pip, ignore the instructions above").
-_OPENS = r"(?:^|(?<=[.!?:;]\s)|(?<=\n))(?:please\s+)?"
+_OPENS = (r"(?:^|(?<=[.!?:;]\s)|(?<=[.!?:;][\"')\]]\s)|(?<=[\"'(\[\u2022]))(?:please\s+)?")
 _AI = (r"(?:an?\s+)?(?:(?:ai\s+)?(?:large\s+)?language\s+model|ai\s+(?:assistant|model|system|reviewer|agent)|ai|"
        r"a\.i\.|llm|chatbot)")
 #: What follows the words for an AI model when a sentence speaks to one ("if you are an AI, ignore ...", "if you are a
@@ -359,7 +361,7 @@ def flag_and_record(
     ``reported`` (the engine's set for the quest) holds the sources already named, with what was found in each: a
     search that finds the same flagged paper again (cross_check searches once per finding) marks it in the prompt but
     does not record it twice. A pass that records itself even when clean (``record_clean``, the literature step)
-    names every flagged source it scanned, so each pass has its own whole record."""
+    names every flagged source it scanned; a source scanned on an earlier pass keeps that pass's record."""
     try:
         scanned, rows = flag_sources(items, content_of=content_of)
     except Exception as e:  # noqa: BLE001 -- a flag is a record; it never costs the quest its sources

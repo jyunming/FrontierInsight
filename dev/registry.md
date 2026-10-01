@@ -271,9 +271,9 @@ same PR that adds, splits or renames one.
   (tag characters, invisible characters inside words, a PDF's `hidden_text`); `flag_and_record` marks each source's
   metadata once per text (`source_text_scanned` / `source_text_flags`, read by `mark` for the prompt's
   `[flagged: ...]` tag), writes one `check_result` event (`check="source_text"`) and one run.log line per call,
-  naming the sources not already named with the same findings (`reported`; a literature pass names all of its own),
+  naming the sources not already named with the same findings (`reported`; a literature pass names every flagged source it scanned),
   and never raises or removes anything. `Engine._flag_sources` runs it in a thread for
-  the literature node (every pass, clean passes recorded as `ok`), `_node_pause_after_literature`, ideate,
+  the literature node (every pass; one that scanned and found nothing is recorded as `ok`), `_node_pause_after_literature`, ideate,
   cross_check and `_propose_criteria`. figures_read (image + caption pairs) is told in `agents/figures_read.md`
   instead of fenced; the foundational-works notes of write and review list titles outside a fence.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,

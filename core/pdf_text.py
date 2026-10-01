@@ -162,8 +162,13 @@ HIDDEN_SIZE_PT = 2.0
 #: A colour with every channel at least this (0-255) counts as white.
 _WHITE = 250
 #: A fill counts as a backdrop that white or invisible text can sit on only when it is clearly darker than white
-#: (some channel below this): a page-sized rectangle in 249 grey is a white page, not a panel.
+#: (its brightness below this, 0-255): a page-sized rectangle in 249 grey is a white page, and bright yellow under
+#: white text hides it as well as white does.
 _DARK = 200
+
+
+def _dark(r: float, g: float, b: float) -> bool:
+    return 0.299 * r + 0.587 * g + 0.114 * b < _DARK
 #: At most this many hidden passages are kept per PDF (each cut to 200 characters).
 _HIDDEN_MAX = 20
 
@@ -189,7 +194,7 @@ def _hidden_pymupdf(page: Any) -> list[str]:
     for d in page.get_drawings():
         fill = d.get("fill")
         opacity = d.get("fill_opacity")
-        if fill and min(fill) * 255 < _DARK and (1.0 if opacity is None else float(opacity)) > 0:
+        if fill and _dark(*(255 * c for c in fill[:3])) and (1.0 if opacity is None else float(opacity)) > 0:
             backdrops.append(tuple(d["rect"]))
     backdrops += [tuple(i["bbox"]) for i in page.get_image_info()]
     out: list[str] = []
@@ -231,6 +236,7 @@ def _hidden_pdfium(page: Any) -> list[str]:
     def area(box: tuple[float, float, float, float]) -> float:
         return abs((box[2] - box[0]) * (box[3] - box[1]))
     objects = list(page.get_objects(max_depth=1))
+    nested_image = None  # whether a form holds an image (a scan wrapped as one page-sized unit); read once, if asked
     backdrops: list[tuple[float, float, float, float]] = []
     for obj in objects:
         if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
@@ -238,13 +244,19 @@ def _hidden_pdfium(page: Any) -> list[str]:
         elif obj.type in (pdfium_c.FPDF_PAGEOBJ_PATH, pdfium_c.FPDF_PAGEOBJ_FORM):
             if obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:
                 # A form (an included figure): what it draws is not read here, so a figure-sized one counts as a
-                # backdrop; one as large as the page (a stamped or wrapped page) would hide everything, so it does not.
-                if area(tuple(obj.get_bounds())) < page_area / 2:
-                    backdrops.append(tuple(obj.get_bounds()))
+                # backdrop. One as large as the page (a stamped or wrapped page) would hide everything, so it counts
+                # only when the page holds an image inside a form: a scan wrapped whole, with its text layer on top.
+                if area(tuple(obj.get_bounds())) >= page_area / 2:
+                    if nested_image is None:
+                        nested_image = any(o.type == pdfium_c.FPDF_PAGEOBJ_IMAGE and getattr(o, "level", 0) > 0
+                                           for o in page.get_objects(max_depth=3))
+                    if not nested_image:
+                        continue
+                backdrops.append(tuple(obj.get_bounds()))
                 continue
             mode, stroke = ctypes.c_int(), ctypes.c_int()
             colour = colour_of(obj)
-            if (colour and min(colour[:3]) < _DARK and colour[3] > 0
+            if (colour and _dark(*colour[:3]) and colour[3] > 0
                     and pdfium_c.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value):
                 backdrops.append(tuple(obj.get_bounds()))
     out: list[str] = []
