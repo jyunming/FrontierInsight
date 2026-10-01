@@ -71,6 +71,8 @@ from tenacity import (
 )
 
 from .config import ProviderConfig
+from .proc_tree import _DESCENDANT_WAIT_S as _TREE_KILL_WAIT_S
+from .proc_tree import AsyncProcessTree, ProcessTree
 from .thinking_capture import add_thinking, as_text, note_declined, note_thinking, wanted as thinking_wanted
 
 _log = logging.getLogger("frontier_insight.provider")
@@ -1147,6 +1149,8 @@ class _ProxyHandle:
     port: int
     proc: subprocess.Popen[bytes]
     refcount: int = 0
+    # The proxy's process tree (``npx`` starts ``node``; ``poetry run`` starts ``python``): stopping it stops them all.
+    tree: ProcessTree | None = None
 
 
 @dataclass
@@ -1232,7 +1236,15 @@ class ProxySupervisor:
     @staticmethod
     def _terminate(handle: _ProxyHandle) -> None:
         """Blocking best-effort teardown of one proxy process. Run via
-        ``asyncio.to_thread`` so the up-to-5s wait never stalls the loop."""
+        ``asyncio.to_thread`` so the up-to-5s wait never stalls the loop.
+
+        A proxy started as a process tree is stopped with everything it
+        started, at once: a polite stop of the launcher alone (``npx``, a
+        ``.cmd`` shim on Windows) left the real server running and holding its
+        port."""
+        if handle.tree is not None and getattr(handle.tree, "real", False):
+            handle.tree.close()
+            return
         handle.proc.terminate()
         try:
             handle.proc.wait(timeout=5)
@@ -1288,13 +1300,14 @@ class ProxySupervisor:
             # stdout/stderr -> DEVNULL: the proxies are long-lived and
             # write enough log volume to fill an OS pipe buffer if we
             # left them as PIPE without draining. Drop them entirely.
-            proc = subprocess.Popen(
+            tree = ProcessTree(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 cwd=cwd,
                 env=env,
             )
+            proc = tree.proc
         except FileNotFoundError as e:
             raise RuntimeError(
                 f"proxy CLI {cmd[0]!r} not found on PATH. "
@@ -1306,14 +1319,10 @@ class ProxySupervisor:
         # If readiness times out, kill the orphan to avoid leaking proxies.
         try:
             _wait_for_openai_endpoint(port, timeout_s=60)
-        except Exception:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+        except BaseException:
+            tree.close()  # the proxy and everything it started
             raise
-        return _ProxyHandle(name=provider_name, port=port, proc=proc)
+        return _ProxyHandle(name=provider_name, port=port, proc=proc, tree=tree)
 
 
 def _free_port() -> int:
@@ -2197,6 +2206,8 @@ async def _run_cli(
     # The call's one try/finally starts here, before the images are written, so a failure anywhere after it (a full
     # disk while writing them, the prompt's encoding) still removes them.
     call_dir: str | None = None
+    tree: AsyncProcessTree | None = None
+    aborted = False
     try:
         if images:
             if spec.image_input == "stream_json":
@@ -2299,7 +2310,9 @@ async def _run_cli(
             at = len(argv) - 2 if spec.pass_prompt_via == "arg" else len(argv)
             argv[at:at] = [spec.cwd_flag, call_dir]
         try:
-            proc = await asyncio.create_subprocess_exec(
+            # A process tree (core/proc_tree.py): a timeout, a cancelled call or a failure stops the CLI together
+            # with every helper it started (codex and node-based CLIs start their own), not the CLI alone.
+            tree = await AsyncProcessTree.start(
                 *argv,
                 stdin=(
                     asyncio.subprocess.PIPE
@@ -2312,6 +2325,7 @@ async def _run_cli(
                 cwd=call_dir,
                 limit=_CLI_STREAM_LIMIT,
             )
+            proc = tree.proc
         except FileNotFoundError as e:
             raise RuntimeError(
                 f"CLI provider binary {argv[0]!r} not found on PATH. "
@@ -2334,6 +2348,7 @@ async def _run_cli(
                     heartbeat_cb=heartbeat_cb,
                     node=node,
                     usage_out=usage_out,
+                    tree=tree,
                 )
             # Legacy ``communicate()`` path for everything else
             # (codex_cli's ``last_message_file``, plus gemini_cli /
@@ -2346,6 +2361,7 @@ async def _run_cli(
             return await _collect_via_communicate(
                 proc, argv, spec, stdin_bytes, tmp_out_path, timeout_s,
                 heartbeat_cb=heartbeat_cb, node=node, usage_out=usage_out,
+                tree=tree,
             )
         except (RuntimeError, asyncio.TimeoutError) as exc:
             # The CLI's own log is in the call's home and goes with it: its errors go into the message first.
@@ -2353,17 +2369,26 @@ async def _run_cli(
             if note and exc.args and isinstance(exc.args[0], str):
                 exc.args = (f"{exc.args[0]}\n{spec.argv[0]}'s own log said: {note}", *exc.args[1:])
             raise
+        except asyncio.CancelledError:
+            aborted = True  # the CLI may have exited while a helper it started still holds its output pipe
+            raise
     finally:
-        if tmp_out_path is not None:
-            tmp_out_path.unlink(missing_ok=True)
-        for image_path in image_paths:
-            image_path.unlink(missing_ok=True)
-        if image_folder is not None:
-            shutil.rmtree(image_folder, ignore_errors=True)
-        if home_dir is not None:
-            _remove_call_dir(home_dir)
-        if call_dir is not None:
-            _remove_call_dir(call_dir)
+        try:
+            # First: a CLI still running (a cancelled call, an error) is stopped with its helpers and waited for,
+            # and on Windows anything it left running goes with the job. Its folders below are then not in use.
+            if tree is not None:
+                await tree.aclose(aborted=aborted)
+        finally:
+            if tmp_out_path is not None:
+                tmp_out_path.unlink(missing_ok=True)
+            for image_path in image_paths:
+                image_path.unlink(missing_ok=True)
+            if image_folder is not None:
+                shutil.rmtree(image_folder, ignore_errors=True)
+            if home_dir is not None:
+                _remove_call_dir(home_dir)
+            if call_dir is not None:
+                _remove_call_dir(call_dir)
 
 
 def _write_cli_home(home: Path, settings: dict[str, Any]) -> None:
@@ -2448,6 +2473,7 @@ async def _collect_via_communicate(
     heartbeat_cb: Callable[[dict[str, Any]], None] | None = None,
     node: str = "",
     usage_out: dict[str, Any] | None = None,
+    tree: AsyncProcessTree | None = None,
 ) -> str:
     """Legacy ``communicate()`` path. Two sub-cases:
 
@@ -2502,7 +2528,7 @@ async def _collect_via_communicate(
             )
         except asyncio.TimeoutError:
             elapsed = f"{timeout_s:g}s" if timeout_s >= 1 else f"{timeout_s * 1000:g}ms"
-            kill_clean = await _kill_and_reap(proc, spec.argv[0])
+            kill_clean = await _kill_and_reap(proc, spec.argv[0], tree)
             raise _CliTransientError(
                 f"{spec.argv[0]} exceeded {elapsed} wall-clock and was killed"
                 + ("" if kill_clean else " (post-kill wait timed out)")
@@ -2585,6 +2611,7 @@ async def _collect_via_streaming(
     heartbeat_cb: Callable[[dict[str, Any]], None] | None,
     node: str,
     usage_out: dict[str, Any] | None = None,
+    tree: AsyncProcessTree | None = None,
 ) -> str:
     """Read the child's stdout line-by-line with two independent
     timeouts (total + inactivity) and emit periodic heartbeats.
@@ -2786,7 +2813,7 @@ async def _collect_via_streaming(
         # inside ``finally`` so even if the caller cancels us mid-
         # watchdog the kill still runs.
         if watchdog_raised is not None:
-            await _kill_and_reap(proc, spec.argv[0])
+            await _kill_and_reap(proc, spec.argv[0], tree)
     if watchdog_raised is not None:
         raise watchdog_raised
     # Reader finished (EOF). Wait for the child to exit and check rc.
@@ -2810,7 +2837,7 @@ async def _collect_via_streaming(
         try:
             await asyncio.wait_for(proc.wait(), timeout=post_eof_reap_timeout_s)
         except asyncio.TimeoutError:
-            await _kill_and_reap(proc, spec.argv[0])
+            await _kill_and_reap(proc, spec.argv[0], tree)
         raise _CliWedgeError(f"{spec.argv[0]} printed {unreadable_line}; the answer could not be read whole")
     have_output = text_chars_total > 0 or bool(aggregated)
     try:
@@ -2825,7 +2852,7 @@ async def _collect_via_streaming(
                 "(killing lingering child best-effort)",
                 spec.argv[0], text_chars_total,
             )
-            await _kill_and_reap(proc, spec.argv[0])
+            await _kill_and_reap(proc, spec.argv[0], tree)
             # Skip the rc-based error check below — we never got rc.
             # An empty error_message and have_output=True means good.
             if error_message is not None:
@@ -2835,7 +2862,7 @@ async def _collect_via_streaming(
             _raise_if_cut_off(turns, spec)
             return _finalise_stream_content(aggregated, spec, usage_out, raw_result_lines)
         # No output AND no exit — genuinely stuck.
-        await _kill_and_reap(proc, spec.argv[0])
+        await _kill_and_reap(proc, spec.argv[0], tree)
         stderr_b = b""
         if proc.stderr is not None:
             try:
@@ -2950,11 +2977,25 @@ def _finalise_stream_content(
     return final
 
 
-async def _kill_and_reap(proc: asyncio.subprocess.Process, name: str) -> bool:
-    """Kill the child and wait up to 5 s for the OS to reap it. Returns
-    True iff the wait completed cleanly. Logs a warning otherwise — a
+async def _kill_and_reap(
+    proc: asyncio.subprocess.Process, name: str, tree: AsyncProcessTree | None = None,
+) -> bool:
+    """Kill the child and wait (5 s; 10 s with ``tree``) for the OS to reap it.
+    Returns True iff the wait completed cleanly. Logs a warning otherwise — a
     leaked child becomes a zombie on POSIX or holds an OS handle on
-    Windows until the parent exits."""
+    Windows until the parent exits.
+
+    With ``tree`` (how ``_run_cli`` starts every CLI) the whole process tree
+    goes: the CLI and every helper it started, waited for up to 10 s."""
+    if tree is not None:
+        if await tree.kill():
+            return True
+        _log.warning(
+            "CLI %s did not reap within %.0fs after SIGKILL; "
+            "process may be wedged in uninterruptible state",
+            name, _TREE_KILL_WAIT_S,
+        )
+        return False
     try:
         proc.kill()
     except ProcessLookupError:

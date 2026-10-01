@@ -30,10 +30,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Protocol
 
+from core.fi_home import fi_home
+from core.proc_tree import AsyncProcessTree
+
 if TYPE_CHECKING:
     from core.skills.mounts import SkillMount
 
 _log = logging.getLogger("frontier_insight.execution")
+
+# How long ``VenvExecutor.execute`` still reads a timed-out command's output after stopping it.
+_POST_KILL_READ_S = 30.0
 
 
 @dataclass
@@ -206,22 +212,48 @@ class VenvExecutor:
         env: dict[str, str] | None = None,
     ) -> ExecutionResult:
         start = time.monotonic()
-        proc = await asyncio.create_subprocess_exec(
+        # The script runs as a process tree (core/proc_tree.py): a timeout or a cancelled quest stops it together
+        # with every process it started (a subprocess, a multiprocessing pool, the real interpreter behind a venv's
+        # python.exe launcher on Windows), so nothing keeps computing, holding files or writing results afterwards.
+        tree = await AsyncProcessTree.start(
             *cmd,
             cwd=str(cwd),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
+        proc = tree.proc
+        aborted = False
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_s
-            )
-            timed_out = False
-        except asyncio.TimeoutError:
-            proc.kill()
-            stdout, stderr = await proc.communicate()
-            timed_out = True
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(), timeout=timeout_s
+                )
+                timed_out = False
+            except asyncio.TimeoutError:
+                if not await tree.kill():
+                    _log.warning(
+                        "[execute] a process started by the timed-out command was still running a few seconds "
+                        "after it was stopped",
+                    )
+                try:
+                    # Read the pipes to their end and reap the script. Bounded: a process that escaped the tree
+                    # could still hold the output pipe open.
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=_POST_KILL_READ_S
+                    )
+                except asyncio.TimeoutError:
+                    _log.warning(
+                        "[execute] the output of a timed-out command did not close %.0f s after it was stopped; "
+                        "its output is lost", _POST_KILL_READ_S,
+                    )
+                    stdout, stderr = b"", b""
+                timed_out = True
+        except asyncio.CancelledError:
+            aborted = True  # the script may have exited while what it started still holds the output pipe
+            raise
+        finally:
+            await tree.aclose(aborted=aborted)
         result = ExecutionResult(
             returncode=proc.returncode if proc.returncode is not None else -1,
             stdout=stdout.decode("utf-8", errors="replace"),
@@ -1148,7 +1180,9 @@ class SharedInterpreterExecutor(VenvExecutor):
         # processes writing it at once corrupt it — the fleet runner runs
         # quests concurrently, so serialise across processes.
         from filelock import FileLock
-        lock_dir = Path.home() / ".frontier-insight"
+        # FI's per-person folder (core/fi_home.py: ``FI_HOME``, else ~/.frontier-insight). The tests point
+        # FI_HOME at a folder of their own, so a test run never waits on a real quest's install, nor the reverse.
+        lock_dir = fi_home()
         lock_dir.mkdir(parents=True, exist_ok=True)
         # thread_local=False is load-bearing: acquire runs in a worker thread
         # and release on the event-loop thread, and with the default a release
