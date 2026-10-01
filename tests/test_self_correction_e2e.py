@@ -26,6 +26,9 @@ from core.config import (
 )
 from core.engine import Engine
 
+# Each test builds a real venv; give it longer than pytest.ini's per-test default.
+pytestmark = pytest.mark.timeout(1800)
+
 
 _GOOD_EXPERIMENT = textwrap.dedent("""\
     import os

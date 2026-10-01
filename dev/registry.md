@@ -345,6 +345,10 @@ same PR that adds, splits or renames one.
   as `/work`, thread counts; `_to_container` for command arguments too), the
   non-root user choice checked by a write in the quest folder (`_user_candidates` / `_resolve_user`, in `setup`;
   `_warn_root_owned`), and the plain `[FI]` line for a run stopped by a cap (`_limit_note`).
+- `core/proc_tree.py` — `ProcessTree`: start a program so that `kill()` stops it with everything it started (Windows:
+  started suspended inside its own Job Object that kills on close; POSIX: its own session and process group), then
+  waits until all of it is gone. Used where a timeout must stop a whole tree: `scripts/import_scientist_skills.py`
+  (`_git`) and `generation/_office_pdf.py` (`_run`).
 - `core/experiment_deps.py` — what a quest environment is given before a run: requested packages minus the quest's
   own files, the selected skills' `pip_requires`, library skills on `PYTHONPATH`, one-at-a-time install fallback,
   skill names pip cannot install explained as the skill, the repair note for what could not be installed. Also the one

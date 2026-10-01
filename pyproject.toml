@@ -113,6 +113,8 @@ dev = [
   "pytest-cov>=6.0",
   "pytest-xdist>=3.5",
   "pytest-testmon>=2.2",
+  # pytest.ini sets a per-test `timeout`: a hung test fails with its name instead of stalling a CI shard.
+  "pytest-timeout>=2.3",
   # The seal and audit-trace property tests generate their inputs; without it they skip.
   "hypothesis>=6.100",
   # The plot-style and figure-redraw tests draw real figures; without it
