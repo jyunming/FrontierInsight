@@ -650,7 +650,8 @@ class EngineConfig(BaseModel):
     # ``after_review`` callback receives the review verdict + scores +
     # paper md + any must-flag hits and returns one of:
     #
-    #   {"action": "accept"}                     # finalise the quest as-is
+    #   {"action": "accept", "answer": "yes"}    # finalise; the person's answer to "Do the main numbers match
+    #                                            #   what you expected?" (yes / partly / not_checked; core/acceptance.py)
     #   {"action": "reject"}                     # finalise with verdict=rejected
     #   {"action": "refine", "feedback": "..."}  # bump iteration; to the writing step with the
     #                                            #   notes (design only if a point needs a new experiment)

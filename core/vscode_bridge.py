@@ -486,7 +486,12 @@ class VSCodeBridgeClient:
             # than taking it as "accept".
             action = str(msg.get("action") or "").strip().lower()
             feedback = str(msg.get("feedback") or "")
-            fut.set_result({"action": action, "feedback": feedback})
+            reply: dict[str, Any] = {"action": action, "feedback": feedback}
+            if action == "accept":
+                # The person's answer to the question asked before accepting (core/acceptance.py); none, and the
+                # engine does not take it as an accept.
+                reply.update(answer=str(msg.get("answer") or ""), via="vscode")
+            fut.set_result(reply)
         elif mtype == "human_review_cancelled":
             req_id = int(msg.get("id", 0))
             fut = self._pending.get(req_id)

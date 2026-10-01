@@ -352,7 +352,7 @@ async def test_run_clears_stale_pause_markers_but_keeps_answers(
     for p in display:
         p.write_text("stale\n", encoding="utf-8")
     answer = engine.fi_dir / "human_review_answer.json"
-    answer.write_text('{"action": "accept", "feedback": ""}', encoding="utf-8")
+    answer.write_text('{"action": "accept", "feedback": "", "answer": "yes"}', encoding="utf-8")
 
     seen: dict[str, bool | None] = {"display_gone": None, "answer_kept": None}
 
@@ -411,7 +411,7 @@ async def test_human_feedback_callback_timeout_pause_exits(
     async def hanging_cb(snapshot: dict) -> dict:
         callback_entered["v"] = True
         await asyncio.sleep(3600)  # never returns within the test window
-        return {"action": "accept"}  # pragma: no cover
+        return {"action": "accept", "answer": "yes"}  # pragma: no cover
 
     # Bound the whole run so a regression (a real hang) fails the test
     # instead of hanging the suite. The bound is generous because the
@@ -467,7 +467,7 @@ async def test_human_refine_loops_past_max_iterations(
         # Refine once (forces a revision past the cap), then accept.
         if len(calls) == 1:
             return {"action": "refine", "feedback": "tighten the methods"}
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     artifacts = await asyncio.wait_for(
         engine.run(human_feedback_callback=cb), timeout=300,
@@ -533,7 +533,7 @@ async def test_a_refine_the_text_cannot_answer_redesigns_through_the_real_graph(
         calls.append(snapshot)
         if len(calls) == 1:
             return {"action": "refine", "feedback": "report a p-value for the comparison"}
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     artifacts = await asyncio.wait_for(engine.run(human_feedback_callback=cb), timeout=300)
     assert len(calls) == 2 and artifacts.paper_md is not None
@@ -575,7 +575,7 @@ async def test_reopen_finished_quest_re_runs_to_review(
 
     async def accept_cb(snapshot: dict) -> dict:
         first.append(snapshot)
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     await asyncio.wait_for(
         engine.run(human_feedback_callback=accept_cb), timeout=300,
@@ -587,7 +587,7 @@ async def test_reopen_finished_quest_re_runs_to_review(
 
     async def accept_cb2(snapshot: dict) -> dict:
         reopened.append(snapshot)
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     art = await asyncio.wait_for(
         engine.run(reopen=True, human_feedback_callback=accept_cb2), timeout=300,

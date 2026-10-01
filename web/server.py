@@ -2721,6 +2721,18 @@ def make_app(
                 400, "refine requires non-empty feedback",
             )
         answer = {"action": action_raw, "feedback": feedback}
+        if action_raw == "accept":
+            # A person's accept answers the one question shown with what the result does not guarantee
+            # (core/acceptance.py); "no" does not accept.
+            from core import acceptance as _acceptance
+
+            checked = _acceptance.parse_answer(body.get("answer"))
+            if checked is None:
+                raise HTTPException(400, f"accept needs your answer to: {_acceptance.QUESTION} "
+                                         "(answer: yes, partly or not_checked)")
+            if checked == "no":
+                raise HTTPException(400, _acceptance.NOT_ACCEPTED_ON_NO)
+            answer = {**answer, "answer": checked, "via": "web"}
         in_process_resolved = registry.resolve_human_review(quest_id, answer)
         # Always write the disk answer so an out-of-process
         # ``--resume`` picks it up too. Best-effort: an OSError on the

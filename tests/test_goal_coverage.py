@@ -226,7 +226,9 @@ def test_the_terminal_gate_prints_the_notes(monkeypatch, capsys) -> None:  # noq
 
     import launch
 
-    monkeypatch.setattr("builtins.input", lambda *_a: "accept")
+    # Accept, then the answer to the question asked before accepting (core/acceptance.py).
+    replies = iter(["accept", "yes"])
+    monkeypatch.setattr("builtins.input", lambda *_a: next(replies))
     snapshot = {"verdict": "accept", "goal_coverage_notes": ["The topic gives 0.9 (\"...\"), and neither ..."]}
     asyncio.run(launch._cli_human_feedback_callback(snapshot))
     out = capsys.readouterr().out

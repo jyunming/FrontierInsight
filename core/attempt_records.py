@@ -368,7 +368,9 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         missing.append("FI's source could not be read")
     if policy["config_sha256"] is None:
         missing.append("the configuration could not be hashed")
-    if not models_used:
+    # A quest resumed only to take a decision (an accept at the review pause) makes no call in that run; the calls of
+    # its earlier runs are counted in its state.
+    if not models_used and not (model_call_counts or state.get("model_call_counts")):
         missing.append("no model call recorded yet")
     if kind == "after_run" or (kind == "quest_end" and _experiment_expected(config, state)):
         if not code:

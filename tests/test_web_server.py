@@ -543,14 +543,15 @@ def test_human_review_post_resolves_in_process_future(
     client = TestClient(app)
     r = client.post(
         f"/api/quests/{qid}/human-review",
-        json={"action": "accept", "feedback": ""},
+        json={"action": "accept", "feedback": "", "answer": "yes"},
     )
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
     assert body["in_process_resolved"] is True
     assert fut.done()
-    assert fut.result() == {"action": "accept", "feedback": ""}
+    # A person's accept carries their answer to the question asked before accepting, and says it came from the web.
+    assert fut.result() == {"action": "accept", "feedback": "", "answer": "yes", "via": "web"}
 
 
 def test_human_review_post_writes_disk_answer_for_subprocess_resume(

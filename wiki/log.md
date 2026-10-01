@@ -50,3 +50,9 @@ Sources: core/retractions.py, core/engine.py, core/todo.py, agents/claim_check.m
 Pages updated: [[study-types|Study types]] (after the search FI checks the best design at finer settings; one verdict, a sentence per check; a failed check limits the evidence level and never stops the quest).
 
 Sources: core/optimum_check.py, core/optimise.py, core/evidence.py, core/optimisation_plan.py.
+
+## 2026-10-01 — a person accepts the result
+
+Pages updated: [[pauses|Pauses]] (before an accept every interface shows what the result does not guarantee and its main gaps and asks one question; the answer is recorded; "no" does not accept), [[how-fi-judges-correctness|How FI judges correctness]] (an accept no person made stays one level below publication ready).
+
+Sources: core/acceptance.py, core/evidence.py, core/engine.py, core/audit_log.py, core/todo.py, core/vscode_bridge.py, launch.py, web/server.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.

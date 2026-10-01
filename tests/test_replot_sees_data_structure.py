@@ -87,7 +87,7 @@ def test_a_redraw_that_fails_twice_tells_the_person_it_was_not_applied(tmp_path:
 
     def pause(**kw: Any) -> Any:
         card.update(kw)
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     eng._pause_for_human = pause
     after = asyncio.run(eng._node_human_feedback({**STATE, **out, "review": {"verdict": "accept", "score": 7}}))

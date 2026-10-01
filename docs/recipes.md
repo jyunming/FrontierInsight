@@ -547,7 +547,7 @@ For unattended fleet runs that still want a human in the loop on the *interestin
 python launch.py --fleet quests/*.yaml --auto-accept-on-pass
 ```
 
-Clean papers (LLM verdict `accept` AND no methodologist must-flag hits) auto-finalise; flagged or revise-verdict papers pause for human review (snapshot at `<quest_root>/.fi/human_review.json`). Resume each paused quest from the dashboard or by dropping the decision into `<quest_root>/.fi/human_review_answer.json` and running `python launch.py --config <yaml> --resume <quest_id>`.
+Clean papers (LLM verdict `accept` AND no methodologist must-flag hits) auto-finalise, marked "not reviewed by a person" (one level below `publication_ready`); flagged or revise-verdict papers pause for human review (snapshot at `<quest_root>/.fi/human_review.json`). Resume each paused quest from the dashboard or by dropping the decision into `<quest_root>/.fi/human_review_answer.json` and running `python launch.py --config <yaml> --resume <quest_id>`.
 
 ### Review every paper before it lands
 
@@ -555,9 +555,11 @@ The human-review gate (`pauses.review: ask`, on by default) pauses the quest aft
 
 | Interface | How |
 |---|---|
-| Web dashboard (`--serve`) | Banner on `/quest/<id>` with Accept / Reject / Refine buttons + a textarea for refine feedback. |
-| CLI | `python launch.py --config <yaml> --interactive` — prompts on stdin for action + feedback. A headless run that paused is decided in one command: `--resume <id> --accept`, `--reject` or `--refine "<notes>"`. |
-| VSCode chat | The `@fi /start` chat panel renders the verdict + must-flag hits + suggestions; QuickPick collects the action; refine opens an input box for the feedback text. |
+| Web dashboard (`--serve`) | Banner on `/quest/<id>` with Accept / Reject / Refine buttons + a textarea for refine feedback; Accept opens the one question and your answer submits it. |
+| CLI | `python launch.py --config <yaml> --interactive` — prompts on stdin for action + feedback. A headless run that paused is decided in one command: `--resume <id> --accept yes` (or `partly` / `not-checked`), `--reject` or `--refine "<notes>"`. |
+| VSCode chat | The `@fi /start` chat panel renders the verdict + must-flag hits + suggestions; QuickPick collects the action; refine opens an input box for the feedback text; an accept then asks the one question. |
+
+Before you accept, each interface shows what the result does not guarantee and its main evidence gaps, and asks *Do the main numbers match what you expected?* (yes / partly / no / I did not check); the answer is recorded with the accept, and "no" does not accept (refine, or look again). A result accepted with no person asked (`--auto-accept-on-pass`, `pauses.review: off`) is marked "not reviewed by a person" and stays one level below `publication_ready`.
 
 An answer that decides nothing is never taken as accept: closing the VS Code prompt with Esc, Ctrl+C or end of input at the terminal prompt, a refine with no notes (`--refine ""` is refused), or a `human_review_answer.json` without accept / reject / refine stops the quest with the review kept, and you decide on resume. Enter at the terminal prompt, and an empty refine box confirmed with Enter, still mean accept, as their prompts say.
 
