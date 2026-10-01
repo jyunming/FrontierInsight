@@ -71,8 +71,8 @@ def _short(text: Any, most: int = 160) -> str:
 
 
 def _about(x: float) -> str:
-    """A factor said plainly: 317, 20, 1.6."""
-    return f"{x:.0f}" if x >= 10 else f"{x:.2g}"
+    """A factor said plainly: 317, 20, 1.6, 3.2e+12."""
+    return f"{x:.2g}" if x < 10 else f"{x:.0f}" if x < 1e6 else f"{x:.2g}"
 
 
 def gap(value: Any, expected: Any, limit: Any) -> dict[str, Any] | None:
@@ -84,12 +84,12 @@ def gap(value: Any, expected: Any, limit: Any) -> dict[str, Any] | None:
     d = abs(v - e)
     out: dict[str, Any] = {"absolute": d}
     parts = [f"off by {d:.4g}"]
-    if lim is not None and lim > 0:
+    if lim is not None and lim > 0 and math.isfinite(d / lim):
         out["times_tolerance"] = d / lim
         parts[0] += f" ({_about(d / lim)} times the tolerance)"
     if e != 0:
         out["relative"] = d / abs(e)
-    if e != 0 and v != 0:
+    if e != 0 and v != 0 and math.isfinite(v / e):
         ratio = v / e
         out["ratio"] = ratio
         if ratio < 0:
@@ -258,6 +258,9 @@ def build(
 
     checks: list[dict[str, Any]] = []
     causes: list[dict[str, str]] = []
+    # While any check has no numbers the gate measures none of them (it asks the plan first): the others were not run,
+    # which is neither a failure nor something to change.
+    any_unjudgeable = any(_oracle.limit_of(o)[1] is None for o in oracles)
     for oracle in oracles:
         name = str(oracle.get("name") or "").strip()
         key = name.lower()
@@ -269,6 +272,8 @@ def build(
         engine = j.get("measured_by") == "engine"
         if limit is None:
             status = "cannot_judge"
+        elif value is None and any_unjudgeable:
+            status = "not_run"
         elif value is None:
             status = "not_measured"
         else:
@@ -346,16 +351,19 @@ def build(
     if not oracles:
         summary = ("FI stopped before the main run: the plan has no known-answer check, so nothing independent of the "
                    "script's own numbers shows they are right.")
-    elif checks and all(c["status"] == "cannot_judge" for c in checks):
-        summary = (f"FI stopped before the main run: {len(checks)} known-answer check(s) give no number to compare "
-                   "with, so FI cannot judge them.")
+    elif any_unjudgeable:
+        blank = sum(1 for c in checks if c["status"] == "cannot_judge")
+        summary = (f"FI stopped before the main run: {blank} known-answer check(s) give no number to compare with, so "
+                   "FI cannot judge them"
+                   + ("; it runs the other checks once every check has its numbers" if blank < len(checks) else "")
+                   + ".")
     elif checks and all(c["status"] != "failed" for c in checks):
         summary = ("FI stopped before the main run: the known-answer checks could not be measured, so nothing was "
                    "compared with its expected value.")
     elif not checks:
-        # Every check passed, but the run itself has a problem (it exited non-zero, it reports a check as failed itself).
-        summary = ("FI stopped before the main run: the known-answer checks did not pass. "
-                   + " ".join(_plain(f) for f in found)[:400])
+        # Every check passed, but the run itself has a problem (it exited non-zero, it reports a check as failed itself):
+        # what it found is listed under "Also found", every sentence of it.
+        summary = "FI stopped before the main run: every known-answer check passed, but the run itself has a problem."
         error = last_error(stderr_tail)
         if error:
             at = error_at(stderr_tail, quest_root)
@@ -370,19 +378,21 @@ def build(
     for c in checks:
         # What the gate found about a check that has no measured number, in its own words (the numbers of a failed
         # check are on the card already).
-        c["found"] = [_plain(p) for p in c.get("problems") or []] if c["status"] != "failed" else []
+        # A check whose error is on the card already does not repeat it.
+        c["found"] = ([_plain(p) for p in c.get("problems") or []]
+                      if c["status"] not in ("failed", "not_run") and not c.get("error") else [])
     return {
         "type": TYPE,
         "summary": summary,
         "checks": checks,
         # What the gate found that is about no check listed above: a passing check the script reports as failed itself,
         # a non-zero exit. Nothing the record says is left off the card.
-        "also_found": [_plain(f) for f in found if not any(repr(c["id"]) in f for c in checks)] if checks else [],
+        "also_found": [_plain(f) for f in found if not any(repr(c["id"]) in f for c in checks)] if oracles else [],
         "causes": causes,
         "tried": _tried(attempts, kept=kept, script=script),
         "actions": _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
                             repairs=repairs, kept=kept, quest_root=quest_root, script=script),
-        "notes": _notes(frozen=frozen, research=research) + [
+        "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + [
             # After the freeze a proposal cannot be applied from here: say the one way it can be used.
             ("This research quest cannot take the repair's proposed change (its protocol is frozen); to use it, start "
              "a new quest whose plan states it: " if research else
@@ -515,7 +525,8 @@ def _revise_text(checks: list[dict[str, Any]], oracles: list[dict[str, Any]]) ->
     if proposals:
         return _oracle.proposal_request(proposals[0])
     parts = []
-    for c in checks[:3]:
+    # A check that was not run (it waits for another check's numbers) is not asked about: nothing says it is wrong.
+    for c in [c for c in checks if c["status"] != "not_run"][:3]:
         if c["status"] == "cannot_judge":
             parts.append(f"give the known-answer check '{c['id']}' a numeric expected value and tolerance, and say "
                          "where the value comes from")
@@ -562,24 +573,38 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
     error_at = next((c.get("error_at") for c in checks if c.get("error_at")), "")
     target = error_at or (f"{where['file']} line {where['line']}" if where else _rel(script, quest_root))
     plan_part = "" if frozen else ", or the check in plan.md (the `oracles` list of the protocol)"
-    if plan_incomplete:
-        what = ("add a known-answer check" if not oracles else
-                "give each check listed above a numeric expected value and tolerance")
-        detail = (f"In plan.md (the `oracles` list of the protocol), {what}, with where the value comes from, then "
-                  "resume." if not frozen else
-                  "The protocol is frozen, so a check can be added or completed only through an amendment approved "
-                  "at the review.")
+    if plan_incomplete and frozen:
+        # After the freeze a resume would stop here again, whatever is edited: no command that only does that.
+        actions.append({
+            "id": "new_quest" if research else "amend", "label": "Start a new quest" if research else "Change the plan "
+            "through an amendment",
+            "detail": ("This quest is set up for research and its protocol is frozen, so a check cannot be added or "
+                       "completed inside it: start a new quest whose plan states the check with its numbers." if research
+                       else "The protocol is frozen, so a check can be added or completed only through an amendment "
+                       "approved at the review (to get there, go on with the failure recorded, below)."),
+        })
     else:
-        detail = (f"Change the simulation at {target}{plan_part}, then resume: the checks run again before anything "
-                  "else.")
-    actions.append({
-        "id": "edit", "label": "Fix it yourself",
-        "detail": detail,
-        "cli": resume_cli, "web": "Resume", "vscode": f"@fi /resume {quest_id}",
-        "file": (error_at.rsplit(" line ", 1)[0] if error_at else where["file"] if where else _rel(script, quest_root)),
-        **({"line": int(error_at.rsplit(" line ", 1)[1])} if error_at and error_at.rsplit(" line ", 1)[-1].isdigit()
-           else {"line": where["line"]} if where else {}),
-    })
+        if plan_incomplete:
+            blank = [c["id"] for c in checks if c["status"] == "cannot_judge"]
+            what = ("add a known-answer check" if not oracles else
+                    f"give {', '.join(repr(n) for n in blank)} a numeric expected value and tolerance")
+            detail = (f"In plan.md (the `oracles` list of the protocol), {what}, with where the value comes from, then "
+                      "resume.")
+        else:
+            detail = (f"Change the simulation at {target}{plan_part}, then resume: the checks run again before "
+                      "anything else.")
+        actions.append({
+            "id": "edit", "label": "Fix it yourself",
+            "detail": detail,
+            "cli": resume_cli, "web": "Resume", "vscode": f"@fi /resume {quest_id}",
+            **({} if plan_incomplete else {
+                "file": (error_at.rsplit(" line ", 1)[0] if error_at else where["file"] if where
+                         else _rel(script, quest_root)),
+                **({"line": int(error_at.rsplit(" line ", 1)[1])}
+                   if error_at and error_at.rsplit(" line ", 1)[-1].isdigit()
+                   else {"line": where["line"]} if where else {}),
+            }),
+        })
     # 3. Change the check: before the freeze, a request to the plan with the text prefilled; after it, the paths that
     # exist (an amendment at the review for a default quest; a new quest for a research one).
     if not frozen:
@@ -625,7 +650,11 @@ def _rel(path: Path, root: Path) -> str:
         return Path(path).name
 
 
-def _notes(*, frozen: bool, research: bool) -> list[str]:
+def _notes(*, frozen: bool, research: bool, plan_incomplete: bool = False) -> list[str]:
+    if frozen and research and plan_incomplete:
+        # Nothing in the script can fix a check that has no numbers: the action above (a new quest) says the one way.
+        return ["This quest is set up for research and its protocol is frozen, so the known-answer checks cannot be "
+                "relaxed, added or completed inside it."]
     if frozen and research:
         from .todo import research_instead
 

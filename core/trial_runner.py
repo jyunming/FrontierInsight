@@ -896,7 +896,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
     if any(_oracle.case_of(o) is None for o in oracles):
         values, why = await run_oracle(executor, python, quest_root, module, timeout_s=timeout_s, env=env, thresholds=thresholds)
         if values is None:
-            problems.append(f"simulate.py's oracle() did not give its values: {why.strip()[-300:] or 'no reason given'}")
+            problems.append(f"simulate.py's oracle() did not give its values: "
+                            f"{clip_keeping_place(why.strip(), 300) or 'no reason given'}")
             timed_out = timed_out or "ran out of time" in why
         else:
             checks += [{"name": k, "value": v, "measured_by": "script"} for k, v in values.items()

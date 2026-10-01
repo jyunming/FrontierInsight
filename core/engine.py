@@ -10718,7 +10718,7 @@ class Engine:
         statuses = {c["status"] for c in (card or {}).get("checks") or []}
         headline = (
             "the plan has no known-answer check to judge the script by" if not oracles else
-            "a known-answer check has no number to compare with" if statuses == {"cannot_judge"} else
+            "a known-answer check has no number to compare with" if "cannot_judge" in statuses else
             "the known-answer checks could not be measured" if statuses and "failed" not in statuses else
             "the script has not passed its known-answer checks"
         )
@@ -10728,7 +10728,7 @@ class Engine:
             headline=headline,
             # What each check found, as the record says it; the card above is what a person reads.
             steps=["The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + "."],
-            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"][1:]] if card else (
+            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"] if a.get("id") != "resume"] if card else (
                 # Without a card, what holds after the freeze (the plan no longer changes a check from here).
                 ["Set `engine.oracle_check: warn` and go on: the failure is recorded, and the check can be changed "
                  "later through an amendment approved at the review."] if frozen and not research else

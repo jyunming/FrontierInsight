@@ -78,8 +78,8 @@ def _fmt(value: Any) -> str:
 
 def digits_for(values: list[Any], scale: Any = None) -> int:
     """How many significant digits show ``values`` side by side so that a difference of ``scale`` (the gap, or the
-    tolerance) is visible: six (what ``%g`` shows) unless more are needed, at most fifteen. A measured 0.36788 against an
-    expected 0.367879 with a tolerance of 1e-12 looks like agreement at six digits; it is not."""
+    tolerance) is visible: six (what ``%g`` shows) unless more are needed, at most seventeen. A measured 0.36788 against
+    an expected 0.367879 with a tolerance of 1e-12 looks like agreement at six digits; it is not."""
     target = _num(scale)
     digits = 6
     if target is None or target <= 0:
@@ -90,8 +90,6 @@ def digits_for(values: list[Any], scale: Any = None) -> int:
             continue
         # Logs subtracted, never divided: 1e300 / 1e-9 is inf (a diverging simulation still has a number to show).
         orders = math.log10(abs(number)) - math.log10(target)
-        if not math.isfinite(orders):
-            return _MOST_DIGITS
         digits = max(digits, math.ceil(orders) + 1)
     return min(digits, _MOST_DIGITS)
 
@@ -109,11 +107,12 @@ def fmt_digits(value: Any, digits: int = 6) -> str:
 
 
 def fmt_pair(value: Any, expected: Any, limit: Any) -> tuple[str, str]:
-    """A measured value and its expected value, each to enough significant digits that the gap between them shows (at
-    the scale of the tolerance when they are equal)."""
+    """A measured value and its expected value, each to enough significant digits that the gap between them shows, and
+    for a value outside its tolerance, by how much it is outside: 1.000000101 against 1 within 1e-7 must not print as
+    1.0000001, which reads as just inside (at the scale of the tolerance when the two are equal)."""
     v, e, lim = _num(value), _num(expected), _num(limit)
     gap = abs(v - e) if v is not None and e is not None else None
-    scale = gap if gap else lim
+    scale = (gap - lim) if gap and lim and gap > lim else (gap if gap else lim)
     digits = digits_for([v, e], scale)
     return fmt_digits(value, digits), fmt_digits(expected, digits)
 

@@ -415,6 +415,8 @@ def _check_lines(c: dict[str, Any], *, markdown: bool) -> list[str]:
         rows.append("Measured: nothing (the value could not be measured)")
     elif c.get("status") == "cannot_judge":
         rows.append("Measured: not run (the check gives no number to compare with)")
+    elif c.get("status") == "not_run":
+        rows.append("Measured: not run yet (FI runs the checks once every check has its numbers)")
     if c.get("limit_text"):
         mode = c.get("tolerance_mode") or "absolute"
         tol = c.get("tolerance")
@@ -468,7 +470,8 @@ def card_lines(card: dict[str, Any], *, markdown: bool = True) -> list[str]:
             for n, a in enumerate(actions, 1):
                 ways = [f"CLI: `{a['cli']}`" if a.get("cli") else "", f"web: **{a['web']}**" if a.get("web") else "",
                         f"VS Code: `{a['vscode']}`" if a.get("vscode") else ""]
-                out.append(f"{n}. **{a.get('label')}.** {a.get('detail') or ''} ({'; '.join(w for w in ways if w)})")
+                said = "; ".join(w for w in ways if w)
+                out.append(f"{n}. **{a.get('label')}.** {a.get('detail') or ''}" + (f" ({said})" if said else ""))
             out.append("")
         if card.get("notes"):
             out += [*(f"> {n}" for n in card["notes"]), ""]
