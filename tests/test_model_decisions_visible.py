@@ -609,6 +609,13 @@ function fakeModel(rejectOption) {
   out.text = [m.thinkingText(["a", "b"]), m.thinkingText("c"), m.thinkingText([1]) === undefined];
   class LanguageModelThinkingPart { constructor(v) { this.value = v; } }
   out.kind = [m.partKind({}, new LanguageModelThinkingPart(["a", "b"])), m.partKind({}, { value: ["a"] })];
+  // A GPT reasoning part as Copilot reports it with includeEncryptedThinking: the summary is the value, the encrypted
+  // state sits in the metadata and is never read.
+  const enc = new LanguageModelThinkingPart(["Step one.", "Step two."]);
+  enc.metadata = { encrypted_content: "SECRET" };
+  const empty = new LanguageModelThinkingPart("");
+  empty.metadata = { encrypted_content: "SECRET" };
+  out.encrypted = [m.partKind({}, enc), m.thinkingText(enc.value), m.thinkingText(empty.value)];
   out.chat = [m.chatModelArgs({ id: "claude-opus-5", vendor: "copilot" }), m.chatModelArgs({ id: "auto" }), m.chatModelArgs(undefined),
               m.chatModelArgs({ id: "gemini-3-flash-preview", family: "gemini-3-flash" })];
   process.stdout.write(JSON.stringify(out));
@@ -638,10 +645,10 @@ def test_the_extension_asks_for_thinking_and_asks_again_without_it_on_a_refusal(
     run = subprocess.run([shutil.which("node"), str(driver)], capture_output=True, text=True, timeout=30)
     assert run.returncode == 0, run.stderr
     out = json.loads(run.stdout)
-    assert out["asked"] == [True, json.dumps({"modelOptions": {"_enableThinking": True}}, separators=(",", ":"))]
+    assert out["asked"] == [True, json.dumps({"modelOptions": {"_enableThinking": True}, "includeEncryptedThinking": True}, separators=(",", ":"))]
     assert out["off"] == [False, "{}"]
     asked, sent, reason = out["rejected"]
-    assert asked is False and sent == ['{"modelOptions":{"_enableThinking":true}}', "{}"] and "unknown model option" in reason
+    assert asked is False and sent == ['{"modelOptions":{"_enableThinking":true},"includeEncryptedThinking":true}', "{}"] and "unknown model option" in reason
     assert out["notAskedAgain"] == [False, 1], "a model that refused is not asked again"
     assert out["transient"] == ["net::ERR_HTTP2_PROTOCOL_ERROR", True], "a connection error is not a refusal"
     assert out["quota"] == ["You have exceeded your premium request quota", True], "a failure the retry repeats is no refusal"
@@ -652,7 +659,8 @@ def test_the_extension_asks_for_thinking_and_asks_again_without_it_on_a_refusal(
     assert remembered, "the call made again without the option answered: the model refused it"
     assert not_remembered and out["askedAgain"] is True, "the call without the option failed the same way: not a refusal"
     assert stalled == "bridge stalled: no part" and late == "400"
-    assert out["text"] == ["ab", "c", True]
+    assert out["text"] == ["a\n\nb", "c", True]
+    assert out["encrypted"] == ["thinking", "Step one.\n\nStep two.", ""], "the summary only, never the encrypted state"
     assert out["kind"] == ["thinking", "unknown"]
     assert out["chat"] == [["--vscode-chat-model", "claude-opus-5"], [], [],
                            ["--vscode-chat-model", "gemini-3-flash-preview", "--vscode-chat-model-family", "gemini-3-flash"]]
@@ -667,6 +675,8 @@ def test_both_bridges_send_through_the_thinking_request_and_the_chat_passes_its_
         assert "thinkingRequests.send(" in text and "thinkingRequests.streamFailed(" in text, name
         assert "ask_thinking" in text and "thinkingText(" in text, name
         assert not re.search(r"sendRequest\([^)]*,\s*\{\}\s*,", text), f"{name} still sends a bare request"
+        # A GPT reasoning part carries Copilot's encrypted state in its metadata: the bridges keep the summary only.
+        assert ".metadata" not in text, f"{name} must not read a part's metadata (encrypted reasoning state)"
     ext = (src / "extension.ts").read_text(encoding="utf-8")
     # /start, /fleet and /resume pass the chat panel's model; /update and /generate keep the config's.
     assert ext.count("...chatModelArgs(userPickedModel)") == 1

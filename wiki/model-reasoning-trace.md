@@ -11,7 +11,7 @@ It is the model's own account of its reasoning, **not evidence**: it is not part
 
 `output.save_thinking: false` turns it off (default on). `--why <quest> <step>` (web **Why?**, `@fi /why`) says whether the file holds that step's reasoning and how many characters; the text stays in the file. `run.log` says once per step when a connection returned none.
 
-On the VS Code connection FI asks Copilot for Claude's thinking by default (Copilot's undocumented internal model option `_enableThinking`; Opus returns a summary, not its full thinking; a model that refuses is asked again without it). Codex's `reasoning` items from `codex exec --json` are kept too. A thinking part whose value is a list of strings is joined.
+On the VS Code connection FI asks Copilot for Claude's thinking by default (Copilot's undocumented internal model option `_enableThinking`; Opus returns a summary, not its full thinking; a model that refuses is asked again without it). For GPT models FI also sends `includeEncryptedThinking: true`, without which Copilot withholds their reasoning summary from other extensions; only the readable summary is kept. Codex's `reasoning` items from `codex exec --json` are kept too. A thinking part whose value is a list of strings is joined.
 
 **Stated reasons.** Separately, every reason a model already writes in its answer (idea choice, skill choice, literature support or conflict, repair summary, setup answers, review verdict and moderator) goes into the audit trace as a `model_claim`, and `--why <quest> reasons` lists them per step. A stated reason and a reasoning summary are both the model's own account, not its hidden reasoning.
 

@@ -133,11 +133,12 @@ export function partKind(
     return "unknown";
 }
 
-/** A thinking part's text. The (proposed) API types its `value` as a string or a list of strings; a list is joined.
+/** A thinking part's text. The (proposed) API types its `value` as a string or a list of strings. A list is a GPT
+ * reasoning summary sent whole, one paragraph per item, so it is joined with a blank line, as Copilot's own chat does.
  * Anything else is not text (`undefined`). */
 export function thinkingText(value: unknown): string | undefined {
     if (typeof value === "string") return value;
-    if (Array.isArray(value) && value.every((v) => typeof v === "string")) return value.join("");
+    if (Array.isArray(value) && value.every((v) => typeof v === "string")) return value.join("\n\n");
     return undefined;
 }
 
@@ -149,8 +150,14 @@ export function thinkingText(value: unknown): string | undefined {
  * is Copilot's own, undocumented and internal: it may be renamed or stop working in any Copilot release. FI asks by
  * default (Python sends `ask_thinking: false` when the quest keeps no reasoning, `output.save_thinking: false`); a model
  * that refuses the option is asked again once without it, and not asked again for as long as the bridge runs.
+ *
+ * GPT models (OpenAI's Responses API) send their reasoning summary inside an encrypted reasoning item; Copilot passes it
+ * to another extension only when the request carries `includeEncryptedThinking: true` (a request option VS Code hands to
+ * the model provider as it is: extHostLanguageModels.ts, vscode.proposed.chatProvider.d.ts). The part then carries the
+ * readable summary as its value and the encrypted state in its metadata; FI keeps the summary only, never the encrypted
+ * state. Without it, a GPT model in Copilot returns no reasoning to FI although the chat panel shows it.
  */
-export const THINKING_REQUEST_OPTIONS = { modelOptions: { _enableThinking: true } };
+export const THINKING_REQUEST_OPTIONS = { modelOptions: { _enableThinking: true }, includeEncryptedThinking: true };
 /** Words FI's Python side retries on (core/provider.py `_TRANSIENT_BRIDGE_MARKERS`): the stream failed after the model
  * was asked for its reasoning, so the call is made again without asking. */
 export const THINKING_DECLINED_MARKER = "the model did not accept the request for its reasoning";
