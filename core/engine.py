@@ -422,8 +422,9 @@ class QuestState(TypedDict, total=False):
     # the user's freeform text on refine, which the design node reads
     # on the next revise loop. Pre-resume the dict is empty.
     human_feedback: dict[str, Any]
-    # Who accepted the result (core/acceptance.py): {"by": "person", "via": <interface>, "question", "answer"}
-    # or {"by": "automatic", "via": ...}. Set by ``_node_human_feedback`` on an accept, cleared on a refine; none
+    # Who accepted the result (core/acceptance.py): a person's receipt {"by": "person", "via": <interface>, "who",
+    # "at", "question", "answer", "note", "evidence_sha256", "limits_shown", "paper_sha256"} or {"by": "automatic",
+    # "via": ...}. Set by ``_node_human_feedback`` on an accept, cleared on a refine; none
     # (no review pause) counts as automatic, which keeps the evidence one level below publication_ready.
     acceptance: dict[str, Any]
     # Cumulative refinement asks across the quest's revise iterations.
@@ -1203,7 +1204,7 @@ class Engine:
                                     if _review_decision(answer):
                                         _consume_snapshot()
                                         # A person answered: an accept carries who, how and their answer.
-                                        payload = Command(resume=_acceptance.stamp(answer, "callback"))
+                                        payload = Command(resume=_acceptance.stamp(answer, "callback", snap))
                                         continue
                                     # No decision in the answer (``{}``, ``None``, a missing or unknown action, an
                                     # accept without the answer to the question, or "no"): stop and ask again rather
@@ -1248,7 +1249,7 @@ class Engine:
                                         "(action=%s)", answer.get("action"),
                                     )
                                     _consume_snapshot()
-                                    payload = Command(resume=_acceptance.stamp(answer, "answer file"))
+                                    payload = Command(resume=_acceptance.stamp(answer, "answer file", snap))
                                     continue
                                 if answer is not None:
                                     # A staged answer with no decision in it is not "accept"; drop it so the next
@@ -1265,7 +1266,8 @@ class Engine:
                             self._log.info(
                                 "[FI] paused for human review. Decide with ONE command:\n"
                                 "      accept:  python launch.py --config <yaml> --resume %s --accept yes"
-                                "   (do the main numbers match what you expected? yes / partly / not-checked)\n"
+                                "   (have you reviewed the evidence record, and do you accept these claims and the "
+                                "limits listed? yes / partly \"what you do not accept\" / not-checked)\n"
                                 "      reject:  python launch.py --config <yaml> --resume %s --reject\n"
                                 "      refine:  python launch.py --config <yaml> --resume %s --refine \"your feedback\"\n"
                                 "      (or, in the web UI / VSCode, click Accept / Reject / Refine.)",
@@ -15859,11 +15861,13 @@ class Engine:
                 "(Web / VSCode), or at the CLI prompt.",
                 "Before you accept, read what this result does not guarantee and its gaps: "
                 + " ".join(line if line.endswith((".", ")", "…")) else line + "." for line in _acceptance.lines(before_accept))
-                + f" Then answer: {_acceptance.QUESTION} (yes / partly / not-checked; \"no\" does not accept: "
-                "refine instead, or look again).",
+                + f" Then answer: {_acceptance.QUESTION} Only yes lets the result count as publication-ready; "
+                "partly needs a short note saying what you do not accept, and it and \"I did not check\" each leave a "
+                "gap; \"no\" does not accept: refine instead, or look again.",
                 "Headless run? "
-                f"`fi --resume {self.quest_id} --accept yes` (or `partly` / `not-checked`; or `--reject` / "
-                "`--refine \"what to change\"`).",
+                f"`fi --resume {self.quest_id} --accept yes` (or `--accept partly \"what you do not accept\"` / "
+                "`--accept not-checked`; or `--reject` / `--refine \"what to change\"`). Add `--approve-as <your name>` "
+                "to record your name rather than your login name.",
                 "Refine sends your notes back to the writing step first; if a point needs a new "
                 "experiment, FI goes back to the design.",
             ],
@@ -15910,8 +15914,10 @@ class Engine:
                 acceptance["paper_sha256"] = ""
             update["acceptance"] = acceptance
             self._audit("result_accepted", **acceptance)
-            self._log.info("[human_feedback] accepted by %s (via %s%s)", acceptance.get("by"), acceptance.get("via"),
-                           f", answer: {acceptance['answer']}" if acceptance.get("answer") else "")
+            self._log.info("[human_feedback] accepted by %s (via %s%s%s%s)", acceptance.get("by"), acceptance.get("via"),
+                           f", who: {acceptance['who']}" if acceptance.get("who") else "",
+                           f", answer: {acceptance['answer']}" if acceptance.get("answer") else "",
+                           f", not accepted: {acceptance['note']}" if acceptance.get("note") else "")
         # When the user refines, bump iteration so the loop budget is
         # consumed and the design node sees an explicit "we're in a
         # revise pass" signal (same convention the verdict-driven

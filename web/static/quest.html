@@ -311,6 +311,10 @@
           <div class="font-label-sm text-label-sm text-outline uppercase">Before you accept</div>
           <div id="hr-before-accept-list" class="font-body-md text-body-md text-on-surface-variant"></div>
           <div id="hr-before-accept-question" class="font-body-md text-body-md text-on-surface"></div>
+          <label for="hr-accept-note" class="sr-only">What you do not accept</label>
+          <input id="hr-accept-note" type="text" maxlength="500" placeholder="What you do not accept (needed for Partly)" class="bg-surface-low border border-white/10 rounded px-3 py-2 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none"/>
+          <label for="hr-accept-who" class="sr-only">Your name</label>
+          <input id="hr-accept-who" type="text" maxlength="80" autocomplete="name" placeholder="Your name (optional, recorded with your answer)" class="bg-surface-low border border-white/10 rounded px-3 py-2 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none"/>
           <div id="hr-before-accept-choices" class="flex flex-wrap gap-2"></div>
           <div id="hr-before-accept-no" class="hidden text-error font-body-md text-body-md"></div>
         </div>
@@ -1612,9 +1616,9 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   }
   // What the review snapshot says to show before an accept (core/acceptance.py): kept from the last render.
   var humanReviewBeforeAccept = null;
-  const ACCEPT_QUESTION = 'Do the main numbers match what you expected?';
+  const ACCEPT_QUESTION = 'Have you reviewed the evidence record, and do you accept these claims and the limits listed?';
   const ACCEPT_CHOICES = [
-    { id: 'yes', label: 'Yes' }, { id: 'partly', label: 'Partly' },
+    { id: 'yes', label: 'Yes' }, { id: 'partly', label: 'Partly (say what you do not accept)' },
     { id: 'no', label: 'No' }, { id: 'not_checked', label: 'I did not check' },
   ];
   function showBeforeAccept() {
@@ -1645,18 +1649,26 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     box.scrollIntoView({ block: 'nearest' });
   }
   function answerBeforeAccept(answer) {
+    const msg = document.getElementById('hr-before-accept-no');
     if (answer === 'no') {
       // "No" does not accept: say so, and point at refine (or looking again).
-      const no = document.getElementById('hr-before-accept-no');
-      no.textContent = 'Then the result is not accepted. Write what is wrong in the feedback box above and click '
+      msg.textContent = 'Then the result is not accepted. Write what is wrong in the feedback box above and click '
         + 'Refine, or read the paper again and decide then.';
-      no.classList.remove('hidden');
+      msg.classList.remove('hidden');
       document.getElementById('hr-feedback').focus();
       return false;
     }
-    return submitHumanReview('accept', answer);
+    const note = (document.getElementById('hr-accept-note').value || '').trim();
+    if (answer === 'partly' && !note) {
+      // "Partly" needs a short note: what is not accepted is recorded and kept as a gap.
+      msg.textContent = 'Write what you do not accept in the box above, then click Partly again.';
+      msg.classList.remove('hidden');
+      document.getElementById('hr-accept-note').focus();
+      return false;
+    }
+    return submitHumanReview('accept', answer, answer === 'partly' ? note : '');
   }
-  async function submitHumanReview(action, answer) {
+  async function submitHumanReview(action, answer, note) {
     // Action MUST be passed explicitly by one of the three button
     // handlers — there is no "default" action. Earlier this function
     // accepted a form-submit event and defaulted to ``accept`` when
@@ -1675,10 +1687,14 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
     const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/human-review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(action === 'accept' ? { action, feedback, answer } : { action, feedback }),
+      body: JSON.stringify(action === 'accept'
+        ? { action, feedback, answer, note: note || '',
+            who: (document.getElementById('hr-accept-who').value || '').trim() }
+        : { action, feedback }),
     });
     if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
     document.getElementById('hr-feedback').value = '';
+    document.getElementById('hr-accept-note').value = '';
     const beforeAccept = document.getElementById('hr-before-accept');
     beforeAccept.classList.add('hidden'); beforeAccept.classList.remove('flex');
     const payload = await res.json().catch(() => ({}));

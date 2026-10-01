@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-01 — an accept means the person accepts the evidence
+
+Updated by hand: [[pauses|Pauses]] and [[how-fi-judges-correctness|How FI judges correctness]] (the question before an accept is now "Have you reviewed the evidence record, and do you accept these claims and the limits listed?"; only an explicit yes reaches publication_ready; "I did not check" and "partly" with its required note each leave a gap; the receipt binds who, when, the interface, the note, the paper and evidence-record hashes and the limits listed; the old "do the numbers match what you expected" question dropped), [[model-reasoning-trace|Model reasoning trace]] (it is the reasoning summary the provider returned, never the hidden or complete chain of thought, never evidence; `output.save_thinking: false` for sensitive data). Sources: core/acceptance.py, core/evidence.py, core/engine.py, core/audit_log.py, core/vscode_bridge.py, launch.py, web/server.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.
+
 ## 2026-10-01 — a changed design is disclosed and is a gap
 
 Updated by hand: [[explore-then-confirm|Explore then confirm]] (a design changed after the first run keeps the result below publication-ready unless a confirm run came after the last change, read from `.fi/phased.json`; FI's own methods paragraph on how the result was reached). Sources: core/disclosure.py, core/evidence.py, core/phased.py, core/engine.py.

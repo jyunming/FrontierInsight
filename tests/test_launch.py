@@ -652,8 +652,10 @@ def test_apply_review_decision_writes_accept(tmp_path) -> None:
     args = launch.parse_args(["--config", "x.yaml", "--resume", "q-1", "--accept", "yes"])
     launch._apply_review_decision(args, tmp_path)
     ans = _json.loads((fi / "human_review_answer.json").read_text())
-    # The person's answer to the question asked before accepting goes with it (core/acceptance.py).
-    assert ans == {"action": "accept", "feedback": "", "answer": "yes", "via": "cli"}
+    # The person's answer to the question asked before accepting goes with it, with who and when
+    # (core/acceptance.py).
+    assert ans.pop("at") and ans.pop("who")
+    assert ans == {"action": "accept", "feedback": "", "answer": "yes", "note": "", "via": "cli"}
 
 
 def test_apply_review_decision_writes_refine(tmp_path) -> None:
@@ -712,7 +714,7 @@ def test_review_refine_always_proceeds_even_without_pause(tmp_path: Path) -> Non
 
 def test_review_accept_stages_when_paused_for_review(tmp_path: Path) -> None:
     out, fi = _setup_review_quest(tmp_path, pause_kind="review")
-    launch._apply_review_decision(_review_args(accept="partly"), out)
+    launch._apply_review_decision(_review_args(accept=["partly", "the rate in table 2"]), out)
     assert json.loads(
         (fi / "human_review_answer.json").read_text(encoding="utf-8"))["action"] == "accept"
 

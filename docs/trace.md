@@ -58,7 +58,7 @@ When the connection hands it back (a reasoning model's `reasoning_content` throu
 | `the model changed from gpt-5.6-luna to claude-opus-5 (the model picked in the VS Code chat panel)` | the quest's model changed; results made before and after it came from different models |
 | `waiting for you (plan)` / `stopped for you` | the quest paused for a person; after you resume, the same step starts again from its beginning |
 
-`summary` shows steps, stops, routes and who accepted the result (a person, through which interface and their answer to "Do the main numbers match what you expected?", or automatically); `checks` (the default) adds each check, each file written and the model's reasons; `debug` adds every step's start.
+`summary` shows steps, stops, routes and who accepted the result (a person, by name when the interface gave one, through which interface, with their answer to "Have you reviewed the evidence record, and do you accept these claims and the limits listed?" and, for "partly", what they did not accept; or automatically); `checks` (the default) adds each check, each file written and the model's reasons; `debug` adds every step's start.
 
 ## What it can and cannot tell you
 

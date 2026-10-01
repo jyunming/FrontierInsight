@@ -4,22 +4,35 @@ An accept that no person looked at (``pauses.auto_accept_on_pass``, or a quest r
 recorded as automatic, and the evidence level then stops one below ``publication_ready`` with the gap
 :data:`NO_PERSON_GAP` (:func:`core.evidence.assess`). Before a person accepts, every interface (the terminal, the web
 page, VS Code) shows what the result does not guarantee and its most important evidence gaps (:func:`shown`), and asks
-:data:`QUESTION`. The answer is recorded with the accept (``acceptance`` in the quest's state, ``needs/EVIDENCE.json``
-and a ``result_accepted`` event in the decision trace). "No" does not accept: the person refines, or looks again.
+:data:`QUESTION`. Only an explicit "yes" lets the result reach ``publication_ready``:
+
+- "yes": the person reviewed the evidence record and accepts the claims and the limits listed.
+- "partly": accepted with a short note (required) saying what is not accepted; the note is recorded and kept as a gap
+  (:func:`partly_gap`) until the paper changes (the limit written into the claims, or the problem fixed) and a person
+  accepts the new paper with "yes".
+- "I did not check": the quest finishes and exports, with the gap :data:`NOT_CHECKED_GAP`.
+- "no": nothing is accepted; the person refines, or looks again.
+
+The answer is recorded as a receipt (:func:`receipt`: the paper and the evidence record it was given for, who, when,
+through which interface, the answer, the note and the limits that were listed) in the quest's state,
+``needs/EVIDENCE.json`` and a ``result_accepted`` event in the decision trace.
 
 Pure: no model, no files.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
+import hashlib
+import json
 from typing import Any
 
-QUESTION = "Do the main numbers match what you expected?"
+QUESTION = "Have you reviewed the evidence record, and do you accept these claims and the limits listed?"
 
 #: The answers, in the order every interface shows them: (id, label).
 CHOICES: tuple[tuple[str, str], ...] = (
     ("yes", "Yes"),
-    ("partly", "Partly"),
+    ("partly", "Partly (say what you do not accept)"),
     ("no", "No"),
     ("not_checked", "I did not check"),
 )
@@ -27,6 +40,16 @@ ANSWERS = tuple(c for c, _ in CHOICES)
 #: The answers an accept can carry ("no" never accepts).
 ACCEPTING = ("yes", "partly", "not_checked")
 LABELS = dict(CHOICES)
+
+#: The gap a person's "I did not check" leaves below ``publication_ready``.
+NOT_CHECKED_GAP = "no person reviewed the evidence before accepting"
+#: How the gap a person's "partly" leaves begins (:func:`partly_gap` adds the note).
+PARTLY_GAP = "a person accepted the result only in part"
+#: Why a "partly" without its note is not an accept.
+NOTE_NEEDED = ("\"partly\" needs a short note saying what you do not accept, so the result was not accepted: give "
+               "what you do not accept with the answer")
+_MAX_NOTE = 500
+_MAX_WHO = 80
 
 # What a person may type (the CLI's ``--accept <answer>``, the terminal prompt).
 _ALIASES = {
@@ -46,9 +69,9 @@ WAITING_GAP = "the review is waiting for your decision (accept, reject or refine
 
 #: What happens when the answer is "no".
 NOT_ACCEPTED_ON_NO = (
-    "You said the main numbers do not match what you expected, so the result was not accepted. Say what is wrong "
-    "with a refine (your notes go to the writing step, or to the design if a point needs a new experiment), or look "
-    "at the paper again and decide then."
+    "You answered no (you do not accept these claims and their limits), so the result was not accepted. Say what is "
+    "wrong with a refine (your notes go to the writing step, or to the design if a point needs a new experiment), or "
+    "look at the paper and the evidence again and decide then."
 )
 
 #: How many items of each list are shown before an accept.
@@ -65,26 +88,63 @@ def parse_answer(text: Any) -> str | None:
     return _ALIASES.get(key) or _ALIASES.get(key.replace(" ", "_"))
 
 
+def note_of(answer: Any) -> str:
+    """The note that goes with an answer (what is not accepted), on one line and capped; ``""`` when there is none."""
+    note = answer.get("note") if isinstance(answer, dict) else None
+    text = " ".join(str(note or "").split())
+    return text if len(text) <= _MAX_NOTE else text[: _MAX_NOTE - 1].rstrip() + "…"
+
+
 def problem(answer: Any) -> str | None:
     """Why an accept cannot go through as given (``None`` when it can): it must carry an answer to :data:`QUESTION`,
-    and "no" does not accept."""
+    "no" does not accept, and "partly" needs its note."""
     got = parse_answer(answer.get("answer")) if isinstance(answer, dict) else None
     if got is None:
         return (f"the accept did not answer the question asked before accepting ({QUESTION}), so the result was not "
                 "accepted")
     if got == "no":
         return NOT_ACCEPTED_ON_NO
+    if got == "partly" and not note_of(answer):
+        return NOTE_NEEDED
     return None
 
 
-def by_person(answer: dict[str, Any], via: str) -> dict[str, Any]:
-    """The acceptance record of a person's accept. ``via`` (the interface) is the one the answer names, else the
-    engine's own name for the path it came by; whatever ``by`` the answer claims is never taken."""
+def now() -> str:
+    """The time now, as the receipts write it (UTC, ISO 8601)."""
+    return _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _time_of(value: Any) -> str:
+    """``value`` when it is an ISO 8601 time with a time zone (when the interface took the answer), else now."""
+    text = str(value or "").strip()
+    try:
+        parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return now()
+    return parsed.isoformat() if parsed.tzinfo is not None else now()
+
+
+def receipt(answer: dict[str, Any], via: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The receipt of a person's accept: who (the name the interface gives: ``--approve-as`` or the login name at the
+    terminal, the name typed on the web page, the login name in VS Code; "not given" when it gives none), when, through
+    which interface (the one the answer names, else the engine's own name for the path it came by), the question, the
+    answer and its note, and what the person was shown with the question: the fingerprint of the evidence record
+    (``evidence_sha256``) and the limits listed, word for word (``limits_shown``), both from the review ``snapshot``
+    the engine handed the interface. The paper it covers (``paper_sha256``) is added where the paper is read
+    (``Engine._node_human_feedback``). Whatever ``by`` the answer claims is never taken."""
+    block = (snapshot or {}).get("before_accept") if isinstance(snapshot, dict) else None
+    block = block if isinstance(block, dict) else None
+    who = " ".join(str(answer.get("who") or "").split())[:_MAX_WHO]
     return {
         "by": "person",
         "via": str(answer.get("via") or via or "unknown")[:40],
+        "who": who or "not given",
+        "at": _time_of(answer.get("at")),
         "question": QUESTION,
         "answer": parse_answer(answer.get("answer")),
+        "note": note_of(answer),
+        "evidence_sha256": str((block or {}).get("evidence_sha256") or ""),
+        "limits_shown": lines(block),
     }
 
 
@@ -93,13 +153,53 @@ def automatic(via: str) -> dict[str, Any]:
     return {"by": "automatic", "via": via}
 
 
-def stamp(answer: dict[str, Any], via: str) -> dict[str, Any]:
-    """A person's review answer as the engine resumes the pause with it: an accept carries the acceptance record
-    (:func:`by_person`); whatever acceptance record the answer brought with it is dropped."""
+def stamp(answer: dict[str, Any], via: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A person's review answer as the engine resumes the pause with it: an accept carries its receipt
+    (:func:`receipt`); whatever acceptance record the answer brought with it is dropped."""
     out = {k: v for k, v in answer.items() if k != "acceptance"}
     if str(answer.get("action") or "").strip().lower() == "accept":
-        out["acceptance"] = by_person(answer, via)
+        out["acceptance"] = receipt(answer, via, snapshot)
     return out
+
+
+def partly_gap(note: str) -> str:
+    """The gap a person's "partly" leaves, with what they did not accept."""
+    return (f"{PARTLY_GAP}; not accepted: {note or '(no note was recorded)'} (write that limit into the paper's "
+            "claims, or fix the problem, then accept the new paper with yes)")
+
+
+def review_gap(record: Any) -> str | None:
+    """The gap a person's accept leaves below ``publication_ready`` (``None`` for an explicit "yes"): "I did not check"
+    and any answer that is not a yes leave :data:`NOT_CHECKED_GAP`, "partly" its note (:func:`partly_gap`)."""
+    record = record if isinstance(record, dict) else {}
+    answer = parse_answer(record.get("answer"))
+    if answer == "yes":
+        return None
+    if answer == "partly":
+        return partly_gap(note_of(record))
+    return NOT_CHECKED_GAP
+
+
+def mark(record: Any) -> str:
+    """One sentence for the summary line when a person's accept was not a plain yes and its gap is not the first one
+    shown ("" otherwise), so the note is seen wherever the one line is."""
+    if not isinstance(record, dict) or record.get("accepted_by") != "person":
+        return ""
+    gap = review_gap(record.get("acceptance"))
+    gaps = record.get("gaps") or []
+    if not gap or (gaps and gaps[0] == gap):
+        return ""
+    if gap == NOT_CHECKED_GAP:
+        return "The person who accepted it did not review the evidence."
+    return f"Accepted only in part; not accepted: {note_of(record.get('acceptance')) or '(no note was recorded)'}."
+
+
+def evidence_sha256(record: Any) -> str:
+    """The fingerprint of an evidence record (its JSON, keys sorted); ``""`` when there is none."""
+    if not isinstance(record, dict):
+        return ""
+    data = json.dumps(record, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8", errors="replace")
+    return hashlib.sha256(data).hexdigest()
 
 
 def accepted_by(state: dict[str, Any], *, pending: bool, paper_sha256: str = "") -> str | None:
@@ -144,11 +244,12 @@ def shown(record: dict[str, Any] | None) -> dict[str, Any]:
     """What a person sees before they accept, from the quest's evidence record: what the result does not guarantee
     (the blind spots of the level it reached, at most :data:`MAX_NOT_GUARANTEED`), its most important gaps (the next
     level's first, then the ones above it, at most :data:`MAX_GAPS`; never the "waiting for your decision" gap, which
-    is the decision being made, and neither is "no person reviewed it"), how many more there are, the question and its
-    answers. Nothing is repeated."""
+    is the decision being made, and neither are the gaps an accept leaves), how many more there are, the question, its
+    answers and the record's fingerprint (:func:`evidence_sha256`). Nothing is repeated."""
     from .evidence import INFO, LEVELS
 
     unknown = not isinstance(record, dict) or bool(record.get("assessment_failed"))
+    fingerprint = evidence_sha256(record)
     record = record if isinstance(record, dict) else {}
     status = str(record.get("status") or "not_executed")
     blind = list(INFO.get(status, INFO[LEVELS[0]])["known_blind_spots"])
@@ -164,8 +265,9 @@ def shown(record: dict[str, Any] | None) -> dict[str, Any]:
     for level in LEVELS[start:]:
         ordered.extend(str(g) for g in all_gaps.get(level) or [])
     ordered.extend(str(g) for g in record.get("gaps") or [])  # a record without all_gaps (an older one)
-    # The decision being made is not one of its own gaps.
-    ordered = [g for g in ordered if g.strip() and g.strip() not in (WAITING_GAP, NO_PERSON_GAP)]
+    # The decision being made is not one of its own gaps (nor an earlier accept's).
+    ordered = [g for g in ordered if g.strip() and g.strip() not in (WAITING_GAP, NO_PERSON_GAP, NOT_CHECKED_GAP)
+               and not g.strip().startswith(PARTLY_GAP)]
     seen: set[str] = set()
     not_guaranteed, _ = _unique(blind, MAX_NOT_GUARANTEED, seen)
     gaps, more = _unique(ordered, MAX_GAPS, seen)
@@ -177,6 +279,8 @@ def shown(record: dict[str, Any] | None) -> dict[str, Any]:
         "more_gaps": more,
         "question": QUESTION,
         "choices": [{"id": c, "label": label} for c, label in CHOICES],
+        # Which evidence record the person is asked about: the receipt of their accept carries it.
+        "evidence_sha256": fingerprint,
     }
 
 

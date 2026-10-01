@@ -220,6 +220,10 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert config.engine.phased is True and record["phased"]["status"] == "confirmed", record.get("phased")
     # A person accepted it, with their answer to the question asked before accepting; the trace says so too.
     assert record["accepted_by"] == "person" and record["acceptance"]["answer"] == "yes", record.get("acceptance")
+    # The receipt binds the paper and the evidence record that were shown, and the limits listed with the question.
+    receipt = record["acceptance"]
+    assert len(receipt["paper_sha256"]) == 64 and len(receipt["evidence_sha256"]) == 64, receipt
+    assert receipt["limits_shown"] and receipt["at"] and receipt["who"], receipt
     accepted = [e for e in audit_log.read(root / ".fi" / "audit.jsonl") if e.get("kind") == "result_accepted"]
     assert [(e["by"], e["via"], e["answer"]) for e in accepted] == [("person", "cli", "yes")]
     # The seal is the trace's last event and names the evidence and attempt records as they are.
