@@ -1242,7 +1242,7 @@ class ProxySupervisor:
         started, at once: a polite stop of the launcher alone (``npx``, a
         ``.cmd`` shim on Windows) left the real server running and holding its
         port."""
-        if handle.tree is not None:
+        if handle.tree is not None and handle.tree.real:
             handle.tree.close()
             return
         handle.proc.terminate()

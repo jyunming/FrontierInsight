@@ -308,3 +308,27 @@ async def test_a_stand_in_process_gets_no_job_or_group_even_with_an_int_pid(monk
     proc.kill.assert_called()
     await tree.aclose(aborted=True)
     assert reached == []
+
+
+def test_a_stand_in_popen_gets_no_job_or_group(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A test that patches ``subprocess.Popen`` (the proxy tests do) hands ``ProcessTree`` a mock: ``int()`` of its
+    ``_handle`` is 1, a real handle number, which must never reach the job calls; nor may its pid reach killpg."""
+    import subprocess
+    from unittest.mock import MagicMock
+
+    from core import proc_tree
+
+    reached: list[str] = []
+    fake = MagicMock()
+    fake.pid = os.getpid()
+    monkeypatch.setattr(subprocess, "Popen", MagicMock(return_value=fake))
+    if os.name == "nt":
+        monkeypatch.setattr(proc_tree, "_new_job", lambda: reached.append("job"))
+    else:
+        monkeypatch.setattr(proc_tree.os, "killpg", lambda *a: reached.append("killpg"))
+    tree = ProcessTree(["whatever"])
+    assert tree.real is False and tree._job is None  # noqa: SLF001
+    tree.kill()
+    fake.kill.assert_called()
+    tree.close()
+    assert reached == []

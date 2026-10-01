@@ -35,6 +35,9 @@ _log = logging.getLogger("frontier_insight.proc_tree")
 # How long ``kill`` waits for every process in the tree to be gone before giving up on the wait.
 _DESCENDANT_WAIT_S = 10.0
 
+# The real class, kept before any test can patch ``subprocess.Popen`` with a stand-in (``ProcessTree.real``).
+_REAL_POPEN = subprocess.Popen
+
 if os.name == "nt":  # pragma: no cover - exercised on Windows only
     import ctypes
     from ctypes import wintypes
@@ -190,6 +193,8 @@ class ProcessTree:
     def _start_windows(self, argv: list[str], popen_kwargs: dict[str, Any]) -> None:  # pragma: no cover
         flags = popen_kwargs.pop("creationflags", 0)
         self.proc = subprocess.Popen(argv, creationflags=flags | _CREATE_SUSPENDED, **popen_kwargs)
+        if not self.real:
+            return  # a test's stand-in: no handle to put in a job (int() of a mock is 1, a real handle number)
         resumed = False
         try:
             handle = int(self.proc._handle)  # noqa: SLF001 - the only way to reach the process handle
@@ -225,8 +230,20 @@ class ProcessTree:
     def pid(self) -> int:
         return self.proc.pid
 
+    @property
+    def real(self) -> bool:
+        """A process ``subprocess.Popen`` started, not a test's stand-in (a test that patches ``subprocess.Popen``).
+        A stand-in gets no job and no process group: ``kill()`` only calls its own ``kill()``."""
+        return type(self.proc) is _REAL_POPEN
+
     def kill(self) -> None:
         """Stop the program and everything it started, and wait (up to a few seconds) until all of it is gone."""
+        if not self.real:
+            try:
+                self.proc.kill()
+            except OSError:
+                pass
+            return
         deadline = time.monotonic() + _DESCENDANT_WAIT_S
         if os.name == "nt":
             self._kill_windows(deadline)
