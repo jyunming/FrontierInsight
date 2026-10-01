@@ -16,6 +16,7 @@ Synchronous on purpose: the callers that need it (``scripts/import_scientist_ski
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
@@ -23,6 +24,8 @@ import time
 from typing import Any
 
 __all__ = ["ProcessTree"]
+
+_log = logging.getLogger("frontier_insight.proc_tree")
 
 # How long ``kill`` waits for every process in the tree to be gone before giving up on the wait.
 _DESCENDANT_WAIT_S = 10.0
@@ -123,8 +126,9 @@ if os.name == "nt":  # pragma: no cover - exercised on Windows only
 class ProcessTree:
     """``subprocess.Popen`` (``.proc``) whose whole tree ``kill()`` stops.
 
-    Use it as a context manager, or call ``close()`` when done: on Windows that releases the job, which also
-    stops anything the program left running.
+    Use it as a context manager, or call ``close()`` when done. Leaving the block (or ``close()``, or dropping the
+    object) while the program still runs stops the whole tree; on Windows it also stops anything a finished program
+    left running. So keep the ``ProcessTree``, not just its ``.proc``, for as long as the program should run.
     """
 
     def __init__(self, argv: list[str], **popen_kwargs: Any) -> None:
@@ -140,23 +144,34 @@ class ProcessTree:
     def _start_windows(self, argv: list[str], popen_kwargs: dict[str, Any]) -> None:  # pragma: no cover
         flags = popen_kwargs.pop("creationflags", 0)
         self.proc = subprocess.Popen(argv, creationflags=flags | _CREATE_SUSPENDED, **popen_kwargs)
-        handle = int(self.proc._handle)  # noqa: SLF001 - the only way to reach the process handle
+        resumed = False
         try:
+            handle = int(self.proc._handle)  # noqa: SLF001 - the only way to reach the process handle
             try:
                 job = _new_job()
-            except OSError:
-                job = None  # no job: kill() falls back to taskkill /T
+            except OSError as exc:
+                _log.warning("could not create a job for %s (%s); a timeout will fall back to taskkill", argv[0], exc)
+                job = None
             if job is not None and not _kernel32.AssignProcessToJobObject(job, handle):
+                _log.warning(
+                    "could not put %s into a job (%s); a timeout will fall back to taskkill",
+                    argv[0], ctypes.WinError(ctypes.get_last_error()),
+                )
                 _kernel32.CloseHandle(job)
                 job = None
             self._job = job
-        finally:
             # Never leave the program suspended: it would look like a hang to whoever waits on it.
-            if _ntdll.NtResumeProcess(handle) < 0:
+            resumed = _ntdll.NtResumeProcess(handle) >= 0
+        finally:
+            if not resumed:
                 self.proc.kill()
                 self.proc.wait()
+                for stream in (self.proc.stdin, self.proc.stdout, self.proc.stderr):
+                    if stream is not None:
+                        stream.close()
                 self.close()
-                raise OSError(f"could not resume {argv[0]} after starting it")
+        if not resumed:
+            raise OSError(f"could not resume {argv[0]} after starting it")
 
     # --- both ------------------------------------------------------------------
 
@@ -173,8 +188,7 @@ class ProcessTree:
             self._kill_posix(deadline)
 
     def _kill_windows(self, deadline: float) -> None:  # pragma: no cover - exercised on Windows only
-        if self._job is not None:
-            _kernel32.TerminateJobObject(self._job, 1)
+        if self._job is not None and _kernel32.TerminateJobObject(self._job, 1):
             while time.monotonic() < deadline:
                 try:
                     if _active_processes(self._job) == 0:
@@ -182,6 +196,9 @@ class ProcessTree:
                 except OSError:
                     break
                 time.sleep(0.05)
+            else:
+                _log.warning("processes started by %s were still running %.0f s after being stopped",
+                             self.proc.args, _DESCENDANT_WAIT_S)
         else:
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(self.proc.pid)],
@@ -191,19 +208,24 @@ class ProcessTree:
 
     def _kill_posix(self, deadline: float) -> None:
         # The program leads its own session, so its process group id is its pid; the group outlives its
-        # leader, which is what catches a helper whose parent has already exited.
+        # leader, which is what catches a helper whose parent has already exited. While any member is left the
+        # id stays reserved, so it cannot name an unrelated group.
         pgid = self.proc.pid
         try:
             os.killpg(pgid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
         self._reap(deadline)
+        # Killed members linger as zombies until their new parent reaps them; one that never does (a container
+        # without an init process) only costs this bounded wait.
         while time.monotonic() < deadline:
             try:
                 os.killpg(pgid, 0)
             except (ProcessLookupError, PermissionError):
                 break
             time.sleep(0.05)
+        else:
+            _log.debug("process group %d was still present %.0f s after being killed", pgid, _DESCENDANT_WAIT_S)
 
     def _reap(self, deadline: float) -> None:
         try:
@@ -216,7 +238,11 @@ class ProcessTree:
             pass
 
     def close(self) -> None:
-        """Release the job (Windows). Anything of the tree still running is stopped with it."""
+        """Stop the tree if the program is still running (an exception or Ctrl+C left the ``with`` block early),
+        then release the job (Windows; closing it also stops anything the program left running)."""
+        proc = getattr(self, "proc", None)
+        if proc is not None and proc.poll() is None:
+            self.kill()
         job, self._job = self._job, None
         if job is not None and os.name == "nt":  # pragma: no cover - exercised on Windows only
             _kernel32.CloseHandle(job)

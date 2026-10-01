@@ -61,8 +61,9 @@ def test_a_command_that_runs_too_long_is_stopped_with_the_helper_it_started(isk,
     """``git-remote-https`` is a child of ``git`` and holds its output handle: with a pipe, the wait for
     the output never ends after git is killed. Here the helper writes a marker if it is left alive."""
     marker = tmp_path / "helper-alive"
-    # The timeout leaves the parent time to have started its helper before it is stopped: a stop that lands while
-    # the helper is still being created cannot see it (a slow Windows runner took over 2 s to get there, twice).
+    # The timeout leaves the parent time to have started its helper before it is stopped (a slow Windows runner took
+    # over 2 s to get there, twice); a helper not yet started when the stop lands never starts at all.
+    # tests/test_proc_tree.py checks the stop itself without depending on how fast processes start.
     parent = textwrap.dedent(
         """
         import subprocess, sys, time

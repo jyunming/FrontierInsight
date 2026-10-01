@@ -76,9 +76,12 @@ jobs:
       #   - tests/test_web_e2e.py
       #   - any test tagged @pytest.mark.slow
       # Each shard records coverage; the `coverage` job below joins one OS's shards and applies the floor.
+      # pytest.ini gives every test a time limit. On Windows a test past it ends its worker; --max-worker-restart=0
+      # then stops the shard with that test named in the summary (a replacement worker re-ran the hung test, and
+      # under --dist loadfile could end the run in an xdist INTERNALERROR that printed no name).
       - name: Run pytest (fast tier)
         run: >-
-          pytest -q -m "not slow" -n auto --dist loadfile --durations=25
+          pytest -q -m "not slow" -n auto --dist loadfile --max-worker-restart=0 --durations=25
           --ignore=tests/test_engine_smoke.py
           --ignore=tests/test_self_correction_e2e.py
           --ignore=tests/test_web_e2e.py
