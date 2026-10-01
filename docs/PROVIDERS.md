@@ -181,13 +181,17 @@ results before and after were then made by different models; the trace
 records the change). `.fi/cost.jsonl` names the model that answered each
 call.
 
-**Claude's thinking over the VS Code connection.** Copilot returns a Claude
+**A model's reasoning over the VS Code connection.** Copilot returns a Claude
 model's thinking only when the request asks for it, through Copilot's own
 undocumented model option `_enableThinking`. FI asks by default on every
 step's call and keeps what comes back in `.fi/thinking.jsonl`; Opus returns a
 summary of its thinking, not the full text. The option is internal to
 Copilot and may stop working in any Copilot release. A model that refuses it
 is asked again once without it (the quest goes on; `run.log` says so once).
+A GPT model (gpt-5.6-luna, for one) sends its reasoning summary in an
+encrypted reasoning item that Copilot passes to another extension only when
+the request carries `includeEncryptedThinking: true`; FI sends it and keeps
+only the readable summary.
 `output.save_thinking: false` stops asking. The chat's per-step line
 (`... N thinking ...`) shows how many characters of thinking arrived.
 

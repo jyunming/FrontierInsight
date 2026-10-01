@@ -823,7 +823,7 @@ export class Bridge {
         let lastErr: Error | undefined;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                // With Copilot's `_enableThinking` model option when asked (lm-messages.ts ThinkingRequests); a model
+                // With THINKING_REQUEST_OPTIONS (Copilot's `_enableThinking`, and `includeEncryptedThinking` for GPT) when asked (lm-messages.ts ThinkingRequests); a model
                 // that refuses it is asked again once without it.
                 return await this.thinkingRequests.send(
                     model.id, askThinking,

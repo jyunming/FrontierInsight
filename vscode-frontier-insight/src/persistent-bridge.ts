@@ -411,7 +411,7 @@ export class PersistentBridge {
             modelKey = model.id;
             const wantThinking = req.ask_thinking !== false;
             try {
-                // With Copilot's `_enableThinking` model option when asked (lm-messages.ts ThinkingRequests); a model
+                // With THINKING_REQUEST_OPTIONS (Copilot's `_enableThinking`, and `includeEncryptedThinking` for GPT) when asked (lm-messages.ts ThinkingRequests); a model
                 // that refuses it is asked again once without it.
                 const sent = await this.thinkingRequests.send(
                     modelKey, wantThinking,
