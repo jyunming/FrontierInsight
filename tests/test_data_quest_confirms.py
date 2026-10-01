@@ -133,6 +133,24 @@ def test_a_second_reading_keeps_the_embargo(tmp_path: Path) -> None:
     assert info["manifest"]["rows_left_out"] == 2 and info["manifest"]["embargo_rows"] == 2
 
 
+def test_later_months_added_after_exploration_read_the_data_never_reach_exploration(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "d.csv"
+    _series(path)
+    phased.prepare(tmp_path, QUEST, data_quest=True)
+    declared = {"strategy": "time", "time_column": "month", "embargo": 1}
+    phased.data_quest_gate(tmp_path, QUEST, declared=declared)
+    explored = set((tmp_path / "data" / "d.csv").read_text().splitlines()[1:])
+    latest = max(r.split(",")[0] for r in explored)
+    # The person puts the whole file back with two newer months, and the quest reads the data again.
+    phased.restore_inputs(tmp_path)
+    _table(path, "month,sales", [*[f"{2020 + m // 12}-{m % 12 + 1:02d},{100 + m}" for m in range(48)],
+                                 "2024-01,999", "2024-02,998"])
+    phased.prepare(tmp_path, QUEST, data_quest=True)
+    phased.data_quest_gate(tmp_path, QUEST, declared=declared)
+    now = (tmp_path / "data" / "d.csv").read_text().splitlines()[1:]
+    assert max(r.split(",")[0] for r in now) == latest, "exploration still ends where it ended"
+
+
 def test_a_column_that_numbers_the_rows_is_not_taken_for_a_unit() -> None:
     """``id`` is unique on every row: it says nothing about which rows belong to one patient."""
     rows = [f"{i},p{i // 3},{i}" for i in range(60)]
@@ -170,6 +188,75 @@ def test_a_confirm_reading_cut_short_is_not_a_second_look(tmp_path: Path) -> Non
     phased.note_confirm_result(tmp_path, {"m": 1.1})
     record, _lines = phased.record_confirm(tmp_path, {"m": 1.1})
     assert phased.status(record) == phased.CONFIRMED
+
+
+def test_a_confirm_reading_that_found_nothing_still_counts(tmp_path: Path) -> None:
+    _visits(tmp_path / "data" / "d.csv")
+    phased.prepare(tmp_path, QUEST, data_quest=True)
+    phased.data_quest_gate(tmp_path, QUEST)
+    phased.enter_confirm(tmp_path, explore_result={"m": 1.0}, frozen_sha256=None, stride=1, replicates=1,
+                         explore_runs=1, isolation=(phased_isolation.ENCRYPTED, ""))
+    phased.data_quest_gate(tmp_path, QUEST)
+    phased.note_confirm_result(tmp_path, {})  # the model's answer could not be read: the reading still happened
+    phased.data_quest_gate(tmp_path, QUEST)  # a second look
+    assert phased.load(tmp_path)["confirm_executions"] == 2
+
+
+def test_a_waiting_background_job_without_a_container_gets_the_whole_files_back(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    original = _visits(engine.quest_root / "data" / "d.csv")
+    engine._phased_prepare()
+    phased.data_quest_gate(engine.quest_root, engine.quest_id, key=engine._phased_key())
+    engine._phased_job_pending = True
+    engine._phased_restore_inputs()
+    assert (engine.quest_root / "data" / "d.csv").read_bytes() == original
+    assert phased.status(phased.load(engine.quest_root)) == "compromised"
+    # After the confirm result (files whole already) a waiting job changes nothing about the result.
+    other = _engine(tmp_path / "done")
+    _visits(other.quest_root / "data" / "d.csv")
+    other._phased_prepare()
+    key = other._phased_key()
+    phased.data_quest_gate(other.quest_root, other.quest_id, key=key)
+    phased.enter_confirm(other.quest_root, explore_result={"m": 1.0}, frozen_sha256=None, stride=1, replicates=1,
+                         explore_runs=1, key=key, isolation=(phased_isolation.ENCRYPTED, ""))
+    phased.data_quest_gate(other.quest_root, other.quest_id, key=key)
+    phased.note_confirm_result(other.quest_root, {"m": 1.1})
+    phased.record_confirm(other.quest_root, {"m": 1.1}, key=key)
+    other._phased_job_pending = True
+    other._phased_restore_inputs()
+    assert phased.status(phased.load(other.quest_root)) == phased.CONFIRMED
+
+
+def test_a_switch_to_a_container_rewrites_the_kept_files_plain_and_clears_stray_copies(tmp_path: Path) -> None:
+    root = tmp_path / QUEST
+    original = _visits(root / "data" / "d.csv")
+    key = phased_isolation.new_key()
+    phased.prepare(root, QUEST, data_quest=True, key=key)
+    phased.decide_split(root, QUEST, key=key)
+    phased.restore_inputs(root, key)
+    stray = phased.store_dir(root) / "tmp" / ".d.csv.fi-tmp"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_bytes(original)
+    phased.prepare(root, QUEST, data_quest=True, mode="docker")  # no key: a container now
+    info = phased.load(root)["files"][0]
+    assert phased._read_kept(phased._kept(root, info, "original"), None) == original
+    assert not stray.exists()
+
+
+def test_without_the_encryption_package_rows_are_kept_plain_and_not_called_isolated(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _engine(tmp_path)
+    _visits(engine.quest_root / "data" / "d.csv")
+
+    def missing() -> bytes:
+        raise ImportError("No module named 'cryptography'")
+
+    monkeypatch.setattr(phased_isolation, "new_key", missing)
+    engine._phased_prepare()
+    assert engine._phased_key() is None and engine._phased_mode() == "plain"
+    assert phased.load(engine.quest_root)["starts"] == ["plain"]
+    state, why = engine._phased_isolation()
+    assert state == phased_isolation.UNVERIFIED and "cryptography" in why
 
 
 def test_a_record_from_before_isolation_was_noted_is_not_counted_as_isolated(tmp_path: Path) -> None:

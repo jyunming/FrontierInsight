@@ -42,8 +42,9 @@ A quest that runs no experiment of its own (a literature survey, ``--analyze``) 
 :func:`mark_not_applicable` puts any held-back rows back (the analysis must see all of the data), records why, and the
 quest goes on as it would without the two stages; its paper carries no stage note and the evidence ladder no stage gap.
 
-A no-simulation quest that analyses data (``data_quest`` in the record) is confirmed on held-back rows too: its data is
-also read from ``data/`` (where the quest asks for it), the rows are held back by the same rules, and the confirm run
+A no-simulation quest that analyses data (``data_quest`` in the record) is confirmed on held-back rows too: its table
+is read from ``data/`` only (where the quest asks for it, and what its data-reading step reads; a table in
+``inputs/data/`` holds nothing back), the rows are held back by the same rules, and the confirm run
 is the quest's own data-reading step (``data_load``) run once more by the engine with the frozen design on the
 held-back rows only (the model reads those rows; it does not change the design). When its data cannot be split (:func:`data_quest_gate`, the first time the data is read) it
 holds nothing back and is ``not_applicable``, which keeps a design revised after the analysis below publication-ready
@@ -246,6 +247,9 @@ def _split(rel: str, raw: bytes, quest_id: str, allowed: set[str] | None = None,
             # manifest keeps saying so.
             decision = _data.decide(rel, header, rows, _delimiter(rel), quest_id, declared_split=rule)
             dropped, manifest = decision.dropped - allowed, decision.manifest
+            # A time split: rows at or after where exploration's part ended (the left-out periods, and rows the person
+            # added in later periods since) stay out of exploration, whatever the rule gives on the table as it is now.
+            dropped |= _data.not_before(header, rows, rule, _delimiter(rel)) - allowed
     elif rule is not None:
         decision = _data.decide(rel, header, rows, _delimiter(rel), quest_id, declared_split=rule)
         picked, dropped, manifest = decision.held, decision.dropped, decision.manifest
@@ -394,8 +398,8 @@ def _not_restored(quest_root: Path, missed: list[dict[str, Any]], key: bytes | N
                        f"the whole file you supplied is kept in {kept}"
                        + (" (encrypted: only the run of FI that wrote it could read it)" if _locked(kept) else ""))
         elif kept.is_file() and _read_kept(kept, key) is None:
-            out.append(f"{shown(info)} could not be put back whole: FI stopped without putting it back (it was killed, "
-                       "or a background job outlived it), and the rows it held back were kept encrypted with a key only "
+            out.append(f"{shown(info)} could not be put back whole: FI stopped without putting it back (it was "
+                       "killed), and the rows it held back were kept encrypted with a key only "
                        f"that run of FI had, so they cannot be read again. {on_disk} now holds only exploration's part: "
                        "put your own copy of the whole file there so the quest has all of your data again (the result "
                        "can no longer be confirmed either way)")
@@ -630,7 +634,7 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False, data_
         reasons = (["the files given in execution.inputs (inputs/examples/) are not held back: only data in "
                     "inputs/data/ can be"]
                    if examples.is_dir() and any(p.is_file() for p in examples.rglob("*"))
-                   else ["no data has been supplied yet in data/ or inputs/data/" if data_quest
+                   else ["no data has been supplied yet in data/" if data_quest
                          else "no data was supplied in inputs/data/"])
     if reasons:
         if split:
@@ -831,6 +835,8 @@ def note_confirm_result(quest_root: Path, result: Any) -> None:
     record = load(quest_root)
     if record is not None and record.get("stage") == CONFIRM:
         record["confirm_run_result_sha256"] = _result_digest(result) if result else None
+        # The confirm run finished (with a result or without one): a later reading is a second look.
+        record["confirm_reading_done"] = True
         _save(quest_root, record)
 
 
@@ -1119,7 +1125,7 @@ def data_quest_gate(quest_root: Path, quest_id: str, *, declared: dict[str, Any]
         record, lines = prepare(quest_root, quest_id, data_quest=True, key=key)
         if record.get("compromised"):
             return lines, ""
-        if int(record.get("confirm_executions") or 0) and not record.get("confirm_run_result_sha256"):
+        if int(record.get("confirm_executions") or 0) and not record.get("confirm_reading_done"):
             # The confirm reading was cut short before it produced a result (the model's connection failed, FI was
             # stopped): this reading is that one again, not a second look at the held-back rows.
             return lines, ""
@@ -1393,7 +1399,7 @@ def _data_plan_lines(record: dict[str, Any], split_note: str = "") -> list[str]:
         what = f"Part of the data is held back from exploration ({held})."
     else:
         what = (f"When the data is first analysed, part of it is held back first, if it is one table you supplied (a "
-                f"CSV or TSV file in `data/` or `inputs/data/`) with at least {MIN_ROWS} rows. Which rows depends on "
+                f"CSV or TSV file in `data/`) with at least {MIN_ROWS} rows. Which rows depends on "
                 "which rows belong together: whole subjects, sites or other units when several rows share one, the "
                 "latest period when the rows are a time series, and rows one by one only when each row is a separate "
                 f"case (at least {_data.MIN_UNITS} units, about {round(HOLD_BACK_FRACTION * 100)}% of them held back). "

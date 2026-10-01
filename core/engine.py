@@ -2642,6 +2642,11 @@ class Engine:
     def _phased_log(self, lines: list[str]) -> None:
         for line in lines:
             self._log.info("[phased] %s", line)
+            if "keep your own copy" in line:
+                # Said where the person watching sees it too (console, web page, VS Code): it is about their data.
+                self._progress("[phased] Part of your data is held back, encrypted with a key only this run of FI "
+                               "holds: if FI is killed rather than stopped, those rows cannot be put back, so keep your "
+                               "own copy of the file.")
 
     def _phased_keep_off_if_began_before(self) -> None:
         """A research quest whose config does not set ``engine.phased`` has it on by default. One that began before that
@@ -2738,9 +2743,12 @@ class Engine:
         the reason in plain words."""
         record = _phased.load(self.quest_root) or {}
         starts = set(record.get("starts") or [])
-        if not starts:
+        if not starts or "unrecorded" in starts:
             return (_phased_isolation.UNVERIFIED,
                     "the quest held its rows back before FI recorded how they were kept from exploration")
+        if "plain" in starts:
+            return (_phased_isolation.UNVERIFIED, "a run of the quest kept the held-back rows unencrypted without a "
+                                                  "container (the `cryptography` package was not installed)")
         if starts == {"docker"}:
             why = _phased_isolation.docker_mounts_clear(self.executor, self.quest_root, _phased.store_dir(self.quest_root))
             return (_phased_isolation.DOCKER, "") if not why else (_phased_isolation.UNVERIFIED, why)
@@ -2889,18 +2897,22 @@ class Engine:
         background job the run submitted is waiting: its tasks read inputs/data/ when they start."""
         if getattr(self, "_phased_job_pending", False):
             record = _phased.load(self.quest_root) or {}
+            # Only while a part of a file is in place (exploring, or the confirm run): after the confirm result the
+            # whole files are back already, and a compromised record has nothing left to lose.
             if self._phased_key() is None or not record.get("files"):
                 self._log.info("[phased] a background job is waiting, so inputs/data/ keeps the part of the data this "
                                "stage may see until the quest is resumed")
                 return
-            # Without a container the kept rows are encrypted with this run's key, which ends with this run: the part
-            # left in place for the job could never be completed again. The whole files go back (the job may then
-            # read every row), and nothing in this quest can be confirmed.
-            _phased.mark_compromised(self.quest_root, "a background job outlived the run of FI that held the key to the "
-                                                      "held-back rows, so the whole files were put back for it")
-            self._log.warning("[phased] a background job is waiting and outlives this run of FI, which holds the only "
-                              "key to the held-back rows: the whole files are put back now, so nothing in this quest "
-                              "can be confirmed")
+            # Without a container the kept rows are encrypted with this run's key, which ends with this run: a part left
+            # in place for the job could never be completed again, so the whole files go back (put back below). While a
+            # part is in place (exploring, or the confirm run) the job may then read every row, and nothing in this
+            # quest can be confirmed; after the confirm result the files are whole already and nothing changes.
+            if record.get("stage") in (_phased.EXPLORE, _phased.CONFIRM) and not record.get("compromised"):
+                _phased.mark_compromised(self.quest_root, "a background job outlived the run of FI that held the key to "
+                                                          "the held-back rows, so the whole files were put back for it")
+                self._log.warning("[phased] a background job is waiting and outlives this run of FI, which holds the "
+                                  "only key to the held-back rows: the whole files are put back now, so nothing in this "
+                                  "quest can be confirmed")
         try:
             for line in _phased.restore_inputs(self.quest_root, key=self._phased_key()):
                 self._log.warning("[phased] %s", line)
@@ -7342,6 +7354,8 @@ class Engine:
                 "[data_load] %s has no user data (only README.md) — "
                 "analyze will run with an empty result_json", data_dir,
             )
+            if _phased.enabled(self.config):
+                _phased.note_confirm_result(self.quest_root, {})  # a confirm reading that found nothing still happened
             return {"result_json": {}, "data_files": []}
 
         manifest = _render_file_manifest(entries)

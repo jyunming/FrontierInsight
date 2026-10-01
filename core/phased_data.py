@@ -331,12 +331,37 @@ def _time(file: str, names: list[str], rows: list[str], cells: list[list[str]], 
     held = {r for r, k in zip(rows, keys) if k and k[1] in held_periods}
     dropped = {r for r, k in zip(rows, keys) if k and k[1] in gap}
     since = next(c[col].strip() for c, k in zip(cells, keys) if k and k[1] == first)
-    rule = _rule(spec, time_column=names[col], since=since)
+    # Where exploration's part ends (the first period left out, or the first held back): kept, so rows added later at
+    # or after it never reach exploration (:func:`not_before`).
+    edge = min(gap) if gap else first
+    until = next(c[col].strip() for c, k in zip(cells, keys) if k and k[1] == edge)
+    rule = _rule(spec, time_column=names[col], since=since, explore_until=until)
     explore_periods = {k[1] for r, k in zip(rows, keys) if k and r not in held and r not in dropped}
     return Decision(rule=rule, held=held, dropped=dropped, manifest={
         "strategy": TIME, "unit": f"period of {names[col]}", "units": len(periods),
         "units_explore": len(explore_periods), "units_held_back": len(held_periods), "embargo_periods": len(gap),
         "embargo_rows": len(dropped), "overlap": len(explore_periods & set(held_periods))})
+
+
+def not_before(header: str, rows: list[str], rule: dict[str, Any] | None, delimiter: str) -> set[str]:
+    """For a time split: the rows at or after the period where exploration's part ended (``explore_until``, recorded
+    when the split was decided): rows added since in the later periods, and the left-out ones, never go to
+    exploration. Empty for any other split, or a value that cannot be put in order (then nothing is assumed)."""
+    rule = rule or {}
+    if rule.get("strategy") != TIME or not rule.get("explore_until"):
+        return set()
+    names = _names(header, delimiter)
+    col = _column(names, rule.get("time_column"))
+    edge = _time_key(str(rule["explore_until"]))
+    if col is None or edge is None:
+        return set()
+    out = set()
+    for r in rows:
+        c = _cells(r, delimiter)
+        k = _time_key(c[col]) if len(c) > col else None
+        if k is None or (k[0] == edge[0] and k[1] >= edge[1]):
+            out.add(r)  # a row that cannot be placed in time is not given to exploration either
+    return out
 
 
 def overlap(header: str, explore_rows: list[str], held_rows: list[str], rule: dict[str, Any] | None,

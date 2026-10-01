@@ -11,8 +11,10 @@ held-back confirm counts as on unseen data only when one of two things held whil
   encrypted (:func:`seal`, Fernet: AES with an HMAC, from the ``cryptography`` package) with a key made for that run of
   FI and kept only in FI's own memory, never on disk and never in the environment of the quest's code; and, before the
   confirm run, the quest's code was read for any path that leads out of the quest folder (:func:`scan`) and none was
-  found. A scan is a reading of the code for plain patterns (an absolute path, ``..``, a parent of the working folder, the
-  home folder, the name ``_held_back``), not proof: anything it finds keeps the result below publication-ready.
+  found. A scan is a reading of the code as it is before the confirm run for plain patterns (an absolute path, ``..`` or
+  ``os.pardir``, a parent of the working folder or of the script past the quest folder, the home folder, the name
+  ``_held_back``, a read of another program's memory), not proof: a path built from pieces at run time is not seen, and
+  anything it finds keeps the result below publication-ready.
 
 Otherwise the status is :data:`UNVERIFIED`, a ``publication_ready`` gap said in one plain sentence. A confirm run on new
 seeds hides no data, and is not judged here.
@@ -154,7 +156,7 @@ def _scan_python(path: Path, rel: str, depth: int) -> list[str]:
             text = node.value.strip()
             if _HELD.search(text):
                 hit(node, "names the folder the held-back rows are kept in (_held_back)")
-            elif re.match(r"^/proc/(?!self/)", text) or text in _MEMORY:
+            elif re.match(r"^/proc/(?:\d|\{)", text) or text in _MEMORY:
                 hit(node, "reads the memory of another program")
             elif "://" not in text and "\n" not in text and _ABSOLUTE.match(text):
                 hit(node, f"opens an absolute path ({text[:60]!r})")
