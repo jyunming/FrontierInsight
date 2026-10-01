@@ -330,12 +330,15 @@ class QuestState(TypedDict, total=False):
     # when present and aggregates numeric fields with mean ± std.
     result_json_replicates: list[dict[str, Any]]
     result_json_trials: bool  # the one result holds every trial FI ran (the trial contract): pool it as the replicates
-    # True when two seeds produced byte-identical results, so replication
-    # stopped early. Distinguishes "no error bars because the experiment is
-    # deterministic" from "no error bars because nothing could be aggregated".
+    # True when every configured seed ran and every one gave byte-identical
+    # results while the script can draw random numbers (the replicates are kept).
+    # Despite the name it is not proof of determinism; it distinguishes "no
+    # spread because every seed agreed" from "no error bars because nothing could
+    # be aggregated", and is never read as "new seeds cannot change the result".
     result_json_deterministic: bool
-    # True when the generated script never reads ``FI_REPLICATE_SEED``, so its
-    # replicate runs repeated ONE run instead of sampling. No replicate list is
+    # True when the generated script's runs were ONE run repeated: it never reads
+    # ``FI_REPLICATE_SEED``, or reads it without the value reaching any generator,
+    # or (with the flag below) has no random source at all. No replicate list is
     # published in that case; this records WHY, so analyze can tell the paper it
     # holds a single measurement rather than quietly losing its error bars.
     result_json_replicate_seed_ignored: bool
@@ -2740,12 +2743,13 @@ class Engine:
                               "kept in %s", e, _phased.store_dir(self.quest_root) / "original")
 
     def _phased_seed_gap(self, state: QuestState) -> str:
-        """Why a confirm run on new seeds could not differ from exploration's run (empty when it can). What the runs
-        showed decides first: identical results whatever the seed (a deterministic study, or a script that ignores the
-        seed), as ``_node_execute`` recorded. Then the code: a deterministic trial contract (``run_cell``), or no file
-        in ``code/`` that reads ``FI_REPLICATE_SEED`` while the experiment draws random numbers only from fixed seeds (a
-        generator built without a seed draws new numbers on every run, so that one does differ). Under ``run_trial`` FI
-        hands every trial its seed itself."""
+        """Why a confirm run on new seeds could not differ from exploration's run (empty when it can). A deterministic
+        trial contract (``run_cell``), or a script ``_node_execute`` found has no source of random numbers, or one whose
+        identical runs it found ignore the seed. Seeds that merely agreed do not count: a script that can draw random
+        numbers can agree on every seed it ran and still differ on a new one. Then the code: no file in ``code/`` that
+        reads ``FI_REPLICATE_SEED`` while the experiment draws random numbers only from fixed seeds (a generator built
+        without a seed draws new numbers on every run, so that one does differ). Under ``run_trial`` FI hands every
+        trial its seed itself."""
         deterministic = ("the study has no randomness (every run gives the same numbers), so a run on new seeds only "
                          "repeats exploration's run")
         code = self.quest_root / "code"
@@ -2753,20 +2757,21 @@ class Engine:
         entries = _trial_runner.entries(simulate) if simulate.is_file() else set()
         if "run_trial" in entries:
             return ""
-        if "run_cell" in entries or state.get("result_json_deterministic") or state.get("result_json_no_random_source"):
+        if "run_cell" in entries or state.get("result_json_no_random_source"):
             return deterministic
         script = simulate if simulate.is_file() else code / "experiment.py"
         if not script.is_file():
             return ""
         if state.get("result_json_replicate_seed_ignored"):
-            return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
-                    "same numbers, so a run on new seeds would repeat exploration's run")
+            return (f"the seed FI gives code/{script.name} (FI_REPLICATE_SEED) reaches none of its random numbers, and "
+                    "its runs gave the same numbers, so a run on new seeds would repeat exploration's run")
         replicates = list(state.get("result_json_replicates") or [])
         this_pass = bool(replicates) and isinstance(replicates[0], dict) and \
             {k: v for k, v in replicates[0].items() if k != "_seed"} == (state.get("result_json") or {})
         if len(replicates) > 1 and this_pass:
-            # Runs on different seeds already gave different numbers (the list is this pass's: its seed 0 is the result
-            # in hand, not an earlier script's left on the state): new seeds change the result.
+            # This pass's runs are samples on several seeds (the list is this pass's: its seed 0 is the result in hand,
+            # not an earlier script's left on the state): they differed, or they agreed while the script can draw
+            # random numbers, which new seeds may still change.
             return ""
         # The seed read in the script or a module it imports from code/ (a multi-module project reads it in a helper);
         # FI's own helpers there (run.py sets a default seed) do not count.
@@ -7886,7 +7891,7 @@ class Engine:
         for index in range(1, replicates):
             raw_dir = _split_run.raw_dir_for(self._raw_root(), index)
             if not raw_dir.is_dir():
-                continue  # that replicate was not run (the study was found deterministic after two seeds)
+                continue  # that replicate was not run (a script with no random source stops after two seeds)
             manifest, why = _run_manifest.read(raw_dir)
             found = _run_manifest.problems(protocol, manifest, why)
             if found:
@@ -11342,6 +11347,7 @@ class Engine:
         seed_ignored = False
         no_random_source = not _script_has_random_source(seed_path)
         replicates_ran = False
+        all_agreed = True  # every replicate that finished gave seed 0's numbers
         primary_figures: dict[str, tuple[bytes, bytes | None]] = {}
         if result.returncode == 0 and result_json is not None:
             # Tag seed 0 explicitly so the aggregator can attribute it.
@@ -11414,70 +11420,28 @@ class Engine:
                         "[execute] replicate seed=%d rc=0 duration=%.1fs",
                         seed, rep_result.duration_s,
                     )
-                    # A deterministic experiment yields the same numbers at
-                    # every seed, so further replicates buy nothing but wall
-                    # clock -- and the aggregate can only ever report std=0.
-                    # Honouring FI_REPLICATE_SEED is not the same as consuming
-                    # randomness: a real quest was observed seeding numpy and
-                    # then integrating an ODE, so all three runs were byte
-                    # identical. One extra run is the cheapest way to find out,
-                    # and unlike asking the design to declare itself, it cannot
-                    # be wrong about what the script actually did.
-                    #
-                    # Two seeds agreeing has two causes that are not the same
-                    # fact about the experiment, and calling both
-                    # "deterministic" is what let a hardcoded seed reach a
-                    # paper. A script that never reads FI_REPLICATE_SEED cannot
-                    # have responded to it, so its runs are ONE run repeated --
-                    # not a computation that happens to be deterministic, and
-                    # not samples anything may be averaged over. Its own source
-                    # says which case this is.
-                    if seed == 1 and rep_rj == result_json:
-                        if reads_seed and seed_reaches_rng:
-                            deterministic = True
-                            if replicates_n > 2:
-                                self._log.info(
-                                    "[execute] seeds 0 and 1 produced identical "
-                                    "results -- experiment is deterministic; "
-                                    "skipping the remaining %d replicate(s)",
-                                    replicates_n - 2,
-                                )
-                        elif no_random_source:
-                            seed_ignored = True
-                            self._log.info(
-                                "[execute] %s draws no random numbers, so this study is deterministic: one run "
-                                "is the whole result, and its trust comes from convergence, conservation and "
-                                "analytic-limit checks rather than repeat counts. Skipping the remaining %d "
-                                "replicate(s).",
-                                seed_path.name, max(0, replicates_n - 2),
-                            )
-                        elif reads_seed:
-                            # Named but not obeyed: it reads FI_REPLICATE_SEED (so it is not the
-                            # "never reads it" case below), but that value reaches no generator this
-                            # script seeds -- a hardcoded constant, or a value read into a name that
-                            # is never used. Agreement between the two runs proves nothing about the
-                            # experiment; it is one run repeated, exactly like the case below.
-                            seed_ignored = True
-                            self._log.warning(
-                                "[execute] seeds 0 and 1 produced identical results, and although "
-                                "%s reads FI_REPLICATE_SEED, that value never reaches a generator it "
-                                "seeds -- so this is one run repeated, not %d samples. No aggregate, "
-                                "standard error or confidence interval will be reported over them: "
-                                "the quest stands on a single measurement. Skipping the remaining "
-                                "%d replicate(s).",
-                                seed_path.name, replicates_n, max(0, replicates_n - 2),
-                            )
-                        else:
-                            seed_ignored = True
-                            self._log.warning(
-                                "[execute] seeds 0 and 1 produced identical results "
-                                "and %s never reads FI_REPLICATE_SEED, so these are "
-                                "one run repeated, not %d samples. No aggregate, "
-                                "standard error or confidence interval will be "
-                                "reported over them: the quest stands on a single "
-                                "measurement. Skipping the remaining %d replicate(s).",
-                                seed_path.name, replicates_n, max(0, replicates_n - 2),
-                            )
+                    # The one case where two agreeing runs (seed 0 and the first
+                    # replicate that finished) may end the
+                    # replication: the script (and the modules it imports from
+                    # its own folder) has no source of random numbers at all,
+                    # so a repeat can only return the same numbers. A script
+                    # that does draw random numbers can agree on two seeds by
+                    # chance -- a yes/no outcome, a rare event, a count, a
+                    # rounded metric -- and differ on the third, so it runs
+                    # every seed the quest asked for and is classified below
+                    # from all of them. (A run_cell simulation never gets here:
+                    # FI runs it once per setting itself.)
+                    if rep_rj != result_json:
+                        all_agreed = False
+                    elif no_random_source and all_agreed:  # the first replicate that finished agreed
+                        seed_ignored = True
+                        self._log.info(
+                            "[execute] %s draws no random numbers, so this study is deterministic: one run "
+                            "is the whole result, and its trust comes from convergence, conservation and "
+                            "analytic-limit checks rather than repeat counts. Skipping the remaining %d "
+                            "replicate(s).",
+                            seed_path.name, replicates_n - 1 - seed,
+                        )
                         break
                 else:
                     self._log.warning(
@@ -11485,6 +11449,61 @@ class Engine:
                         "(skipping in aggregate)",
                         seed, rep_result.returncode, rep_result.duration_s,
                     )
+
+        # Every seed ran and every one gave seed 0's numbers. That has two
+        # causes that are not the same fact about the experiment, and calling
+        # both "deterministic" is what let a hardcoded seed reach a paper. A
+        # script whose seed reaches its generators, or that draws from OS
+        # entropy, produced independent samples that agreed: they stay the
+        # replicates, reported as what these seeds showed. A script whose
+        # randomness the seed never reaches (it never reads FI_REPLICATE_SEED,
+        # or reads it into a name no generator is seeded from) ran ONE run
+        # repeated -- not samples anything may be averaged over. Its own source
+        # says which case this is.
+        # The modules the script imports from its own folder count too: a multi-module project reads the seed, or
+        # builds a generator without one, in a helper (a mention in a comment is not a read).
+        own_modules = _own_modules(seed_path) if len(result_json_replicates) > 1 and not seed_ignored else []
+        helpers = own_modules[1:]
+        helper_reads = any(_code_names_replicate_seed(p) for p in helpers)
+        helper_unseeded = [(f"{p.name} line {line}", expr) for p in helpers for line, expr in _unseeded_rng_calls(p)]
+        if replicates_ran and not seed_ignored and all_agreed and len(result_json_replicates) > 1:
+            n_runs = len(result_json_replicates)
+            if (
+                (reads_seed and seed_reaches_rng) or unseeded_rng or helper_unseeded
+                # A helper reads the seed: unless every generator is seeded with a fixed number, it may reach them.
+                or (not reads_seed and helper_reads and not _seeds_only_constants(own_modules))
+            ):
+                deterministic = True
+                self._log.info(
+                    "[execute] all %d seeds gave the same numbers. %s can draw random numbers, so this is what "
+                    "these seeds showed, not proof that other seeds would give the same.",
+                    n_runs, seed_path.name,
+                )
+            elif reads_seed:
+                # Named but not obeyed: it reads FI_REPLICATE_SEED (so it is not the
+                # "never reads it" case below), but that value reaches no generator this
+                # script seeds -- a hardcoded constant, or a value read into a name that
+                # is never used. It is one run repeated, exactly like the case below.
+                seed_ignored = True
+                self._log.warning(
+                    "[execute] all %d runs produced identical results, and although "
+                    "%s reads FI_REPLICATE_SEED, that value never reaches a generator it "
+                    "seeds -- so this is one run repeated, not %d samples. No aggregate, "
+                    "standard error or confidence interval will be reported over them: "
+                    "the quest stands on a single measurement.",
+                    n_runs, seed_path.name, n_runs,
+                )
+            else:
+                seed_ignored = True
+                self._log.warning(
+                    "[execute] all %d runs produced identical results "
+                    "and %s never reads FI_REPLICATE_SEED, so these are "
+                    "one run repeated, not %d samples. No aggregate, "
+                    "standard error or confidence interval will be "
+                    "reported over them: the quest stands on a single "
+                    "measurement.",
+                    n_runs, seed_path.name, n_runs,
+                )
 
         # A line figure drawn by one seed shows that run's noise. With the
         # seeds in hand it is drawn again as their mean, shaded with its 95%
@@ -11499,14 +11518,18 @@ class Engine:
         # anyway. Those replicates ARE independent samples, so the aggregate
         # stands -- but nothing about the run is reproducible, and a rerun will
         # not land on these numbers.
-        if (not reads_seed or unseeded_rng) and not seed_ignored and len(result_json_replicates) > 1:
+        if (
+            ((not reads_seed and not helper_reads) or unseeded_rng or helper_unseeded)
+            and not seed_ignored and len(result_json_replicates) > 1
+        ):
+            found = [(f"line {line}", expr) for line, expr in unseeded_rng] + helper_unseeded
             self._log.warning(
                 "[execute] %s draws from OS entropy (%s), so its replicates are "
                 "independent samples but not reproducible: a rerun of these seeds "
                 "will not land on these numbers",
                 seed_path.name,
-                "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
-                if unseeded_rng else "it never reads FI_REPLICATE_SEED",
+                "; ".join(f"{where}: {expr}" for where, expr in found[:6])
+                if found else "it never reads FI_REPLICATE_SEED",
             )
         if replicates_ran and split and run_accepted:
             await asyncio.to_thread(self._save_run_data, run_started, split, root_files=False)
@@ -12701,11 +12724,14 @@ class Engine:
             result_json_block, _rj_orig = _compact_result_json_block(payload)
             if state.get("result_json_deterministic"):
                 # Without this the line reads "0 numeric keys", which is what a
-                # broken aggregator looks like. Every seed agreeing is a fact
-                # about the experiment, not a failure to measure.
+                # broken aggregator looks like. Despite the flag's name,
+                # result_json_deterministic only says every seed agreed: that is
+                # what these runs showed, not a failure to measure, and not proof
+                # that the experiment has no randomness (a script with no random
+                # source stops early and publishes no replicates).
                 self._log.info(
-                    "[analyze] replicates agreed exactly (n=%d): the experiment "
-                    "is deterministic, so there are no error bars to report",
+                    "[analyze] all %d seeds gave the same numbers, so there is no "
+                    "spread over them to report",
                     len(replicates),
                 )
             else:
@@ -12764,7 +12790,8 @@ class Engine:
         elif state.get("result_json_replicate_seed_ignored"):
             stdout_for_analyze = (
                 "[FI NOTE] Replication was configured, but the experiment script "
-                "never reads FI_REPLICATE_SEED, so every replicate repeated the "
+                "never reads FI_REPLICATE_SEED (or reads it without the value "
+                "reaching any random generator), so every replicate repeated the "
                 "SAME run and returned the same numbers. There is ONE measurement "
                 "here, not several. Report it as a single run: do NOT report a "
                 "mean over seeds, a standard error, a confidence interval, or any "
@@ -20025,8 +20052,8 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
     case that occurs -- the name is simply absent from the file -- and costs
     nothing. Its blind spot is a script that NAMES the variable without obeying
     it (reads and discards it, or mentions it only in a comment): that one
-    passes here and falls through to the runtime comparison, which can only
-    call it deterministic. An unreadable file returns ``True``, because silence
+    passes here, and ``replicate_seed_reaches_rng`` is what asks whether the
+    value reaches a generator. An unreadable file returns ``True``, because silence
     is not evidence of a fault and the runtime check still runs.
     """
     try:
@@ -20035,6 +20062,15 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
         )
     except OSError:
         return True
+
+
+def _code_names_replicate_seed(code_path: Path) -> bool:
+    """Whether a module's code (comments aside) names ``FI_REPLICATE_SEED``. Used for the modules a script imports,
+    where a note saying the seed is not used must not count as reading it. An unreadable file names nothing."""
+    try:
+        return "FI_REPLICATE_SEED" in _without_comments(code_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
 
 
 _RANDOM_SOURCE_PATTERN = re.compile(

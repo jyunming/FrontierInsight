@@ -457,7 +457,9 @@ async def test_execute_draws_the_line_figure_as_the_mean_of_the_seeds(tmp_path: 
 @pytest.mark.parametrize(("values", "runs", "one_run"), [
     pytest.param([0.1, 0.2, 0.3], 3, True, id="the seeds differ"),
     pytest.param([0.1, 0.2, None], 3, True, id="the last replicate crashed after drawing"),
-    pytest.param([0.1, 0.1, 0.1], 2, False, id="every seed agrees"),
+    # The script reads its seed, so it can draw random numbers: every seed runs even when the first two agree
+    # (this used to stop after two).
+    pytest.param([0.1, 0.1, 0.1], 3, False, id="every seed agrees"),
 ])
 async def test_a_figure_the_seeds_do_not_redraw_shows_seed_0(
     tmp_path: Path, values: list[float | None], runs: int, one_run: bool,
@@ -490,8 +492,8 @@ async def test_a_figure_the_seeds_do_not_redraw_shows_seed_0(
     eng.executor.execute = run  # type: ignore[method-assign]
     eng.executor.install = AsyncMock(return_value=SimpleNamespace(returncode=0, stderr=""))  # type: ignore[method-assign]
     (eng.quest_root / "code").mkdir(parents=True, exist_ok=True)
-    # Reads the seed, so "every seed agrees" means the experiment is
-    # deterministic rather than unable to see the seed at all.
+    # Reads the seed, so "every seed agrees" means the seeds agreed rather
+    # than that the script was unable to see the seed at all.
     (eng.quest_root / "code" / "experiment.py").write_text(
         'import os\nseed = int(os.environ.get("FI_REPLICATE_SEED", 0))\n', encoding="utf-8")
 

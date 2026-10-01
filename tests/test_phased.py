@@ -859,10 +859,11 @@ def _gate_after(tmp_path: Path, files: dict[str, str], state: dict | None = None
 
 
 def test_a_study_without_randomness_and_without_held_back_data_cannot_be_confirmed(tmp_path: Path) -> None:
-    seeded = "import os, random\nrng = random.Random(int(os.environ.get('FI_REPLICATE_SEED', '0')))\n"
-    # The runs agreed whatever the seed (recorded by the experiment step), or FI's trial contract runs each setting once.
+    # The experiment step found no random source (one run is the whole result), or FI's trial contract runs each
+    # setting once.
     for label, files, state in (
-            ("ran", {"experiment.py": seeded}, {"result_json_deterministic": True}),
+            ("none", {"experiment.py": "import math\nprint(math.sin(1.0))\n"},
+             {"result_json_no_random_source": True, "result_json_replicate_seed_ignored": True}),
             ("cell", {"simulate.py": "def run_cell(cell):\n    return {'v': 1.0}\n", "experiment.py": ""}, {}),
             ("ode", {"experiment.py": "import math\nprint(math.sin(1.0))\n"}, {}),
             # The seed is named, but every generator is built from a constant (one run, so nothing showed it at run time).
@@ -891,6 +892,13 @@ def test_a_study_that_takes_its_seed_or_draws_fresh_numbers_goes_to_the_confirm_
                         "experiment.py": "import os\nfrom sim import run\nprint(run(int(os.environ['FI_REPLICATE_SEED'])))\n"})):
         route, record, _frozen = _gate_after(tmp_path, files, label=label)
         assert route == "confirm" and phased.status(record) == "confirming", label
+    # Changed expectation: this used to be not confirmable. A script whose seed reaches its generator gave the same
+    # numbers on every seed it ran; that is what those seeds showed, not proof that new seeds cannot change the result
+    # (a rare event can be absent from every exploration seed), so the confirm run still happens.
+    seeded = "import os, random\nrng = random.Random(int(os.environ.get('FI_REPLICATE_SEED', '0')))\n"
+    route, record, _frozen = _gate_after(tmp_path, {"experiment.py": seeded}, {"result_json_deterministic": True},
+                                         label="agreed")
+    assert route == "confirm" and phased.status(record) == "confirming"
     route, record, _frozen = _gate_after(
         tmp_path, {"experiment.py": "import os\nseed = os.environ.get('FI_REPLICATE_SEED', '0')\nprint('submit', seed)\n"},
         background=True, label="bg")
