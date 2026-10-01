@@ -145,12 +145,13 @@ def test_spawn_resolves_npx_through_pathext(monkeypatch: pytest.MonkeyPatch) -> 
     def fake_which(name: str) -> str | None:
         return r"C:\Program Files\nodejs\npx.CMD" if name == "npx" else name
 
-    def fake_popen(cmd, **kw):  # noqa: ANN001
-        captured_cmd.extend(cmd)
-        return _FakeProc()
+    class FakeTree:
+        def __init__(self, cmd, **kw):  # noqa: ANN001
+            captured_cmd.extend(cmd)
+            self.proc = _FakeProc()
 
     monkeypatch.setattr(provider_mod.shutil, "which", fake_which)
-    monkeypatch.setattr(provider_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(provider_mod, "ProcessTree", FakeTree)
     monkeypatch.setattr(provider_mod, "_wait_for_openai_endpoint", lambda port, timeout_s=60: None)
 
     sup = ProxySupervisor()
@@ -170,10 +171,10 @@ def test_spawn_leaves_unresolvable_binary_name_untouched(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(provider_mod.shutil, "which", lambda name: None)
 
-    def fake_popen(cmd, **kw):  # noqa: ANN001
+    def fake_tree(cmd, **kw):  # noqa: ANN001
         raise FileNotFoundError()
 
-    monkeypatch.setattr(provider_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(provider_mod, "ProcessTree", fake_tree)
 
     sup = ProxySupervisor()
     with pytest.raises(RuntimeError, match="'npx' not found on PATH"):
