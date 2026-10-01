@@ -257,9 +257,20 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
 #: What a connection adds to a model's name without making it another model: a date or a version stamp, ``preview``,
 #: ``latest``, a ``-v1``/``-v2:0`` revision, a ``-001`` release (``gpt-5.6-luna-2026-09`` is ``gpt-5.6-luna``;
 #: ``claude-opus-4-5-20251101`` is ``claude-opus-4-5``; ``gemini-2.0-flash-001`` is ``gemini-2.0-flash``).
-_STAMP_RE = re.compile(r"(?:[-_.@](?:\d{4}[\d.-]*|\d{2}-\d{2}|\d{3}|v\d+(?::\d+)?|preview|latest))+$")
+#: One such stamp at the end of a name, cut one at a time (a run of digits of two or more, ``v2``, ``v1:0``,
+#: ``preview``, ``latest``): linear, whatever the name.
+_STAMP_RE = re.compile(r"[-_.@](?:\d{2,}|v\d+(?::\d+)?|preview|latest)$")
 #: A cloud's region and vendor before a model's name (``us.anthropic.claude-...``, ``anthropic.claude-...``).
-_CLOUD_PREFIX_RE = re.compile(r"^(?:[a-z]{2}\.)?(?:anthropic|meta|amazon|mistral|cohere|ai21|openai|google|deepseek)\.")
+_CLOUD_PREFIX_RE = re.compile(r"^(?:[a-z]{2}\.|apac\.|global\.|us-gov\.)?"
+                              r"(?:anthropic|meta|amazon|mistral|cohere|ai21|openai|google|deepseek)\.")
+
+
+def _unstamped(text: str) -> str:
+    while True:
+        cut = _STAMP_RE.sub("", text)
+        if cut == text or not cut:
+            return text
+        text = cut
 #: Connections that relay a model through a proxy of their own: the model they report may be the name FI asked for
 #: echoed back, so it does not show which model answered.
 PROXY_PROVIDERS = frozenset({"claude_code", "github_copilot_cli", "github_copilot_vscode"})
@@ -273,12 +284,11 @@ def canonical_model(name: Any) -> str:
     ``us.anthropic.``), without an Ollama ``:tag`` (``gemma4:27b`` is read as ``gemma4``: it may be the same weights),
     a date, a version or release stamp or ``-preview``/``-latest``, and with ``.`` and ``_`` read as ``-``. Two names
     that differ only in these are the same model. Errs towards "the same": two models taken for one only keep a gap."""
-    text = str(name or "").strip().lower().rsplit("/", 1)[-1]
+    text = str(name or "").strip().lower()[:200].rsplit("/", 1)[-1]
     text = _CLOUD_PREFIX_RE.sub("", text)
-    text = _STAMP_RE.sub("", text) or text  # a Bedrock revision (-v1:0) before the Ollama tag is cut
+    text = _unstamped(text)  # a Bedrock revision (-v1:0) before the Ollama tag is cut
     text = text.split(":", 1)[0] or text
-    text = _STAMP_RE.sub("", text) or text
-    return re.sub(r"[._]", "-", text)
+    return re.sub(r"[._]", "-", _unstamped(text))
 
 
 def same_model(a: Any, b: Any) -> bool:
@@ -298,10 +308,11 @@ def _shown(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
 
 
 def fingerprint(oracle: dict[str, Any]) -> str:
-    """What decides a check's verdict, as one string: its name, kind, expected value, tolerance and its mode, case and
-    measure (not its wording or its reference, which a later step may fill in without changing what is judged)."""
+    """What decides a check's verdict, as one string: its name, expected value, tolerance and its mode, case and
+    measure (not its wording, its kind or its reference, which a later step may fill in without changing what is
+    judged)."""
     expected, limit, mode = _oracle.limit_of(oracle)
-    return json.dumps({"name": str(oracle.get("name") or "").strip().lower(), "kind": _oracle.kind_of(oracle),
+    return json.dumps({"name": str(oracle.get("name") or "").strip().lower(),
                        "expected": expected, "limit": limit, "mode": mode, "case": oracle.get("case"),
                        "measure": " ".join(str(oracle.get("measure") or "").split())}, sort_keys=True, default=str)
 
@@ -321,9 +332,9 @@ def independence_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]]
     (empty when it counts). It counts only when
 
     * it gave a usable answer (``record``, ``.fi/oracle_review.json``);
-    * it covers the checks ``protocol`` (the frozen one) declares: each has a verdict, and is the check as the reader
-      read it (``read``) or as the same look left it after applying what the reader found (``after_look``); a check the
-      reader proposed itself (``add``) counts as read;
+    * it covers the checks ``protocol`` (the frozen one) declares: each was shown to the reader (``read``), has a
+      verdict, and is the check as the reader read it or as the same look left it after applying what the reader found
+      (``after_look``); a check the reader proposed itself (``add``) counts as read only with the numbers it gave it;
     * the quest's record of its model calls (``calls``, ``.fi/model_calls.jsonl``) names, for the call that gave it (the
       record's ``call_id``) and for every answered call of a step that writes the checks (:data:`WRITER_NODES`), the
       model that answered, through a connection that does not relay a proxy (:data:`PROXY_PROVIDERS`);
@@ -341,14 +352,21 @@ def independence_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]]
     gaps: list[str] = []
     if protocol is not None:
         judged = {str(v.get("name") or "").strip().lower() for v in record.get("verdicts") or [] if isinstance(v, dict)}
-        proposed = {str(a.get("name") or "").strip().lower() for a in record.get("add") or [] if isinstance(a, dict)}
+        # The reader's own proposals, with the numbers it gave them: one the plan took with other numbers was not read.
+        proposed = {fingerprint(a) for a in record.get("add") or [] if isinstance(a, dict)}
         read = set(record.get("read") or []) | set(record.get("after_look") or [])
+        shown: set[str] = set()
+        for fp in record.get("read") or []:
+            try:
+                shown.add(str(json.loads(fp).get("name") or ""))
+            except (TypeError, ValueError, AttributeError):
+                continue
         unread = []
         for oracle in _oracle.declared(protocol):
             name = str(oracle["name"]).strip()
-            if name.lower() in proposed and fingerprint(oracle) in set(record.get("after_look") or []):
-                continue  # the reader's own check, as the look left it
-            if name.lower() not in judged or fingerprint(oracle) not in read:
+            if fingerprint(oracle) in proposed:
+                continue  # the reader's own check, as it proposed it
+            if name.lower() not in judged or name.lower() not in shown or fingerprint(oracle) not in read:
                 unread.append(name)
         if unread:
             gaps.append(f"{NOT_REVIEWED}: the second reading did not judge {_names(unread)} as "

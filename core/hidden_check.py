@@ -115,7 +115,7 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
     if own is None:
         return None, "it has no case FI can run"
     case = own[0]
-    shown = [c[0] for c in (_oracle.case_of(o) for o in _oracle.declared(protocol)) if c]
+    shown = [o["case"] for o in _oracle.declared(protocol) if isinstance(o.get("case"), dict)]
     for key in _oracle._STEP_KEYS:
         step = case.get(key)
         if isinstance(step, float) and math.isfinite(step) and step > 0:
@@ -130,7 +130,7 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
         numbers = [v for v in values if _number(v) is not None] if isinstance(values, list) else []
         if _number(current) is None or not numbers:
             continue
-        if isinstance(current, float) or any(isinstance(v, float) for v in numbers):
+        if isinstance(current, float) and all(isinstance(v, float) for v in numbers):
             low, high = min(float(v) for v in numbers + [current]), max(float(v) for v in numbers + [current])
             if high > low:
                 between.append((key, low, high))
@@ -151,7 +151,10 @@ def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
 
 
 #: What under ``code/`` does not compute the simulation's numbers: a change to it does not call for the check again.
-_NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py")
+#: The same files ``Engine._simulation_sources`` does not read as the simulation, and FI's figure redraws (written
+#: after every run).
+_NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py", "replot_figures.py", "replot_figures.json",
+                       "replot_layout.py", "run.py", "submit.py", "fi_search.py")
 _NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
 
 
@@ -169,7 +172,11 @@ def code_sha(quest_root: Path) -> str:
                 or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
             continue
         try:
-            digest.update(rel.as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+            digest.update(rel.as_posix().encode("utf-8") + b"\0")
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    digest.update(block)
+            digest.update(b"\0")
         except OSError:
             return ""
     return digest.hexdigest()
@@ -273,7 +280,10 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
         _forget_case(quest_root)
     if not record["cases"]:
         return {**record, "status": "not_covered"}
-    return {**record, "status": "passed" if all(c["passed"] is True for c in record["cases"]) else "failed"}
+    verdicts = [c["passed"] for c in record["cases"]]
+    # "failed" only for a value outside the tolerance; a case that gave no value (a timeout, a crash) is run again.
+    status = "failed" if False in verdicts else "could_not_run" if None in verdicts else "passed"
+    return {**record, "status": status}
 
 
 def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
@@ -286,11 +296,12 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
     if not chosen or _optimise.block_of(protocol) is not None:
         return []
     written = [w for w in written or [] if isinstance(w, dict)]
-    sha = code_sha(quest_root)
+    sha, key = code_sha(quest_root), checks_key(protocol)
     gaps: list[str] = []
-    if any(w.get("status") == "failed" and sha and w.get("code_sha256") == sha for w in written[:-1]):
+    if any(w.get("status") == "failed" and sha and w.get("code_sha256") == sha and w.get("checks_key") == key
+           for w in written[:-1]):
         gaps.append("an earlier run of this same code failed a check at a setting the code never saw (see the quest's "
-                    "trace, event `hidden_check`)")
+                    "trace, event `hidden_check`); FI checks again after the code is changed and run")
     record = load(quest_root)
     if record is None:
         return [*gaps, "FI did not run the checks at a setting the code never saw (it does so after each run of a "
@@ -300,7 +311,7 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
     if record.get("status") == "not_run":
         return [*gaps, "FI could not run the checks at a setting the code never saw: "
                        f"{record.get('reason') or 'no reason given'}"]
-    if record.get("code_sha256") != sha or record.get("checks_key") != checks_key(protocol):
+    if record.get("code_sha256") != sha or record.get("checks_key") != key:
         return [*gaps, "the simulation or its checks changed after FI ran them at a setting the code never saw (run "
                        "the experiment again so FI checks them as they are)"]
     done = {str(c.get("name")) for c in record.get("cases") or [] if isinstance(c, dict)}

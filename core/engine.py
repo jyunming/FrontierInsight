@@ -10383,8 +10383,11 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
             self._log.warning("[oracle] the check at a setting the code never saw could not be made: %r", e)
             return
-        # The record's hash goes into the trace: a record the simulation's own code writes is not FI's.
-        self._audit("hidden_check", sha256=sha, status=record.get("status"), code_sha256=record.get("code_sha256"))
+        # The record's hash goes into the trace: a record the simulation's own code writes is not FI's. A record reused
+        # as FI wrote it is not a new run, so it adds no event.
+        if not (written and sha == written[-1].get("sha256")):
+            self._audit("hidden_check", sha256=sha, status=record.get("status"), code_sha256=record.get("code_sha256"),
+                        checks_key=record.get("checks_key"))
         for gap in _hidden.evidence_gaps(self.quest_root, protocol, self._hidden_check_written()):
             self._log.warning("[oracle] %s", gap)
         if record.get("status") == "passed":
@@ -10403,8 +10406,11 @@ class Engine:
                 *_hidden.evidence_gaps(self.quest_root, protocol, self._hidden_check_written())]
 
     def _hidden_check_written(self) -> list[dict[str, Any]]:
-        """The trace's ``hidden_check`` events, oldest first: the hash of each record FI wrote, its status and code."""
+        """The trace's ``hidden_check`` events, oldest first: the hash of each record FI wrote, its status and code.
+        None from a trace whose hash chain does not check out (the simulation's code could have added one)."""
         try:
+            if not _audit_log.verify(self.audit.path).ok:
+                return []
             return [e for e in _audit_log.read(self.audit.path) if e.get("kind") == "hidden_check"]
         except Exception:  # noqa: BLE001 -- an unreadable trace names no record, which is a gap, never a pass
             return []
@@ -10496,7 +10502,9 @@ class Engine:
             "reviewer": reviewer or default, "planner": planner or default, "same_model": same,
             "reported": bool(answered.get("reported")), "findings": found,
             # The line of .fi/model_calls.jsonl that holds this reading: the evidence level reads who answered from there.
-            **({"call_id": answered["call_id"]} if answered.get("call_id") and not error else {}),
+            # Always present (None when the call's line was not written): only a record from before it was kept is
+            # matched to the one reading on record.
+            "call_id": answered.get("call_id") if not error else None,
             # Which checks it read, as they were shown (what decides each verdict): a check added or changed later was
             # not read (core/oracle_review.py::independence_gaps).
             **({"read": _review.fingerprints(protocol, shown_only=True)} if review is not None else {}),
@@ -11476,8 +11484,6 @@ class Engine:
                                if split and result.returncode == 0 and self.config.engine.run_manifest_check != "off"
                                else None)
             manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
-            if split and result.returncode == 0 and not manifest_found and self.config.rigor_profile == "research":
-                await self._hidden_check(state, py, primary_env)  # not on a run about to be sent back
         manifest_attempts_next = 0
         if manifest_found:
             mode = self.config.engine.run_manifest_check
@@ -11532,6 +11538,8 @@ class Engine:
         run_accepted = result.returncode == 0 and manifest_status not in ("stopped", "pending", "repairing")
         if run_accepted:
             await asyncio.to_thread(self._save_run_data, run_started, split)
+            if split and self.config.rigor_profile == "research":
+                await self._hidden_check(state, py, primary_env)  # the checks at a setting the code never saw
         if manifest_status == "stopped":
             try:
                 manifest_stop.write_text(json.dumps({"problems": manifest_found}) + "\n", encoding="utf-8")

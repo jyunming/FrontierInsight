@@ -71,6 +71,8 @@ def test_a_review_that_failed_or_never_ran_is_a_gap(record: Any, why: str) -> No
     ("gemma4:27b", "gemma4"),                          # an Ollama tag (it may be the same weights)
     ("gemini-2.0-flash-001", "gemini-2.0-flash"),      # a release number
     ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),  # a cloud's id
+    ("apac.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),
+    ("command-r-08-2024", "command-r"),              # a month and year
 ])
 def test_the_same_model_under_another_name_is_the_same_model(writer: str, reader: str) -> None:
     assert orv.same_model(writer, reader)
@@ -82,6 +84,14 @@ def test_the_same_model_under_another_name_is_the_same_model(writer: str, reader
                                   ("gemini-2.5-pro", "gemini-2.5-flash"), ("llama3.1", "llama3.2")])
 def test_different_models_stay_different(a: str, b: str) -> None:
     assert not orv.same_model(a, b)
+
+
+def test_a_long_odd_model_name_is_read_at_once() -> None:
+    import time
+
+    start = time.perf_counter()
+    orv.canonical_model("m" + "-1234" * 400 + "x")
+    assert time.perf_counter() - start < 0.5
 
 
 @pytest.mark.parametrize("writer_node", ["plan_revise", "design", "design_self_critique"])
@@ -145,8 +155,19 @@ def test_the_reading_must_cover_the_checks_as_they_were_frozen() -> None:
     gaps = orv.independence_gaps(read, calls, configured=True, protocol=_protocol_read(looser))
     assert len(gaps) == 1 and "did not judge 'power_conservation' as it stands" in gaps[0]
     # ... unless the same look left it so, answering what the reader found; and a check the reader proposed itself.
-    after = {**read, "after_look": orv.fingerprints(_protocol_read(looser, extra)), "add": [{"name": "ohm"}]}
+    after = {**read, "after_look": orv.fingerprints(_protocol_read(looser, extra)), "add": [extra]}
     assert orv.independence_gaps(after, calls, configured=True, protocol=_protocol_read(looser, extra)) == []
+    # The reader's proposal taken with other numbers was not read; nor a check the look added that the reader never saw.
+    retuned = {**extra, "tolerance": 0.5}
+    gaps = orv.independence_gaps({**after, "after_look": orv.fingerprints(_protocol_read(looser, retuned))}, calls,
+                                 configured=True, protocol=_protocol_read(looser, retuned))
+    assert len(gaps) == 1 and "'ohm'" in gaps[0]
+    planners = {**read, "after_look": orv.fingerprints(_protocol_read(looser, extra)), "add": [],
+                "verdicts": [{"name": "power_conservation"}, {"name": "ohm"}]}
+    assert "'ohm'" in orv.independence_gaps(planners, calls, configured=True, protocol=_protocol_read(looser, extra))[0]
+    # The kind filled in later (the source step may add it) does not change what is judged.
+    assert orv.independence_gaps(read, calls, configured=True,
+                                 protocol=_protocol_read({**check, "kind": "symmetry"})) == []
     # A record from before the checks read were kept: nothing shows which checks it read.
     assert orv.independence_gaps(USABLE, calls, configured=True, protocol=_protocol_read(check))
 
@@ -338,7 +359,8 @@ def _run(root: Path, protocol: dict[str, Any], written: list[dict[str, Any]] | N
                                 timeout_s=60, env={}, engine_callable=True, rng=random.Random(1), **kw))
     sha = hc.write(root, record)
     if written is not None:
-        written.append({"sha256": sha, "status": record["status"], "code_sha256": record.get("code_sha256")})
+        written.append({"sha256": sha, "status": record["status"], "code_sha256": record.get("code_sha256"),
+                        "checks_key": record.get("checks_key")})
     return record
 
 
@@ -357,9 +379,11 @@ def test_a_hidden_check_that_passes_is_no_gap(tmp_path: Path) -> None:
     assert hc.evidence_gaps(root, GRID_PROTOCOL, written) == []
     tighter = {**GRID_PROTOCOL, "oracles": [{**INVARIANT, "tolerance": 1e-12}]}
     assert "changed after FI ran them" in hc.evidence_gaps(root, tighter, written)[0]
-    # The analysis and the notes are not the simulation.
+    # The analysis, the notes and FI's own figure redraws (written after every run) are not the simulation.
     (root / "code" / "analysis.py").write_text("print(1)\n", encoding="utf-8")
     (root / "code" / "CHANGELOG.md").write_text("x\n", encoding="utf-8")
+    (root / "code" / "replot_figures.json").write_text('{"plans": [1]}', encoding="utf-8")
+    (root / "code" / "replot_figures.py").write_text("pass\n", encoding="utf-8")
     assert hc.evidence_gaps(root, GRID_PROTOCOL, written) == []
 
 
@@ -376,7 +400,8 @@ def test_a_record_fi_did_not_write_is_not_trusted_nor_reused(tmp_path: Path) -> 
     assert again["status"] == "failed"
     # And the earlier failure on this same code stays a gap, however a later run went.
     passing = {**again, "status": "passed", "cases": [{**c, "passed": True} for c in again["cases"]]}
-    written.append({"sha256": hc.write(root, passing), "status": "passed", "code_sha256": again["code_sha256"]})
+    written.append({"sha256": hc.write(root, passing), "status": "passed", "code_sha256": again["code_sha256"],
+                    "checks_key": again["checks_key"]})
     assert any("an earlier run of this same code failed" in g for g in hc.evidence_gaps(root, GRID_PROTOCOL, written))
 
 
@@ -432,6 +457,16 @@ def test_the_engine_runs_the_hidden_check_after_the_run_and_the_evidence_reads_i
     assert (hidden == []) is passed, hidden
     if not passed:
         assert "a setting the code never saw" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    else:
+        # The same code and checks again (an analysis repaired on the same run): the record FI wrote is reused, and
+        # the trace gets no second event.
+        asyncio.run(engine._hidden_check(state, sys.executable, {}))
+        assert len(engine._hidden_check_written()) == 1
+        # An event added to the trace by anything but FI breaks its chain: no record is then FI's.
+        with (engine.fi_dir / "audit.jsonl").open("a", encoding="utf-8") as trace:
+            trace.write(json.dumps({"kind": "hidden_check", "sha256": "0" * 64}) + "\n")
+        assert engine._hidden_check_written() == []
+        assert any("is not the one FI wrote" in g for g in engine._independence_gaps(GRID_PROTOCOL))
     # Outside research there is no hidden check and no such gap.
     plain = Engine(_config(tmp_path / "plain", research=False))
     assert plain._independence_gaps(GRID_PROTOCOL) == []
