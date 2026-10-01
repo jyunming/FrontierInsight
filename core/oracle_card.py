@@ -273,8 +273,11 @@ def build(
             status = "not_measured"
         else:
             status = "failed"
-        shown_value, shown_expected = _oracle.fmt_pair(value, expected, limit) if value is not None else (
-            "", _oracle.fmt_digits(expected) if expected is not None else "")
+        if value is not None and expected is not None:
+            shown_value, shown_expected = _oracle.fmt_pair(value, expected, limit)
+        else:
+            shown_value = _oracle.fmt_digits(value) if value is not None else ""
+            shown_expected = _oracle.fmt_digits(expected) if expected is not None else ""
         kind = _oracle.kind_of(oracle)
         problems = _matching(found, name)
         own = _oracle.case_of(oracle)
@@ -356,7 +359,8 @@ def build(
     else:
         summary = (f"FI stopped before the main run: {n_failed} of {len(oracles)} known-answer check(s) did not pass"
                    + (" and FI's repair says the check itself is wrong" if kept else "")
-                   + (f"; {len(checks) - n_failed} more could not be measured" if len(checks) > n_failed else "")
+                   + (f"; {len(checks) - n_failed} more could not be measured or judged" if len(checks) > n_failed
+                      else "")
                    + ".")
 
     return {

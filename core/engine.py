@@ -10703,16 +10703,20 @@ class Engine:
         frozen = _frozen.load(self.quest_root) is not None
         research = getattr(self.config, "rigor_profile", "default") == "research"
         oracles = list(oracles or [])
-        card = _oracle_card.build(
-            quest_id=self.quest_id, quest_root=self.quest_root, script=seed_path, found=found, oracles=oracles,
-            judged=judged, attempts=attempts, proposals=proposed, disputed=disputed,
-            trial=bool(getattr(self, "_trial_mode", False)), frozen=frozen, research=research,
-            # A quest the interview wrote holds its checks' settings to what was approved (core/plan_settings.py):
-            # changing `engine.oracle_check` there needs `--update`, or the resume stops again to ask.
-            interview_made=(self.fi_dir / _plan_settings.NAME).is_file(),
-            repairs=int(self.config.engine.oracle_repair_attempts), kept=kept, stderr_tail=stderr_tail,
-        )
-        statuses = {c["status"] for c in card["checks"]}
+        try:
+            card: dict[str, Any] | None = _oracle_card.build(
+                quest_id=self.quest_id, quest_root=self.quest_root, script=seed_path, found=found, oracles=oracles,
+                judged=judged, attempts=attempts, proposals=proposed, disputed=disputed,
+                trial=bool(getattr(self, "_trial_mode", False)), frozen=frozen, research=research,
+                # A quest the interview wrote holds its checks' settings to what was approved (core/plan_settings.py):
+                # changing `engine.oracle_check` there needs `--update`, or the resume stops again to ask.
+                interview_made=(self.fi_dir / _plan_settings.NAME).is_file(),
+                repairs=int(self.config.engine.oracle_repair_attempts), kept=kept, stderr_tail=stderr_tail,
+            )
+        except Exception as e:  # noqa: BLE001 -- the card is what a person reads; the stop must happen without it too
+            self._log.warning("[oracle] could not build the card for this stop (%r); NEXT_STEP.md lists the problems", e)
+            card = None
+        statuses = {c["status"] for c in (card or {}).get("checks") or []}
         headline = (
             "the plan has no known-answer check to judge the script by" if not oracles else
             "a known-answer check has no number to compare with" if statuses == {"cannot_judge"} else
@@ -10725,7 +10729,7 @@ class Engine:
             headline=headline,
             # What each check found, as the record says it; the card above is what a person reads.
             steps=["The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + "."],
-            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"][1:]],
+            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"][1:]] if card else None,
             card=card,
             payload={
                 "oracle_stage": True, "quest_id": self.quest_id, "problems": found,

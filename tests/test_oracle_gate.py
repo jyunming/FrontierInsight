@@ -312,7 +312,9 @@ async def test_when_the_plan_cannot_be_given_an_oracle_the_quest_stops_and_says_
     engine = Engine(_cfg(tmp_path))
     await engine.run()
     assert "[oracle] paused" in (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "declares no oracle" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    assert "the plan has no known-answer check" in text and "--revise-plan \"Add a known-answer check" in text
+    assert "declares no oracle" in json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["problems"][0]
     assert not (engine.quest_root / "paper" / "paper.md").exists()
 
 
@@ -376,7 +378,8 @@ async def test_a_protocol_edited_in_the_plan_while_stopped_is_the_one_the_script
 def test_the_dashboard_and_the_quest_page_name_the_oracle_stop() -> None:
     static = Path(__file__).resolve().parent.parent / "web" / "static"
     for page in ("index.html", "quest.html"):
-        assert "oracle: 'oracle'" in (static / page).read_text(encoding="utf-8"), page
+        # The pause kind stays `oracle`; a person reads the one plain name.
+        assert "oracle: 'known-answer check'" in (static / page).read_text(encoding="utf-8"), page
 
 
 def test_the_code_writing_prompts_give_the_oracle_contract() -> None:
