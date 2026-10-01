@@ -102,15 +102,19 @@ same PR that adds, splits or renames one.
   again, and `core/rerun_from.py` moves it aside with the plan). The reviewer model is `provider.node_models.oracle_review`; the VS Code node picker lists it
   (`OTHER_NODES` in `vscode-frontier-insight/src/interview-core.ts`). Under `rigor_profile: research`,
   `independence_gaps` (with `canonical_model` / `same_model`, `WRITER_NODES`, `NOT_REVIEWED`, `HOW_TO_NAME_ANOTHER`)
-  makes the review a condition of `independently_validated`: a usable answer, and `.fi/model_calls.jsonl` naming a
-  reader model (the call `call_id` in the record names) that is none of the models that answered `plan` /
-  `plan_revise` / `design`. `Engine._independence_gaps` passes it (and `hidden_check.evidence_gaps`) to
+  makes the review a condition of `independently_validated`: a usable answer covering the frozen checks
+  (`fingerprint(s)`; the record's `read` and `after_look`, written by `_review_oracles` / `_hold_oracle_forms`), and
+  `.fi/model_calls.jsonl` naming a reader model (the call `call_id` in the record names) that is none of the models
+  that answered `plan` / `plan_revise` / `design` / `design_self_critique` (`PROXY_PROVIDERS` not taken at their
+  word). `Engine._independence_gaps` passes it (and `hidden_check.evidence_gaps`) to
   `evidence.assess(independence_gaps=...)`.
 - `core/hidden_check.py` — FI's own check at a setting the code never saw (`rigor_profile: research`): `candidates`
-  (invariant / symmetry / second implementation with a case), `derive` (a smaller step, else another value of a grid
-  setting), `run` (through `trial_runner.measure_oracles`, judged by `oracle_check.judged`; reused for the same
-  `code_sha` and checks), `write` / `load` (`needs/HIDDEN_CHECK.json`), `evidence_gaps`. Called by
-  `Engine._hidden_check` in `_node_execute` after a successful two-script run; never stops a quest.
+  (invariant / symmetry / second implementation with a case), `derive` (a smaller decimal step, else a value between
+  the grid's decimal settings, else another whole-number grid value), `run` (through `trial_runner.measure_oracles`,
+  judged by `oracle_check.judged`; reused only for the record the trace names, same `code_sha` and `checks_key`),
+  `write` / `load` / `record_sha` (`needs/HIDDEN_CHECK.json`), `evidence_gaps` (reads the trace's `hidden_check`
+  events, `Engine._hidden_check_written`). Called by `Engine._hidden_check` in `_node_execute` after a successful
+  two-script run; never stops a quest.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the
   script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by

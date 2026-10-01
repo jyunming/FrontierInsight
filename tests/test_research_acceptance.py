@@ -377,6 +377,33 @@ def test_an_accept_no_person_made_is_one_level_below_publication_ready(baseline:
         assert record["gaps"] == [acceptance.NO_PERSON_GAP] and record["accepted_by"] == "automatic"
 
 
+@pytest.mark.parametrize("fault", ["no_review", "failed_review", "same_model", "check_changed"])
+def test_checks_not_read_by_a_second_different_model_take_independent_validation_away(
+        baseline: dict[str, Any], tmp_path: Path, fault: str) -> None:
+    from core import oracle_review
+
+    config, root = _copy(baseline, tmp_path)
+    path = root / ".fi" / "oracle_review.json"
+    review = json.loads(path.read_text(encoding="utf-8"))
+    if fault == "no_review":
+        path.unlink()
+    elif fault == "failed_review":
+        path.write_text(json.dumps({**{k: v for k, v in review.items() if k != "verdicts"},
+                                    "error": "the call failed (TimeoutError)"}), encoding="utf-8")
+    elif fault == "same_model":
+        # The connection reported that the planner's model answered the reading.
+        calls = root / ".fi" / "model_calls.jsonl"
+        rows = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines() if line.strip()]
+        rows = [{**r, "served_model": "m-default"} if r.get("node") == "oracle_review" else r for r in rows]
+        calls.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    else:
+        path.write_text(json.dumps({**review, "read": [], "after_look": []}), encoding="utf-8")
+    record = _reassess(baseline, config, root.name)
+    assert record["levels"]["independently_validated"] is False and record["status"] != "publication_ready"
+    gaps = record["all_gaps"]["independently_validated"]
+    assert any(g.startswith(oracle_review.NOT_REVIEWED) for g in gaps), gaps
+
+
 def test_an_exploration_is_never_publication_ready(baseline: dict[str, Any], tmp_path: Path) -> None:
     config, root = _copy(baseline, tmp_path)
     record = _reassess(baseline, config.model_copy(update={"result_use": "explore"}), root.name)

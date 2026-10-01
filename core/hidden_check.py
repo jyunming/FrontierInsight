@@ -12,19 +12,26 @@ numeric form is "the worst violation, expecting 0" (:mod:`core.oracle_forms`): a
 **second implementation**. A conserved quantity is conserved, a symmetry holds and two implementations agree at any
 valid setting, so the plan's expected value (0) and tolerance still apply. The setting changed, in this order:
 
-1. a step size of the case (``dt``, ``h``, ``dx``, ...) made smaller (divided by 2 or 3): a finer step never makes an
-   honest simulation less accurate, so a check that passed should still pass;
-2. otherwise one setting of the case that the study's own grid also sweeps, moved to another value of that grid (the
-   main run already runs the simulation there), chosen at random.
+1. a step size of the case (``dt``, ``h``, ``dx``, ...; a decimal number, never a count) made smaller by a factor
+   drawn between 1.7 and 3.3: a finer step does not make an honest simulation less accurate (a tolerance near
+   rounding error can still be exceeded by the extra steps);
+2. otherwise a decimal setting of the case that the study's grid also sweeps, moved to a value drawn between the
+   grid's smallest and largest values that is none of them;
+3. otherwise a whole-number setting the grid sweeps, moved to another of the grid's values: the main run ran the code
+   there, but no check did, and the record says so.
+
+Never a case another declared check uses. The setting is drawn when the check runs, after the code is final.
 
 Not covered: a special or limiting case, a published value and a convergence rate (each expected value belongs to its
 own setting, and FI cannot work out the value at another), a check with no case FI can run, a search for the best
 design (it has its own check at finer settings, core/optimum_check.py), and a check whose case has no step size and no
 setting the grid sweeps. The record says which checks were not covered and why; not being covered is not a gap.
 
-A hidden check that passes is recorded with the hash of the simulation's code (simulate.py and its package); one that fails, or could not run, is a gap below
-``independently_validated`` (:func:`evidence_gaps`), as is a record made on another version of the simulation. It never
-stops the quest. The case is chosen when the check runs and is written only to ``needs/HIDDEN_CHECK.json`` afterwards.
+The record (``needs/HIDDEN_CHECK.json``) keeps the hash of the simulation's code (``code/`` but the analysis and the
+notes) and of the checks, and FI puts the record's own hash in the quest's trace when it writes it: a record the
+simulation's code wrote or changed is not FI's (:func:`evidence_gaps`). A check that failed or could not run, a record
+on other code or other checks, and an earlier failure on the same code are gaps below ``independently_validated``. It
+never stops the quest. The harness's copy of the case is removed after the run.
 """
 
 from __future__ import annotations
@@ -70,8 +77,8 @@ def candidates(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     return out
 
 
-def _not_covered(protocol: dict[str, Any] | None, chosen: list[dict[str, Any]]) -> list[str]:
-    """One sentence per declared check that is not run at a hidden setting, saying why."""
+def _not_covered(protocol: dict[str, Any] | None, chosen: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """``{name, why}`` for each declared check that is not run at a hidden setting."""
     names = {str(o["name"]).strip() for o in chosen}
     out = []
     for oracle in _oracle.declared(protocol):
@@ -80,70 +87,106 @@ def _not_covered(protocol: dict[str, Any] | None, chosen: list[dict[str, Any]]) 
             continue
         kind = _oracle.kind_of(oracle)
         if kind not in KINDS:
-            what = _oracle.KINDS.get(kind or "", "a check of no kind FI reads")
-            out.append(f"{name!r}: {what}; its expected value belongs to its own setting")
+            why = f"{_oracle.KINDS.get(kind or '', 'a check of no kind FI reads')}; its expected value belongs to its own setting"
         elif _oracle.case_of(oracle) is None:
-            out.append(f"{name!r}: it has no case FI can run")
+            why = "it has no case FI can run"
         else:
-            out.append(f"{name!r}: FI cannot judge it (no numeric expected value and tolerance)")
+            why = "FI cannot judge it (no numeric expected value and tolerance)"
+        out.append({"name": name, "why": why})
     return out
+
+
+def _round(value: float, digits: int = 4) -> float:
+    """``value`` to ``digits`` significant digits (a setting a person can read in the record)."""
+    return float(f"{value:.{digits}g}")
 
 
 def derive(oracle: dict[str, Any], protocol: dict[str, Any] | None,
            rng: random.Random) -> tuple[dict[str, Any] | None, str]:
-    """``(the hidden case, what was changed)`` for one check (:func:`candidates`), or ``(None, why not)``. A step size of
-    the case is made smaller; else one setting the study's grid sweeps is moved to another of its values; never a
-    setting another declared check already uses as its case."""
+    """``(the hidden case, what was changed)`` for one check (:func:`candidates`), or ``(None, why not)``. Never a case
+    a declared check already uses. In this order:
+
+    1. a step size of the case (a decimal number, not a count) made smaller by a factor drawn between 1.7 and 3.3;
+    2. a decimal setting the study's grid sweeps, moved to a value drawn between the grid's smallest and largest
+       values that is none of them (no prompt named it);
+    3. a whole-number setting the grid sweeps, moved to another of the grid's values: the code ran there in the main
+       run, but no check did (the record says so)."""
     own = _oracle.case_of(oracle)
     if own is None:
         return None, "it has no case FI can run"
     case = own[0]
     shown = [c[0] for c in (_oracle.case_of(o) for o in _oracle.declared(protocol)) if c]
     for key in _oracle._STEP_KEYS:
-        step = _number(case.get(key))
-        if step is not None and step > 0:
-            divisor = rng.choice((2, 3))
-            value: Any = step / divisor
-            return {**case, key: value}, f"{key} = {_fmt(value)} instead of {_fmt(case[key])}"
+        step = case.get(key)
+        if isinstance(step, float) and math.isfinite(step) and step > 0:
+            value = _round(step / rng.uniform(1.7, 3.3))
+            if {**case, key: value} not in shown:
+                return {**case, key: value}, f"{key} = {_fmt(value)} instead of {_fmt(step)}"
     grid = protocol.get("grid") if isinstance(protocol, dict) else None
-    options: list[tuple[str, Any]] = []
+    between: list[tuple[str, float, float]] = []
+    others: list[tuple[str, Any]] = []
     for key, current in case.items():
         values = grid.get(key) if isinstance(grid, dict) else None
-        if _number(current) is None or not isinstance(values, list):
+        numbers = [v for v in values if _number(v) is not None] if isinstance(values, list) else []
+        if _number(current) is None or not numbers:
             continue
-        for v in values:
-            if _number(v) is not None and _number(v) != _number(current) and {**case, key: v} not in shown:
-                options.append((key, v))
-    if options:
-        key, value = rng.choice(options)
-        return {**case, key: value}, f"{key} = {_fmt(value)} (a setting of the study) instead of {_fmt(case[key])}"
+        if isinstance(current, float) or any(isinstance(v, float) for v in numbers):
+            low, high = min(float(v) for v in numbers + [current]), max(float(v) for v in numbers + [current])
+            if high > low:
+                between.append((key, low, high))
+        others += [(key, v) for v in numbers if _number(v) != _number(current) and {**case, key: v} not in shown]
+    if between:
+        key, low, high = rng.choice(between)
+        taken = {_number(v) for v in grid.get(key) or []} | {_number(case[key])}
+        for _ in range(20):
+            value = _round(rng.uniform(low, high))
+            if low < value < high and value not in taken and {**case, key: value} not in shown:
+                return ({**case, key: value},
+                        f"{key} = {_fmt(value)} (between the study's settings) instead of {_fmt(case[key])}")
+    if others:
+        key, value = rng.choice(others)
+        return ({**case, key: value}, f"{key} = {_fmt(value)} (another setting of the study's grid, where no check "
+                                      f"runs) instead of {_fmt(case[key])}")
     return None, "its case has no step size and no setting the study's grid sweeps, so FI has no safe setting to move"
 
 
-#: Code that does not compute the simulation's numbers: a change to it does not call for the hidden check again.
-_NOT_THE_SIMULATION = ("analysis.py", "web_plots.py")
+#: What under ``code/`` does not compute the simulation's numbers: a change to it does not call for the check again.
+_NOT_THE_SIMULATION = ("analysis.py", "experiment.py", "web_plots.py")
+_NOT_THE_SIMULATION_DIRS = ("__pycache__", ".git")
 
 
 def code_sha(quest_root: Path) -> str:
-    """One hash of the simulation's code as it is now: simulate.py and every other Python file under ``code/`` (the
-    model's package), not the analysis; ``""`` when there is no simulate.py."""
+    """One hash of the simulation's code as it is now: simulate.py and every other file under ``code/`` it may use
+    (the model's package, a parameter file), not the analysis, the notes (``*.md``) or git's own; ``""`` when there is
+    no simulate.py."""
     code = Path(quest_root) / "code"
     if not (Path(quest_root) / _SIMULATE).is_file():
         return ""
     digest = hashlib.sha256()
-    for path in sorted(code.rglob("*.py")):
-        if path.name in _NOT_THE_SIMULATION or "__pycache__" in path.parts:
+    for path in sorted(p for p in code.rglob("*") if p.is_file()):
+        rel = path.relative_to(code)
+        if (path.name in _NOT_THE_SIMULATION or path.suffix.lower() == ".md"
+                or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
             continue
         try:
-            digest.update(path.relative_to(code).as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
+            digest.update(rel.as_posix().encode("utf-8") + b"\0" + path.read_bytes() + b"\0")
         except OSError:
             return ""
     return digest.hexdigest()
 
 
-def _checks_key(protocol: dict[str, Any] | None) -> str:
-    """A fingerprint of the checks a hidden setting is derived from: a change to one runs the hidden check again."""
+def checks_key(protocol: dict[str, Any] | None) -> str:
+    """A fingerprint of the checks a hidden setting is derived from: a change to one calls for the check again."""
     return hashlib.sha256(json.dumps(candidates(protocol), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def record_sha(quest_root: Path) -> str:
+    """The SHA-256 of the record as it is on disk, ``""`` when there is none. FI puts it in the quest's trace when it
+    writes the record, so a record the simulation's own code wrote or changed is told apart."""
+    try:
+        return hashlib.sha256((Path(quest_root) / RECORD).read_bytes()).hexdigest()
+    except OSError:
+        return ""
 
 
 def load(quest_root: Path) -> dict[str, Any] | None:
@@ -154,30 +197,43 @@ def load(quest_root: Path) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
-def write(quest_root: Path, record: dict[str, Any]) -> None:
+def write(quest_root: Path, record: dict[str, Any]) -> str:
+    """Write the record; returns its SHA-256 (for the trace)."""
     path = Path(quest_root) / RECORD
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+    return record_sha(quest_root)
+
+
+def _forget_case(quest_root: Path) -> None:
+    """The harness leaves the case it ran in ``.fi/trials/``: removed, so later code cannot read the hidden setting."""
+    for name in ("oracle.json", "oracle.out.jsonl"):
+        try:
+            (Path(quest_root) / ".fi" / "trials" / name).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dict[str, Any] | None, *, timeout_s: int,
-              env: dict[str, str] | None, engine_callable: bool, rng: random.Random | None = None) -> dict[str, Any]:
-    """Run the hidden check on the simulation as it is now and return its record (not written). A record already made
-    on the same simulation and the same checks is returned as it is (an analysis repaired on the same run does not run
-    it again). ``engine_callable``: FI can call the simulation on one case (``run_trial``/``run_cell``)."""
+              env: dict[str, str] | None, engine_callable: bool, rng: random.Random | None = None,
+              trusted_sha: str = "") -> dict[str, Any]:
+    """Run the hidden check on the simulation as it is now and return its record (not written). A record FI itself
+    wrote (its SHA-256 is ``trusted_sha``, from the trace) on the same code and the same checks is returned as it is,
+    so an analysis repaired on the same run does not run it again. ``engine_callable``: FI can call the simulation on
+    one case (``run_trial``/``run_cell``)."""
     quest_root = Path(quest_root)
     simulate = quest_root / _SIMULATE
-    sha, key = code_sha(quest_root), _checks_key(protocol)
+    sha, key = code_sha(quest_root), checks_key(protocol)
     kept = load(quest_root)
-    if kept and sha and kept.get("code_sha256") == sha and kept.get("checks_key") == key and kept.get("status") in (
-            "passed", "failed", "not_covered"):
+    if (kept and sha and trusted_sha and record_sha(quest_root) == trusted_sha and kept.get("code_sha256") == sha
+            and kept.get("checks_key") == key and kept.get("status") in ("passed", "failed", "not_covered")):
         return kept
     chosen = candidates(protocol)
     record: dict[str, Any] = {"code_sha256": sha, "checks_key": key, "cases": [],
                               "not_covered": _not_covered(protocol, chosen)}
     if _optimise.block_of(protocol) is not None:
-        record["not_covered"] = [f"{str(o['name']).strip()!r}: a search for the best design is checked at finer "
-                                 "settings instead" for o in _oracle.declared(protocol)]
+        record["not_covered"] = [{"name": str(o["name"]).strip(), "why": "a search for the best design is checked at "
+                                  "finer settings instead"} for o in _oracle.declared(protocol)]
         return {**record, "status": "not_covered"}
     if not chosen:
         return {**record, "status": "not_covered"}
@@ -187,56 +243,72 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
     rng = rng or random.SystemRandom()
     thresholds = protocol.get("thresholds") if isinstance(protocol, dict) and isinstance(protocol.get("thresholds"),
                                                                                         dict) else None
-    for oracle in chosen[:MAX_CASES]:
+    planned: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+    for oracle in chosen:
         name = str(oracle["name"]).strip()
         case, changed = derive(oracle, protocol, rng)
         if case is None:
-            record["not_covered"].append(f"{name!r}: {changed}")
-            continue
-        hidden = {**oracle, "case": case}
-        try:
-            checks, problems, _ = await _trial_runner.measure_oracles(
-                executor, python, quest_root, _SIMULATE.as_posix(), [hidden], timeout_s=timeout_s, env=env,
-                thresholds=thresholds, case_env=env)
-        except Exception as e:  # noqa: BLE001 -- a run that cannot start is recorded, never raised
-            checks, problems = [], [f"the run could not start: {type(e).__name__}: {str(e)[:200]}"]
-        judged = _oracle.judged([hidden], {"checks": checks, "engine_measured": True})[0]
-        record["cases"].append({
-            "name": name, "kind": _oracle.kind_of(oracle), "case": case, "changed": changed,
-            "value": judged["value"], "expected": judged["expected"], "limit": judged["limit"],
-            "passed": judged["passed_by_engine"] if judged["measured_by"] == "engine" else None,
-            **({"problem": "; ".join(problems)[:400]} if problems else {}),
-        })
-    for oracle in chosen[MAX_CASES:]:
-        record["not_covered"].append(f"{str(oracle['name']).strip()!r}: only {MAX_CASES} checks are run again")
+            record["not_covered"].append({"name": name, "why": changed})
+        elif len(planned) < MAX_CASES:
+            planned.append((oracle, case, changed))
+        else:
+            record["not_covered"].append({"name": name, "why": f"only {MAX_CASES} checks are run again"})
+    try:
+        for oracle, case, changed in planned:
+            hidden = {**oracle, "case": case}
+            try:
+                checks, problems, _ = await _trial_runner.measure_oracles(
+                    executor, python, quest_root, _SIMULATE.as_posix(), [hidden], timeout_s=timeout_s, env=env,
+                    thresholds=thresholds, case_env=env)
+            except Exception as e:  # noqa: BLE001 -- a run that cannot start is recorded, never raised
+                checks, problems = [], [f"the run could not start: {type(e).__name__}: {str(e)[:200]}"]
+            judged = _oracle.judged([hidden], {"checks": checks, "engine_measured": True})[0]
+            record["cases"].append({
+                "name": str(oracle["name"]).strip(), "kind": _oracle.kind_of(oracle), "case": case, "changed": changed,
+                "value": judged["value"], "expected": judged["expected"], "limit": judged["limit"],
+                "passed": judged["passed_by_engine"] if judged["measured_by"] == "engine" else None,
+                **({"problem": "; ".join(problems)[:400]} if problems else {}),
+            })
+    finally:
+        _forget_case(quest_root)
     if not record["cases"]:
         return {**record, "status": "not_covered"}
     return {**record, "status": "passed" if all(c["passed"] is True for c in record["cases"]) else "failed"}
 
 
-def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> list[str]:
+def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
+                  written: list[dict[str, Any]] | None = None) -> list[str]:
     """Under research: why the hidden check keeps the result below ``independently_validated``, one sentence each.
-    Empty when no declared check is of a kind it covers, or when every check run at a hidden setting passed on the
-    simulation as it is now."""
+    Empty when no declared check is of a kind it covers, or when FI's own record (its SHA-256 the last one ``written``
+    names: the trace's ``hidden_check`` events, oldest first) says every check run at a hidden setting passed, on the
+    code and the checks as they are now, and no earlier run of the same code failed one."""
     chosen = candidates(protocol)
     if not chosen or _optimise.block_of(protocol) is not None:
         return []
+    written = [w for w in written or [] if isinstance(w, dict)]
+    sha = code_sha(quest_root)
+    gaps: list[str] = []
+    if any(w.get("status") == "failed" and sha and w.get("code_sha256") == sha for w in written[:-1]):
+        gaps.append("an earlier run of this same code failed a check at a setting the code never saw (see the quest's "
+                    "trace, event `hidden_check`)")
     record = load(quest_root)
     if record is None:
-        return ["FI has not run the checks at a setting the code never saw (run the experiment again so it does)"]
+        return [*gaps, "FI did not run the checks at a setting the code never saw (it does so after each run of a "
+                       "simulation in its own script, `code/simulate.py`, that FI can call on one case)"]
+    if not written or written[-1].get("sha256") != record_sha(quest_root):
+        return [*gaps, f"the record of the checks at a setting the code never saw ({RECORD}) is not the one FI wrote"]
     if record.get("status") == "not_run":
-        return [f"FI could not run the checks at a setting the code never saw: {record.get('reason') or 'no reason given'}"]
-    if record.get("code_sha256") != code_sha(quest_root):
-        return ["the simulation changed after FI ran its checks at a setting the code never saw (run the experiment "
-                "again so FI checks the code as it is)"]
-    gaps: list[str] = []
+        return [*gaps, "FI could not run the checks at a setting the code never saw: "
+                       f"{record.get('reason') or 'no reason given'}"]
+    if record.get("code_sha256") != sha or record.get("checks_key") != checks_key(protocol):
+        return [*gaps, "the simulation or its checks changed after FI ran them at a setting the code never saw (run "
+                       "the experiment again so FI checks them as they are)"]
     done = {str(c.get("name")) for c in record.get("cases") or [] if isinstance(c, dict)}
-    told = " ".join(str(n) for n in record.get("not_covered") or [])
-    for oracle in chosen[:MAX_CASES]:
+    told = {str(n.get("name")) for n in record.get("not_covered") or [] if isinstance(n, dict)}
+    for oracle in chosen:
         name = str(oracle["name"]).strip()
-        if name not in done and repr(name) not in told:
-            gaps.append(f"the check {name!r} was not run at a setting the code never saw (it was added after FI's run; "
-                        "run the experiment again)")
+        if name not in done and name not in told:
+            gaps.append(f"the check {name!r} was not run at a setting the code never saw (run the experiment again)")
     for case in record.get("cases") or []:
         if not isinstance(case, dict) or case.get("passed") is True:
             continue

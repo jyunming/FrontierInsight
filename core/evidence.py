@@ -81,13 +81,15 @@ INFO: dict[str, dict[str, Any]] = {
             "values and tolerances. A value the script reported itself (an oracle without a case, or a one-script quest's "
             "FI_ORACLE run) is judged too, but never counts toward this level, and a check that judged no value does not reach it. "
             "Under rigor_profile: research, a second model, shown by the record of the quest's model calls to be "
-            "different from the one that wrote the checks, read them and gave a usable answer, and each invariant, "
-            "symmetry or second-implementation check also passed at a setting of FI's choosing the code never saw."
+            "different from the one that wrote the checks, read them as they were frozen and gave a usable answer, and up "
+            "to three invariant, symmetry or second-implementation checks for which FI could choose another setting "
+            "also passed at a setting the code never saw."
         ),
         "known_blind_spots": [
             "The second model reads the checks; it does not work their expected values out again. A special or limiting "
             "case, a published value and a convergence rate are not run at a hidden setting (their expected value "
-            "belongs to their own setting).",
+            "belongs to their own setting), nor is a check FI found no other setting for: a quest with only such checks "
+            "reaches this level with no hidden setting at all.",
             "The expected values come from the plan (the same model that wrote it): a wrong closed form is passed by a wrong "
             "simulator that agrees with it. The engine checks that each one says where it comes from (a derivation with "
             "its steps, a source this quest retrieved, an equation of the plan's model, or a second implementation that "

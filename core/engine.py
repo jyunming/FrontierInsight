@@ -10372,15 +10372,20 @@ class Engine:
         if protocol is None or self.config.engine.oracle_check == "off" or not _hidden.candidates(protocol):
             return
         timeout = max(30, int(self.config.execution.timeout_s * self.config.engine.pilot_timeout_frac))
+        written = self._hidden_check_written()
         try:
             record = await self._await_with_heartbeat(_hidden.run(
                 self.executor, python, self.quest_root, protocol, timeout_s=timeout, env=env,
-                engine_callable=bool(getattr(self, "_trial_mode", False))), label="checking a setting the code never saw")
-            _hidden.write(self.quest_root, record)
+                engine_callable=bool(getattr(self, "_trial_mode", False)),
+                trusted_sha=str(written[-1].get("sha256") or "") if written else ""),
+                label="checking a setting the code never saw")
+            sha = _hidden.write(self.quest_root, record)
         except Exception as e:  # noqa: BLE001 -- the run itself succeeded; this check must not end the quest
             self._log.warning("[oracle] the check at a setting the code never saw could not be made: %r", e)
             return
-        for gap in _hidden.evidence_gaps(self.quest_root, protocol):
+        # The record's hash goes into the trace: a record the simulation's own code writes is not FI's.
+        self._audit("hidden_check", sha256=sha, status=record.get("status"), code_sha256=record.get("code_sha256"))
+        for gap in _hidden.evidence_gaps(self.quest_root, protocol, self._hidden_check_written()):
             self._log.warning("[oracle] %s", gap)
         if record.get("status") == "passed":
             self._log.info("[oracle] %d check(s) also passed at a setting the code never saw", len(record["cases"]))
@@ -10394,8 +10399,15 @@ class Engine:
             return []
         calls = _attempts.read(self.fi_dir, _attempts.MODEL_CALLS)
         return [*_review.independence_gaps(self._oracle_review_read(), calls,
-                                           configured=bool(self._model_for_node(_review.NODE))),
-                *_hidden.evidence_gaps(self.quest_root, protocol)]
+                                           configured=bool(self._model_for_node(_review.NODE)), protocol=protocol),
+                *_hidden.evidence_gaps(self.quest_root, protocol, self._hidden_check_written())]
+
+    def _hidden_check_written(self) -> list[dict[str, Any]]:
+        """The trace's ``hidden_check`` events, oldest first: the hash of each record FI wrote, its status and code."""
+        try:
+            return [e for e in _audit_log.read(self.audit.path) if e.get("kind") == "hidden_check"]
+        except Exception:  # noqa: BLE001 -- an unreadable trace names no record, which is a gap, never a pass
+            return []
 
     def _oracle_review_path(self) -> Path:
         return self.fi_dir / "oracle_review.json"
@@ -10457,9 +10469,9 @@ class Engine:
         reviewer = str(answered.get("model") if answered.get("reported") else reviewer_asked or "")
         planner = str(planned.get("model") if planned.get("reported") else planner_asked or "")
         if answered.get("reported") and planned.get("reported"):
-            same: bool | None = str(answered.get("model")) == str(planned.get("model"))
+            same: bool | None = _review.same_model(answered.get("model"), planned.get("model"))
         elif reviewer_asked and planner_asked:
-            same = reviewer_asked == planner_asked
+            same = _review.same_model(reviewer_asked, planner_asked)
         elif not self._model_for_node(_review.NODE) and not self._model_for_node("plan"):
             same = True  # both on the provider's own default
         else:
@@ -10485,6 +10497,9 @@ class Engine:
             "reported": bool(answered.get("reported")), "findings": found,
             # The line of .fi/model_calls.jsonl that holds this reading: the evidence level reads who answered from there.
             **({"call_id": answered["call_id"]} if answered.get("call_id") and not error else {}),
+            # Which checks it read, as they were shown (what decides each verdict): a check added or changed later was
+            # not read (core/oracle_review.py::independence_gaps).
+            **({"read": _review.fingerprints(protocol, shown_only=True)} if review is not None else {}),
             "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
                                         same_model=same, research=research,
                                         reported=bool(answered.get("reported")), error=error,
@@ -10572,6 +10587,13 @@ class Engine:
                 *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
             ], note="the checks against known answers looked at")
             self._oracle_review_write({**self._oracle_review_read(), "answered": True})
+        end = self._oracle_review_read()
+        if end.get("verdicts") and "after_look" not in end and (not end.get("asked") or end.get("answered")):
+            # The checks as this one look left them, after what the reader found was applied: a later change to one is
+            # a change the reader never read.
+            design_now, _why = _plan.load_design(self.quest_root)
+            now = design_now.get("protocol") if isinstance(design_now, dict) else None
+            self._oracle_review_write({**end, "after_look": _review.fingerprints(now if isinstance(now, dict) else None)})
         return {"rewritten": rewrites, "asked": requests, "left": left,
                 **({"review": {k: v for k, v in review.items() if k != "lines"}} if review else {})}
 
@@ -11454,8 +11476,8 @@ class Engine:
                                if split and result.returncode == 0 and self.config.engine.run_manifest_check != "off"
                                else None)
             manifest_status, manifest_found = self._run_manifest_problems(state, split, result, run_cell_random)
-            if split and result.returncode == 0 and self.config.rigor_profile == "research":
-                await self._hidden_check(state, py, primary_env)
+            if split and result.returncode == 0 and not manifest_found and self.config.rigor_profile == "research":
+                await self._hidden_check(state, py, primary_env)  # not on a run about to be sent back
         manifest_attempts_next = 0
         if manifest_found:
             mode = self.config.engine.run_manifest_check

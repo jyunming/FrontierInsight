@@ -35,8 +35,8 @@ from . import oracle_check as _oracle
 #: The node a model is named for in ``provider.node_models``.
 NODE = "oracle_review"
 #: The steps whose answers write the plan's checks: the plan, every rewrite of it (FI's own requests about the checks
-#: included), and the design step of a quest with no plan.md.
-WRITER_NODES = ("plan", "plan_revise", "design")
+#: included), the design step of a quest with no plan.md, and the design's own critique (which may amend the checks).
+WRITER_NODES = ("plan", "plan_revise", "design", "design_self_critique")
 #: How a person gives the review another model (the key that already names a step's model; nothing new).
 HOW_TO_NAME_ANOTHER = ("set `oracle_review: <another model your provider offers>` under `provider: node_models:` in "
                        "the quest's config.yaml; it reads the checks when the plan is written (for this quest, do the "
@@ -91,12 +91,8 @@ def prompt_parts(protocol: dict[str, Any] | None) -> tuple[str, str, bool]:
                             indent=2, default=str)
     if len(model_text) > _MAX_MODEL_CHARS:
         model_text = model_text[:_MAX_MODEL_CHARS] + "\n(the rest of the model is not shown)"
-    shown: list[dict[str, Any]] = []
     checks = _oracle.declared(protocol)
-    for oracle in checks:
-        if len(json.dumps([*shown, oracle], indent=2, default=str)) > _MAX_CHECK_CHARS:
-            break
-        shown.append(oracle)
+    shown = _shown(protocol)
     text = json.dumps(shown, indent=2, default=str)
     partial = len(shown) < len(checks)
     if partial:
@@ -259,16 +255,28 @@ def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model
 # --- whether the second reading counts as independent (rigor_profile: research) ------------------------------------
 
 #: What a connection adds to a model's name without making it another model: a date or a version stamp, ``preview``,
-#: ``latest`` (``gpt-5.6-luna-2026-09`` is ``gpt-5.6-luna``; ``claude-opus-4-5-20251101`` is ``claude-opus-4-5``).
-_STAMP_RE = re.compile(r"(?:[-_.@](?:\d{4}[\d.-]*|\d{2}-\d{2}|preview|latest))+$")
+#: ``latest``, a ``-v1``/``-v2:0`` revision, a ``-001`` release (``gpt-5.6-luna-2026-09`` is ``gpt-5.6-luna``;
+#: ``claude-opus-4-5-20251101`` is ``claude-opus-4-5``; ``gemini-2.0-flash-001`` is ``gemini-2.0-flash``).
+_STAMP_RE = re.compile(r"(?:[-_.@](?:\d{4}[\d.-]*|\d{2}-\d{2}|\d{3}|v\d+(?::\d+)?|preview|latest))+$")
+#: A cloud's region and vendor before a model's name (``us.anthropic.claude-...``, ``anthropic.claude-...``).
+_CLOUD_PREFIX_RE = re.compile(r"^(?:[a-z]{2}\.)?(?:anthropic|meta|amazon|mistral|cohere|ai21|openai|google|deepseek)\.")
+#: Connections that relay a model through a proxy of their own: the model they report may be the name FI asked for
+#: echoed back, so it does not show which model answered.
+PROXY_PROVIDERS = frozenset({"claude_code", "github_copilot_cli", "github_copilot_vscode"})
+#: Which connections name the model that answered, in the gap's words.
+_WHO_NAMES = ("an HTTP API, the claude command-line tool, and VS Code with a model picked (not Auto) name the model that "
+              "answered")
 
 
 def canonical_model(name: Any) -> str:
-    """A model's name as one model: lower case, without a vendor or folder prefix (``openai/gpt-5``, ``models/gemini``),
-    without an ``:latest`` tag, a date or a ``-preview``/``-latest`` stamp, and with ``.`` and ``_`` read as ``-``. Two
-    names that differ only in these are the same model."""
+    """A model's name as one model: lower case, without a vendor or folder prefix (``openai/gpt-5``, ``models/gemini``,
+    ``us.anthropic.``), without an Ollama ``:tag`` (``gemma4:27b`` is read as ``gemma4``: it may be the same weights),
+    a date, a version or release stamp or ``-preview``/``-latest``, and with ``.`` and ``_`` read as ``-``. Two names
+    that differ only in these are the same model. Errs towards "the same": two models taken for one only keep a gap."""
     text = str(name or "").strip().lower().rsplit("/", 1)[-1]
-    text = re.sub(r":latest$", "", text)
+    text = _CLOUD_PREFIX_RE.sub("", text)
+    text = _STAMP_RE.sub("", text) or text  # a Bedrock revision (-v1:0) before the Ollama tag is cut
+    text = text.split(":", 1)[0] or text
     text = _STAMP_RE.sub("", text) or text
     return re.sub(r"[._]", "-", text)
 
@@ -279,36 +287,95 @@ def same_model(a: Any, b: Any) -> bool:
     return bool(first) and first == second
 
 
-def independence_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]], *, configured: bool) -> list[str]:
+def _shown(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The checks the reader is shown (whole checks, as many as fit): :func:`prompt_parts`'s own cut."""
+    shown: list[dict[str, Any]] = []
+    for oracle in _oracle.declared(protocol):
+        if len(json.dumps([*shown, oracle], indent=2, default=str)) > _MAX_CHECK_CHARS:
+            break
+        shown.append(oracle)
+    return shown
+
+
+def fingerprint(oracle: dict[str, Any]) -> str:
+    """What decides a check's verdict, as one string: its name, kind, expected value, tolerance and its mode, case and
+    measure (not its wording or its reference, which a later step may fill in without changing what is judged)."""
+    expected, limit, mode = _oracle.limit_of(oracle)
+    return json.dumps({"name": str(oracle.get("name") or "").strip().lower(), "kind": _oracle.kind_of(oracle),
+                       "expected": expected, "limit": limit, "mode": mode, "case": oracle.get("case"),
+                       "measure": " ".join(str(oracle.get("measure") or "").split())}, sort_keys=True, default=str)
+
+
+def fingerprints(protocol: dict[str, Any] | None, *, shown_only: bool = False) -> list[str]:
+    """:func:`fingerprint` of each declared check (only those a reader is shown, with ``shown_only``)."""
+    return [fingerprint(o) for o in (_shown(protocol) if shown_only else _oracle.declared(protocol))]
+
+
+def _names(items: list[str]) -> str:
+    return ", ".join(repr(n) for n in items[:5]) + (f" and {len(items) - 5} more" if len(items) > 5 else "")
+
+
+def independence_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]], *, configured: bool,
+                      protocol: dict[str, Any] | None = None) -> list[str]:
     """Under ``rigor_profile: research``: why the second reading of the plan's checks does not count, one plain sentence
-    (empty when it counts). It counts only when it gave a usable answer (``record``, ``.fi/oracle_review.json``) and the
-    quest's record of its model calls (``calls``, ``.fi/model_calls.jsonl``) names, for the call that gave it and for
-    every call of a step that writes the plan's checks (:data:`WRITER_NODES`), the model that answered, and the model of
-    the reading is none of the writers' (:func:`same_model`). ``configured``: ``provider.node_models.oracle_review`` is
-    set; when it is not, the sentence says how to set it."""
+    (empty when it counts). It counts only when
+
+    * it gave a usable answer (``record``, ``.fi/oracle_review.json``);
+    * it covers the checks ``protocol`` (the frozen one) declares: each has a verdict, and is the check as the reader
+      read it (``read``) or as the same look left it after applying what the reader found (``after_look``); a check the
+      reader proposed itself (``add``) counts as read;
+    * the quest's record of its model calls (``calls``, ``.fi/model_calls.jsonl``) names, for the call that gave it (the
+      record's ``call_id``) and for every answered call of a step that writes the checks (:data:`WRITER_NODES`), the
+      model that answered, through a connection that does not relay a proxy (:data:`PROXY_PROVIDERS`);
+    * and the reading's model is none of the writers' (:func:`same_model`).
+
+    ``configured``: ``provider.node_models.oracle_review`` is set; when it is not, the sentence says how to set it."""
     record = record if isinstance(record, dict) else {}
     how = f"; to have another model read them, {HOW_TO_NAME_ANOTHER}" if not configured else ""
+    again = "; for this quest, do the plan again: `--resume <quest_id> --from plan --approve-as <you>`"
     if not record.get("lines") and not record.get("error") and not record.get("verdicts"):
         return [f"{NOT_REVIEWED}: no second reading of them is recorded{how}"]
     if record.get("error") or not record.get("verdicts"):
         why = str(record.get("error") or "it judged none of the checks")
         return [f"{NOT_REVIEWED}: the second reading gave no usable answer ({why[:200]}){how}"]
+    gaps: list[str] = []
+    if protocol is not None:
+        judged = {str(v.get("name") or "").strip().lower() for v in record.get("verdicts") or [] if isinstance(v, dict)}
+        proposed = {str(a.get("name") or "").strip().lower() for a in record.get("add") or [] if isinstance(a, dict)}
+        read = set(record.get("read") or []) | set(record.get("after_look") or [])
+        unread = []
+        for oracle in _oracle.declared(protocol):
+            name = str(oracle["name"]).strip()
+            if name.lower() in proposed and fingerprint(oracle) in set(record.get("after_look") or []):
+                continue  # the reader's own check, as the look left it
+            if name.lower() not in judged or fingerprint(oracle) not in read:
+                unread.append(name)
+        if unread:
+            gaps.append(f"{NOT_REVIEWED}: the second reading did not judge {_names(unread)} as "
+                        f"{'it stands' if len(unread) == 1 else 'they stand'} (added or changed after it, or not "
+                        f"shown to it){again}")
     ok = [r for r in calls if isinstance(r, dict) and r.get("outcome") == "ok"]
     call_id = record.get("call_id")
-    reading = next((r for r in ok if call_id and r.get("call_id") == call_id and r.get("node") == NODE), None)
-    if reading is None:  # a record written before the call's id was kept: the latest answered reading
-        reading = next((r for r in reversed(ok) if r.get("node") == NODE), None)
+    readings = [r for r in ok if r.get("node") == NODE]
+    if call_id:
+        reading = next((r for r in readings if r.get("call_id") == call_id), None)
+    else:  # a record written before the call's id was kept: only when there is no other reading to mistake it for
+        reading = readings[0] if "call_id" not in record and len(readings) == 1 else None
     writers = [r for r in ok if r.get("node") in WRITER_NODES]
     if reading is None or not writers:
         missing = "read" if reading is None else "wrote"
-        return [f"{NOT_REVIEWED}: the quest's record of its model calls does not show which model {missing} them"]
-    unnamed = "read" if not (reading.get("reported") and reading.get("served_model")) else (
-        "wrote" if any(not (w.get("reported") and w.get("served_model")) for w in writers) else "")
+        return [*gaps, f"{NOT_REVIEWED}: the quest's record of its model calls does not show which model {missing} them"]
+
+    def _named(row: dict[str, Any]) -> bool:
+        return bool(row.get("reported") and row.get("served_model")) and row.get("provider") not in PROXY_PROVIDERS
+
+    unnamed = "read" if not _named(reading) else ("wrote" if not all(_named(w) for w in writers) else "")
     if unnamed:
-        return [f"{NOT_REVIEWED}: the connection did not say which model {unnamed} them, so they are not shown to be "
-                "two different models (an HTTP API and the claude command-line tool name the model that answered)"]
+        return [*gaps, f"{NOT_REVIEWED}: the connection did not say which model {unnamed} them, so they are not shown "
+                       f"to be two different models ({_WHO_NAMES}; a proxy such as claude_code or copilot-api does not)"]
     model = str(reading["served_model"])
     if any(same_model(w["served_model"], model) for w in writers):
-        tail = how or "; the model set for `oracle_review` is the one that wrote the plan, so name another"
-        return [f"{NOT_REVIEWED}: {model} wrote them and read them again{tail}"]
-    return []
+        tail = how or "; the model set for `oracle_review` is one that wrote the plan, so name another"
+        return [*gaps, f"{NOT_REVIEWED}: {model} wrote them and read them again{tail}"]
+    return gaps
+

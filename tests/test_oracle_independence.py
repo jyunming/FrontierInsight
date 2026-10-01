@@ -68,6 +68,9 @@ def test_a_review_that_failed_or_never_ran_is_a_gap(record: Any, why: str) -> No
     ("gemma4:latest", "gemma4"),
     ("gemini-2.5-pro-preview-05-06", "gemini-2.5-pro"),
     ("gpt-5.6", "gpt_5_6"),
+    ("gemma4:27b", "gemma4"),                          # an Ollama tag (it may be the same weights)
+    ("gemini-2.0-flash-001", "gemini-2.0-flash"),      # a release number
+    ("us.anthropic.claude-sonnet-4-5-20250929-v1:0", "claude-sonnet-4-5"),  # a cloud's id
 ])
 def test_the_same_model_under_another_name_is_the_same_model(writer: str, reader: str) -> None:
     assert orv.same_model(writer, reader)
@@ -76,24 +79,31 @@ def test_the_same_model_under_another_name_is_the_same_model(writer: str, reader
 
 
 @pytest.mark.parametrize("a, b", [("gpt-5", "gpt-5-mini"), ("claude-opus-4-5", "claude-sonnet-4-5"),
-                                  ("llama3:8b", "llama3:70b"), ("gemini-2.5-pro", "gemini-2.5-flash")])
+                                  ("gemini-2.5-pro", "gemini-2.5-flash"), ("llama3.1", "llama3.2")])
 def test_different_models_stay_different(a: str, b: str) -> None:
     assert not orv.same_model(a, b)
 
 
-def test_any_writer_of_the_checks_on_the_reader_s_model_is_a_gap() -> None:
-    # The plan was written by one model, but a rewrite of it (FI's request about the checks) by the reader's own model.
-    calls = [_row("plan", "planner-model"), _row("plan_revise", "reviewer-model"),
+@pytest.mark.parametrize("writer_node", ["plan_revise", "design", "design_self_critique"])
+def test_any_writer_of_the_checks_on_the_reader_s_model_is_a_gap(writer_node: str) -> None:
+    # The plan was written by one model, but a rewrite or the design's critique (which may amend the checks) by the
+    # reader's own model.
+    calls = [_row("plan", "planner-model"), _row(writer_node, "reviewer-model"),
              _row("oracle_review", "reviewer-model", call_id="r1")]
     gaps = orv.independence_gaps(USABLE, calls, configured=True)
-    assert gaps and "the model set for `oracle_review` is the one that wrote the plan" in gaps[0]
+    assert gaps and "the model set for `oracle_review` is one that wrote the plan" in gaps[0]
 
 
 def test_a_model_the_connection_did_not_name_is_not_shown_different() -> None:
     reader_unnamed = [_row("plan", "planner-model"), _row("oracle_review", None, reported=False, call_id="r1")]
-    assert "did not say which model read them" in orv.independence_gaps(USABLE, reader_unnamed, configured=True)[0]
+    gap = orv.independence_gaps(USABLE, reader_unnamed, configured=True)[0]
+    assert "did not say which model read them" in gap and "VS Code with a model picked (not Auto)" in gap
     writer_unnamed = [_row("plan", None, reported=False), _row("oracle_review", "reviewer-model", call_id="r1")]
     assert "did not say which model wrote them" in orv.independence_gaps(USABLE, writer_unnamed, configured=True)[0]
+    # A proxy may echo the name it was asked for: not proof of which model answered.
+    proxied = [_row("plan", "planner-model", provider="claude_code"),
+               _row("oracle_review", "reviewer-model", call_id="r1", provider="claude_code")]
+    assert "did not say which model" in orv.independence_gaps(USABLE, proxied, configured=True)[0]
     # A failed attempt of the plan is not a writer; the record of calls must still name the writer.
     no_writer = [_row("plan", "x", outcome="TimeoutError"), _row("oracle_review", "reviewer-model", call_id="r1")]
     assert "does not show which model wrote them" in orv.independence_gaps(USABLE, no_writer, configured=True)[0]
@@ -105,6 +115,52 @@ def test_the_reading_counted_is_the_one_the_record_names() -> None:
              _row("oracle_review", "reviewer-model", call_id="r1")]
     assert orv.independence_gaps(USABLE, calls, configured=True) == []
     assert orv.independence_gaps({**USABLE, "call_id": "old"}, calls, configured=True)
+    # A record without the call's id is matched only when there is one reading to match; a record whose call id is
+    # in no line (its line could not be written) is a gap, never the latest reading on record.
+    old = {k: v for k, v in USABLE.items() if k != "call_id"}
+    assert orv.independence_gaps(old, calls, configured=True)
+    assert orv.independence_gaps(old, [calls[0], calls[2]], configured=True) == []
+    assert orv.independence_gaps({**USABLE, "call_id": "lost"}, calls, configured=True)
+
+
+def _protocol_read(*oracles: dict[str, Any]) -> dict[str, Any]:
+    return {"oracles": list(oracles)}
+
+
+def test_the_reading_must_cover_the_checks_as_they_were_frozen() -> None:
+    calls = [_row("plan", "planner-model"), _row("oracle_review", "reviewer-model", call_id="r1")]
+    check = {"name": "power_conservation", "kind": "invariant", "expected": 0, "tolerance": 1e-6, "case": {"n": 4},
+             "measure": "abs(P_out - P_in)"}
+    read = {**USABLE, "read": orv.fingerprints(_protocol_read(check))}
+    assert orv.independence_gaps(read, calls, configured=True, protocol=_protocol_read(check)) == []
+    # Its wording or its reference filled in later: the same check.
+    worded = {**check, "check": "another sentence", "reference": "derivation: P_out = P_in"}
+    assert orv.independence_gaps(read, calls, configured=True, protocol=_protocol_read(worded)) == []
+    # A check added after the reading, or one the reader was not shown: no verdict.
+    extra = {**check, "name": "ohm", "kind": "special_case", "expected": 2.0}
+    gaps = orv.independence_gaps(read, calls, configured=True, protocol=_protocol_read(check, extra))
+    assert len(gaps) == 1 and "did not judge 'ohm' as it stands" in gaps[0] and "--from plan" in gaps[0]
+    # A check whose numbers changed after the reading (a person's edit, a later rewrite).
+    looser = {**check, "tolerance": 1e-2}
+    gaps = orv.independence_gaps(read, calls, configured=True, protocol=_protocol_read(looser))
+    assert len(gaps) == 1 and "did not judge 'power_conservation' as it stands" in gaps[0]
+    # ... unless the same look left it so, answering what the reader found; and a check the reader proposed itself.
+    after = {**read, "after_look": orv.fingerprints(_protocol_read(looser, extra)), "add": [{"name": "ohm"}]}
+    assert orv.independence_gaps(after, calls, configured=True, protocol=_protocol_read(looser, extra)) == []
+    # A record from before the checks read were kept: nothing shows which checks it read.
+    assert orv.independence_gaps(USABLE, calls, configured=True, protocol=_protocol_read(check))
+
+
+def test_only_the_checks_a_reader_was_shown_count_as_read() -> None:
+    many = {"oracles": [{"name": f"check {i}", "kind": "invariant", "expected": 0, "tolerance": 1e-6,
+                         "check": "x" * 900} for i in range(20)]}
+    shown = orv.fingerprints(many, shown_only=True)
+    assert 0 < len(shown) < 20
+    record = {**USABLE, "read": shown,
+              "verdicts": [{"name": f"check {i}"} for i in range(20)]}  # a reply naming even the unshown ones
+    calls = [_row("plan", "planner-model"), _row("oracle_review", "reviewer-model", call_id="r1")]
+    gaps = orv.independence_gaps(record, calls, configured=True, protocol=many)
+    assert gaps and "as they stand" in gaps[0] and "more" in gaps[0]
 
 
 # --- the engine: the reading at plan time, and the evidence that reads it ---------------------------------------------
@@ -244,11 +300,21 @@ SPECIAL_CASED = "def run_cell(cell):\n    return {'P_in': 1.0, 'P_out': 1.0 if c
 
 def test_a_hidden_setting_is_well_defined_only_for_checks_whose_expected_value_holds_everywhere() -> None:
     rng = random.Random(0)
+    # A whole-number setting the grid sweeps: another of its values, said plainly.
     case, changed = hc.derive(INVARIANT, GRID_PROTOCOL, rng)
-    assert case == {"n": 8} and "n = 8" in changed
+    assert case == {"n": 8} and "another setting of the study's grid, where no check runs" in changed
+    # A step size: smaller, by a factor no prompt names.
     stepped = {**INVARIANT, "kind": "symmetry", "case": {"n": 4, "dt": 0.1}}
     case, changed = hc.derive(stepped, GRID_PROTOCOL, rng)
-    assert case["n"] == 4 and case["dt"] in (0.05, 0.1 / 3) and "dt" in changed
+    assert case["n"] == 4 and 0.1 / 3.31 < case["dt"] < 0.1 / 1.69 and "dt" in changed
+    # A step that is a count is not divided.
+    counted = {**INVARIANT, "case": {"step": 100}}
+    assert hc.derive(counted, {"oracles": [counted]}, rng)[0] is None
+    # A decimal setting: a value between the grid's settings that is none of them.
+    decimal = {**INVARIANT, "case": {"x": 0.5}}
+    grid = {"grid": {"x": [0.5, 1.0, 2.0]}, "oracles": [decimal]}
+    case, changed = hc.derive(decimal, grid, rng)
+    assert 0.5 < case["x"] < 2.0 and case["x"] not in (0.5, 1.0, 2.0) and "between the study's settings" in changed
     special = {**INVARIANT, "kind": "special_case", "expected": 2.0}
     assert hc.candidates({"grid": {"n": [4, 8]}, "oracles": [special]}) == []
     nowhere = {**INVARIANT, "case": {"m": 3}}
@@ -265,47 +331,89 @@ def _quest(tmp_path: Path, simulate: str) -> Path:
     return root
 
 
-def _run(root: Path, protocol: dict[str, Any], **kw: Any) -> dict[str, Any]:
+def _run(root: Path, protocol: dict[str, Any], written: list[dict[str, Any]] | None = None,
+         **kw: Any) -> dict[str, Any]:
+    """Run the hidden check and write its record as the engine does, noting the record's hash as the trace would."""
     record = asyncio.run(hc.run(SharedInterpreterExecutor(python_version="3.11"), sys.executable, root, protocol,
                                 timeout_s=60, env={}, engine_callable=True, rng=random.Random(1), **kw))
-    hc.write(root, record)
+    sha = hc.write(root, record)
+    if written is not None:
+        written.append({"sha256": sha, "status": record["status"], "code_sha256": record.get("code_sha256")})
     return record
 
 
 def test_a_hidden_check_that_passes_is_no_gap(tmp_path: Path) -> None:
-    root = _quest(tmp_path, HONEST)
-    record = _run(root, GRID_PROTOCOL)
+    root, written = _quest(tmp_path, HONEST), []
+    record = _run(root, GRID_PROTOCOL, written)
     assert record["status"] == "passed" and record["cases"][0]["case"] == {"n": 8}
-    assert hc.evidence_gaps(root, GRID_PROTOCOL) == []
-    # The code changed after it: the record no longer covers it.
-    (root / "code" / "simulate.py").write_text(HONEST + "\n# changed\n", encoding="utf-8")
-    assert "changed after FI ran its checks" in hc.evidence_gaps(root, GRID_PROTOCOL)[0]
+    assert hc.evidence_gaps(root, GRID_PROTOCOL, written) == []
+    # The harness's copy of the case is gone: later code cannot read the setting.
+    assert not (root / ".fi" / "trials" / "oracle.json").exists()
+    # The code changed after it (a parameter file too): the record no longer covers it.
+    (root / "code" / "params.json").write_text("{}", encoding="utf-8")
+    assert "changed after FI ran them" in hc.evidence_gaps(root, GRID_PROTOCOL, written)[0]
+    # So did the checks.
+    (root / "code" / "params.json").unlink()
+    assert hc.evidence_gaps(root, GRID_PROTOCOL, written) == []
+    tighter = {**GRID_PROTOCOL, "oracles": [{**INVARIANT, "tolerance": 1e-12}]}
+    assert "changed after FI ran them" in hc.evidence_gaps(root, tighter, written)[0]
+    # The analysis and the notes are not the simulation.
+    (root / "code" / "analysis.py").write_text("print(1)\n", encoding="utf-8")
+    (root / "code" / "CHANGELOG.md").write_text("x\n", encoding="utf-8")
+    assert hc.evidence_gaps(root, GRID_PROTOCOL, written) == []
+
+
+def test_a_record_fi_did_not_write_is_not_trusted_nor_reused(tmp_path: Path) -> None:
+    root, written = _quest(tmp_path, SPECIAL_CASED), []
+    _run(root, GRID_PROTOCOL, written)
+    # The simulation's own code writes a passing record over FI's, with the right hashes.
+    forged = {**hc.load(root), "status": "passed"}
+    forged["cases"] = [{**c, "passed": True} for c in forged["cases"]]
+    hc.write(root, forged)
+    assert "is not the one FI wrote" in hc.evidence_gaps(root, GRID_PROTOCOL, written)[0]
+    # A record FI did not write is never reused: the check runs again (and fails again).
+    again = _run(root, GRID_PROTOCOL, written, trusted_sha=written[-1]["sha256"])
+    assert again["status"] == "failed"
+    # And the earlier failure on this same code stays a gap, however a later run went.
+    passing = {**again, "status": "passed", "cases": [{**c, "passed": True} for c in again["cases"]]}
+    written.append({"sha256": hc.write(root, passing), "status": "passed", "code_sha256": again["code_sha256"]})
+    assert any("an earlier run of this same code failed" in g for g in hc.evidence_gaps(root, GRID_PROTOCOL, written))
 
 
 def test_code_that_passes_only_the_case_it_was_shown_fails_the_hidden_check(tmp_path: Path) -> None:
-    root = _quest(tmp_path, SPECIAL_CASED)
-    record = _run(root, GRID_PROTOCOL)
+    root, written = _quest(tmp_path, SPECIAL_CASED), []
+    record = _run(root, GRID_PROTOCOL, written)
     assert record["status"] == "failed" and record["cases"][0]["passed"] is False
-    gaps = hc.evidence_gaps(root, GRID_PROTOCOL)
+    gaps = hc.evidence_gaps(root, GRID_PROTOCOL, written)
     assert len(gaps) == 1 and "passed at its own case but not at a setting the code never saw (n = 8" in gaps[0]
 
 
 def test_a_hidden_check_that_cannot_run_is_a_gap_and_kinds_not_covered_are_none(tmp_path: Path) -> None:
-    root = _quest(tmp_path, "def run_cell(cell):\n    if cell['n'] != 4:\n        raise ValueError('no')\n"
-                            "    return {'P_in': 1.0, 'P_out': 1.0}\n")
-    _run(root, GRID_PROTOCOL)
-    assert "could not be run at a setting the code never saw" in hc.evidence_gaps(root, GRID_PROTOCOL)[0]
+    root, written = _quest(tmp_path, "def run_cell(cell):\n    if cell['n'] != 4:\n        raise ValueError('no')\n"
+                                     "    return {'P_in': 1.0, 'P_out': 1.0}\n"), []
+    _run(root, GRID_PROTOCOL, written)
+    assert "could not be run at a setting the code never saw" in hc.evidence_gaps(root, GRID_PROTOCOL, written)[0]
     special = {"grid": {"n": [4, 8]}, "oracles": [{**INVARIANT, "kind": "special_case", "expected": 2.0}]}
     record = _run(_quest(tmp_path / "s", HONEST), special)
-    assert record["status"] == "not_covered" and "special or limiting case" in record["not_covered"][0]
+    assert record["status"] == "not_covered" and "special or limiting case" in record["not_covered"][0]["why"]
     assert hc.evidence_gaps(tmp_path / "s" / "q", special) == []
     # A quest whose simulation FI cannot call on one case: said, and a gap.
-    root = _quest(tmp_path / "n", HONEST)
-    hc.write(root, asyncio.run(hc.run(None, sys.executable, root, GRID_PROTOCOL, timeout_s=5, env={},
-                                      engine_callable=False)))
-    assert "could not run the checks at a setting the code never saw" in hc.evidence_gaps(root, GRID_PROTOCOL)[0]
-    # No record at all.
-    assert "has not run the checks" in hc.evidence_gaps(tmp_path / "none", GRID_PROTOCOL)[0]
+    root, written = _quest(tmp_path / "n", HONEST), []
+    record = asyncio.run(hc.run(None, sys.executable, root, GRID_PROTOCOL, timeout_s=5, env={}, engine_callable=False))
+    written.append({"sha256": hc.write(root, record), "status": record["status"]})
+    assert "could not run the checks at a setting the code never saw" in hc.evidence_gaps(root, GRID_PROTOCOL, written)[0]
+    # No record at all: says when FI runs it.
+    assert "it does so after each run of a simulation in its own script" in hc.evidence_gaps(tmp_path / "none",
+                                                                                              GRID_PROTOCOL)[0]
+
+
+def test_only_checks_a_setting_can_be_found_for_take_the_three_runs(tmp_path: Path) -> None:
+    stuck = [{**INVARIANT, "name": f"stuck {i}", "case": {"m": i}} for i in range(3)]
+    movable = {**INVARIANT, "name": "movable"}
+    protocol = {"grid": {"n": [4, 8]}, "oracles": [*stuck, movable]}
+    record = _run(_quest(tmp_path, HONEST), protocol)
+    assert [c["name"] for c in record["cases"]] == ["movable"] and record["status"] == "passed"
+    assert {n["name"] for n in record["not_covered"]} == {"stuck 0", "stuck 1", "stuck 2"}
 
 
 @pytest.mark.parametrize("simulate, passed", [(HONEST, True), (SPECIAL_CASED, False)])
