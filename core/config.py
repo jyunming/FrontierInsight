@@ -639,7 +639,10 @@ class EngineConfig(BaseModel):
     # Explore, then confirm (core/phased.py). On: the model may try designs and look at results in an exploration
     # stage; when it ends the protocol is frozen and the frozen design is run once more on data held back from the
     # person's own files (or, without enough of it, on new random seeds exploration never used). Only that confirm
-    # run's numbers can be publication-ready. Off (the default) changes nothing.
+    # run's numbers can be publication-ready. Off (the default profile's default) changes nothing. Under
+    # ``rigor_profile: research`` it is on unless the config says ``phased: false`` (``_RESEARCH_DEFAULTS``); a quest
+    # that runs no experiment of its own (a literature survey, a no-simulation quest, ``--analyze``) has nothing to run
+    # once more, and says so in one sentence.
     phased: bool = False
     # Human-feedback gate. ``"after_review"`` (the default) pauses
     # the quest AFTER the review node fires and waits for the user
@@ -1643,6 +1646,13 @@ _RESEARCH_PROFILE: dict[str, dict[str, Any]] = {
     },
 }
 
+# What ``rigor_profile: research`` turns on where the config is silent, but, unlike ``_RESEARCH_PROFILE``, leaves to the
+# person: a config that sets one of these to the opposite keeps it (the plan and run.log then say what that means).
+# Explore first, then confirm once on data or seeds exploration never saw (core/phased.py): every research quest.
+_RESEARCH_DEFAULTS: dict[str, dict[str, Any]] = {
+    "engine": {"phased": True},
+}
+
 
 class Config(BaseModel):
     topic: str
@@ -1659,7 +1669,9 @@ class Config(BaseModel):
     # without both stops the quest instead of running as one), the protocol, oracle, numeric-warning and run-manifest checks
     # stop the quest and cannot be turned off, and the cross-check verification and the review panel are on. Settings the
     # profile does not name are left as they are. A config that sets one of these to the opposite is refused, naming the key:
-    # the profile is a guarantee, and a later line of YAML must not take it apart quietly. ``default``: nothing changes.
+    # the profile is a guarantee, and a later line of YAML must not take it apart quietly. It also turns on, where the
+    # config is silent, exploring first and confirming once on data or seeds exploration never saw (``engine.phased``,
+    # ``_RESEARCH_DEFAULTS``); that one a config may turn off. ``default``: nothing changes.
     rigor_profile: Literal["default", "research"] = "default"
     # What the result is for, as the interview asked it (explore / research / decision). Kept because it bounds the
     # evidence: an exploration's result is preliminary, never publication-ready. A config that does not say (one
@@ -1711,6 +1723,18 @@ class Config(BaseModel):
                 "rigor_profile: research cannot be combined with " + "; ".join(conflicts)
                 + ". Remove those lines, or use the default profile."
             )
+        for section, wanted in _RESEARCH_DEFAULTS.items():
+            block = data.get(section)
+            if isinstance(block, BaseModel):  # built in code: a value it was given is kept, one it was not is filled
+                missing = {k: v for k, v in wanted.items() if k not in block.model_fields_set}
+                if missing:
+                    data[section] = block.model_copy(update=missing)
+                continue
+            block = dict(block or {})
+            for key, value in wanted.items():
+                if key not in block or block[key] is None:
+                    block[key] = value
+            data[section] = block
         return data
 
     @model_validator(mode="before")

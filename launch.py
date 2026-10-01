@@ -4028,7 +4028,9 @@ async def _run_new(
         web_research=bool(derived.get("web_research", True)),
         supply_papers=bool(advanced.get("supply_papers", True)),
         pause_for_plan=bool(advanced.get("pause_for_plan", False)),
-        phased=bool(advanced.get("phased", False)),
+        # Explore first, then confirm once: the smart default follows the result use (on for research); a missing
+        # answer writes nothing and the profile decides.
+        phased=advanced["phased"] if isinstance(advanced.get("phased"), bool) else None,
         result_use=str(partial.get("result_use") or "research"),
         second_reviewer_model=str(partial.get("second_reviewer_model") or ""),
         # Advanced (tier 3): off unless the person opened Advanced and named the models.
@@ -4111,6 +4113,12 @@ def _print_plan_summary(partial: dict[str, object]) -> None:
         print("                 the per-finding cross-check and the redesign after the analysis")
     else:
         print("  Checks       : every check stops the quest; the plan waits for you; clean environment per quest")
+    phased = partial.get("phased")
+    if phased is True:
+        print("  Confirm      : explore first, then run the frozen design once more on data or seeds it never saw")
+        print("                 (one more full run of the experiment; a quest with no experiment of its own skips it)")
+    elif phased is False and use != "explore":
+        print("  Confirm      : off: the result is not confirmed on data or seeds it never saw")
     model = partial.get("provider_model") or "(provider default)"
     print(f"  Model        : {partial.get('provider') or 'openai'} / {model}")
     second = str(partial.get("second_reviewer_model") or "")

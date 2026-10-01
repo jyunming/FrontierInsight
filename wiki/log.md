@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-01 — research quests explore first, then confirm once
+
+Updated by hand: [[explore-then-confirm|Explore then confirm]] (on by default under `rigor_profile: research`, an explicit `phased: false` kept and said; older research quests go on as they began; `not_applicable` for a quest with no experiment of its own, rows held back put back; the plan's cost line; the interview default follows what the result is for; the stale "YAML only" and `.fi/phased/original/` statements corrected). Sources: core/config.py, core/phased.py, core/engine.py, core/interview.py, core/plan.py, core/plan_settings.py.
+
 ## 2026-09-30 — the model's decisions made visible
 
 Updated by hand: [[model-reasoning-trace|Model reasoning trace]] (Copilot asked for Claude's thinking by default, Codex reasoning items, `--why` shows the reasoning note and `reasons`, stated reasons from every choosing step). Sources: core/thinking_capture.py, core/why.py, core/engine.py (`_audit_stated_reasons`, `_note_served_model`), core/provider.py, vscode-frontier-insight/src/lm-messages.ts.

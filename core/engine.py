@@ -760,6 +760,10 @@ class Engine:
             self._log.info("starting quest %s", self.quest_id)
             _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
+            # Research explores first and confirms once by default (engine.phased); a research quest that began before
+            # that default goes on as it began. Decided before the approved settings are compared, so a quest approved
+            # with it off is compared as it runs.
+            self._phased_keep_off_if_began_before()
             # Research needs a reviewer on another model: checked before the settings are recorded as approved, so the
             # model the person adds is part of what is approved, not a change to it. A model change that leaves every
             # reviewer on one model stops here too.
@@ -833,9 +837,15 @@ class Engine:
             await self._preflight_required_skills()
             await asyncio.to_thread(self._stage_example_inputs)
             if _phased.enabled(self.config):
+                self._audit(_phased.STARTED_EVENT)  # this quest ran with it on (phased.ran_without)
                 await asyncio.to_thread(self._phased_prepare)
             elif _phased.record_path(self.quest_root).exists():
                 await asyncio.to_thread(self._phased_turned_off)
+            if (not _phased.enabled(self.config) and self.config.rigor_profile == "research"
+                    and not getattr(self, "_phased_kept_off", False)):
+                # A research quest that turned explore-then-confirm off: said plainly (plan.md says it too).
+                self._log.info("[phased] %s", _phased.off_sentence(self._runs_code_by_config(),
+                                                                    self._phased_no_experiment_reason()))
             await self.executor.setup(self.quest_root)
             await self._record_environment()
 
@@ -2201,7 +2211,7 @@ class Engine:
         # The QuestState TypedDict is the contract — keep field names
         # backwards-compatible if you add a graph here.
         g: StateGraph[QuestState] = StateGraph(QuestState)
-        g.add_node("clarify", self._audited("clarify", self._node_clarify))
+        g.add_node("clarify", self._audited("clarify", self._node_clarify_then_phased))
         g.add_node("ideate", self._audited("ideate", self._node_ideate))
         g.add_node("literature", self._audited("literature", self._node_literature))
         g.add_node("pause_after_literature", self._audited("pause_after_literature", self._node_pause_after_literature))
@@ -2589,8 +2599,68 @@ class Engine:
         for line in lines:
             self._log.info("[phased] %s", line)
 
+    def _phased_keep_off_if_began_before(self) -> None:
+        """A research quest whose config does not set ``engine.phased`` has it on by default. One that began before that
+        default (it has run with it never on, and has no record of the two stages; ``phased.kept_off``) goes on as it
+        began, without them: for this engine only, never the caller's config object. Said in run.log at every start."""
+        if not (_phased.enabled(self.config) and self.config.rigor_profile == "research"):
+            return  # nothing of core/phased.py beyond ``enabled`` runs for a quest with it off
+        if not _phased.kept_off(self.quest_root, self.config):
+            return
+        self.config = _phased.without(self.config)
+        self._phased_kept_off = True
+        self._log.info("[phased] %s", _phased.kept_off_sentence(self._runs_code_by_config()))
+
+    def _runs_code_by_config(self) -> bool:
+        """Whether, as far as the config says, the quest runs an experiment of its own (the clarify step may still
+        decide it does not)."""
+        return not self._phased_no_experiment_reason()
+
+    def _plan_confirm_lines(self, state: QuestState) -> list[str]:
+        """At plan time: plan.md's lines on whether and how the result will be confirmed, and what that costs; the same
+        said in run.log. Nothing under the default profile with explore-then-confirm off."""
+        on = _phased.enabled(self.config)
+        research = self.config.rigor_profile == "research"
+        if not on and not research:
+            return []
+        try:
+            lines = _phased.plan_lines(
+                _phased.load(self.quest_root) if on else None, on=on, research=research,
+                runs_code=self._runs_code(state), why=self._phased_no_experiment_reason(state),
+                kept_off=bool(getattr(self, "_phased_kept_off", False)))
+        except Exception as e:  # noqa: BLE001 -- a line of the plan must never stop the quest
+            self._log.warning("[phased] the plan's section on confirming the result could not be written: %r", e)
+            return []
+        if on and self._runs_code(state) and len(lines) > 2:
+            self._log.info("[phased] plan: %s", lines[2])
+        return lines
+
+    def _phased_no_experiment_reason(self, state: QuestState | None = None) -> str:
+        """Why this quest runs no experiment of its own (empty when it runs one, or it is not known yet): the config
+        pins it, or the clarify step resolved it (``state``)."""
+        engine = self.config.engine
+        if engine.analyze_local_first:
+            return "the quest analyses data you supplied (--analyze) and designs no experiment of its own"
+        if engine.survey_mode or (state or {}).get("survey_mode_resolved"):
+            return "this quest is a literature survey and runs no experiment"
+        if engine.no_simulation or (state or {}).get("no_simulation_resolved"):
+            return "this quest collects and analyses data instead of running a simulation of its own"
+        return ""
+
+    def _phased_mark_not_applicable(self, why: str) -> None:
+        """The two stages do not apply to this quest (``why``): any held-back rows go back, and it is said once."""
+        try:
+            self._phased_log(_phased.mark_not_applicable(self.quest_root, why))
+        except OSError as e:
+            self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
+                              "kept in %s", e, _phased.store_dir(self.quest_root) / "original")
+
     def _phased_prepare(self) -> None:
-        """At every start: the exploration stage begins, or takes in the data supplied since (a part held back)."""
+        """At every start: the exploration stage begins, or takes in the data supplied since (a part held back). A quest
+        whose config says it runs no experiment of its own holds nothing back: there is nothing to confirm."""
+        if why := self._phased_no_experiment_reason():
+            self._phased_mark_not_applicable(why)
+            return
         # Turned on after the experiment already ran: every row was seen, so nothing can be held back. Any step of the
         # experiment in the decision trace counts, a paused or failed one too (a background job reads the data when it
         # is submitted, before the step pauses). Without the trace (engine.audit_trace off) a saved state is taken to
@@ -2711,6 +2781,10 @@ class Engine:
         if current is None:
             self._log.warning("[phased] the record of the two stages is missing or cannot be read; nothing is "
                               "confirmed, so the paper is written from exploration and says its numbers are exploratory")
+            return route
+        if record and record.get("not_applicable"):
+            # The quest runs no experiment of its own (said once in run.log): it goes on exactly as it would without
+            # explore-then-confirm, and the paper says nothing about stages it never had.
             return route
         if record and (record.get("compromised") or record.get("not_confirmable")):
             # Nothing can be confirmed any more (said in run.log when it happened): the quest goes on as it would
@@ -2903,6 +2977,17 @@ class Engine:
         return "write" if state.get("layout_missed") else "check"
 
     # ---- nodes -----------------------------------------------------------
+
+    async def _node_clarify_then_phased(self, state: QuestState) -> QuestState:
+        """The clarify step, then: when it found the quest runs no experiment of its own, explore-then-confirm has no
+        design to run once more, so the rows held back at the start go back before the data is collected and analysed
+        (off the event loop: the files may be large), and it is said once."""
+        out = await self._node_clarify(state)
+        if _phased.enabled(self.config) and isinstance(out, dict):
+            why = self._phased_no_experiment_reason({**state, **out})  # type: ignore[arg-type]
+            if why:
+                await asyncio.to_thread(self._phased_mark_not_applicable, why)
+        return out
 
     async def _node_clarify(self, state: QuestState) -> QuestState:
         """Pre-flight clarification, then the quest's title.
@@ -4791,7 +4876,8 @@ class Engine:
         body = _plan.render(state.get("topic") or self.config.topic, extra if isinstance(extra, dict) else {},
                             normalized, audit,
                             sources=self._retrieved_sources(state) if self._runs_code(state) else None,
-                            code_layout=self._plan_code_layout({**state, "design": normalized}))
+                            code_layout=self._plan_code_layout({**state, "design": normalized}),
+                            confirm=self._plan_confirm_lines(state))
         path.write_text(body, encoding="utf-8")
         _plan.record_version(self.quest_root, body, by="model", note="written from the topic and the literature")
         self._log.info("[plan] wrote %s (%d sources named, %d checks)", path,
@@ -13201,8 +13287,8 @@ class Engine:
             models_note = ""
         if models_note:
             evidence_note = f"{evidence_note}\n\n{models_note}".strip()
-        if _phased.enabled(self.config):
-            evidence_note = f"{evidence_note}\n\n{_phased.write_note(self.quest_root)}".strip()
+        if _phased.enabled(self.config) and (phased_note := _phased.write_note(self.quest_root)):
+            evidence_note = f"{evidence_note}\n\n{phased_note}".strip()
         improved = _improve.write_note(self.quest_root)
         if improved:
             evidence_note = f"{evidence_note}\n\n{improved}".strip()

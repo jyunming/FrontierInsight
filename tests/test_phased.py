@@ -256,7 +256,9 @@ async def test_off_the_quest_never_touches_the_phased_code(tmp_path: Path, monke
     _fake(monkeypatch)
     for name in ("prepare", "seed_env", "enter_confirm", "record_confirm", "evidence_settings", "write_note",
                  "mark_paper", "load", "turned_off", "restore_inputs", "note_job_pending", "note_confirm_result",
-                 "mark_compromised"):
+                 "mark_compromised", "mark_not_applicable", "plan_lines", "began_before_default", "kept_off",
+                 "ran_without", "without", "not_applicable_sentence", "off_sentence", "kept_off_sentence",
+                 "unconfirmable"):
         def boom(*a, _name=name, **k):  # noqa: ANN001, ANN002, ANN003
             raise AssertionError(f"core.phased.{_name} called with engine.phased off")
         monkeypatch.setattr(phased, name, boom)

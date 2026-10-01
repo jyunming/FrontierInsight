@@ -56,6 +56,8 @@ KINDS = (
                           # run were answered by another model than the earlier ones (before, after, source), or the
                           # recorded model settings in config.yaml changed (changes: [{setting, label, from, to}]);
                           # before_any_step when nothing had been made on the old model
+    "phased_started",     # a start with explore-then-confirm on (core/phased.py): a quest that has one ran with it, so it
+                          # is never taken for a research quest that began before research turned it on by default
 )
 
 

@@ -490,8 +490,9 @@ export async function runInterview(
         supply_papers: true,
         // The plan is always written; stopping for it is opt-in (unattended runs).
         pause_for_plan: false,
-        // Explore first, then confirm once (engine.phased): off unless chosen under the advanced fields.
-        phased: false,
+        // Explore first, then confirm once (engine.phased): on for research and a decision, off when exploring
+        // (core/interview.py:smart_default_phased); changeable under the advanced fields.
+        phased: resultUse !== "explore",
         result_use: resultUse,
         second_reviewer_model: secondReviewer,
         rigor_profile: rigorProfileFor(resultUse),
@@ -607,6 +608,7 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
     lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
     lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
     lines.push(`| Stop to read and edit the plan | ${a.pause_for_plan === true ? "yes (plan.md)" : "no"} |`);
+    lines.push(`| Confirm the result on data it never saw | ${a.phased === true ? "yes: explore first, then run the frozen design once more (one more full run)" : a.result_use !== "explore" ? "no: the result is not confirmed on data or seeds it never saw" : "no"} |`);
     lines.push(`| Result for | ${a.result_use === "explore" ? "exploring: a cheaper preliminary draft (no idea self-critique, no per-finding cross-check, no redesign after the analysis)" : `${a.result_use ?? "research"}: every check stops the quest, the plan waits for you, a clean environment per quest`} |`);
     if (a.result_use !== "explore") {
         lines.push(`| Reviewers' models | ${a.second_reviewer_model ? secondReviewerText(a.second_reviewer_model).replace(/\|/g, "\\|") : "not chosen yet: asked before launch"} |`);
@@ -633,7 +635,6 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
         || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
         || (a.paper_style !== undefined && a.paper_style !== "latex")
         || a.max_iterations !== 2
-        || a.phased === true
         || typeof a.page_limit === "number"
     );
     if (hasOverride) {
@@ -653,7 +654,6 @@ function reviewBlockMarkdown(a: InterviewAnswers): string {
             lines.push(`  • paper style: ${a.paper_style}`);
         }
         if (a.max_iterations !== 2) lines.push(`  • iteration budget: ${a.max_iterations}`);
-        if (a.phased === true) lines.push("  • explore first, then confirm once on data or seeds it never saw");
         if (typeof a.page_limit === "number") lines.push(`  • page limit: ${a.page_limit} pages`);
     }
     lines.push("");
@@ -1256,8 +1256,12 @@ async function editTier2Field(
                 { title: "What is the result for?", ignoreFocusOut: true },
             );
             if (v) {
+                // Explore-then-confirm follows the answer unless it was changed by hand (it then no longer matches
+                // the old answer's default).
+                const phasedWasDefault = a.phased === ((a.result_use ?? "research") !== "explore");
                 a.result_use = v.value;
                 a.rigor_profile = rigorProfileFor(v.value);
+                if (phasedWasDefault) a.phased = v.value !== "explore";
                 a.review_panel = resolveReviewPanel(a.review_panel, v.value);
                 // Research or a decision needs the second reviewer's model: asked now if it was not before (the
                 // first answer was exploring), so the quest does not stop on its first run to ask for it.
@@ -1401,13 +1405,13 @@ async function editTier3Field(a: InterviewAnswers, edited: Set<string> = new Set
         const v = await vscode.window.showQuickPick(
             [
                 {
-                    label: "No (default)",
-                    description: "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs.",
+                    label: "No (default when exploring)",
+                    description: "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs, and the result is not confirmed on data or seeds it never saw.",
                     value: false,
                 },
                 {
-                    label: "Yes: explore first, then confirm once",
-                    description: "The model may try designs and look at results first. Then the design is frozen and run once more on data or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. For a study that runs an experiment; a literature survey stays exploratory.",
+                    label: "Yes: explore first, then confirm once (default for research)",
+                    description: "The model may try designs and look at results first. Then the design is frozen and run once more on data or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. It costs one more full run of the experiment. A quest that runs no experiment of its own (a literature survey, a quest that only collects and analyses data) has nothing to run once more and says so.",
                     value: true,
                 },
             ],
