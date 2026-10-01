@@ -147,10 +147,26 @@ same PR that adds, splits or renames one.
   the trial harness in its own process with a nonce, a library method's steps through `.fi/optimisation/optimise_search.py --drive`
   in the quest's Python, the budget and `execution.timeout_s`, the run key cache in `.fi/optimisation/run.json`),
   the record FI alone writes (`raw/optimisation_ledger.jsonl`, `results/best_design.json`; `restore` / `read` put
-  FI's copy back), `summary_lines` (run.log; `CHECKS_AT_FINER_SETTINGS` is the switch the finer check will flip), and
+  FI's copy back), `summary_lines` (run.log), `OptimisationRunner._check` (runs `optimum_check.run_check` after the
+  search and before the analysis, then `attach_check` puts the verdict and the check file's hash into
+  `results/best_design.json` under `check` and the hash into the run record (`check_sha256`), re-saved so `restore`
+  keeps it and `optimum_check.run_check` reuses a kept check only when it is that one; the analysis gets
+  `FI_OPTIMUM_CHECK`; nothing in `_check` can stop the quest), and
   `complete_case` (an oracle's case gets the fixed conditions, search settings and baseline, in `Engine._oracle_gate`),
-  `with_fi_record` (FI's numbers added to the analysis's RESULT_JSON as `fi_search`), `searches_itself` (an optimiser in
-  the simulation's code: a warning). `Engine._node_execute` calls `_stop_if_the_search_cannot_start` too.
+  `with_fi_record` (FI's numbers added to the analysis's RESULT_JSON as `fi_search`, the check's under `fi_search.check`),
+  `searches_itself` (an optimiser in the simulation's code: a warning). `Engine._node_execute` calls
+  `_stop_if_the_search_cannot_start` too.
+- `core/optimum_check.py` — the engine checks the search's best design at finer numerical settings, through the same
+  harness (`optimise._evaluate`, fresh seeds for `run_trial` via `check_seeds`): `check` (a generator of evaluate
+  requests, like `optimise_search.search`; `check_sync` drives it in one process for the tests), `levels_of` (the finer
+  levels, the plan's `check` values or `optimisation_plan.check_levels`' fixed rule, and where each came from),
+  `numerical_error` (Roache's grid-convergence estimate per design), `candidates` (the best design of each starting
+  point), the six checks (refinement, limits, improvement over the baseline against the plan's threshold or the
+  numerical error of the two designs, starting points, neighbourhood nudges, the search's budget) and one `verdict`;
+  `run_check` writes `needs/OPTIMUM_CHECK.json` (cached in `.fi/optimisation/check.json`; `restore` / `read`),
+  `summary_lines` / `summary_line` (run.log), `attach_summary` (the part in `results/best_design.json`), and
+  `evidence_gaps` (read by `evidence.assess`: each failed or unfinished part is a gap at the level it bears on). Never
+  pauses a quest.
   `Engine._run_manifest_problems` returns `not_applicable` for a search; replicate seeds are not run for it; the
   code-writing prompt gets `_SEARCH_PROTOCOL` (via `_split_block`) and the repair prompts `_SEARCH_REFLECT_*`.
 - `core/optimise_search.py` — which design comes next, standard library only and importing nothing from FI (copied
@@ -161,7 +177,7 @@ same PR that adds, splits or renames one.
   `optimisation_plan.effective_method` / `check_levels` that `tests/test_optimise_runner.py` keeps equal.
 - `core/metric_spec.py` — a metric spec (estimand, estimator, contrasts) per headline number, and the statistics that
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
-- `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).
+- `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records; for a search for the best design `assess` adds `optimum_check.evidence_gaps` level by level and `_OPTIMUM_INFO`'s blind spot and artifacts); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).
 - `core/audit_log.py` — the hash-chained, redacted per-quest trace (`STAGE_PROGRESS`/`_ProgressOnly` for the curated
   console/web view live in `core/engine.py`, next to `_quest_logger`).
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits

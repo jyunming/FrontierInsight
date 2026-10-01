@@ -40,3 +40,9 @@ Sources: core/oracle_check.py, core/plan.py, core/accepted_checks.py, core/engin
 Pages updated: [[literature-screening-record|Literature screening record]] (a third entry per literature pass: each DOI looked up in Crossref for a retraction; a retracted source is marked `[retracted]`, cannot ground a claim, and is named on the to-do card; no answer is "not checked").
 
 Sources: core/retractions.py, core/engine.py, core/todo.py, agents/claim_check.md, agents/write.md, agents/write_patch.md.
+
+## 2026-09-30 — the best design checked at finer numerical settings
+
+Pages updated: [[study-types|Study types]] (after the search FI checks the best design at finer settings; one verdict, a sentence per check; a failed check limits the evidence level and never stops the quest).
+
+Sources: core/optimum_check.py, core/optimise.py, core/evidence.py, core/optimisation_plan.py.

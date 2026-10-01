@@ -128,7 +128,7 @@ _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "nee
 _PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json"]
 # From the design on: the protocol, the design's audit, and everything the run and the writing made from it.
 # A search for the best design (core/optimise.py): its best design and FI's record of the search go with the run.
-_SEARCH = ["results/best_design.json", ".fi/optimisation"]
+_SEARCH = ["results/best_design.json", ".fi/optimisation", "needs/OPTIMUM_CHECK.json"]
 _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RUN_RECORDS, "needs/EVIDENCE.json",
                 # The test run of the checks before the study is read once per protocol: a new one reads it again.
                 ".fi/oracle_dry_run.json",
