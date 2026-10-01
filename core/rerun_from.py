@@ -172,6 +172,34 @@ OUTPUTS: dict[str, list[str]] = {
 LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "plan": "select_skills", "design": "plan"}
 
 
+def in_quest(path: Any, quest_root: Path) -> str:
+    """``path`` as it is in ``quest_root``: a quest folder that was copied or moved keeps the absolute paths of its old
+    folder in its checkpoints (the paper's path, written by the writing step), so a rerun from a later step would read
+    and judge the OLD folder's paper. A path inside a folder named like this quest, but not this one, is taken to the
+    same place in this one; any other path is returned as it is."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
+    text = str(path or "")
+    if not text:
+        return text
+    root = Path(quest_root)
+    try:
+        Path(text).relative_to(root)
+        return text
+    except ValueError:
+        pass
+    # A path written on Windows is read as one on any system (a quest copied from Windows to Linux).
+    windows = "\\" in text or (len(text) > 1 and text[1] == ":")
+    parts = (PureWindowsPath(text) if windows else PurePosixPath(text)).parts
+    at = [i for i, part in enumerate(parts) if part == root.name]
+    if not at:
+        return text
+    # The quest's name can appear twice (a folder inside it named the same): the place that exists in this quest wins,
+    # else the last one.
+    candidates = [root.joinpath(*parts[i + 1:]) for i in reversed(at)]
+    return str(next((c for c in candidates if c.exists()), candidates[0]))
+
+
 def resolve(name: str) -> str | None:
     """The plain step name ``name`` stands for, or ``None`` when it names no step that can be rerun from."""
     key = (name or "").strip().lower()

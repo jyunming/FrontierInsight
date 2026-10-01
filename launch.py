@@ -274,12 +274,32 @@ _TOOL_SUBCOMMANDS: dict[str, tuple[str, str]] = {
 }
 
 
+#: ``fi tools bench ...``: FI's self-benchmark (dev/evaluation/bench/), for FI's developers. It has no top-level flag:
+#: it runs from a checkout of FI's repository, where ``dev/`` is.
+_BENCH_TOOL = "bench"
+
+
+def _run_bench(argv: list[str]) -> int:
+    repo = Path(__file__).resolve().parent
+    if not (repo / "dev" / "evaluation" / "bench").is_dir():
+        print("fi tools bench: the self-benchmark is part of FI's repository (dev/evaluation/bench/), not of an "
+              "installed FI; run it from a checkout.")
+        return 2
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from dev.evaluation.bench.cli import main as bench_main  # an import error here is a real one: shown as it is
+
+    return bench_main(argv)
+
+
 def _tools_help() -> str:
     lines = ["fi tools <name> [args] — less common, one-shot commands. Each also still works as its own top-level flag",
              "(`fi --digest` is the same as `fi tools digest`); see `fi --help-all` for every flag and qualifier.", ""]
-    width = max(len(n) for n in _TOOL_SUBCOMMANDS)
+    width = max(len(n) for n in (*_TOOL_SUBCOMMANDS, _BENCH_TOOL))
     for name, (_flag, summary) in _TOOL_SUBCOMMANDS.items():
         lines.append(f"  {name:<{width}}  {summary}")
+    lines.append(f"  {_BENCH_TOOL:<{width}}  For FI's developers: how often FI lets a planted error through. "
+                 "`fi tools bench --help`.")
     return "\n".join(lines)
 
 
@@ -298,6 +318,8 @@ def _expand_tools_argv(argv: list[str]) -> list[str]:
     if rest[0] == "--help-all":  # `fi tools --help-all` names no tool; it means the same as `fi --help-all`
         return ["--help-all"]
     name, tail = rest[0], rest[1:]
+    if name == _BENCH_TOOL:
+        raise SystemExit(_run_bench(tail))
     found = _TOOL_SUBCOMMANDS.get(name)
     if found is None:
         print(f"fi tools: no tool named {name!r}.\n")

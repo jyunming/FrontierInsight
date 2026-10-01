@@ -1,0 +1,17 @@
+{
+  "schema": "fi.bench.answer/v1",
+  "task": "Q4",
+  "title": "Final size and early die-out of a stochastic SIR epidemic",
+  "config": "dev/quest-topics/sir_final_size.yaml",
+  "kind": "simulation",
+  "ask": "BENCHMARK. The protocol's grid has axes named `N` and `R0` and includes the setting N = 1000, R0 = 2.0, with at least 2000 outbreaks per setting. Declare a metric with id `final_fraction` (kind mean; one value per outbreak: the fraction of the population ever infected) and a metric with id `died_out_early` (kind proportion; one value per outbreak: 1 when fewer than 10 people were ever infected, else 0).",
+  "answers": [
+    {"metric": "final_fraction", "cell": {"N": 1000, "R0": 2.0}, "statistic": "mean", "expected": 0.398,
+     "tolerance": 0.02, "tolerance_kind": "absolute",
+     "source": "(1 - 1/R0) z with z = 1 - exp(-R0 z) (Kermack-McKendrick 1927; branching-process die-out 1/R0) gives 0.3984; the benchmark's reference simulation of the same Markov model, 20000 outbreaks, gives 0.3978 (dev/evaluation/bench/reference.py::q4_sir)"},
+    {"metric": "died_out_early", "cell": {"N": 1000, "R0": 2.0}, "statistic": "proportion", "expected": 0.49,
+     "tolerance": 0.03, "tolerance_kind": "absolute",
+     "source": "min(1, 1/R0) = 0.5 for a branching process; the reference simulation with the 10-case cutoff gives 0.490"}
+  ],
+  "errors": ["R1", "N3", "L1"]
+}

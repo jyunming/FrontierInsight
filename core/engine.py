@@ -13741,7 +13741,7 @@ class Engine:
         previous = ""
         try:
             if state.get("paper_md"):
-                previous = Path(str(state["paper_md"])).read_text(encoding="utf-8")
+                previous = Path(_rerun_from.in_quest(state["paper_md"], self.quest_root)).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             previous = ""
         grounding = state.get("claim_grounding") or {}
@@ -13817,7 +13817,8 @@ class Engine:
         ``engine.claim_grounding`` is off."""
         if not self.config.engine.claim_grounding:
             return {}
-        paper_md = state.get("paper_md")
+        # This quest's own paper, also when the folder was copied or moved after the paper was written.
+        paper_md = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
         if not paper_md or not Path(paper_md).is_file():
             self._log.info("[claim_check] no paper to check; skipping")
             # An earlier draft's receipt must not stand for a paper that is not there.
@@ -15384,7 +15385,7 @@ class Engine:
         ``provider.node_models["review_panel.<name>"]``.
         """
         self._log.info("[review] judging paper")
-        paper_path = state.get("paper_md")
+        paper_path = _rerun_from.in_quest(state.get("paper_md"), self.quest_root) or None
         # With a page limit, this draft is rendered the way paper.pdf will be
         # and its pages counted, for both review paths below. Without one,
         # nothing is rendered.
@@ -15782,7 +15783,7 @@ class Engine:
         # accommodates custom pipelines / future relocations of the
         # rendered paper. Falls back to the conventional path if the
         # write node didn't populate it (older quest checkpoints).
-        paper_md_state = state.get("paper_md") or ""
+        paper_md_state = _rerun_from.in_quest(state.get("paper_md"), self.quest_root)
         paper_md_path = (
             str(paper_md_state)
             if paper_md_state
