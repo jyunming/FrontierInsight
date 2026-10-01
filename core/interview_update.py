@@ -241,7 +241,9 @@ def load_current_answers(quest_root: Path) -> tuple[InterviewAnswers, Path, dict
         # pause runs with it on, so --update must not write it back as off.
         supply_papers=bool(_pause("papers", knowledge, "pause_for_user_papers", True)),
         pause_for_plan=(pauses.get("plan") == "ask"),
-        phased=engine.get("phased") is True,
+        # As the config says it: on, off, or not said (None: the profile decides, on for research). Not said must stay
+        # not said on --update, or a research quest's default would be written back as off.
+        phased=engine["phased"] if isinstance(engine.get("phased"), bool) else None,
         rigor_profile=("research" if str(raw.get("rigor_profile") or "").strip().lower() == "research" else "default"),
         result_use=_result_use_of(raw, engine),
         pause_for_user_input=str(_rev_supply.get(_supply_raw, _supply_raw) or "never"),
@@ -321,6 +323,12 @@ def approve_settings(quest_root: Path, cfg: Config, *, say: Callable[[str], Any]
         approved = _json.loads((fi_dir / plan_settings.NAME).read_text(encoding="utf-8"))["settings"]
     except (OSError, ValueError, KeyError, TypeError):
         approved = None
+    # A research quest that began before research explored first and confirmed once by default runs without it
+    # (core/phased.py:kept_off): approved as it runs, never as "now on" when the next start turns it off again.
+    from core import phased as _phased
+
+    if _phased.kept_off(quest_root, cfg):
+        cfg = _phased.without(cfg)
     now = plan_settings.settings_of(cfg)
     changed = plan_settings.differences(approved, now, models=False) if isinstance(approved, dict) else []
     # A different model needs no approval: it is left as recorded here, so the quest's next start takes it, records

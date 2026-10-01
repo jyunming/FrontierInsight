@@ -826,8 +826,9 @@
       // The two pauses: the review screen showed "(unset)" for them. Mirror the question defaults.
       supply_papers: true,
       pause_for_plan: false,
-      // engine.phased: explore first, then confirm once on unseen data or seeds (off writes nothing).
-      phased: false,
+      // engine.phased: explore first, then confirm once on unseen data or seeds. On for research and a decision, off
+      // when exploring (mirrors core/interview.py:smart_default_phased); off under research writes phased: false.
+      phased: ((tier1 && tier1.result_use) || 'research') !== 'explore',
       poster_size: 'a1_portrait',
       // provider.reasoning_effort — 'default' writes nothing (mirrors the
       // question default in core/interview.py).
@@ -910,6 +911,15 @@
   }
 
   // ─── Review screen ─────────────────────────────────────────────
+  // Explore first, then confirm once (engine.phased), as the summary card says it.
+  function phasedSummary() {
+    if (pendingAnswers.phased === true) {
+      return 'yes: explore first, then run the frozen design once more (one more full run; change under Advanced)';
+    }
+    return (pendingAnswers.result_use || 'research') !== 'explore'
+      ? 'no: the result is not confirmed on data or seeds it never saw (change under Advanced)' : 'no';
+  }
+
   function renderReview() {
     const sec = document.getElementById('review-section');
     sec.innerHTML = '';
@@ -932,6 +942,10 @@
             <dd class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(formatReviewValue(pendingAnswers[q.id], q))}</dd>
           </div>
         `).join('')}
+          <div>
+            <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">Confirm the result on data it never saw</dt>
+            <dd id="review-phased-summary" class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(phasedSummary())}</dd>
+          </div>
       </dl>
     `;
     sec.appendChild(t1Card);
@@ -1092,6 +1106,10 @@
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
     if (id === 'paper_format' || id === 'study_depth') {
       rederive();
+    } else if (id === 'phased') {
+      // The summary at the top shows it too (updated in place: other open edits are kept).
+      const summary = document.getElementById('review-phased-summary');
+      if (summary) summary.textContent = phasedSummary();
     }
   };
 

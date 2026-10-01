@@ -143,6 +143,13 @@ def _set_in(raw: Any, path: str) -> bool:
     return True
 
 
+def config_sets(quest_root: Path, path: str) -> bool | None:
+    """Whether the quest's own ``config.yaml`` sets ``path`` (a dotted key); ``None`` when it cannot be read (a quest
+    built in code has none)."""
+    raw = _raw(Path(quest_root))
+    return None if raw is None else _set_in(raw, path)
+
+
 def _write(fi_dir: Path, settings: dict[str, Any], explicit: list[str]) -> None:
     fi_dir.mkdir(parents=True, exist_ok=True)
     (fi_dir / NAME).write_text(

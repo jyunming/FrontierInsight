@@ -725,22 +725,22 @@
     {
       "id": "phased",
       "label": "Confirm the result on data it never saw",
-      "prompt": "Let the model try designs and look at results first, then freeze the design and run it once more on data or seeds it never saw? Only that last run's numbers can be publication-ready.",
+      "prompt": "Let the model try designs and look at results first, then freeze the design and run it once more on data or seeds it never saw? Only that last run's numbers can be publication-ready. On by default for research and a decision, off when exploring.",
       "kind": "single",
       "choices": [
         {
           "value": false,
-          "label": "No (default)",
-          "description": "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs."
+          "label": "No (default when exploring)",
+          "description": "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs, and the result is not confirmed on data or seeds it never saw."
         },
         {
           "value": true,
-          "label": "Yes: explore first, then confirm once",
-          "description": "The model may try designs and look at results first. Then the design is frozen and run once more on data or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. For a study that runs an experiment; a literature survey stays exploratory."
+          "label": "Yes: explore first, then confirm once (default for research)",
+          "description": "The model may try designs and look at results first. Then the design is frozen and run once more on data or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. It costs one more full run of the experiment. A quest that runs no experiment of its own (a literature survey, a quest that only collects and analyses data) has nothing to run once more and says so."
         }
       ],
       "placeholder": "",
-      "default": false,
+      "default": true,
       "mid_quest_editable": false,
       "frontends": [
         "cli",

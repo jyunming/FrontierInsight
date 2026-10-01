@@ -1,4 +1,5 @@
-"""Explore, then confirm: a quest run in two stages (``engine.phased: true``; off by default).
+"""Explore, then confirm: a quest run in two stages (``engine.phased: true``; off by default, on by default under
+``rigor_profile: research``).
 
 In the EXPLORATION stage the model may try designs, look at results and change the design, as a quest always could.
 When exploration ends (the quest is about to write its paper on an accepted result) the protocol is frozen and the
@@ -30,6 +31,15 @@ The confirm run is made once, and it is the confirm run's own result that is rec
 data or seeds, a result that is not the one the confirm run produced, a held-back part that could not be put in place,
 or an experiment that does not take the seed it is given (new-seeds confirm) leaves nothing confirmed.
 
+A quest that runs no experiment of its own (a literature survey, a no-simulation quest, ``--analyze``) has no design to
+run once more: :func:`mark_not_applicable` puts any held-back rows back (the analysis must see all of the data), records
+why, and the quest goes on as it would without the two stages; its paper carries no stage note and the evidence ladder
+no stage gap.
+
+A research quest that began before research turned this on by default (its config does not set ``engine.phased``) goes
+on as it began, without the two stages: :func:`began_before_default` tells the engine so, and the engine says it in
+run.log.
+
 This record (``.fi/phased.json``) is apart from the attempt records and the shadow recommendations
 (``core/attempt_records.py``, ``core/attempt_memory.py``): it reads neither, and neither decides anything here.
 """
@@ -53,6 +63,8 @@ STORE = "_held_back"
 EXPLORE = "explore"
 CONFIRM = "confirm"
 CONFIRMED = "confirmed"
+#: The status of a quest that runs no experiment of its own (:func:`mark_not_applicable`).
+NOT_APPLICABLE = "not_applicable"
 
 HELD_BACK = "held_back_data"
 FRESH_SEEDS = "fresh_seeds"
@@ -296,6 +308,8 @@ def turned_off(quest_root: Path) -> list[str]:
     except OSError:
         pass
     lines = _not_restored(quest_root, _restore(quest_root, record.get("files") or []))
+    if record.get("not_applicable"):
+        return lines  # the two stages never applied: nothing was confirmed or held back to say anything about
     if record.get("stage") == EXPLORE and not record.get("late_start") and not record.get("compromised"):
         why = "explore-then-confirm was turned off while exploring, so the experiment may have run on all of the data"
         record.update(late_start=True, strategy=FRESH_SEEDS, why_no_data=why, files=[])
@@ -380,7 +394,7 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False) -> tu
     if record.get("stage") != EXPLORE:
         lines += _not_restored(quest_root, _restore(quest_root, record.get("files") or []))
         return record, lines
-    if record.get("late_start") or record.get("compromised"):
+    if record.get("late_start") or record.get("compromised") or record.get("not_applicable"):
         return record, lines
     if record.get("strategy") == FRESH_SEEDS and record.get("explore_seed_bases"):
         # Exploration has already run on the whole files: none of their rows is unseen, so none can be held back now
@@ -674,18 +688,100 @@ def mark_unconfirmable(quest_root: Path, why: str) -> None:
 
 
 def unconfirmable(quest_root: Path) -> bool:
-    """Nothing in this quest can be confirmed any more (``compromised`` or ``not_confirmable``)."""
+    """Nothing in this quest can be confirmed any more (``compromised`` or ``not_confirmable``), or there is nothing to
+    confirm (``not_applicable``)."""
     record = load(quest_root)
-    return bool(record and (record.get("compromised") or record.get("not_confirmable")))
+    return bool(record and (record.get("compromised") or record.get("not_confirmable") or record.get("not_applicable")))
+
+
+#: What run.log and the plan say for a quest that runs no experiment of its own (``why`` is the reason, in plain words).
+_NOT_APPLICABLE = ("explore-then-confirm does not apply: {why}, so there is no design to run once more on data or seeds "
+                   "the exploration never saw, and the result is not confirmed that way")
+
+
+def not_applicable_sentence(why: str) -> str:
+    """The one plain sentence said when the two stages do not apply to this quest."""
+    return _NOT_APPLICABLE.format(why=why)
+
+
+def mark_not_applicable(quest_root: Path, why: str) -> list[str]:
+    """This quest runs no experiment of its own (``why``: a literature survey, no simulation, ``--analyze``): there is no
+    design to run once more. Any rows held back are put back in ``inputs/data/`` (the analysis must see all of the data
+    the person supplied) and the record says why, so a later start holds nothing back. Returns the plain lines for
+    run.log, the first time only. A quest already past exploration is left as it is (it did run an experiment)."""
+    quest_root = Path(quest_root)
+    record = load(quest_root)
+    if record is not None and (record.get("not_applicable") or record.get("stage") != EXPLORE):
+        return []
+    if record is None:
+        record = {"schema": SCHEMA, "stage": EXPLORE, "started_at": _now(), "strategy": FRESH_SEEDS,
+                  "why_no_data": "", "files": [], "explore_seed_bases": [], "confirm_seed_base": None,
+                  "explore_runs": 0, "confirm_runs": 0, "confirm_executions": 0, "results_seen_in_confirm": 0}
+    _clear_stray_tmp(quest_root)
+    files = record.get("files") or []
+    missed = _restore(quest_root, files)
+    record.update(not_applicable=why, files=[])
+    _save(quest_root, record)
+    back = [" (the rows held back at the start are back in inputs/data/)"] if files and not missed else [""]
+    return [not_applicable_sentence(why) + back[0], *_not_restored(quest_root, missed)]
+
+
+def began_before_default(quest_root: Path, *, set_in_config: bool, has_run: bool) -> bool:
+    """Whether this research quest began before research quests explored first and confirmed once by default, so it
+    goes on as it began, without the two stages: its config does not set ``engine.phased`` (``set_in_config``), it has
+    run before (``has_run``: a step of the graph ran, or its saved state exists), and it has no record of the two stages
+    (every quest that ran with them has one from its first start)."""
+    return not set_in_config and has_run and not record_path(quest_root).exists()
+
+
+#: The trace event a start with the two stages on writes (``Engine.run``): a quest that has it ran with them.
+STARTED_EVENT = "phased_started"
+
+
+def ran_without(quest_root: Path) -> bool:
+    """Whether a step of this quest's graph ran on an earlier start with the two stages never on: its hash-chained trace
+    has a step and no :data:`STARTED_EVENT` (so a quest that ran with them is never taken for one that began before the
+    default, even when its record is lost); without a trace, its saved state exists."""
+    from . import audit_log as _audit_log
+
+    fi = Path(quest_root) / ".fi"
+    trace = fi / "audit.jsonl"
+    if trace.is_file():
+        events = _audit_log.read(trace)
+        if any(e.get("kind") == STARTED_EVENT for e in events):
+            return False
+        return any(str(e.get("kind") or "").startswith("node_") for e in events)
+    return (fi / "state.sqlite").is_file()
+
+
+def kept_off(quest_root: Path, config: Any) -> bool:
+    """A research quest that has the two stages only from the research default (its own ``config.yaml`` does not set
+    ``engine.phased``) and began before that default: it goes on as it began, without them. The engine runs it so
+    (:func:`without`), and ``--update`` approves it so, so the approved settings say what runs. A quest built in code
+    (no ``config.yaml``) counts as having set it."""
+    if not enabled(config) or getattr(config, "rigor_profile", "default") != "research":
+        return False
+    from . import plan_settings as _plan_settings
+
+    sets = _plan_settings.config_sets(Path(quest_root), "engine.phased")
+    return began_before_default(quest_root, set_in_config=sets is not False, has_run=ran_without(quest_root))
+
+
+def without(config: Any) -> Any:
+    """A copy of ``config`` with the two stages off (the caller's object is not changed)."""
+    return config.model_copy(update={"engine": config.engine.model_copy(update={"phased": False})})
 
 
 def status(record: dict[str, Any] | None) -> str:
     """``explore`` (no confirm run yet), ``confirming``, ``confirmed``, ``confirm_failed`` (it produced no result),
     ``confirm_reused`` (the confirm data or seeds were run on more than once), ``compromised`` (the confirm run could
-    not be kept apart from exploration: its held-back data, its new seeds or its result) or ``not_confirmable`` (no data
-    was held back and new seeds could not change the result)."""
+    not be kept apart from exploration: its held-back data, its new seeds or its result), ``not_confirmable`` (no data
+    was held back and new seeds could not change the result) or ``not_applicable`` (the quest runs no experiment of its
+    own, so there is nothing to confirm)."""
     if not record:
         return EXPLORE
+    if record.get("not_applicable"):
+        return NOT_APPLICABLE
     if record.get("compromised"):
         return "compromised"
     if record.get("not_confirmable"):
@@ -704,6 +800,9 @@ def status(record: dict[str, Any] | None) -> str:
 def evidence_settings(quest_root: Path) -> dict[str, str]:
     """What the evidence ladder is told (``core/evidence.py``: ``settings["phased"]``)."""
     record = load(quest_root)
+    if status(record) == NOT_APPLICABLE:  # no seeds and no data were set apart: there was nothing to confirm
+        return {"phased": NOT_APPLICABLE, "phased_strategy": "",
+                "phased_why_no_data": str((record or {}).get("not_applicable") or "")}
     return {"phased": status(record), "phased_strategy": str((record or {}).get("strategy") or FRESH_SEEDS),
             "phased_why_no_data": str((record or {}).get("why_no_data") or "")}
 
@@ -727,6 +826,9 @@ def summary(record: dict[str, Any] | None) -> str:
     """One plain sentence on which numbers are exploratory and which are confirmed (no numbers of the result in it: the
     paper's number audits hold every number in the paper to the results)."""
     state = status(record)
+    if state == NOT_APPLICABLE:
+        return ("This quest runs no experiment of its own, so there was no design to run once more on data or seeds that "
+                "exploration never saw; nothing here is confirmed that way.")
     if state == EXPLORE:
         return ("These numbers come from the exploration stage, in which the design could still be changed after its "
                 "results were seen, and they have not been confirmed on data or seeds that exploration never saw. "
@@ -753,9 +855,76 @@ def summary(record: dict[str, Any] | None) -> str:
             "reported as findings.")
 
 
+#: plan.md's section on confirming the result.
+PLAN_HEADING = "How the result will be confirmed"
+
+#: Said (plan.md, run.log) for a research quest that turned the two stages off.
+OFF_SENTENCE = ("the result will not be confirmed once more on data or seeds the exploration never saw: explore-then-"
+                "confirm is off (`engine.phased: false`), so the design may be changed after its results are seen and "
+                "the numbers reported come from those runs")
+def off_sentence(runs_code: bool, why: str = "") -> str:
+    """What a research quest with the two stages turned off is told: :data:`OFF_SENTENCE`, or, for a quest that runs no
+    experiment of its own (``why``), that they would not apply anyway."""
+    return OFF_SENTENCE if runs_code else not_applicable_sentence(why or "this quest runs no experiment of its own")
+
+
+def kept_off_sentence(runs_code: bool) -> str:
+    """What a research quest that began before the two stages were on by default for research is told (plan.md,
+    run.log). How to turn them on is said only to a quest that runs an experiment: for one that does not, they would
+    not apply."""
+    text = ("this quest began before research quests explored first and confirmed once by default, so it goes on as it "
+            "began: the result will not be confirmed once more on data or seeds the exploration never saw")
+    if runs_code:
+        text += (" (to confirm it, set `engine.phased: true` in its config.yaml and approve that change with "
+                 "`--update`)")
+    return text
+
+
+def plan_lines(record: dict[str, Any] | None, *, on: bool, research: bool, runs_code: bool, why: str = "",
+               kept_off: bool = False) -> list[str]:
+    """plan.md's section saying whether and how the result will be confirmed, and what the confirm run costs. Silent
+    under the default profile with the two stages off (nothing changes there). ``why``: why the quest runs no
+    experiment of its own, when it does not. Nothing here is read back."""
+    head = [f"## {PLAN_HEADING}", ""]
+
+    def said(text: str) -> list[str]:
+        return head + [text[0].upper() + text[1:] + ".", ""]
+
+    if not on:
+        if not research:
+            return []
+        return said(kept_off_sentence(runs_code) if kept_off else off_sentence(runs_code, why))
+    if not runs_code or status(record) == NOT_APPLICABLE:
+        return said(not_applicable_sentence(
+            str((record or {}).get("not_applicable") or why or "this quest runs no experiment of its own")))
+    if (record or {}).get("compromised") or (record or {}).get("not_confirmable"):
+        reason = str(record.get("compromised") or record.get("not_confirmable"))
+        return said(f"the result cannot be confirmed once more on data or seeds the exploration never saw ({reason}), "
+                    "so its numbers stay exploratory")
+    if (record or {}).get("strategy") == HELD_BACK and record.get("files"):
+        held = ", ".join(f"{i['held_back_rows']} of the {i['rows']} rows of `inputs/data/{i['file']}`" for i in record["files"])
+        on_what = f"on data exploration never saw ({held}, held back at random before exploration began) and on new seeds"
+    else:
+        reason = str((record or {}).get("why_no_data") or "no data was supplied in inputs/data/")
+        on_what = f"on new random seeds exploration never used (no data is held back: {reason})"
+    return head + [
+        "The model may try designs and look at results first (exploration). When exploration ends, the design is "
+        f"frozen and run once more {on_what}. Only that run's numbers can be publication-ready; exploration's numbers "
+        "are reported as exploratory.",
+        "",
+        "This costs one more full run of the frozen design: every setting again, with as many runs per setting as an "
+        "exploration run, about as long as one run during exploration, and the checks after it. The confirm run is made "
+        "once: a second run on the confirm data or seeds (a repair, a redesign) leaves the result preliminary.",
+        "",
+    ]
+
+
 def write_note(quest_root: Path) -> str:
-    """What the writer is told about the two stages (appended to the evidence note)."""
+    """What the writer is told about the two stages (appended to the evidence note). Empty when they do not apply (the
+    quest runs no experiment of its own): there is nothing to say about stages it never had."""
     record = load(quest_root)  # None (the record is missing): nothing is confirmed, and the note says so
+    if status(record) == NOT_APPLICABLE:
+        return ""
     return ("This quest ran in two stages, exploration then confirmation. State this in the methods, in these terms: "
             + summary(record) + " Report only the numbers in the results you are given as the findings, and do not "
             "call exploratory numbers confirmed.")
@@ -763,7 +932,13 @@ def write_note(quest_root: Path) -> str:
 
 def mark_paper(markdown: str, record: dict[str, Any] | None) -> str:
     """``markdown`` with the stage note under its title (one, replacing an earlier one). No record: nothing is
-    confirmed, and the note says the numbers are exploratory."""
+    confirmed, and the note says the numbers are exploratory. The two stages do not apply (the quest runs no experiment
+    of its own): no note, and an earlier one is taken out."""
+    if status(record) == NOT_APPLICABLE:
+        if _BEGIN in markdown and _END in markdown:
+            head, rest = markdown.split(_BEGIN, 1)
+            return head.rstrip("\n") + "\n\n" + rest.split(_END, 1)[1].lstrip("\n")
+        return markdown
     block = f"{_BEGIN}\n> **Exploratory and confirmed numbers.** {summary(record)}\n{_END}"
     if _BEGIN in markdown and _END in markdown:
         head, rest = markdown.split(_BEGIN, 1)

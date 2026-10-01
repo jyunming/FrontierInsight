@@ -520,9 +520,10 @@ def _parse_answers(body: dict[str, Any], *, new_quest: bool = True) -> Interview
         raise TypeError(
             f"pause_for_plan must be bool, got {type(pause_for_plan).__name__}"
         )
-    # phased: explore first, then confirm once on unseen data or seeds (engine.phased). Missing (an older client) is off.
-    phased = body.get("phased", False)
-    if not isinstance(phased, bool):
+    # phased: explore first, then confirm once on unseen data or seeds (engine.phased). Missing (an older client) writes
+    # nothing, so the profile decides: on for research, off otherwise.
+    phased = body.get("phased")
+    if phased is not None and not isinstance(phased, bool):
         raise TypeError(f"phased must be bool, got {type(phased).__name__}")
     # rigor_profile: "default" (or missing, from an older client) writes nothing; "research" turns the profile on.
     rigor_profile = body.get("rigor_profile") or "default"

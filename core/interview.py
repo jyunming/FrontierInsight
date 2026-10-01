@@ -301,15 +301,18 @@ PAUSE_FOR_PLAN_CHOICES: tuple[Choice, ...] = (
 )
 
 
-# engine.phased (core/phased.py). Mirrored in vscode-frontier-insight/src/interview.ts.
+# engine.phased (core/phased.py). Mirrored in vscode-frontier-insight/src/interview.ts. The default follows what the
+# result is for (``smart_default_phased``): on for research and a decision, off for exploring.
 PHASED_CHOICES: tuple[Choice, ...] = (
-    Choice(False, "No (default)",
-           "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs."),
-    Choice(True, "Yes: explore first, then confirm once",
+    Choice(False, "No (default when exploring)",
+           "The design may be changed after its results are seen, as usual; the paper's numbers come from those runs, "
+           "and the result is not confirmed on data or seeds it never saw."),
+    Choice(True, "Yes: explore first, then confirm once (default for research)",
            "The model may try designs and look at results first. Then the design is frozen and run once more on data "
            "or seeds it never saw: a part of your data held back before it starts (one CSV/TSV file in inputs/data/ "
            "with at least 40 rows), otherwise new random seeds. Only that last run's numbers can be publication-ready. "
-           "For a study that runs an experiment; a literature survey stays exploratory."),
+           "It costs one more full run of the experiment. A quest that runs no experiment of its own (a literature "
+           "survey, a quest that only collects and analyses data) has nothing to run once more and says so."),
 )
 
 
@@ -764,10 +767,12 @@ QUESTIONS: tuple[Question, ...] = (
     Question(
         id="phased",
         label="Confirm the result on data it never saw",
-        prompt="Let the model try designs and look at results first, then freeze the design and run it once more on data or seeds it never saw? Only that last run's numbers can be publication-ready.",
+        prompt="Let the model try designs and look at results first, then freeze the design and run it once more on data or seeds it never saw? Only that last run's numbers can be publication-ready. On by default for research and a decision, off when exploring.",
         kind="single",
         choices=PHASED_CHOICES,
-        default=False,
+        # The default "result use" is research, so the static default is on; exploring turns it off
+        # (``smart_default_phased``).
+        default=True,
         # Fixed for the quest: which data is held back is decided before anything runs, and turning it off midway would
         # leave the held-back part of the data where the confirm run reads it.
         mid_quest_editable=False,
@@ -1162,6 +1167,13 @@ def smart_default_review_panel(partial: dict[str, Any]) -> list[str]:
     )
 
 
+def smart_default_phased(partial: dict[str, Any]) -> bool:
+    """Explore first, then confirm once: on for research and a decision (``rigor_profile: research`` turns it on where
+    the config is silent), off when exploring. Mirrored in web/static/interview.html (``deriveTier3``) and
+    vscode-frontier-insight/src/interview.ts."""
+    return str(partial.get("result_use") or "research") != "explore"
+
+
 def smart_default_audience(_partial: dict[str, Any]) -> str:
     """External by default — safer for a one-shot paper, since FI's
     cross-quest memory artifacts (fi_critique / fi_digest / ...)
@@ -1211,6 +1223,7 @@ SMART_DEFAULTS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "study_depth": smart_default_study_depth,
     "clarify_mode": smart_default_clarify_mode,
     "review_panel": smart_default_review_panel,
+    "phased": smart_default_phased,
     "audience": smart_default_audience,
     "knowledge_enabled": smart_default_knowledge_enabled,
     "knowledge_top_k": smart_default_knowledge_top_k,
@@ -1546,9 +1559,12 @@ class InterviewAnswers:
     supply_papers: bool = True
     # Stop once plan.md is written, to read and edit it → ``pauses.plan``.
     pause_for_plan: bool = False
-    # Explore first, then confirm once on data or seeds never seen → ``engine.phased`` (core/phased.py); off writes
-    # nothing. Must stay in sync with vscode-frontier-insight/src/interview-core.ts.
-    phased: bool = False
+    # Explore first, then confirm once on data or seeds never seen → ``engine.phased`` (core/phased.py). ``None`` (not
+    # answered) writes nothing and the profile decides (on for research, off otherwise); ``True`` writes it on; ``False``
+    # writes it off under research and nothing otherwise. The interview's own default is on for research and a
+    # decision, off for exploring (``smart_default_phased``). Must stay in sync with
+    # vscode-frontier-insight/src/interview-core.ts.
+    phased: bool | None = None
     # ``rigor_profile`` at the top of the config: "default" (writes nothing) or "research". Must stay in sync with
     # vscode-frontier-insight/src/interview-core.ts. When ``result_use`` is set it decides this (see
     # ``rigor_profile_for``); left blank (a caller from before the question existed) this field is used as given.
@@ -1857,8 +1873,14 @@ def answers_to_yaml(answers: InterviewAnswers, *, frontend: str = "cli") -> str:
         # Only one model: the quest runs, and its result says the review was one model's view. Not written when a
         # per-node override puts a reviewer on another model after all.
         lines.append(f"{indent}one_model_review: true")
-    if getattr(answers, "phased", False):
+    # Explore first, then confirm once: on is written as it was chosen; off only under research, where the profile would
+    # otherwise turn it on (``core/config.py:_RESEARCH_DEFAULTS``); unanswered (None) writes nothing, so the profile's
+    # own default applies.
+    phased = getattr(answers, "phased", None)
+    if phased is True:
         lines.append(f"{indent}phased: true")
+    elif phased is False and rigor_profile == "research":
+        lines.append(f"{indent}phased: false")
 
     # A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface.
     if answers.result_use == "explore":

@@ -208,6 +208,8 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert any(e.get("kind") == "plan_settings_recorded" for e in audit_log.read(root / ".fi" / "audit.jsonl"))
     record = _evidence(root)
     assert record["status"] == "publication_ready", record.get("gaps")
+    # Research explores first and confirms once by default: the result that is publication-ready is the confirm run's.
+    assert config.engine.phased is True and record["phased"]["status"] == "confirmed", record.get("phased")
     # The seal is the trace's last event and names the evidence and attempt records as they are.
     assert audit_log.read(root / ".fi" / "audit.jsonl")[-1]["kind"] == "quest_finalized"
     assert record["trace_seal"] == "verified"
@@ -368,7 +370,14 @@ def test_a_clean_rerun_from_the_run_redoes_the_trials_and_keeps_the_old_outputs(
     previous = list((root / ".fi" / "previous").iterdir())
     assert len(previous) == 1 and (previous[0] / "raw" / "ledger.jsonl").is_file()
     assert (root / "raw" / "ledger.jsonl").is_file()
-    assert _evidence(root)["status"] == "publication_ready", _evidence(root).get("gaps")
+    # A research quest explores first and confirms once (engine.phased, the research default): the baseline's result
+    # is the confirm run's. Running the frozen design again from the run, after that confirm result was seen, runs it
+    # on the confirm seeds a second time, so the result is no longer from one untouched confirm run. That is the one
+    # thing that keeps this clean rerun from publication-ready.
+    record = _evidence(root)
+    assert record["status"] == "statistically_adequate", record.get("gaps")
+    assert record.get("gaps") == [evidence._PHASED_GAPS["confirm_reused"]], record.get("gaps")
+    assert record["phased"]["status"] == "confirm_reused"
     assert audit_log.verify(root / ".fi" / "audit.jsonl").ok
 
 

@@ -90,8 +90,10 @@ export interface InterviewAnswers {
     // to pauses.plan; off (the default) emits nothing. Must stay in sync with
     // core/interview.py.
     pause_for_plan?: boolean;
-    // Explore first, then confirm once on data or seeds never seen. Maps to engine.phased (core/phased.py); off (the
-    // default) emits nothing. Must stay in sync with core/interview.py:InterviewAnswers.phased.
+    // Explore first, then confirm once on data or seeds never seen. Maps to engine.phased (core/phased.py): true emits
+    // `phased: true`; false emits `phased: false` under research (where the profile turns it on) and nothing
+    // otherwise; unset emits nothing, so the profile decides. The interview's default is on for research and a
+    // decision, off when exploring. Must stay in sync with core/interview.py:InterviewAnswers.phased.
     phased?: boolean;
     // The top-level `rigor_profile` of the config: "default" (writes nothing, the default) or "research", which turns on
     // together what a study needs before its result can be trusted (docs/rigor.md). Must stay in sync with
@@ -490,8 +492,11 @@ export function answersToYaml(answers: InterviewAnswers): string {
         // per-node override puts a reviewer on another model after all. Mirrors core/interview.py.
         lines.push(`${indent}one_model_review: true`);
     }
+    // Mirrors core/interview.py:answers_to_yaml: off is written only under research, where the profile would turn it on.
     if (answers.phased === true) {
         lines.push(`${indent}phased: true`);
+    } else if (answers.phased === false && rigorProfile === "research") {
+        lines.push(`${indent}phased: false`);
     }
     // A cheaper draft: exploring skips three model-call-heavy loops. Follows the answer, never the interface (this
     // interview once wrote them for every quest). Mirrors core/interview.py:answers_to_yaml.
