@@ -238,12 +238,31 @@ async def test_a_seed_read_in_a_helper_module_keeps_agreeing_runs_as_samples(tmp
         encoding="utf-8")
     (code / "experiment.py").write_text("from model import rng\nprint(int(rng.random() < 0.01))\n", encoding="utf-8")
     eng.executor.execute = AsyncMock(return_value=_er(_rj('{"event": 0}')))  # type: ignore[method-assign]
+    logged = _capture_log(eng)
     patch = await eng._node_execute({"deps": []})
 
     assert eng.executor.execute.await_count == 3
     assert patch["result_json_replicate_seed_ignored"] is False
     assert patch["result_json_deterministic"] is True
     assert len(patch["result_json_replicates"]) == 3
+    assert not [m for _, m in logged if "OS entropy" in m], "the helper's seeded generator is reproducible"
+
+
+@pytest.mark.asyncio
+async def test_a_helper_that_reads_the_seed_while_every_generator_is_fixed_is_one_run_repeated(tmp_path: Path) -> None:
+    """The helper reads the seed into a name, but the experiment's only generator is seeded with
+    a fixed number: the seed reaches nothing, so the agreeing runs are one run repeated."""
+    eng = _engine(tmp_path, replicates=3)
+    code = eng.quest_root / "code"
+    (code / "params.py").write_text("import os\nSEED = int(os.environ.get('FI_REPLICATE_SEED', 0))\n", encoding="utf-8")
+    (code / "experiment.py").write_text(
+        "import params\nimport numpy as np\nrng = np.random.default_rng(42)\nprint(rng.random())\n", encoding="utf-8")
+    eng.executor.execute = AsyncMock(return_value=_er(_rj('{"p": 0.5}')))  # type: ignore[method-assign]
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 3
+    assert patch["result_json_replicate_seed_ignored"] is True
+    assert not patch.get("result_json_replicates")
 
 
 @pytest.mark.asyncio
@@ -254,9 +273,11 @@ async def test_a_script_with_no_random_source_stops_at_the_first_replicate_that_
     eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
         _er(_rj('{"err": 0.01}')), _er("boom", returncode=1), _er(_rj('{"err": 0.01}')),
     ])
+    logged = _capture_log(eng)
     patch = await eng._node_execute({"deps": []})
 
     assert eng.executor.execute.await_count == 3
+    assert any("Skipping the remaining 2 replicate(s)" in m for _, m in logged)
     assert patch["result_json_no_random_source"] is True
     assert patch["result_json_replicate_seed_ignored"] is True
 

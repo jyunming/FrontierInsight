@@ -330,12 +330,15 @@ class QuestState(TypedDict, total=False):
     # when present and aggregates numeric fields with mean ± std.
     result_json_replicates: list[dict[str, Any]]
     result_json_trials: bool  # the one result holds every trial FI ran (the trial contract): pool it as the replicates
-    # True when two seeds produced byte-identical results, so replication
-    # stopped early. Distinguishes "no error bars because the experiment is
-    # deterministic" from "no error bars because nothing could be aggregated".
+    # True when every configured seed ran and every one gave byte-identical
+    # results while the script can draw random numbers (the replicates are kept).
+    # Despite the name it is not proof of determinism; it distinguishes "no
+    # spread because every seed agreed" from "no error bars because nothing could
+    # be aggregated", and is never read as "new seeds cannot change the result".
     result_json_deterministic: bool
-    # True when the generated script never reads ``FI_REPLICATE_SEED``, so its
-    # replicate runs repeated ONE run instead of sampling. No replicate list is
+    # True when the generated script's runs were ONE run repeated: it never reads
+    # ``FI_REPLICATE_SEED``, or reads it without the value reaching any generator,
+    # or (with the flag below) has no random source at all. No replicate list is
     # published in that case; this records WHY, so analyze can tell the paper it
     # holds a single measurement rather than quietly losing its error bars.
     result_json_replicate_seed_ignored: bool
@@ -11437,7 +11440,7 @@ class Engine:
                             "is the whole result, and its trust comes from convergence, conservation and "
                             "analytic-limit checks rather than repeat counts. Skipping the remaining %d "
                             "replicate(s).",
-                            seed_path.name, max(0, replicates_n - 2),
+                            seed_path.name, replicates_n - 1 - seed,
                         )
                         break
                 else:
@@ -11457,15 +11460,18 @@ class Engine:
         # or reads it into a name no generator is seeded from) ran ONE run
         # repeated -- not samples anything may be averaged over. Its own source
         # says which case this is.
+        # The modules the script imports from its own folder count too: a multi-module project reads the seed, or
+        # builds a generator without one, in a helper (a mention in a comment is not a read).
+        own_modules = _own_modules(seed_path) if len(result_json_replicates) > 1 and not seed_ignored else []
+        helpers = own_modules[1:]
+        helper_reads = any(_code_names_replicate_seed(p) for p in helpers)
+        helper_unseeded = [(f"{p.name} line {line}", expr) for p in helpers for line, expr in _unseeded_rng_calls(p)]
         if replicates_ran and not seed_ignored and all_agreed and len(result_json_replicates) > 1:
             n_runs = len(result_json_replicates)
-            # The modules the script imports from its own folder count too: a multi-module project reads the seed,
-            # or builds a generator without one, in a helper.
-            helpers = _own_modules(seed_path)[1:]
             if (
-                (reads_seed and seed_reaches_rng) or unseeded_rng
-                or (not reads_seed and any(_script_reads_replicate_seed(p) for p in helpers))
-                or any(_unseeded_rng_calls(p) for p in helpers)
+                (reads_seed and seed_reaches_rng) or unseeded_rng or helper_unseeded
+                # A helper reads the seed: unless every generator is seeded with a fixed number, it may reach them.
+                or (not reads_seed and helper_reads and not _seeds_only_constants(own_modules))
             ):
                 deterministic = True
                 self._log.info(
@@ -11512,14 +11518,18 @@ class Engine:
         # anyway. Those replicates ARE independent samples, so the aggregate
         # stands -- but nothing about the run is reproducible, and a rerun will
         # not land on these numbers.
-        if (not reads_seed or unseeded_rng) and not seed_ignored and len(result_json_replicates) > 1:
+        if (
+            ((not reads_seed and not helper_reads) or unseeded_rng or helper_unseeded)
+            and not seed_ignored and len(result_json_replicates) > 1
+        ):
+            found = [(f"line {line}", expr) for line, expr in unseeded_rng] + helper_unseeded
             self._log.warning(
                 "[execute] %s draws from OS entropy (%s), so its replicates are "
                 "independent samples but not reproducible: a rerun of these seeds "
                 "will not land on these numbers",
                 seed_path.name,
-                "; ".join(f"line {line}: {expr}" for line, expr in unseeded_rng[:6])
-                if unseeded_rng else "it never reads FI_REPLICATE_SEED",
+                "; ".join(f"{where}: {expr}" for where, expr in found[:6])
+                if found else "it never reads FI_REPLICATE_SEED",
             )
         if replicates_ran and split and run_accepted:
             await asyncio.to_thread(self._save_run_data, run_started, split, root_files=False)
@@ -20052,6 +20062,15 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
         )
     except OSError:
         return True
+
+
+def _code_names_replicate_seed(code_path: Path) -> bool:
+    """Whether a module's code (comments aside) names ``FI_REPLICATE_SEED``. Used for the modules a script imports,
+    where a note saying the seed is not used must not count as reading it. An unreadable file names nothing."""
+    try:
+        return "FI_REPLICATE_SEED" in _without_comments(code_path.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return False
 
 
 _RANDOM_SOURCE_PATTERN = re.compile(
