@@ -28,6 +28,7 @@ describes software and has no reason to contain any of this, where a paper may.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
@@ -43,7 +44,7 @@ FLAG_TAG = "[flagged: may contain hidden instructions]"
 #: Metadata keys: the scan's version (a source is scanned once; a later pass or a resume reuses it) and its flags.
 SCANNED_KEY = "source_text_scanned"
 FLAGS_KEY = "source_text_flags"
-SCAN_VERSION = 1
+SCAN_VERSION = 2  # raised whenever the rules change, so every source is scanned again by the new ones
 
 #: Invisible formatting characters: zero-width space, joiners and marks, bidirectional embeddings and overrides, the
 #: word joiner and invisible operators, and the zero-width no-break space. Each is legitimate somewhere (a joiner in
@@ -57,8 +58,10 @@ _INVISIBLE_IN_WORD_MIN = 3
 #: Unicode tag characters (U+E0000-U+E007F) spell ASCII no reader sees and a model may read ("ASCII smuggling").
 _TAG_CHARS = re.compile("[\U000e0000-\U000e007f]+")
 
-#: The flag emoji of Scotland, England and Wales: a black flag followed by tag letters and a cancel tag. Ordinary text.
-_SUBDIVISION_FLAG = re.compile(f"{chr(0x1F3F4)}[{chr(0xE0020)}-{chr(0xE007E)}]+{chr(0xE007F)}")
+#: The flag emoji of Scotland, England and Wales: a black flag, four to seven tag letters or digits (a region code
+#: such as "gbsct") and a cancel tag. Ordinary text; anything longer, or with spaces or capitals, still counts.
+_SUBDIVISION_FLAG = re.compile(
+    f"{chr(0x1F3F4)}[{chr(0xE0061)}-{chr(0xE007A)}{chr(0xE0030)}-{chr(0xE0039)}]{{4,7}}{chr(0xE007F)}")
 
 #: Text a PDF drew in white or at a tiny size (core/pdf_text.py) counts from this many words: a white "A" labelling
 #: a dark figure panel is not hidden text.
@@ -69,8 +72,13 @@ _ADJ = r"(?:previous|prior|above|earlier|preceding|foregoing|all\s+(?:the\s+)?(?
 #: physics, medicine and robotics ("we ignore all other directions of propagation").
 _ORDERS = r"(?:instructions|prompts?)"
 #: Reported speech in a methods section ("participants were told to disregard the previous instructions") is not an
-#: order to the reader. Fixed-width look-behinds, one per phrasing.
-_NOT_REPORTED = r"(?<!told to )(?<!asked to )(?<!instructed to )(?<!were to )(?<!who )(?<!would )"
+#: order to the reader. Only the third person in the past counts ("you are instructed to ignore ..." is an order).
+#: Fixed-width look-behinds, one per phrasing.
+_NOT_REPORTED = (r"(?<!were told to )(?<!was told to )(?<!were asked to )(?<!was asked to )"
+                 r"(?<!were instructed to )(?<!was instructed to )")
+#: An order that opens its sentence ("Ignore the instructions above."), not a clause of one ("if you installed with
+#: pip, ignore the instructions above").
+_OPENS = r"(?:^|(?<=[.!?:;]\s)|(?<=\n))(?:please\s+)?"
 _AI = (r"(?:an?\s+)?(?:(?:ai\s+)?(?:large\s+)?language\s+model|ai\s+(?:assistant|model|system|reviewer|agent)|ai|"
        r"a\.i\.|llm|chatbot)")
 #: What follows the words for an AI model when a sentence speaks to one ("if you are an AI, ignore ...", "if you are a
@@ -86,11 +94,12 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(rf"{_NOT_REPORTED}\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+)?(?:(?:of\s+)?(?:the|your|my)\s+)?"
                 rf"{_ADJ}\s+{_ORDERS}", re.I),
      "tells the model to drop its instructions"),
-    (re.compile(rf"{_NOT_REPORTED}\b(?:ignore|disregard|forget|override)\s+"
-                rf"(?:all\s+(?:of\s+)?(?:your\s+|these\s+|those\s+|the\s+)?|(?:of\s+)?(?:your|these|those)\s+)"
+    # "your" instructions only: "ignore these instructions" is a README's "if you use conda, ignore these
+    # instructions", and "ignore all instructions after the fault" is a processor's pipeline.
+    (re.compile(rf"{_NOT_REPORTED}\b(?:ignore|disregard|forget|override)\s+(?:all\s+)?(?:of\s+)?your\s+"
                 rf"(?:previous\s+|prior\s+)?(?:instructions|prompts?|system\s+prompt)", re.I),
      "tells the model to drop its instructions"),
-    (re.compile(rf"{_NOT_REPORTED}\b(?:ignore|disregard)\s+(?:all\s+)?(?:the\s+)?(?:instructions|prompts?)\s+"
+    (re.compile(rf"{_OPENS}(?:ignore|disregard)\s+(?:all\s+)?(?:the\s+|these\s+)?(?:instructions|prompts?)\s+"
                 rf"(?:above|before)\b", re.I),
      "tells the model to drop its instructions"),
     (re.compile(r"\b(?:ignore|disregard|forget)\s+everything\s+(?:above|before|you\s+(?:were|have\s+been)\s+told)",
@@ -102,7 +111,8 @@ _RULES: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\b(?:reveal|print|output|leak)\s+(?:me\s+)?(?:your|the)\s+(?:system\s+prompt|hidden\s+instructions?)",
                 re.I),
      "asks the model for its instructions"),
-    (re.compile(r"\bnew\s+system\s+prompt\s*:|\byour\s+(?:new|real|actual)\s+(?:task|instructions?)\s+(?:is|are)\b",
+    # Not "your new task is to": a participant's instruction quoted in a methods section.
+    (re.compile(r"\bnew\s+system\s+prompt\s*:|\byour\s+(?:new|real|actual)\s+instructions?\s+(?:is|are)\b",
                 re.I),
      "declares replacement instructions"),
     (re.compile(rf"\byou\s+are\s+now\s+(?:(?:an?|the)\s+)?(?:(?:helpful|unrestricted|unfiltered|new|different|"
@@ -209,7 +219,7 @@ _SEP = rf"[\W_{_INVISIBLE_CHARS}]*"
 #: characters. "FI" and a word boundary on both sides are required, so prose about a "source text" (a term of
 #: translation studies and textual editing) is left alone.
 _FORGED_MARKER = re.compile(
-    rf"(?<![A-Za-z]){_loose('FI')}{_SEP}{_loose('SOURCE')}{_SEP}{_loose('TEXT')}{_SEP}"
+    rf"(?<![A-Za-z-]){_loose('FI')}{_SEP}{_loose('SOURCE')}{_SEP}{_loose('TEXT')}{_SEP}"
     rf"(?:{_loose('BEGIN')}|{_loose('END')})(?![A-Za-z])",
     re.I,
 )
@@ -270,7 +280,16 @@ def _content_of(item: Any) -> str:
 
 
 def _name(meta: dict[str, Any]) -> str:
-    return " ".join(str(meta.get("title") or meta.get("url") or meta.get("doi") or "(untitled)").split())[:120]
+    """How run.log and the trace name a source: its title, else its address, else its file (a paper you dropped in)."""
+    return " ".join(str(meta.get("title") or meta.get("url") or meta.get("doi") or meta.get("filename")
+                        or meta.get("path") or "(untitled)").split())[:120]
+
+
+def _disk_size(path: Any) -> int:
+    try:
+        return os.stat(str(path)).st_size if path else 0
+    except OSError:
+        return 0
 
 
 def flag_sources(
@@ -287,9 +306,10 @@ def flag_sources(
             continue
         # The same text scanned by this version of the rules is not scanned again (a later pass, a resume); a source
         # whose full text arrived, or whose figure readings were appended, since it was scanned is. The stamp is read
-        # from what is at hand (the text held in memory and where the whole text is on disk), so a source already
-        # scanned is not read back from disk just to find that out.
-        stamp = (f"{SCAN_VERSION}:{len(_content_of(item))}:{meta.get('full_text_path') or ''}:"
+        # from what is at hand (the text held in memory, and where the whole text is on disk and its size), so a
+        # source already scanned is not read back from disk just to find that out.
+        path = meta.get("full_text_path") or ""
+        stamp = (f"{SCAN_VERSION}:{len(_content_of(item))}:{path}:{_disk_size(path)}:"
                  f"{len(meta.get('hidden_text') or ())}")
         if meta.get(SCANNED_KEY) == stamp:
             continue
@@ -304,7 +324,7 @@ def flag_sources(
             meta[FLAGS_KEY] = [f.line() for f in flags]
             rows.append({
                 "source": _name(meta),
-                **{k: meta[k] for k in ("doi", "url") if meta.get(k)},
+                **{k: meta[k] for k in ("doi", "url", "filename") if meta.get(k)},
                 "flags": meta[FLAGS_KEY],
             })
         else:
@@ -323,7 +343,9 @@ def summary_line(scanned: int, rows: list[dict[str, Any]]) -> str:
 
 
 def _key(row: dict[str, Any]) -> str:
-    return str(row.get("doi") or row.get("url") or row.get("source") or "").strip().lower()
+    """A flagged source and what was found in it: the same source with a new finding is new."""
+    who = str(row.get("doi") or row.get("url") or row.get("filename") or row.get("source") or "").strip().lower()
+    return who + "|" + "|".join(str(f).split(":", 1)[0] for f in row.get("flags") or [])
 
 
 def flag_and_record(
@@ -334,8 +356,10 @@ def flag_and_record(
     ``flagged`` with the sources, or ``ok`` when ``record_clean`` and nothing was found) and one run.log line. Never
     raises: a scan that fails is logged, and the quest goes on with its sources as they were.
 
-    ``reported`` (the engine's set for the quest) holds the sources already named: a search that finds the same
-    flagged paper again (cross_check searches once per finding) marks it in the prompt but does not record it twice."""
+    ``reported`` (the engine's set for the quest) holds the sources already named, with what was found in each: a
+    search that finds the same flagged paper again (cross_check searches once per finding) marks it in the prompt but
+    does not record it twice. A pass that records itself even when clean (``record_clean``, the literature step)
+    names every flagged source it scanned, so each pass has its own whole record."""
     try:
         scanned, rows = flag_sources(items, content_of=content_of)
     except Exception as e:  # noqa: BLE001 -- a flag is a record; it never costs the quest its sources
@@ -345,10 +369,11 @@ def flag_and_record(
         return []
     if reported is not None:
         fresh = [r for r in rows if _key(r) not in reported]
-        reported.update(_key(r) for r in fresh)
-        if rows and not fresh:
-            return rows  # every flagged source was named before: nothing new to record
-        rows = fresh
+        reported.update(_key(r) for r in rows)
+        if not record_clean:
+            if rows and not fresh:
+                return rows  # every flagged source was named before, with the same findings: nothing new to record
+            rows = fresh
     if not scanned:
         return rows
     line = summary_line(scanned, rows)
