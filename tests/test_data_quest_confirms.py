@@ -121,6 +121,67 @@ def test_a_time_series_holds_back_its_latest_period_with_an_embargo(tmp_path: Pa
     assert phased.load(tmp_path / "b")["files"][0]["rule"]["strategy"] == "time"
 
 
+def test_a_second_reading_keeps_the_embargo(tmp_path: Path) -> None:
+    _series(tmp_path / "data" / "d.csv")
+    phased.prepare(tmp_path, QUEST, data_quest=True)
+    declared = {"strategy": "time", "time_column": "month", "embargo": 2}
+    phased.data_quest_gate(tmp_path, QUEST, declared=declared)
+    first = (tmp_path / "data" / "d.csv").read_bytes()
+    phased.data_quest_gate(tmp_path, QUEST, declared=declared)  # the next reading (a redesign in exploration)
+    assert (tmp_path / "data" / "d.csv").read_bytes() == first
+    info = phased.load(tmp_path)["files"][0]
+    assert info["manifest"]["rows_left_out"] == 2 and info["manifest"]["embargo_rows"] == 2
+
+
+def test_a_column_that_numbers_the_rows_is_not_taken_for_a_unit() -> None:
+    """``id`` is unique on every row: it says nothing about which rows belong to one patient."""
+    rows = [f"{i},p{i // 3},{i}" for i in range(60)]
+    decision = phased_data.decide("t.csv", "id,patient_name,score", rows, ",", QUEST)
+    assert decision.ask and "numbers the rows" in decision.why and not decision.held
+
+
+def test_a_header_with_a_byte_order_mark_is_read_by_its_name() -> None:
+    rows = [f"{2020 + m // 12}-{m % 12 + 1:02d},{m}" for m in range(48)]
+    decision = phased_data.decide("t.csv", "﻿month,sales", rows, ",", QUEST)
+    assert not decision.ask and decision.rule["strategy"] == "time" and decision.rule["time_column"] == "month"
+
+
+def test_a_table_outside_data_is_not_held_back_for_a_data_quest(tmp_path: Path) -> None:
+    """A data quest's numbers come from what its data-reading step reads (data/): a table in inputs/data/ is not it."""
+    original = _visits(tmp_path / "inputs" / "data" / "d.csv")
+    (tmp_path / "data" / "literature").mkdir(parents=True)
+    (tmp_path / "data" / "literature" / "paper.md").write_text("# a paper\n")
+    phased.prepare(tmp_path, QUEST, data_quest=True)
+    lines, question = phased.data_quest_gate(tmp_path, QUEST)
+    assert question == "" and phased.status(phased.load(tmp_path)) == phased.NOT_APPLICABLE
+    assert any("put it in data/" in line for line in lines)
+    assert (tmp_path / "inputs" / "data" / "d.csv").read_bytes() == original
+
+
+def test_a_confirm_reading_cut_short_is_not_a_second_look(tmp_path: Path) -> None:
+    _visits(tmp_path / "data" / "d.csv")
+    phased.prepare(tmp_path, QUEST, data_quest=True)
+    phased.data_quest_gate(tmp_path, QUEST)
+    phased.enter_confirm(tmp_path, explore_result={"m": 1.0}, frozen_sha256=None, stride=1, replicates=1,
+                         explore_runs=1, isolation=(phased_isolation.ENCRYPTED, ""))
+    phased.data_quest_gate(tmp_path, QUEST)  # the confirm reading starts, and the model's connection fails
+    phased.data_quest_gate(tmp_path, QUEST)  # resumed: the same reading again
+    assert phased.load(tmp_path)["confirm_executions"] == 1
+    phased.note_confirm_result(tmp_path, {"m": 1.1})
+    record, _lines = phased.record_confirm(tmp_path, {"m": 1.1})
+    assert phased.status(record) == phased.CONFIRMED
+
+
+def test_a_record_from_before_isolation_was_noted_is_not_counted_as_isolated(tmp_path: Path) -> None:
+    _visits(tmp_path / "data" / "d.csv")
+    phased.prepare(tmp_path, QUEST, data_quest=True)  # no mode: as a record written before starts were noted
+    record = phased.load(tmp_path)
+    record.pop("starts", None)
+    phased._save(tmp_path, record)
+    phased.prepare(tmp_path, QUEST, data_quest=True, mode="encrypted")
+    assert phased.load(tmp_path)["starts"] == ["unrecorded", "encrypted"]
+
+
 def test_a_time_column_that_cannot_be_ordered_never_falls_back_to_a_random_split() -> None:
     rows = [f"day {i},{i}" for i in range(60)]
     decision = phased_data.decide("t.csv", "date,v", rows, ",", QUEST)
@@ -398,6 +459,9 @@ def test_the_scan_finds_reads_outside_the_quest_folder_and_leaves_ordinary_code_
         "e.py": "open('/home/someone/data.csv')",
         "f.py": "import os\nprint(os.path.expanduser('~'))",
         "g.sh": "cat ../_held_back/q/held_back/d.csv\n",
+        "h.py": "import os\nopen(os.path.join(os.pardir, 'x.csv'))",
+        "i.py": "from pathlib import Path\nprint(list(Path().resolve().parent.iterdir()))",
+        "j.py": "import ctypes\nctypes.windll.kernel32.ReadProcessMemory(0, 0, 0, 0, 0)",
     }
     for name, text in bad.items():
         (code / name).write_text(text, encoding="utf-8")
@@ -434,7 +498,7 @@ def test_a_killed_run_cannot_put_back_rows_it_kept_encrypted_and_says_so(tmp_pat
     assert phased._read_kept(phased._kept(root, phased.load(root)["files"][0], "original"), key2) == original
     # Killed: exploration's part stays on disk and the key is gone with the run.
     record, lines = phased.prepare(root, QUEST, data_quest=True, key=phased_isolation.new_key())
-    assert record.get("compromised") and any("Put your own copy of the whole file back" in x for x in lines)
+    assert record.get("compromised") and any("put your own copy of the whole file there" in x for x in lines)
 
 
 def test_a_container_is_isolated_only_when_nothing_it_mounts_holds_the_kept_files(tmp_path: Path) -> None:

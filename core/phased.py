@@ -241,6 +241,11 @@ def _split(rel: str, raw: bytes, quest_id: str, allowed: set[str] | None = None,
     manifest: dict[str, Any] = {}
     if allowed is not None:
         held = [r in allowed for r in rows]
+        if rule is not None:
+            # The rows a time split leaves out between the two parts stay out on every later reading too, and the
+            # manifest keeps saying so.
+            decision = _data.decide(rel, header, rows, _delimiter(rel), quest_id, declared_split=rule)
+            dropped, manifest = decision.dropped - allowed, decision.manifest
     elif rule is not None:
         decision = _data.decide(rel, header, rows, _delimiter(rel), quest_id, declared_split=rule)
         picked, dropped, manifest = decision.held, decision.dropped, decision.manifest
@@ -296,11 +301,12 @@ def _write(path: Path, data: bytes, quest_root: Path | None = None) -> None:
 
 
 def _clear_stray_tmp(quest_root: Path) -> None:
-    """Temporary files an earlier FI left in ``inputs/data/`` (it wrote them there): they may hold held-back rows."""
-    data = Path(quest_root) / "inputs" / "data"
-    if data.is_dir():
-        for stray in data.rglob(f".*{_TMP}"):
-            stray.unlink(missing_ok=True)
+    """Temporary files an earlier FI left in ``inputs/data/`` (it wrote them there), or in the store's ``tmp/`` (a run
+    stopped between writing one and putting it in place): they may hold held-back rows unencrypted."""
+    for folder in (Path(quest_root) / "inputs" / "data", store_dir(quest_root) / "tmp"):
+        if folder.is_dir():
+            for stray in folder.rglob(f".*{_TMP}"):
+                stray.unlink(missing_ok=True)
 
 
 def _move_out_of_quest(quest_root: Path) -> None:
@@ -390,8 +396,9 @@ def _not_restored(quest_root: Path, missed: list[dict[str, Any]], key: bytes | N
         elif kept.is_file() and _read_kept(kept, key) is None:
             out.append(f"{shown(info)} could not be put back whole: FI stopped without putting it back (it was killed, "
                        "or a background job outlived it), and the rows it held back were kept encrypted with a key only "
-                       f"that run of FI had, so they cannot be read again. Put your own copy of the whole file back in "
-                       f"{on_disk}")
+                       f"that run of FI had, so they cannot be read again. {on_disk} now holds only exploration's part: "
+                       "put your own copy of the whole file there so the quest has all of your data again (the result "
+                       "can no longer be confirmed either way)")
         else:
             out.append(f"{shown(info)} could not be put back whole: the copy kept of it is missing from {kept.parent} "
                        f"(when a quest folder is moved, move {STORE}/<quest id>/ beside it with it)")
@@ -487,8 +494,8 @@ def _rekey(quest_root: Path, quest_id: str, record: dict[str, Any], key: bytes |
     key, from the whole file in place (every run puts it back when it stops) and the split recorded for it, checked
     against the recorded fingerprints of both parts. A file that is not whole on disk, or whose split no longer gives
     the recorded parts, is left as it is (what that means is said where it matters)."""
-    if key is None:
-        return
+    # Without a key (a container now) an earlier run's encrypted files are written again plain: the container does not
+    # mount them.
     for info in record.get("files") or []:
         kept_whole, kept_back = _kept(quest_root, info, "original"), _kept(quest_root, info, "held_back")
         if all(not p.is_file() or _read_kept(p, key) is not None for p in (kept_whole, kept_back)):
@@ -527,6 +534,7 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False, data_
     _move_out_of_quest(quest_root)
     record = load(quest_root)
     lines: list[str] = []
+    fresh = record is None
     if record is None:
         record = _new_record()
         if data_quest:
@@ -542,7 +550,9 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False, data_
             _save(quest_root, record)
             return record, lines
     if mode and record.get("stage") in (EXPLORE, CONFIRM):
-        record["starts"] = [*(record.get("starts") or []), mode]
+        # A record that ran before FI noted how each start kept the rows out of reach: those starts are not shown to.
+        earlier = record.get("starts") if "starts" in record else ([] if fresh else ["unrecorded"])
+        record["starts"] = [*(earlier or []), mode]
         _save(quest_root, record)
     _rekey(quest_root, quest_id, record, key)
     if data_quest and record.get("stage") == EXPLORE and not record.get("data_quest"):
@@ -597,6 +607,11 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False, data_
         return supplied[name][1] if supplied[name][0] == INPUTS and not data_quest else name
 
     reasons = [why for name, (_f, _r, raw) in supplied.items() if (why := _why_not_splittable(label(name), raw))]
+    if data_quest and any(folder == INPUTS for folder, _r, _raw in supplied.values()):
+        # A data quest's analysis is its data-reading step, which reads data/ only: a table elsewhere is not what its
+        # numbers come from, so holding part of it back would confirm nothing.
+        reasons.append("the table is in inputs/data/, which the data-reading step does not read; put it in data/ to "
+                       "have part of it held back for a confirm run")
     if not reasons:
         reasons = [(f"{label(name)} now holds only {n} of the rows held back before exploration ran (the file was "
                     f"changed since), fewer than the {MIN_HELD_BACK_ROWS} a confirm run needs") if allowed is not None
@@ -651,7 +666,8 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False, data_
         if kept_now is not None and known and _sha(kept_now) == known.get("original_sha256") \
                 and known.get("original_sha256") != info["original_sha256"]:
             # The file changed since it was kept (edited while the quest was not running, or while a part of it was in
-            # its place after a hard stop): the earlier whole file is kept too, never overwritten.
+            # its place after a hard stop): the earlier whole file is kept too, never overwritten (without a container
+            # it stays encrypted with this run's key, so only this run can read it).
             kept.replace(kept.with_name(f"{kept.name}.replaced-{str(known['original_sha256'])[:12]}"))
         for dst, data, sealed in ((kept, raw, True), (_kept(quest_root, info, "held_back"), back, True),
                                   (_on_disk(quest_root, info), explore, False)):
@@ -668,7 +684,10 @@ def prepare(quest_root: Path, quest_id: str, *, already_ran: bool = False, data_
                    "set aside one by one until it is decided which rows belong together, before the data is first read")
             lines.append(f"held back {info['held_back_rows']} of {info['rows']} rows of {shown(info)} ({how}); "
                          f"exploration sees the other {info['explore_rows']} (the whole file and the held-back part "
-                         "are kept outside the quest folder" + (", encrypted" if key is not None else "") + ")")
+                         "are kept outside the quest folder" + (
+                             ", encrypted with a key only this run of FI holds: if FI is killed rather than stopped, "
+                             "the held-back rows cannot be put back, so keep your own copy of the file"
+                             if key is not None and not known else ", encrypted" if key is not None else "") + ")")
     record.update(strategy=HELD_BACK, why_no_data="", files=out)
     _save(quest_root, record)
     return record, lines
@@ -1100,6 +1119,10 @@ def data_quest_gate(quest_root: Path, quest_id: str, *, declared: dict[str, Any]
         record, lines = prepare(quest_root, quest_id, data_quest=True, key=key)
         if record.get("compromised"):
             return lines, ""
+        if int(record.get("confirm_executions") or 0) and not record.get("confirm_run_result_sha256"):
+            # The confirm reading was cut short before it produced a result (the model's connection failed, FI was
+            # stopped): this reading is that one again, not a second look at the held-back rows.
+            return lines, ""
     record = load(quest_root) or record
     record["confirm_executions"] = int(record.get("confirm_executions") or 0) + 1
     _save(quest_root, record)
@@ -1220,7 +1243,8 @@ def _how_confirmed(record: dict[str, Any]) -> str:
         from . import phased_isolation as _iso
 
         reach = {_iso.DOCKER: ", which exploration's code, run in a container without it, could not read",
-                 _iso.ENCRYPTED: ", kept encrypted while exploration ran so that its code could not read it"}.get(
+                 _iso.ENCRYPTED: (", kept encrypted while exploration ran, and exploration's code showed no read "
+                                  "outside the study's folder")}.get(
             isolation(record)[0], ", kept apart from exploration though not shown to be out of its code's reach")
         rule = next((i.get("rule") for i in record.get("files") or [] if i.get("rule")), None)
         picked = (f"held back before exploration began ({_data.how_in_paper(rule)})" if rule
@@ -1332,7 +1356,8 @@ def plan_lines(record: dict[str, Any] | None, *, on: bool, research: bool, runs_
     if (not runs_code and not data_quest) or status(record) == NOT_APPLICABLE:
         return said(not_applicable_sentence(
             str((record or {}).get("not_applicable") or why or "this quest runs no experiment of its own"),
-            data_quest=data_quest and bool((record or {}).get("not_applicable"))))
+            # A record from before data quests were confirmed keeps its own sentence.
+            data_quest=bool((record or {}).get("data_quest")) and bool((record or {}).get("not_applicable"))))
     if (record or {}).get("compromised") or (record or {}).get("not_confirmable"):
         reason = str(record.get("compromised") or record.get("not_confirmable"))
         return said(f"the result cannot be confirmed once more on data or seeds the exploration never saw ({reason}), "

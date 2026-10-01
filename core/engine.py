@@ -2708,17 +2708,28 @@ class Engine:
         """This run's key for the held-back rows (``core/phased_isolation.py``): made once per run of FI and kept only in
         this object's memory, never on disk, in the state or in the environment of the quest's code. None in a
         container, which keeps the kept files out of reach by not mounting them."""
-        if self.config.execution.sandbox == "docker":
+        if self.config.execution.sandbox == "docker" or getattr(self, "_phased_no_crypto", False):
             return None
         key = getattr(self, "_phased_key_value", None)
         if key is None:
-            key = _phased_isolation.new_key()
+            try:
+                key = _phased_isolation.new_key()
+            except ImportError:
+                # Installed before FI needed it: the rows are still held back, kept plain, and the record says they
+                # were not out of reach (isolation_unverified).
+                self._phased_no_crypto = True
+                self._log.warning("[phased] the `cryptography` package is not installed, so the held-back rows are kept "
+                                  "unencrypted and the result cannot count as confirmed on unseen data; install it "
+                                  "with `pip install -r requirements.txt`")
+                return None
             self._phased_key_value = key
         return key
 
     def _phased_mode(self) -> str:
-        """How this run keeps the held-back rows out of reach: ``docker`` or ``encrypted``."""
-        return "docker" if self.config.execution.sandbox == "docker" else "encrypted"
+        """How this run keeps the held-back rows out of reach: ``docker``, ``encrypted``, or ``plain`` (neither)."""
+        if self.config.execution.sandbox == "docker":
+            return "docker"
+        return "encrypted" if self._phased_key() is not None else "plain"
 
     def _phased_isolation(self) -> tuple[str, str]:
         """``(status, why)`` for the confirm stage: ``docker`` when every start ran the quest's code in a container that
@@ -2877,9 +2888,19 @@ class Engine:
         """When a run stops (finished, paused or failed): the person's whole files back in inputs/data/. Not while a
         background job the run submitted is waiting: its tasks read inputs/data/ when they start."""
         if getattr(self, "_phased_job_pending", False):
-            self._log.info("[phased] a background job is waiting, so inputs/data/ keeps the part of the data this stage "
-                           "may see until the quest is resumed")
-            return
+            record = _phased.load(self.quest_root) or {}
+            if self._phased_key() is None or not record.get("files"):
+                self._log.info("[phased] a background job is waiting, so inputs/data/ keeps the part of the data this "
+                               "stage may see until the quest is resumed")
+                return
+            # Without a container the kept rows are encrypted with this run's key, which ends with this run: the part
+            # left in place for the job could never be completed again. The whole files go back (the job may then
+            # read every row), and nothing in this quest can be confirmed.
+            _phased.mark_compromised(self.quest_root, "a background job outlived the run of FI that held the key to the "
+                                                      "held-back rows, so the whole files were put back for it")
+            self._log.warning("[phased] a background job is waiting and outlives this run of FI, which holds the only "
+                              "key to the held-back rows: the whole files are put back now, so nothing in this quest "
+                              "can be confirmed")
         try:
             for line in _phased.restore_inputs(self.quest_root, key=self._phased_key()):
                 self._log.warning("[phased] %s", line)

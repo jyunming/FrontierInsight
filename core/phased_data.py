@@ -95,6 +95,11 @@ def _cells(line: str, delimiter: str) -> list[str]:
     return next(csv.reader([line], delimiter=delimiter), [])
 
 
+def _names(header: str, delimiter: str) -> list[str]:
+    """The column names (a byte-order mark that Excel puts before the first one is not part of it)."""
+    return [n.lstrip("\ufeff").strip() for n in _cells(header, delimiter)]
+
+
 def _norm(name: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(name).lower()).strip("_")
 
@@ -172,7 +177,7 @@ def decide(file: str, header: str, rows: list[str], delimiter: str, quest_id: st
            declared_split: dict[str, Any] | None = None, answer: str | None = None,
            grouping: list[str] | None = None) -> Decision:
     """The split of one table (see the module docstring for the order). The rows are the file's lines after the header."""
-    names = _cells(header, delimiter)
+    names = _names(header, delimiter)
     cells = [_cells(r, delimiter) for r in rows]
     if declared_split:
         spec = {**declared_split, "source": declared_split.get("source") or "plan"}
@@ -190,6 +195,14 @@ def decide(file: str, header: str, rows: list[str], delimiter: str, quest_id: st
         if len(times) == 1 and not units:
             spec = {"strategy": TIME, "time_column": times[0], "source": "columns"}
         elif len(units) == 1 and not times:
+            col = names.index(units[0])
+            values = [c[col].strip() for c in cells if len(c) > col]
+            if len(set(values)) * 2 > len(values):
+                # Nearly every row has its own value: the column numbers the rows (a row id), it does not name a unit
+                # several rows share, so it says nothing about which rows belong together.
+                return Decision(ask=True, why=(
+                    f"FI cannot tell from {file}'s columns which rows belong to the same subject, site or other unit "
+                    f"('{units[0]}' has a different value on almost every row, so it numbers the rows)"))
             spec = {"strategy": GROUP, "unit": units[0], "source": "columns"}
         else:
             found = ", ".join(f"'{n}'" for n in times + units)
@@ -262,10 +275,12 @@ def _group(file: str, names: list[str], rows: list[str], cells: list[list[str]],
     if len(units) < max(least, 2 * MIN_HELD_UNITS):
         return Decision(why=(f"{file} has {len(units)} different values of '{names[col]}', fewer than the "
                              f"{max(least, 2 * MIN_HELD_UNITS)} a split by {names[col]} needs"))
+    first: dict[str, list[str]] = {}
+    for c in cells:
+        first.setdefault(c[col].strip(), c)
     by_stratum: dict[str, list[str]] = {}
     for unit in units:
-        first = next(c for c in cells if c[col].strip() == unit)
-        by_stratum.setdefault(first[stratum].strip() if stratum is not None else "", []).append(unit)
+        by_stratum.setdefault(first[unit][stratum].strip() if stratum is not None else "", []).append(unit)
     held_units: set[str] = set()
     for members in by_stratum.values():
         members.sort(key=lambda u: _digest(salt, u))
@@ -331,7 +346,7 @@ def overlap(header: str, explore_rows: list[str], held_rows: list[str], rule: di
     rule = rule or {}
     strategy = rule.get("strategy")
     if strategy in (GROUP, SPATIAL, TIME):
-        names = _cells(header, delimiter)
+        names = _names(header, delimiter)
         col = _column(names, rule.get("unit") if strategy != TIME else rule.get("time_column"))
         if col is None:
             return 0

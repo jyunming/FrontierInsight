@@ -114,7 +114,17 @@ def _is_file_name(node: ast.AST) -> bool:
 
 
 def _is_cwd(node: ast.AST) -> bool:
-    return isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _CWD_CALLS
+    """The working folder: ``Path.cwd()``, ``os.getcwd()``, ``Path()``, ``"."``."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _CWD_CALLS:
+        return True
+    if isinstance(node, ast.Call) and not node.args and (
+            (node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")) in ("Path", "PurePath")):
+        return True
+    return isinstance(node, ast.Constant) and node.value in (".", "./", ".\\")
+
+
+#: Names that read another process's memory (FI's own, where the key is): never needed by a study.
+_MEMORY = {"ReadProcessMemory", "OpenProcess", "process_vm_readv", "NtReadVirtualMemory"}
 
 
 def _docstrings(tree: ast.AST) -> set[int]:
@@ -144,12 +154,19 @@ def _scan_python(path: Path, rel: str, depth: int) -> list[str]:
             text = node.value.strip()
             if _HELD.search(text):
                 hit(node, "names the folder the held-back rows are kept in (_held_back)")
+            elif re.match(r"^/proc/(?!self/)", text) or text in _MEMORY:
+                hit(node, "reads the memory of another program")
             elif "://" not in text and "\n" not in text and _ABSOLUTE.match(text):
                 hit(node, f"opens an absolute path ({text[:60]!r})")
             elif "\n" not in text and _UP.search(text):
                 hit(node, f"leads out of the folder with '..' ({text[:60]!r})")
         elif isinstance(node, ast.Name) and _HELD.search(node.id):
             hit(node, "names the folder the held-back rows are kept in (_held_back)")
+        elif (isinstance(node, ast.Attribute) and node.attr in _MEMORY) or (
+                isinstance(node, ast.Name) and node.id in _MEMORY):
+            hit(node, "reads the memory of another program")
+        elif isinstance(node, ast.Attribute) and node.attr == "pardir":
+            hit(node, "leads out of the folder with os.pardir ('..')")
         elif isinstance(node, ast.Attribute) and node.attr in ("parent", "parents") or (
                 isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "dirname"):
             count, base = _parents(node)
