@@ -62,7 +62,7 @@ class PdfText:
     #: Each OCR-read page's lines with their place, ``{page: [((left, bottom, right, top) in PDF points, text)]}``,
     #: for core/pdf_figures.py to find a scanned page's figures without reading the page twice.
     ocr_lines: dict[int, list[tuple[tuple[float, float, float, float], str]]] = field(default_factory=dict)
-    #: Passages drawn so a reader cannot see them (white on the page, or tiny); see the module docstring.
+    #: Passages drawn so a reader cannot see them (white on the page, invisible, or tiny); see the module docstring.
     hidden_text: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -78,7 +78,7 @@ class PdfText:
             parts.append(f"cut at page {self.truncated_at_page} by the size limit")
         if self.hidden_text:
             words = sum(len(t.split()) for t in self.hidden_text)
-            parts.append(f"{words} word(s) drawn so a reader cannot see them (white on the page, or tiny)")
+            parts.append(f"{words} word(s) drawn so a reader cannot see them (white on the page, invisible, or tiny)")
         if self.error:
             parts.append(f"error: {self.error}")
         return "; ".join(parts)
