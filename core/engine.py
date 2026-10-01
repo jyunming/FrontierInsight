@@ -13408,6 +13408,9 @@ class Engine:
         markdown = None if refine_round or reported else await self._patch_flagged_passages(state, persona_block)
         if markdown is None:
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
+        # Whatever the writer put where the engine's paragraph goes is not the paper's text: out before any step reads
+        # the draft (its citations, figures and numbers), and the engine's own goes in at the end (core/disclosure.py).
+        markdown = _disclosure.without_block(markdown)
         needs_experiment: list[str] = []
         extend: list[str] = []
         layout: list[str] = []
@@ -13490,7 +13493,8 @@ class Engine:
         # How often the design changed and how many runs were made, from the records: the engine's words, never the
         # model's (core/disclosure.py).
         markdown = _disclosure.mark_paper(markdown, _disclosure.paragraph(
-            self.quest_root, no_simulation=bool(state.get("no_simulation_resolved"))))
+            self.quest_root, no_simulation=bool(state.get("no_simulation_resolved")),
+            survey=bool(state.get("survey_mode_resolved"))))
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -13573,7 +13577,7 @@ class Engine:
         )
         still = missing
         try:
-            again = await self._write_whole_paper(state, persona_block, extra_note=note)
+            again = _disclosure.without_block(await self._write_whole_paper(state, persona_block, extra_note=note))
             still = number_provenance.unreported_results(again, result, before, asked)
             if len(still) < len(missing):
                 markdown = again
@@ -13698,7 +13702,7 @@ class Engine:
         started = _receipts.now()
         checked_bytes = Path(paper_md).read_bytes()
         # The engine's paragraph on how the result was reached is not a claim of the paper's (core/disclosure.py).
-        paper_text = _paper_for_prompt(_disclosure.without_block(Path(paper_md).read_text(encoding="utf-8")),
+        paper_text = _paper_for_prompt(_disclosure.strip_for_checks(Path(paper_md).read_text(encoding="utf-8")),
                                        "claim_check", self._log)
         literature = state.get("literature") or []
         audience = self.config.output.audience
@@ -23804,6 +23808,31 @@ def _read_json_or_none_path(path: Path) -> Any:
         return None
 
 
+def _anything_ran(state: "QuestState", quest_root: Path) -> bool:
+    """Whether the experiment has run or the data been analysed: a result or analysis in the state, an earlier design
+    version recorded after results, a ``run`` line in ``.fi/attempts.jsonl``, or results or a paper that a rerun from an
+    earlier step moved aside to ``.fi/previous/`` (a data analysis writes no run line)."""
+    if state.get("result_json") or state.get("analysis") or state.get("exec_result"):
+        return True
+    if any(isinstance(e, dict) and e.get("after_results") for e in state.get("design_history") or []):
+        return True
+    if any(r.get("kind") == "run" for r in _attempts.read(quest_root / ".fi", _attempts.ATTEMPTS)):
+        return True
+    # What a rerun moved aside counts only by content: a rerun moves the empty folders a quest starts with too, and the
+    # oracle gate's own runs (raw/oracle_check) come before the first full run.
+    previous = quest_root / ".fi" / "previous"
+    if not previous.is_dir():
+        return False
+    for earlier in previous.iterdir():
+        if (earlier / "results.json").is_file() or (earlier / "paper" / "paper.md").is_file():
+            return True
+        if any((earlier / "data" / "auto_collected").glob("*")):
+            return True
+        if any(p.name != "oracle_check" for p in (earlier / "raw").glob("*")):
+            return True
+    return False
+
+
 def _append_design_revision(
     state: "QuestState", design: dict, quest_root: Path, log: logging.Logger, plan_sha: str = "",
 ) -> list[dict[str, Any]]:
@@ -23843,6 +23872,9 @@ def _append_design_revision(
         "iteration": int(state.get("iteration", 0) or 0),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "post_hoc": bool(prior),
+        # Whether the experiment had run (or the data been analysed) by now: a design done again before anything ran
+        # (a rerun from the plan after a stop before the first run) is not a revision after results (core/disclosure.py).
+        "after_results": bool(prior) and _anything_ran(state, quest_root),
         "reason": reason,
         "hypothesis": hypothesis[:600],
     }

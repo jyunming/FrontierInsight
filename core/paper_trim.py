@@ -51,6 +51,8 @@ _TRIMMABLE_SECTION_RE = re.compile(
 )
 _HEADING_LINE_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$", re.MULTILINE)
 _MIN_WORDS = 6  # a shorter sentence is not worth a place in the list
+# A note the engine writes into the paper (core/disclosure.py, core/phased.py), markers included: never offered.
+_ENGINE_NOTE_RE = re.compile(r"<!-- fi:([\w-]+) -->.*?<!-- /fi:\1 -->", re.S)
 _CITE_BRACKET_RE = re.compile(r"\[((?:W?\d+(?:\s*[–-]\s*\d+)?)(?:\s*[,;]\s*W?\d+(?:\s*[–-]\s*\d+)?)*)\]")
 _FIGURE_OR_TABLE_RE = re.compile(r"\b(?:figures?|figs?\.?|tables?)\b", re.IGNORECASE)
 # A sentence that introduces a term, a symbol or an abbreviation the text may use
@@ -168,6 +170,7 @@ def candidates(paper: str, end: int) -> list[Sentence]:
     stated = Counter(_numbers(region))
     seen_blocks: set[int] = set()
     out: list[Sentence] = []
+    notes = [(m.start(), m.end()) for m in _ENGINE_NOTE_RE.finditer(region)]
     units = paper_patch.sentence_units(region)
     for i, (start, stop, block) in enumerate(units):
         text = region[start:stop]
@@ -177,6 +180,8 @@ def candidates(paper: str, end: int) -> list[Sentence]:
         seen_blocks.add(block)
         if first:
             continue
+        if any(start < n_end and stop > n_start for n_start, n_end in notes):
+            continue  # the engine's own note, not the writer's text
         if _OWN_WORK_RE.search(text):
             continue  # what the paper sets out to do, did or found
         following = units[i + 1] if i + 1 < len(units) else None

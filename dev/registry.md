@@ -179,14 +179,17 @@ same PR that adds, splits or renames one.
   follow from it; `core/stats.py` is the pure-stdlib estimator/interval/test library underneath it.
 - `core/evidence.py` — the six-level evidence ladder (`assess`, `summary_line`, `upgrade` for older records; for a search for the best design `assess` adds `optimum_check.evidence_gaps` level by level and `_OPTIMUM_INFO`'s blind spot and artifacts); `_trace_completeness_gaps` reads the trace's `quest_finalized` seal (written last by `Engine._seal_trace`, naming `SEALED_FILES`); `SEALED_LEDGERS` and `SEALED_QUERIES` (the signed record of the search queries, `engine._record_query_set` / `_query_set_standing`; a person's own in `inputs/search_queries.txt` ; the same file also holds each pass's source verdicts, stages `floor` and `screen`: `Engine._record_floor_verdicts` / `_record_source_verdicts`, digest fields `_SOURCE_VERDICT_HASHED`, so no seal change) are required in the seal; `read` / `verify_seal` are how every surface reads `needs/EVIDENCE.json` (a record written before its seal says `trace_seal: pending`).
 - `core/disclosure.py` — what the paper says about how its result was reached: `paragraph` builds the methods
-  paragraph from `needs/DESIGN_HISTORY.json` (`revisions`, `reason_phrase` into the closed `REASONS`) and
-  `.fi/attempts.jsonl` (`runs`: the `run` lines by outcome, discarded ones by why); `mark_paper` (called by
-  `Engine._node_write` after the model has written: removes whatever was between `BEGIN`/`END` and puts the paragraph
-  at the end of the methods) and `without_block` (the claim check's copy of the paper); `strip_for_checks` (called
-  first by `stat_claims.normalise` and `numeric_oracle.extract_paper_numbers`, so `number_provenance` too: removes the
-  block only when `is_engine_paragraph`); `unconfirmed_gap` / `confirmed_after_last_change` (`evidence.assess`: a
-  post-hoc design revision without a confirm run after it, read from `.fi/phased.json` `design_revisions_at_confirm`,
-  is a `publication_ready` gap unless a `_PHASED_GAPS` entry already names the stage).
+  paragraph from `needs/DESIGN_HISTORY.json` (`revisions`: `post_hoc` entries not marked `after_results: false`, which
+  `engine._append_design_revision` / `_anything_ran` records; `reason_phrase` into the closed `REASONS`) and
+  `.fi/attempts.jsonl` (`runs`: the `run` lines, every one but the last discarded, by outcome); `without_block` (called
+  by `Engine._node_write` right after the writer returns: removes markers, blocks and lead-word paragraphs until none is
+  left) and `mark_paper` (at the end of the write node: the paragraph at the end of the methods, else before the
+  results); `strip_for_checks` (first in `stat_claims.normalise` and `numeric_oracle.extract_paper_numbers`, so
+  `number_provenance` too, and the claim check's copy of the paper: removes the block only when `is_engine_paragraph`);
+  `unconfirmed_gap` / `confirmed_after_last_change` (`evidence.assess`: a revision after results with no confirm run
+  after it, read from `.fi/phased.json` `design_revisions_at_confirm`, beyond the `frozen_protocol.post_hoc`
+  amendments, is a `publication_ready` gap unless a `_PHASED_GAPS` entry already names the stage; none for a survey).
+  `paper_trim.candidates` never offers a sentence inside an engine note (`<!-- fi:... -->`).
 - `core/audit_log.py` — the hash-chained, redacted per-quest trace (`STAGE_PROGRESS`/`_ProgressOnly` for the curated
   console/web view live in `core/engine.py`, next to `_quest_logger`).
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits

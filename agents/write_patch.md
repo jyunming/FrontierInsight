@@ -47,6 +47,8 @@ $literature_block
 $passages_block
 
 ## The draft
+(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's records. Never edit it or its markers: any change to it is undone.)
+
 <draft>
 $paper_block
 </draft>

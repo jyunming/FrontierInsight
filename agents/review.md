@@ -64,6 +64,6 @@ $claim_grounding_block
 $figure_check_block$foundational_check_block$user_feedback_block
 
 ## Paper draft
-(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design changed and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says.)
+(A paragraph between `<!-- fi:attempts -->` and `<!-- /fi:attempts -->` is written by FI from the quest's own records: how often the design was revised and how many runs were made. It is not the writer's text and no revision can change it, so never ask for it to be edited or removed; you may weigh what it says.)
 
 $paper_md
