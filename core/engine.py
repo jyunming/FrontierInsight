@@ -15918,6 +15918,10 @@ class Engine:
                            f", who: {acceptance['who']}" if acceptance.get("who") else "",
                            f", answer: {acceptance['answer']}" if acceptance.get("answer") else "",
                            f", not accepted: {acceptance['note']}" if acceptance.get("note") else "")
+            if acceptance.get("evidence_sha256_at_accept"):
+                self._log.warning("[human_feedback] the evidence record worked out when the quest resumed differs from "
+                                  "the one whose limits were shown with the question; the receipt keeps both "
+                                  "fingerprints (needs/EVIDENCE.json, acceptance)")
         # When the user refines, bump iteration so the loop budget is
         # consumed and the design node sees an explicit "we're in a
         # revise pass" signal (same convention the verdict-driven

@@ -2733,10 +2733,14 @@ def make_app(
             refused = _acceptance.problem(body)
             if refused:
                 raise HTTPException(400, refused)
-            # Who: the name typed on the page ("" when none was); when: now, as the page sent it.
+            # Who: the name typed on the page ("" when none was); when: now, as the server receives it; and the
+            # fingerprint of the evidence record whose limits the page showed.
             answer = {**answer, "answer": checked, "note": _acceptance.note_of(body) if checked == "partly" else "",
                       "via": "web", "who": " ".join(str(body.get("who") or "").split())[:80],
                       "at": _acceptance.now()}
+            shown_hash = str(body.get("shown_evidence_sha256") or "").strip()[:64]
+            if shown_hash:
+                answer["shown_evidence_sha256"] = shown_hash
         in_process_resolved = registry.resolve_human_review(quest_id, answer)
         # Always write the disk answer so an out-of-process
         # ``--resume`` picks it up too. Best-effort: an OSError on the

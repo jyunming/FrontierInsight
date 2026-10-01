@@ -495,6 +495,8 @@ class VSCodeBridgeClient:
 
                 reply.update(answer=str(msg.get("answer") or ""), note=str(msg.get("note") or "").strip(),
                              via="vscode", who=str(msg.get("who") or "").strip(), at=_now())
+                if msg.get("shown_evidence_sha256"):
+                    reply["shown_evidence_sha256"] = str(msg["shown_evidence_sha256"])[:64]
             fut.set_result(reply)
         elif mtype == "human_review_cancelled":
             req_id = int(msg.get("id", 0))

@@ -45,6 +45,9 @@ LABELS = dict(CHOICES)
 NOT_CHECKED_GAP = "no person reviewed the evidence before accepting"
 #: How the gap a person's "partly" leaves begins (:func:`partly_gap` adds the note).
 PARTLY_GAP = "a person accepted the result only in part"
+#: The gap an accept given in answer to an earlier question leaves (it did not say the evidence was reviewed).
+EARLIER_QUESTION_GAP = ("the person who accepted it answered an earlier question, not whether they reviewed the "
+                        "evidence: accept it again")
 #: Why a "partly" without its note is not an accept.
 NOTE_NEEDED = ("\"partly\" needs a short note saying what you do not accept, so the result was not accepted: give "
                "what you do not accept with the answer")
@@ -121,7 +124,9 @@ def _time_of(value: Any) -> str:
         parsed = _dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return now()
-    return parsed.isoformat() if parsed.tzinfo is not None else now()
+    if parsed.tzinfo is None or parsed > _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(minutes=5):
+        return now()  # no time zone, or a time still to come: not when anyone answered
+    return parsed.isoformat()
 
 
 def receipt(answer: dict[str, Any], via: str, snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -135,17 +140,27 @@ def receipt(answer: dict[str, Any], via: str, snapshot: dict[str, Any] | None = 
     block = (snapshot or {}).get("before_accept") if isinstance(snapshot, dict) else None
     block = block if isinstance(block, dict) else None
     who = " ".join(str(answer.get("who") or "").split())[:_MAX_WHO]
-    return {
+    got = parse_answer(answer.get("answer"))
+    shown_now = str((block or {}).get("evidence_sha256") or "")
+    # The fingerprint the interface displayed (it sends it back), else the one handed to it now.
+    shown_then = str(answer.get("shown_evidence_sha256") or "").strip().lower()
+    shown_then = shown_then if len(shown_then) == 64 and all(c in "0123456789abcdef" for c in shown_then) else ""
+    out = {
         "by": "person",
         "via": str(answer.get("via") or via or "unknown")[:40],
         "who": who or "not given",
         "at": _time_of(answer.get("at")),
         "question": QUESTION,
-        "answer": parse_answer(answer.get("answer")),
-        "note": note_of(answer),
-        "evidence_sha256": str((block or {}).get("evidence_sha256") or ""),
+        "answer": got,
+        # Only "partly" says what is not accepted: a note sent with any other answer is not kept.
+        "note": note_of(answer) if got == "partly" else "",
+        "evidence_sha256": shown_then or shown_now,
         "limits_shown": lines(block),
     }
+    if shown_then and shown_now and shown_then != shown_now:
+        # The evidence was worked out again when the quest resumed and came out different from what was shown.
+        out["evidence_sha256_at_accept"] = shown_now
+    return out
 
 
 def automatic(via: str) -> dict[str, Any]:
@@ -169,9 +184,14 @@ def partly_gap(note: str) -> str:
 
 
 def review_gap(record: Any) -> str | None:
-    """The gap a person's accept leaves below ``publication_ready`` (``None`` for an explicit "yes"): "I did not check"
-    and any answer that is not a yes leave :data:`NOT_CHECKED_GAP`, "partly" its note (:func:`partly_gap`)."""
+    """The gap a person's accept leaves below ``publication_ready`` (``None`` for an explicit "yes" to
+    :data:`QUESTION`): "I did not check" and any answer that is not a yes leave :data:`NOT_CHECKED_GAP`, "partly" its
+    note (:func:`partly_gap`), and an answer to an earlier question (a record that names another one)
+    :data:`EARLIER_QUESTION_GAP`."""
     record = record if isinstance(record, dict) else {}
+    question = str(record.get("question") or "").strip()
+    if question and question != QUESTION:
+        return EARLIER_QUESTION_GAP
     answer = parse_answer(record.get("answer"))
     if answer == "yes":
         return None
@@ -182,15 +202,19 @@ def review_gap(record: Any) -> str | None:
 
 def mark(record: Any) -> str:
     """One sentence for the summary line when a person's accept was not a plain yes and its gap is not the first one
-    shown ("" otherwise), so the note is seen wherever the one line is."""
+    shown ("" otherwise), so the note is seen wherever the one line is. Said only when the record itself holds that
+    gap: a record worked out before this rule (read back as it was) is not described by it."""
     if not isinstance(record, dict) or record.get("accepted_by") != "person":
         return ""
     gap = review_gap(record.get("acceptance"))
     gaps = record.get("gaps") or []
-    if not gap or (gaps and gaps[0] == gap):
+    held = [str(g) for level in (record.get("all_gaps") or {}).values() if isinstance(level, list) for g in level]
+    if not gap or gap not in held or (gaps and gaps[0] == gap):
         return ""
     if gap == NOT_CHECKED_GAP:
         return "The person who accepted it did not review the evidence."
+    if gap == EARLIER_QUESTION_GAP:
+        return "The person who accepted it answered an earlier question, not whether they reviewed the evidence."
     return f"Accepted only in part; not accepted: {note_of(record.get('acceptance')) or '(no note was recorded)'}."
 
 
@@ -266,7 +290,8 @@ def shown(record: dict[str, Any] | None) -> dict[str, Any]:
         ordered.extend(str(g) for g in all_gaps.get(level) or [])
     ordered.extend(str(g) for g in record.get("gaps") or [])  # a record without all_gaps (an older one)
     # The decision being made is not one of its own gaps (nor an earlier accept's).
-    ordered = [g for g in ordered if g.strip() and g.strip() not in (WAITING_GAP, NO_PERSON_GAP, NOT_CHECKED_GAP)
+    ordered = [g for g in ordered if g.strip()
+               and g.strip() not in (WAITING_GAP, NO_PERSON_GAP, NOT_CHECKED_GAP, EARLIER_QUESTION_GAP)
                and not g.strip().startswith(PARTLY_GAP)]
     seen: set[str] = set()
     not_guaranteed, _ = _unique(blind, MAX_NOT_GUARANTEED, seen)

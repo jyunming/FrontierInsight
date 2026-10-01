@@ -2,7 +2,9 @@
 
 The user's rule: an accept that no person looked at is marked "not reviewed by a person" and reaches at most one level
 below ``publication_ready``; before a person accepts, FI shows what the result does not guarantee and its gaps and
-asks one question, and the answer is recorded. "No" does not accept.
+asks one question (have they reviewed the evidence record, and do they accept these claims and the limits listed?).
+Only an explicit yes reaches ``publication_ready``; "I did not check" and "partly" (which needs a note) leave a gap;
+"no" does not accept. The answer is recorded as a receipt.
 """
 
 from __future__ import annotations
@@ -215,11 +217,11 @@ def test_the_acceptance_receipt_binds_what_was_accepted_and_who_when_how() -> No
     block = acceptance.shown(record)
     snap = {"verdict": "accept", "before_accept": block}
     stamped = acceptance.stamp({"action": "accept", "answer": "partly", "note": "  table 2  ", "via": "web",
-                                "who": "ada", "at": "2026-10-01T08:00:00+00:00",
+                                "who": "ada", "at": "2026-09-30T08:00:00+00:00",
                                 "acceptance": {"by": "automatic"}}, "callback", snap)
     receipt = stamped["acceptance"]
     assert receipt["by"] == "person" and receipt["via"] == "web" and receipt["who"] == "ada"
-    assert receipt["at"] == "2026-10-01T08:00:00+00:00"
+    assert receipt["at"] == "2026-09-30T08:00:00+00:00"
     assert receipt["question"] == acceptance.QUESTION and receipt["answer"] == "partly" and receipt["note"] == "table 2"
     assert receipt["evidence_sha256"] == block["evidence_sha256"] and len(receipt["evidence_sha256"]) == 64
     # The limits that were listed with the question, word for word.
@@ -231,6 +233,65 @@ def test_the_acceptance_receipt_binds_what_was_accepted_and_who_when_how() -> No
     assert bare["note"] == "" and bare["limits_shown"] == [] and bare["evidence_sha256"] == ""
     # A time that is not a time is not taken.
     assert acceptance.stamp({"action": "accept", "answer": "yes", "at": "yesterday"}, "x")["acceptance"]["at"] != "yesterday"
+
+
+def test_a_note_is_kept_only_with_partly() -> None:
+    stamped = acceptance.stamp({"action": "accept", "answer": "yes", "note": "table 2 is wrong"}, "answer file")
+    assert stamped["acceptance"]["note"] == "" and acceptance.review_gap(stamped["acceptance"]) is None
+
+
+def test_the_receipt_keeps_the_fingerprint_that_was_shown_and_says_when_it_changed() -> None:
+    block = acceptance.shown({"status": "executed"})
+    snap = {"before_accept": block}
+    same = acceptance.stamp({"action": "accept", "answer": "yes", "shown_evidence_sha256": block["evidence_sha256"]},
+                            "x", snap)["acceptance"]
+    assert same["evidence_sha256"] == block["evidence_sha256"] and "evidence_sha256_at_accept" not in same
+    other = "a" * 64
+    moved = acceptance.stamp({"action": "accept", "answer": "yes", "shown_evidence_sha256": other}, "x", snap)
+    assert moved["acceptance"]["evidence_sha256"] == other
+    assert moved["acceptance"]["evidence_sha256_at_accept"] == block["evidence_sha256"]
+    # Not a fingerprint: the one handed to the interface is kept.
+    junk = acceptance.stamp({"action": "accept", "answer": "yes", "shown_evidence_sha256": "x"}, "x", snap)
+    assert junk["acceptance"]["evidence_sha256"] == block["evidence_sha256"]
+
+
+def test_a_time_still_to_come_is_not_taken() -> None:
+    assert acceptance.stamp({"action": "accept", "answer": "yes", "at": "2999-01-01T00:00:00+00:00"},
+                            "x")["acceptance"]["at"] != "2999-01-01T00:00:00+00:00"
+
+
+def test_an_accept_given_to_the_earlier_question_is_not_a_yes_to_this_one(tmp_path: Path) -> None:
+    root = _quest(tmp_path, protocol_status="ok", oracle_status="ok")
+    earlier = {**PERSON, "question": "Do the main numbers match what you expected?"}
+    record = evidence.assess(root, _state(acceptance=earlier), settings=ON)
+    assert record["status"] == "statistically_adequate" and record["gaps"] == [acceptance.EARLIER_QUESTION_GAP]
+
+
+def test_a_record_worked_out_before_this_rule_is_not_described_by_it() -> None:
+    # needs/EVIDENCE.json read back as it was written: publication_ready with an older person's accept.
+    old = {"status": "publication_ready", "gaps": [], "all_gaps": {}, "accepted_by": "person",
+           "acceptance": {"by": "person", "via": "cli", "answer": "not_checked"}}
+    line = evidence.summary_line(old)
+    assert "did not review" not in line and "only in part" not in line
+
+
+def test_the_interactive_prompt_records_the_approve_as_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    import launch
+
+    replies = iter(["accept", "yes"])
+    monkeypatch.setattr("builtins.input", lambda *_a: next(replies))
+    callback = launch._pick_human_feedback_callback(None, None, True, "Ada Lovelace")  # type: ignore[arg-type]
+    assert asyncio.run(callback({"verdict": "accept"}))["who"] == "Ada Lovelace"
+
+
+@pytest.mark.parametrize("words", [["not", "checked"], ["I", "did", "not", "check"]])
+def test_an_answer_typed_as_several_words_is_the_answer(tmp_path: Path, words: list[str]) -> None:
+    import launch
+
+    fi = _paused(tmp_path)
+    launch._apply_review_decision(_args(accept=words), tmp_path)
+    staged = _staged(fi)
+    assert staged["answer"] == "not_checked" and staged["note"] == ""
 
 
 def test_an_answer_cannot_claim_to_be_automatic_or_by_someone_else() -> None:
@@ -354,6 +415,9 @@ def _args(**over: Any) -> argparse.Namespace:
 def _staged(fi: Path) -> dict:
     staged = json.loads((fi / "human_review_answer.json").read_text(encoding="utf-8"))
     assert staged.pop("at")  # when the person answered
+    # The fingerprint of the evidence record whose limits were printed goes back with the answer.
+    shown = json.loads((fi / "human_review.json").read_text(encoding="utf-8"))["before_accept"]
+    assert staged.pop("shown_evidence_sha256") == shown["evidence_sha256"]
     return staged
 
 
@@ -459,10 +523,12 @@ def test_the_interactive_prompt_asks_before_an_accept(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("builtins.input", reply)
     monkeypatch.setattr("getpass.getuser", lambda: "jdoe")
-    got = asyncio.run(launch._cli_human_feedback_callback({"verdict": "accept", "before_accept": acceptance.shown(
-        {"status": "executed", "all_gaps": {"internally_reconciled": ["the number check reported 2 finding(s)"]}})}))
+    block = acceptance.shown(
+        {"status": "executed", "all_gaps": {"internally_reconciled": ["the number check reported 2 finding(s)"]}})
+    got = asyncio.run(launch._cli_human_feedback_callback({"verdict": "accept", "before_accept": block}))
     assert got.pop("at")
-    assert got == {"action": "accept", "feedback": "", "answer": "yes", "note": "", "via": "cli", "who": "jdoe"}
+    assert got == {"action": "accept", "feedback": "", "answer": "yes", "note": "", "via": "cli", "who": "jdoe",
+                   "shown_evidence_sha256": block["evidence_sha256"]}
     assert acceptance.QUESTION in prompts[-1]
     out = capsys.readouterr().out
     assert "Not guaranteed: Nothing says the results are right" in out

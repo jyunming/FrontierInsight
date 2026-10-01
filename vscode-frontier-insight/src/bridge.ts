@@ -99,6 +99,8 @@ interface BeforeAccept {
     more_gaps?: number;
     question?: string;
     choices?: Array<{ id: string; label: string }>;
+    /** The fingerprint of the evidence record these limits come from; sent back with the accept. */
+    evidence_sha256?: string;
 }
 
 const ACCEPT_QUESTION = "Have you reviewed the evidence record, and do you accept these claims and the limits listed?";
@@ -548,7 +550,9 @@ export class Bridge {
             id: req.id,
             action,
             feedback,
-            ...(action === "accept" ? { answer, note, who: loginName() } : {}),
+            ...(action === "accept"
+                ? { answer, note, who: loginName(), shown_evidence_sha256: snap.before_accept?.evidence_sha256 || "" }
+                : {}),
         });
         this.opts.progress.markdown(
             `\n— human review: **${action}**${feedback ? " (with feedback)" : ""}${action === "accept" ? ` (${escapeMd(answerLabel)}${note ? `: ${escapeMd(note)}` : ""})` : ""}; resuming…\n\n`,

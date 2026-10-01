@@ -1821,7 +1821,7 @@ def _web_page_clarify_callback(fi_dir: Path, log: logging.Logger, timeout_s: flo
 
 
 def _pick_human_feedback_callback(
-    cfg: Config, engine: Engine, interactive: bool,
+    cfg: Config, engine: Engine, interactive: bool, who: str = "",
 ) -> object:
     """Select the right human-feedback-gate callback for this run.
 
@@ -1837,6 +1837,10 @@ def _pick_human_feedback_callback(
       ``human_review_answer.json`` and running ``--resume``.
     """
     if interactive:
+        if (who or "").strip():  # --approve-as: the name an accept records, instead of the login name
+            import functools
+
+            return functools.partial(_cli_human_feedback_callback, who=who.strip())
         return _cli_human_feedback_callback
     if cfg.provider.name == "vscode_extension":
         # Defensive parse: a hand-crafted YAML could leave
@@ -1915,7 +1919,7 @@ async def _cli_clarify_callback(questions: dict[str, object]) -> dict[str, objec
 
 
 async def _cli_human_feedback_callback(
-    snapshot: dict[str, object],
+    snapshot: dict[str, object], *, who: str = "",
 ) -> dict[str, object]:
     """Terminal-based human-feedback gate. Prints the current review
     + verdict / score / weaknesses, then asks the user to type
@@ -2033,8 +2037,11 @@ async def _cli_human_feedback_callback(
         print(f"  → accept ({_acceptance.LABELS[answer]}{': ' + note if note else ''})")
         print("=" * 72)
         print()
+        block = snapshot.get("before_accept")
+        shown_hash = str(block.get("evidence_sha256") or "") if isinstance(block, dict) else ""
         return {"action": "accept", "feedback": "", "answer": answer, "note": note, "via": "cli",
-                "who": _login_name(), "at": _acceptance.now()}
+                "who": " ".join(str(who or "").split()) or _login_name(), "at": _acceptance.now(),
+                **({"shown_evidence_sha256": shown_hash} if shown_hash else {})}
     print(f"  → {action}")
     print("=" * 72)
     print()
@@ -2116,10 +2123,12 @@ def _apply_review_decision(args: argparse.Namespace, output_dir: Path) -> None:
             )
             sys.exit(2)
     if decision["action"] == "accept":
-        decision["answer"], decision["note"] = _accept_answer(fi_dir, args.resume, decision["answer"],
-                                                              decision["note"])
+        decision["answer"], decision["note"], shown_hash = _accept_answer(fi_dir, args.resume, decision["answer"],
+                                                                          decision["note"])
         who = " ".join(str(getattr(args, "approve_as", "") or "").split())
         decision.update(who=who or _login_name(), at=_acceptance.now())
+        if shown_hash:
+            decision["shown_evidence_sha256"] = shown_hash
     try:
         fi_dir.mkdir(parents=True, exist_ok=True)
         answer_path.write_text(json.dumps(decision), encoding="utf-8")
@@ -2155,11 +2164,14 @@ def _login_name() -> str:
         return "not given"
 
 
-def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> tuple[str, str]:
-    """The person's answer to the question asked before accepting (core/acceptance.py) and its note: ``given`` with
-    ``--accept`` (the note after it), or asked at a terminal; either way after showing what the result does not
-    guarantee and its gaps. With no terminal and no answer (or a "partly" with no note), or with "no", the accept is
-    refused (exit 2) with what to do instead."""
+def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> tuple[str, str, str]:
+    """The person's answer to the question asked before accepting (core/acceptance.py), its note and the fingerprint
+    of the evidence record whose limits were shown: ``given`` with ``--accept`` (the note after it), or asked at a
+    terminal; either way after showing what the result does not guarantee and its gaps. With no terminal and no
+    answer (or a "partly" with no note), or with "no", the accept is refused (exit 2) with what to do instead."""
+    if given and note and _acceptance.parse_answer(f"{given} {note}"):
+        # `--accept not checked` / `--accept I did not check`: the words are the answer, not an answer and a note.
+        given, note = f"{given} {note}", ""
     answer = _acceptance.parse_answer(given)
     if given and answer is None:
         print(f"[FI] --accept {given!r} is not an answer to \"{_acceptance.QUESTION}\". Use --accept yes, "
@@ -2173,7 +2185,9 @@ def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> t
         snapshot = json.loads((fi_dir / "human_review.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
         snapshot = {}
-    shown = _before_accept_text((snapshot or {}).get("before_accept") if isinstance(snapshot, dict) else None)
+    block = (snapshot or {}).get("before_accept") if isinstance(snapshot, dict) else None
+    shown = _before_accept_text(block)
+    shown_hash = str(block.get("evidence_sha256") or "") if isinstance(block, dict) else ""
     needs_note = answer == "partly" and not note.strip()
     if (answer is None or needs_note) and not _stdin_is_terminal():
         print("\n".join([
@@ -2205,8 +2219,10 @@ def _accept_answer(fi_dir: Path, quest_id: str, given: str, note: str = "") -> t
             print("[FI] \"partly\" needs a short note saying what you do not accept — nothing was accepted.",
                   file=sys.stderr)
             sys.exit(2)
+    if answer != "partly" and note.strip():
+        print(f"[FI] only \"partly\" keeps a note; \"{' '.join(note.split())}\" was not recorded.", file=sys.stderr)
     print(f"  {_acceptance.QUESTION} {_acceptance.LABELS[answer]}")
-    return answer, (" ".join(note.split()) if answer == "partly" else "")
+    return answer, (" ".join(note.split()) if answer == "partly" else ""), shown_hash
 
 
 def _ask_accept_note() -> str:
@@ -2439,7 +2455,7 @@ async def run_one(
     # ``human_review_answer.json`` and running ``--resume``.
     hf_callback: object = None
     if cfg.pauses.review == "ask":
-        hf_callback = _pick_human_feedback_callback(cfg, engine, interactive)
+        hf_callback = _pick_human_feedback_callback(cfg, engine, interactive, approved_by or "")
     art: QuestArtifacts = await _maybe_profiled(
         engine, profile=profile, clarify_callback=callback,
         human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,

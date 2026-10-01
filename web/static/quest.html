@@ -1666,6 +1666,13 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       document.getElementById('hr-accept-note').focus();
       return false;
     }
+    if (answer !== 'partly' && note) {
+      // A note is kept only with "Partly": say so rather than drop it without a word.
+      msg.textContent = 'A note is kept only with Partly. Click Partly to keep it, or clear the note box and answer again.';
+      msg.classList.remove('hidden');
+      document.getElementById('hr-accept-note').focus();
+      return false;
+    }
     return submitHumanReview('accept', answer, answer === 'partly' ? note : '');
   }
   async function submitHumanReview(action, answer, note) {
@@ -1689,7 +1696,8 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(action === 'accept'
         ? { action, feedback, answer, note: note || '',
-            who: (document.getElementById('hr-accept-who').value || '').trim() }
+            who: (document.getElementById('hr-accept-who').value || '').trim(),
+            shown_evidence_sha256: (humanReviewBeforeAccept && humanReviewBeforeAccept.evidence_sha256) || '' }
         : { action, feedback }),
     });
     if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
