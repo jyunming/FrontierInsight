@@ -54,8 +54,9 @@ def _config(root: Path, **over: Any) -> Config:
         "rigor_profile": "research",
         # Research needs one reviewer on another model; the fake model answers the same whatever it is called.
         "provider": {"name": "openai", "node_models": {"review_panel.statistician": "m-other"}},
-        "engine": {"max_iterations": 1, "review_loop": False, "auto_accept_on_pass": True, "execute_replicates": 3,
-                   "pilot_run": False},
+        # No auto_accept_on_pass: an accept no person made stays one level below publication_ready, so a person
+        # accepts at the review pause (``_run_through_pauses``), as `--resume <id> --accept yes` stages it.
+        "engine": {"max_iterations": 1, "review_loop": False, "execute_replicates": 3, "pilot_run": False},
         "execution": {"sandbox": "venv", "timeout_s": 300},
         "knowledge": {"enabled": False},
         "output": {"output_dir": str(root)},
@@ -119,9 +120,16 @@ def _run_through_pauses(config: Config, *, quest_id: str | None = None, from_ste
         if not nxt.is_file():
             break
         text = nxt.read_text(encoding="utf-8")
-        pauses.append(text.splitlines()[0])
-        if "read and edit the plan" not in text:
-            break  # anything else is a stop the test is about
+        pause = json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8")) if (
+            engine.fi_dir / "pause.json").is_file() else {}
+        if pause.get("kind") == "review":
+            # A person accepts, answering the question asked before accepting (what `--accept yes` stages).
+            (engine.fi_dir / "human_review_answer.json").write_text(json.dumps(
+                {"action": "accept", "feedback": "", "answer": "yes", "via": "cli"}), encoding="utf-8")
+        else:
+            pauses.append(text.splitlines()[0])
+            if "read and edit the plan" not in text:
+                break  # anything else is a stop the test is about
         nxt.unlink()
         engine = Engine(config, resume_quest_id=engine.quest_id)
         artifacts = asyncio.run(engine.run())
@@ -210,6 +218,10 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert record["status"] == "publication_ready", record.get("gaps")
     # Research explores first and confirms once by default: the result that is publication-ready is the confirm run's.
     assert config.engine.phased is True and record["phased"]["status"] == "confirmed", record.get("phased")
+    # A person accepted it, with their answer to the question asked before accepting; the trace says so too.
+    assert record["accepted_by"] == "person" and record["acceptance"]["answer"] == "yes", record.get("acceptance")
+    accepted = [e for e in audit_log.read(root / ".fi" / "audit.jsonl") if e.get("kind") == "result_accepted"]
+    assert [(e["by"], e["via"], e["answer"]) for e in accepted] == [("person", "cli", "yes")]
     # The seal is the trace's last event and names the evidence and attempt records as they are.
     assert audit_log.read(root / ".fi" / "audit.jsonl")[-1]["kind"] == "quest_finalized"
     assert record["trace_seal"] == "verified"
@@ -328,6 +340,17 @@ def test_a_package_list_that_could_not_be_made_is_a_gap(baseline: dict[str, Any]
     record = _reassess(baseline, config, root.name)
     assert record["status"] != "publication_ready"
     assert any("could not be listed" in g for g in _all_gaps(record))
+
+
+def test_an_accept_no_person_made_is_one_level_below_publication_ready(baseline: dict[str, Any], tmp_path: Path) -> None:
+    from core import acceptance
+
+    for n, automatic in enumerate(({"by": "automatic", "via": "auto_accept_on_pass"}, {})):
+        # A copy each: a reassessment records itself in the trace, after the seal.
+        config, root = _copy(baseline, tmp_path / str(n))
+        record = _reassess(baseline, config, root.name, acceptance=automatic)
+        assert record["status"] == "statistically_adequate", record.get("gaps")
+        assert record["gaps"] == [acceptance.NO_PERSON_GAP] and record["accepted_by"] == "automatic"
 
 
 def test_an_exploration_is_never_publication_ready(baseline: dict[str, Any], tmp_path: Path) -> None:

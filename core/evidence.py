@@ -16,7 +16,8 @@ checks behind it prove:
   counts, on one script or two);
 * ``statistically_adequate`` — and every headline metric has a declared estimator matched to its data, the contrasts carry
   engine-computed p-values, and every precision target was reached;
-* ``publication_ready`` — and the review accepted the paper with no must-fix finding, the protocol was not amended after the
+* ``publication_ready`` — and the review accepted the paper with no must-fix finding, a person accepted the result (an
+  automatic accept stays one level below, core/acceptance.py), the protocol was not amended after the
   results were seen, a design revised after the experiment had run was confirmed by a run on data or seeds never seen
   after its last change (core/disclosure.py), and the evidence gate, the design methodology audit and the claim check
   each left a receipt that says it passed (core/receipts.py; a missing one is a gap).
@@ -32,6 +33,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import acceptance as _acceptance
 from . import disclosure as _disclosure
 from . import frozen_protocol as _frozen
 from . import optimise as _optimise
@@ -100,13 +102,13 @@ INFO: dict[str, dict[str, Any]] = {
     },
     "publication_ready": {
         "assurance_claim": (
-            "The review accepted the paper with no must-fix finding, the protocol was not amended after the results were "
-            "seen, a design revised after the experiment had run was confirmed by a run on data or seeds never seen "
+            "The review accepted the paper with no must-fix finding and a person accepted the result, the protocol was not "
+            "amended after the results were seen, a design revised after the experiment had run was confirmed by a run on data or seeds never seen "
             "after its last change, and the evidence gate, the design methodology audit and the claim check each ran "
             "and passed, the claim check on the final draft (each left a record saying so; a check that is missing, was "
             "turned off or could not judge is not a pass)."
         ),
-        "known_blind_spots": ["The review is a model's opinion (and a person's decision when one was asked for); it does not re-run anything."],
+        "known_blind_spots": ["The review is a model's opinion and the accept a person's judgement; neither re-runs anything."],
         "artifacts": ["needs/DESIGN_HISTORY.json", "paper/review.json", "needs/receipts/evidence_gate.json",
                       "needs/receipts/design_audit.json", "needs/receipts/claim_check.json"],
     },
@@ -508,9 +510,17 @@ def assess(
         )
     review = state.get("review") or {}
     fi = quest_root / ".fi"
-    if (fi / "human_review.json").is_file() and not (fi / "human_review_answer.json").is_file():
+    pending = (fi / "human_review.json").is_file() and not (fi / "human_review_answer.json").is_file()
+    if pending:
         # The review's verdict is the model's; the quest is waiting for a person to accept, reject or refine it.
-        ready_gaps.append("the review is waiting for your decision (accept, reject or refine)")
+        ready_gaps.append(_acceptance.WAITING_GAP)
+    # Who accepted it: an accept no person made (auto_accept_on_pass, or no review pause at all) is marked so and keeps
+    # the result one level below publication_ready. No record of a person counts as nobody (core/acceptance.py).
+    paper = state.get("paper_md") or quest_root / "paper" / "paper.md"
+    paper_hash = _receipts.sha256(Path(str(paper)).read_bytes()) if Path(str(paper)).is_file() else ""
+    accepted_by = _acceptance.accepted_by(state, pending=pending, paper_sha256=paper_hash)
+    if accepted_by == "automatic":
+        ready_gaps.append(_acceptance.NO_PERSON_GAP)
     if not review:
         ready_gaps.append("the paper has not been reviewed yet")
     else:
@@ -588,8 +598,6 @@ def assess(
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
     # so three checks that never ran left a quest publication-ready.
-    paper = state.get("paper_md") or quest_root / "paper" / "paper.md"
-    paper_hash = _receipts.sha256(Path(str(paper)).read_bytes()) if Path(str(paper)).is_file() else ""
     design_now = state.get("design")
     for check, name in _receipts.REQUIRED.items():
         setting = settings.get(check)
@@ -678,6 +686,20 @@ def assess(
         "ladder": ladder,
         "rigor_profile": settings.get("rigor_profile") or "default",
     }
+    kept = state.get("acceptance") if isinstance(state.get("acceptance"), dict) else {}
+    if not accepted_by and not pending and kept.get("by") in ("person", "automatic"):
+        # Accepted although the review did not accept it (its verdict is already the gap): still say who accepted.
+        accepted_by = kept["by"]
+    if accepted_by:
+        # "automatic" is the mark of a result no person reviewed before it was accepted.
+        record["accepted_by"] = accepted_by
+        if kept.get("by") == accepted_by:
+            record["acceptance"] = dict(kept)
+        elif kept.get("by") == "person":  # a person accepted another version of the paper
+            record["acceptance"] = {"by": "automatic", "via": "the paper changed after a person accepted it",
+                                    "earlier": dict(kept)}
+        else:
+            record["acceptance"] = {"by": "automatic", "via": "none recorded (no review pause asked a person)"}
     if settings.get("phased"):
         record["phased"] = {"status": settings["phased"], "strategy": settings.get("phased_strategy") or "",
                             "why_no_data": settings.get("phased_why_no_data") or ""}
@@ -815,4 +837,7 @@ def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
         return f"The evidence could not be assessed ({record['assessment_failed']}); no level is claimed."
     claim = INFO.get(status, {}).get("assurance_claim") or _NOT_EXECUTED_CLAIM
     tail = f" Next: {gaps[0]}" + (f" (+{len(gaps) - 1} more)" if len(gaps) > 1 else "") if gaps else ""
+    # The mark of an accept no person made, said on every surface even when another gap comes first.
+    if record.get("accepted_by") == "automatic" and (not gaps or gaps[0] != _acceptance.NO_PERSON_GAP):
+        tail += " Not reviewed by a person: it was accepted automatically."
     return f"{claim}{tail}"

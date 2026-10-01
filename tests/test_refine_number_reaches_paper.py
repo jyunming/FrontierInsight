@@ -107,7 +107,7 @@ def test_a_number_both_writes_leave_out_is_said_plainly_at_the_review_pause(tmp_
 
     def pause(**kw: Any) -> dict[str, str]:
         seen.update(kw)
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     eng._pause_for_human = pause  # type: ignore[method-assign]
     asyncio.run(eng._node_human_feedback(  # type: ignore[arg-type]

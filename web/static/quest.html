@@ -306,6 +306,14 @@
           <button type="button" data-action="reject" class="bg-transparent border border-error/50 text-error px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-error/10 transition-colors">Reject</button>
           <button type="button" data-action="refine" class="bg-transparent cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Refine</button>
         </div>
+        <!-- Shown when Accept is clicked: what the result does not guarantee, its gaps, and one question to answer. -->
+        <div id="hr-before-accept" class="hidden flex-col gap-2 bg-surface-low border border-white/10 rounded p-4">
+          <div class="font-label-sm text-label-sm text-outline uppercase">Before you accept</div>
+          <div id="hr-before-accept-list" class="font-body-md text-body-md text-on-surface-variant"></div>
+          <div id="hr-before-accept-question" class="font-body-md text-body-md text-on-surface"></div>
+          <div id="hr-before-accept-choices" class="flex flex-wrap gap-2"></div>
+          <div id="hr-before-accept-no" class="hidden text-error font-body-md text-body-md"></div>
+        </div>
       </form>
     </div>
     <!-- Figures -->
@@ -1591,15 +1599,64 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       histEl.classList.add('hidden'); histEl.classList.remove('flex');
       histEl.innerHTML = '';
     }
+    humanReviewBeforeAccept = snap.before_accept || null;
     const form = document.getElementById('human-review-form');
     if (form.dataset.bound !== '1') {
       form.querySelectorAll('button[data-action]').forEach(btn => {
-        btn.addEventListener('click', () => submitHumanReview(btn.dataset.action));
+        // Accept first shows what the result does not guarantee and asks one question; the answer submits it.
+        btn.addEventListener('click', () => btn.dataset.action === 'accept'
+          ? showBeforeAccept() : submitHumanReview(btn.dataset.action));
       });
       form.dataset.bound = '1';
     }
   }
-  async function submitHumanReview(action) {
+  // What the review snapshot says to show before an accept (core/acceptance.py): kept from the last render.
+  var humanReviewBeforeAccept = null;
+  const ACCEPT_QUESTION = 'Do the main numbers match what you expected?';
+  const ACCEPT_CHOICES = [
+    { id: 'yes', label: 'Yes' }, { id: 'partly', label: 'Partly' },
+    { id: 'no', label: 'No' }, { id: 'not_checked', label: 'I did not check' },
+  ];
+  function showBeforeAccept() {
+    const block = humanReviewBeforeAccept || {};
+    const box = document.getElementById('hr-before-accept');
+    box.classList.remove('hidden'); box.classList.add('flex');
+    const items = [
+      ...(block.not_guaranteed || []).map(t => `<li><b>Not guaranteed:</b> ${escapeHtml(t)}</li>`),
+      ...(block.gaps || []).map(t => `<li><b>Gap:</b> ${escapeHtml(t)}</li>`),
+    ];
+    document.getElementById('hr-before-accept-list').innerHTML =
+      (block.reached ? `<div><b>What the checks show:</b> ${escapeHtml(block.reached)}</div>` : '') +
+      (items.length ? '<ul class="list-disc list-inside">' + items.join('') + '</ul>' : '') +
+      (block.more_gaps ? `<div class="text-outline">+${escapeHtml(String(block.more_gaps))} more gap(s) in needs/EVIDENCE.json</div>` : '');
+    document.getElementById('hr-before-accept-question').innerHTML = `<b>${escapeHtml(block.question || ACCEPT_QUESTION)}</b>`;
+    const choices = document.getElementById('hr-before-accept-choices');
+    choices.innerHTML = '';
+    for (const c of (block.choices && block.choices.length ? block.choices : ACCEPT_CHOICES)) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.dataset.answer = c.id;
+      b.textContent = c.label;
+      b.className = 'bg-transparent cyber-border text-on-surface px-4 py-1 rounded-full font-label-sm text-label-sm hover:bg-surface-high transition-colors';
+      b.addEventListener('click', () => answerBeforeAccept(c.id));
+      choices.appendChild(b);
+    }
+    document.getElementById('hr-before-accept-no').classList.add('hidden');
+    box.scrollIntoView({ block: 'nearest' });
+  }
+  function answerBeforeAccept(answer) {
+    if (answer === 'no') {
+      // "No" does not accept: say so, and point at refine (or looking again).
+      const no = document.getElementById('hr-before-accept-no');
+      no.textContent = 'Then the result is not accepted. Write what is wrong in the feedback box above and click '
+        + 'Refine, or read the paper again and decide then.';
+      no.classList.remove('hidden');
+      document.getElementById('hr-feedback').focus();
+      return false;
+    }
+    return submitHumanReview('accept', answer);
+  }
+  async function submitHumanReview(action, answer) {
     // Action MUST be passed explicitly by one of the three button
     // handlers — there is no "default" action. Earlier this function
     // accepted a form-submit event and defaulted to ``accept`` when
@@ -1614,13 +1671,16 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       alert('Refine requires feedback text.');
       return false;
     }
+    if (action === 'accept' && !answer) { showBeforeAccept(); return false; }
     const res = await fetch(`/api/quests/${encodeURIComponent(questId)}/human-review`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action, feedback }),
+      body: JSON.stringify(action === 'accept' ? { action, feedback, answer } : { action, feedback }),
     });
     if (!res.ok) { alert('Submit failed: ' + await res.text()); return false; }
     document.getElementById('hr-feedback').value = '';
+    const beforeAccept = document.getElementById('hr-before-accept');
+    beforeAccept.classList.add('hidden'); beforeAccept.classList.remove('flex');
     const payload = await res.json().catch(() => ({}));
     if (payload && payload.in_process_resolved === false) {
       try {

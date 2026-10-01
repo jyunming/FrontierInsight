@@ -1,7 +1,7 @@
 ---
 title: How FI judges correctness
-sources: [core/oracle_check.py, core/engine.py, core/trial_runner.py, core/evidence.py, core/config.py]
-updated: 2026-09-30
+sources: [core/oracle_check.py, core/engine.py, core/trial_runner.py, core/evidence.py, core/acceptance.py, core/config.py]
+updated: 2026-10-01
 ---
 # How FI judges correctness
 
@@ -47,6 +47,8 @@ The evidence level says how strongly a result is backed. A result reaches **inde
 - every equation that produces the numbers is labelled in the code ([[engine-callable-simulations|Engine-callable simulations]]).
 
 For a random simulation a case is one trial, so only checks one trial shows exactly can be run by FI. A probability or a mean stays the script's own answer and keeps the quest below this level.
+
+The top level, **publication ready**, also needs a person: the review's accept is a model's opinion, so a result accepted with no person asked (`pauses.auto_accept_on_pass`, or `pauses.review: off`) is marked "not reviewed by a person" and stays one level below it. Before a person accepts they see what the result does not guarantee and its main gaps, and answer one question ([[pauses|Pauses]]). Their answer is recorded; it does not change the level.
 
 ## Oracles FI added itself
 

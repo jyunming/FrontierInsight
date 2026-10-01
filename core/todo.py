@@ -128,7 +128,9 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
     "review": (
         "Accept the paper, ask for another revision, or reject it?",
         "Read the paper and the review, then accept it or ask for a revision.",
-        ["Accept: `--accept`.", "Ask for a revision: `--refine \"<what to change>\"`.", "Reject: `--reject`."],
+        ["Accept, answering whether the main numbers match what you expected: `--accept yes`, `--accept partly` or "
+         "`--accept not-checked` (if they do not, ask for a revision instead).",
+         "Ask for a revision: `--refine \"<what to change>\"`.", "Reject: `--reject`."],
     ),
     "results": (
         "The experiment runs as a background job. Wait for it here?",

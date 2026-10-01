@@ -324,7 +324,7 @@ async def test_a_quest_paused_at_the_review_is_not_finished_until_it_is_accepted
     web = TestClient(make_app(cfg.output.output_dir)).get(f"/api/quests/{quest_id}/rerun-steps").json()
     assert web["finished"] is False and web["nodes"] == paused["nodes"]
 
-    (quest_root / ".fi" / "human_review_answer.json").write_text(json.dumps({"action": "accept"}), encoding="utf-8")
+    (quest_root / ".fi" / "human_review_answer.json").write_text(json.dumps({"action": "accept", "answer": "yes"}), encoding="utf-8")
     await asyncio.wait_for(Engine(cfg, resume_quest_id=quest_id).run(), timeout=300)
     done = await cli_map()
     assert done["finished"] is True and {n["status"] for n in done["nodes"]} == {"done", "off"}

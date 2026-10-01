@@ -86,7 +86,47 @@ interface HumanReviewRequest {
         layout_not_redrawn?: string[];
         feedback_history?: Array<{ iteration?: number; text?: string }>;
         paper_md_path?: string;
+        /** Shown before an accept (core/acceptance.py): what the result does not guarantee, its gaps, one question. */
+        before_accept?: BeforeAccept;
     };
+}
+
+interface BeforeAccept {
+    reached?: string;
+    not_guaranteed?: string[];
+    gaps?: string[];
+    more_gaps?: number;
+    question?: string;
+    choices?: Array<{ id: string; label: string }>;
+}
+
+const ACCEPT_QUESTION = "Do the main numbers match what you expected?";
+const ACCEPT_CHOICES = [
+    { id: "yes", label: "Yes" },
+    { id: "partly", label: "Partly" },
+    { id: "no", label: "No" },
+    { id: "not_checked", label: "I did not check" },
+];
+
+/** What the result does not guarantee and its gaps, as chat markdown (empty when the engine sent none). */
+export function beforeAcceptMarkdown(block: BeforeAccept | undefined): string {
+    if (!block) {
+        return "";
+    }
+    let md = "\n**Before you accept**\n\n";
+    if (block.reached) {
+        md += `- **What the checks show:** ${escapeMd(block.reached)}\n`;
+    }
+    for (const t of block.not_guaranteed || []) {
+        md += `- **Not guaranteed:** ${escapeMd(t)}\n`;
+    }
+    for (const t of block.gaps || []) {
+        md += `- **Gap:** ${escapeMd(t)}\n`;
+    }
+    if (block.more_gaps) {
+        md += `- (+${block.more_gaps} more gap(s) in \`needs/EVIDENCE.json\`)\n`;
+    }
+    return md + "\n";
 }
 
 type IncomingMessage = LmRequest | ClarifyRequest | HumanReviewRequest;
@@ -425,14 +465,64 @@ export class Bridge {
             feedback = fb.trim();
             if (!feedback) action = "accept";
         }
+        let answer = "";
+        let answerLabel = "";
+        if (action === "accept") {
+            // Before a person accepts: what the result does not guarantee, its gaps, and one question.
+            const block = snap.before_accept;
+            this.opts.progress.markdown(beforeAcceptMarkdown(block));
+            const choices = block?.choices?.length ? block.choices : ACCEPT_CHOICES;
+            const picked = await vscode.window.showQuickPick(
+                choices.map((c) => ({ label: c.label, id: c.id })),
+                { title: block?.question || ACCEPT_QUESTION, placeHolder: "Answer to accept", ignoreFocusOut: true },
+            );
+            if (!picked) {
+                this.send({ type: "human_review_cancelled", id: req.id });
+                this.opts.progress.markdown(
+                    "\n— the question before accepting was closed; nothing was accepted and the quest stops here. Decide later with `@fi /resume` (see NEXT_STEP.md in the quest folder).\n\n",
+                );
+                return;
+            }
+            if (picked.id === "no") {
+                // "No" does not accept: refine now, or stop and look again.
+                const next = await vscode.window.showQuickPick(
+                    [
+                        { label: "Refine", description: "Say what is wrong; the writing step (or the design) answers it" },
+                        { label: "Look again", description: "Stop here and read the paper again; decide later" },
+                    ],
+                    { title: "Then the result is not accepted", ignoreFocusOut: true },
+                );
+                let fb: string | undefined;
+                if (next?.label === "Refine") {
+                    fb = await vscode.window.showInputBox({
+                        title: "Refine — what is wrong?",
+                        prompt: "Your notes go to the writing step first; a point that needs a new experiment sends the quest back to the design.",
+                        ignoreFocusOut: true,
+                    });
+                }
+                if (!fb || !fb.trim()) {
+                    this.send({ type: "human_review_cancelled", id: req.id });
+                    this.opts.progress.markdown(
+                        "\n— not accepted; the quest stops here. Read the paper again, then decide with `@fi /resume` (see NEXT_STEP.md in the quest folder).\n\n",
+                    );
+                    return;
+                }
+                action = "refine";
+                feedback = fb.trim();
+            } else {
+                answer = picked.id;
+                answerLabel = picked.label;
+            }
+        }
         this.send({
             type: "human_review_response",
             id: req.id,
             action,
             feedback,
+            ...(action === "accept" ? { answer } : {}),
         });
         this.opts.progress.markdown(
-            `\n— human review: **${action}**${feedback ? " (with feedback)" : ""}; resuming…\n\n`,
+            `\n— human review: **${action}**${feedback ? " (with feedback)" : ""}${action === "accept" ? ` (${escapeMd(answerLabel)})` : ""}; resuming…\n\n`,
         );
     }
 

@@ -269,6 +269,16 @@ def test_what_keeps_a_context_from_being_complete_is_named(tmp_path: Path) -> No
     assert not ctx["complete"]
     assert "no model call recorded yet" in ctx["missing"] and "no script in code/" in ctx["missing"]
     assert ctx["policy"]["config_sha256"]
+    # A run resumed only to take a decision makes no call itself; a model answered the quest's earlier runs.
+    (tmp_path / ".fi").mkdir(exist_ok=True)
+    calls = tmp_path / ".fi" / ar.MODEL_CALLS
+    counted = {"model_call_counts": {"write": 2}}
+    calls.write_text(json.dumps({"node": "write", "outcome": "error"}) + "\n", encoding="utf-8")
+    failed = ar.context_fingerprint(cfg, tmp_path, counted, prompts={}, fi_repo=repo, kind="after_run")
+    assert "no model call recorded yet" in failed["missing"], "calls that all failed: no model has answered"
+    calls.write_text(json.dumps({"node": "write", "outcome": "ok"}) + "\n", encoding="utf-8")
+    resumed = ar.context_fingerprint(cfg, tmp_path, counted, prompts={}, fi_repo=repo, kind="after_run")
+    assert "no model call recorded yet" not in resumed["missing"]
     part = ar.context_fingerprint(cfg, tmp_path, {}, kind="in_progress", prompts={}, fi_repo=repo, partial=True,
                                   models_used={"design": {"provider": "p", "model": "m"}})
     assert any("without the quest's state" in m for m in part["missing"])

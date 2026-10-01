@@ -200,6 +200,7 @@ def _bootstrap_or_reraise(exc: ImportError) -> None:
 
 
 try:
+    from core import acceptance as _acceptance
     from core.config import Config
     from core.engine import Engine, QuestArtifacts, write_cost_summary
     from core.provider import ProxySupervisor
@@ -1339,9 +1340,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     # decision, e.g. `--resume <id> --accept`.
     review = p.add_mutually_exclusive_group()
     review.add_argument(
-        "--accept", action="store_true",
+        "--accept", nargs="?", const="", default=None, metavar="ANSWER",
         help="With --resume: accept the paused review and finalize the quest "
-             "(generate paper/poster/slides). No JSON editing needed.",
+             "(generate paper/poster/slides). No JSON editing needed. Before accepting, answer "
+             "\"Do the main numbers match what you expected?\": --accept yes, --accept partly or "
+             "--accept not-checked (--accept alone asks at a terminal; \"no\" does not accept: use --refine).",
     )
     review.add_argument(
         "--reject", action="store_true",
@@ -1983,6 +1986,44 @@ async def _cli_human_feedback_callback(
         if not feedback:
             print("  (empty feedback — falling back to accept)")
             action = "accept"
+    if action == "accept":
+        # Before a person accepts: what the result does not guarantee, its gaps, and one question (core/acceptance.py).
+        print()
+        print("  Before you accept, read what this result does not guarantee and its gaps:")
+        print("\n".join(_before_accept_text(snapshot.get("before_accept")) or ["  - (see needs/EVIDENCE.json)"]))
+        answer = _ask_accept_question()
+        if answer is None:
+            print("  (no answer — the quest stops here; NEXT_STEP.md says how to decide)")
+            print("=" * 72)
+            return {}
+        if answer == "no":
+            print(f"  {_acceptance.NOT_ACCEPTED_ON_NO}")
+            while True:
+                try:
+                    raw = input("  refine now, or look again (the quest stops) [refine/look]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    raw = "look"
+                if raw in ("refine", "r", "look", "l", "look again", "stop"):
+                    break
+                print("  please type refine or look")
+            feedback = ""
+            if raw in ("refine", "r"):
+                try:
+                    feedback = input("  what is wrong (one line): ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    feedback = ""
+            if not feedback:
+                print("  (the quest stops here; read the paper again, then decide with --resume)")
+                print("=" * 72)
+                return {}
+            print("  → refine")
+            print("=" * 72)
+            print()
+            return {"action": "refine", "feedback": feedback}
+        print(f"  → accept ({_acceptance.LABELS[answer]})")
+        print("=" * 72)
+        print()
+        return {"action": "accept", "feedback": "", "answer": answer, "via": "cli"}
     print(f"  → {action}")
     print("=" * 72)
     print()
@@ -1993,9 +2034,15 @@ def _apply_review_decision(args: argparse.Namespace, output_dir: Path) -> None:
     """When ``--resume`` is combined with ``--accept`` / ``--reject`` /
     ``--refine "..."``, write the decision into the quest's
     ``.fi/human_review_answer.json`` so the engine's human-review gate reads
-    it on resume — no hand-editing. A no-op when none of the flags is set."""
-    if getattr(args, "accept", False):
-        decision = {"action": "accept", "feedback": ""}
+    it on resume — no hand-editing. A no-op when none of the flags is set.
+
+    An accept carries the person's answer to the question asked before accepting (core/acceptance.py): given with
+    the flag (``--accept yes``), or asked at a terminal after showing what the result does not guarantee and its
+    gaps. With no terminal and no answer, or with "no", nothing is staged (exit 2) and the message says what to do."""
+    accept = getattr(args, "accept", None)
+    if accept is not None and accept is not False:
+        # The answer is settled once the guards below have passed (a refused accept asks nothing).
+        decision = {"action": "accept", "feedback": "", "answer": "" if accept is True else str(accept), "via": "cli"}
     elif getattr(args, "reject", False):
         decision = {"action": "reject", "feedback": ""}
     elif getattr(args, "refine", None) is not None:
@@ -2051,13 +2098,82 @@ def _apply_review_decision(args: argparse.Namespace, output_dir: Path) -> None:
                 file=sys.stderr,
             )
             sys.exit(2)
+    if decision["action"] == "accept":
+        decision["answer"] = _accept_answer(fi_dir, args.resume, decision["answer"])
     try:
         fi_dir.mkdir(parents=True, exist_ok=True)
         answer_path.write_text(json.dumps(decision), encoding="utf-8")
         tail = f" — {decision['feedback']}" if decision["feedback"] else ""
+        if decision["action"] == "accept":
+            tail = f" — {_acceptance.QUESTION} {_acceptance.LABELS.get(decision['answer'], decision['answer'])}"
         print(f"[FI] review decision: {decision['action']}{tail}")
     except OSError as e:
         print(f"[FI] could not write review decision: {e!r}", file=sys.stderr)
+
+
+def _stdin_is_terminal() -> bool:
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _before_accept_text(block: object) -> list[str]:
+    """What the result does not guarantee and its gaps (the review snapshot's ``before_accept``), as terminal lines."""
+    return [f"  - {line}" for line in _acceptance.lines(block if isinstance(block, dict) else None)]
+
+
+def _accept_answer(fi_dir: Path, quest_id: str, given: str) -> str:
+    """The person's answer to the question asked before accepting (core/acceptance.py): ``given`` with ``--accept``,
+    or asked at a terminal after showing what the result does not guarantee and its gaps. With no terminal and no
+    answer, or with "no", the accept is refused (exit 2) with what to do instead."""
+    answer = _acceptance.parse_answer(given)
+    if given and answer is None:
+        print(f"[FI] --accept {given!r} is not an answer to \"{_acceptance.QUESTION}\". Use --accept yes, "
+              "--accept partly or --accept not-checked.", file=sys.stderr)
+        sys.exit(2)
+    if answer is None:
+        try:
+            snapshot = json.loads((fi_dir / "human_review.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            snapshot = {}
+        shown = _before_accept_text((snapshot or {}).get("before_accept"))
+        if not _stdin_is_terminal():
+            print("\n".join([
+                "[FI] Before you accept, read what this result does not guarantee and its gaps:",
+                *(shown or ["  - (see needs/EVIDENCE.json)"]),
+                f"[FI] Then answer: {_acceptance.QUESTION}",
+                f"      --resume {quest_id} --accept yes | --accept partly | --accept not-checked",
+                f"      If they do not: --resume {quest_id} --refine \"what is wrong\", or read the paper again.",
+            ]), file=sys.stderr)
+            sys.exit(2)
+        print("Before you accept, read what this result does not guarantee and its gaps:")
+        print("\n".join(shown or ["  - (see needs/EVIDENCE.json)"]))
+        answer = _ask_accept_question()
+        if answer is None:
+            print("[FI] no answer — nothing was accepted.", file=sys.stderr)
+            sys.exit(2)
+    if answer == "no":
+        print(f"[FI] {_acceptance.NOT_ACCEPTED_ON_NO}\n      --resume {quest_id} --refine \"what is wrong\"",
+              file=sys.stderr)
+        sys.exit(2)
+    return answer
+
+
+def _ask_accept_question() -> str | None:
+    """Ask the question at the terminal until one of the answers is typed (five tries); ``None`` when nobody answers."""
+    options = " / ".join(label for _, label in _acceptance.CHOICES)
+    for _ in range(5):  # a stream of answers that are none of these is no answer, not a loop
+        try:
+            raw = input(f"  {_acceptance.QUESTION} ({options}): ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        answer = _acceptance.parse_answer(raw)
+        if answer is not None:
+            return answer
+        print(f"  please answer {options}")
+    return None
 
 
 def _is_review_pause_active(pause_path: Path) -> bool:

@@ -1,7 +1,7 @@
 ---
 title: Pauses
-sources: [core/config.py, core/engine.py, launch.py, web/server.py, web/quest_launcher.py, vscode-frontier-insight/src/bridge.ts]
-updated: 2026-09-30
+sources: [core/config.py, core/engine.py, core/acceptance.py, launch.py, web/server.py, web/quest_launcher.py, vscode-frontier-insight/src/bridge.ts]
+updated: 2026-10-01
 ---
 # Pauses
 
@@ -34,11 +34,13 @@ How to answer:
 
 A decision is accept, reject, or refine *with* notes. Anything else (a closed prompt, an empty answer file, refine with no notes) is not a decision: the quest stops cleanly and asks again on resume. It is never taken as accept. The one exception is the prompt itself: at the terminal prompt and the VS Code input box, an empty refine confirmed with Enter means accept, as the prompt says.
 
-- CLI: `--resume <id> --accept`, `--reject` or `--refine "notes"`; or `--interactive`.
+- CLI: `--resume <id> --accept yes` (or `partly` / `not-checked`), `--reject` or `--refine "notes"`; or `--interactive`.
 - Web: the review banner on the quest page.
 - VS Code: Accept / Reject / Refine in the chat, for quests on the VS Code chat model. For a quest on another provider, use the CLI or the web page.
 
-`pauses.auto_accept_on_pass: true` accepts a clean result without stopping.
+**Before you accept** (`core/acceptance.py`), every interface shows what the result does not guarantee and its most important evidence gaps (two and three at most, none twice), then asks one question: *Do the main numbers match what you expected?* — yes, partly, no, I did not check. The answer is recorded with the accept (`acceptance` in `needs/EVIDENCE.json`, a `result_accepted` event in the trace). "No" does not accept: refine with what is wrong, or look again. An accept without an answer is not a decision.
+
+`pauses.auto_accept_on_pass: true` accepts a clean result without stopping, but no person looked: the result is marked "not reviewed by a person" and stays one level below `publication_ready` ([[how-fi-judges-correctness|How FI judges correctness]]). So does a quest with `pauses.review: off`.
 
 ## Plan
 

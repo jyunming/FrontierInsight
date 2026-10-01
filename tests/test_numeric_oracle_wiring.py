@@ -320,7 +320,7 @@ def test_human_review_snapshot_carries_the_warnings(tmp_path: Path) -> None:
 
     def pause(**_kw):  # noqa: ANN003, ANN202 -- what a UI reads while the gate waits
         seen["snap"] = json.loads((tmp_path / ".fi" / "human_review.json").read_text("utf-8"))
-        return {"action": "accept"}
+        return {"action": "accept", "answer": "yes"}
 
     eng._pause_for_human = pause  # type: ignore[method-assign]
     state = {

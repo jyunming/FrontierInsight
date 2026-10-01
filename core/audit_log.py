@@ -52,6 +52,8 @@ KINDS = (
     "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
     "title_changed",      # a person changed the quest's title (core/quest_title.py): old, new, the paper's hash before and
                           # after; the only event a seal may be followed by (core/evidence.py chains the paper's hash)
+    "result_accepted",    # the result was accepted at the review pause: by a person (via which interface, the question
+                          # asked before accepting and their answer) or automatically (core/acceptance.py)
     "model_changed",      # the quest's model changed: the chat panel's model replaced the config's, or the calls of this
                           # run were answered by another model than the earlier ones (before, after, source), or the
                           # recorded model settings in config.yaml changed (changes: [{setting, label, from, to}]);
@@ -378,7 +380,7 @@ DETAILS = ("summary", "checks", "debug")
 # What each detail level shows. ``summary``: the shape of the run and every decision. ``checks``: plus each check's verdict,
 # the artifacts and the model's stated reasons. ``debug``: everything, including each node's start.
 _SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair",
-                  "quest_finalized", "title_changed", "model_changed"}
+                  "quest_finalized", "title_changed", "model_changed", "result_accepted"}
 _CHECK_KINDS = _SUMMARY_KINDS | {"check_result", "artifact_created", "model_claim"}
 
 
@@ -449,6 +451,15 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
     if kind == "model_changed":
         return (f"{where}the model changed from {e.get('before') or 'none named'} to {e.get('after', '')}"
                 + (f" ({e['source']})" if e.get("source") else ""))
+    if kind == "result_accepted":
+        via = {"cli": "the terminal", "web": "the web page", "vscode": "VS Code", "callback": "the review prompt",
+               "answer file": "a staged answer", "auto_accept_on_pass": "automatic accept of a clean review",
+               "not recorded": "no person's answer was recorded"}.get(str(e.get("via")), str(e.get("via") or "unknown"))
+        if e.get("by") == "person":
+            labels = {"yes": "yes", "partly": "partly", "no": "no", "not_checked": "did not check"}
+            answer = labels.get(str(e.get("answer")), str(e.get("answer") or "no answer"))
+            return f"{where}a person accepted the result (via {via}); asked \"{e.get('question', '')}\", they answered {answer}"
+        return f"{where}the result was accepted automatically ({via}), with no person reviewing it"
     if kind == "quest_finalized":
         lost = e.get("write_errors") or 0
         return (f"quest finished: {e.get('events_before')} events recorded"

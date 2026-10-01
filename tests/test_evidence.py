@@ -63,9 +63,13 @@ def _write_passes(root: Path, design: dict[str, Any] | None = None) -> None:
                     inputs={"paper": (root / "paper" / "paper.md").read_bytes()}, output={"claims": []})
 
 
+#: A person accepted the result at the review pause (an automatic accept stops one level below publication_ready).
+PERSON_ACCEPTED = {"by": "person", "via": "cli", "answer": "yes"}
+
+
 def _state(**over: Any) -> dict[str, Any]:
     return {"result_json": {"p": 0.3}, "exec_result": {"returncode": 0}, "design": {"hypothesis": "h", "protocol": PROTOCOL},
-            "review": ACCEPT, **over}
+            "review": ACCEPT, "acceptance": PERSON_ACCEPTED, **over}
 
 
 ON = {"protocol_check": "block", "oracle_check": "block", "numeric_warnings": "block", "run_manifest_check": "block"}

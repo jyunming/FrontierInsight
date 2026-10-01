@@ -67,6 +67,7 @@ from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
 
 from .vscode_bridge import BridgeError
+from . import acceptance as _acceptance
 from . import audit_log as _audit_log
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
@@ -416,6 +417,10 @@ class QuestState(TypedDict, total=False):
     # the user's freeform text on refine, which the design node reads
     # on the next revise loop. Pre-resume the dict is empty.
     human_feedback: dict[str, Any]
+    # Who accepted the result (core/acceptance.py): {"by": "person", "via": <interface>, "question", "answer"}
+    # or {"by": "automatic", "via": ...}. Set by ``_node_human_feedback`` on an accept, cleared on a refine; none
+    # (no review pause) counts as automatic, which keeps the evidence one level below publication_ready.
+    acceptance: dict[str, Any]
     # Cumulative refinement asks across the quest's revise iterations.
     # One entry per refine round: ``{"iteration": int, "text": str}``.
     # The design node reads ALL of these on every revise pass so a
@@ -970,6 +975,8 @@ class Engine:
                                 run_config,
                                 {
                                     "human_feedback": {"action": "refine"},
+                                    # The earlier accept was of the earlier pass: this one needs its own.
+                                    "acceptance": {},
                                     "iteration": _it + 1,
                                     "refine_written_for": _answered,
                                     "feedback_rounds_from": len((prior_snapshot.values or {}).get("feedback_history") or []),
@@ -1166,8 +1173,11 @@ class Engine:
                                     "(verdict=accept, no must_flag_hits)",
                                 )
                                 _consume_snapshot()
+                                # No person looked: recorded as automatic, which keeps the evidence one level
+                                # below publication_ready (core/acceptance.py).
                                 payload = Command(
-                                    resume={"action": "accept", "feedback": ""},
+                                    resume={"action": "accept", "feedback": "",
+                                            "acceptance": _acceptance.automatic("auto_accept_on_pass")},
                                 )
                                 continue
                             if human_feedback_callback is not None:
@@ -1185,14 +1195,16 @@ class Engine:
                                         answer = await human_feedback_callback(snap)
                                     if _review_decision(answer):
                                         _consume_snapshot()
-                                        payload = Command(resume=answer)
+                                        # A person answered: an accept carries who, how and their answer.
+                                        payload = Command(resume=_acceptance.stamp(answer, "callback"))
                                         continue
-                                    # No decision in the answer (``{}``, ``None``, a missing or unknown action):
-                                    # stop and ask again rather than guess. Resuming with ``{}`` re-fired this pause
-                                    # forever (LangGraph reads it as "resume nothing") and ``None`` crashed the run.
+                                    # No decision in the answer (``{}``, ``None``, a missing or unknown action, an
+                                    # accept without the answer to the question, or "no"): stop and ask again rather
+                                    # than guess. Resuming with ``{}`` re-fired this pause forever (LangGraph reads it
+                                    # as "resume nothing") and ``None`` crashed the run.
                                     self._log.warning(
-                                        "[run] the review answer had no decision in it (accept, reject or refine) "
-                                        "— the quest stops here; NEXT_STEP.md says how to decide",
+                                        "[run] %s — the quest stops here; NEXT_STEP.md says how to decide",
+                                        _review_answer_problem(answer),
                                     )
                                 except BridgeError as e:
                                     # The person closed the VS Code review prompt without choosing: stop and wait
@@ -1229,14 +1241,14 @@ class Engine:
                                         "(action=%s)", answer.get("action"),
                                     )
                                     _consume_snapshot()
-                                    payload = Command(resume=answer)
+                                    payload = Command(resume=_acceptance.stamp(answer, "answer file"))
                                     continue
                                 if answer is not None:
                                     # A staged answer with no decision in it is not "accept"; drop it so the next
                                     # resume does not read it again, and say why.
                                     self._log.warning(
-                                        "[run] %s has no decision in it (accept, reject or refine) — ignoring it; "
-                                        "the quest stops here", answer_path,
+                                        "[run] %s: %s — ignoring it; the quest stops here", answer_path,
+                                        _review_answer_problem(answer),
                                     )
                                     try:
                                         answer_path.unlink(missing_ok=True)
@@ -1245,7 +1257,8 @@ class Engine:
                             data_paused = True
                             self._log.info(
                                 "[FI] paused for human review. Decide with ONE command:\n"
-                                "      accept:  python launch.py --config <yaml> --resume %s --accept\n"
+                                "      accept:  python launch.py --config <yaml> --resume %s --accept yes"
+                                "   (do the main numbers match what you expected? yes / partly / not-checked)\n"
                                 "      reject:  python launch.py --config <yaml> --resume %s --reject\n"
                                 "      refine:  python launch.py --config <yaml> --resume %s --refine \"your feedback\"\n"
                                 "      (or, in the web UI / VSCode, click Accept / Reject / Refine.)",
@@ -1425,7 +1438,12 @@ class Engine:
                         data_analysis=bool(final_state.get("no_simulation_resolved")),
                     ),
                     "review": review.get("verdict"),
-                    "person": human.get("action"),
+                    # What a person decided: an accept made automatically is no person's (core/acceptance.py).
+                    "person": (None if human.get("action") == "accept"
+                               and (final_state.get("acceptance") or {}).get("by") != "person"
+                               else human.get("action")),
+                    # As the evidence record says it (no review pause, or another paper, counts as automatic).
+                    "accepted_by": (evidence_record or {}).get("accepted_by"),
                     # This run's run records (a resumed quest's earlier ones are in the file before it).
                     "run_record_ids": list(getattr(self, "_run_record_ids", [])),
                     "records_not_written": _attempts.lost(self.fi_dir),
@@ -8722,10 +8740,11 @@ class Engine:
             )
         return gaps
 
-    def _write_evidence(self, state: QuestState, *, sealing: bool = False) -> dict[str, Any] | None:
+    def _write_evidence(self, state: QuestState, *, sealing: bool = False, write: bool = True) -> dict[str, Any] | None:
         """Work out how much of the result has been checked against something other than itself
         (:mod:`core.evidence`) and keep it in ``needs/EVIDENCE.json``. Best-effort: it never touches the quest.
-        ``sealing``: the quest is finishing and seals its trace right after (the seal names this record)."""
+        ``sealing``: the quest is finishing and seals its trace right after (the seal names this record). ``write``
+        False: only work it out (what the review pause shows before an accept), writing and recording nothing."""
         try:
             missed: list[str] = []
             replicates = state.get("result_json_replicates") or []
@@ -8781,6 +8800,8 @@ class Engine:
                     **(_phased.evidence_settings(self.quest_root) if _phased.enabled(self.config) else {}),
                 },
             )
+            if not write:
+                return record
             path = self.quest_root / "needs" / "EVIDENCE.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -8790,6 +8811,8 @@ class Engine:
             return record
         except Exception as e:  # noqa: BLE001 -- a report about the quest must never stall it
             self._log.warning("[evidence] could not assess the quest: %r", e)
+            if not write:
+                return None
             # Replace any earlier record: a stale "publication_ready" from a previous pass must not outlive a failed
             # assessment of this one.
             try:
@@ -15704,6 +15727,10 @@ class Engine:
         not_redrawn = [str(n) for n in state.get("layout_not_redrawn") or [] if str(n).strip()]
         if not_redrawn:
             snapshot["layout_not_redrawn"] = not_redrawn
+        # Before a person accepts: what the result does not guarantee, its most important evidence gaps, and the one
+        # question they answer (core/acceptance.py). Worked out here, written nowhere.
+        before_accept = _acceptance.shown(self._write_evidence(state, write=False))
+        snapshot["before_accept"] = before_accept
         # Best-effort disk snapshot so a web UI / VSCode chat can render
         # the gate state without re-loading the LangGraph checkpoint.
         try:
@@ -15731,8 +15758,12 @@ class Engine:
                   for item in state.get("extend_unreported") or []),
                 "Accept, reject, or refine the paper in the panel "
                 "(Web / VSCode), or at the CLI prompt.",
+                "Before you accept, read what this result does not guarantee and its gaps: "
+                + " ".join(line if line.endswith((".", ")", "…")) else line + "." for line in _acceptance.lines(before_accept))
+                + f" Then answer: {_acceptance.QUESTION} (yes / partly / not-checked; \"no\" does not accept: "
+                "refine instead, or look again).",
                 "Headless run? "
-                f"`fi --resume {self.quest_id} --accept` (or `--reject` / "
+                f"`fi --resume {self.quest_id} --accept yes` (or `partly` / `not-checked`; or `--reject` / "
                 "`--refine \"what to change\"`).",
                 "Refine sends your notes back to the writing step first; if a point needs a new "
                 "experiment, FI goes back to the design.",
@@ -15765,7 +15796,23 @@ class Engine:
             "human_feedback": {"action": action, "feedback": feedback},
             # Told at this review; the next review tells only what the next refine could not do.
             "layout_not_redrawn": [],
+            # Who accepted it (the run loop stamps it: a person with their answer, or automatic). An accept the run
+            # loop did not stamp is recorded as automatic: nobody is recorded as having looked.
+            "acceptance": {},
         }
+        if action == "accept":
+            given = payload.get("acceptance") if isinstance(payload, dict) else None
+            acceptance = (dict(given) if isinstance(given, dict) and given.get("by") in ("person", "automatic")
+                          else _acceptance.automatic("not recorded"))
+            # Which paper was accepted: a later change to it (a re-run) is not covered by this accept.
+            try:
+                acceptance["paper_sha256"] = _receipts.sha256(Path(paper_md_path).read_bytes())
+            except OSError:
+                acceptance["paper_sha256"] = ""
+            update["acceptance"] = acceptance
+            self._audit("result_accepted", **acceptance)
+            self._log.info("[human_feedback] accepted by %s (via %s%s)", acceptance.get("by"), acceptance.get("via"),
+                           f", answer: {acceptance['answer']}" if acceptance.get("answer") else "")
         # When the user refines, bump iteration so the loop budget is
         # consumed and the design node sees an explicit "we're in a
         # revise pass" signal (same convention the verdict-driven
@@ -16968,6 +17015,13 @@ class Engine:
         re-audit's P1-2 finding). Best-effort throughout: a diagnostic that cannot be written must never stop a
         quest.
         """
+        if stage == "at the start of the run":
+            # A resumed quest (after the review pause, say) keeps the record of the environment its experiment ran
+            # on: one made after the experiment's packages were installed. A run that installs them again records
+            # it again then.
+            earlier = _read_json_or_none_path(self.quest_root / "needs" / "ENVIRONMENT.json")
+            if isinstance(earlier, dict) and str(earlier.get("recorded") or "").startswith("after installing"):
+                return
         isolated = self.config.execution.sandbox == "docker" or not (
             self.config.execution.shared_interpreter or self.config.execution.system_site_packages
         )
@@ -21235,14 +21289,24 @@ def _auto_accepts(snapshot: dict[str, Any]) -> bool:
 
 def _review_decision(answer: Any) -> bool:
     """Whether a human-review answer (from a callback or a staged answer file) carries a decision: a dict whose
-    ``action`` is accept, reject or refine (a refine with its notes). Anything else is no decision, and the quest
+    ``action`` is accept, reject or refine (a refine with its notes; an accept with the person's answer to the
+    question asked before accepting, and not "no": core/acceptance.py). Anything else is no decision, and the quest
     stops for one instead of taking it as an accept (a refine with no notes would otherwise become one)."""
+    return not _review_answer_problem(answer)
+
+
+def _review_answer_problem(answer: Any) -> str:
+    """Why a human-review answer is not a decision, in plain words ('' when it is one)."""
     if not isinstance(answer, dict):
-        return False
+        return "the review answer had no decision in it (accept, reject or refine)"
     action = str(answer.get("action") or "").strip().lower()
     if action == "refine":
-        return bool(str(answer.get("feedback") or "").strip())
-    return action in ("accept", "reject")
+        return "" if str(answer.get("feedback") or "").strip() else "the refine had no notes in it"
+    if action == "accept":
+        return _acceptance.problem(answer) or ""
+    if action == "reject":
+        return ""
+    return "the review answer had no decision in it (accept, reject or refine)"
 
 
 def _review_was_real(review: dict[str, Any] | None) -> bool:
