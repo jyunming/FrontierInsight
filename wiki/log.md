@@ -77,3 +77,10 @@ Sources: core/changelog.py, core/code_project.py, core/criteria.py, core/engine.
 Pages added: [[retrieved-text-is-data|Retrieved text is data]] (every block of retrieved text in a prompt is fenced between two markers a source cannot forge; text addressed to an AI model or hidden from a reader is flagged, recorded in the trace and run.log, and kept).
 
 Sources: core/source_text.py, core/pdf_text.py, core/knowledge.py, core/engine.py, core/summarizer.py, agents/figures_read.md.
+
+## 2026-10-01 — a data quest's confirm run; which rows belong together; isolation
+
+Pages updated: [[explore-then-confirm|Explore then confirm]] (a quest that analyses one table is confirmed on held-back rows by its own data-reading step run once more with the frozen design; the split is decided before the data is first read from the plan's `protocol.split`, the plan.md line *Rows that belong together*, or the table's columns, and a research quest asks when FI cannot tell; held back counts as unseen only in a container or, without one, encrypted with an in-memory key and a clean scan of the quest's code).
+
+Sources: core/phased.py, core/phased_data.py, core/phased_isolation.py, core/engine.py, core/evidence.py, core/disclosure.py.
+

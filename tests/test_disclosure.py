@@ -481,11 +481,12 @@ def test_a_revision_an_approved_amendment_made_is_that_amendment_s_gap_only(tmp_
     assert _changed(_ready_gaps(tmp_path))[0].startswith("the design was revised 1 time"), "the one beyond it"
 
 
-def test_a_survey_has_no_gap_and_a_data_analysis_is_not_told_to_turn_on_a_confirm_run(tmp_path: Path) -> None:
+def test_a_survey_has_no_gap_and_a_data_analysis_is_told_when_it_can_be_confirmed(tmp_path: Path) -> None:
     _history(tmp_path, "review verdict=revise (results were seen)")
     assert _changed(_ready_gaps(tmp_path, {"no_simulation_resolved": True, "survey_mode_resolved": True})) == []
     (gap,) = _changed(_ready_gaps(tmp_path, {"no_simulation_resolved": True}))
-    assert "engine.phased" not in gap and "has no confirm run" in gap
+    assert "after the data had first been analysed" in gap
+    assert "part of one table it was given can be held back" in gap and "engine.phased" in gap
 
 
 def test_the_amendment_gap_is_still_the_frozen_protocol_s(tmp_path: Path) -> None:
