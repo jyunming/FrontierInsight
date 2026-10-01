@@ -409,6 +409,8 @@ def _check_lines(c: dict[str, Any], *, markdown: bool) -> list[str]:
         rows.append(f"Expected: {c['expected_text']} — from: {c.get('reference') or 'the check does not say'}")
     if c.get("measured_text"):
         rows.append(f"Measured: {c['measured_text']} — by {c.get('measured_by_text')}")
+    elif c.get("reported"):
+        rows.append(f"Measured: {c['reported']}, which is not a finite number, so it cannot be compared")
     elif c.get("status") == "not_measured":
         rows.append("Measured: nothing (the value could not be measured)")
     elif c.get("status") == "cannot_judge":
@@ -429,13 +431,15 @@ def _check_lines(c: dict[str, Any], *, markdown: bool) -> list[str]:
                     + (f"; measure: `{c['measure']}`" if c.get("measure") else ""))
     if c.get("error"):
         rows.append(f"Error: {c['error']}" + (f" (at {c['error_at']})" if c.get("error_at") else ""))
+    rows += [f"Found: {f}" for f in c.get("found") or []]
     where = c.get("where")
     if where:
         rows.append(f"In the script: {where['file']} line {where['line']} — {where['what']}")
     out = [head]
     out += [f"- {r}" for r in rows] if markdown else [f"  {r}" for r in rows]
     if where and where.get("excerpt") and markdown:
-        out += ["", "  ```python", *(f"  {line}" for line in where["excerpt"]), "  ```"]
+        # The fence at the start of the line: the web page's renderer reads only that one as a code block.
+        out += ["", "```python", *where["excerpt"], "```"]
     return out
 
 
@@ -452,6 +456,8 @@ def card_lines(card: dict[str, Any], *, markdown: bool = True) -> list[str]:
         out += ["## Why it stopped", str(card.get("summary") or ""), ""]
         for c in checks:
             out += [*_check_lines(c, markdown=True), ""]
+        if card.get("also_found"):
+            out += ["**Also found:**", *(f"- {f}" for f in card["also_found"]), ""]
         if causes:
             out += ["## Most likely cause", *(f"{n}. {c.get('text')} {c.get('evidence') or ''}".rstrip()
                                               for n, c in enumerate(causes, 1)), ""]
@@ -470,6 +476,7 @@ def card_lines(card: dict[str, Any], *, markdown: bool = True) -> list[str]:
     out.append(str(card.get("summary") or ""))
     for c in checks:
         out += _check_lines(c, markdown=False)
+    out += [f"Also found: {f}" for f in card.get("also_found") or []]
     if causes:
         out += ["Most likely: " + causes[0].get("text", "") + " " + (causes[0].get("evidence") or "")]
         out += [f"  also: {c.get('text')}" for c in causes[1:3]]

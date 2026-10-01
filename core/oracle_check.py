@@ -86,10 +86,18 @@ def digits_for(values: list[Any], scale: Any = None) -> int:
         return digits
     for value in values:
         number = _num(value)
-        if number is None or number == 0:
+        if number is None or number == 0 or abs(number) <= target:
             continue
-        digits = max(digits, math.ceil(math.log10(abs(number) / target)) + 1 if abs(number) > target else 1)
-    return min(digits, 15)
+        # Logs subtracted, never divided: 1e300 / 1e-9 is inf (a diverging simulation still has a number to show).
+        orders = math.log10(abs(number)) - math.log10(target)
+        if not math.isfinite(orders):
+            return _MOST_DIGITS
+        digits = max(digits, math.ceil(orders) + 1)
+    return min(digits, _MOST_DIGITS)
+
+
+#: Seventeen significant digits tell any two different doubles apart.
+_MOST_DIGITS = 17
 
 
 def fmt_digits(value: Any, digits: int = 6) -> str:
@@ -101,12 +109,11 @@ def fmt_digits(value: Any, digits: int = 6) -> str:
 
 
 def fmt_pair(value: Any, expected: Any, limit: Any) -> tuple[str, str]:
-    """A measured value and its expected value, each to enough significant digits that their difference is visible at
-    the scale of the tolerance (``limit``) or of the gap, whichever is smaller."""
+    """A measured value and its expected value, each to enough significant digits that the gap between them shows (at
+    the scale of the tolerance when they are equal)."""
     v, e, lim = _num(value), _num(expected), _num(limit)
     gap = abs(v - e) if v is not None and e is not None else None
-    scale = min(x for x in (gap, lim) if x is not None and x > 0) if any(
-        x is not None and x > 0 for x in (gap, lim)) else None
+    scale = gap if gap else lim
     digits = digits_for([v, e], scale)
     return fmt_digits(value, digits), fmt_digits(expected, digits)
 
@@ -930,7 +937,10 @@ def problems(oracles: list[dict[str, Any]], reported: dict[str, Any] | None, ret
                 # Who measured it (FI, by running the simulation on the check's case, or the script itself): a person
                 # told "the script measured" goes to change the script's oracle(), which FI never read.
                 by_fi = bool(reported.get("engine_measured")) and check.get("measured_by") == "engine"
-                shown, shown_expected = fmt_pair(value, expected, limit)
+                try:
+                    shown, shown_expected = fmt_pair(value, expected, limit)
+                except (OverflowError, ValueError):  # showing a number must never stop the check that judges it
+                    shown, shown_expected = _fmt(value), _fmt(expected)
                 out.append(
                     f"the oracle {name!r} failed: {'FI measured' if by_fi else 'the script measured'} {shown}, the "
                     f"protocol expects {shown_expected} within {_fmt(limit)} ({mode} tolerance "
@@ -1093,5 +1103,7 @@ def _shell_safe(text: str) -> str:
     ends a string on become ``'``, ``!`` (bash history) becomes ``.``, ``$``, backticks and backslashes are dropped, and
     line breaks become spaces."""
     text = re.sub(r'["“”„‟]', "'", text).replace("!", ".")
+    # cmd.exe expands %NAME% even inside double quotes.
+    text = re.sub(r"\s*%", " percent", text)
     text = re.sub(r"[$`\\]", "", text)
     return re.sub(r"\s+", " ", text).strip()

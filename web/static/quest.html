@@ -662,7 +662,8 @@
     box.innerHTML = '';
     for (const a of actions) {
       let run = null;
-      if (a.id === 'resume') run = () => resumeQuest();
+      // "Let FI try again" resumes where the quest stopped, never from a step left chosen in the Redo menu.
+      if (a.id === 'resume') run = () => { const sel = document.getElementById('rerun-from'); if (sel) sel.value = ''; resumeQuest(); };
       else if ((a.id === 'revise_check' || a.id === 'accept_proposal') && a.prefill) run = () => fillPlanRequest(a.prefill);
       else if (a.id === 'go_on_recorded' && a.web === 'Update settings') run = () => document.getElementById('update-link').click();
       if (!run) continue;

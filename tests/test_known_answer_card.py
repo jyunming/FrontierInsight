@@ -157,9 +157,8 @@ def test_enough_digits_are_shown_to_see_a_gap_the_tolerance_cares_about() -> Non
     oracle = {"name": "y1", "expected": 0.3678794641, "tolerance": 1e-12}
     found = oc.problems([oracle], {"checks": [{"name": "y1", "value": 0.36787977}]}, 0)[0]
     # At six digits both read 0.367879/0.36788: they look the same, and the gap is 3e-7 against a tolerance of 1e-12.
-    assert "measured 0.36787977, the protocol expects 0.3678794641" in found
-    shown, expected = oc.fmt_pair(0.36787977, 0.3678794641, 1e-12)
-    assert shown != expected and len(expected.replace("0.", "")) >= 10
+    assert "measured 0.36787977, the protocol expects 0.36787946" in found
+    assert oc.fmt_pair(0.36787977, 0.3678794641, 1e-12) == ("0.36787977", "0.36787946")
     # A plain gap keeps the short form a person is used to.
     assert oc.fmt_pair(0.5, 1.0, 0.05) == ("0.5", "1")
 
@@ -255,6 +254,119 @@ def test_after_the_freeze_an_interview_quest_is_told_to_approve_the_setting_with
     research = _rk4_card(tmp_path / "c", frozen=True, research=True)
     text = json.dumps(research)
     assert "oracle_check: warn" not in text and "start a new quest" in text
+    # Before the freeze a research quest may still change the check through the plan, and is never offered warn.
+    open_research = _rk4_card(tmp_path / "d", research=True)
+    assert [a["id"] for a in open_research["actions"]] == ["resume", "edit", "revise_check"]
+    assert "oracle_check: warn" not in json.dumps(open_research) and "--revise-plan" in open_research["notes"][0]
+
+
+def test_resume_says_what_it_really_does_for_a_check_with_no_numbers(tmp_path: Path) -> None:
+    """The gate sends a check with no numbers to the plan, not to a repair of the script, and after the freeze asks
+    nobody: there a resume would only stop again, so it is not offered."""
+    root, script = _quest(tmp_path)
+    blank = {"name": "blank", "check": "a check with no numbers"}
+    found = oc.unjudgeable([blank])
+    card = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=found, oracles=[blank],
+                             attempts=[{"problems": found}])
+    assert card["checks"][0]["status"] == "cannot_judge" and "cannot judge" in card["summary"]
+    resume, edit = card["actions"][:2]
+    assert "asks the plan to give the check its numbers" in resume["detail"] and "repairs the script" not in resume["detail"]
+    assert "plan.md" in edit["detail"] and "Change the simulation" not in edit["detail"]
+    assert any("fixes no numeric `expected`" in f for f in card["checks"][0]["found"])
+    frozen = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=found, oracles=[blank],
+                               attempts=[{"problems": found}], frozen=True)
+    assert "resume" not in [a["id"] for a in frozen["actions"]]
+    none = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=oc.problems([], None, 0), oracles=[])
+    assert "asks the plan to add a known-answer check" in none["actions"][0]["detail"]
+    assert none["actions"][2]["prefill"].startswith("Add a known-answer check")
+
+
+# --- what the review of this card found -------------------------------------------------------------------------------------
+
+
+def test_a_diverging_value_is_judged_as_before_and_shown_without_an_error() -> None:
+    """1e300 against a tolerance of 1e-9: dividing the two is inf, and showing the number must not stop the check."""
+    oracle = {"name": "x", "expected": 1.0, "tolerance": 1e-9}
+    found = oc.problems([oracle], {"checks": [{"name": "x", "value": 1e300}]}, 0)
+    assert len(found) == 1 and found[0].startswith("the oracle 'x' failed: the script measured 1")
+    assert oc.fmt_pair(1.7e308, 0.0, 1e-3)[0].startswith("1.7")
+    assert oc.fmt_pair(1e200, 1.0, 1e-200)[0].startswith("1")
+    # Seventeen digits tell two neighbouring doubles apart.
+    assert len(set(oc.fmt_pair(1.0000000000000002, 1.0, 1e-20))) == 2
+
+
+def test_a_value_that_is_not_a_number_and_what_names_no_check_stay_on_the_card(tmp_path: Path) -> None:
+    root, script = _quest(tmp_path)
+    a = {"name": "a", "expected": 1.0, "tolerance": 0.1}
+    b = {"name": "b", "expected": 1.0, "tolerance": 0.1}
+    reported = {"checks": [{"name": "a", "value": float("nan")}, {"name": "b", "value": 1.0, "passed": False}]}
+    found = oc.problems([a, b], reported, 0)
+    card = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=found, oracles=[a, b],
+                             judged=oc.judged([a, b], reported), attempts=[{"problems": found, "checks": reported["checks"]}])
+    (check,) = card["checks"]
+    assert check["id"] == "a" and check["reported"] == "nan"
+    assert any("reports the check as failed itself" in f and "'b'" in f for f in card["also_found"])
+    text = "\n".join(todo.card_lines(card, markdown=False))
+    assert "Measured: nan, which is not a finite number" in text and "Also found:" in text
+
+
+def test_the_place_of_an_error_is_the_quests_code_never_a_library_and_survives_the_cut() -> None:
+    from core import trial_runner
+
+    root = "/home/u/code/fi/outputs/q1"
+    tb = ('Traceback (most recent call last):\n'
+          f'  File "{root}/code/simulate.py", line 21, in run_cell\n    x = np.linalg.solve(a, b)\n'
+          f'  File "{root}/.venv/lib/python3.11/site-packages/numpy/linalg/linalg.py", line 409, in solve\n'
+          'numpy.linalg.LinAlgError: Singular matrix\n')
+    assert trial_runner.last_frame(tb, root) == "code/simulate.py line 21"
+    assert trial_runner.last_frame(tb, None) == "code/simulate.py line 21"
+    windows = tb.replace("/home/u", "C:\\Users\\u").replace("/", "\\")
+    assert trial_runner.last_frame(windows, "c:/Users/u/code/fi/outputs/q1") == "code/simulate.py line 21"
+    long = "KeyError: " + "x" * 400 + " (at code/simulate.py line 12)"
+    clipped = trial_runner.clip_keeping_place(long, 300)
+    assert len(clipped) == 300 and clipped.endswith("(at code/simulate.py line 12)")
+    assert oracle_card.last_error("…its case (" + clipped + ")").startswith("KeyError: xxx")
+
+
+def test_a_real_crash_on_a_checks_case_names_its_line_on_the_card(tmp_path: Path) -> None:
+    """The whole path: the harness's traceback, the trial runner's reason, the gate's sentence, the card."""
+    import asyncio
+    import sys
+
+    from core import trial_runner
+    from core.execution import SharedInterpreterExecutor
+
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    script = root / "code" / "simulate.py"
+    script.write_text('import os\n\n\ndef run_cell(cell):\n    raw = os.environ["FI_NOT_THERE"]\n    return {"err": 1.0}\n',
+                      encoding="utf-8")
+    oracle = {"name": "r0_threshold", "expected": 0.0, "tolerance": 1e-3, "case": {"beta": 0.2}, "measure": "err"}
+    checks, problems, _ = asyncio.run(trial_runner.measure_oracles(
+        SharedInterpreterExecutor(python_version=f"{sys.version_info[0]}.{sys.version_info[1]}"), sys.executable, root,
+        "code/simulate.py", [oracle], timeout_s=120))
+    assert checks == [] and "(at code/simulate.py line 5)" in problems[0], problems
+    reported = {"checks": checks, "engine_measured": True}
+    found = oc.with_run_problems(problems, oc.problems([oracle], reported, 0), [oracle])
+    card = oracle_card.build(quest_id="q-1", quest_root=root, script=script, found=found, oracles=[oracle],
+                             judged=oc.judged([oracle], reported), attempts=[{"problems": found}], trial=True)
+    (check,) = card["checks"]
+    assert check["error"] == "KeyError: 'FI_NOT_THERE'" and check["error_at"] == "code/simulate.py line 5"
+    edit = next(a for a in card["actions"] if a["id"] == "edit")
+    assert edit["file"] == "code/simulate.py" and edit["line"] == 5
+
+
+def test_the_web_page_renders_the_cards_excerpt_as_a_code_block(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not here")
+    markdown = "\n".join(todo.card_lines(_rk4_card(tmp_path)))
+    script = ("global.window = {}; require(process.argv[1]); const src = require('fs').readFileSync(0, 'utf8');"
+              "process.stdout.write(window.fi_renderMarkdown(src));")
+    done = subprocess.run([node, "-e", script, str(ROOT / "web" / "static" / "md_lite.js")], input=markdown,
+                          capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert '<pre><code class="lang-python">' in done.stdout and "```" not in done.stdout
 
 
 # --- the stop itself: pause.json carries the card for the web page and VS Code ----------------------------------------------
@@ -277,7 +389,9 @@ def _paused(tmp_path: Path) -> Engine:
     engine._trial_mode = True
     reported = {"checks": [{"name": RK4["name"], "value": 3.33241e-07, "measured_by": "engine"}], "engine_measured": True}
     found = oc.problems([RK4], reported, 0)
-    with pytest.raises(BaseException):  # the pause interrupts; outside a graph that raises
+    # The pause ends in LangGraph's interrupt(), which outside a running graph raises RuntimeError: reaching it means
+    # everything before it (the card, NEXT_STEP.md, pause.json) was written without an error of its own.
+    with pytest.raises(RuntimeError):
         engine._pause_for_oracle(found, script, [], _judged(3.33241e-07), [RK4],
                                  attempts=[{"problems": found, "checks": reported["checks"], "judged": _judged(3.33241e-07)}])
     return engine

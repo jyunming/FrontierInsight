@@ -39,7 +39,7 @@ A failing check asks the model to repair the script, up to `engine.oracle_repair
 
 ## What you see when the checks stop the quest
 
-Every screen calls an oracle a **known-answer check**. When the checks stop the quest, FI builds one card (`core/oracle_card.py`). The terminal, `NEXT_STEP.md`, the web quest page and the VS Code chat all show it, from the one copy kept in `.fi/pause.json`. For each check that did not pass, the card shows:
+Every screen calls an oracle a **known-answer check**. When the checks stop the quest, FI builds one card (`core/oracle_card.py`). The terminal, `NEXT_STEP.md`, the web quest page and the VS Code chat all show it, from one payload kept in `.fi/pause.json` and `.fi/todo.json`. For each check that did not pass, the card shows:
 
 - what it checks, and its kind;
 - the expected value and where it comes from;
@@ -48,7 +48,7 @@ Every screen calls an oracle a **known-answer check**. When the checks stop the 
 - the case and the measure;
 - the file and line where the script computes the number.
 
-Then the card gives the most likely cause, using only what FI already has: a repair's proposal and its reason, the test run's size verdict, two checks under one name, or the error and line when nothing was measured. It also lists what FI tried and two or three ways on, each with its command. Resuming repairs the script again, up to `engine.oracle_repair_attempts` times. A change to the check is filled in as a request to work the expected value out again from its source; it never takes the measured value. The card reports the verdict and never changes it. (A check that names no source for its expected value stops earlier, at the plan, with its own "go on as it is": [[oracle-provenance|Oracle provenance]].)
+Then the card gives the most likely cause, using only what FI already has: a repair's proposal and its reason, the test run's size verdict, two checks under one name, or the error and line when nothing was measured. It also lists what FI tried and two or three ways on, each with its command. Resuming repairs the script again, up to `engine.oracle_repair_attempts` times; a check with no numbers is sent back to the plan instead. A change to the check is filled in as a request to work the expected value out again from its source; it never takes the measured value. The card reports the verdict and never changes it. (A check that names no source for its expected value stops earlier, at the plan, with its own "go on as it is": [[oracle-provenance|Oracle provenance]].)
 
 ## What counts as independent evidence
 

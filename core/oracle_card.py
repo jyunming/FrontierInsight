@@ -308,6 +308,10 @@ def build(
             "where": locate(script, quest_root, oracle, trial=trial),
             "problems": problems,
         }
+        raw = (reported_by_name.get(key) or {}).get("value")
+        if value is None and raw is not None:
+            # A value was reported but is not a finite number (nan, inf, text): say what it was, not "nothing".
+            check["reported"] = _short(repr(raw), 60)
         if status == "not_measured":
             text = "; ".join(problems) or run_text
             error = last_error(text)
@@ -363,10 +367,17 @@ def build(
                       else "")
                    + ".")
 
+    for c in checks:
+        # What the gate found about a check that has no measured number, in its own words (the numbers of a failed
+        # check are on the card already).
+        c["found"] = [_plain(p) for p in c.get("problems") or []] if c["status"] != "failed" else []
     return {
         "type": TYPE,
         "summary": summary,
         "checks": checks,
+        # What the gate found that is about no check listed above: a passing check the script reports as failed itself,
+        # a non-zero exit. Nothing the record says is left off the card.
+        "also_found": [_plain(f) for f in found if not any(repr(c["id"]) in f for c in checks)] if checks else [],
         "causes": causes,
         "tried": _tried(attempts, kept=kept, script=script),
         "actions": _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
@@ -383,14 +394,18 @@ def build(
 def _entries(script: Path) -> set[str]:
     from .trial_runner import entries
 
-    return entries(Path(script))
+    try:
+        return entries(Path(script))
+    except ValueError:  # a script that is not UTF-8 text: the card names run_cell
+        return set()
 
 
 def _same_each_time(attempts: list[dict[str, Any]], error: str) -> str:
     """A sentence when every attempt stopped on the same error, so the repairs did not change it."""
     errors = [last_error("; ".join(a.get("problems") or [])) for a in attempts]
-    if len(attempts) >= 2 and error and all(e == error for e in errors):
-        return f"; the same error came back after each of FI's {len(attempts) - 1} repair(s)"
+    applied = sum(1 for a in attempts if a.get("repair") == "applied")
+    if applied and len(attempts) >= 2 and error and all(e == error for e in errors):
+        return f"; the same error came back after each of FI's {applied} repair(s) that changed the script"
     return ""
 
 
@@ -457,7 +472,7 @@ def _plain(sentence: str) -> str:
 
 def _tried(attempts: list[dict[str, Any]], *, kept: str | None, script: Path) -> list[str]:
     out: list[str] = []
-    if attempts and attempts[0].get("test_run_mismatches"):
+    if any(a.get("test_run_mismatches") for a in attempts):
         out.append("Before any repair, FI asked the plan once to look at the checks' definitions (the numbers of a "
                    "test run did not fit them).")
     asked_plan = sum(1 for a in attempts[:-1] if any("declares no oracle" in p or "cannot judge it" in p
@@ -525,27 +540,35 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
     resume_cli = f"python launch.py --resume {quest_id}"
     actions: list[dict[str, Any]] = []
     nothing_measured = bool(checks) and all(c["status"] == "not_measured" for c in checks)
+    # A check with no numbers (or no check at all) is the plan's to complete: the gate asks the plan, not a repair of
+    # the script, and after the freeze it asks nobody (Engine._oracle_gate).
+    plan_incomplete = not oracles or any(c["status"] == "cannot_judge" for c in checks)
     # 1. Resume as it is. Each resume gives the gate a fresh budget; the repair's earlier view that a check is wrong is
-    # not carried into it, so say both.
-    if not oracles and not frozen:
-        again = f"FI asks the plan for a known-answer check again (up to {repairs} time(s)) and checks the script with it."
+    # not carried into it, so say both. After the freeze an incomplete plan stops here again: no such action then.
+    if plan_incomplete and not frozen:
+        again = (f"FI asks the plan to {'add a known-answer check' if not oracles else 'give the check its numbers'} "
+                 f"(up to {repairs} time(s)) and then checks the script with it.")
     else:
         again = (f"FI measures the checks again and, if one still does not pass, repairs the script up to {repairs} "
                  "more time(s).")
     if kept:
         again += (" The repair's earlier view that the check is wrong is not carried over, so a new repair may change "
                   "the script towards the declared value: read the reason above first.")
-    actions.append({"id": "resume", "label": "Let FI try again", "detail": "Resume as it is: " + again,
-                    "cli": resume_cli, "web": "Resume", "vscode": f"@fi /resume {quest_id}"})
+    if not (plan_incomplete and frozen):
+        actions.append({"id": "resume", "label": "Let FI try again", "detail": "Resume as it is: " + again,
+                        "cli": resume_cli, "web": "Resume", "vscode": f"@fi /resume {quest_id}"})
     # 2. Fix it yourself: the script at the line that computes the number, or the check in plan.md (before the freeze).
     where = next((c.get("where") for c in checks if c.get("where")), None)
     error_at = next((c.get("error_at") for c in checks if c.get("error_at")), "")
     target = error_at or (f"{where['file']} line {where['line']}" if where else _rel(script, quest_root))
     plan_part = "" if frozen else ", or the check in plan.md (the `oracles` list of the protocol)"
-    if not oracles:
-        detail = ("Add a known-answer check to plan.md yourself (the `oracles` list of the protocol: what it checks, "
-                  "its expected value, tolerance and where the value comes from), then resume." if not frozen else
-                  "The protocol is frozen, so a check can be added only through an amendment approved at the review.")
+    if plan_incomplete:
+        what = ("add a known-answer check" if not oracles else
+                "give each check listed above a numeric expected value and tolerance")
+        detail = (f"In plan.md (the `oracles` list of the protocol), {what}, with where the value comes from, then "
+                  "resume." if not frozen else
+                  "The protocol is frozen, so a check can be added or completed only through an amendment approved "
+                  "at the review.")
     else:
         detail = (f"Change the simulation at {target}{plan_part}, then resume: the checks run again before anything "
                   "else.")

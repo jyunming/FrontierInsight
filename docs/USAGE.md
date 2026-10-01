@@ -229,7 +229,7 @@ Check "RK4 global error at t=1 with step 0.1" (rk4_closed_form_h01, a special or
 
 First decide which one is wrong. Here the measured error is about 20 times the expected one, so before changing the simulation, work out the constant C in that derivation again. In the real quest this example comes from, the derivation was wrong and the simulation was right. The ways on are:
 
-- **Let FI try again:** resume (`fi --resume <quest_id>`, **Resume**, or `@fi /resume <quest_id>`). FI measures the checks again and repairs the script up to `engine.oracle_repair_attempts` more times (2 by default). Choose this when the simulation is what is wrong.
+- **Let FI try again:** resume (`fi --resume <quest_id>`, **Resume**, or `@fi /resume <quest_id>`). FI measures the checks again and repairs the script up to `engine.oracle_repair_attempts` more times (2 by default). Choose this when the simulation is what is wrong. When a check has no numbers to compare with, FI asks the plan for them instead. After the protocol is frozen, that would only stop here again, so the card does not offer it.
 - **Fix it yourself:** change the script at the line the card names, or the check in `plan.md`, then resume.
 - **Have the check worked out again:** the card fills in a `--revise-plan` request for you that asks the plan to work out the expected value again from its own source (the quest page's button puts it in the Plan box; in VS Code it goes in the chat box as `@fi /plan <quest_id> ...`). Read it, send it, then resume. FI never puts the measured value in as the new expected value. When FI's repair already proposed a corrected value, the card shows its reason and offers that change instead. Check the reason, not just whether the measured value would then pass.
 

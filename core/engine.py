@@ -1133,7 +1133,6 @@ class Engine:
                                 "(or ask for a change with `--revise-plan`), "
                                 "then run `fi --resume %s`",
                                 "run's numeric warnings" if intr_value.get("numeric_stage")
-                                else "oracle checks" if intr_value.get("oracle_stage")
                                 else "protocol" if intr_value.get("protocol_stage")
                                 else "checks FI added to the plan" if intr_value.get("oracles_added") else "plan",
                                 intr_value.get("plan_file", "plan.md"),
@@ -10729,7 +10728,11 @@ class Engine:
             headline=headline,
             # What each check found, as the record says it; the card above is what a person reads.
             steps=["The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + "."],
-            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"][1:]] if card else None,
+            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"][1:]] if card else (
+                # Without a card, what holds after the freeze (the plan no longer changes a check from here).
+                ["Set `engine.oracle_check: warn` and go on: the failure is recorded, and the check can be changed "
+                 "later through an amendment approved at the review."] if frozen and not research else
+                [_todo.research_instead("oracle", frozen=True)] if frozen else None),
             card=card,
             payload={
                 "oracle_stage": True, "quest_id": self.quest_id, "problems": found,

@@ -735,11 +735,26 @@ def last_frame(traceback_text: str, quest_root: Path | str | None = None) -> str
     found = ""
     for match in _FRAME_RE.finditer(traceback_text or ""):
         path = match.group(1).replace("\\", "/")
-        if "/code/" not in f"/{path}" and not path.startswith("code/"):
+        if root and path.casefold().startswith(root.casefold()):
+            rel = path[len(root):]  # the quest's own folder: what is under it, never the folders above it
+        elif "/code/" in path:
+            rel = path[path.rfind("/code/") + 1:]
+        else:
+            rel = path
+        # A library's frame (the quest's venv, site-packages) is not the place a person fixes.
+        if not rel.startswith("code/") or "site-packages" in rel or "/.venv/" in f"/{rel}":
             continue
-        rel = path[len(root):] if root and path.startswith(root) else path[path.rfind("/code/") + 1:] if "/code/" in path else path
         found = f"{rel} line {match.group(2)}"
     return found
+
+
+def clip_keeping_place(text: str, most: int) -> str:
+    """``text`` cut to ``most`` characters, keeping a trailing ``(at <file> line <n>)``: the place is what a person
+    opens, so it is the last thing to lose."""
+    tail = re.search(r" \(at [^()]+ line \d+\)$", text or "")
+    if not tail or len(text) <= most:
+        return (text or "")[:most]
+    return text[: max(0, most - len(tail.group(0)))] + tail.group(0)
 
 
 async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, timeout_s: int,
@@ -843,7 +858,8 @@ async def measure_oracles(executor: Any, python: Path | str, quest_root: Path, m
         values, why = await run_case(executor, python, quest_root, module, cell=case, timeout_s=timeout_s, env=cenv,
                                      thresholds=thresholds)
         if values is None:
-            problems.append(f"the oracle {name!r}: the simulation could not be run on its case ({why[:300]})")
+            problems.append(f"the oracle {name!r}: the simulation could not be run on its case "
+                            f"({clip_keeping_place(why, 300)})")
             timed_out = timed_out or "ran out of time" in why
             continue
         if measure in values:  # one returned name, as every oracle was before formulas: read as it is
