@@ -337,7 +337,7 @@ def _invisible_pdf(path: Path) -> Path:
     """A page with an invisible sentence on the bare page, and an invisible layer over an image (what a scan's
     searchable text looks like)."""
     from PIL import Image
-    from reportlab.pdfgen import canvas
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")  # builds the test PDF; not a dependency of FI
 
     image = path.with_suffix(".png")
     Image.new("RGB", (400, 100), (120, 120, 120)).save(image)
@@ -373,7 +373,7 @@ def test_invisible_text_counts_unless_it_lies_over_an_image(tmp_path: Path, monk
 
 def _outline_pdf(path: Path) -> Path:
     """Text a reader sees by its outline (white fill, black stroke), and white text on a near-white page-sized box."""
-    from reportlab.pdfgen import canvas
+    canvas = pytest.importorskip("reportlab.pdfgen.canvas")  # builds the test PDF; not a dependency of FI
 
     c = canvas.Canvas(str(path))
     c.setFillColorRGB(0.98, 0.98, 0.98)
