@@ -27,6 +27,12 @@ correct. Each graded run lists those faults, and most fixes to FI's checks began
 - **The rubric changed.** Every change is dated in [rubric.md](rubric.md); every run in `scores.md` is re-scored on the
   rubric now in force.
 
+## The self-benchmark
+
+The grades here are by hand, on one topic. The self-benchmark ([`../bench/README.md`](../bench/README.md),
+`fi tools bench`) is the programmatic counterpart: tasks with known answers, errors planted on purpose, and how often
+FI would still publish a wrong result. Its report is written here as `self_benchmark.md` and `self_benchmark.json`.
+
 ## Adding a run
 
 Grade it by [rubric.md](rubric.md), add a row to [scores.md](scores.md) with the FI build it ran on, and list the FI

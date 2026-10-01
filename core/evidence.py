@@ -40,6 +40,7 @@ from . import optimise as _optimise
 from . import optimum_check as _optimum_check
 from . import oracle_check as _oracle_check
 from . import receipts as _receipts
+from . import rerun_from as _rerun_from
 from . import run_manifest as _run_manifest
 
 LEVELS = (
@@ -516,7 +517,8 @@ def assess(
         ready_gaps.append(_acceptance.WAITING_GAP)
     # Who accepted it: an accept no person made (auto_accept_on_pass, or no review pause at all) is marked so and keeps
     # the result one level below publication_ready. No record of a person counts as nobody (core/acceptance.py).
-    paper = state.get("paper_md") or quest_root / "paper" / "paper.md"
+    # This quest's own paper, also when the folder was copied or moved after the paper was written.
+    paper = _rerun_from.in_quest(state.get("paper_md"), quest_root) or quest_root / "paper" / "paper.md"
     paper_hash = _receipts.sha256(Path(str(paper)).read_bytes()) if Path(str(paper)).is_file() else ""
     accepted_by = _acceptance.accepted_by(state, pending=pending, paper_sha256=paper_hash)
     if accepted_by == "automatic":

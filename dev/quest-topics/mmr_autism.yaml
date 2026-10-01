@@ -1,0 +1,52 @@
+# General-science test topic (medicine, a literature review). The one review among the test topics: its answer is a
+# settled conclusion, and one of the field's best-known papers on it was retracted, so a run can be checked for what it
+# cites as well as for what it concludes. Run: python launch.py --config dev/quest-topics/mmr_autism.yaml
+topic: |
+  TOPIC. Is MMR (measles, mumps and rubella) vaccination associated with autism?
+
+  CONTEXT. The question became public in 1998 through a case series of twelve children; that paper was later retracted. Large population studies have since compared vaccinated and unvaccinated children directly.
+  SCOPE. Review the published evidence: cohort studies, case-control studies and meta-analyses that compare the rate of autism in children who did and did not receive MMR. Say what each study design can and cannot show, how large each study was, and whether any study supports an association. Check every cited source for a retraction and do not rest any claim on a retracted paper.
+
+  GOALS.
+    - A literature review, no simulation: what the strongest studies found, and the conclusion they support.
+    - One table of the main studies (design, size, result).
+    - A short paper of at most 4 pages. Cite only sources you have actually found and read; if a reference cannot be confirmed, say so rather than citing it.
+  CONSTRAINTS.
+    - Prefer open-access sources; name any study you could not read in full.
+    - Report each study's effect with its uncertainty as the study gives it.
+
+title: mmr-autism-review
+
+result_use: research
+
+# The only thing to set before you run this: which model answers (see docs/PROVIDERS.md).
+provider:
+  name: openai
+
+engine:
+  framework: langgraph
+  max_iterations: 2
+  review_loop: true
+  survey_mode: true
+
+execution:
+  sandbox: venv
+  timeout_s: 900
+  python_version: "3.11"
+
+knowledge:
+  enabled: true
+  top_k: 8
+  # Repeat runs of a test topic must stay independent, so a finished run is not written back for the next one to copy.
+  write_back_quests: false
+
+pauses:
+  papers: false
+  review: "off"
+
+output:
+  kinds:
+    - paper_md
+    - paper_pdf
+  paper_format: generic
+  output_dir: ./outputs

@@ -1,0 +1,23 @@
+{
+  "schema": "fi.bench.answer/v1",
+  "task": "Q11",
+  "title": "MMR vaccination and autism: a literature review",
+  "config": "dev/quest-topics/mmr_autism.yaml",
+  "kind": "literature",
+  "ask": "BENCHMARK. State in one sentence whether MMR vaccination is associated with autism, and cite each study that sentence rests on.",
+  "answers": [],
+  "structural": {
+    "must_not_cite": [
+      {"doi": "10.1016/S0140-6736(97)11096-0", "title": "Wakefield et al. 1998, The Lancet; retracted in 2010 (Crossref, Retraction Watch)"}
+    ],
+    "must_find": [
+      {"doi": "10.1056/NEJMoa021134", "title": "Madsen et al. 2002, N Engl J Med: a population-based cohort of 537,303 children"},
+      {"doi": "10.7326/M18-2101", "title": "Hviid et al. 2019, Ann Intern Med: a nationwide cohort of 657,461 children"},
+      {"doi": "10.1016/j.vaccine.2014.04.085", "title": "Taylor et al. 2014, Vaccine: a meta-analysis of case-control and cohort studies"}
+    ],
+    "min_recall": 0.67,
+    "min_supported_share": 0.8,
+    "notes": "Scored on structure only: the retracted paper is not cited, the studies the conclusion rests on were found, and most claims are grounded. Whether each must-find study is free to read is not yet confirmed one by one; the direction of the conclusion is judged by a person, not by this file."
+  },
+  "errors": ["R1", "R2", "L1"]
+}

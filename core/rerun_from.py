@@ -172,6 +172,28 @@ OUTPUTS: dict[str, list[str]] = {
 LEADS_INTO: dict[str, str] = {"ideas": "clarify", "literature": "ideate", "plan": "select_skills", "design": "plan"}
 
 
+def in_quest(path: Any, quest_root: Path) -> str:
+    """``path`` as it is in ``quest_root``: a quest folder that was copied or moved keeps the absolute paths of its old
+    folder in its checkpoints (the paper's path, written by the writing step), so a rerun from a later step would read
+    and judge the OLD folder's paper. A path inside a folder named like this quest, but not this one, is taken to the
+    same place in this one; any other path is returned as it is."""
+    text = str(path or "")
+    if not text:
+        return text
+    p = Path(text)
+    root = Path(quest_root)
+    try:
+        p.relative_to(root)
+        return text
+    except ValueError:
+        pass
+    parts = p.parts
+    if root.name in parts:
+        at = len(parts) - 1 - parts[::-1].index(root.name)
+        return str(root.joinpath(*parts[at + 1:]))
+    return text
+
+
 def resolve(name: str) -> str | None:
     """The plain step name ``name`` stands for, or ``None`` when it names no step that can be rerun from."""
     key = (name or "").strip().lower()

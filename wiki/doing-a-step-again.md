@@ -12,6 +12,7 @@ Steps, in order: ideas, literature, plan, design, skills, code, run, figures (qu
 - **ideas, literature, plan, design** replace the plan and the frozen protocol. That is a change after results were seen, so it needs `--approve-as <you>`, is recorded as a post-hoc amendment, and holds the result below publication-ready.
 - **skills** picks the skills again from the current YAML (`engine.skills`, `skills_exclude`, `skills_required`) and leaves plan and protocol alone.
 - Later steps just re-run from there.
+- A quest folder that was copied or moved is still judged in its own folder: a rerun from the claims or the review reads the paper in the folder the quest is in now, not the one it was written in (the saved state still names the old path; `core/rerun_from.py::in_quest` takes it to the new one).
 
 For a small change to a finished paper, [[refine|Refine]] is usually cheaper.
 

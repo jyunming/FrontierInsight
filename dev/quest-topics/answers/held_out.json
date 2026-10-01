@@ -1,0 +1,4 @@
+{
+  "about": "Tasks of the self-benchmark held back from the development tree. Each answer file is kept outside the repository (FI_BENCH_HELD_OUT, default ~/.fi/bench_held_out/); only its SHA-256 is kept here, and a file that no longer matches it is refused. `fi tools bench hold-out <answer.json>` moves a file out and records its hash.",
+  "tasks": {}
+}

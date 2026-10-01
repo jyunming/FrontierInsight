@@ -1,0 +1,20 @@
+{
+  "schema": "fi.bench.answer/v1",
+  "task": "Q1",
+  "title": "Convergence order of Euler, Velocity-Verlet and RK4 on a damped oscillator",
+  "config": "examples/integrator_bakeoff/config.yaml",
+  "kind": "simulation",
+  "ask": "BENCHMARK. Run each integrator as its own setting: the protocol's grid has an axis `method` with the values euler, verlet and rk4. Declare a metric with id `convergence_order`: within one setting's run, the slope of log(|x(10) - exact x(10)|) against log(h) over h in {0.1, 0.05, 0.025}.",
+  "answers": [
+    {"metric": "convergence_order", "cell": {"method": "euler"}, "statistic": "value", "expected": 1.0,
+     "tolerance": 0.25, "tolerance_kind": "absolute",
+     "source": "forward Euler is first order (textbook); the benchmark's reference computation gives 1.16 over these steps (dev/evaluation/bench/reference.py::q1_orders), inside the tolerance"},
+    {"metric": "convergence_order", "cell": {"method": "verlet"}, "statistic": "value", "expected": 2.0,
+     "tolerance": 0.15, "tolerance_kind": "absolute",
+     "source": "Velocity-Verlet is second order (textbook); reference computation 2.00"},
+    {"metric": "convergence_order", "cell": {"method": "rk4"}, "statistic": "value", "expected": 4.0,
+     "tolerance": 0.25, "tolerance_kind": "absolute",
+     "source": "classical Runge-Kutta is fourth order (textbook); reference computation 3.95"}
+  ],
+  "errors": ["R1", "R2", "N3"]
+}
