@@ -2723,16 +2723,27 @@ def make_app(
         answer = {"action": action_raw, "feedback": feedback}
         if action_raw == "accept":
             # A person's accept answers the one question shown with what the result does not guarantee
-            # (core/acceptance.py); "no" does not accept.
+            # (core/acceptance.py); "no" does not accept, and "partly" needs its note. The same rule the engine applies.
             from core import acceptance as _acceptance
 
             checked = _acceptance.parse_answer(body.get("answer"))
             if checked is None:
                 raise HTTPException(400, f"accept needs your answer to: {_acceptance.QUESTION} "
-                                         "(answer: yes, partly or not_checked)")
-            if checked == "no":
-                raise HTTPException(400, _acceptance.NOT_ACCEPTED_ON_NO)
-            answer = {**answer, "answer": checked, "via": "web"}
+                                         "(answer: yes, partly with a note, or not_checked)")
+            refused = _acceptance.problem(body)
+            if refused:
+                raise HTTPException(400, refused)
+            if checked != "partly" and _acceptance.note_of(body):
+                # A reservation given with "yes" or "I did not check" would be dropped: refused, as on the page.
+                raise HTTPException(400, "only \"partly\" keeps a note: answer partly to keep it, or leave it out")
+            # Who: the name typed on the page ("" when none was); when: now, as the server receives it; and the
+            # fingerprint of the evidence record whose limits the page showed.
+            answer = {**answer, "answer": checked, "note": _acceptance.note_of(body) if checked == "partly" else "",
+                      "via": "web", "who": " ".join(str(body.get("who") or "").split())[:80],
+                      "at": _acceptance.now()}
+            shown_hash = str(body.get("shown_evidence_sha256") or "").strip()[:64]
+            if shown_hash:
+                answer["shown_evidence_sha256"] = shown_hash
         in_process_resolved = registry.resolve_human_review(quest_id, answer)
         # Always write the disk answer so an out-of-process
         # ``--resume`` picks it up too. Best-effort: an OSError on the

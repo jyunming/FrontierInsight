@@ -48,7 +48,7 @@ The evidence level says how strongly a result is backed. A result reaches **inde
 
 For a random simulation a case is one trial, so only checks one trial shows exactly can be run by FI. A probability or a mean stays the script's own answer and keeps the quest below this level.
 
-The top level, **publication ready**, also needs a person: the review's accept is a model's opinion, so a result accepted with no person asked (`pauses.auto_accept_on_pass`, or `pauses.review: off`) is marked "not reviewed by a person" and stays one level below it. Before a person accepts they see what the result does not guarantee and its main gaps, and answer one question ([[pauses|Pauses]]). Their answer is recorded; it does not change the level.
+The top level, **publication ready**, also needs a person: the review's accept is a model's opinion, so a result accepted with no person asked (`pauses.auto_accept_on_pass`, or `pauses.review: off`) is marked "not reviewed by a person" and stays one level below it. Before a person accepts they see what the result does not guarantee and its main gaps, and answer one question: have they reviewed the evidence record, and do they accept these claims and the limits listed ([[pauses|Pauses]]). Only an explicit "yes" reaches `publication_ready`; "I did not check" and "partly" (with its note) each leave a gap one level below it. The answer is recorded as a receipt bound to the paper and evidence record it was given for.
 
 ## Oracles FI added itself
 

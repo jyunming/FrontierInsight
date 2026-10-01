@@ -21,6 +21,7 @@
  */
 import * as vscode from "vscode";
 import * as net from "net";
+import * as os from "os";
 import { ChildProcess } from "child_process";
 import {
     BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, looksTransient,
@@ -98,15 +99,26 @@ interface BeforeAccept {
     more_gaps?: number;
     question?: string;
     choices?: Array<{ id: string; label: string }>;
+    /** The fingerprint of the evidence record these limits come from; sent back with the accept. */
+    evidence_sha256?: string;
 }
 
-const ACCEPT_QUESTION = "Do the main numbers match what you expected?";
+const ACCEPT_QUESTION = "Have you reviewed the evidence record, and do you accept these claims and the limits listed?";
 const ACCEPT_CHOICES = [
     { id: "yes", label: "Yes" },
-    { id: "partly", label: "Partly" },
+    { id: "partly", label: "Partly (say what you do not accept)" },
     { id: "no", label: "No" },
     { id: "not_checked", label: "I did not check" },
 ];
+
+/** The login name of whoever runs VS Code: recorded with an accept as who answered ("" when there is none). */
+function loginName(): string {
+    try {
+        return os.userInfo().username || "";
+    } catch {
+        return "";
+    }
+}
 
 /** What the result does not guarantee and its gaps, as chat markdown (empty when the engine sent none). */
 export function beforeAcceptMarkdown(block: BeforeAccept | undefined): string {
@@ -467,6 +479,7 @@ export class Bridge {
         }
         let answer = "";
         let answerLabel = "";
+        let note = "";
         if (action === "accept") {
             // Before a person accepts: what the result does not guarantee, its gaps, and one question.
             const block = snap.before_accept;
@@ -509,6 +522,24 @@ export class Bridge {
                 }
                 action = "refine";
                 feedback = fb.trim();
+            } else if (picked.id === "partly") {
+                // "Partly" needs a short note: what is not accepted is recorded and kept as a gap.
+                const nb = await vscode.window.showInputBox({
+                    title: "Partly — what do you not accept?",
+                    prompt: "Recorded with your answer and kept as a gap until the paper changes and you accept it with yes.",
+                    ignoreFocusOut: true,
+                    validateInput: (v) => (v.trim() ? undefined : "Say what you do not accept"),
+                });
+                if (!nb || !nb.trim()) {
+                    this.send({ type: "human_review_cancelled", id: req.id });
+                    this.opts.progress.markdown(
+                        "\n— no note given; nothing was accepted and the quest stops here. Decide later with `@fi /resume` (see NEXT_STEP.md in the quest folder).\n\n",
+                    );
+                    return;
+                }
+                answer = picked.id;
+                answerLabel = picked.label;
+                note = nb.trim();
             } else {
                 answer = picked.id;
                 answerLabel = picked.label;
@@ -519,10 +550,12 @@ export class Bridge {
             id: req.id,
             action,
             feedback,
-            ...(action === "accept" ? { answer } : {}),
+            ...(action === "accept"
+                ? { answer, note, who: loginName(), shown_evidence_sha256: snap.before_accept?.evidence_sha256 || "" }
+                : {}),
         });
         this.opts.progress.markdown(
-            `\n— human review: **${action}**${feedback ? " (with feedback)" : ""}${action === "accept" ? ` (${escapeMd(answerLabel)})` : ""}; resuming…\n\n`,
+            `\n— human review: **${action}**${feedback ? " (with feedback)" : ""}${action === "accept" ? ` (${escapeMd(answerLabel)}${note ? `: ${escapeMd(note)}` : ""})` : ""}; resuming…\n\n`,
         );
     }
 

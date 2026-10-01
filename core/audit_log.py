@@ -458,7 +458,10 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         if e.get("by") == "person":
             labels = {"yes": "yes", "partly": "partly", "no": "no", "not_checked": "did not check"}
             answer = labels.get(str(e.get("answer")), str(e.get("answer") or "no answer"))
-            return f"{where}a person accepted the result (via {via}); asked \"{e.get('question', '')}\", they answered {answer}"
+            who = f", by {e['who']}" if e.get("who") and e.get("who") != "not given" else ""
+            note = f"; not accepted: {e['note']}" if e.get("note") else ""
+            return (f"{where}a person accepted the result (via {via}{who}); asked \"{e.get('question', '')}\", they "
+                    f"answered {answer}{note}")
         return f"{where}the result was accepted automatically ({via}), with no person reviewing it"
     if kind == "quest_finalized":
         lost = e.get("write_errors") or 0

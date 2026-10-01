@@ -26,6 +26,9 @@ from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, SIM_TRIAL, _reply
 
 pytestmark = pytest.mark.slow
 
+# The evidence-record fingerprint the last review pause of each quest showed (the staged accept sends it back).
+SHOWN_EVIDENCE: dict[str, str] = {}
+
 METRIC = {"id": "final_size", "kind": "mean", "estimand": "mean final epidemic size", "unit": "trial"}
 RESEARCH_PROTOCOL = {
     **PROTOCOL,
@@ -123,9 +126,13 @@ def _run_through_pauses(config: Config, *, quest_id: str | None = None, from_ste
         pause = json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8")) if (
             engine.fi_dir / "pause.json").is_file() else {}
         if pause.get("kind") == "review":
-            # A person accepts, answering the question asked before accepting (what `--accept yes` stages).
+            # A person accepts, answering the question asked before accepting (what `--accept yes` stages, with the
+            # fingerprint of the evidence record whose limits it printed).
+            shown = json.loads((engine.fi_dir / "human_review.json").read_text(encoding="utf-8"))["before_accept"]
+            SHOWN_EVIDENCE[engine.quest_id] = shown["evidence_sha256"]
             (engine.fi_dir / "human_review_answer.json").write_text(json.dumps(
-                {"action": "accept", "feedback": "", "answer": "yes", "via": "cli"}), encoding="utf-8")
+                {"action": "accept", "feedback": "", "answer": "yes", "via": "cli", "who": "ada",
+                 "shown_evidence_sha256": shown["evidence_sha256"]}), encoding="utf-8")
         else:
             pauses.append(text.splitlines()[0])
             if "read and edit the plan" not in text:
@@ -220,6 +227,12 @@ def test_a_research_quest_reaches_publication_ready_only_through_every_gate(base
     assert config.engine.phased is True and record["phased"]["status"] == "confirmed", record.get("phased")
     # A person accepted it, with their answer to the question asked before accepting; the trace says so too.
     assert record["accepted_by"] == "person" and record["acceptance"]["answer"] == "yes", record.get("acceptance")
+    # The receipt binds the paper and the evidence record that were shown, and the limits listed with the question.
+    receipt = record["acceptance"]
+    assert len(receipt["paper_sha256"]) == 64 and receipt["evidence_sha256"] == SHOWN_EVIDENCE[engine.quest_id], receipt
+    # Worked out again when the quest resumed, the evidence record is the one that was shown.
+    assert "evidence_sha256_at_accept" not in receipt, receipt
+    assert receipt["limits_shown"] and receipt["at"] and receipt["who"] == "ada", receipt
     accepted = [e for e in audit_log.read(root / ".fi" / "audit.jsonl") if e.get("kind") == "result_accepted"]
     assert [(e["by"], e["via"], e["answer"]) for e in accepted] == [("person", "cli", "yes")]
     # The seal is the trace's last event and names the evidence and attempt records as they are.

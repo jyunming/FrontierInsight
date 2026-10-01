@@ -56,7 +56,7 @@ The words FI uses, in the order you meet them. Each is one plain sentence, with 
 
 **Model claim**: the reasons a model states in its answer (why this design, why this verdict), kept in the trace so you can argue with it. It is never a check result. [trace.md](trace.md)
 
-**Model reasoning (`.fi/thinking.jsonl`)**: the reasoning text some connections return beside the answer (a reasoning model over HTTP, Claude's thinking, VS Code's thinking parts), one line per call, kept for you to read. It is not part of the trace, never checked, and can quote your data. [trace.md](trace.md)
+**Model reasoning (`.fi/thinking.jsonl`)**: the reasoning text some connections return beside the answer (a reasoning model over HTTP, Claude's thinking, VS Code's thinking parts), one line per call, kept for you to read. It is the reasoning summary the provider returned, not the model's hidden or complete chain of thought, and never evidence: it is not part of the trace, never checked, and can quote your data (`output.save_thinking: false` keeps none, for a quest that handles sensitive data). [trace.md](trace.md)
 
 **Skill**: what FI has learned about driving one piece of software, with a test that proves it still works. You approve each one. [USAGE.md](USAGE.md)
 

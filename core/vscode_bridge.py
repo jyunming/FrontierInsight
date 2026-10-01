@@ -488,9 +488,15 @@ class VSCodeBridgeClient:
             feedback = str(msg.get("feedback") or "")
             reply: dict[str, Any] = {"action": action, "feedback": feedback}
             if action == "accept":
-                # The person's answer to the question asked before accepting (core/acceptance.py); none, and the
-                # engine does not take it as an accept.
-                reply.update(answer=str(msg.get("answer") or ""), via="vscode")
+                # The person's answer to the question asked before accepting (core/acceptance.py), its note and the
+                # login name the extension sends; no answer (or a "partly" with no note), and the engine does not
+                # take it as an accept.
+                from .acceptance import now as _now
+
+                reply.update(answer=str(msg.get("answer") or ""), note=str(msg.get("note") or "").strip(),
+                             via="vscode", who=str(msg.get("who") or "").strip(), at=_now())
+                if msg.get("shown_evidence_sha256"):
+                    reply["shown_evidence_sha256"] = str(msg["shown_evidence_sha256"])[:64]
             fut.set_result(reply)
         elif mtype == "human_review_cancelled":
             req_id = int(msg.get("id", 0))

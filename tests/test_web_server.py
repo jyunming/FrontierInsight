@@ -551,7 +551,9 @@ def test_human_review_post_resolves_in_process_future(
     assert body["in_process_resolved"] is True
     assert fut.done()
     # A person's accept carries their answer to the question asked before accepting, and says it came from the web.
-    assert fut.result() == {"action": "accept", "feedback": "", "answer": "yes", "via": "web"}
+    got = dict(fut.result())
+    assert got.pop("at")
+    assert got == {"action": "accept", "feedback": "", "answer": "yes", "note": "", "via": "web", "who": ""}
 
 
 def test_human_review_post_writes_disk_answer_for_subprocess_resume(

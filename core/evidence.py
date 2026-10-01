@@ -16,8 +16,8 @@ checks behind it prove:
   counts, on one script or two);
 * ``statistically_adequate`` — and every headline metric has a declared estimator matched to its data, the contrasts carry
   engine-computed p-values, and every precision target was reached;
-* ``publication_ready`` — and the review accepted the paper with no must-fix finding, a person accepted the result (an
-  automatic accept stays one level below, core/acceptance.py), the protocol was not amended after the
+* ``publication_ready`` — and the review accepted the paper with no must-fix finding, a person accepted the result with an
+  explicit yes (an automatic accept, "I did not check" or "partly" stays one level below, core/acceptance.py), the protocol was not amended after the
   results were seen, a design revised after the experiment had run was confirmed by a run on data or seeds never seen
   after its last change (core/disclosure.py), and the evidence gate, the design methodology audit and the claim check
   each left a receipt that says it passed (core/receipts.py; a missing one is a gap).
@@ -521,6 +521,12 @@ def assess(
     accepted_by = _acceptance.accepted_by(state, pending=pending, paper_sha256=paper_hash)
     if accepted_by == "automatic":
         ready_gaps.append(_acceptance.NO_PERSON_GAP)
+    elif accepted_by == "person":
+        # Only a person's explicit "yes" (they reviewed the evidence and accept the claims and the limits listed) goes
+        # on to publication_ready: "I did not check" and "partly" (with its note) each leave a gap.
+        person_gap = _acceptance.review_gap(state.get("acceptance"))
+        if person_gap:
+            ready_gaps.append(person_gap)
     if not review:
         ready_gaps.append("the paper has not been reviewed yet")
     else:
@@ -840,4 +846,8 @@ def summary_line(record: dict[str, Any], *, technical: bool = False) -> str:
     # The mark of an accept no person made, said on every surface even when another gap comes first.
     if record.get("accepted_by") == "automatic" and (not gaps or gaps[0] != _acceptance.NO_PERSON_GAP):
         tail += " Not reviewed by a person: it was accepted automatically."
+    # A person's accept that was not a plain yes ("I did not check", "partly" and its note), likewise.
+    person_mark = _acceptance.mark(record)
+    if person_mark:
+        tail += f" {person_mark}"
     return f"{claim}{tail}"
