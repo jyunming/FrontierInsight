@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "0b70e06891989e854a0f9d0607195aeb07f6c129cab193d374ccfbe072b29d30",
+  "vsix_sha256": "a6bd7c326408b37517afebae18162a295bbd5f250d73d2e37a43136ebe1e58ea",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -42,8 +42,8 @@
       "bytes": 3626
     },
     "extension/out/bridge.js": {
-      "sha256": "bc0f01db280960565e35bf9f0b40c711bad24984e2b6dc2b2dcc15e4a33bb7ac",
-      "bytes": 41466
+      "sha256": "ded631b7bec0919f4267304a4e0c58de6485c50c2ee90b3e217c3932ce8b08ae",
+      "bytes": 41520
     },
     "extension/out/extension.js": {
       "sha256": "68071f77fac648cb42fb452bf3381c0206f3c8f17b309eadc28cf8484b64507e",
@@ -62,12 +62,12 @@
       "bytes": 71669
     },
     "extension/out/lm-messages.js": {
-      "sha256": "419de108bfa76f8f291366702a260340f50e2419fe759abf4e35b5b67087b012",
-      "bytes": 14163
+      "sha256": "a6e48de4ca3a016994188c86e2875040d7173118c5c25822474e0972766eb3ba",
+      "bytes": 14911
     },
     "extension/out/persistent-bridge.js": {
-      "sha256": "8ca18a9d291e8b55396417aed66b78e2804b263026f97ae387db05e654eb133b",
-      "bytes": 27710
+      "sha256": "96baefccc63143dcdda6792fb7b77e4bd2f06f366ad4994aea4dc86d1ac9a23d",
+      "bytes": 27764
     },
     "extension/out/probe.js": {
       "sha256": "83f33fe220bbf749d6d1e1413e8773cf0e0c98718a6726348b6950024b988bd4",
@@ -118,8 +118,8 @@
       "bytes": 15345
     },
     "extension/readme.md": {
-      "sha256": "84c13a9e4a6e40c540a27faf9d30d5bee3ab41836c8563c7201ea37e5f4ef03b",
-      "bytes": 83138
+      "sha256": "cf29e9b21ac0502867c80d895cf25dd80db3351753d84786b691fa0c55ab49b4",
+      "bytes": 83323
     }
   }
 }
