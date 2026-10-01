@@ -633,10 +633,12 @@ def record_confirm(quest_root: Path, result: Any) -> tuple[dict[str, Any] | None
             lines.append(f"confirm stage: {record['compromised']}, so nothing in this quest is confirmed")
         elif (digest is not None and record.get("strategy") == FRESH_SEEDS
               and digest == record.get("explore_result_sha256")):
-            # New seeds gave exactly exploration's numbers: the run does not depend on its seed (or ignores it), so it
-            # repeated exploration's run rather than confirming it.
-            record["not_confirmable"] = ("the confirm run on new seeds gave exactly exploration's numbers, so the study "
-                                         "does not depend on its seed and the run only repeated exploration's")
+            # New seeds gave exactly exploration's numbers. A run that ignores its seed gives the same, so this cannot be
+            # told apart from a repeat of exploration's run, and is not counted as a confirmation (the conservative
+            # reading: a random study can also match exactly, a rare event absent on both sets of seeds, say).
+            record["not_confirmable"] = ("the confirm run on new seeds gave exactly exploration's numbers, which a run "
+                                         "that ignores its seed would also give, so it cannot be told apart from a "
+                                         "repeat of exploration's run")
             lines.append(f"confirm stage: {record['not_confirmable']}; nothing in this quest is confirmed")
         elif digest is None:
             lines.append("confirm stage: the confirm run produced no result, so nothing in this quest is confirmed")

@@ -227,6 +227,40 @@ async def test_two_equal_outcomes_from_an_unseeded_generator_are_still_samples(t
     assert len(patch["result_json_replicates"]) == 3
 
 
+@pytest.mark.asyncio
+async def test_a_seed_read_in_a_helper_module_keeps_agreeing_runs_as_samples(tmp_path: Path) -> None:
+    """A multi-module project reads the seed in the module it imports. Its agreeing runs are
+    samples that agreed, not one run repeated by a script that never reads the seed."""
+    eng = _engine(tmp_path, replicates=3)
+    code = eng.quest_root / "code"
+    (code / "model.py").write_text(
+        "import os\nimport numpy as np\nrng = np.random.default_rng(int(os.environ['FI_REPLICATE_SEED']))\n",
+        encoding="utf-8")
+    (code / "experiment.py").write_text("from model import rng\nprint(int(rng.random() < 0.01))\n", encoding="utf-8")
+    eng.executor.execute = AsyncMock(return_value=_er(_rj('{"event": 0}')))  # type: ignore[method-assign]
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 3
+    assert patch["result_json_replicate_seed_ignored"] is False
+    assert patch["result_json_deterministic"] is True
+    assert len(patch["result_json_replicates"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_script_with_no_random_source_stops_at_the_first_replicate_that_agrees(tmp_path: Path) -> None:
+    """Seed 1 fails; seed 2 agrees with seed 0, so the remaining seeds are not run."""
+    eng = _engine(tmp_path, replicates=5)
+    (eng.quest_root / "code" / "experiment.py").write_text(DETERMINISTIC_SCRIPT, encoding="utf-8")
+    eng.executor.execute = AsyncMock(side_effect=[  # type: ignore[method-assign]
+        _er(_rj('{"err": 0.01}')), _er("boom", returncode=1), _er(_rj('{"err": 0.01}')),
+    ])
+    patch = await eng._node_execute({"deps": []})
+
+    assert eng.executor.execute.await_count == 3
+    assert patch["result_json_no_random_source"] is True
+    assert patch["result_json_replicate_seed_ignored"] is True
+
+
 # --- aggregation: nested results ---------------------------------------------
 
 def test_nested_results_aggregate_under_dotted_paths() -> None:

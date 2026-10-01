@@ -2760,14 +2760,15 @@ class Engine:
         if not script.is_file():
             return ""
         if state.get("result_json_replicate_seed_ignored"):
-            return (f"code/{script.name} never reads the seed FI gives it (FI_REPLICATE_SEED), and its runs gave the "
-                    "same numbers, so a run on new seeds would repeat exploration's run")
+            return (f"the seed FI gives code/{script.name} (FI_REPLICATE_SEED) reaches none of its random numbers, and "
+                    "its runs gave the same numbers, so a run on new seeds would repeat exploration's run")
         replicates = list(state.get("result_json_replicates") or [])
         this_pass = bool(replicates) and isinstance(replicates[0], dict) and \
             {k: v for k, v in replicates[0].items() if k != "_seed"} == (state.get("result_json") or {})
         if len(replicates) > 1 and this_pass:
-            # Runs on different seeds already gave different numbers (the list is this pass's: its seed 0 is the result
-            # in hand, not an earlier script's left on the state): new seeds change the result.
+            # This pass's runs are samples on several seeds (the list is this pass's: its seed 0 is the result in hand,
+            # not an earlier script's left on the state): they differed, or they agreed while the script can draw
+            # random numbers, which new seeds may still change.
             return ""
         # The seed read in the script or a module it imports from code/ (a multi-module project reads it in a helper);
         # FI's own helpers there (run.py sets a default seed) do not count.
@@ -11416,7 +11417,8 @@ class Engine:
                         "[execute] replicate seed=%d rc=0 duration=%.1fs",
                         seed, rep_result.duration_s,
                     )
-                    # The one case where two agreeing seeds may end the
+                    # The one case where two agreeing runs (seed 0 and the first
+                    # replicate that finished) may end the
                     # replication: the script (and the modules it imports from
                     # its own folder) has no source of random numbers at all,
                     # so a repeat can only return the same numbers. A script
@@ -11428,7 +11430,7 @@ class Engine:
                     # FI runs it once per setting itself.)
                     if rep_rj != result_json:
                         all_agreed = False
-                    elif seed == 1 and no_random_source:
+                    elif no_random_source and all_agreed:  # the first replicate that finished agreed
                         seed_ignored = True
                         self._log.info(
                             "[execute] %s draws no random numbers, so this study is deterministic: one run "
@@ -11457,7 +11459,14 @@ class Engine:
         # says which case this is.
         if replicates_ran and not seed_ignored and all_agreed and len(result_json_replicates) > 1:
             n_runs = len(result_json_replicates)
-            if (reads_seed and seed_reaches_rng) or unseeded_rng:
+            # The modules the script imports from its own folder count too: a multi-module project reads the seed,
+            # or builds a generator without one, in a helper.
+            helpers = _own_modules(seed_path)[1:]
+            if (
+                (reads_seed and seed_reaches_rng) or unseeded_rng
+                or (not reads_seed and any(_script_reads_replicate_seed(p) for p in helpers))
+                or any(_unseeded_rng_calls(p) for p in helpers)
+            ):
                 deterministic = True
                 self._log.info(
                     "[execute] all %d seeds gave the same numbers. %s can draw random numbers, so this is what "
@@ -12705,10 +12714,11 @@ class Engine:
             result_json_block, _rj_orig = _compact_result_json_block(payload)
             if state.get("result_json_deterministic"):
                 # Without this the line reads "0 numeric keys", which is what a
-                # broken aggregator looks like. Every seed agreeing is what these
-                # runs showed, not a failure to measure -- and not proof that the
-                # experiment has no randomness (only a script with no random source
-                # is called deterministic, and it publishes no replicates).
+                # broken aggregator looks like. Despite the flag's name,
+                # result_json_deterministic only says every seed agreed: that is
+                # what these runs showed, not a failure to measure, and not proof
+                # that the experiment has no randomness (a script with no random
+                # source stops early and publishes no replicates).
                 self._log.info(
                     "[analyze] all %d seeds gave the same numbers, so there is no "
                     "spread over them to report",
@@ -12770,7 +12780,8 @@ class Engine:
         elif state.get("result_json_replicate_seed_ignored"):
             stdout_for_analyze = (
                 "[FI NOTE] Replication was configured, but the experiment script "
-                "never reads FI_REPLICATE_SEED, so every replicate repeated the "
+                "never reads FI_REPLICATE_SEED (or reads it without the value "
+                "reaching any random generator), so every replicate repeated the "
                 "SAME run and returned the same numbers. There is ONE measurement "
                 "here, not several. Report it as a single run: do NOT report a "
                 "mean over seeds, a standard error, a confidence interval, or any "
@@ -20031,8 +20042,8 @@ def _script_reads_replicate_seed(code_path: Path) -> bool:
     case that occurs -- the name is simply absent from the file -- and costs
     nothing. Its blind spot is a script that NAMES the variable without obeying
     it (reads and discards it, or mentions it only in a comment): that one
-    passes here and falls through to the runtime comparison, which can only
-    call it deterministic. An unreadable file returns ``True``, because silence
+    passes here, and ``replicate_seed_reaches_rng`` is what asks whether the
+    value reaches a generator. An unreadable file returns ``True``, because silence
     is not evidence of a fault and the runtime check still runs.
     """
     try:
