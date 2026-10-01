@@ -161,16 +161,22 @@ def _pdfium_reading_order(page: Any, textpage: Any) -> str:
 HIDDEN_SIZE_PT = 2.0
 #: A colour with every channel at least this (0-255) counts as white.
 _WHITE = 250
-#: A fill counts as a backdrop that white or invisible text can sit on only when it is clearly darker than white
-#: (its brightness below this, 0-255): a page-sized rectangle in 249 grey is a white page, and bright yellow under
-#: white text hides it as well as white does.
-_DARK = 200
+#: A fill counts as a backdrop that white or invisible text can sit on only when it is clearly darker than white: its
+#: relative luminance (0 black, 1 white) below this, which leaves white text a contrast of at least 1.4. A page-sized
+#: rectangle in 249 grey is a white page, and bright yellow, cyan or lime under white text hide it about as well as
+#: white does; grey 200, orange and a brochure's leaf green count as dark (white on them is read).
+_DARK = 0.7
+#: At most this many hidden passages are kept per PDF (each cut to 200 characters).
+_HIDDEN_MAX = 20
 
 
 def _dark(r: float, g: float, b: float) -> bool:
-    return 0.299 * r + 0.587 * g + 0.114 * b < _DARK
-#: At most this many hidden passages are kept per PDF (each cut to 200 characters).
-_HIDDEN_MAX = 20
+    """Whether a colour (channels 0-255) is clearly darker than white: WCAG relative luminance below :data:`_DARK`."""
+    def linear(c: float) -> float:
+        c = max(0.0, min(255.0, float(c))) / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b) < _DARK
 
 
 def _inside(box: tuple[float, float, float, float], boxes: list[tuple[float, float, float, float]]) -> bool:
@@ -236,7 +242,7 @@ def _hidden_pdfium(page: Any) -> list[str]:
     def area(box: tuple[float, float, float, float]) -> float:
         return abs((box[2] - box[0]) * (box[3] - box[1]))
     objects = list(page.get_objects(max_depth=1))
-    nested_image = None  # whether a form holds an image (a scan wrapped as one page-sized unit); read once, if asked
+
     backdrops: list[tuple[float, float, float, float]] = []
     for obj in objects:
         if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
@@ -246,12 +252,9 @@ def _hidden_pdfium(page: Any) -> list[str]:
                 # A form (an included figure): what it draws is not read here, so a figure-sized one counts as a
                 # backdrop. One as large as the page (a stamped or wrapped page) would hide everything, so it counts
                 # only when the page holds an image inside a form: a scan wrapped whole, with its text layer on top.
-                if area(tuple(obj.get_bounds())) >= page_area / 2:
-                    if nested_image is None:
-                        nested_image = any(o.type == pdfium_c.FPDF_PAGEOBJ_IMAGE and getattr(o, "level", 0) > 0
-                                           for o in page.get_objects(max_depth=3))
-                    if not nested_image:
-                        continue
+                if area(tuple(obj.get_bounds())) >= page_area / 2 and not any(
+                        o.type == pdfium_c.FPDF_PAGEOBJ_IMAGE for o in page.get_objects(max_depth=2, form=obj)):
+                    continue
                 backdrops.append(tuple(obj.get_bounds()))
                 continue
             mode, stroke = ctypes.c_int(), ctypes.c_int()

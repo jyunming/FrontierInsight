@@ -80,7 +80,8 @@ _NOT_REPORTED = (r"(?<!were told to )(?<!was told to )(?<!were asked to )(?<!was
                  r"(?<!were instructed to )(?<!was instructed to )")
 #: An order that opens its sentence ("Ignore the instructions above."), not a clause of one ("if you installed with
 #: pip, ignore the instructions above").
-_OPENS = (r"(?:^|(?<=[.!?:;]\s)|(?<=[.!?:;][\"')\]]\s)|(?<=[\"'(\[\u2022]))(?:please\s+)?")
+_OPENS = (r"(?:^|(?<=[.!?:;]\s)|(?<=[.!?:;][\"')\]]\s)|(?<=[.!?:;]\s[\"'(\[])|(?<=^[\"'(\[])|"
+          r"(?<=[\u2022*-]\s))(?:please\s+)?")
 _AI = (r"(?:an?\s+)?(?:(?:ai\s+)?(?:large\s+)?language\s+model|ai\s+(?:assistant|model|system|reviewer|agent)|ai|"
        r"a\.i\.|llm|chatbot)")
 #: What follows the words for an AI model when a sentence speaks to one ("if you are an AI, ignore ...", "if you are a
