@@ -30,6 +30,9 @@ from web.server import make_app
 # Re-use the canned LLM responses from the engine smoke test.
 from tests.test_engine_smoke import _fake_response_for
 
+# A whole quest with a real venv runs behind each test; give it longer than pytest.ini's per-test default.
+pytestmark = pytest.mark.timeout(1800)
+
 
 _QUEST_YAML = textwrap.dedent("""\
     topic: |

@@ -54,15 +54,34 @@ class _Proc:
         self.killed = True
 
 
+class _Tree:
+    """A stand-in for ``core.proc_tree.ProcessTree`` around a fake ``soffice``."""
+
+    def __init__(self, proc: _Proc) -> None:
+        self.proc = proc
+        proc.tree_killed = False
+
+    def kill(self) -> None:
+        self.proc.tree_killed = True
+        self.proc.kill()
+
+    def __enter__(self) -> _Tree:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+
 def _fake_soffice(monkeypatch, **behaviour) -> list[_Proc]:
     started: list[_Proc] = []
 
-    def popen(argv, **kwargs):  # noqa: ANN001
+    def start(argv, **kwargs):  # noqa: ANN001
         started.append(_Proc(argv, **behaviour, **kwargs))
-        return started[-1]
+        return _Tree(started[-1])
 
     monkeypatch.setattr(op, "find_libreoffice", lambda: "/opt/soffice")
-    monkeypatch.setattr(op.subprocess, "Popen", popen)
+    # The boundary is the process-tree helper: the real one would start (and kill) real processes.
+    monkeypatch.setattr(op, "ProcessTree", start)
     return started
 
 
@@ -96,14 +115,10 @@ def test_an_export_that_writes_nothing_reports_the_exit_code_and_output(tmp_path
 
 def test_a_hung_export_is_killed_with_its_children(tmp_path: Path, monkeypatch) -> None:
     started = _fake_soffice(monkeypatch, write=False, hang=True)
-    killed: list[list[str]] = []
-    monkeypatch.setattr(op.sys, "platform", "win32")
-    monkeypatch.setattr(op.subprocess, "run", lambda argv, **kw: killed.append(argv))
     pdf, reason = op.pptx_to_pdf(tmp_path / "slides.pptx", tmp_path / "out", timeout_s=5)
     assert pdf is None and reason == "LibreOffice took longer than 5 s to export slides.pptx"
-    # soffice.exe only launches soffice.bin: the whole tree goes.
-    assert killed == [["taskkill", "/PID", "4242", "/T", "/F"]]
-    assert started[0].killed
+    # soffice.exe only launches soffice.bin: the whole tree goes (tests/test_proc_tree.py checks the real kill).
+    assert started[0].tree_killed and started[0].killed
 
 
 @pytest.mark.slow

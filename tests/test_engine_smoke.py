@@ -25,6 +25,9 @@ from core.config import (
 )
 from core.engine import Engine
 
+# Each test builds a real venv; give it longer than pytest.ini's per-test default.
+pytestmark = pytest.mark.timeout(1800)
+
 
 # Pre-baked code for the implement node — writes a figure and a RESULT_JSON line.
 _FAKE_EXPERIMENT_CODE = """\

@@ -16,11 +16,12 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from core.proc_tree import ProcessTree
 
 _log = logging.getLogger("frontier_insight.office_pdf")
 
@@ -83,23 +84,13 @@ def pptx_to_pdf(pptx: Path, out_dir: Path, *, timeout_s: float = _TIMEOUT_S) -> 
 def _run(argv: list[str], timeout_s: float) -> tuple[int | None, str]:
     """Run ``argv``; on timeout kill it with its children and return
     ``(None, "")``. On Windows ``soffice.exe`` only launches ``soffice.bin``,
-    so killing the launcher alone would leave LibreOffice running."""
-    windows = sys.platform == "win32"
-    proc = subprocess.Popen(
-        argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        start_new_session=not windows,
-    )
-    try:
-        out, _ = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired:
-        if windows:
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
-        else:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                pass
-        proc.kill()
-        proc.communicate()
-        return None, ""
-    return proc.returncode, (out or b"").decode("utf-8", "replace")
+    so killing the launcher alone would leave LibreOffice running (and
+    holding the output pipe open)."""
+    with ProcessTree(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as tree:
+        try:
+            out, _ = tree.proc.communicate(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            tree.kill()
+            tree.proc.communicate()
+            return None, ""
+        return tree.proc.returncode, (out or b"").decode("utf-8", "replace")

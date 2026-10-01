@@ -86,7 +86,6 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -95,6 +94,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+from core.proc_tree import ProcessTree  # noqa: E402 - needs the repository on sys.path first
 
 REPOS: dict[str, str] = {
     "kdense": "https://github.com/K-Dense-AI/scientific-agent-skills.git",
@@ -268,25 +269,6 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _kill_tree(proc: subprocess.Popen) -> None:
-    """Stop ``proc`` and everything it started. Killing git alone leaves the helper it started
-    for the network (git-remote-https) running."""
-    if os.name == "nt":
-        subprocess.run(
-            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-            capture_output=True, stdin=subprocess.DEVNULL,
-        )
-    else:
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-    try:
-        proc.kill()
-    except OSError:
-        pass
-
-
 def _git(argv: list[str], *, timeout: float) -> GitResult:
     """Run one git command that cannot hang.
 
@@ -294,26 +276,27 @@ def _git(argv: list[str], *, timeout: float) -> GitResult:
     is alive, so a run that had to be stopped could not even be read (``subprocess.run`` with
     ``capture_output`` sat in ``communicate`` for ever, which is what a stalled ``git pull`` looked
     like). It never asks for anything, and a command still running after ``timeout`` seconds is
-    stopped with everything it started."""
-    kwargs: dict = {} if os.name == "nt" else {"start_new_session": True}
+    stopped with everything it started (``core/proc_tree.py``: killing git alone leaves the helper
+    it started for the network, git-remote-https, running)."""
     timed_out = False
     try:
         with tempfile.TemporaryFile() as out:
-            proc = subprocess.Popen(
-                argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                env=_git_env(), **kwargs,
-            )
-            try:
-                proc.wait(timeout=timeout)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                _kill_tree(proc)
-                proc.wait()
+            with ProcessTree(
+                argv, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, env=_git_env(),
+            ) as tree:
+                try:
+                    tree.proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    tree.kill()
+                    tree.proc.wait()
             out.seek(0)
             text = out.read().decode("utf-8", "replace")
     except FileNotFoundError:
         return GitResult(127, f"{argv[0]} was not found on PATH: install git, or put it on PATH")
-    return GitResult(-1 if timed_out else proc.returncode, text, timed_out)
+    except OSError as exc:
+        return GitResult(126, f"{argv[0]} failed: {exc}")
+    return GitResult(-1 if timed_out else tree.proc.returncode, text, timed_out)
 
 
 def _remove_tree(path: Path) -> None:
