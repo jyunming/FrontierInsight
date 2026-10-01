@@ -62,7 +62,8 @@ def bench_config(config: Config | dict[str, Any], *, output_dir: Path, ask: str 
     if ask and ask.strip() not in str(data.get("topic") or ""):
         data["topic"] = str(data.get("topic") or "").rstrip() + "\n\n" + ask.strip() + "\n"
     data = _merge(data, extra or {})
-    data = _merge(data, {"output": {"output_dir": str(output_dir)}})
+    # After the models' settings: a kind of output made outside the engine calls a model no replay answers.
+    data = _merge(data, {"output": {"output_dir": str(output_dir), "kinds": BENCH_SETTINGS["output"]["kinds"]}})
     return Config.model_validate(data)
 
 
@@ -157,10 +158,15 @@ async def run(config: Config, run_dir: Path, *, mode: str, recording: Recording 
                 await engine.run()
         except Exception as e:  # noqa: BLE001 -- a quest that fails is an outcome the scorer reads, not a crash of the bench
             error = f"{type(e).__name__}: {e}"[:2000]
+    # Every call this run asked for that its recording did not have: the model's, and Crossref's retraction lookups.
+    from core.replay import read_events
+
+    looked_up = sum(1 for e in read_events(bench_dir) if e.get("event") == "divergence" and e.get("node") == "retractions"
+                    and float(e.get("ts") or 0) >= started)
     record = {
         "mode": mode, "quest_id": engine.quest_id, "from_step": from_step, "started_at": started,
         "seconds": round(time.time() - started, 1),
-        "stops": stops, "error": error, "divergences": replay.divergences,
+        "stops": stops, "error": error, "divergences": replay.divergences + looked_up,
         "planted_calls": [f"{n}#{i}" for (n, i) in (plants or {})],
     }
     (bench_dir / "run.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
@@ -232,5 +238,7 @@ def segment_after(recording_dir: Path, after: float) -> Recording:
     were asked); a quest recorded outside the benchmark falls back to the calls it kept in ``.fi/io/``."""
     calls = paths(recording_dir)[1] / "calls.jsonl"
     if calls.is_file():
-        return Recording.load(calls).after(after)
+        rows = [json.loads(line) for line in calls.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if rows and all(r.get("ts") for r in rows):  # an older recording has no start times: read the quest's own
+            return Recording(rows).after(after)
     return Recording.from_quest(quest_root(recording_dir), after=after)

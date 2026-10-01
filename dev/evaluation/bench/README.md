@@ -62,7 +62,8 @@ Three rules keep the numbers honest:
   not counted when it has no control, when its control would not be published either, when its replay asked for a
   call the recording does not have, or when its planted answer was never asked for; the report says which.
 - **L1 counts when it was exercised**: when its control's paper rests on the same kind of source (one never
-  retracted, added the same way). Whether FI then used the retracted one is what is measured.
+  retracted, added the same way). It is let through only when the result would be published with the paper resting
+  on the retracted source; published without it is FI's check working.
 
 ## The benchmark's settings, and why
 

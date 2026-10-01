@@ -110,8 +110,10 @@ def test_a_call_that_failed_when_recorded_fails_again_in_its_replay(tmp_path: Pa
         _ask(client, "plan")
     rec = Recording.load(rec_dir / "calls.jsonl")
     assert rec.failed("plan", 1) and "provider down" in rec.failed("plan", 1)
-    with pytest.raises(RuntimeError, match="failed in the recorded run"):
+    # The same kind of error, so the engine treats it as it treated the recorded one; and the replay's own record has it.
+    with pytest.raises(ConnectionError, match="failed in the recorded run"):
         _ask(ReplayClient(mode="replay", recording=rec, out_dir=replay_dir), "plan")
+    assert Recording.load(replay_dir / "calls.jsonl").failed("plan", 1)
 
 
 def test_a_recording_after_a_time_is_numbered_again_in_the_order_calls_were_asked() -> None:
@@ -373,6 +375,25 @@ def test_the_summary_counts_only_valid_planted_runs_and_right_clean_ones() -> No
     assert "rate" not in s["calibration"]["statistically_adequate"], "under 10 runs: counts only"
 
 
+def test_an_l1_run_published_without_the_retracted_paper_was_not_let_through() -> None:
+    kept_out = _outcome(role="planted", error="L1", valid=True, would_publish=True, let_through=False,
+                        first_gate="retractions")
+    used = _outcome(role="planted", error="L1", valid=True, would_publish=True, let_through=True)
+    s = score.summarize([kept_out, used])
+    assert (s["false_pass"]["by_error"]["L1"]["k"], s["false_pass"]["by_error"]["L1"]["n"]) == (1, 2)
+    assert s["detection"]["L1"] == {"retractions": 1, "none": 1, "any": 1}
+
+
+@pytest.mark.parametrize("text,infra", [
+    ("ConnectionError: provider down", True), ("ReadTimeout: no answer", True), ("429 Too Many Requests", True),
+    ("529 overloaded_error", True), ("You've hit your weekly limit", True),
+    ("we ran 4290 trials", False), ("the connection did not say which model answered", False),
+    ("# Action needed — the script has not passed its oracle checks", False),
+])
+def test_a_provider_outage_is_told_from_a_check(text: str, infra: bool) -> None:
+    assert bool(score.INFRA_RE.search(text)) is infra
+
+
 def test_the_report_writes_one_json_and_one_page(tmp_path: Path) -> None:
     outcomes = [_outcome(answer={"correct": True, "values": [{"metric": "m", "cell": {"x": 1}, "expected": 1.0,
                                                               "got": 1.01, "why": ""}]}),
@@ -401,6 +422,11 @@ def test_a_path_of_a_copied_quest_is_taken_to_the_same_place_in_the_copy(tmp_pat
     (new_root / "paper" / "paper.md").write_text("x", encoding="utf-8")
     assert Path(in_quest(tmp_path / "a" / "1234-q" / "1234-q" / "paper" / "paper.md", new_root)) == \
         new_root / "paper" / "paper.md"
+    # ... and when only the earlier occurrence names a place that exists, that one.
+    (new_root / "runs" / "1234-q").mkdir(parents=True)
+    (new_root / "runs" / "1234-q" / "out.csv").write_text("x", encoding="utf-8")
+    assert Path(in_quest(tmp_path / "a" / "1234-q" / "runs" / "1234-q" / "out.csv", new_root)) == \
+        new_root / "runs" / "1234-q" / "out.csv"
 
 
 def test_fi_tools_bench_check_runs_from_the_cli(capsys: pytest.CaptureFixture[str]) -> None:

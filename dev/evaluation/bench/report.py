@@ -66,8 +66,10 @@ def markdown(data: dict[str, Any], *, title: str = "FI self-benchmark") -> str:
         lines.append("")
     if s["detection"]:
         gates = [g for g in catalogue.GATES if any(g in row for row in s["detection"].values())]
-        extra = ["none"] if any("none" in row for row in s["detection"].values()) else []
+        extra = [k for k in ("control_also", "none") if any(k in row for row in s["detection"].values())]
         lines += ["## Where each error was first caught", "",
+                  "`control_also`: held back only by a check its control failed the same way; `none`: no check "
+                  "flagged it.", "",
                   "| Error | " + " | ".join(gates + extra) + " | caught at all |",
                   "|---|" + "---|" * (len(gates) + len(extra) + 1)]
         for err, row in s["detection"].items():

@@ -179,8 +179,9 @@ def score_dir(bench_root: Path) -> list[dict[str, Any]]:
         r = p.parent.parent
         try:
             _runner.quest_root(r)
+            task_of(r)
             runs.append(r)
-        except FileNotFoundError as e:
+        except (OSError, ValueError, KeyError) as e:
             print(f"[bench] {r} is left out: {e}")
     records = {r: (_plant.read_record(_runner.paths(r)[1]) or {}) for r in runs}
 
@@ -250,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
     try:
         return _main(args)
-    except (ValueError, KeyError, FileNotFoundError, FileExistsError) as e:  # AnswerError is a ValueError
+    except (ValueError, FileNotFoundError, FileExistsError) as e:  # AnswerError is a ValueError
         print(f"fi tools bench {args.cmd}: {e}")
         return 2
 

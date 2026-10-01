@@ -38,8 +38,9 @@ from . import plant as _plant
 from . import runner as _runner
 
 # A provider outage or a spent quota, in the words a stop or a failure uses: not a check of FI's.
-INFRA_RE = re.compile(r"\brate.?limit|\bquota\b|\b(?:http|status|error)\s*429\b|\btimed out\b|\bcould not reach\b"
-                      r"|\bconnection (?:error|refused|reset)\b|\busage limit\b|\bweekly limit\b", re.I)
+INFRA_RE = re.compile(r"\brate.?limit|\bquota\b|\b429\b(?!\d)|too many requests|\boverloaded|\btimed out\b"
+                      r"|\bcould not reach\b|\bconnect(?:ion)?(?:error|timeout)\b|\bconnection (?:error|refused|reset)\b"
+                      r"|\b(?:read|write|pool)timeout\b|\btimeouterror\b|\busage limit\b|\bweekly limit\b", re.I)
 
 
 def _json(path: Path) -> Any:
@@ -168,25 +169,38 @@ def gate_of(level: str, gap: str) -> str | None:
     return "other"
 
 
+def _finding_text(f: Any) -> str:
+    if isinstance(f, dict):
+        return str(f.get("message") or f.get("token") or f.get("kind") or json.dumps(f, sort_keys=True))
+    return str(f)
+
+
 def _record_flags(root: Path) -> dict[str, str]:
-    """The gates whose own record says this run failed them, with the record's words."""
+    """The gates whose own record says this run failed them, with what the record found (the findings themselves,
+    so a planted run's finding is told apart from a different one its control also had)."""
     needs = root / "needs"
     flags: dict[str, str] = {}
     retracted = _retractions.retracted_in_record(root / ".fi")
     if retracted:
-        flags["retractions"] = "retracted source(s) found: " + "; ".join(retracted)[:300]
+        flags["retractions"] = "retracted source(s) found: " + "; ".join(sorted(retracted))[:600]
     for gate, name in (("oracle", "ORACLE_CHECK.json"), ("protocol", "PROTOCOL_CHECK.json"),
                        ("run_record", "RUN_MANIFEST_CHECK.json"), ("optimum", "OPTIMUM_CHECK.json")):
         rec = _json(needs / name)
         if isinstance(rec, dict) and rec.get("status") not in (None, "ok", "not_applicable", "single_script"):
-            flags[gate] = f"{name}: {rec.get('status')}"
+            problems = rec.get("problems") or rec.get("differences") or []
+            flags[gate] = f"{name}: {rec.get('status')}" + (
+                ": " + "; ".join(sorted(_finding_text(p) for p in problems))[:600] if problems else "")
+    found = []
     for name in ("numeric_audit.json", "provenance_audit.json", "statistics_audit.json"):
         rec = _json(root / "paper" / name)
         if isinstance(rec, dict) and rec.get("ok") is False:
-            flags.setdefault("numbers", f"paper/{name}: {len(rec.get('findings') or [])} finding(s)")
+            found += [f"paper/{name}: {_finding_text(f)}" for f in rec.get("findings") or []] or [f"paper/{name}"]
+    if found:
+        flags["numbers"] = "; ".join(sorted(found))[:1200]
     claims = _json(root / "paper" / "claims.json")
     if isinstance(claims, dict) and claims.get("unsupported"):
-        flags["claim_check"] = f"paper/claims.json: {len(claims['unsupported'])} unsupported claim(s)"
+        flags["claim_check"] = "paper/claims.json, unsupported: " + "; ".join(
+            sorted(str(c) for c in claims["unsupported"]))[:1200]
     for check in ("evidence_gate", "claim_check", "design_audit"):
         status, _rec, problem = _receipts.read(root, check)
         if status in ("fail", "unknown") and not problem:
@@ -286,19 +300,22 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
 
     # Flags: the checks' own records and the evidence gaps, less what the control run also has (the same gate for the
     # same reason, its numbers aside). A gate flagged only for a reason the control shares is kept apart, not dropped.
-    control_reasons = {(g, _same_reason(why)) for g, why in (control or {}).get("_record_flags", {}).items()}
-    control_reasons |= {(gate_of(lvl, gap) or "", _same_reason(gap)) for lvl, gap in (control or {}).get("_gaps", [])}
+    # A check's record is compared by what it found (its findings, word for word); an evidence gap by its words with
+    # its counts left out, except the paper-number audits' gap, which is only a count (their findings decide).
+    control_records = set((control or {}).get("_record_flags", {}).items())
+    control_gaps = {(gate_of(lvl, gap) or "", gap if lvl == "internally_reconciled" else _same_reason(gap))
+                    for lvl, gap in (control or {}).get("_gaps", [])}
     flags: dict[str, str] = {}
     shared: dict[str, str] = {}
     for g, why in _record_flags(root).items():
-        (shared if (g, _same_reason(why)) in control_reasons else flags)[g] = why
+        (shared if (g, why) in control_records else flags)[g] = why
     for lvl, gap in gaps:
         if stop_text and lvl == "executed":
             continue  # a stopped quest has no results: that follows from the stop, it is not a check of its own
         gate = gate_of(lvl, gap)
-        if not gate:
+        if not gate or gate in flags:
             continue
-        if (gate, _same_reason(gap)) in control_reasons:
+        if (gate, gap if lvl == "internally_reconciled" else _same_reason(gap)) in control_gaps or gate in shared:
             shared.setdefault(gate, gap)
         else:
             flags.setdefault(gate, gap)
@@ -327,7 +344,7 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
             # retracted one had the same chance to be used, whatever FI then did with it.
             valid = bool(control.get("cites_planted")) if control else None
             why_not = "" if valid else ("the control's paper does not rest on the planted kind of source"
-                                        if control else "")
+                                        if control else "there is no control run of the same task")
         if valid and plant.get("answers") and not any(e.get("event") == "planted" for e in events):
             valid, why_not = None, "the planted answer was never asked for"
         if valid and divergences:
@@ -336,8 +353,11 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
             valid, why_not = None, "there is no control run of the same copy and step"
         if valid and control is not None and not control.get("would_publish"):
             valid, why_not = None, "its control would not be published either: this step cannot be measured by a copy"
-    _o, bench_dir = _runner.paths(run_dir)
-    tokens, calls = _tokens(bench_dir)
+    tokens, calls = _tokens(bench)
+    cites_planted = _cites_source(root, plant.get("hits") or []) if plant.get("hits") else None
+    # A planted error let through: the result would be published. For L1, only when the paper also rests on the
+    # retracted source: FI keeping it out of a published paper is the check working.
+    let_through = would_publish and (error != "L1" or bool(cites_planted))
     return {
         "run": run_dir.name, "task": task["task"], "error": error, "role": role, "mode": meta.get("mode"),
         "from_step": meta.get("from_step"), "answer": answer, "evidence_level": level,
@@ -348,7 +368,7 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
         "flagged": flagged, "flag_reasons": {g: flags[g] for g in flagged},
         "first_gate": flagged[0] if flagged else None, "flagged_as_control": sorted(shared),
         "valid": valid, "not_counted_because": why_not if error and valid is not True else "",
-        "cites_planted": _cites_source(root, plant.get("hits") or []) if plant.get("hits") else None,
+        "cites_planted": cites_planted, "let_through": let_through if error else None,
         "divergences": divergences, "tokens": tokens, "calls": calls,
         "seconds": meta.get("seconds"),
         # Kept for the runs that use this one as their control; dropped from the report.
@@ -363,6 +383,11 @@ def _rate(k: int, n: int) -> dict[str, Any]:
     return {"k": k, "n": n, "rate": (k / n) if n else None, "ci95": list(ci) if ci else None}
 
 
+def _let(o: dict[str, Any]) -> bool:
+    """Whether a planted error was let through (score_run's ``let_through``; ``would_publish`` for an older outcome)."""
+    return bool(o["let_through"] if o.get("let_through") is not None else o["would_publish"])
+
+
 def summarize(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     """The design's metrics over scored runs (design section 4)."""
     planted = [o for o in outcomes if o["role"] == "planted" and o.get("valid") is True]
@@ -370,8 +395,8 @@ def summarize(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     by_error: dict[str, dict[str, Any]] = {}
     for err in sorted({o["error"] for o in planted}):
         runs = [o for o in planted if o["error"] == err]
-        by_error[err] = _rate(sum(o["would_publish"] for o in runs), len(runs))
-    false_pass = {"by_error": by_error, "total": _rate(sum(o["would_publish"] for o in planted), len(planted)),
+        by_error[err] = _rate(sum(_let(o) for o in runs), len(runs))
+    false_pass = {"by_error": by_error, "total": _rate(sum(_let(o) for o in planted), len(planted)),
                   "not_valid": sum(1 for o in outcomes if o["role"] == "planted" and o.get("valid") is not True)}
     right = [o for o in clean if o["answer"].get("correct") is True and not o["infrastructure_failure"]]
     false_block = _rate(sum(not o["would_publish"] for o in right), len(right))
@@ -380,9 +405,10 @@ def summarize(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
     matrix: dict[str, dict[str, int]] = {}
     for o in planted:
         row = matrix.setdefault(o["error"], {})
-        key = o["first_gate"] or "none"
+        # Held back, but only by checks its control failed the same way: listed apart, not as a detection of a gate.
+        key = o["first_gate"] or ("control_also" if o.get("flagged_as_control") and not _let(o) else "none")
         row[key] = row.get(key, 0) + 1
-        if not o["would_publish"]:
+        if not _let(o):
             row["any"] = row.get("any", 0) + 1
     calibration: dict[str, dict[str, Any]] = {}
     for o in outcomes:

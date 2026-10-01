@@ -99,4 +99,4 @@ def get(error_id: str) -> Error:
     try:
         return CATALOGUE[error_id.upper()]
     except KeyError:
-        raise KeyError(f"no planted error {error_id!r}; the catalogue has {', '.join(CATALOGUE)}") from None
+        raise ValueError(f"no planted error {error_id!r}; the catalogue has {', '.join(CATALOGUE)}") from None

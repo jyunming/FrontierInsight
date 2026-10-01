@@ -77,15 +77,20 @@ class Recording:
 
     def failed(self, node: str, index: int) -> str | None:
         """Why the recorded call failed, when it did (and nothing answered it)."""
-        key = _key(node, index)
-        row = None if key in self.calls else self.errors.get(key)
+        row = self.failure(node, index)
         return str(row.get("error") or "an error") if row is not None else None
+
+    def failure(self, node: str, index: int) -> dict[str, Any] | None:
+        key = _key(node, index)
+        return None if key in self.calls else self.errors.get(key)
 
     def after(self, ts: float) -> "Recording":
         """The calls started after ``ts`` (each row's start time), numbered again per step from 1, in the order they
         started: what a run resumed from a checkpoint taken at ``ts`` asks for."""
-        rows = sorted((c for c in [*self.calls.values(), *self.errors.values()] if float(c.get("ts") or 0) > ts),
-                      key=lambda c: float(c.get("ts") or 0))
+        # A step's first call can start in the same clock tick as the checkpoint (>=); calls started in one tick keep
+        # their recorded order within the step (the index), never the order they finished.
+        rows = sorted((c for c in [*self.calls.values(), *self.errors.values()] if float(c.get("ts") or 0) >= ts),
+                      key=lambda c: (float(c.get("ts") or 0), int(c.get("index") or 0)))
         counts: dict[str, int] = {}
         out = []
         for c in rows:
@@ -191,14 +196,18 @@ class ReplayClient:
     def event(self, kind: str, **fields: Any) -> None:
         self._write(EVENTS_FILE, {"ts": time.time(), "event": kind, **fields})
 
+    def _write_failure(self, node: str, index: int, started: float, messages: Any, e: BaseException) -> None:
+        self._write(CALLS_FILE, {"node": node, "index": index, "ts": started, "source": "error",
+                                 "error": f"{type(e).__name__}: {e}"[:500],
+                                 "error_type": f"{type(e).__module__}.{type(e).__qualname__}", "response": None,
+                                 "prompt_sha256": _attempts.prompt_sha(messages)})
+
     async def _real(self, messages: Any, node: str, index: int, started: float, **kw: Any) -> str:
         try:
             response = await self.real.chat(messages, node=node, **kw)
         except Exception as e:
             # A failed call is part of the run: a replay of it fails the same way, never answers it.
-            self._write(CALLS_FILE, {"node": node, "index": index, "ts": started, "source": "error",
-                                     "error": f"{type(e).__name__}: {e}"[:500], "response": None,
-                                     "prompt_sha256": _attempts.prompt_sha(messages)})
+            self._write_failure(node, index, started, messages, e)
             raise
         served = dict(_provider.LAST_CALL.get() or {})
         usage = served.get("usage") if isinstance(served.get("usage"), dict) else getattr(self.real, "last_usage", None)
@@ -230,7 +239,9 @@ class ReplayClient:
             self.event("planted", node=node, index=index)
         elif self._replaying and failed is not None:
             self.event("replayed_failure", node=node, index=index, error=failed)
-            raise RuntimeError(f"[replay] this call failed in the recorded run: {failed}")
+            error = _rebuilt(self.recording.failure(node, index) or {}, failed)
+            self._write_failure(node, index, started, messages, error)  # the replay's own recording has it too
+            raise error
         elif self._replaying and recorded is not None:
             source = "replayed"
             response = str(recorded["response"])
@@ -355,6 +366,22 @@ async def _dispatch(dois: list[str], **kw: Any) -> dict[str, dict[str, Any]]:
     if current is None:
         return await real(dois, **kw)
     return await current._lookup(real, dois, **kw)
+
+
+def _rebuilt(row: dict[str, Any], why: str) -> Exception:
+    """The kind of error the recorded call raised (the engine treats some kinds in their own way), with its message;
+    a ``RuntimeError`` when that kind cannot be made again from a message."""
+    import importlib
+
+    message = f"[replay] this call failed in the recorded run: {why}"
+    module, _, name = str(row.get("error_type") or "").rpartition(".")
+    try:
+        cls = getattr(importlib.import_module(module), name) if module else None
+        if isinstance(cls, type) and issubclass(cls, Exception):
+            return cls(message)
+    except Exception:  # noqa: BLE001 -- an error class that will not rebuild is reported as a RuntimeError
+        pass
+    return RuntimeError(message)
 
 
 def read_events(out_dir: Path) -> list[dict[str, Any]]:
