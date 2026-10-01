@@ -26,7 +26,8 @@ from tests.test_research_acceptance import METRIC, _with_package
 from tests.test_retractions import RETRACTED_ITEM
 from tests.test_run_manifest import ANALYSIS_TRIAL, PROTOCOL, SIM_TRIAL, _reply
 
-pytestmark = pytest.mark.slow
+# The module's campaign (a recording and eleven runs) is set up by the first test: it gets the e2e files' longer limit.
+pytestmark = [pytest.mark.slow, pytest.mark.timeout(3600)]
 
 PROTO = {
     **PROTOCOL,
