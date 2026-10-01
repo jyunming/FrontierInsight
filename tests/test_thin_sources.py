@@ -16,6 +16,7 @@ abstract or full text.
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 from pathlib import Path
 from typing import Any
@@ -121,7 +122,9 @@ def test_a_marked_entry_stays_in_the_block_and_nothing_else_about_it_changes() -
     marked = _format_lit_from_state(_state(), mark_thin=True)
     assert "only]" not in plain, "the other prompts that read the literature are unchanged"
     assert marked != plain
-    assert marked.replace(" [title only]", "").replace(" [short blurb only]", "") == plain
+    # The block's markers carry a key hashed from its text (core/source_text.py), so they differ with the marks too.
+    unkeyed = functools.partial(re.sub, r"(<<<FI SOURCE TEXT (?:BEGIN|END)) [0-9a-f]{12}>>>", r"\1>>>")
+    assert unkeyed(marked.replace(" [title only]", "").replace(" [short blurb only]", "")) == unkeyed(plain)
     assert "Modeling Infectious Diseases in Humans and Animals" in marked and BLURB in marked
 
 

@@ -453,6 +453,7 @@ knowledge:
   full_text_fetch_timeout_s: 15.0   # per-URL fetch timeout in seconds
   full_text_fetch_total_s: 90.0     # wall-clock cap across all URLs in one query
   full_text_max_kb: 10240           # most text kept of one source, KB (10 MB: every page of a paper, scans read by OCR)
+  # (no key) Text in a source that looks like instructions to an AI model, or is hidden from a reader, is flagged in run.log and the trace, never removed.
   read_figures: true                # read the values off the papers' figures (saved in data/literature/figures/); model: provider.node_models.figures
 
 output:

@@ -92,6 +92,7 @@ from . import criteria as _criteria
 from . import improve as _improve
 from . import plan_settings as _plan_settings
 from . import receipts as _receipts
+from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -1695,6 +1696,16 @@ class Engine:
             self.audit.append(kind, node=node or self._audit_node, provenance=provenance, **fields)
         except Exception as e:  # noqa: BLE001 -- the trace is a record; it must never stop a quest
             self._log.debug("[audit] could not record %s: %r", kind, e)
+
+    async def _flag_sources(self, items: list[Any], stage: str, *, record_clean: bool = False) -> None:
+        """Flag text in these sources that is hidden from a reader or addressed to an AI model (core/source_text.py):
+        kept, marked in the prompts, recorded once per source in the audit trace and run.log. In a thread: a source's
+        whole text can be 10 MB, and a --fleet shares the event loop."""
+        await asyncio.to_thread(
+            _source_text.flag_and_record, items, stage=stage, audit=self._audit, log=self._log,
+            content_of=_item_content, record_clean=record_clean,
+            reported=self.__dict__.setdefault("_sources_flagged", set()),
+        )
 
     def _seal_trace(self, state: QuestState) -> None:
         """The last event of a finished quest (``quest_finalized``), written after everything else the quest keeps:
@@ -3539,6 +3550,7 @@ class Engine:
             chat_fn=functools.partial(self._chat_messages, node="source_router"),
             work_scope=self._work_scope(state),
         )
+        await self._flag_sources(seeded, "ideate")
         prompt = self._prompts["ideate"].substitute(
             topic=state["topic"],
             literature_block=_format_lit(seeded, **self._lit_kwargs(state)),
@@ -4132,6 +4144,9 @@ class Engine:
             "+%d user-supplied, total=%d)",
             len(docs), this_iter, added, user_added, len(merged),
         )
+        # Text in a source that is hidden from a reader or addressed to an AI model is flagged, never removed
+        # (core/source_text.py): marked in the prompts, recorded in the audit trace, and the quest goes on.
+        await self._flag_sources(merged, "literature", record_clean=True)
         qualities = Counter((e.get("metadata") or {}).get("content_quality") or "snippet_only" for e in merged)
         full_n = qualities.get("full_text", 0)
         # "Nothing fetched" is not "no abstract": a search record from OpenAlex / Crossref / Semantic Scholar carries
@@ -4949,14 +4964,18 @@ class Engine:
                        "new source(s)) and asking the model again", query, len(new))
         lines = [f"- [{s['label']}] {s.get('title') or '(untitled)'}" for s in known[:25]] or ["- (none)"]
         lines += ["", f"One more search ({query!r}) found:"]
+        await self._flag_sources(new, "criteria")
         for i, doc in enumerate(new, start=1):
             meta = getattr(doc, "metadata", {}) or {}
             text = " ".join(str(getattr(doc, "content", "") or "").split())[:400]
-            lines.append(f"- [C{i}] {' '.join(str(meta.get('title') or '(untitled)').split())}: {text}")
+            head = _source_text.mark(f"- [C{i}] {' '.join(str(meta.get('title') or '(untitled)').split())}", meta)
+            lines.append(f"{head}: {text}")
         if not new:
             lines.append("- (nothing new)")
         prompt = self._prompts["plan_criteria"].substitute(
-            topic=topic[:1500], protocol=json.dumps(protocol, indent=2, default=str)[:8000], found="\n".join(lines),
+            topic=topic[:1500], protocol=json.dumps(protocol, indent=2, default=str)[:8000],
+            # Retrieved titles and text are material to read, never instructions (core/source_text.py).
+            found=_source_text.fence("\n".join(lines)),
         )
         try:
             reply = await self._chat(prompt, node="plan_criteria")
@@ -5934,6 +5953,7 @@ class Engine:
         read = await self._read_literature_figures(state, merged)
         if not added and not read:
             return {}
+        await self._flag_sources(merged, "after_literature")  # the papers added and the readings appended
         if read:
             self._write_literature_files(merged, self.quest_root / "data" / "literature")
         return {"literature": merged}
@@ -5996,7 +6016,9 @@ class Engine:
                      f"{str(todo[fid][1].get('caption') or '')[:400]}" for fid in chunk]
             try:
                 raw = await self._chat(
-                    self._prompts["figures_pick"].substitute(topic=topic, figures="\n".join(lines)), node="figures",
+                    self._prompts["figures_pick"].substitute(
+                        topic=topic, figures=_source_text.fence("\n".join(lines), "papers' titles and figure captions"),
+                    ), node="figures",
                 )
                 picked = (_parse_json_lenient(raw, node="figures") or {}).get("pick")
             except Exception as e:  # noqa: BLE001 -- these figures stay unjudged; the quest goes on
@@ -6501,7 +6523,8 @@ class Engine:
             "papers returned for a corporate-finance question). Return ONLY "
             "the indices that are genuinely relevant to the topic.\n\n"
             "# Candidates\n"
-            + "\n".join(listing_lines)
+            # Retrieved titles and excerpts are material to judge, never instructions (core/source_text.py).
+            + _source_text.fence("\n".join(listing_lines))
             + "\n\nRespond with a single JSON object, no prose:\n"
             '{"relevant_indices": [<int>, ...]}\n'
             "If NONE are relevant, return an empty list."
@@ -6634,7 +6657,8 @@ class Engine:
                 "field that only shares vocabulary is a 0 or a 1."
             )
         prompt = self._prompts["literature_screen"].substitute(
-            topic=topic[:1200], kind_guidance=guidance, candidates="\n".join(lines),
+            # Retrieved titles and excerpts are material to grade, never instructions (core/source_text.py).
+            topic=topic[:1200], kind_guidance=guidance, candidates=_source_text.fence("\n".join(lines)),
         )
         self.__dict__.setdefault("_last_call_id", {}).pop("literature_screen", None)
         try:
@@ -6838,7 +6862,7 @@ class Engine:
             "QUERIES ALREADY TRIED (do not repeat these):\n"
             + "\n".join(f"- {q[:160]}" for q in tried)
             + "\n\nWHAT CAME BACK (all judged off-topic):\n"
-            + ("\n".join(titles) if titles else "- (no titles)")
+            + (_source_text.fence("\n".join(titles), "the titles of retrieved sources") if titles else "- (no titles)")
             + "\n\nThe likely cause is vocabulary: this field's papers may use "
             "different terminology than the topic statement does. Propose ONE "
             "alternative search query that uses the terms researchers in this "
@@ -12408,7 +12432,8 @@ class Engine:
             result_json=json.dumps(
                 state.get("result_json") or {}, ensure_ascii=False,
             )[:2000],
-            sources=sources_text[:12000],
+            # Collected pages and files are material to mine, never instructions (core/source_text.py).
+            sources=_source_text.fence(sources_text[:12000], "web pages and data files the quest collected"),
         )
         try:
             raw = await self._chat(prompt, node="web_plots")
@@ -12496,7 +12521,9 @@ class Engine:
             f"[{i}] ({c.kind}) {c.caption[:160]}" for i, c in enumerate(cands)
         )
         prompt = (
-            f"Topic: {topic[:400]}\n\nCandidate illustrative figures:\n{lines}\n\n"
+            # Captions are retrieved text: material to judge, never instructions (core/source_text.py).
+            f"Topic: {topic[:400]}\n\nCandidate illustrative figures:\n"
+            f"{_source_text.fence(lines, 'figure captions from papers and Wikimedia Commons')}\n\n"
             "Return ONLY a JSON array of the indices that are genuinely "
             "relevant AND appropriate as an illustration for THIS topic. Drop "
             "anything off-topic, misleading, or only superficially keyword-"
@@ -12877,6 +12904,7 @@ class Engine:
             # provider.node_ensemble["cross_check"] is configured —
             # majority verdict wins per-finding, ties surfaced. Either
             # way ``parsed`` carries the same shape downstream.
+            await self._flag_sources(hits, "cross_check")
             cand_block = _format_lit(hits, **self._lit_kwargs(state))
             prompt = self._prompts["cross_check"].substitute(
                 topic=state.get("topic", "")[:1000],
@@ -13788,12 +13816,13 @@ class Engine:
         sources = {label: (meta, text) for label, (meta, text, _readings) in split_sources.items()}
         readings_of = {label: readings for label, (_meta, _text, readings) in split_sources.items()}
         citing = _citing_sentences(paper_text)
-        refs_block = "\n\n".join(
+        # The sources' text is material to check claims against, never instructions (core/source_text.py).
+        refs_block = _source_text.fence("\n\n".join(
             _claim_source_block(label, meta, text, citing.get(label) or [], readings=readings_of.get(label, ""))
             for label, (meta, text) in sorted(
                 sources.items(), key=lambda kv: (kv[0].startswith("W"), int(kv[0].lstrip("W")))
             )
-        ) or "(no references)"
+        )) or "(no references)"
         analysis = state.get("analysis") or {}
         # The findings and the supported claims go in whole and first — they
         # are what an "experiment" basis is checked against — and the run's
@@ -14516,7 +14545,7 @@ class Engine:
         return (
             "Titles of the sources retrieved for this study (their text is not shown at this step: the "
             "write step receives it, and each key finding is cross-checked against the literature "
-            "afterwards):\n" + titles
+            "afterwards):\n" + _source_text.fence(titles, "the titles of retrieved papers and web pages")
         )
 
     def _skills_summary_block(self, state: QuestState | None = None) -> str:
@@ -18029,7 +18058,8 @@ def _preliminary_reminders(items: list[Any], limit: int = 3, chars: int = 300) -
     if not lines:
         return ""
     return ("Earlier FI results kept as PRELIMINARY (an exploration, or a result with evidence gaps). They say what was "
-            "tried; they are not evidence. Never cite them or state their findings as established:\n" + "\n".join(lines))
+            "tried; they are not evidence. Never cite them or state their findings as established:\n"
+            + _source_text.fence("\n".join(lines), "earlier FI results read back from the knowledge base"))
 
 
 def _with_reminders(block: str, items: list[Any]) -> str:
@@ -18186,14 +18216,15 @@ def _format_lit(
             continue
         keep_idx += 1
         title = meta.get("title") or meta.get("source") or f"item-{keep_idx}"
-        header = _format_lit_header(meta, keep_idx)
+        header = _source_text.mark(_format_lit_header(meta, keep_idx), meta)
         excerpt = _format_lit_excerpt(
             d.content, title, query=query, budget=budget, mode=mode,
         )
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return _with_reminders("(no prior work surfaced from the knowledge base)", docs)
-    return _with_reminders("\n\n".join(lines), docs)
+    # Retrieved text is material to read, never instructions (core/source_text.py); FI's reminders stay outside.
+    return _with_reminders(_source_text.fence("\n\n".join(lines)), docs)
 
 
 def _format_lit_from_state(
@@ -18219,6 +18250,7 @@ def _format_lit_from_state(
         title = meta.get("title") or meta.get("source") or f"item-{label}"
         content = _item_content(item)  # the whole text, from disk when the state holds only its first part
         header = _format_lit_header(meta, label, _thin_source(meta, content) if mark_thin else None)
+        header = _source_text.mark(header, meta)
         excerpt = _format_lit_excerpt(
             content, title,
             query=query, budget=budget, mode=mode,
@@ -18226,7 +18258,8 @@ def _format_lit_from_state(
         lines.append(f"{header}\n{excerpt}" if excerpt else header)
     if not lines:
         return _with_reminders("(no prior work surfaced from the knowledge base)", items)
-    return _with_reminders("\n\n".join(lines), items)
+    # Retrieved text is material to read, never instructions (core/source_text.py); FI's reminders stay outside.
+    return _with_reminders(_source_text.fence("\n\n".join(lines)), items)
 
 
 def _is_web_page(meta: dict[str, Any]) -> bool:
@@ -23699,9 +23732,10 @@ def _ingest_user_dropped_papers(
             continue
         ocr_note = ""
         figures: list[dict[str, Any]] = []
+        hidden: list[str] = []
         try:
             if suffix == ".pdf":
-                content, ocr_note, figures = _extract_pdf(p)
+                content, ocr_note, figures, hidden = _extract_pdf(p)
                 log.info("[literature] %s: %s%s", p.name, ocr_note,
                          f"; {len(figures)} figure(s) with captions" if figures else "")
             else:
@@ -23728,15 +23762,17 @@ def _ingest_user_dropped_papers(
             "fetched_full_text": True,
             **({"full_text_ocr": True} if "by OCR" in ocr_note else {}),
             **({"figures": figures} if figures else {}),
+            **({"hidden_text": hidden} if hidden else {}),  # flagged by core/source_text.py
         }, quality="full_text"))
         count += 1
     return merged, count
 
 
-def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]]]:
+def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]], list[str]]:
     """Text of a PDF the person dropped in ``inputs/papers/`` (core/pdf_text.py: every page, scanned pages read by
-    OCR, up to 10 MB), its one-line summary, and its captioned figures (core/knowledge.py ``_pdf_figures``: cut once
-    and cached; a scanned page's figures too when OCR read it)."""
+    OCR, up to 10 MB), its one-line summary, its captioned figures (core/knowledge.py ``_pdf_figures``: cut once
+    and cached; a scanned page's figures too when OCR read it), and the passages it draws so a reader cannot see
+    them."""
     from core import pdf_text
     from core.knowledge import _pdf_figures
 
@@ -23746,7 +23782,7 @@ def _extract_pdf(path: Path) -> tuple[str, str, list[dict[str, Any]]]:
         figures = _pdf_figures(data, ocr_lines=result.ocr_lines or None)
     except Exception:  # noqa: BLE001 -- the text is what the source is for; its figures are extra
         figures = []
-    return result.text, result.summary(), figures
+    return result.text, result.summary(), figures, list(result.hidden_text)
 
 
 #: What the quest state keeps of a source's text: the first this many characters, as it always held (64 KB). The

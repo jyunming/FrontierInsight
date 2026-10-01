@@ -15,6 +15,13 @@ lost its results and discussion.
   31 MB, are inside the wheel, so it runs offline once installed). With neither, the page is counted as unread and the result says so;
   it is never silently empty. No language model is involved.
 - ``max_bytes`` bounds the text (10 MB by default); a PDF cut there says at which page.
+- Text drawn so a reader cannot see it (in white on a white page, invisibly, or at a size below
+  :data:`HIDDEN_SIZE_PT`) is kept in the text like the rest and also listed in ``hidden_text``: it reaches the model
+  all the same, and it is how instructions are planted in a paper for a model to read (core/source_text.py flags it).
+  White or invisible text over a clearly darker fill or over any image is not counted: a label on a dark figure, a
+  journal's banner, and the searchable layer a scan (or a browser printing its text as images) lays over the page
+  image. Not found, then: white or invisible text placed over an image (even a plain white one), near-white text,
+  text covered by a white box drawn after it, and (on the pypdfium2 path) text inside an included figure.
 """
 
 from __future__ import annotations
@@ -55,6 +62,8 @@ class PdfText:
     #: Each OCR-read page's lines with their place, ``{page: [((left, bottom, right, top) in PDF points, text)]}``,
     #: for core/pdf_figures.py to find a scanned page's figures without reading the page twice.
     ocr_lines: dict[int, list[tuple[tuple[float, float, float, float], str]]] = field(default_factory=dict)
+    #: Passages drawn so a reader cannot see them (white on the page, invisible, or tiny); see the module docstring.
+    hidden_text: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
         """One plain line for the log and the file header."""
@@ -67,6 +76,9 @@ class PdfText:
             parts.append(f"{len(self.unread_pages)} scanned page(s) not read ({why})")
         if self.truncated_at_page:
             parts.append(f"cut at page {self.truncated_at_page} by the size limit")
+        if self.hidden_text:
+            words = sum(len(t.split()) for t in self.hidden_text)
+            parts.append(f"{words} word(s) drawn so a reader cannot see them (white on the page, invisible, or tiny)")
         if self.error:
             parts.append(f"error: {self.error}")
         return "; ".join(parts)
@@ -142,6 +154,159 @@ def _pdfium_reading_order(page: Any, textpage: Any) -> str:
         left, bottom, right, top = rects[i]
         lines.append(textpage.get_text_bounded(left, bottom, right, top))
     return "\n".join(lines)
+
+
+#: Text drawn below this size (points, with the page's scaling) counts as hidden. Real small print (a figure's axis
+#: label, a copyright line) is 4 pt or more.
+HIDDEN_SIZE_PT = 2.0
+#: A colour with every channel at least this (0-255) counts as white.
+_WHITE = 250
+#: A fill counts as a backdrop that white or invisible text can sit on only when it is clearly darker than white: its
+#: relative luminance (0 black, 1 white) below this, which leaves white text a contrast of at least 1.4. A page-sized
+#: rectangle in 249 grey is a white page, and bright yellow, cyan or lime under white text hide it about as well as
+#: white does; grey 200, orange and a brochure's leaf green count as dark (white on them is read).
+_DARK = 0.7
+#: At most this many hidden passages are kept per PDF (each cut to 200 characters).
+_HIDDEN_MAX = 20
+
+
+def _dark(r: float, g: float, b: float) -> bool:
+    """Whether a colour (channels 0-255) is clearly darker than white: WCAG relative luminance below :data:`_DARK`."""
+    def linear(c: float) -> float:
+        c = max(0.0, min(255.0, float(c))) / 255
+        return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+    return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b) < _DARK
+
+
+def _inside(box: tuple[float, float, float, float], boxes: list[tuple[float, float, float, float]]) -> bool:
+    """Whether the middle of ``box`` lies within one of ``boxes`` (any corner order)."""
+    x = (box[0] + box[2]) / 2
+    y = (box[1] + box[3]) / 2
+    return any(min(b[0], b[2]) <= x <= max(b[0], b[2]) and min(b[1], b[3]) <= y <= max(b[1], b[3]) for b in boxes)
+
+
+def _is_hidden(*, invisible: bool, tiny: bool, white: bool, covered: bool) -> bool:
+    """A run of text no reader sees: drawn invisibly, tiny, or white, and (unless tiny) not over an image or a
+    coloured fill. An invisible layer over a page image is how a scan (and some browsers' print-to-PDF) makes the page
+    searchable, so it does not count; an invisible run on a bare page does."""
+    if invisible:
+        return not covered
+    return tiny or (white and not covered)
+
+
+def _hidden_pymupdf(page: Any) -> list[str]:
+    backdrops: list[tuple[float, float, float, float]] = []
+    for d in page.get_drawings():
+        fill = d.get("fill")
+        opacity = d.get("fill_opacity")
+        if fill and _dark(*(255 * c for c in fill[:3])) and (1.0 if opacity is None else float(opacity)) > 0:
+            backdrops.append(tuple(d["rect"]))
+    backdrops += [tuple(i["bbox"]) for i in page.get_image_info()]
+    out: list[str] = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                text = " ".join(str(span.get("text") or "").split())
+                if not text:
+                    continue
+                color = int(span.get("color") or 0)
+                if _is_hidden(invisible=span.get("alpha", 255) == 0,
+                              tiny=float(span.get("size") or 12) < HIDDEN_SIZE_PT,
+                              white=min((color >> 16) & 255, (color >> 8) & 255, color & 255) >= _WHITE,
+                              covered=_inside(tuple(span["bbox"]), backdrops)):
+                    out.append(text)
+    return out
+
+
+def _hidden_pdfium(page: Any) -> list[str]:
+    """The pypdfium2 reading. Only the page's own objects are read (``max_depth=1``): an object inside a form (a
+    figure included as one) has its size and place in the form's own coordinates, which would misread both."""
+    import ctypes
+
+    import pypdfium2.raw as pdfium_c
+
+    def colour_of(obj: Any, *, stroke: bool = False) -> tuple[int, int, int, int] | None:
+        r, g, b, a = (ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint())
+        get = pdfium_c.FPDFPageObj_GetStrokeColor if stroke else pdfium_c.FPDFPageObj_GetFillColor
+        if not get(obj.raw, r, g, b, a):
+            return None
+        return r.value, g.value, b.value, a.value
+
+    # Mode 7 (text used only as a clip) is painted by what is drawn through it, often a gradient title: not counted.
+    clip_only = pdfium_c.FPDF_TEXTRENDERMODE_CLIP
+    stroked_modes = {pdfium_c.FPDF_TEXTRENDERMODE_STROKE, pdfium_c.FPDF_TEXTRENDERMODE_STROKE_CLIP}
+    both_modes = {pdfium_c.FPDF_TEXTRENDERMODE_FILL_STROKE, pdfium_c.FPDF_TEXTRENDERMODE_FILL_STROKE_CLIP}
+    page_area = abs(float(page.get_width()) * float(page.get_height())) or 1.0
+
+    def area(box: tuple[float, float, float, float]) -> float:
+        return abs((box[2] - box[0]) * (box[3] - box[1]))
+    objects = list(page.get_objects(max_depth=1))
+
+    backdrops: list[tuple[float, float, float, float]] = []
+    for obj in objects:
+        if obj.type == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+            backdrops.append(tuple(obj.get_bounds()))
+        elif obj.type in (pdfium_c.FPDF_PAGEOBJ_PATH, pdfium_c.FPDF_PAGEOBJ_FORM):
+            if obj.type == pdfium_c.FPDF_PAGEOBJ_FORM:
+                # A form (an included figure): what it draws is not read here, so a figure-sized one counts as a
+                # backdrop. One as large as the page (a stamped or wrapped page) would hide everything, so it counts
+                # only when the page holds an image inside a form: a scan wrapped whole, with its text layer on top.
+                if area(tuple(obj.get_bounds())) >= page_area / 2 and not any(
+                        o.type == pdfium_c.FPDF_PAGEOBJ_IMAGE for o in page.get_objects(max_depth=2, form=obj)):
+                    continue
+                backdrops.append(tuple(obj.get_bounds()))
+                continue
+            mode, stroke = ctypes.c_int(), ctypes.c_int()
+            colour = colour_of(obj)
+            if (colour and _dark(*colour[:3]) and colour[3] > 0
+                    and pdfium_c.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value):
+                backdrops.append(tuple(obj.get_bounds()))
+    out: list[str] = []
+    textpage = None
+    try:
+        for obj in objects:
+            if obj.type != pdfium_c.FPDF_PAGEOBJ_TEXT:
+                continue
+            mode = pdfium_c.FPDFTextObj_GetTextRenderMode(obj.raw)
+            if mode == clip_only:
+                continue
+            colour = colour_of(obj, stroke=mode in stroked_modes)  # outlined text is seen by its outline
+            size = ctypes.c_float()
+            if colour is None or not pdfium_c.FPDFTextObj_GetFontSize(obj.raw, ctypes.byref(size)):
+                continue
+            white = min(colour[:3]) >= _WHITE and colour[3] > 0
+            if white and mode in both_modes:  # filled and outlined: white only when the outline is white too
+                outline = colour_of(obj, stroke=True)
+                white = outline is None or (min(outline[:3]) >= _WHITE and outline[3] > 0)
+            m = obj.get_matrix()
+            drawn = size.value * (abs(m.a * m.d - m.b * m.c) ** 0.5 or 1.0)
+            if not _is_hidden(invisible=mode == pdfium_c.FPDF_TEXTRENDERMODE_INVISIBLE or colour[3] == 0,
+                              tiny=drawn < HIDDEN_SIZE_PT, white=white,
+                              covered=_inside(tuple(obj.get_bounds()), backdrops)):
+                continue
+            if textpage is None:
+                textpage = page.get_textpage()
+            n = pdfium_c.FPDFTextObj_GetText(obj.raw, textpage.raw, None, 0)
+            if n <= 2:
+                continue
+            buf = (ctypes.c_ushort * (n // 2 + 1))()
+            pdfium_c.FPDFTextObj_GetText(obj.raw, textpage.raw, buf, n)
+            text = " ".join(bytes(buf)[:n - 2].decode("utf-16-le", errors="ignore").split())
+            if text:
+                out.append(text)
+    finally:
+        if textpage is not None:
+            textpage.close()
+    return out
+
+
+def _hidden_text(engine: str, page: Any) -> list[str]:
+    """What ``page`` draws so a reader cannot see it; ``[]`` when that cannot be read (never raises)."""
+    try:
+        return (_hidden_pymupdf if engine == "pymupdf" else _hidden_pdfium)(page)
+    except Exception:  # noqa: BLE001 -- a check on top of the text; the text is what the PDF is read for
+        return []
 
 
 def _page_height(engine: str, page: Any) -> float:
@@ -293,6 +458,8 @@ def extract(
         for i in range(out.pages):
             page = doc[i]
             text, has_images = (_page_text_pymupdf if engine == "pymupdf" else _page_text_pdfium)(page)
+            if len(out.hidden_text) < _HIDDEN_MAX:
+                out.hidden_text += [t[:200] for t in _hidden_text(engine, page)][:_HIDDEN_MAX - len(out.hidden_text)]
             if len(text.strip()) < SCANNED_PAGE_CHARS and has_images:
                 if ocr and reader is None:
                     reader = _Ocr()

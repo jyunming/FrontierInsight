@@ -63,3 +63,9 @@ Sources: core/acceptance.py, core/evidence.py, core/engine.py, core/audit_log.py
 Pages updated: [[code-project-and-run-data|The code project and run data]] (each `code/CHANGELOG.md` entry is Added / Changed / Fixed / Tidied, decided by the step that made it; each has a line saying whether the results changed, "not measured yet" until a run of that code finishes with results).
 
 Sources: core/changelog.py, core/code_project.py, core/criteria.py, core/engine.py.
+
+## 2026-10-01 — retrieved text is data
+
+Pages added: [[retrieved-text-is-data|Retrieved text is data]] (every block of retrieved text in a prompt is fenced between two markers a source cannot forge; text addressed to an AI model or hidden from a reader is flagged, recorded in the trace and run.log, and kept).
+
+Sources: core/source_text.py, core/pdf_text.py, core/knowledge.py, core/engine.py, core/summarizer.py, agents/figures_read.md.

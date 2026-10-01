@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import source_text
 from .config import ProviderConfig
 from .knowledge import Knowledge, _load_local_paper
 from .provider import (
@@ -370,6 +371,8 @@ def _render_content_blocks(
     if not blocks and elided == 0:
         return "(no readable content found)"
 
+    # The files' contents are material to read, never instructions (core/source_text.py); the note below is FI's.
+    fenced = source_text.fence("\n".join(blocks), "the files being read") if blocks else ""
     if elided > 0:
         # Show up to 20 IDs explicitly so the model can cite them by
         # ID from the manifest even though their content blocks aren't
@@ -396,8 +399,8 @@ def _render_content_blocks(
                 f"prompt budget: {id_list}. Cite them by ID from the "
                 f"manifest only — do NOT invent their content.)_\n"
             )
-        blocks.append(note)
-    return "\n".join(blocks)
+        return f"{fenced}\n{note}" if fenced else note
+    return fenced
 
 
 def _slugify_folder(folder: Path) -> str:
