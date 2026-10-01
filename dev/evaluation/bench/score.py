@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
 from core import acceptance as _acceptance
 from core import evidence as _evidence
 from core import receipts as _receipts
+from core import replay as _replay
 from core import retractions as _retractions
 from core import trial_runner as _trials
 
@@ -35,7 +37,9 @@ from . import catalogue
 from . import plant as _plant
 from . import runner as _runner
 
-INFRA_WORDS = ("rate limit", "quota", "429", "timed out", "could not reach", "connection", "usage limit")
+# A provider outage or a spent quota, in the words a stop or a failure uses: not a check of FI's.
+INFRA_RE = re.compile(r"\brate.?limit|\bquota\b|\b(?:http|status|error)\s*429\b|\btimed out\b|\bcould not reach\b"
+                      r"|\bconnection (?:error|refused|reset)\b|\busage limit\b|\bweekly limit\b", re.I)
 
 
 def _json(path: Path) -> Any:
@@ -207,10 +211,11 @@ def _gaps(record: dict[str, Any] | None) -> list[tuple[str, str]]:
     return [(level, str(g)) for level, gaps in (record.get("all_gaps") or {}).items() for g in gaps]
 
 
-def _tokens(root: Path, since: float | None) -> tuple[int, int]:
-    """(tokens, calls) of the model calls this run made (``.fi/cost.jsonl`` rows after ``since``)."""
+def _tokens(bench: Path) -> tuple[int, int]:
+    """(tokens, calls) of the model calls this run really made: the ``real`` rows of its ``calls.jsonl`` (a replayed
+    or planted answer cost nothing now, whatever the recording says it cost then)."""
     tokens = calls = 0
-    path = root / ".fi" / "cost.jsonl"
+    path = bench / "calls.jsonl"
     if not path.is_file():
         return 0, 0
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -218,7 +223,7 @@ def _tokens(root: Path, since: float | None) -> tuple[int, int]:
             row = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(row, dict) or "node" not in row or (since is not None and float(row.get("ts") or 0) < since):
+        if not isinstance(row, dict) or row.get("source") not in ("real", "error"):
             continue
         calls += 1
         usage = row.get("usage") or {}
@@ -227,18 +232,35 @@ def _tokens(root: Path, since: float | None) -> tuple[int, int]:
     return tokens, calls
 
 
-def _l1_exercised(root: Path, plant: dict[str, Any]) -> bool:
-    """Whether the planted retracted paper reached the paper: cited by DOI or title, or a claim rests on it."""
+def _cites_source(root: Path, hits: list[dict[str, Any]]) -> bool:
+    """Whether the paper rests on one of ``hits`` (a planted search result): its DOI or title is in the paper, or a
+    claim of the paper quotes its text."""
     paper = _paper_text(root).lower()
-    if str(plant.get("doi") or "").lower() in paper or str(plant.get("title") or "")[:40].lower() in paper:
-        return True
-    claims = _json(root / "paper" / "claims.json") or {}
-    return any("retracted" in str(c.get("evidence") or "").lower() for c in claims.get("claims") or [])
+    claims = (_json(root / "paper" / "claims.json") or {}).get("claims") or []
+    for hit in hits:
+        meta = hit.get("metadata") or {}
+        doi, title = str(meta.get("doi") or "").lower(), str(meta.get("title") or "")[:40].lower()
+        if (doi and doi in paper) or (title and title in paper):
+            return True
+        text = " ".join(str(hit.get("content") or "").split()).lower()
+        if any(len(q := " ".join(str(c.get("quote") or "").split()).lower()) >= 20 and q in text for c in claims):
+            return True
+    return False
+
+
+_DIGITS = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _same_reason(text: str) -> str:
+    """A flag's words with its numbers taken out: "3 finding(s)" in a planted run and "1 finding(s)" in its control
+    are the same reason."""
+    return _DIGITS.sub("#", text).strip().lower()
 
 
 def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | None = None,
-              role: str | None = None) -> dict[str, Any]:
-    """One run's outcome (see the module docstring). ``control``: the scored control of the same copy and step."""
+              role: str | None = None, needs_control: bool = False) -> dict[str, Any]:
+    """One run's outcome (see the module docstring). ``control``: the scored control of the same copy and step;
+    ``needs_control``: a planted run with none is not counted (nothing shows the copy alone would be published)."""
     run_dir = Path(run_dir)
     root = _runner.quest_root(run_dir)
     _out, bench = _runner.paths(run_dir)
@@ -253,7 +275,7 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
             break
     if meta.get("error") and not stop_text:
         stop_text = str(meta["error"])
-    infra = bool(stop_text) and any(w in stop_text.lower() for w in INFRA_WORDS)
+    infra = bool(stop_text) and bool(INFRA_RE.search(stop_text))
     record = _evidence.read(root) if (root / "needs" / "EVIDENCE.json").is_file() else None
     level = (record or {}).get("status") if not stop_text else None
     gaps = _gaps(record)
@@ -262,15 +284,23 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
         or (record.get("status") == "statistically_adequate" and list(record.get("gaps") or []) == [_acceptance.NO_PERSON_GAP]))
     would_publish = bool(ready_or_one_below) and not stop_text
 
-    # Flags: the checks' own records and the evidence gaps, less what the control run also has.
-    control_gaps = {(g[0], g[1]) for g in (control or {}).get("_gaps", [])}
-    control_flags = set((control or {}).get("_record_flags", {}))
-    flags = {g: why for g, why in _record_flags(root).items() if g not in control_flags}
+    # Flags: the checks' own records and the evidence gaps, less what the control run also has (the same gate for the
+    # same reason, its numbers aside). A gate flagged only for a reason the control shares is kept apart, not dropped.
+    control_reasons = {(g, _same_reason(why)) for g, why in (control or {}).get("_record_flags", {}).items()}
+    control_reasons |= {(gate_of(lvl, gap) or "", _same_reason(gap)) for lvl, gap in (control or {}).get("_gaps", [])}
+    flags: dict[str, str] = {}
+    shared: dict[str, str] = {}
+    for g, why in _record_flags(root).items():
+        (shared if (g, _same_reason(why)) in control_reasons else flags)[g] = why
     for lvl, gap in gaps:
-        if (lvl, gap) in control_gaps or (stop_text and lvl == "executed"):
+        if stop_text and lvl == "executed":
             continue  # a stopped quest has no results: that follows from the stop, it is not a check of its own
         gate = gate_of(lvl, gap)
-        if gate:
+        if not gate:
+            continue
+        if (gate, _same_reason(gap)) in control_reasons:
+            shared.setdefault(gate, gap)
+        else:
             flags.setdefault(gate, gap)
     if stop_text and not infra and not flags:
         # The stop's own words, when no check's record names what stopped it.
@@ -281,17 +311,33 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
         answer = check_structure(root, task)
     else:
         answer = check_answers(root, task)
+    divergences = int(meta.get("divergences") or 0)
+    events = _replay.read_events(bench)
     valid: bool | None = None
+    why_not = ""
     if error:
         validity = _json(bench / "validity.json")
         if isinstance(validity, dict) and validity.get("valid") is not None:
             valid = bool(validity["valid"])
+            why_not = "" if valid else str(validity.get("why") or "an equivalent change")
         elif error in ("R1", "R2"):
             valid = True  # the paper states a number the run did not compute, by construction (plant.py)
         elif error == "L1":
-            valid = _l1_exercised(root, plant)
-    started = meta.get("started_at")
-    tokens, calls = _tokens(root, float(started) if started else None)
+            # Exercised when the same source, never retracted, is one the paper rests on in the control: then the
+            # retracted one had the same chance to be used, whatever FI then did with it.
+            valid = bool(control.get("cites_planted")) if control else None
+            why_not = "" if valid else ("the control's paper does not rest on the planted kind of source"
+                                        if control else "")
+        if valid and plant.get("answers") and not any(e.get("event") == "planted" for e in events):
+            valid, why_not = None, "the planted answer was never asked for"
+        if valid and divergences:
+            valid, why_not = None, f"{divergences} call(s) were not in the recording: the run did not follow it"
+        if valid and needs_control and control is None:
+            valid, why_not = None, "there is no control run of the same copy and step"
+        if valid and control is not None and not control.get("would_publish"):
+            valid, why_not = None, "its control would not be published either: this step cannot be measured by a copy"
+    _o, bench_dir = _runner.paths(run_dir)
+    tokens, calls = _tokens(bench_dir)
     return {
         "run": run_dir.name, "task": task["task"], "error": error, "role": role, "mode": meta.get("mode"),
         "from_step": meta.get("from_step"), "answer": answer, "evidence_level": level,
@@ -300,8 +346,10 @@ def score_run(run_dir: Path, task: dict[str, Any], *, control: dict[str, Any] | 
         and _evidence.LEVELS.index(level) >= _evidence.LEVELS.index("independently_validated"),
         "stopped": stop_text.splitlines()[0][:300] if stop_text else "", "infrastructure_failure": infra,
         "flagged": flagged, "flag_reasons": {g: flags[g] for g in flagged},
-        "first_gate": flagged[0] if flagged else None, "valid": valid,
-        "divergences": int(meta.get("divergences") or 0), "tokens": tokens, "calls": calls,
+        "first_gate": flagged[0] if flagged else None, "flagged_as_control": sorted(shared),
+        "valid": valid, "not_counted_because": why_not if error and valid is not True else "",
+        "cites_planted": _cites_source(root, plant.get("hits") or []) if plant.get("hits") else None,
+        "divergences": divergences, "tokens": tokens, "calls": calls,
         "seconds": meta.get("seconds"),
         # Kept for the runs that use this one as their control; dropped from the report.
         "_gaps": [list(g) for g in gaps], "_record_flags": _record_flags(root),

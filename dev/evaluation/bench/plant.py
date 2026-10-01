@@ -7,7 +7,7 @@ the run was given. A planter changes a file of the copied quest (``edit``), or n
 
 The MVP planters: R1 (a number of the paper changed), R2 (a sentence with a number the run never computed added to the
 writer's answer), N3 (a factor taken out of the simulation), S1 (the analysis keeps one value in five of FI's trials) and
-L1 (a retracted paper pinned as a source, with its recorded Crossref answer).
+L1 (a retracted paper among a fresh run's search results, with its DOI; its Crossref answer is recorded and replayed).
 """
 
 from __future__ import annotations
@@ -154,6 +154,9 @@ def plant_l1(*, paper: dict[str, Any] | None = None) -> tuple[dict[str, Any], li
     ``inputs/papers/`` is not a way to plant it: FI keeps no DOI for those (core/knowledge.py::_load_local_paper,
     core/engine.py::_ingest_user_dropped_papers), so no retraction lookup is made for them at all."""
     paper = dict(paper or WAKEFIELD)
+    missing = [k for k in ("doi", "title", "content") if not str(paper.get(k) or "").strip()]
+    if missing:
+        raise ValueError(f"the source to plant needs a {', '.join(missing)}")
     hit = {"content": paper["content"], "metadata": {
         "title": paper["title"], "doi": paper["doi"], "year": paper.get("year"), "venue": paper.get("venue"),
         "source": "crossref"}}

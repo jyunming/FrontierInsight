@@ -91,6 +91,46 @@ def test_a_partial_replay_with_nothing_planted_is_a_real_run(tmp_path: Path) -> 
     assert _ask(client, "write")[0] == "real answer of write" and client.divergences == 0
 
 
+def test_before_the_planted_call_an_unrecorded_call_goes_to_the_model_and_is_noted(tmp_path: Path) -> None:
+    real = _Real()
+    client = ReplayClient(mode="partial", recording=Recording([]), real=real, plants={("write", 1): "planted"},
+                          out_dir=tmp_path)
+    assert _ask(client, "analyze")[0] == "real answer of analyze" and client.divergences == 1
+    assert [e["event"] for e in read_events(tmp_path)] == ["divergence"]
+
+
+def test_a_call_that_failed_when_recorded_fails_again_in_its_replay(tmp_path: Path) -> None:
+    class _Down(_Real):
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            raise ConnectionError("provider down")
+
+    rec_dir, replay_dir = tmp_path / "rec", tmp_path / "replay"
+    client = ReplayClient(mode="record", real=_Down(), out_dir=rec_dir)
+    with pytest.raises(ConnectionError):
+        _ask(client, "plan")
+    rec = Recording.load(rec_dir / "calls.jsonl")
+    assert rec.failed("plan", 1) and "provider down" in rec.failed("plan", 1)
+    with pytest.raises(RuntimeError, match="failed in the recorded run"):
+        _ask(ReplayClient(mode="replay", recording=rec, out_dir=replay_dir), "plan")
+
+
+def test_a_recording_after_a_time_is_numbered_again_in_the_order_calls_were_asked() -> None:
+    rec = Recording([{"node": "write", "index": 1, "ts": 1.0, "response": "a"},
+                     {"node": "write", "index": 2, "ts": 3.0, "response": "b"},
+                     {"node": "review", "index": 1, "ts": 4.0, "response": "c"}])
+    later = rec.after(2.0)
+    assert later.get("write", 1)["response"] == "b" and later.get("review", 1)["response"] == "c"
+    assert later.get("write", 2) is None
+
+
+def test_the_client_hands_anything_else_to_the_real_one(tmp_path: Path) -> None:
+    real = _Real()
+    real.built_fallback_providers = ["x"]  # type: ignore[attr-defined]
+    assert ReplayClient(mode="record", real=real, out_dir=tmp_path).built_fallback_providers == ["x"]
+    with pytest.raises(AttributeError):
+        ReplayClient(mode="replay", out_dir=tmp_path).built_fallback_providers  # noqa: B018
+
+
 def test_a_mode_that_reaches_a_model_needs_one(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         ReplayClient(mode="partial", out_dir=tmp_path)
@@ -131,6 +171,27 @@ def test_crossref_answers_are_replayed_and_an_unknown_doi_is_not_checked(tmp_pat
     assert out[doi]["status"] == "retracted" and out["10.5555/unknown"]["status"] == "not_checked"
     assert retractions.check_dois is before, "the lookup is put back after the run"
     assert [e["doi"] for e in read_events(tmp_path)] == ["10.5555/unknown"]
+
+
+def test_runs_at_the_same_time_each_get_their_own_crossref_answers(tmp_path: Path) -> None:
+    doi = "10.1000/a"
+    before = retractions.check_dois
+    one = CrossrefReplay(mode="replay", out_dir=tmp_path / "1", recorded={doi: {"status": "retracted", "why": "",
+                                                                                 "notices": []}})
+    two = CrossrefReplay(mode="replay", out_dir=tmp_path / "2", recorded={doi: {"status": "not_retracted", "why": "",
+                                                                                 "notices": []}})
+
+    async def run(replay: CrossrefReplay, wait: float) -> str:
+        with replay.installed():
+            await asyncio.sleep(wait)
+            return (await retractions.check_dois([doi]))[doi]["status"]
+
+    async def both() -> list[str]:
+        # The first to start leaves first, while the second still looks up: it must still get its own answers.
+        return await asyncio.gather(run(one, 0.0), run(two, 0.05))
+
+    assert asyncio.run(both()) == ["retracted", "not_retracted"]
+    assert retractions.check_dois is before
 
 
 def test_crossref_answers_are_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -333,6 +394,13 @@ def test_a_path_of_a_copied_quest_is_taken_to_the_same_place_in_the_copy(tmp_pat
     assert in_quest(new_root / "x.md", new_root) == str(new_root / "x.md")
     assert in_quest(tmp_path / "elsewhere.md", new_root) == str(tmp_path / "elsewhere.md")
     assert in_quest(None, new_root) == ""
+    # A path written on Windows, read anywhere.
+    assert Path(in_quest(r"C:\runs\1234-q\paper\paper.md", new_root)) == new_root / "paper" / "paper.md"
+    # The quest's name twice in the path: the place that exists in this quest wins.
+    (new_root / "paper").mkdir(parents=True)
+    (new_root / "paper" / "paper.md").write_text("x", encoding="utf-8")
+    assert Path(in_quest(tmp_path / "a" / "1234-q" / "1234-q" / "paper" / "paper.md", new_root)) == \
+        new_root / "paper" / "paper.md"
 
 
 def test_fi_tools_bench_check_runs_from_the_cli(capsys: pytest.CaptureFixture[str]) -> None:

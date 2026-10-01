@@ -5,8 +5,8 @@
     fi tools bench record Q4 --out DIR [--settings models.yaml]
                                                  run a task's clean quest, keeping every model call (calls models)
     fi tools bench plant R1 --from-run DIR --out DIR [--file F --find X --replace Y]
-    fi tools bench plant control --from-run DIR --step claims --out DIR
-    fi tools bench plant L1 --task Q4 --out DIR [--control] [--settings models.yaml]
+    fi tools bench plant control --from-run DIR --step STEP --out DIR
+    fi tools bench plant L1 --task Q11 --out DIR [--control] [--paper source.json]
     fi tools bench filter --clean DIR --planted DIR
     fi tools bench run DIR --mode partial        replay the calls before the planted one, real after (calls models)
     fi tools bench run DIR --mode replay --recording OLD_RUN
@@ -72,18 +72,22 @@ async def record(task: dict[str, Any], run_dir: Path, *, settings: dict[str, Any
 
 def plant(error: str, *, out: Path, from_run: Path | None = None, task: dict[str, Any] | None = None,
           step: str | None = None, file: str | None = None, find: str | None = None, replace: str | None = None,
-          control: bool = False) -> dict[str, Any]:
-    """Prepare a planted (or control) run folder; nothing runs yet. Returns its ``plant.json``."""
+          control: bool = False, paper: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prepare a planted (or control) run folder; nothing runs yet. Returns its ``plant.json``. ``paper``: L1's source
+    (``doi``, ``title``, ``content``; by default the retracted Wakefield 1998, or with ``control`` Madsen 2002)."""
     out = Path(out)
     _o, bench = _runner.paths(out)
-    if error.lower() == "control" and from_run is not None:
-        root = _runner.fork(from_run, out)
-        record = {"error": None, "control": True, "how": "edit", "from_step": step or "claims", "edits": []}
+    if error.lower() == "control":
+        if from_run is None or not step:
+            raise ValueError("a control is a copy of a recorded run, run again from the same step as the planted runs "
+                             "it is the control of: give --from-run and --step")
+        _runner.fork(from_run, out)
+        record = {"error": None, "control": True, "how": "edit", "from_step": step, "edits": []}
         task = task or task_of(from_run)
     elif error.upper() == "L1":
         if task is None:
             raise ValueError("L1 runs a task's quest from the start: name the task (--task)")
-        record, hits = _plant.plant_l1(paper=_plant.MADSEN if control else None)
+        record, hits = _plant.plant_l1(paper=paper or (_plant.MADSEN if control else None))
         if control:
             record.update(error=None, control=True)
         record["hits"] = hits
@@ -106,7 +110,7 @@ def plant(error: str, *, out: Path, from_run: Path | None = None, task: dict[str
             if not (file and find is not None and replace is not None):
                 raise ValueError(f"{entry.id} changes the code: give --file, --find and --replace")
             record = _plant.plant_code(entry.id, root, file=file, find=find, replace=replace)
-    record.update(task=task["task"], source_run=str(from_run) if from_run else None)
+    record.update(task=task["task"], source_run=str(Path(from_run).resolve()) if from_run else None)
     _save_task(out, task)
     _plant.write_record(bench, record)
     return record
@@ -147,12 +151,19 @@ async def run_planted(run_dir: Path, *, mode: str, recording: Path | None = None
             # The calls a rerun from this step makes again, as the source run made them: the ones before the planted one
             # are replayed from here.
             source = Path(record["source_run"])
-            rec = _runner.segment_after(source, await _runner.fork_start_time(source, step) if step else None)
+            started = await _runner.fork_start_time(source, step) if step else None
+            if started is None:
+                raise ValueError(f"when the {step} step of {source} began cannot be read from its checkpoints, so its "
+                                 "calls cannot be lined up with the rerun's")
+            rec = _runner.segment_after(source, started)
     if record.get("how") == "input":  # a fresh run of the task's quest (L1)
         config = task_config(task, run_dir, settings=settings, base=base)
         return await _runner.run(config, run_dir, mode="record" if mode == "partial" and not plants else mode,
                                  recording=rec, plants=plants or None, crossref=crossref,
                                  extra_hits=record.get("hits"))
+    if settings:
+        raise ValueError("a copy runs with the settings of the run it was copied from (its approved plan names them); "
+                         "--settings only applies to a run from the start (L1)")
     root = _runner.quest_root(run_dir)
     config = _runner.config_of(run_dir, source=True)
     return await _runner.run(config, run_dir, mode="record" if mode == "partial" and not plants else mode,
@@ -163,18 +174,34 @@ async def run_planted(run_dir: Path, *, mode: str, recording: Path | None = None
 def score_dir(bench_root: Path) -> list[dict[str, Any]]:
     """Score every run folder under ``bench_root`` (one with ``bench/run.json``), each planted run against its control
     (the control run of the same source and step), controls first."""
-    runs = sorted({p.parent.parent for p in Path(bench_root).rglob("bench/run.json")})
+    runs = []
+    for p in sorted(Path(bench_root).rglob("bench/run.json")):
+        r = p.parent.parent
+        try:
+            _runner.quest_root(r)
+            runs.append(r)
+        except FileNotFoundError as e:
+            print(f"[bench] {r} is left out: {e}")
     records = {r: (_plant.read_record(_runner.paths(r)[1]) or {}) for r in runs}
+
+    def key(rec: dict[str, Any]) -> tuple[str, str]:
+        source = rec.get("source_run")
+        return (str(Path(source).resolve()) if source else str(rec.get("task")), str(rec.get("from_step")))
+
     controls: dict[tuple[str, str], dict[str, Any]] = {}
     outcomes = []
     for r in [r for r in runs if records[r].get("control")]:
         o = _score.score_run(r, task_of(r))
-        controls[(str(records[r].get("source_run") or records[r].get("task")), str(records[r].get("from_step")))] = o
+        if key(records[r]) in controls:
+            print(f"[bench] {r.name}: a second control for the same run and step; the first one is used")
+            outcomes.append({**o, "role": "control"})
+            continue
+        controls[key(records[r])] = o
         outcomes.append(o)
     for r in [r for r in runs if not records[r].get("control")]:
         rec = records[r]
-        key = (str(rec.get("source_run") or rec.get("task")), str(rec.get("from_step")))
-        outcomes.append(_score.score_run(r, task_of(r), control=controls.get(key)))
+        outcomes.append(_score.score_run(r, task_of(r), control=controls.get(key(rec)),
+                                         needs_control=bool(rec.get("error"))))
     return outcomes
 
 
@@ -197,11 +224,12 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--from-run")
     r.add_argument("--task")
     r.add_argument("--out", required=True)
-    r.add_argument("--step", help="control: the step its planted runs start from")
+    r.add_argument("--step", help="control: the step its planted runs start from (R1: claims, R2: writing, N3 and S1: run)")
     r.add_argument("--file")
     r.add_argument("--find")
     r.add_argument("--replace")
     r.add_argument("--control", action="store_true", help="L1: a source that was never retracted, as the control")
+    r.add_argument("--paper", help="L1: a JSON file with the source to add (doi, title, content), one the topic would use")
     r = sub.add_parser("filter", help="whether a planted change moves the answer (run offline, no model)")
     r.add_argument("--clean", required=True)
     r.add_argument("--planted", required=True)
@@ -220,7 +248,14 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("hold-out", help="hold a task back: its answer file leaves the repository")
     r.add_argument("answer_file")
     args = p.parse_args(argv)
+    try:
+        return _main(args)
+    except (ValueError, KeyError, FileNotFoundError, FileExistsError) as e:  # AnswerError is a ValueError
+        print(f"fi tools bench {args.cmd}: {e}")
+        return 2
 
+
+def _main(args: argparse.Namespace) -> int:
     if args.cmd == "check":
         problems = _answers.check_all()
         for line in problems:
@@ -242,7 +277,8 @@ def main(argv: list[str] | None = None) -> int:
         task = _answers.load_task(args.task) if args.task else None
         rec = plant(args.error, out=Path(args.out), from_run=Path(args.from_run) if args.from_run else None,
                     task=task, step=args.step, file=args.file, find=args.find, replace=args.replace,
-                    control=args.control)
+                    control=args.control,
+                    paper=json.loads(Path(args.paper).read_text(encoding="utf-8")) if args.paper else None)
         print(json.dumps({k: v for k, v in rec.items() if k not in ("answers", "hits")}, indent=1))
         return 0
     if args.cmd == "filter":

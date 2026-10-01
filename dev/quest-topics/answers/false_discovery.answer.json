@@ -4,7 +4,7 @@
   "title": "False discovery rate of Benjamini-Hochberg",
   "config": "dev/quest-topics/false_discovery.yaml",
   "kind": "simulation",
-  "ask": "BENCHMARK. The protocol's grid has axes named `m`, `pi1` and `method` (with the values none, bonferroni and bh) and includes the setting m = 200, pi1 = 0.2. Declare a metric with id `fdp` (kind mean; one value per repeat: the false discoveries divided by the discoveries, 0 when there are none).",
+  "ask": "BENCHMARK. The protocol's grid has axes named `m`, `pi1` and `method` (with the values none, bonferroni and bh) and includes the setting m = 200, pi1 = 0.2, with at least 500 repeats per setting. Declare a metric with id `fdp` (kind mean; one value per repeat: the false discoveries divided by the discoveries, 0 when there are none).",
   "answers": [
     {"metric": "fdp", "cell": {"m": 200, "pi1": 0.2, "method": "bh"}, "statistic": "mean", "expected": 0.04,
      "tolerance": 0.008, "tolerance_kind": "absolute",

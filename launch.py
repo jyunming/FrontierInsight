@@ -281,14 +281,14 @@ _BENCH_TOOL = "bench"
 
 def _run_bench(argv: list[str]) -> int:
     repo = Path(__file__).resolve().parent
-    if (repo / "dev" / "evaluation" / "bench").is_dir() and str(repo) not in sys.path:
-        sys.path.insert(0, str(repo))
-    try:
-        from dev.evaluation.bench.cli import main as bench_main
-    except ImportError as e:
-        print(f"fi tools bench: the self-benchmark is part of FI's repository (dev/evaluation/bench/), not of an "
-              f"installed FI; run it from a checkout ({e}).")
+    if not (repo / "dev" / "evaluation" / "bench").is_dir():
+        print("fi tools bench: the self-benchmark is part of FI's repository (dev/evaluation/bench/), not of an "
+              "installed FI; run it from a checkout.")
         return 2
+    if str(repo) not in sys.path:
+        sys.path.insert(0, str(repo))
+    from dev.evaluation.bench.cli import main as bench_main  # an import error here is a real one: shown as it is
+
     return bench_main(argv)
 
 

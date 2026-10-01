@@ -177,21 +177,27 @@ def in_quest(path: Any, quest_root: Path) -> str:
     folder in its checkpoints (the paper's path, written by the writing step), so a rerun from a later step would read
     and judge the OLD folder's paper. A path inside a folder named like this quest, but not this one, is taken to the
     same place in this one; any other path is returned as it is."""
+    from pathlib import PurePosixPath, PureWindowsPath
+
     text = str(path or "")
     if not text:
         return text
-    p = Path(text)
     root = Path(quest_root)
     try:
-        p.relative_to(root)
+        Path(text).relative_to(root)
         return text
     except ValueError:
         pass
-    parts = p.parts
-    if root.name in parts:
-        at = len(parts) - 1 - parts[::-1].index(root.name)
-        return str(root.joinpath(*parts[at + 1:]))
-    return text
+    # A path written on Windows is read as one on any system (a quest copied from Windows to Linux).
+    windows = "\\" in text or (len(text) > 1 and text[1] == ":")
+    parts = (PureWindowsPath(text) if windows else PurePosixPath(text)).parts
+    at = [i for i, part in enumerate(parts) if part == root.name]
+    if not at:
+        return text
+    # The quest's name can appear twice (a folder inside it named the same): the place that exists in this quest wins,
+    # else the last one.
+    candidates = [root.joinpath(*parts[i + 1:]) for i in reversed(at)]
+    return str(next((c for c in candidates if c.exists()), candidates[0]))
 
 
 def resolve(name: str) -> str | None:

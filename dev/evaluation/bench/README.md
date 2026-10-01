@@ -47,17 +47,22 @@ prompt: a prompt holds paths, times and retrieved text that differ between two r
 | `partial` (B) | the calls before the planted one replayed from the source recording, the planted one replaced, every later call real | the checks done by code and the checks a model judges | the steps after the planted one |
 | `replay` (A) | every call from an earlier run of the same plant; a call it does not have gets a fixed "cannot fix" answer and a divergence event naming the step | the checks done by code, and regressions in FI's parsing and routing; a judging model's verdict is the recorded one | none |
 
-Crossref's retraction answers are recorded with the run (`bench/crossref.json`) and replayed; a DOI with no recorded
-answer is "not checked", never "not retracted".
+A call that failed in the recorded run fails again in its replay (it is never answered). Crossref's retraction answers
+are recorded with a run that makes them live (`bench/crossref.json`: a recording, a fresh L1 run in `partial`) and
+replayed in `replay`; a DOI with no recorded answer is then "not checked", never "not retracted". A copy run again from
+a step after the literature makes no lookup of its own.
 
 Three rules keep the numbers honest:
 
 - **After the planted point, everything is real** in mode B: replaying a clean writer after a planted error in the code
   would give a clean paper, and the checks would then catch a mismatch the replay made, not the error.
 - **Only valid errors count** (`validity.py`).
-- **Every planted run has a control**: the same copy run again from the same step with nothing planted. A gap the
-  control has too is the copy's doing, not a detection; a control that would not be published means the step cannot be
-  measured that way.
+- **Every planted run has a control**: the same copy run again from the same step with nothing planted. A flag the
+  control has too, for the same reason, is the copy's doing, not a detection (it is listed apart). A planted run is
+  not counted when it has no control, when its control would not be published either, when its replay asked for a
+  call the recording does not have, or when its planted answer was never asked for; the report says which.
+- **L1 counts when it was exercised**: when its control's paper rests on the same kind of source (one never
+  retracted, added the same way). Whether FI then used the retracted one is what is measured.
 
 ## The benchmark's settings, and why
 
@@ -78,7 +83,10 @@ The models are not the benchmark's choice: pass them in a YAML with `--settings`
 ```bash
 fi tools bench check                                        # every answer file is usable
 fi tools bench record Q4 --out C:/fi_runs/bench/Q4/clean --settings models.yaml        # calls models
-fi tools bench plant control --from-run .../Q4/clean --step claims --out .../Q4/control-claims
+fi tools bench plant control --from-run .../Q4/clean --step claims --out .../Q4/control-claims   # for R1
+fi tools bench plant control --from-run .../Q4/clean --step run --out .../Q4/control-run         # for N3, S1
+fi tools bench plant control --from-run .../Q4/clean --step writing --out .../Q4/control-writing # for R2
+fi tools bench run .../Q4/control-claims --mode partial      # each control runs too (calls models)
 fi tools bench plant R1 --from-run .../Q4/clean --out .../Q4/R1
 fi tools bench plant N3 --from-run .../Q4/clean --out .../Q4/N3 \
     --file code/simulate.py --find "2.0 * beta" --replace "beta"
@@ -90,8 +98,11 @@ fi tools bench score C:/fi_runs/bench                        # writes dev/evalua
 
 A code plant names its own `--find`/`--replace`: the code is the model's, different in every recording. R1 without
 `--find` multiplies the paper's first number with two or more decimals by 1.37. L1 is a fresh run of the task
-(`plant L1 --task Q4`, and `--control` for its control with a paper that was never retracted): forking from the
-literature step replaces the frozen protocol, which FI records as an amendment made after the results were seen.
+(`plant L1 --task Q11`, and `--control` for its control with a paper that was never retracted): forking from the
+literature step replaces the frozen protocol, which FI records as an amendment made after the results were seen. The
+default L1 source is about MMR and autism; for another task (Q4) give a retracted paper on its own topic with
+`--paper source.json` (`doi`, `title`, `content`), and its control a never-retracted one, or the run is not exercised.
+A copy runs with the settings of the run it was copied from; `--settings` applies only to a run from the start.
 
 Large outputs belong outside the repository (`C:\fi_runs\bench\` on the maintainer's machine).
 
@@ -108,8 +119,11 @@ the four are chosen from the seven tasks still to be written.
 
 - A paper pinned with `knowledge.local_papers` or dropped into `inputs/papers/` is never looked up for a retraction:
   FI keeps no DOI for it. L1 is therefore planted as a search result.
-- Replay assumes each step makes its calls in the same order in two runs. Calls one step makes at the same time (a
-  review panel's reviewers are separate steps, so they are fine) could be numbered differently; a change to FI's flow
-  can make an old recording diverge, which the divergence events show.
+- Replay assumes each step asks for its calls in the same order in two runs. A benchmark run numbers its calls in the
+  order they were asked (`calls.jsonl`); a quest recorded outside the benchmark is read from `.fi/io/`, in the order
+  the answers came back, which differs for calls one step makes at the same time (the ideas' tournament, an
+  ensemble). A change to FI's flow can make an old recording diverge, which the divergence events show.
+- The tolerances assume the run counts the `ask` sentences name; a run with far fewer trials can be scored wrong
+  although its simulation is right.
 - The first recording of the MVP (five tasks, two models) has not been run: phase 0 is the tools, validated on
   fake-model quests (`tests/test_self_benchmark_e2e.py`).

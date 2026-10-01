@@ -4,7 +4,7 @@
   "title": "Recovering an activation energy from noisy first-order kinetics",
   "config": "dev/quest-topics/first_order_kinetics.yaml",
   "kind": "simulation",
-  "ask": "BENCHMARK. Use Ea = 50 kJ/mol and A = 1.0e7 per second. The protocol's grid has axes named `noise` (the standard deviation of the added noise, as a fraction of c0) and `points` (time points per temperature) and includes the setting noise = 0.02, points = 20. Declare a metric with id `ea_kj_per_mol` (kind mean; one value per repeat: the fitted activation energy in kJ/mol) and a metric with id `ea_covered` (kind proportion; one value per repeat: 1 when the 95 percent interval of Ea contains 50 kJ/mol, else 0).",
+  "ask": "BENCHMARK. Use Ea = 50 kJ/mol and A = 1.0e7 per second. The protocol's grid has axes named `noise` (the standard deviation of the added noise, as a fraction of c0) and `points` (time points per temperature) and includes the setting noise = 0.02, points = 20, with at least 400 repeats per setting. Declare a metric with id `ea_kj_per_mol` (kind mean; one value per repeat: the fitted activation energy in kJ/mol) and a metric with id `ea_covered` (kind proportion; one value per repeat: 1 when the 95 percent interval of Ea contains 50 kJ/mol, else 0).",
   "answers": [
     {"metric": "ea_kj_per_mol", "cell": {"noise": 0.02, "points": 20}, "statistic": "mean", "expected": 50.0,
      "tolerance": 1.0, "tolerance_kind": "absolute",

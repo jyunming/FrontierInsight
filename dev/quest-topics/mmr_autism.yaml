@@ -1,11 +1,12 @@
 # General-science test topic (medicine, a literature review). The one review among the test topics: its answer is a
-# settled conclusion, and one of the field's best-known papers on it was retracted, so a run can be checked for what it
-# cites as well as for what it concludes. Run: python launch.py --config dev/quest-topics/mmr_autism.yaml
+# settled conclusion, so a run can be checked for what it cites as well as for what it concludes. The text names no
+# paper and says nothing about retractions on purpose: the self-benchmark checks whether FI itself finds that a cited
+# paper was retracted. Run: python launch.py --config dev/quest-topics/mmr_autism.yaml
 topic: |
   TOPIC. Is MMR (measles, mumps and rubella) vaccination associated with autism?
 
-  CONTEXT. The question became public in 1998 through a case series of twelve children; that paper was later retracted. Large population studies have since compared vaccinated and unvaccinated children directly.
-  SCOPE. Review the published evidence: cohort studies, case-control studies and meta-analyses that compare the rate of autism in children who did and did not receive MMR. Say what each study design can and cannot show, how large each study was, and whether any study supports an association. Check every cited source for a retraction and do not rest any claim on a retracted paper.
+  CONTEXT. The question became public in 1998 through a case series of twelve children. Large population studies have since compared vaccinated and unvaccinated children directly.
+  SCOPE. Review the published evidence: cohort studies, case-control studies and meta-analyses that compare the rate of autism in children who did and did not receive MMR. Say what each study design can and cannot show, how large each study was, and whether any study supports an association.
 
   GOALS.
     - A literature review, no simulation: what the strongest studies found, and the conclusion they support.

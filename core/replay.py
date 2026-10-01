@@ -26,7 +26,9 @@ a fresh lookup. Nothing here calls a model or the network on its own.
 
 from __future__ import annotations
 
+import contextvars
 import json
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -60,12 +62,37 @@ class Recording:
 
     def __init__(self, calls: list[dict[str, Any]] | None = None) -> None:
         self.calls: dict[str, dict[str, Any]] = {}
+        self.errors: dict[str, dict[str, Any]] = {}
         for c in calls or []:
-            if isinstance(c, dict) and c.get("node") is not None and isinstance(c.get("response"), str):
-                self.calls.setdefault(_key(str(c["node"]), int(c.get("index") or 0)), c)
+            if not isinstance(c, dict) or c.get("node") is None:
+                continue
+            key = _key(str(c["node"]), int(c.get("index") or 0))
+            if isinstance(c.get("response"), str):
+                self.calls.setdefault(key, c)
+            elif c.get("source") == "error":
+                self.errors.setdefault(key, c)
 
     def get(self, node: str, index: int) -> dict[str, Any] | None:
         return self.calls.get(_key(node, index))
+
+    def failed(self, node: str, index: int) -> str | None:
+        """Why the recorded call failed, when it did (and nothing answered it)."""
+        key = _key(node, index)
+        row = None if key in self.calls else self.errors.get(key)
+        return str(row.get("error") or "an error") if row is not None else None
+
+    def after(self, ts: float) -> "Recording":
+        """The calls started after ``ts`` (each row's start time), numbered again per step from 1, in the order they
+        started: what a run resumed from a checkpoint taken at ``ts`` asks for."""
+        rows = sorted((c for c in [*self.calls.values(), *self.errors.values()] if float(c.get("ts") or 0) > ts),
+                      key=lambda c: float(c.get("ts") or 0))
+        counts: dict[str, int] = {}
+        out = []
+        for c in rows:
+            node = str(c["node"])
+            counts[node] = counts.get(node, 0) + 1
+            out.append({**c, "index": counts[node]})
+        return Recording(out)
 
     def __len__(self) -> int:
         return len(self.calls)
@@ -86,7 +113,9 @@ class Recording:
     @classmethod
     def from_quest(cls, quest_root: Path, *, after: float | None = None) -> "Recording":
         """The calls a quest kept itself (``output.save_model_calls``: one file per call in ``.fi/io/``), numbered per
-        step in the order they were made, with who answered each from the quest's record of its calls
+        step in the order their answers came back (calls one step makes at the same time can come back in another order
+        than they were asked; a benchmark run's own ``calls.jsonl`` keeps the order they were asked, and is preferred),
+        with who answered each from the quest's record of its calls
         (``.fi/model_calls.jsonl``, joined on the answer's hash). ``after``: only the calls made after this time (the
         calls of a run resumed from a step are the ones made after the checkpoint it resumed from)."""
         fi_dir = Path(quest_root) / ".fi"
@@ -131,7 +160,7 @@ class ReplayClient:
         if mode != "replay" and real is None:
             raise ValueError(f"mode {mode!r} passes calls on to a model, so it needs the real client")
         self.mode = mode
-        self.recording = recording or Recording()
+        self.recording = recording if recording is not None else Recording()  # (an empty one is falsy: it has a len)
         self.real = real
         self.plants = {(str(n), int(i)): str(a) for (n, i), a in (plants or {}).items()}
         self.out_dir = Path(out_dir)
@@ -162,47 +191,71 @@ class ReplayClient:
     def event(self, kind: str, **fields: Any) -> None:
         self._write(EVENTS_FILE, {"ts": time.time(), "event": kind, **fields})
 
+    async def _real(self, messages: Any, node: str, index: int, started: float, **kw: Any) -> str:
+        try:
+            response = await self.real.chat(messages, node=node, **kw)
+        except Exception as e:
+            # A failed call is part of the run: a replay of it fails the same way, never answers it.
+            self._write(CALLS_FILE, {"node": node, "index": index, "ts": started, "source": "error",
+                                     "error": f"{type(e).__name__}: {e}"[:500], "response": None,
+                                     "prompt_sha256": _attempts.prompt_sha(messages)})
+            raise
+        served = dict(_provider.LAST_CALL.get() or {})
+        usage = served.get("usage") if isinstance(served.get("usage"), dict) else getattr(self.real, "last_usage", None)
+        if served.get("provider") or served.get("model"):
+            self.last_provider, self.last_model, self.last_usage = served.get("provider"), served.get("model"), usage
+        else:  # a transport that names nobody: the client's own attributes, and not "reported"
+            self._served(getattr(self.real, "last_provider", None), getattr(self.real, "last_model", None), False,
+                         usage)
+        return response
+
     async def chat(self, messages: list[dict[str, str]], *, temperature: float = 0.2, max_tokens: int | None = None,
                    extra: dict[str, Any] | None = None, model: str | None = None, node: str = "") -> str:
         node = node or ""
+        # Numbered when the call starts, and the start time kept: a recording is replayed in the order calls were asked.
         index = self._counts[node] = self._counts.get(node, 0) + 1
+        started = time.time()
+        kw = {"temperature": temperature, "max_tokens": max_tokens, "extra": extra, "model": model}
         recorded = self.recording.get(node, index)
+        failed = self.recording.failed(node, index)
         planted = self.plants.get((node, index))
         if planted is not None:
             source = "planted"
             response = planted
             who = recorded or {}
+            # Who "answered" a planted answer is the recorded call's model; with no recorded call, nobody is named.
             self._served(who.get("provider") or "replay", who.get("model") or model or "replay",
-                         bool(who.get("reported", True)), who.get("usage"))
+                         bool(who.get("reported", False)), who.get("usage"))
             self._replaying = self.mode == "replay"  # partial replay: every call after the planted one is real
             self.event("planted", node=node, index=index)
+        elif self._replaying and failed is not None:
+            self.event("replayed_failure", node=node, index=index, error=failed)
+            raise RuntimeError(f"[replay] this call failed in the recorded run: {failed}")
+        elif self._replaying and recorded is not None:
+            source = "replayed"
+            response = str(recorded["response"])
+            self._served(recorded.get("provider"), recorded.get("model"), bool(recorded.get("reported")),
+                         recorded.get("usage"))
+        elif self._replaying and self.mode == "partial":
+            # Before the planted call, a call the recording does not have may still go to the model: it does, and says so.
+            source = "real"
+            self.divergences += 1
+            self.event("divergence", node=node, index=index,
+                       why="before the planted call, the run asked for a call its recording does not have; the model answered it")
+            response = await self._real(messages, node, index, started, **kw)
         elif self._replaying:
-            if recorded is not None:
-                source = "replayed"
-                response = str(recorded["response"])
-                self._served(recorded.get("provider"), recorded.get("model"), bool(recorded.get("reported")),
-                             recorded.get("usage"))
-            else:
-                source = "unrecorded"
-                response = CANNOT_FIX
-                self.divergences += 1
-                # Not "reported": nothing answered this call, and the record of who answered must not say otherwise.
-                self._served("replay", "no recorded answer", False, None)
-                self.event("divergence", node=node, index=index,
-                           why="the run asked for a call its recording does not have; it got the fixed cannot-fix answer")
+            source = "unrecorded"
+            response = CANNOT_FIX
+            self.divergences += 1
+            # Not "reported": nothing answered this call, and the record of who answered must not say otherwise.
+            self._served("replay", "no recorded answer", False, None)
+            self.event("divergence", node=node, index=index,
+                       why="the run asked for a call its recording does not have; it got the fixed cannot-fix answer")
         else:
             source = "real"
-            response = await self.real.chat(messages, temperature=temperature, max_tokens=max_tokens, extra=extra,
-                                            model=model, node=node)
-            served = dict(_provider.LAST_CALL.get() or {})
-            usage = served.get("usage") if isinstance(served.get("usage"), dict) else getattr(self.real, "last_usage", None)
-            if served.get("provider") or served.get("model"):
-                self.last_provider, self.last_model, self.last_usage = served.get("provider"), served.get("model"), usage
-            else:  # a transport that names nobody: the client's own attributes, and not "reported"
-                self._served(getattr(self.real, "last_provider", None), getattr(self.real, "last_model", None), False,
-                             usage)
+            response = await self._real(messages, node, index, started, **kw)
         who = dict(_provider.LAST_CALL.get() or {})
-        self._write(CALLS_FILE, {"node": node, "index": index, "source": source, "response": response,
+        self._write(CALLS_FILE, {"node": node, "index": index, "ts": started, "source": source, "response": response,
                                  "provider": who.get("provider"), "model": who.get("model"),
                                  "reported": bool(who.get("reported")), "usage": who.get("usage"),
                                  "prompt_sha256": _attempts.prompt_sha(messages)})
@@ -211,6 +264,13 @@ class ReplayClient:
     async def aclose(self) -> None:
         if self.real is not None and hasattr(self.real, "aclose"):
             await self.real.aclose()
+
+    def __getattr__(self, name: str) -> Any:
+        # Anything else the engine asks of its client (the fallback providers it releases at the end) is the real one's.
+        real = self.__dict__.get("real")
+        if real is None or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(real, name)
 
 
 class CrossrefReplay:
@@ -237,35 +297,64 @@ class CrossrefReplay:
         (self.out_dir / CROSSREF_FILE).write_text(
             json.dumps({"answers": self.answers}, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    @contextmanager
-    def installed(self) -> Iterator["CrossrefReplay"]:
+    async def _lookup(self, real: Any, dois: list[str], **kw: Any) -> dict[str, dict[str, Any]]:
         from . import retractions as _retractions
 
-        real = _retractions.check_dois
-
-        async def lookup(dois: list[str], **kw: Any) -> dict[str, dict[str, Any]]:
-            wanted = [d for d in (_retractions.normalize_doi(x) for x in dois) if d]
-            if self.mode == "record":
-                out = await real(dois, **kw)
-                self.answers.update(out)
-                self._save()
-                return out
-            out = {}
-            for doi in wanted:
-                if doi in self.answers:
-                    out[doi] = self.answers[doi]
-                else:
-                    out[doi] = {"status": _retractions.NOT_CHECKED, "why": "no recorded Crossref answer", "notices": []}
-                    with (self.out_dir / EVENTS_FILE).open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"ts": time.time(), "event": "divergence", "node": "retractions",
-                                             "doi": doi, "why": "a DOI the recording has no Crossref answer for"}) + "\n")
+        if self.mode == "record":
+            out = await real(dois, **kw)
+            self.answers.update(out)
+            self._save()
             return out
+        out = {}
+        for doi in (d for d in (_retractions.normalize_doi(x) for x in dois) if d):
+            if doi in self.answers:
+                out[doi] = self.answers[doi]
+            else:
+                out[doi] = {"status": _retractions.NOT_CHECKED, "why": "no recorded Crossref answer", "notices": []}
+                with (self.out_dir / EVENTS_FILE).open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"ts": time.time(), "event": "divergence", "node": "retractions",
+                                         "doi": doi, "why": "a DOI the recording has no Crossref answer for"}) + "\n")
+        return out
 
-        _retractions.check_dois = lookup
+    @contextmanager
+    def installed(self) -> Iterator["CrossrefReplay"]:
+        """This replay answers the retraction lookups made in the current task (and the tasks it starts) while the
+        block runs. Several runs in one process each get their own: one dispatcher stands in for ``check_dois`` while
+        any is installed (counted), finds the current run's replay by context, and puts the real lookup back when the
+        last one leaves; a lookup made outside every run goes to the real one."""
+        from . import retractions as _retractions
+
+        token = _CURRENT_CROSSREF.set(self)
+        with _DISPATCH_LOCK:
+            if _DISPATCH["count"] == 0:
+                _DISPATCH["real"] = _retractions.check_dois
+                _retractions.check_dois = _dispatch
+            _DISPATCH["count"] += 1
         try:
             yield self
         finally:
-            _retractions.check_dois = real
+            with _DISPATCH_LOCK:
+                _DISPATCH["count"] -= 1
+                if _DISPATCH["count"] == 0:
+                    _retractions.check_dois = _DISPATCH["real"]
+                    _DISPATCH["real"] = None
+            _CURRENT_CROSSREF.reset(token)
+
+
+# The one dispatcher that stands in for core.retractions.check_dois while any CrossrefReplay is installed; like the
+# proxy supervisor, it is shared on purpose and counted (FI's rule: no process state that two runs could collide on).
+_CURRENT_CROSSREF: contextvars.ContextVar[CrossrefReplay | None] = contextvars.ContextVar("fi_crossref_replay",
+                                                                                         default=None)
+_DISPATCH: dict[str, Any] = {"count": 0, "real": None}
+_DISPATCH_LOCK = threading.Lock()
+
+
+async def _dispatch(dois: list[str], **kw: Any) -> dict[str, dict[str, Any]]:
+    real = _DISPATCH["real"]
+    current = _CURRENT_CROSSREF.get()
+    if current is None:
+        return await real(dois, **kw)
+    return await current._lookup(real, dois, **kw)
 
 
 def read_events(out_dir: Path) -> list[dict[str, Any]]:

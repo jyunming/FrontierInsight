@@ -163,7 +163,9 @@ def bench(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
                                      crossref=recorded) for n in ("L1", "control-L1")]
             return await asyncio.gather(*jobs)
 
+        lookup = retractions.check_dois
         meta = asyncio.run(campaign())
+        assert retractions.check_dois is lookup, "the retraction lookup is put back after the runs"
         # Mode A: the R2 run replayed from its own recording; nothing may reach the model.
         calls_before = len(calls)
         cli.plant("R2", out=root / "R2-replay", from_run=clean)
@@ -196,6 +198,8 @@ def test_every_control_would_still_be_published(bench: dict[str, Any]) -> None:
     for name in ("control-claims", "control-writing", "control-run", "control-L1"):
         o = bench["outcomes"][name]
         assert o["role"] == "control" and o["would_publish"], (name, o["evidence_level"], o["flag_reasons"], o["stopped"])
+    # L1's control rests on the source added in place of the retracted one: the plant was exercised.
+    assert bench["outcomes"]["control-L1"]["cites_planted"] is True
 
 
 def test_the_valid_error_filter_keeps_n3_and_s1(bench: dict[str, Any]) -> None:
@@ -225,6 +229,8 @@ def test_a_full_replay_calls_no_model_and_reaches_the_same_outcome(bench: dict[s
 def test_a_replay_that_runs_out_of_recording_says_which_step_asked(bench: dict[str, Any]) -> None:
     o = bench["outcomes"]["R2-short"]
     assert o["divergences"] >= 1
+    # It did not follow its recording, so it is not counted.
+    assert o["valid"] is None and "not in the recording" in o["not_counted_because"]
     events = read_events(runner.paths(bench["root"] / "R2-short")[1])
     assert any(e["event"] == "divergence" and e["node"] == "review_moderator" for e in events), events
 
@@ -233,9 +239,10 @@ def test_the_report_has_the_numbers(bench: dict[str, Any]) -> None:
     js, md = bench["report"]
     data = json.loads(js.read_text(encoding="utf-8"))
     total = data["summary"]["false_pass"]["total"]
-    # R1, R2, N3, S1, L1 and the two replays of R2: every valid planted run, none let through.
-    assert total["n"] == 7 and total["k"] == 0, total
+    # R1, R2, N3, S1, L1 and the full replay of R2 (the replay short of a call is not counted): none let through.
+    assert total["n"] == 6 and total["k"] == 0, total
+    assert data["summary"]["false_pass"]["not_valid"] == 1
     assert data["summary"]["false_block"]["k"] == 0 and data["summary"]["false_block"]["n"] == 1
     text = md.read_text(encoding="utf-8")
-    assert "Wrong results let through" in text and "0/7" in text
+    assert "Wrong results let through" in text and "0/6" in text
     assert "| N3 |" in text and "oracle" in text

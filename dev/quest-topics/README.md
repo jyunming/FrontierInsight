@@ -14,7 +14,7 @@ They exist to test FI on more than one kind of science; none is tied to an indus
 | `giant_component.yaml` | network science | when a random network forms a giant cluster |
 | `neuron_firing_rate.yaml` | neuroscience | model-neuron firing rate vs closed form |
 | `heat_diffusion.yaml` | earth science | finite-difference heat flow vs the exact solution |
-| `mmr_autism.yaml` | medicine (a literature review) | is MMR vaccination associated with autism; one well-known paper on it was retracted |
+| `mmr_autism.yaml` | medicine (a literature review) | is MMR vaccination associated with autism |
 
 Run one with `python launch.py --config dev/quest-topics/<name>.yaml`. Before the first run, set the model in the
 `provider:` block of the file. The files ship with `openai`, which needs an `OPENAI_API_KEY` environment variable;

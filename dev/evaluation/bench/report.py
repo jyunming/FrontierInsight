@@ -1,4 +1,5 @@
-"""The benchmark's report: ``results.json`` (one object; what a web or VS Code page will show) and a Markdown page."""
+"""The benchmark's report: ``self_benchmark.json`` (one object; what a web or VS Code page will show) and
+``self_benchmark.md``."""
 
 from __future__ import annotations
 
@@ -56,8 +57,8 @@ def markdown(data: dict[str, Any], *, title: str = "FI self-benchmark") -> str:
         "",
     ]
     if s["false_pass"]["not_valid"]:
-        lines += [f"{s['false_pass']['not_valid']} planted run(s) are not counted: their change did not move the "
-                  "answer (an equivalent change) or could not be judged.", ""]
+        lines += [f"{s['false_pass']['not_valid']} planted run(s) are not counted (the last column of the runs table "
+                  "says why: an equivalent change, no usable control, or a replay that did not follow its recording).", ""]
     if s["false_pass"]["by_error"]:
         lines += ["## By planted error", "", "| Error | What was planted | Let through |", "|---|---|---|"]
         for err, rate in s["false_pass"]["by_error"].items():
@@ -84,7 +85,7 @@ def markdown(data: dict[str, Any], *, title: str = "FI self-benchmark") -> str:
     lines += ["## Runs", "", "| Run | Task | Planted | Mode | Answer | Evidence level | Would publish | First caught by | Counted |",
               "|---|---|---|---|---|---|---|---|---|"]
     for o in data["runs"]:
-        counted = {True: "yes", False: "no (equivalent change)", None: "no (not judged)"}[o["valid"]] if o["error"] else "-"
+        counted = ("yes" if o["valid"] else f"no: {o.get('not_counted_because') or 'not judged'}") if o["error"] else "-"
         planted = o["error"] or ("(control)" if o["role"] == "control" else "(clean)")
         lines.append(f"| {o['run']} | {o['task']} | {planted} | {o['mode'] or ''} | "
                      f"{_score.answer_line(o).replace('|', '/')} | {o['evidence_level'] or ('stopped: ' + o['stopped'][:60] if o['stopped'] else '-')} | "

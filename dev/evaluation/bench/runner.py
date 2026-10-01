@@ -39,7 +39,8 @@ from core.replay import CrossrefReplay, Recording, ReplayClient
 #: What every benchmark quest runs with (see the module docstring).
 BENCH_SETTINGS: dict[str, Any] = {
     "engine": {"phased": False, "auto_accept_on_pass": True},
-    "output": {"save_model_calls": True},
+    # Only the paper: slides and a poster call a model of their own, outside any replay.
+    "output": {"save_model_calls": True, "kinds": ["paper_md"]},
     "knowledge": {"write_back_quests": False},
     "pauses": {"papers": False, "review": "off"},
 }
@@ -225,8 +226,11 @@ async def fork_start_time(run_dir: Path, step: str) -> float | None:
         await conn.close()
 
 
-def segment_after(recording_dir: Path, after: float | None) -> Recording:
-    """The calls of a recorded run made after ``after`` (its ``calls.jsonl`` has no times, so the quest's own kept calls
-    in ``.fi/io/`` are read: ``Recording.from_quest``), numbered per step from 1: the recording a rerun from a step
-    replays."""
+def segment_after(recording_dir: Path, after: float) -> Recording:
+    """The calls of a recorded run started after ``after``, numbered per step from 1 in the order they were asked: the
+    recording a rerun from a step replays. Read from the run's own ``calls.jsonl`` (the whole answers, in the order they
+    were asked); a quest recorded outside the benchmark falls back to the calls it kept in ``.fi/io/``."""
+    calls = paths(recording_dir)[1] / "calls.jsonl"
+    if calls.is_file():
+        return Recording.load(calls).after(after)
     return Recording.from_quest(quest_root(recording_dir), after=after)
