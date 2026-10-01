@@ -258,7 +258,7 @@ async def test_off_the_quest_never_touches_the_phased_code(tmp_path: Path, monke
                  "mark_paper", "load", "turned_off", "restore_inputs", "note_job_pending", "note_confirm_result",
                  "mark_compromised", "mark_not_applicable", "plan_lines", "began_before_default", "kept_off",
                  "ran_without", "without", "not_applicable_sentence", "off_sentence", "kept_off_sentence",
-                 "unconfirmable"):
+                 "unconfirmable", "decide_split", "split_preview", "data_quest_gate", "isolation"):
         def boom(*a, _name=name, **k):  # noqa: ANN001, ANN002, ANN003
             raise AssertionError(f"core.phased.{_name} called with engine.phased off")
         monkeypatch.setattr(phased, name, boom)
@@ -341,18 +341,24 @@ async def test_on_with_enough_data_the_confirm_run_sees_only_the_held_back_rows(
 
     _fake(monkeypatch)
     engine = Engine(_config(tmp_path / "out", phased_on=True))
-    original = _csv(engine.quest_root / "inputs" / "data" / "d.csv", 100)
+    # Several rows per subject: the split is decided from the column that names the unit, before the first run.
+    path = engine.quest_root / "inputs" / "data" / "d.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    original = ("subject_id,y\n" + "".join(f"s{i // 4},{i}\n" for i in range(100))).encode()
+    path.write_bytes(original)
     artifacts = await engine.run()
     record = phased.load(engine.quest_root)
     assert record["strategy"] == phased.HELD_BACK and record["stage"] == phased.CONFIRMED
     (info,) = record["files"]
+    assert info["rule"]["strategy"] == "group" and info["manifest"]["overlap"] == 0
     n_explore, n_held = info["explore_rows"], info["held_back_rows"]
     assert n_explore + n_held == 100 and n_held > 0
     assert [s["rows"] for s in _seen(engine)] == [n_explore, n_explore, n_held, n_held]
     assert artifacts.raw_state["result_json"]["rows"] == n_held, "the paper is written from the confirm run"
     assert (engine.quest_root / "inputs" / "data" / "d.csv").read_bytes() == original, "the whole file is back"
+    assert record["isolation"] == "encrypted+scanned", record.get("isolation_why")
     paper = artifacts.paper_md.read_text(encoding="utf-8")
-    assert "held back at random before exploration began" in paper
+    assert "whole units picked at random" in paper and "kept encrypted while exploration ran" in paper
 
 
 def test_in_the_confirm_stage_a_redesign_is_not_followed(tmp_path: Path) -> None:

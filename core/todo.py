@@ -65,6 +65,12 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "Put the dataset in data/ (data/README.md says what is expected), then go on.",
         [],
     ),
+    "data_split": (
+        "Which rows of your data belong together (the same subject, site or device)?",
+        "In plan.md, on the line `Rows that belong together:`, name the column that identifies them, then go on.",
+        ["Write `independent` on that line if every row is a separate case.",
+         "Turn explore-then-confirm off (`engine.phased: false`): the result is then not confirmed on unseen data."],
+    ),
     "split": (
         "The simulation and the analysis did not come as the two scripts this quest keeps. Ask for them again, or run "
         "one script?",

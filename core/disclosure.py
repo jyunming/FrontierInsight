@@ -344,7 +344,8 @@ def unconfirmed_gap(quest_root: Path, *, no_simulation: bool = False, survey: bo
     if changed <= 0 or confirmed_after_last_change(quest_root):
         return ""
     study = kind(no_simulation=no_simulation)
-    how = ("a study that analyses given data has no confirm run, so this stays preliminary" if study == DATA
+    how = ("a study that analyses data is confirmed only when part of one table it was given can be held back before "
+           "the data is first analysed: explore, then confirm, `engine.phased: true`" if study == DATA
            else "explore, then confirm: `engine.phased: true`")
     return (
         f"the design was revised {_times(changed)} {_AFTER[study]}, and no confirm run on data or seeds the earlier "

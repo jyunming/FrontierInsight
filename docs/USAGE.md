@@ -367,7 +367,7 @@ engine:
   review_loop: true                 # enable review-driven revise
   audit_trace: true                 # write .fi/audit.jsonl: what ran, each check, each route, the model's stated reasons; see docs/trace.md
   attempt_memory: shadow            # at each decision, record what past failed attempts (of the quests under the same output folder) would recommend, and act on none of it; `off` reads and writes nothing
-  phased: false                     # explore, then confirm: the model may try designs and look at results; then the design is frozen and run once more on a part of your data held back before exploration (one CSV/TSV file in inputs/data/, at least 40 rows), or else on new random seeds; only that confirm run can be publication-ready; costs one more full run. Off here (the default profile); on by default under rigor_profile: research, where `phased: false` keeps it off and plan.md says the result is not confirmed on unseen data. A quest with no experiment of its own (a survey, no simulation) says it does not apply. The interview asks it as "Confirm the result on data it never saw" (see docs/rigor.md)
+  phased: false                     # explore, then confirm: the model may try designs and look at results; then the design is frozen and run once more on a part of your data held back before exploration (one CSV/TSV table of at least 40 rows, in inputs/data/ or, for a quest that analyses data, data/; whole subjects/sites or the latest period, decided by the plan's `protocol.split`, plan.md's line "Rows that belong together:", or the table's columns; a research quest asks when it cannot tell), or else on new random seeds; only that confirm run can be publication-ready; costs one more full run (a data quest: one more reading of the held-back rows). Without a container the held-back rows are kept encrypted and the code is checked for paths out of the quest folder. Off here (the default profile); on by default under rigor_profile: research, where `phased: false` keeps it off and plan.md says the result is not confirmed on unseen data. A survey or --analyze says it does not apply. The interview asks it as "Confirm the result on data it never saw" (see docs/rigor.md)
   one_model_review: false           # only one model available: under rigor_profile: research the review panel may run on it (no stop for the reviewers' models); the result is then not publication-ready. Not part of the approved settings: the evidence level already shows it
   # clarify_mode:                  # old name of pauses.clarify (off | auto | interactive = ask). Left out (the default), the quest asks its setup questions when someone can answer while it runs, else answers them itself; see Setup questions below
   ideate_reflect: true              # extra self-critique pass (1 LLM call)
@@ -845,6 +845,17 @@ For the no-simulation (data-analysis) path — where there IS a dataset
 to analyse — the engine runs `clarify → ideate → literature → design →
 auto_collect_data → wait_for_data → data_load → analyze → ...`. The
 two no-simulation-specific stops:
+
+**Confirming a data analysis** (`engine.phased: true`, on by default for research): when you
+supply one table (a CSV or TSV of at least 40 rows in `data/`), part of it is held back before
+`data_load` first reads it, and when exploration ends the engine reads the held-back rows once more
+with the frozen design; only that reading can be publication-ready, and where its numbers differ from
+exploration's the paper says so. FI must know which rows belong together (several rows of one
+subject, site or device stay on one side): it reads the plan's `protocol.split`, then the line
+`Rows that belong together:` in plan.md (a column name, or `independent`), then the table's column
+names; a research quest that still cannot tell stops once and asks (answer on that line in plan.md,
+then resume). Data that cannot be split (too few rows, only gathered pages) is said in one sentence
+in `run.log` and `plan.md`. See docs/rigor.md, *Explore, then confirm*.
 
 **`auto_collect_data`** — agent-side data collection. Before
 pausing for user input, the engine asks the Knowledge layer (Axon)

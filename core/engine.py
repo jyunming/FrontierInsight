@@ -79,6 +79,7 @@ from . import rerun_from as _rerun_from
 from . import attempt_records as _attempts
 from . import attempt_memory as _memory
 from . import phased as _phased
+from . import phased_isolation as _phased_isolation
 from . import disclosure as _disclosure
 from . import thinking_capture as _thinking
 from . import metric_spec as _metric_spec
@@ -2385,8 +2386,10 @@ class Engine:
         # back to literature for ONE bounded broaden pass.
         after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design"}
         if _phased.enabled(self.config):
-            # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more.
+            # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
+            # that analyses data reads the held-back rows once more with it.
             after_gate["confirm"] = "execute"
+            after_gate["confirm_data"] = "data_load"
         g.add_conditional_edges(
             "evidence_gate",
             self._audited_route("evidence_gate", self._route_after_evidence_gate),
@@ -2639,6 +2642,11 @@ class Engine:
     def _phased_log(self, lines: list[str]) -> None:
         for line in lines:
             self._log.info("[phased] %s", line)
+            if "keep your own copy" in line:
+                # Said where the person watching sees it too (console, web page, VS Code): it is about their data.
+                self._progress("[phased] Part of your data is held back, encrypted with a key only this run of FI "
+                               "holds: if FI is killed rather than stopped, those rows cannot be put back, so keep your "
+                               "own copy of the file.")
 
     def _phased_keep_off_if_began_before(self) -> None:
         """A research quest whose config does not set ``engine.phased`` has it on by default. One that began before that
@@ -2664,34 +2672,184 @@ class Engine:
         research = self.config.rigor_profile == "research"
         if not on and not research:
             return []
+        data_quest = self._phased_data_quest(state)
         try:
+            # How the held-back rows will be chosen, or the question of which rows belong together (read back from
+            # plan.md when the data is first read).
+            note = _phased.split_preview(self.quest_root, self.quest_id, **self._phased_split_inputs(state),
+                                         key=self._phased_key()) if on else ""
             lines = _phased.plan_lines(
                 _phased.load(self.quest_root) if on else None, on=on, research=research,
                 runs_code=self._runs_code(state), why=self._phased_no_experiment_reason(state),
-                kept_off=bool(getattr(self, "_phased_kept_off", False)))
+                kept_off=bool(getattr(self, "_phased_kept_off", False)), data_quest=data_quest, split_note=note)
         except Exception as e:  # noqa: BLE001 -- a line of the plan must never stop the quest
             self._log.warning("[phased] the plan's section on confirming the result could not be written: %r", e)
             return []
-        if on and self._runs_code(state) and len(lines) > 2:
+        if on and (self._runs_code(state) or data_quest) and len(lines) > 2:
             self._log.info("[phased] plan: %s", lines[2])
         return lines
 
     def _phased_no_experiment_reason(self, state: QuestState | None = None) -> str:
-        """Why this quest runs no experiment of its own (empty when it runs one, or it is not known yet): the config
-        pins it, or the clarify step resolved it (``state``)."""
+        """Why this quest has nothing to run once more (empty when it has, or it is not known yet): the config pins it,
+        or the clarify step resolved it (``state``). A quest that collects and analyses data instead of simulating has:
+        its data-reading step, on held-back rows (``_phased_data_quest``)."""
         engine = self.config.engine
         if engine.analyze_local_first:
             return "the quest analyses data you supplied (--analyze) and designs no experiment of its own"
         if engine.survey_mode or (state or {}).get("survey_mode_resolved"):
             return "this quest is a literature survey and runs no experiment"
-        if engine.no_simulation or (state or {}).get("no_simulation_resolved"):
-            return "this quest collects and analyses data instead of running a simulation of its own"
         return ""
+
+    def _phased_data_quest(self, state: QuestState | None = None) -> bool:
+        """Whether this quest analyses data instead of simulating (not a survey, not ``--analyze``): the config pins it,
+        the clarify step resolved it (``state``), or the record of the two stages says so (a resume)."""
+        if self._phased_no_experiment_reason(state):
+            return False
+        if self.config.engine.no_simulation or (state or {}).get("no_simulation_resolved"):
+            return True
+        return bool((_phased.load(self.quest_root) or {}).get("data_quest"))
+
+    def _phased_key(self) -> bytes | None:
+        """This run's key for the held-back rows (``core/phased_isolation.py``): made once per run of FI and kept only in
+        this object's memory, never on disk, in the state or in the environment of the quest's code. None in a
+        container, which keeps the kept files out of reach by not mounting them."""
+        if self.config.execution.sandbox == "docker" or getattr(self, "_phased_no_crypto", False):
+            return None
+        key = getattr(self, "_phased_key_value", None)
+        if key is None:
+            try:
+                key = _phased_isolation.new_key()
+            except ImportError:
+                # Installed before FI needed it: the rows are still held back, kept plain, and the record says they
+                # were not out of reach (isolation_unverified).
+                self._phased_no_crypto = True
+                self._log.warning("[phased] the `cryptography` package is not installed, so the held-back rows are kept "
+                                  "unencrypted and the result cannot count as confirmed on unseen data; install it "
+                                  "with `pip install -r requirements.txt`")
+                return None
+            self._phased_key_value = key
+        return key
+
+    def _phased_mode(self) -> str:
+        """How this run keeps the held-back rows out of reach: ``docker``, ``encrypted``, or ``plain`` (neither)."""
+        if self.config.execution.sandbox == "docker":
+            return "docker"
+        return "encrypted" if self._phased_key() is not None else "plain"
+
+    def _phased_isolation(self) -> tuple[str, str]:
+        """``(status, why)`` for the confirm stage: ``docker`` when every start ran the quest's code in a container that
+        is not given the kept files; ``encrypted+scanned`` when the kept files were encrypted at every start without a
+        container and the quest's code reads no path out of the quest folder; otherwise ``isolation_unverified`` with
+        the reason in plain words."""
+        record = _phased.load(self.quest_root) or {}
+        starts = set(record.get("starts") or [])
+        if not starts or "unrecorded" in starts:
+            return (_phased_isolation.UNVERIFIED,
+                    "the quest held its rows back before FI recorded how they were kept from exploration")
+        if "plain" in starts:
+            return (_phased_isolation.UNVERIFIED, "a run of the quest kept the held-back rows unencrypted without a "
+                                                  "container (the `cryptography` package was not installed)")
+        if starts == {"docker"}:
+            why = _phased_isolation.docker_mounts_clear(self.executor, self.quest_root, _phased.store_dir(self.quest_root))
+            return (_phased_isolation.DOCKER, "") if not why else (_phased_isolation.UNVERIFIED, why)
+        if starts <= {"docker", "encrypted"}:
+            hits = _phased_isolation.scan(self.quest_root)
+            if hits:
+                more = f" and {len(hits) - 3} more" if len(hits) > 3 else ""
+                return (_phased_isolation.UNVERIFIED,
+                        "the quest's code may read outside the quest folder: " + "; ".join(hits[:3]) + more)
+            return _phased_isolation.ENCRYPTED, ""
+        return (_phased_isolation.UNVERIFIED,
+                "a run of the quest kept the held-back rows neither in a container nor encrypted")
+
+    def _phased_split_inputs(self, state: QuestState) -> dict[str, Any]:
+        """What decides which rows are held back: the plan's ``protocol.split`` (plan.md's design block, else the design
+        in the state), the answer on plan.md's line ``Rows that belong together:``, and the plan's variables."""
+        from . import phased_data as _phased_data
+
+        planned, _why = _plan.load_design(self.quest_root)
+        declared = _phased_data.declared((planned or {}).get("protocol")) or _phased_data.declared(
+            (state.get("design") or {}).get("protocol") if isinstance(state.get("design"), dict) else None)
+        try:
+            text = _plan.plan_path(self.quest_root).read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        return {"declared": declared, "answer": _phased_data.plan_answer(text),
+                "grouping": _phased_data.grouping_names(state.get("design"))}
+
+    def _phased_ask_split(self, question: str) -> None:
+        """Stop and ask which rows of the data belong together (one plain question, answered in plan.md). Nothing has
+        read the data yet; the resume reads the answer and holds rows back by it."""
+        plan = _plan.plan_path(self.quest_root)
+        self._pause_for_human(
+            kind="data_split",
+            interaction="supply",
+            headline="say which rows of your data belong together",
+            steps=[
+                "Part of your data is held back so that the result can be confirmed on data the exploration never read. "
+                "Rows of one subject, site or device must stay on the same side, and FI cannot tell from the table "
+                "which rows those are.",
+                question,
+                f"In `{plan}`, write your answer on the line `Rows that belong together:` (add the line if it is not "
+                "there): the column that names the subject, site, device or other unit several rows can share, or "
+                "`independent` if every row is a separate case. Then resume.",
+            ],
+            recommended="Name the column that identifies the subject, site or device, then resume.",
+            alternatives=["`independent`, if every row is a separate case (no subject, site or device is measured twice).",
+                          "Turn explore-then-confirm off for this quest (`engine.phased: false`): the result is then "
+                          "not confirmed on unseen data."],
+            payload={"quest_id": self.quest_id, "plan_file": str(plan), "data_split": True},
+        )
+
+    def _phased_before_first_run(self, state: QuestState) -> str:
+        """Right before the experiment's code first runs: which rows are held back is decided
+        (``core/phased.decide_split``). Returns the question to ask when a research quest cannot tell which rows belong
+        together, else ``""``."""
+        try:
+            _record, lines, question = _phased.decide_split(
+                self.quest_root, self.quest_id, **self._phased_split_inputs(state),
+                research=self.config.rigor_profile == "research", key=self._phased_key(),
+                outlives_run=bool(self.config.execution.background_jobs) and self._phased_key() is not None)
+        except OSError as e:
+            self._log.warning("[phased] the data held back could not be kept apart from exploration (%r); nothing in "
+                              "this quest can be confirmed, so its numbers stay exploratory", e)
+            _phased.mark_compromised(self.quest_root, f"a data file could not be written before it was read ({e!r})")
+            return ""
+        self._phased_log(lines)
+        return question
+
+    def _phased_prepare_data_quest(self) -> None:
+        """The clarify step found the quest analyses data: its data in ``data/`` is held back too (and what was held back
+        of ``inputs/data/`` stays), before anything reads it."""
+        try:
+            _record, lines = _phased.prepare(self.quest_root, self.quest_id, data_quest=True, key=self._phased_key())
+        except OSError as e:
+            self._log.warning("[phased] the data held back could not be kept apart from exploration (%r); nothing in "
+                              "this quest can be confirmed, so its numbers stay exploratory", e)
+            _phased.mark_compromised(self.quest_root, f"a data file could not be written at a start ({e!r})")
+            return
+        self._phased_log(lines)
+
+    def _phased_before_data_read(self, state: QuestState) -> str:
+        """Right before a data quest's data-reading step reads the data (``core/phased.data_quest_gate``): the split is
+        decided the first time, or the quest says in one sentence why its data cannot be split; in the confirm stage the
+        held-back rows are put in place. Every reading is counted. Returns a question to ask, else ``""``."""
+        try:
+            lines, question = _phased.data_quest_gate(
+                self.quest_root, self.quest_id, **self._phased_split_inputs(state),
+                research=self.config.rigor_profile == "research", key=self._phased_key())
+        except OSError as e:
+            self._log.warning("[phased] the data held back could not be kept apart from exploration (%r); nothing in "
+                              "this quest can be confirmed, so its numbers stay exploratory", e)
+            _phased.mark_compromised(self.quest_root, f"a data file could not be written before it was read ({e!r})")
+            return ""
+        self._phased_log(lines)
+        return question
 
     def _phased_mark_not_applicable(self, why: str) -> None:
         """The two stages do not apply to this quest (``why``): any held-back rows go back, and it is said once."""
         try:
-            self._phased_log(_phased.mark_not_applicable(self.quest_root, why))
+            self._phased_log(_phased.mark_not_applicable(self.quest_root, why, key=self._phased_key()))
         except OSError as e:
             self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
                               "kept in %s", e, _phased.store_dir(self.quest_root) / "original")
@@ -2709,12 +2867,15 @@ class Engine:
         already_ran = False
         if _phased.load(self.quest_root) is None and not (self.fi_dir / _phased.RECORD).exists():
             if self.audit.path.is_file():
-                already_ran = any(str(e.get("kind") or "").startswith("node_") and e.get("node") == "execute"
+                # The experiment's step, or a data quest's data-reading step (it reads the data).
+                already_ran = any(str(e.get("kind") or "").startswith("node_") and e.get("node") in ("execute", "data_load")
                                   for e in _audit_log.read(self.audit.path))
             else:
                 already_ran = (self.fi_dir / "state.sqlite").is_file()
         try:
-            _record, lines = _phased.prepare(self.quest_root, self.quest_id, already_ran=already_ran)
+            _record, lines = _phased.prepare(self.quest_root, self.quest_id, already_ran=already_ran,
+                                             data_quest=self._phased_data_quest(), key=self._phased_key(),
+                                             mode=self._phased_mode())
         except OSError as e:
             self._log.warning("[phased] the data held back could not be kept apart from exploration (%r); nothing in "
                               "this quest can be confirmed, so its numbers stay exploratory", e)
@@ -2726,7 +2887,7 @@ class Engine:
         """A start with engine.phased off on a quest that ran with it on: the whole files back in inputs/data/, and
         what it means for confirming said in run.log."""
         try:
-            self._phased_log(_phased.turned_off(self.quest_root))
+            self._phased_log(_phased.turned_off(self.quest_root, key=self._phased_key()))
         except OSError as e:
             self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
                               "kept in %s", e, _phased.store_dir(self.quest_root))
@@ -2735,11 +2896,25 @@ class Engine:
         """When a run stops (finished, paused or failed): the person's whole files back in inputs/data/. Not while a
         background job the run submitted is waiting: its tasks read inputs/data/ when they start."""
         if getattr(self, "_phased_job_pending", False):
-            self._log.info("[phased] a background job is waiting, so inputs/data/ keeps the part of the data this stage "
-                           "may see until the quest is resumed")
-            return
+            record = _phased.load(self.quest_root) or {}
+            # Only while a part of a file is in place (exploring, or the confirm run): after the confirm result the
+            # whole files are back already, and a compromised record has nothing left to lose.
+            if self._phased_key() is None or not record.get("files"):
+                self._log.info("[phased] a background job is waiting, so inputs/data/ keeps the part of the data this "
+                               "stage may see until the quest is resumed")
+                return
+            # Without a container the kept rows are encrypted with this run's key, which ends with this run: a part left
+            # in place for the job could never be completed again, so the whole files go back (put back below). While a
+            # part is in place (exploring, or the confirm run) the job may then read every row, and nothing in this
+            # quest can be confirmed; after the confirm result the files are whole already and nothing changes.
+            if record.get("stage") in (_phased.EXPLORE, _phased.CONFIRM) and not record.get("compromised"):
+                _phased.mark_compromised(self.quest_root, "a background job outlived the run of FI that held the key to "
+                                                          "the held-back rows, so the whole files were put back for it")
+                self._log.warning("[phased] a background job is waiting and outlives this run of FI, which holds the "
+                                  "only key to the held-back rows: the whole files are put back now, so nothing in this "
+                                  "quest can be confirmed")
         try:
-            for line in _phased.restore_inputs(self.quest_root):
+            for line in _phased.restore_inputs(self.quest_root, key=self._phased_key()):
                 self._log.warning("[phased] %s", line)
         except OSError as e:
             self._log.warning("[phased] the whole data files could not be put back in inputs/data/ (%r); they are "
@@ -2836,12 +3011,15 @@ class Engine:
             if route == "write" and current == _phased.EXPLORE:
                 self._freeze_protocol_if_due(state, at_confirm=True)
             return route
+        data_quest = bool((record or {}).get("data_quest"))
+        confirm_edge = "confirm_data" if data_quest else "confirm"
         if current == _phased.CONFIRM and not _phased.confirm_run_started(self.quest_root):
             # The confirm stage began but its run has not (a stop before this step was saved): run it now, rather
             # than take the exploration result in hand for the confirm result.
             self._log.info("[phased] confirm stage: the confirm run has not been made yet; running it now")
-            self._phased_fresh_background_job()
-            return "write" if (_phased.load(self.quest_root) or {}).get("compromised") else "confirm"
+            if not data_quest:
+                self._phased_fresh_background_job()
+            return "write" if (_phased.load(self.quest_root) or {}).get("compromised") else confirm_edge
         if current == _phased.CONFIRM and route != "write":
             self._log.info("[phased] confirm stage: the frozen design is run once, so the evidence gate's %s is not "
                            "followed; the confirm result is written up as it is", route)
@@ -2849,20 +3027,28 @@ class Engine:
         if route != "write":
             return route
         if current in (None, _phased.EXPLORE):
-            if not self._runs_code(state) or not state.get("result_json"):
+            if not (self._runs_code(state) or data_quest) or not state.get("result_json"):
                 self._log.info("[phased] exploration stage: there is no accepted result to confirm, so the paper is "
                                "written from exploration and says its numbers are exploratory")
                 return "write"
+            if data_quest and (record or {}).get("strategy") != _phased.HELD_BACK:
+                # Its data was never split (the data-reading step says why in run.log): nothing to read once more.
+                self._phased_log(_phased.mark_not_applicable(
+                    self.quest_root, str((record or {}).get("why_no_data") or "the data could not be split by rows"),
+                    key=self._phased_key()))
+                return "write"
             self._freeze_protocol_if_due(state, at_confirm=True)
-            seed_gap = self._phased_seed_gap(state) if (record or {}).get("strategy") == _phased.FRESH_SEEDS else ""
+            seed_gap = "" if data_quest else (
+                self._phased_seed_gap(state) if (record or {}).get("strategy") == _phased.FRESH_SEEDS else "")
             if seed_gap:
                 self._log.warning("[phased] %s; no data was held back either, so this quest cannot be confirmed and the "
                                   "paper says its numbers are exploratory", seed_gap)
                 _phased.mark_unconfirmable(self.quest_root, seed_gap)
                 return "write"
             frozen = _frozen.load(self.quest_root)
+            step = "data_load" if data_quest else "execute"
             explore_runs = sum(1 for e in _audit_log.read(self.audit.path)
-                               if e.get("kind") == "node_completed" and e.get("node") == "execute") \
+                               if e.get("kind") == "node_completed" and e.get("node") == step) \
                 if self.audit.path.is_file() else 0
             try:
                 _record, lines = _phased.enter_confirm(
@@ -2870,6 +3056,11 @@ class Engine:
                     frozen_sha256=str(frozen["sha256"]) if frozen else None,
                     stride=max(1, int(self.config.engine.replicate_seed_stride)),
                     replicates=max(1, int(self.config.engine.execute_replicates)), explore_runs=explore_runs,
+                    design_sha256=_frozen.sha256(state.get("design") or {}) if data_quest else None,
+                    key=self._phased_key(),
+                    # Whether the held-back rows were out of exploration's reach (a container, or encrypted with the
+                    # quest's code read for paths out of the quest folder): judged now, before the confirm run.
+                    isolation=self._phased_isolation() if (record or {}).get("strategy") == _phased.HELD_BACK else None,
                 )
             except OSError as e:
                 self._log.warning("[phased] the confirm run could not be given the data held back (%r); nothing in this "
@@ -2879,12 +3070,15 @@ class Engine:
             self._phased_log(lines)
             if (_record or {}).get("compromised"):
                 return "write"
-            self._phased_fresh_background_job()
-            return "write" if (_phased.load(self.quest_root) or {}).get("compromised") else "confirm"
+            if not data_quest:
+                self._phased_fresh_background_job()
+            return "write" if (_phased.load(self.quest_root) or {}).get("compromised") else confirm_edge
         try:
             _record, lines = _phased.record_confirm(
                 self.quest_root,
-                state.get("result_json") if (state.get("exec_result") or {}).get("returncode", 0) == 0 else None)
+                state.get("result_json") if (state.get("exec_result") or {}).get("returncode", 0) == 0 else None,
+                design_sha256=_frozen.sha256(state.get("design") or {}) if data_quest else None,
+                key=self._phased_key())
         except OSError as e:
             # The record was saved before the files are put back; the next stop puts them back again.
             self._log.warning("[phased] the whole data files could not be put back in inputs/data/ yet (%r)", e)
@@ -3027,9 +3221,13 @@ class Engine:
         (off the event loop: the files may be large), and it is said once."""
         out = await self._node_clarify(state)
         if _phased.enabled(self.config) and isinstance(out, dict):
-            why = self._phased_no_experiment_reason({**state, **out})  # type: ignore[arg-type]
+            merged = {**state, **out}
+            why = self._phased_no_experiment_reason(merged)  # type: ignore[arg-type]
             if why:
                 await asyncio.to_thread(self._phased_mark_not_applicable, why)
+            elif self._phased_data_quest(merged):  # type: ignore[arg-type]
+                # It analyses data instead of simulating: its data in data/ is held back too, before it is read.
+                await asyncio.to_thread(self._phased_prepare_data_quest)
         return out
 
     async def _node_clarify(self, state: QuestState) -> QuestState:
@@ -7121,6 +7319,12 @@ class Engine:
             _walk_folder, _render_file_manifest, _render_content_blocks,
         )
 
+        if _phased.enabled(self.config):
+            # Explore, then confirm: the rows held back are taken out (or, in the confirm stage, are the only ones in
+            # place) before anything below reads the data (off the event loop: the files may be large).
+            question = await asyncio.to_thread(self._phased_before_data_read, state)
+            if question:
+                self._phased_ask_split(question)
         data_dir = self.quest_root / "data"
         # Re-walk the dir on every invocation rather than trusting
         # ``state["data_files"]`` — the user may have edited / added
@@ -7150,6 +7354,8 @@ class Engine:
                 "[data_load] %s has no user data (only README.md) — "
                 "analyze will run with an empty result_json", data_dir,
             )
+            if _phased.enabled(self.config):
+                _phased.note_confirm_result(self.quest_root, {})  # a confirm reading that found nothing still happened
             return {"result_json": {}, "data_files": []}
 
         manifest = _render_file_manifest(entries)
@@ -7166,6 +7372,9 @@ class Engine:
             "[data_load] synthesized result_json with %d keys from %d files",
             len(result_json), len(entries),
         )
+        if _phased.enabled(self.config):
+            # In the confirm stage, what the evidence gate records must be this reading's result.
+            _phased.note_confirm_result(self.quest_root, result_json)
         return {
             "result_json": result_json,
             "data_files": [str(e.path) for e in entries],
@@ -10773,6 +10982,12 @@ class Engine:
             design_now = {**(design_now if isinstance(design_now, dict) else {}),
                           "protocol": {**((design_now or {}).get("protocol") or {}), "optimisation": frozen_block}}
         self._stop_if_the_search_cannot_start(state, design_now)
+        if _phased.enabled(self.config):
+            # Explore, then confirm: before any code reads the data for the first time, which rows are held back is
+            # decided (or, in a research quest that cannot tell which rows belong together, the person is asked).
+            question = await asyncio.to_thread(self._phased_before_first_run, state)
+            if question:
+                self._phased_ask_split(question)
         await self._shadow("execute", state, taken="ran the experiment")
         # Docker sandbox: the selected, approved external skills are mounted
         # read-only in every container this node starts (a thread: resolving

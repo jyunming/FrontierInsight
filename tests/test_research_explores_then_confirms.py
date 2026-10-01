@@ -256,9 +256,10 @@ def test_a_research_survey_pinned_in_the_config_holds_nothing_back_and_says_why(
     assert any("does not apply" in line for line in lines)
 
 
-def test_no_simulation_decided_at_clarify_puts_the_held_back_rows_back_before_the_data_is_read(tmp_path: Path) -> None:
-    """A pre-existing gap the default would have spread: rows held back at the start, then the quest turned out to
-    collect and analyse data (no simulation), so it analysed part of its data and could never confirm."""
+def test_no_simulation_decided_at_clarify_keeps_the_rows_held_back_for_a_data_confirm_run(tmp_path: Path) -> None:
+    """Until data quests had a confirm run, a quest found at clarify to analyse data put its held-back rows back and
+    could never be confirmed. Now it is a data quest: what was held back stays held back (and its own data folder is
+    held back too), so its data-reading step can be confirmed on rows exploration never read."""
     engine = _engine(tmp_path)
     data = _csv(engine.quest_root / "inputs" / "data" / "d.csv", 100)
     engine.fi_dir.mkdir(parents=True, exist_ok=True)
@@ -272,9 +273,21 @@ def test_no_simulation_decided_at_clarify_puts_the_held_back_rows_back_before_th
     engine._node_clarify = clarify  # type: ignore[method-assign]
     out = asyncio.run(engine._node_clarify_then_phased({}))
     assert out["no_simulation_resolved"] is True
+    record = phased.load(engine.quest_root)
+    assert record["data_quest"] is True and phased.status(record) == phased.EXPLORE
+    # Its data-reading step reads data/ only: a table in inputs/data/ is not what its numbers come from, so it goes
+    # back whole and the record says where to put it to have it confirmed.
     assert (engine.quest_root / "inputs" / "data" / "d.csv").read_bytes() == data
-    assert phased.status(phased.load(engine.quest_root)) == phased.NOT_APPLICABLE
-    # Routed as without the two stages: straight to writing, the protocol frozen as usual.
+    assert "put it in data/" in record["why_no_data"]
+    # The same table in data/ is held back.
+    engine2 = _engine(tmp_path / "in-data")
+    data2 = _csv(engine2.quest_root / "data" / "d.csv", 100)
+    engine2.fi_dir.mkdir(parents=True, exist_ok=True)
+    engine2._phased_prepare()
+    engine2._node_clarify = clarify  # type: ignore[method-assign]
+    asyncio.run(engine2._node_clarify_then_phased({}))
+    assert (engine2.quest_root / "data" / "d.csv").read_bytes() != data2, "held back"
+    # Without a result yet, the route writes from exploration, as before.
     assert engine._phased_route({"no_simulation_resolved": True}, "write") == "write"
 
 

@@ -576,6 +576,15 @@ def assess(
     # A quest run in two stages (engine.phased, core/phased.py): only the confirm run's result, on data or seeds the
     # exploration never saw, is more than preliminary.
     phased_gap = _PHASED_GAPS.get(str(settings.get("phased") or ""))
+    if settings.get("phased") == "confirmed":
+        # Held back is not unseen unless exploration could not read it (core/phased_isolation.py), and rows of one
+        # subject or site split one by one are not unseen either (core/phased_data.py).
+        if settings.get("phased_isolation") == "isolation_unverified":
+            ready_gaps.append("the held-back rows were not shown to be out of exploration's reach ("
+                              + str(settings.get("phased_isolation_why") or "no reason recorded")
+                              + "), so the confirm run is not shown to be on data exploration never saw")
+        if settings.get("phased_split_gap"):
+            ready_gaps.append(str(settings["phased_split_gap"]))
     if phased_gap:
         ready_gaps.append(phased_gap)
     else:
@@ -711,6 +720,12 @@ def assess(
     if settings.get("phased"):
         record["phased"] = {"status": settings["phased"], "strategy": settings.get("phased_strategy") or "",
                             "why_no_data": settings.get("phased_why_no_data") or ""}
+        if settings.get("phased_differs"):
+            # A data quest's confirm numbers that differ from exploration's (core/phased_data.compare): not a gap.
+            record["phased"]["confirm_differs"] = settings["phased_differs"]
+        if settings.get("phased_isolation"):
+            # docker, encrypted+scanned, or isolation_unverified (core/phased_isolation.py).
+            record["phased"]["isolation"] = settings["phased_isolation"]
     if settings.get("sealing") and settings.get("rigor_profile") == "research":
         # Written before the seal that names it: whoever reads it checks the seal (verify_seal).
         record["trace_seal"] = "pending"

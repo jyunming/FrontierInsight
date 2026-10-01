@@ -40,7 +40,6 @@ Pages created (17):
 
 Sources: core/oracle_check.py, core/trial_runner.py, core/evidence.py, core/criteria.py, core/optimisation_plan.py, core/phased.py, core/code_project.py, core/plan.py, core/rerun_from.py, core/quest_title.py, core/number_provenance.py, core/data_shape.py, core/thinking_capture.py, core/provider.py, core/skills/, core/engine.py, core/config.py, launch.py, web/, vscode-frontier-insight/src/. Audit: docs/audits/docs-sync-2026-09-30.md.
 
-
 ## 2026-09-30 — the checks' sources: read more shapes, fill once, three ways on
 
 Pages updated: [[oracle-provenance|Oracle provenance]] (a derivation needs an equation with `=`; shapes read at read time; FI fills once under research; the three ways on at the stop; going on as it is, with a name), [[model-behind-the-numbers|The model behind the numbers]] (parts under other names are read; the section is shown again after a rewrite).
@@ -65,7 +64,6 @@ Pages updated: [[pauses|Pauses]] (before an accept every interface shows what th
 
 Sources: core/acceptance.py, core/evidence.py, core/engine.py, core/audit_log.py, core/todo.py, core/vscode_bridge.py, launch.py, web/server.py, web/static/quest.html, vscode-frontier-insight/src/bridge.ts.
 
-
 ## 2026-09-30 — CHANGELOG kinds of change and "Did the results change"
 
 Pages updated: [[code-project-and-run-data|The code project and run data]] (each `code/CHANGELOG.md` entry is Added / Changed / Fixed / Tidied, decided by the step that made it; each has a line saying whether the results changed, "not measured yet" until a run of that code finishes with results).
@@ -77,3 +75,10 @@ Sources: core/changelog.py, core/code_project.py, core/criteria.py, core/engine.
 Pages added: [[retrieved-text-is-data|Retrieved text is data]] (every block of retrieved text in a prompt is fenced between two markers a source cannot forge; text addressed to an AI model or hidden from a reader is flagged, recorded in the trace and run.log, and kept).
 
 Sources: core/source_text.py, core/pdf_text.py, core/knowledge.py, core/engine.py, core/summarizer.py, agents/figures_read.md.
+
+## 2026-10-01 — a data quest's confirm run; which rows belong together; isolation
+
+Pages updated: [[explore-then-confirm|Explore then confirm]] (a quest that analyses one table is confirmed on held-back rows by its own data-reading step run once more with the frozen design; the split is decided before the data is first read from the plan's `protocol.split`, the plan.md line *Rows that belong together*, or the table's columns, and a research quest asks when FI cannot tell; held back counts as unseen only in a container or, without one, encrypted with an in-memory key and a clean scan of the quest's code).
+
+Sources: core/phased.py, core/phased_data.py, core/phased_isolation.py, core/engine.py, core/evidence.py, core/disclosure.py.
+

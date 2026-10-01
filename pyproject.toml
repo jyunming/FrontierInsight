@@ -67,6 +67,9 @@ dependencies = [
   # Cross-process lock around a skill's provenance.json, so two quests
   # recording a use of the same skill can't lose each other's record.
   "filelock>=3.13",
+  # Explore, then confirm without a container: the rows held back are kept encrypted (Fernet) with a key only the
+  # running FI holds (core/phased_isolation.py).
+  "cryptography>=42",
   # Document rendering. Core rather than an extra: these produce the
   # artifacts users actually come for (slides.pptx, paper.pdf), and on a
   # locked-down host an OS-level pandoc/marp install is often impossible,
