@@ -86,3 +86,9 @@ Pages updated: [[explore-then-confirm|Explore then confirm]] (a quest that analy
 
 Sources: core/phased.py, core/phased_data.py, core/phased_isolation.py, core/engine.py, core/evidence.py, core/disclosure.py.
 
+
+## 2026-10-01 — who read the checks, and a setting the code never saw
+
+Pages updated: [[oracle-provenance|Oracle provenance]] (under research a second, different model must read the checks, as the record of the calls names the models, and invariant, symmetry and second-implementation checks run again at a setting the code never saw), [[how-fi-judges-correctness|How FI judges correctness]] (both added to what independently validated needs).
+
+Sources: core/oracle_review.py, core/hidden_check.py, core/evidence.py, core/engine.py.

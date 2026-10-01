@@ -100,7 +100,17 @@ same PR that adds, splits or renames one.
   `Engine._review_oracles` from `_hold_oracle_forms` (one call; its findings share the one `plan_revise` request with
   the form requests; `.fi/oracle_review.json` keeps the answer and how far the look got, so a resume asks nothing
   again, and `core/rerun_from.py` moves it aside with the plan). The reviewer model is `provider.node_models.oracle_review`; the VS Code node picker lists it
-  (`OTHER_NODES` in `vscode-frontier-insight/src/interview-core.ts`).
+  (`OTHER_NODES` in `vscode-frontier-insight/src/interview-core.ts`). Under `rigor_profile: research`,
+  `independence_gaps` (with `canonical_model` / `same_model`, `WRITER_NODES`, `NOT_REVIEWED`, `HOW_TO_NAME_ANOTHER`)
+  makes the review a condition of `independently_validated`: a usable answer, and `.fi/model_calls.jsonl` naming a
+  reader model (the call `call_id` in the record names) that is none of the models that answered `plan` /
+  `plan_revise` / `design`. `Engine._independence_gaps` passes it (and `hidden_check.evidence_gaps`) to
+  `evidence.assess(independence_gaps=...)`.
+- `core/hidden_check.py` — FI's own check at a setting the code never saw (`rigor_profile: research`): `candidates`
+  (invariant / symmetry / second implementation with a case), `derive` (a smaller step, else another value of a grid
+  setting), `run` (through `trial_runner.measure_oracles`, judged by `oracle_check.judged`; reused for the same
+  `code_sha` and checks), `write` / `load` (`needs/HIDDEN_CHECK.json`), `evidence_gaps`. Called by
+  `Engine._hidden_check` in `_node_execute` after a successful two-script run; never stops a quest.
 - `core/criteria.py` — how a quest judges whether its code got better: the protocol's `criteria` (two to five checks of
   correctness, each from a declared oracle or FI's trial record; never a headline metric or the
   script's results). `normalize` (strict, called by `plan.normalize_protocol`) / `repair` (a draft, called by

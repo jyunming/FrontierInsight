@@ -61,7 +61,7 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
-| `oracle_review` | 0–1 | Once per quest, right after the plan is written, when its protocol has checks against known answers: a second model reads them as a referee would (does each test the model, would a plausible bug make it fail, is its number well defined, is there a better one, which equations no check tests). Its findings go back to the plan in the same one request as the checks not in their kind's form (`plan_revise`). Set its model with `provider.node_models.oracle_review`. |
+| `oracle_review` | 0–1 | Once per quest, right after the plan is written, when its protocol has checks against known answers: a second model reads them as a referee would (does each test the model, would a plausible bug make it fail, is its number well defined, is there a better one, which equations no check tests). Its findings go back to the plan in the same one request as the checks not in their kind's form (`plan_revise`). Set its model with `provider.node_models.oracle_review`. Under `rigor_profile: research` the result reaches *independently validated* only when this review gave a usable answer and the record of the calls shows another model gave it than the one that wrote the checks (a connection that does not name the answering model cannot show that). |
 | `plan_revise` | 0–4 | One call per `--revise-plan` request (two if the first reply's design block cannot be read). FI itself asks at most one request at the plan step, only when a check against a known answer is not in its kind's numeric form and cannot be put right without the plan, or when the second reading of the checks (`oracle_review`) found something to change, and at most one at the test run of the checks before the study, only when a measured number says the plan and the simulation mean different things by a check (each request can take a second call when its reply cannot be read); these come on top of the oracle requests counted under `implement_oracle`. |
 | `design` | 1 per later design pass | Runs again when the cross-check or the review sends the quest back; the first pass adopts the design block of `plan.md`. |
 | `design_self_critique` | 1 per design pass | Audits the drafted methodology against twelve checks (precision, the estimand and its interval, thresholds, random streams, convergence, an oracle, failed runs among them) and keeps what it found and changed in `needs/DESIGN_CRITIQUE.json`. |
@@ -336,7 +336,10 @@ title: integrator-bakeoff
 # the quest before it runs, saying how to set one. For research or a decision the interview asks for that model
 # right away ("A different model for one reviewer", written as review_panel.statistician); its "I only have one model" writes
 # engine.one_model_review: true instead, so the quest runs and its result says the review was one model's view and
-# is never publication-ready. See docs/rigor.md.
+# is never publication-ready. Under research the plan's checks count as independent evidence only when a second,
+# different model read them (provider.node_models.oracle_review) and, for invariants, symmetries and second
+# implementations, they also held at a setting FI chose that the code never saw (needs/HIDDEN_CHECK.json).
+# See docs/rigor.md.
 rigor_profile: default
 # What the result is for: explore, research or decision (the interview writes it). Left out, the quest is an
 # exploration: it runs, its paper opens with a note that the result is preliminary, and it never reaches
@@ -359,6 +362,7 @@ provider:
     clarify:       gpt-4o-mini
     write:         claude-3-5-sonnet
     review:        gpt-5
+    oracle_review: claude-3-5-sonnet   # the second reading of the plan's checks; under research a model other than the plan's
   # The most a step's answer may be, in tokens (HTTP providers only; the same step names as node_models). Unset, no
   # limit is sent and the model's own applies. When a step's answer is cut off at its limit, the quest stops and says
   # which step to raise here (or to give another model); a limit set here is first tried once more at twice the size.
