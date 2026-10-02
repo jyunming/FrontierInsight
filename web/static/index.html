@@ -88,7 +88,7 @@
   <section id="empty-banner" class="hidden bg-surface-mid border border-dashed border-white/10 rounded-2xl p-12 text-center my-component-padding-md">
     <span class="material-symbols-outlined text-6xl text-outline-variant mb-4">science</span>
     <h3 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">No quests yet</h3>
-    <p class="font-body-md text-body-md text-on-surface-variant mb-6 max-w-md mx-auto">Run an end-to-end quest from the 14-question interview. It clarifies your topic, runs the experiment, and writes the paper.</p>
+    <p class="font-body-md text-body-md text-on-surface-variant mb-6 max-w-md mx-auto">Run an end-to-end quest: answer <span id="question-count">a few short questions</span>, and FI clarifies your topic, runs the experiment, and writes the paper.</p>
     <a href="/interview" class="inline-flex items-center gap-2 px-6 py-3 rounded-full bg-gradient-to-r from-primary-container to-secondary-container text-white font-bold shadow-[0_0_20px_rgba(79,70,229,0.3)] hover:shadow-[0_0_30px_rgba(79,70,229,0.5)] transition-all">
       <span class="material-symbols-outlined">add</span>
       <span>Start your first quest</span>
@@ -283,6 +283,18 @@
   setInterval(loadQuests, 5000);
   loadOtherFolders();
   setInterval(loadOtherFolders, 30000);
+
+// How many questions the new-quest page asks first, counted from the interview schema (never written into this page:
+// a number here went stale when the interview changed).
+(async () => {
+  try {
+    const res = await fetch('/api/interview/schema');
+    if (!res.ok) return;
+    const schema = await res.json();
+    const n = (schema.questions || []).filter(q => q.tier === 1 && (!q.frontends || q.frontends.includes('serve'))).length;
+    if (n > 0) document.getElementById('question-count').textContent = `up to ${n} short questions`;
+  } catch (_) { /* keep the words already there */ }
+})();
 </script>
 </body>
 </html>

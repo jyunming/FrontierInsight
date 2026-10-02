@@ -9,7 +9,7 @@ Three install paths depending on your environment:
    built-in tectonic fallback.
 
 All three end at the same place: `pip install` complete, optional system
-tools available, `python launch.py --config my.yaml` produces a paper.
+tools available, and `fi demo` as the first command.
 
 ## System requirements
 
@@ -17,7 +17,7 @@ tools available, `python launch.py --config my.yaml` produces a paper.
 |---|---|---|
 | Python | 3.11+ | Type hints + LangGraph need it. |
 | pip | recent | `python -m pip --version` |
-| Git | optional | Only needed if you clone the repo. `pip install frontier-insight` will skip this. |
+| Git | optional | Needed to clone the repo, or to install straight from GitHub (below). |
 
 Operating systems supported: Windows 10+, macOS 12+ (Intel and Apple
 Silicon), Linux (modern distros with glibc). All paths use
@@ -26,15 +26,20 @@ Silicon), Linux (modern distros with glibc). All paths use
 ## Path 1 — Standard install
 
 ```bash
-pip install frontier-insight
+pip install git+https://github.com/jyunming/FrontierInsight
 ```
 
-That's it. The `fi` command is now on your PATH. Try:
+(Frontier Insight is not on PyPI yet; once it is, this becomes `pip install frontier-insight`.) The `fi` command is
+now on your PATH. The first step, in any folder:
 
 ```bash
-fi --help
-fi --config examples/integrator_bakeoff/config.yaml
+fi demo
 ```
+
+It writes a small example quest, `fi-demo.yaml`, into that folder (never over a file that is there), checks at no
+cost that your model can be used (a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call), and asks before it runs the
+quest for real. If something stops it, it says what and how to fix it. `fi --doctor` shows, in a few seconds, what
+else this machine has (LaTeX, a browser for PDFs, Marp, the model providers).
 
 For richer output formats install the optional system tools listed
 under [System tools](#system-tools) below.
@@ -49,7 +54,7 @@ prompts.
 # After install, "py -3.11" or "python" works.
 
 # Frontier Insight itself:
-pip install --user frontier-insight
+pip install --user git+https://github.com/jyunming/FrontierInsight
 
 # Optional system tools (per-user installs). Note that pandoc already
 # came along with the pip install above -- a system copy is simply
@@ -78,7 +83,7 @@ Tectonic is a single Rust binary (~70 MB) that needs no install step
 and self-bootstraps CTAN packages.
 
 ```bash
-pip install --user frontier-insight
+pip install --user git+https://github.com/jyunming/FrontierInsight
 fi --install-tectonic       # downloads tectonic into ./tools/, verifies SHA-256
 ```
 
@@ -360,9 +365,10 @@ participant picker.
 ## Verifying the install
 
 ```bash
-fi --help                                                  # console script
-fi --config examples/integrator_bakeoff/config.yaml        # ~3 min end-to-end
-# Output lands at outputs/<quest_id>/paper/paper.md
+fi --help        # console script
+fi --doctor      # what this machine has, in a few seconds, no network
+fi demo          # writes fi-demo.yaml here, checks your model at no cost, asks before running it
+# A run's output lands at outputs/<quest_id>/paper/paper.md
 ```
 
 If `fi` isn't on PATH after `pip install --user`, your user-scripts

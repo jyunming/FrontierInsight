@@ -260,13 +260,15 @@ Press **Esc** on any modal to cancel.
 ### Power-user — write your own YAML
 
 ```
-@fi /start examples/integrator_bakeoff/config.yaml
+@fi /start fi-demo.yaml
 ```
+
+(`fi demo` in a terminal writes `fi-demo.yaml`, a small example quest, into the folder it runs in; any quest YAML of your own works the same way.)
 
 In the chat panel you'll see progress messages:
 ```
-🧪 Starting quest: examples/integrator_bakeoff/config.yaml
-  [FI] start quest_id=...-integrator-bakeoff-xxx provider=openai
+🧪 Starting quest: fi-demo.yaml
+  [FI] start quest_id=...-fi-demo-integrators-xxx provider=openai
   → clarify
   [clarify] mode=auto; agent self-answered 10 slots
   → ideate

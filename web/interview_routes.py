@@ -237,6 +237,28 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         if request.query_params.get("launch") == "true":
             from core.engine import mint_quest_id
             from web.quest_launcher import QuestLauncherFull
+
+            # Before anything is spent: the provider and model chosen, checked at no cost (signed in, the service
+            # answering, the model there; core/provider_readiness.py). A problem stops the launch with the plain
+            # sentence and its fix; the page keeps the answers, and they are in the draft YAML written above.
+            if answers.provider != "vscode_extension":  # the bridge check above covers that one
+                from core import provider_readiness
+
+                ready = await provider_readiness.preflight(
+                    answers.provider, model=answers.provider_model, base_url=answers.provider_base_url,
+                    api_key_env=answers.provider_api_key_env,
+                )
+                if ready.blocked:
+                    return JSONResponse(
+                        {
+                            "error": "the model is not ready",
+                            "detail": provider_readiness.one_line(ready),
+                            "readiness": ready.as_dict(),
+                            "yaml_path": str(yaml_path),
+                            "profile_saved": keep_profile(),
+                        },
+                        status_code=409,
+                    )
             seed = answers.title or answers.topic or "quest"
             quest_id = mint_quest_id(seed)
             try:

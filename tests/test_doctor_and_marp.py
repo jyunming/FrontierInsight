@@ -102,6 +102,10 @@ def test_install_from_archive_without_binary_fails(tmp_path: Path) -> None:
 
 # ----------------------------------------------------------------- doctor
 
+def _never_load():  # noqa: ANN202
+    raise AssertionError("the quick doctor must not load the embedding model (it may download it)")
+
+
 def test_doctor_reports_everything_missing(
     capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -113,7 +117,9 @@ def test_doctor_reports_everything_missing(
     monkeypatch.setattr("generation._html_pdf.find_html_browser", lambda *a, **k: None)
     monkeypatch.setattr("generation._marp.find_marp", lambda *a, **k: None)
     monkeypatch.setattr("generation._office_pdf.find_libreoffice", lambda *a, **k: None)
-    monkeypatch.setattr("core.passages._embed_model", lambda: None)
+    # The quick doctor looks for the model on disk; it never loads it (core.passages.embed_model_cached).
+    monkeypatch.setattr("core.passages.embed_model_cached", lambda: (False, "sentence-transformers is not installed"))
+    monkeypatch.setattr("core.passages._embed_model", _never_load)
 
     assert launch._doctor() == 0
     out = capsys.readouterr().out
@@ -141,7 +147,8 @@ def test_doctor_reports_all_present(
         "generation._html_pdf.find_html_browser", lambda *a, **k: ("edge", "/e/edge"))
     monkeypatch.setattr("generation._marp.find_marp", lambda *a, **k: "/m/marp")
     monkeypatch.setattr("generation._office_pdf.find_libreoffice", lambda *a, **k: "/l/soffice")
-    monkeypatch.setattr("core.passages._embed_model", lambda: object())
+    monkeypatch.setattr("core.passages.embed_model_cached", lambda: (True, "all-MiniLM-L6-v2 downloaded"))
+    monkeypatch.setattr("core.passages._embed_model", _never_load)
 
     assert launch._doctor() == 0
     out = capsys.readouterr().out

@@ -21,13 +21,13 @@
   <section class="flex flex-col gap-4">
     <h1 class="font-headline-xl text-headline-xl md:text-headline-xl text-headline-lg-mobile font-headline-lg-mobile text-on-surface">Settings</h1>
     <p class="font-body-lg text-body-lg text-on-surface-variant max-w-2xl">
-      Inspect this server's configuration, the LLM provider availability on this machine, and run system tasks like installing tectonic for PDF rendering.
+      Inspect this server's configuration, how far each model provider is set up on this machine, and run system tasks like installing tectonic for PDF rendering.
     </p>
   </section>
 
   <section class="flex flex-col gap-6">
     <div class="flex items-center justify-between border-b border-surface-high pb-4">
-      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">Provider availability</h2>
+      <h2 class="font-headline-lg text-headline-lg md:text-headline-lg text-headline-lg-mobile font-headline-lg-mobile text-on-surface text-[24px]">Model providers</h2>
     </div>
     <div id="providers" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-gutter"></div>
   </section>
@@ -110,20 +110,34 @@
 </footer>
 
 <script>
+  // Each provider's state is a step on a ladder (not installed, installed, signed in, reachable, model available),
+  // with the sentence and the fix the CLI and `fi --doctor` print (core/provider_readiness.py). Never a bare
+  // "ready": an installed command or a key that is set says nothing about the model answering.
   async function loadProviders() {
-    const res = await fetch('/api/providers/availability');
-    const data = await res.json();
+    const el = document.getElementById('providers');
+    el.textContent = 'Checking each provider (a few seconds)…';
+    let data;
+    try {
+      const res = await fetch('/api/providers/availability');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+    } catch (e) {
+      el.textContent = `Could not check the providers (${e}).`;
+      return;
+    }
     const html = (data.providers || []).map(p => `
       <div class="gradient-border-neutral rounded-lg p-6 flex flex-col gap-4">
         <div class="flex justify-between items-start gap-3">
           <span class="font-code-md text-code-md uppercase text-on-surface break-words">${escapeHtml(p.label)}</span>
-          <span class="font-label-sm text-label-sm px-2 py-1 rounded ${p.available ? 'bg-status-success/10 text-status-success border border-status-success/20' : 'bg-status-warning/10 text-status-warning border border-status-warning/20'} whitespace-nowrap">
-            ${p.available ? 'READY' : 'SETUP REQUIRED'}
+          <span class="font-label-sm text-label-sm px-2 py-1 rounded ${p.available ? 'bg-status-success/10 text-status-success border border-status-success/20' : 'bg-status-warning/10 text-status-warning border border-status-warning/20'} whitespace-nowrap" data-state="${escapeHtml(p.state || '')}">
+            ${escapeHtml(p.state_label || (p.available ? 'Installed' : 'Not installed'))}
           </span>
         </div>
+        <p class="font-body-md text-body-md text-on-surface">${escapeHtml(p.sentence || '')}</p>
+        ${p.fix ? `<p class="font-body-md text-body-md text-status-warning">To fix: ${escapeHtml(p.fix)}</p>` : ''}
         <p class="font-body-md text-body-md text-on-surface-variant">${escapeHtml(p.description)}</p>
       </div>`).join('');
-    document.getElementById('providers').innerHTML = html;
+    el.innerHTML = html;
   }
 
   async function checkTectonic() {
@@ -202,15 +216,60 @@
       }
       reingestCard.classList.remove('hidden');
       reingestCard.classList.add('flex');
-      const bySource = data.doc_counts_by_source || {};
+      // The first view reads the settings only. Counting the documents opens the store and loads its search index,
+      // which can take a while on a large one: it runs when asked.
       el.innerHTML = `
         <div class="flex justify-between items-center flex-wrap gap-3">
           <div>
             <h3 class="font-body-lg text-body-lg text-on-surface font-semibold">${escapeHtml(data.project || '(default)')}</h3>
             <p class="font-body-md text-body-md text-on-surface-variant mt-1">${escapeHtml(data.store_path || 'Axon vector store')}</p>
           </div>
-          <span class="font-label-sm text-label-sm px-2 py-1 rounded bg-status-success/10 text-status-success border border-status-success/20">AVAILABLE</span>
+          <span class="font-label-sm text-label-sm px-2 py-1 rounded bg-status-success/10 text-status-success border border-status-success/20">INSTALLED</span>
         </div>
+        <div id="axon-inventory" class="flex items-center gap-4 flex-wrap">
+          <button id="inventory-btn" onclick="inspectKnowledge()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-4 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity whitespace-nowrap">Inspect knowledge base</button>
+          <span class="font-body-md text-body-md text-on-surface-variant">Counts the documents in it. Opens the store, so it can take a while on a large one.</span>
+        </div>
+        <details class="group">
+          <summary class="font-label-sm text-label-sm uppercase text-primary cursor-pointer hover:text-secondary transition-colors select-none flex items-center gap-2">
+            <span class="material-symbols-outlined text-[16px] group-open:rotate-90 transition-transform">chevron_right</span>
+            View AxonConfig (secrets redacted)
+          </summary>
+          <div class="mt-4 p-4 bg-surface-low rounded border border-surface-high overflow-x-auto">
+            <pre class="font-code-md text-code-md text-on-surface-variant text-sm">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
+          </div>
+        </details>
+        ${data.config_error ? `<p class="text-error text-body-sm">${escapeHtml(data.config_error)}</p>` : ''}`;
+    } catch (e) {
+      document.getElementById('axon-info').textContent = `Error: ${e}`;
+    }
+  }
+
+  async function inspectKnowledge() {
+    const box = document.getElementById('axon-inventory');
+    const btn = document.getElementById('inventory-btn');
+    if (btn) btn.disabled = true;
+    const note = document.createElement('span');
+    note.className = 'font-body-md text-body-md text-on-surface-variant';
+    note.textContent = 'Counting…';
+    box.appendChild(note);
+    let data;
+    try {
+      const res = await fetch('/api/knowledge/inventory', {method: 'POST'});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      data = await res.json();
+    } catch (e) {
+      note.textContent = `Could not count the documents (${e}).`;
+      if (btn) btn.disabled = false;
+      return;
+    }
+    renderInventory(box, data);
+  }
+
+  function renderInventory(box, data) {
+      const bySource = data.doc_counts_by_source || {};
+      box.className = 'flex flex-col gap-4';
+      box.innerHTML = `
         <div class="grid grid-cols-3 gap-4 border-y border-surface-high py-4">
           <div class="flex flex-col">
             <span class="font-label-sm text-label-sm text-on-surface-variant uppercase">Total Chunks</span>
@@ -241,20 +300,9 @@
             </tbody>
           </table>
         </details>` : ''}
-        <details class="group">
-          <summary class="font-label-sm text-label-sm uppercase text-primary cursor-pointer hover:text-secondary transition-colors select-none flex items-center gap-2">
-            <span class="material-symbols-outlined text-[16px] group-open:rotate-90 transition-transform">chevron_right</span>
-            View AxonConfig (secrets redacted)
-          </summary>
-          <div class="mt-4 p-4 bg-surface-low rounded border border-surface-high overflow-x-auto">
-            <pre class="font-code-md text-code-md text-on-surface-variant text-sm">${escapeHtml(JSON.stringify(data.axon_config || {}, null, 2))}</pre>
-          </div>
-        </details>
         ${data.counts_error ? `<p class="text-error text-body-sm">${escapeHtml(data.counts_error)}</p>` : ''}
-        ${data.counts_note ? `<p class="text-on-surface-variant text-body-sm italic">${escapeHtml(data.counts_note)}</p>` : ''}`;
-    } catch (e) {
-      document.getElementById('axon-info').textContent = `Error: ${e}`;
-    }
+        ${data.counts_note ? `<p class="text-on-surface-variant text-body-sm italic">${escapeHtml(data.counts_note)}</p>` : ''}
+        <div><button id="inventory-btn" onclick="inspectKnowledge()" class="bg-gradient-to-r from-primary-container to-secondary-container text-white px-4 py-2 rounded font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity whitespace-nowrap">Count again</button></div>`;
   }
 
   async function reingest() {

@@ -497,7 +497,16 @@ def test_purge_rejects_path_traversal(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_provider_availability_endpoint(tmp_path: Path) -> None:
+def test_provider_availability_endpoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core import provider_readiness as pr
+
+    # No CLI status command and no request: this test is about the shape of the answer.
+    monkeypatch.setattr(pr, "_run_command", lambda argv, timeout_s: (None, ""))
+
+    async def nothing(url, headers, timeout_s):  # noqa: ANN001, ANN202
+        return None, None
+
+    monkeypatch.setattr(pr, "_get_json", nothing)
     client = _client(tmp_path)
     res = client.get("/api/providers/availability")
     assert res.status_code == 200
@@ -506,6 +515,7 @@ def test_provider_availability_endpoint(tmp_path: Path) -> None:
     assert len(payload["providers"]) >= 5  # at least openai, codex, claude_cli, etc.
     for p in payload["providers"]:
         assert "name" in p and "available" in p
+        assert p["state"] in pr.STATE_LABELS and p["sentence"]
 
 
 def test_static_pages_render(tmp_path: Path) -> None:

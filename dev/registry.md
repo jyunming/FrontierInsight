@@ -249,6 +249,14 @@ same PR that adds, splits or renames one.
   clarify-mode default `CLARIFY_WHEN_PRESENT` is never written, so `pauses.clarify` stays unset unless a person chose.
 - `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call, and why its answer ended); `ModelAnswerTruncated` / `ModelAnswerFiltered` / `outcome_of` (an answer cut off at its limit or withheld is never returned as whole; `Engine._pause_for_model_output` turns either into a `model_output` pause); `node_output_limit` (`provider.node_max_tokens` per step); `quest_run_log` (a failed call made outside the engine still reaches the quest's run.log); `_http_streams` / `_post_streamed` (Moonshot calls are streamed). The HTTP retry policy waits out a server outage or rate limit (`_http_outage_status`, `_http_retry_wait` / `_http_retry_stop` / `_http_retry_sleep`: six attempts on `_HTTP_OUTAGE_WAITS_S`, a sane `Retry-After` up to `_RETRY_AFTER_MAX_S`, at most `_HTTP_OUTAGE_MAX_WAIT_S` per call, the `FI_MAX_CONCURRENT_LLM_CALLS` slot given back while waiting); a used-up quota is `_is_exhausted_quota`; `FallbackLLMClient` sets `short_retry` (`_http_short_retry`) while a later provider's circuit is closed.
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
+- `core/provider_readiness.py` — how far a provider is set up, as a ladder of plain states (`Readiness`: not
+  installed → installed → signed in / unknown → reachable → model available; no key / key present / key rejected;
+  not running / model missing), each with one sentence and a fix that every surface prints as is (`one_line`).
+  `check_local` (PATH and environment only: the quick `--doctor`, the CLI interview's provider list,
+  `core/interview.py::available_providers`), `check` (also a CLI's own sign-in status command through
+  `_run_command`, a `core/proc_tree.py` tree with a time limit, and a local Ollama's `/api/tags`: the web Settings
+  page and the interview's picker via `/api/providers/availability`), `preflight` (also the provider's free
+  `GET /models`: before a launch from the CLI interview or the web form, `fi demo`, `--doctor --deep`).
 - `core/ensemble.py` — the multi-model fan-out-and-merge primitive a node opts into.
 
 ## Knowledge / literature
@@ -256,7 +264,9 @@ same PR that adds, splits or renames one.
 - `core/knowledge.py` — `Knowledge`, the three-layer retrieval (pinned papers → Axon → external router); `is_open_access(metadata)` is the one rule for "free to download" and `_free_locations(metadata)` the only addresses requested for a free paper (the source's own `free_url`, or an address on a free host; never a DOI or publisher page); `_get_checked` follows redirects by hand and `_redirect_allowed` re-checks every hop (the headless render does the same per hop in `_playwright_fetch_html`, through the route handler `_make_navigation_guard`, whose `_route_call`, on the "page already closed" error only, marks the page's routes "ignore errors" and re-raises so Playwright drops it without printing a traceback); `_looks_scholarly` keeps journal-article web hits out unless free (gates `_fetch_full_text` / `_fetch_web_page_text`; `engine._is_open_access` delegates to it); `add_quest_artifacts` writes accepted or preliminary kinds by `metadata['standing']` (decided in `Engine._write_back_knowledge`; read back by `engine._is_preliminary_memory` / `_preliminary_reminders`); the copy under the other standing (`STANDING_KINDS`) is removed first (`_retire`, `_delete_in_process`), and `retire_stale_standing` / `retire_stale_ref_spines` back `fi tools tidy-knowledge`; a removal that fails stops the write (`last_writeback_problem`, which the engine puts in run.log and `.fi/knowledge_problem.json` for the card); cited papers' entries (`REF_SPINE`) keep every accepted consumer (`_paper_entry`, `_drop_consumer`, under `_paper_entries_lock`).
 - `core/axon_http.py`, `core/axon_sidecar.py`, `core/axon_endpoint.py` — talking to the shared Axon service: HTTP
   client (`AxonHTTPBrain`: ingest, delete_documents, list_sources, search_raw), sidecar lifecycle (start/reuse/stale-lock clearing), endpoint discovery.
-- `core/passages.py` — relevance-ranked excerpt selection over fetched full text.
+- `core/passages.py` — relevance-ranked excerpt selection over fetched full text; `embed_model_cached` says whether
+  the embedding model is downloaded, from the model caches on disk only (the quick `--doctor`), `_embed_model`
+  loads it.
 - `core/retractions.py` — the retraction check: `check_literature` looks each DOI up in Crossref (`updated-by`
   notices, Retraction Watch included) after the literature node's dedup and sets `metadata["retraction"]`
   (`retracted` / `not_retracted` / `not_checked` / `no_doi`); `apply_to_claims` makes a claim grounded in a retracted
@@ -454,6 +464,8 @@ same PR that adds, splits or renames one.
   `core/summarizer.py`, `core/state_dump.py` — the one-shot CLI tools (`fi tools <name>`, see `launch.py:
   _TOOL_SUBCOMMANDS`); `core/proposal_seed.py` seeds an interview from a saved proposal.
 - `web/server.py` — the FastAPI status server (quest list, log stream, evidence, trace, amendment banner, ...).
+  The Settings page's knowledge-base card: `_knowledge_config_info` (`GET /api/knowledge/info`, settings only) and
+  `_knowledge_inventory` (`POST /api/knowledge/inventory`, opens the store; on request, in a thread, time-limited).
 - `web/interview_routes.py`, `web/skills_routes.py`, `web/tools_routes.py` — the web UI's interview, skills and
   CLI-tools surfaces.
 - `web/quest_launcher.py` — the subprocess pool for quests started from the web UI. Its children (and the quest page's
@@ -481,6 +493,13 @@ same PR that adds, splits or renames one.
 ## Platform / diagnostics
 
 - `core/platform.py` — `--doctor`'s machine-capability detection.
+- `launch.py:_doctor` — `--doctor`: quick by default (this computer only, each check bounded by `_bounded`, the
+  engine not imported: `_quick_doctor_argv` / `_import_runtime`), `--deep` loads the embedding model and runs
+  `provider_readiness.preflight` for every provider.
+- `core/demo.py`, `launch.py:_demo` — `fi demo`, the first step after installing: writes `fi-demo.yaml` (the example
+  is a string in the package; `examples/` is not in the wheel) without overwriting, checks the providers set up on
+  this computer in turn, asks before running (no terminal: prints the command). `tests/test_wheel_quickstart.py`
+  runs it from a freshly built wheel.
 - `core/bridge_path.py`, `vscode-frontier-insight/src/bridge-path.ts` — the canonical persistent-bridge socket path,
   kept identical on both sides. A second VS Code window open at the same time binds `<path>-<pid>` instead
   (`persistent-bridge.ts` `listen`), and its `/update` / `/generate` terminals are handed that address.

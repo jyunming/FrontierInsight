@@ -199,20 +199,41 @@ def _bootstrap_or_reraise(exc: ImportError) -> None:
     _relaunch(target, sys.argv[1:])
 
 
-try:
-    from core import acceptance as _acceptance
-    from core.config import Config
-    from core.engine import Engine, QuestArtifacts, write_cost_summary
-    from core.provider import ProxySupervisor
-    from core.skills import ExternalSkillDirs
-    from generation.paper import PaperGenerator
-    from generation.poster import PosterGenerator
-    from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
-    from generation.slides import SlideGenerator
-    from generation.speech import SpeechGenerator
-except ImportError as _missing_dependency:
-    _bootstrap_or_reraise(_missing_dependency)
-    raise  # unreachable: a successful bootstrap re-execs and never returns here
+def _quick_doctor_argv(argv: list[str]) -> bool:
+    """``fi --doctor`` (the quick one) needs a handful of modules, not the engine: importing the engine (LangGraph,
+    its checkpointer, the generators) is most of FI's start-up time, and the quick doctor promises a few seconds.
+    Anything else -- ``--deep``, a help flag, any other command -- imports everything as before."""
+    return "--doctor" in argv and not any(a in argv for a in ("--deep", "-h", "--help", "--help-all"))
+
+
+def _import_runtime() -> None:
+    """The engine and the generators, as module globals (every command but the quick doctor needs them)."""
+    global _acceptance, Config, Engine, QuestArtifacts, write_cost_summary, ProxySupervisor, ExternalSkillDirs
+    global PaperGenerator, PosterGenerator, LABELS, check_and_redo, check_pdf, check_pptx, report_summary
+    global SlideGenerator, SpeechGenerator, _VALID_PAPER_FORMATS
+    try:
+        from typing import get_args as _get_args
+
+        from core.config import PaperFormat as _PaperFormat
+        _VALID_PAPER_FORMATS = frozenset(_get_args(_PaperFormat))
+        from core import acceptance as _acceptance
+        from core.config import Config
+        from core.engine import Engine, QuestArtifacts, write_cost_summary
+        from core.provider import ProxySupervisor
+        from core.skills import ExternalSkillDirs
+        from generation.paper import PaperGenerator
+        from generation.poster import PosterGenerator
+        from generation._visual_check import LABELS, check_and_redo, check_pdf, check_pptx, report_summary
+        from generation.slides import SlideGenerator
+        from generation.speech import SpeechGenerator
+    except ImportError as _missing_dependency:
+        _bootstrap_or_reraise(_missing_dependency)
+        raise  # unreachable: a successful bootstrap re-execs and never returns here
+
+
+_RUNTIME_DEFERRED = _quick_doctor_argv(sys.argv[1:])
+if not _RUNTIME_DEFERRED:
+    _import_runtime()
 
 
 #: The modes that read ``--config`` for the skill folders it names instead of
@@ -332,7 +353,7 @@ def _expand_tools_argv(argv: list[str]) -> list[str]:
 
 
 _SHORT_HELP = """\
-usage: fi [-h] [--help-all] --config CONFIG | --new | --update QUEST_ID | --serve | --resume QUEST_ID |
+usage: fi [-h] [--help-all] demo | --config CONFIG | --new | --update QUEST_ID | --serve | --resume QUEST_ID |
           --watch QUEST_ID | --trace QUEST_ID | --why QUEST_ID | --skills | tools <name> ...
 
 Run a research quest end to end: literature, an experiment, the paper, and the checks that hold it to what
@@ -340,6 +361,8 @@ it found. `fi --help-all` lists every flag; `fi tools --help` lists the less com
 (a weekly digest, a cross-quest portfolio, an adversarial critique, ...).
 
 Run a quest
+  demo                   Start here: writes a small example quest (fi-demo.yaml) in this folder, checks your
+                          model at no cost, and asks before running it.
   --config CONFIG        YAML for one quest. Also resumes / updates / traces it with the flags below.
   --new                  Answer a few questions and write the YAML for you (also: the web form, `@fi /new`).
   --serve                Local web UI at http://127.0.0.1:8765.
@@ -356,7 +379,8 @@ While a quest is running, or after
 Skills (what FI has learned about driving one piece of software on this machine)
   --skills               List them, and whether each is approved.
   --approve-skill NAME   Approve one, after --approve-as <you>.
-  --doctor               What this machine has (LaTeX, a knowledge layer, ...) for FI to use.
+  --doctor               What this machine has (LaTeX, a model provider, ...) for FI to use: a few seconds, no
+                          network. Add --deep to also check sign-in and the network (can take a minute).
 
 Less common
   tools <name>           A weekly digest, a cross-quest portfolio, an adversarial critique, and more:
@@ -556,9 +580,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "and what to install for the ones it can't. Checks the same "
              "lookups the generators use (pandoc, LaTeX engine, Marp, a "
              "Chromium-family browser, embeddings), so a pass here predicts "
-             "a real run. Costs nothing and makes no LLM calls — run it "
+             "a real run, and which model providers are set up. Costs nothing "
+             "and makes no LLM calls — run it "
              "before a quest rather than discovering a missing renderer "
-             "after paying for the whole pipeline.",
+             "after paying for the whole pipeline. This computer only: no "
+             "network, nothing loaded, a few seconds; add --deep for the rest.",
+    )
+    p.add_argument(
+        "--deep",
+        action="store_true",
+        help="With --doctor: also load the embedding model (downloading it the first time) and ask each model "
+             "provider whether you are signed in and whether its service answers (a model list; no model is "
+             "called). Uses the network and can take a minute.",
     )
     mode.add_argument(
         "--dump-state",
@@ -1464,6 +1497,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     _check_mode(p, mode._group_actions, args)
     if args.title is not None and not args.rename:
         p.error("--title goes with --rename <quest_id>")
+    if args.deep and not args.doctor:
+        p.error("--deep goes with --doctor (fi --doctor --deep)")
     # Env-var fallback for the bridge port. The VSCode extension can
     # expose ``FI_VSCODE_BRIDGE_PORT`` to a terminal session it spawns,
     # which lets the user run ``python launch.py --serve`` (or any
@@ -2564,12 +2599,9 @@ async def _finish_outputs(
     return summary
 
 
-# Derive the allowed values from `core.config.PaperFormat` so adding a
-# new template stays a one-place change. `typing.get_args` returns the
-# Literal members as a tuple of strings.
-from typing import get_args as _get_args
-from core.config import PaperFormat as _PaperFormat
-_VALID_PAPER_FORMATS: frozenset[str] = frozenset(_get_args(_PaperFormat))
+# `_VALID_PAPER_FORMATS` is derived from `core.config.PaperFormat` in `_import_runtime` (so adding a new template
+# stays a one-place change, and importing launch for the quick doctor runs no `core` import outside the bootstrap's
+# guard: the doctor loads core.config later, through core.interview, inside main()'s guarded import).
 
 
 def _apply_paper_venue_override(cfg: Config, art: QuestArtifacts) -> None:
@@ -3208,7 +3240,7 @@ async def main_async(args: argparse.Namespace) -> int:
             return _tidy_knowledge(check_only=args.tidy_knowledge == "check", axon_config_path=args.axon_config)
 
         if args.doctor:
-            return _doctor()
+            return _doctor(deep=bool(getattr(args, "deep", False)))
 
         if args.dump_state is not None:
             from core.state_dump import dump_state
@@ -4299,6 +4331,24 @@ async def _run_new(
         print(f"  python launch.py --config {yaml_path}")
         return 0
 
+    # Before anything is spent: the provider and model the person chose, checked at no cost (signed in, the service
+    # answering, the model there). On a problem the quest is not started; the answers are kept in the YAML above.
+    if answers.provider != "vscode_extension":  # VS Code checks its own Chat-picker model
+        from core.provider_readiness import one_line, preflight
+
+        print()
+        print(f"Checking {answers.provider} before launching (nothing is paid for) ...", flush=True)
+        ready = await preflight(
+            answers.provider, model=answers.provider_model, base_url=answers.provider_base_url,
+            api_key_env=answers.provider_api_key_env,
+        )
+        print(f"  {one_line(ready)}")
+        if ready.blocked:
+            print()
+            print("The quest was not started. Your answers are kept in the YAML above; once that is fixed, run:")
+            print(f"  {_command_name()} --config {yaml_path}")
+            return 1
+
     # Launch the quest using the existing --config code path
     # (``run_one``). The interview already pinned clarify_overrides
     # in the YAML, so the engine skips its own clarify LLM call.
@@ -4493,11 +4543,20 @@ def _cli_prompt_for(
         return raw
 
     # Render the choice list.
+    if q.id == "provider":
+        # What is on this computer for each, in the words the Settings page and `fi --doctor` use
+        # (core/provider_readiness.py). Local only, so the list shows at once; the chosen one is checked fully
+        # (signed in, the service answering, the model there) before the quest is launched.
+        from core.provider_readiness import check_local, label as _state_label
     for i, c in enumerate(choices, start=1):
-        marker = " (default)" if c.value == default else ""
+        # A label that already says "(default)" (e.g. "Research (default)") is not marked twice.
+        marker = " (default)" if c.value == default and "(default" not in c.label else ""
         print(f"    {i}. {c.label}{marker}")
         if c.description:
             print(f"        {c.description}")
+        if q.id == "provider":
+            r = check_local(str(c.value))
+            print(f"        {_state_label(r.state)} \u2014 {r.sentence}")
     if q.allow_other:
         print(f"    {len(choices) + 1}. Other (type your own)")
     if default is not None and not any(c.value == default for c in choices):
@@ -4749,9 +4808,152 @@ def _export_models(dest: Path) -> int:
     return 0
 
 
-def _doctor() -> int:
-    """Report which output kinds this machine can produce, and how to fix
-    the rest. No LLM calls, no network, no quest.
+_DEMO_HELP = """\
+usage: fi demo
+
+The first thing to run. It writes a small example quest, fi-demo.yaml, into the folder you are in (never over a
+file that is there: the next one is fi-demo-2.yaml), checks at no cost what it can about the model it names (a key
+the service accepts, a CLI signed in, a local model downloaded; no model is called), and then asks before running it
+for real. Without a terminal to ask in, it prints the command that runs it and stops; when the model is not ready it
+says how to fix that and exits 1.
+
+The model: the first one set up on this computer (an OpenAI or Gemini key, a signed-in claude / codex / gemini
+command, a local Ollama); with none, openai, and what to set. Change provider: name: in the file to use another.
+"""
+
+
+def _command_name() -> str:
+    """How the person started FI, for the commands FI prints back: ``fi`` when installed, else ``python launch.py``
+    (with its full path when it is not in the folder the person is in, so the printed command works there)."""
+    script = Path(sys.argv[0])
+    if script.name != "launch.py":
+        return "fi"
+    try:
+        here = script.resolve().parent == Path.cwd().resolve()
+    except OSError:
+        here = False
+    return "python launch.py" if here else f'python "{script.resolve()}"'
+
+
+def _demo(argv: list[str]) -> int | list[str]:
+    """``fi demo``. Returns an exit code, or the arguments to go on with (``["--config", <the file>]``) when the
+    person said yes to running it."""
+    import asyncio as _asyncio
+
+    from core import demo as _demo_mod
+    from core import provider_readiness as _pr
+
+    if any(a in ("-h", "--help") for a in argv):
+        print(_DEMO_HELP)
+        return 0
+    if argv:
+        print(f"fi demo takes no arguments (got {' '.join(argv)}).\n")
+        print(_DEMO_HELP)
+        return 2
+
+    print("Frontier Insight -- a first quest to try")
+    print("=" * 72)
+    candidates = _demo_mod.set_up_providers()
+    set_up = bool(candidates)
+    chosen: tuple[str, str | None, _pr.Readiness] | None = None
+    for provider in candidates or ["openai"]:
+        # Each one set up on this computer, in turn, until one passes (a key that is set but refused, a CLI that is
+        # installed but signed out, is passed over for the next).
+        model: str | None = None
+        print(f"Checking {provider}: is it ready to use? (nothing is paid for) ...", flush=True)
+        if provider == "ollama":
+            # A chat model the server already has: an embedding model (nomic-embed-text, ...) cannot write a paper.
+            # None: the check below names the model the quest would call and how to download it.
+            names = [n for n in _asyncio.run(_pr.ollama_models()) if "embed" not in n.lower()]
+            model = names[0] if names else None
+        state = _asyncio.run(_pr.preflight(provider, model=model))
+        if chosen is None or (chosen[2].blocked and not state.blocked):
+            chosen = (provider, model, state)
+        if not state.blocked:
+            break
+        print(f"  {_pr.one_line(state)}")
+    assert chosen is not None
+    provider, model, state = chosen
+    note = "" if set_up else ("No model provider is set up on this computer yet, so openai is named here: it needs "
+                              "the key in OPENAI_API_KEY.")
+    try:
+        path = _demo_mod.write_demo_config(Path.cwd(), provider, model, note)
+    except OSError as exc:
+        print(f"Could not write the example into {Path.cwd()} ({exc}). Run `fi demo` from a folder you can write to.")
+        return 1
+    run_cmd = f"{_command_name()} --config {path.name}"
+    print()
+    print(f"  Example quest : {path}")
+    print("                  three numerical integrators on a damped oscillator; needs no data; an exploration")
+    print("                  (the cheapest kind of quest, its paper marked preliminary)")
+    print(f"  Model         : {provider}{(' / ' + model) if model else ''}")
+    print(f"  Ready?        : {_pr.one_line(state)}")
+    print("                  Another model? Change `provider: name:` in the file "
+          "(openai, gemini, claude_cli, codex_cli, gemini_cli, ollama).")
+    print(f"  Python        : {sys.version.split()[0]}")
+    print()
+    if state.blocked:
+        # Exit 1: `fi demo && fi --config fi-demo.yaml` must not go on to a model just found not ready.
+        print("Fix the model first (above), then run the example with:")
+        print(f"  {run_cmd}")
+        return 1
+    if not (_stdin_is_terminal() and sys.stdout.isatty()):
+        print("To run it (it calls the model for real, typically a few dozen calls; the results go to ./outputs):")
+        print(f"  {run_cmd}")
+        return 0
+    try:
+        answer = input("Run it now? It calls the model for real (typically a few dozen calls). [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer not in ("y", "yes"):
+        print(f"Not run. When you want to: {run_cmd}")
+        return 0
+    return ["--config", str(path)]
+
+
+#: How long one quick ``--doctor`` check may take before it is reported as not answering and the next one starts.
+_DOCTOR_CHECK_TIMEOUT_S = 3.0
+
+
+def _bounded(fn, timeout_s: float):  # noqa: ANN001, ANN202 -- any zero-argument callable, its result
+    """``(result, "")``, or ``(None, why)`` when ``fn`` raised or did not return within ``timeout_s``. It runs in a
+    daemon thread, so a check that hangs is left behind without holding up the next one or the process's exit (a
+    ``ThreadPoolExecutor`` would join it at exit)."""
+    import threading
+
+    box: dict[str, object] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = fn()
+        except Exception as exc:  # noqa: BLE001 -- reported as the check's result
+            box["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    if t.is_alive():
+        return None, f"did not answer within {timeout_s:g} s"
+    if isinstance(box.get("error"), _DoctorMiss):
+        return None, str(box["error"])
+    if "error" in box:
+        return None, f"failed ({box['error']})"
+    return box.get("value"), ""
+
+
+class _DoctorMiss(Exception):
+    """A check's plain answer for "not there" (shown as it is, not as a failure)."""
+
+
+def _doctor(deep: bool = False) -> int:
+    """Report which output kinds this machine can produce, which model providers are set up, and how to fix
+    the rest. No LLM calls, no quest.
+
+    Quick (the default): this computer only -- no network, nothing loaded, each check with a short time limit and
+    one line printed as it starts, so a check that hangs is visible and the rest still run. The embedding model is
+    looked for in the model cache (``core.passages.embed_model_cached``), not loaded. ``deep`` says so first, then
+    loads the embedding model (which may download it) and asks each provider whether it is signed in and whether
+    its service answers (``core.provider_readiness.preflight``: a model list, never a paid call).
 
     The point is ordering: ``paper_pdf`` already had a pre-flight, but
     ``slides`` and ``poster`` had none, so a missing renderer surfaced only
@@ -4767,7 +4969,7 @@ def _doctor() -> int:
     here" is a successful diagnosis, not a tool failure. Only an unexpected
     internal error returns non-zero.
     """
-    import shutil
+    import time as _time
 
     from generation._marp import find_marp
     from generation._pandoc import find_pandoc
@@ -4775,81 +4977,105 @@ def _doctor() -> int:
     from generation._html_pdf import find_html_browser
     from generation._office_pdf import find_libreoffice
 
-    ok_mark, no_mark = "  OK  ", " MISS "
-    lines: list[str] = []
+    started = _time.monotonic()
+    ok_mark, no_mark, unknown_mark = "  OK  ", " MISS ", "  ?   "
     fixes: list[str] = []
 
-    def row(label: str, found: object, detail: str = "") -> bool:
+    if deep:
+        print("Frontier Insight -- environment check (deep)\n")
+        print("This also loads the embedding model (the first time it downloads it from Hugging Face, about 90 MB),")
+        print("and asks each model provider whether you are signed in and whether its service answers (a model")
+        print("list only: no model is called, nothing is paid for). It can take a minute.\n", flush=True)
+    else:
+        print("Frontier Insight -- environment check (quick: this computer only, no network, nothing loaded;")
+        print("`fi --doctor --deep` also checks sign-in and the network)\n")
+    print("Tooling")
+    print("-" * 72, flush=True)
+
+    unanswered: set[str] = set()  # checks that did not answer in time: not known to be missing
+
+    def row(label: str, fn, detail_of=None, timeout_s: float = _DOCTOR_CHECK_TIMEOUT_S):  # noqa: ANN001, ANN202
+        # The label goes out first, so a check that hangs shows which one it is.
+        print(f"  {label:<28} ", end="", flush=True)
+        found, why = _bounded(fn, timeout_s)
         good = bool(found)
-        lines.append(
-            f"[{ok_mark if good else no_mark}] {label:<28} "
-            f"{(detail or (str(found) if good else 'not found'))[:90]}"
-        )
-        return good
+        if why.startswith("did not answer"):
+            unanswered.add(label)
+            print(f"[{unknown_mark}] not checked: {why}", flush=True)
+            return None
+        detail = why or (detail_of(found) if (good and detail_of) else (str(found) if good else "not found"))
+        print(f"[{ok_mark if good else no_mark}] {detail[:90]}", flush=True)
+        return found
 
-    print("Frontier Insight -- environment check\n")
-
-    pandoc = find_pandoc()
-    has_pandoc = row("pandoc", pandoc)
-    if not has_pandoc:
+    pandoc = row("pandoc", lambda: find_pandoc())
+    has_pandoc = bool(pandoc)
+    if not has_pandoc and "pandoc" not in unanswered:
         fixes.append(
             "pandoc      pip install pypandoc_binary   (no admin, any OS)\n"
             "                     or: winget install --id JohnMacFarlane.Pandoc"
         )
 
-    engine = find_pdf_engine()
-    has_latex = row("LaTeX engine", engine, engine[1] if engine else "")
-    if not has_latex:
+    engine = row("LaTeX engine", lambda: find_pdf_engine(), lambda e: e[1])
+    has_latex = bool(engine)
+    if not has_latex and "LaTeX engine" not in unanswered:
         fixes.append(
             "LaTeX       python launch.py --install-tectonic   (no admin, ~70 MB)\n"
             "                     airgapped: --install-tectonic-from <archive>"
         )
 
-    browser = find_html_browser()
-    has_browser = row(
-        "Chromium browser", browser, browser[1] if browser else "",
-    )
+    browser = row("Chromium browser", lambda: find_html_browser(), lambda b: b[1])
+    has_browser = bool(browser)
 
-    marp = find_marp()
-    has_marp = row("Marp CLI", marp)
-    if not has_marp:
+    marp = row("Marp CLI", lambda: find_marp())
+    has_marp = bool(marp)
+    if not has_marp and "Marp CLI" not in unanswered:
         fixes.append(
             "Marp        python launch.py --install-marp   (no admin, no Node)\n"
             "                     airgapped: --install-marp-from <archive>\n"
             "                     only needed for slides.html / slides.pdf"
         )
 
-    libreoffice = find_libreoffice()
-    has_libreoffice = row("LibreOffice", libreoffice, libreoffice or "")
-    if not has_libreoffice:
+    libreoffice = row("LibreOffice", lambda: find_libreoffice())
+    if not libreoffice and "LibreOffice" not in unanswered:
         fixes.append(
             "LibreOffice https://www.libreoffice.org/download/\n"
             "                     only needed to check slides.pptx in the visual check"
         )
 
-    try:
-        from core.passages import _embed_model
-        has_embed = _embed_model() is not None
-    except Exception:  # noqa: BLE001 — a broken import is just "unavailable"
-        has_embed = False
-    row("Embeddings (MiniLM)", has_embed,
-        "all-MiniLM-L6-v2 loaded" if has_embed else "")
-    if not has_embed:
+    if deep:
+        def _load_embeddings() -> str:
+            # A thread left running at exit must not be writing a progress bar to stderr when Python shuts down.
+            os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+            from core.passages import _embed_model
+            return "all-MiniLM-L6-v2 loaded" if _embed_model() is not None else ""
+
+        embed = row("Embeddings (MiniLM)", _load_embeddings, timeout_s=180.0)
+    else:
+        def _cached_embeddings() -> str:
+            from core.passages import embed_model_cached
+            usable, what = embed_model_cached()
+            if not usable:
+                raise _DoctorMiss(what)
+            return what
+
+        embed = row("Embeddings (MiniLM)", _cached_embeddings)
+    has_embed = bool(embed)
+    if not has_embed and "Embeddings (MiniLM)" not in unanswered:
         fixes.append(
-            "Embeddings  pip install sentence-transformers\n"
+            "Embeddings  pip install sentence-transformers (the model, about 90 MB, downloads\n"
+            "                     on first use; `fi --doctor --deep` loads it now)\n"
             "                     offline: launch.py --export-models <dir> on a\n"
             "                     connected machine, copy it, set FI_MODELS_DIR"
         )
-
-    print("Tooling")
-    print("-" * 72)
-    print("\n".join(lines))
 
     # ---- what that means for each artifact -----------------------------
     print("\nOutput kinds")
     print("-" * 72)
 
-    def kind(label: str, can: bool, why_not: str = "", note: str = "") -> None:
+    def kind(label: str, can: bool, why_not: str = "", note: str = "", needs: tuple[str, ...] = ()) -> None:
+        if not can and unanswered.intersection(needs):
+            print(f"[{unknown_mark}] {label:<28} not known: a check it depends on did not answer")
+            return
         print(
             f"[{ok_mark if can else no_mark}] {label:<28} "
             f"{note if can else why_not}"
@@ -4863,17 +5089,21 @@ def _doctor() -> int:
     )
     kind("paper_pdf", bool(pdf_via),
          "needs pandoc, plus a LaTeX engine or a Chromium browser",
-         note=f"via {pdf_via}")
+         note=f"via {pdf_via}",
+         # Without pandoc it is certainly not possible; otherwise a renderer that did not answer leaves it unknown.
+         needs=("pandoc",) if not has_pandoc else ("LaTeX engine", "Chromium browser"))
     kind("poster", has_latex, "needs a LaTeX engine (poster is LaTeX-only)",
-         note="via " + (engine[1] if engine else ""))
+         note="via " + (engine[1] if engine else ""), needs=("LaTeX engine",))
     # slides.pptx is rendered in-process by python-pptx, so it needs nothing.
     kind("slides (.pptx)", True, note="rendered in-process, no binary needed")
     kind("slides (.html/.pdf)", has_marp, "needs the Marp CLI",
-         note="via " + (marp or ""))
+         note="via " + (marp or ""), needs=("Marp CLI",))
 
     print("\nRetrieval quality")
     print("-" * 72)
-    if has_embed:
+    if "Embeddings (MiniLM)" in unanswered:
+        print(f"[{unknown_mark}] relevance filter: not known (the embeddings check did not answer)")
+    elif has_embed:
         print(f"[{ok_mark}] relevance filter active -- off-topic sources are dropped")
     else:
         print(
@@ -4882,12 +5112,53 @@ def _doctor() -> int:
             "paper and the keyword\n         re-search cannot trigger."
         )
 
+    # ---- model providers -------------------------------------------------
+    # The same sentences as the web Settings page and the interview (core/provider_readiness.py). Quick: what is on
+    # this computer (a command on PATH, a key set). Deep: also signed in, the service answering, the model listed.
+    from core import provider_readiness as _pr
+    from core.interview import PROVIDER_CHOICES
+
+    print("\nModel providers" + ("" if deep else " (installed or key set; sign-in and the service are checked by --deep, and "
+                                     "when you launch from `fi demo`, `fi --new` or the web form)"))
+    print("-" * 72, flush=True)
+    names = [str(c.value) for c in PROVIDER_CHOICES]
+    if "gemini" not in names:  # an API key fi demo uses, not in the interview's list
+        names.append("gemini")
+    if deep:
+        import asyncio as _asyncio
+
+        # Inside main_async's running loop: the checks get a loop of their own, in a bounded thread.
+        found, why = _bounded(lambda: _asyncio.run(_pr.check_all(names, sign_in=True, call_service=True)), 60.0)
+        states = found if isinstance(found, list) else [
+            _pr.Readiness(n, "unknown", f"FI could not check this provider ({why}).") for n in names]
+    else:
+        states = [_pr.check_local(n) for n in names]
+    for r in states:
+        # A provider that is not installed is listed without its install instructions: most are never used.
+        shown = _pr.one_line(r) if r.state != "not_installed" else _pr.one_line(_pr.Readiness(r.provider, r.state,
+                                                                                               r.sentence))
+        print(f"  {r.provider:<16} {shown}")
+    # The same providers `fi demo` would use (core/demo.py PROVIDER_PREFERENCE): set up (quick) or passing (deep).
+    from core.demo import PROVIDER_PREFERENCE
+
+    usable = [r for r in states if r.provider in PROVIDER_PREFERENCE
+              and r.state not in ("not_installed", "no_key") and not r.blocked]
+    if not usable:
+        fixes.append(
+            "A model   none of the providers above can be used yet: set OPENAI_API_KEY (or GEMINI_API_KEY),\n"
+            "                     sign in to the claude or codex command, or run Ollama with a chat model;\n"
+            "                     then `fi demo`"
+        )
+
+    print(f"\n(checks took {_time.monotonic() - started:.1f} s)")
+    if unanswered:
+        print(f"\nNot every check answered ({', '.join(sorted(unanswered))}); run `fi --doctor` again.")
     if fixes:
         print("\nTo fix")
         print("-" * 72)
         for f in fixes:
             print("  " + f)
-    else:
+    elif not unanswered:
         print("\nEverything checked is available on this machine.")
     return 0
 
@@ -6713,7 +6984,25 @@ def main() -> int:
     # defaults resolve BRAVE_API_KEY / OPENALEX_API_KEY /
     # SEMANTIC_SCHOLAR_API_KEY / FI_* at Config construction time).
     _load_dotenvs()
-    args = parse_args()
+    argv = sys.argv[1:]
+    if argv[:1] == ["demo"]:
+        # `fi demo` (core/demo.py): writes the example quest and checks the model; a yes runs it as `--config`.
+        went_on = _demo(argv[1:])
+        if isinstance(went_on, int):
+            return went_on
+        argv = went_on
+    args = parse_args(argv)
+    if _RUNTIME_DEFERRED:
+        if args.doctor and not args.deep:
+            # The quick doctor runs here, without the engine imported and without the event loop.
+            try:
+                import core.interview  # noqa: F401 -- what the doctor reads; a missing dependency bootstraps
+                import generation._pandoc  # noqa: F401
+            except ImportError as missing:
+                _bootstrap_or_reraise(missing)
+                raise
+            return _doctor()
+        _import_runtime()
     # Hold the coroutine so we can close() it if asyncio.run never consumes
     # it (e.g. a KeyboardInterrupt during loop startup). Without this, an
     # un-awaited 'main_async' coroutine is GC'd with a RuntimeWarning.

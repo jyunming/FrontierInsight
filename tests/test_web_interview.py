@@ -48,6 +48,16 @@ def _ok_answers_payload() -> dict:
     }
 
 
+def _model_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Launch checks the chosen model first (core/provider_readiness.py): here it passes, with no call made."""
+    from core import provider_readiness as pr
+
+    async def ready(provider, **_kw):  # noqa: ANN001, ANN202
+        return pr.Readiness(provider, "model_available", "The service accepts the key and lists gpt-4o.")
+
+    monkeypatch.setattr(pr, "preflight", ready)
+
+
 def test_interview_page_renders(tmp_path: Path) -> None:
     res = _client(tmp_path).get("/interview")
     assert res.status_code == 200
@@ -479,6 +489,7 @@ def test_submit_with_launch_true_spawns_subprocess(
         return FakeProc()
 
     monkeypatch.setattr("web.quest_launcher.subprocess.Popen", fake_popen)
+    _model_ready(monkeypatch)
     client = _client(tmp_path)
     res = client.post("/api/interview/submit?launch=true", json=_ok_answers_payload())
     assert res.status_code == 200, res.text
@@ -498,6 +509,7 @@ def test_submit_launch_503_when_pool_full(
     """When the launcher pool is at capacity, the submit handler
     returns 503 with a Retry-After header so clients can back off."""
     from web.quest_launcher import QuestLauncherFull
+    _model_ready(monkeypatch)
     client = _client(tmp_path)
     # Replace launch() on the live launcher to always raise.
     def always_full(**_kwargs):

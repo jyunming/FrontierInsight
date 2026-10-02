@@ -39,7 +39,7 @@ If you want to run quests overnight or in CI, use one of the chat-style CLI prov
 
 ```bash
 # Pick whichever you already have signed in:
-claude login                                # → provider.name: claude_cli
+claude auth login                           # → provider.name: claude_cli
 codex login                                 # → provider.name: codex_cli
 ```
 
@@ -58,7 +58,7 @@ Then change `provider.name` to `openai` or `gemini`.
 > **Why `claude_cli` is NOT in this list:** `claude_cli` is the
 > Option-B path that shells out to the Claude Code CLI and reuses
 > its OAuth — it does NOT read `ANTHROPIC_API_KEY`. For
-> Anthropic API-key usage, use Option B (`claude login` + then set
+> Anthropic API-key usage, use Option B (`claude auth login` + then set
 > `provider.name: claude_cli`).
 
 #### What each provider charges you in — read this before picking

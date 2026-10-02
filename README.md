@@ -23,23 +23,23 @@ You need **Python 3.11 or newer** and a language model FI can talk to (an API ke
 git clone https://github.com/jyunming/FrontierInsight
 cd FrontierInsight
 export OPENAI_API_KEY=sk-...       # Windows PowerShell: $env:OPENAI_API_KEY = "sk-..."
-python launch.py --config examples/integrator_bakeoff/config.yaml
+python launch.py demo
 ```
 
-The first run asks once to install its own packages into `.venv/` (usually 30-90s), then continues straight into the quest; every run after that skips straight past it, and a later `git pull` that adds a new dependency is caught and installed the same way, automatically. Prefer to do it yourself first? `python -m venv .venv`, activate it, `pip install -e .` — FI sees that and does nothing further.
+The first run asks once to install its own packages into `.venv/` (usually 30-90s), then continues where you were; every run after that skips straight past it, and a later `git pull` that adds a new dependency is caught and installed the same way, automatically. Prefer to do it yourself first? `python -m venv .venv`, activate it, `pip install -e .` — FI sees that and does nothing further.
 
-That runs the bundled example (three numerical integrators on a damped oscillator). It needs no data. It takes a while (it searches the literature, writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (Once set up, `fi` from an activated `.venv` is the same command as `python launch.py`.)
+`demo` writes a small example quest, **`fi-demo.yaml`**, into the folder you are in (three numerical integrators on a damped oscillator; it needs no data), checks at no cost that your model can be used (a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call), and asks before it runs the quest for real. The quest takes a while (it searches the literature, writes and runs code, then writes and reviews the paper) and prints each stage as it goes. When it ends, open **`outputs/<quest_id>/paper/paper.md`**. (Once set up, `fi` from an activated `.venv` is the same command as `python launch.py`; installed with pip, the first step is `fi demo`.)
 
-**Not using OpenAI?** Change `provider: name:` at the top of the example's YAML:
+**Not using OpenAI?** `demo` picks the first model it finds set up on this computer; to choose, change `provider: name:` in `fi-demo.yaml`:
 
 | You have… | Set `provider.name` to |
 |---|---|
 | An API key | `openai` / `gemini` |
 | GitHub Copilot, or any model VSCode already has | `vscode_extension` (use the `@fi` chat in VSCode) |
-| A signed-in CLI (`claude login`, `codex login`) | `claude_cli` / `codex_cli` |
+| A signed-in CLI (`claude auth login`, `codex login`) | `claude_cli` / `codex_cli` |
 | Nothing, offline | `ollama` (local, free) |
 
-If a key is missing FI says which variable before it starts anything. If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
+If something is missing (a key, a sign-in, a local model), `demo` says what and how to fix it before anything is spent (so do `--new` and the web form before they launch). If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
 **Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks the topic, what the result is for, (CLI and web) the model and, for research or a decision, a second model for one reviewer, works the rest out from the topic for you to review, and writes the config. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 

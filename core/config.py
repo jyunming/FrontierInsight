@@ -28,7 +28,7 @@ ProviderName = Literal[
     "codex_cli",      # local Codex CLI (uses ChatGPT Plus/Pro OAuth via `codex login`)
     "antigravity_cli",  # local Google Antigravity CLI (`agy`), prompt via its
                         # stream-json stdin so long nodes are not argv-capped
-    "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude login`)
+    "claude_cli",     # local Claude Code CLI (uses Claude Pro/Max OAuth via `claude auth login`)
     "copilot_cli",    # local GitHub Copilot CLI (uses `gh auth login` Copilot Pro/Business)
     "gemini_cli",     # local @google/gemini-cli (uses `gemini` OAuth / Google AI Studio key)
     # The FI VSCode extension spawns Python with --vscode-bridge-port N
