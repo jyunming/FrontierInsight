@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -73,10 +74,34 @@ def test_vscode_carries_the_same_steps_cards_and_words() -> None:
 def test_every_surface_builds_its_review_from_the_cards() -> None:
     html = INTERVIEW_HTML.read_text(encoding="utf-8")
     assert "schema.review_cards" in html and "schema.first_steps" in html
+    assert "cardRows(card.shown)" in html and "cardRows(card.advanced)" in html
     ts = INTERVIEW_TS.read_text(encoding="utf-8")
     assert "REVIEW_SCREEN.review_cards" in ts and "REVIEW_SCREEN.first_steps" in ts
     run = ts[ts.index("export async function runInterview"):ts.index("function reviewBlockMarkdown")]
     assert "askAuthorLine(" not in run, "VS Code asks the byline before the review"
+
+
+def test_vscode_has_a_row_for_every_setting_a_card_shows_there() -> None:
+    """VS Code builds each card's rows from REVIEW_SCREEN.review_cards through VSCODE_CARD_ROWS; a setting added to a
+    card in core/interview.py must have a row there, or it would silently not show in VS Code."""
+    ts = INTERVIEW_TS.read_text(encoding="utf-8")
+    block = ts[ts.index("export const VSCODE_CARD_ROWS"):ts.index("function reviewBlockMarkdown")]
+    keys = set(re.findall(r"^\s{4}(\w+): \[", block, re.M))
+    vscode_ids = {q.id for q in QUESTIONS if "vscode" in q.frontends}
+    needed = {qid for card in REVIEW_CARDS for qid in card["shown"] if qid in vscode_ids} - set(BYLINE_FIELDS[1:])
+    assert needed - keys == set(), f"no VS Code row for {sorted(needed - keys)}"
+    assert "for (const id of card.shown" in ts
+
+
+def test_only_a_single_terminal_quest_asks_the_byline() -> None:
+    """A fleet, the web server's in-process quests, --emit and --watch never ask: only --config and --new pass
+    ask_byline=True."""
+    src = (REPO / "launch.py").read_text(encoding="utf-8")
+    assert src.count("ask_byline=True") == 2
+    assert "ask_byline" not in (REPO / "web" / "server.py").read_text(encoding="utf-8")
+    fleet = src[src.index("async def run_fleet"):]
+    fleet = fleet[:fleet.index("\nasync def ") if "\nasync def " in fleet else len(fleet)]
+    assert "ask_byline" not in fleet
 
 
 # --- the byline, asked once before the first paper --------------------------------------------------------------------
@@ -94,21 +119,40 @@ def _terminal(monkeypatch: pytest.MonkeyPatch, *, yes: bool = True) -> None:
     monkeypatch.setattr(sys.stdout, "isatty", lambda: yes, raising=False)
 
 
-def test_the_byline_is_asked_once_used_and_kept(monkeypatch: pytest.MonkeyPatch) -> None:
+def _typed(monkeypatch: pytest.MonkeyPatch, answer, asked: list | None = None) -> None:  # noqa: ANN001
+    """What the person types at the byline question (launch._read_line_until reads the terminal itself)."""
+    import launch
+
+    def read(prompt: str, timeout_s: float):  # noqa: ANN202
+        if asked is not None:
+            asked.append(prompt)
+        return answer(timeout_s) if callable(answer) else answer
+
+    monkeypatch.setattr(launch, "_read_line_until", read)
+
+
+def test_the_byline_is_asked_once_used_and_kept(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     import launch
     from core import profile
 
     _terminal(monkeypatch)
     asked: list[str] = []
-    monkeypatch.setattr("builtins.input", lambda prompt="": asked.append(prompt) or "  Jane   Chen ")
+    _typed(monkeypatch, "  Jane   Chen ", asked)
     cfg = _cfg()
-    asyncio.run(launch._ask_byline_once(cfg))
+    asyncio.run(launch._ask_byline_once(cfg, tmp_path))
     assert cfg.output.author == "Jane Chen" and len(asked) == 1
     assert profile.load()["author"] == "Jane Chen"
     # Asked once: the next quest with no byline of its own is not asked again.
     again = _cfg()
-    asyncio.run(launch._ask_byline_once(again))
+    asyncio.run(launch._ask_byline_once(again, tmp_path / "other"))
     assert len(asked) == 1
+    # This quest keeps it: a later --resume / --emit of it prints the name though its config has none.
+    later = _cfg()
+    launch._apply_quest_byline(later, tmp_path)
+    assert later.output.author == "Jane Chen"
+    other = _cfg()
+    launch._apply_quest_byline(other, tmp_path / "other")
+    assert other.output.author == ""
 
 
 def test_enter_keeps_the_frontier_insight_byline_and_is_not_asked_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,7 +160,7 @@ def test_enter_keeps_the_frontier_insight_byline_and_is_not_asked_again(monkeypa
     from core import profile
 
     _terminal(monkeypatch)
-    monkeypatch.setattr("builtins.input", lambda prompt="": "")
+    _typed(monkeypatch, "")
     cfg = _cfg()
     asyncio.run(launch._ask_byline_once(cfg))
     assert cfg.output.author == ""
@@ -129,7 +173,7 @@ def test_the_byline_is_not_asked_when_it_should_not_be(monkeypatch: pytest.Monke
     from core import profile
 
     _terminal(monkeypatch, yes=case != "no terminal")
-    monkeypatch.setattr("builtins.input", lambda prompt="": pytest.fail("asked"))
+    _typed(monkeypatch, lambda _t: pytest.fail("asked"))
     cfg = _cfg(author="Ann Lee") if case == "quest has a byline" else (
         _cfg(kinds=["speech"]) if case == "no paper, slides or poster" else _cfg())
     asyncio.run(launch._ask_byline_once(cfg))
@@ -137,21 +181,39 @@ def test_the_byline_is_not_asked_when_it_should_not_be(monkeypatch: pytest.Monke
 
 
 def test_nobody_answering_never_holds_the_quest(monkeypatch: pytest.MonkeyPatch) -> None:
-    import threading
-
+    """No answer by the deadline: the reader returns None (it polls the terminal, so nothing is left reading stdin to
+    swallow a later prompt's line), the paper goes on without a byline, and it is asked again next time."""
     import launch
     from core import profile
 
     _terminal(monkeypatch)
-    monkeypatch.setattr(launch, "_BYLINE_WAIT_S", 0.3)
-    release = threading.Event()
-    monkeypatch.setattr("builtins.input", lambda prompt="": release.wait(10) and "")
+    _typed(monkeypatch, None)
     cfg = _cfg()
-    try:
-        asyncio.run(asyncio.wait_for(launch._ask_byline_once(cfg), timeout=5))
-    finally:
-        release.set()
+    asyncio.run(asyncio.wait_for(launch._ask_byline_once(cfg), timeout=5))
     assert cfg.output.author == "" and profile.load() is None, "an unanswered question counts as answered"
+
+
+def test_the_terminal_reader_gives_up_by_its_deadline_and_leaves_nothing_reading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import threading
+    import time
+
+    import launch
+
+    if os.name == "nt":
+        import msvcrt
+
+        monkeypatch.setattr(msvcrt, "kbhit", lambda: False)
+    else:
+        import select
+
+        monkeypatch.setattr(select, "select", lambda r, w, x, t: (time.sleep(t), ([], [], []))[1])
+    before = threading.active_count()
+    started = time.monotonic()
+    assert launch._read_line_until("? ", 0.4) is None
+    assert time.monotonic() - started < 3
+    assert threading.active_count() <= before
 
 
 # --- bare `fi` ----------------------------------------------------------------------------------------------------------

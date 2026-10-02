@@ -1076,19 +1076,24 @@ CHECKS_SENTENCES: dict[str, str] = {
     "explore": "A preliminary draft: fewer checks, never marked ready to publish as it stands.",
 }
 
-#: The folded "Paper byline (optional)" row when nothing is set.
-BYLINE_EMPTY = "none yet: asked once before the first paper (else the Frontier Insight byline)"
+#: The folded "Paper byline (optional)" row when nothing is set, per interface: only a quest run from a terminal asks
+#: it before the first paper (launch._ask_byline_once); the web page and VS Code never ask, so they say so.
+BYLINE_EMPTY: dict[str, str] = {
+    "cli": "none yet: asked once before the first paper (else the Frontier Insight byline)",
+    "serve": "none: the Frontier Insight byline (change it here)",
+    "vscode": "none: the Frontier Insight byline (change it with Edit a default)",
+}
 
 
 def checks_sentence(answers: dict[str, Any]) -> str:
     return CHECKS_SENTENCES["explore" if str(answers.get("result_use") or "research") == "explore" else "research"]
 
 
-def byline_text(answers: dict[str, Any]) -> str:
+def byline_text(answers: dict[str, Any], frontend: str = "cli") -> str:
     """The folded "Paper byline (optional)" row: what is printed, or what happens when nothing is."""
     parts = [" ".join(str(answers.get(k) or "").split()) for k in BYLINE_FIELDS]
     parts = [p for p in parts if p]
-    return ", ".join(parts) if parts else BYLINE_EMPTY
+    return ", ".join(parts) if parts else BYLINE_EMPTY.get(frontend, BYLINE_EMPTY["cli"])
 
 
 def review_cards_json() -> list[dict[str, Any]]:

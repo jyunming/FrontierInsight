@@ -592,8 +592,34 @@ function plainList(field: "output_kinds" | "review_panel", values: readonly stri
 }
 
 function bylineText(a: InterviewAnswers): string {
-    return formatAuthorLine(a) || REVIEW_SCREEN.byline_empty;
+    return formatAuthorLine(a) || REVIEW_SCREEN.byline_empty.vscode;
 }
+
+/**
+ * How each card row is shown in VS Code: label and value in plain words, keyed by question id. The cards' rows come
+ * from REVIEW_SCREEN.review_cards (core/interview.py REVIEW_CARDS); tests/test_interview_review_cards.py checks every
+ * id a card shows on VS Code has a renderer here. The provider and its model are the Chat view's own (the "Model"
+ * row), and the byline's four fields are one row.
+ */
+export const VSCODE_CARD_ROWS: Record<string, [string, (a: InterviewAnswers) => string]> = {
+    result_use: ["What is the result for?", (a) => ({ research: "Research", decision: "A decision", explore: "Exploring (cheaper draft)" }[a.result_use ?? "research"] ?? "Research")],
+    review_panel: ["Reviewers", (a) => plainList("review_panel", a.review_panel)],
+    phased: ["Confirm the result on data it never saw", (a) => (a.phased === true ? "yes: explore first, then run the frozen design once more" : "no")],
+    second_reviewer_model: [SECOND_REVIEWER_LABEL, (a) => (a.second_reviewer_model
+        ? (a.second_reviewer_model === ONE_MODEL_ANSWER ? "I only have one model" : a.second_reviewer_model)
+        : "not chosen yet: asked before launch")],
+    no_simulation: ["Research approach", (a) => (a.no_simulation ? "observational: real-world data" : "computational: a Python script makes the data")],
+    survey_mode: ["Literature synthesis (survey) mode", (a) => (a.survey_mode === true ? "yes: no experiment, no data" : "no")],
+    knowledge_enabled: ["Look up the literature", (a) => (a.knowledge_enabled ? "on" : "off: the model's own knowledge only")],
+    web_research: ["Web research", (a) => (a.web_research === false ? "off" : "on")],
+    pause_for_user_input: ["Pause for your own papers or data", (a) => ({ never: "never", after_literature: "after the literature", after_design: "after the design", after_paper: "after the first draft", both: "after the design and the first draft" }[a.pause_for_user_input ?? "never"] ?? String(a.pause_for_user_input))],
+    title: ["Short name (used for the folder)", (a) => a.title],
+    output_kinds: ["Outputs", (a) => plainList("output_kinds", a.output_kinds)],
+    paper_format: ["Paper format / venue", (a) => a.paper_format],
+    study_depth: ["Study depth", (a) => a.study_depth],
+    audience: ["Paper audience", (a) => (a.audience === "internal" ? "internal: keeps every reference" : "external: journal / open web")],
+    author: ["Paper byline (optional)", (a) => bylineText(a)],
+};
 
 /**
  * The review screen: the four cards of core/interview.py REVIEW_CARDS (how strictly it is checked and what it costs;
@@ -603,45 +629,30 @@ function bylineText(a: InterviewAnswers): string {
 function reviewBlockMarkdown(a: InterviewAnswers, modelName?: string): string {
     const esc = (v: unknown) => String(v ?? "").replace(/\|/g, "\\|");
     const use = a.result_use === "explore" ? "explore" : "research";
-    const [checks, models, data, outputs] = REVIEW_SCREEN.review_cards;
+    const byline = REVIEW_SCREEN.byline_fields as readonly string[];
     const lines: string[] = ["\n### Review before launch\n"];
-    const card = (title: string, rows: [string, string][], lead: string[] = []) => {
-        lines.push(`**${title}**\n`);
-        for (const l of lead) lines.push(`${l}\n`);
+    for (const card of REVIEW_SCREEN.review_cards) {
+        lines.push(`**${card.title}**\n`);
+        if (card.id === "checks") {
+            const ensemble = (a.ensemble_profile ?? "off") !== "off" && parseEnsembleModels(a.ensemble_models).length >= ENSEMBLE_MIN_MODELS;
+            lines.push(`${REVIEW_SCREEN.checks_sentences[use]}\n`);
+            lines.push(`Cost: ${REVIEW_SCREEN.cost_notes[use]}${ensemble ? "; the ensemble multiplies that" : ""}\n`);
+        }
+        if (card.id === "models") lines.push("Ready? Your VS Code chat model: VS Code signs you in, nothing else to set up.\n");
         lines.push("| | |");
         lines.push("|---|---|");
-        for (const [k, v] of rows) lines.push(`| ${esc(k)} | ${esc(v)} |`);
+        if (card.id === "models") {
+            lines.push(`| Model | ${esc(modelName ? `${modelName} (picked in the Chat view)` : "the model picked in the Chat view")} |`);
+        }
+        for (const id of card.shown as readonly string[]) {
+            if (byline.includes(id) && id !== byline[0]) continue;
+            if (id === "second_reviewer_model" && a.result_use === "explore") continue;  // asked for research or a decision only
+            const row = VSCODE_CARD_ROWS[id];
+            if (!row) continue;  // the provider and its model: the Chat view's ("Model" above)
+            lines.push(`| ${esc(row[0])} | ${esc(row[1](a))} |`);
+        }
         lines.push("");
-    };
-    const resultUse = { research: "Research", decision: "A decision", explore: "Exploring (cheaper draft)" }[a.result_use ?? "research"] ?? "Research";
-    card(checks.title, [
-        ["What is the result for?", resultUse],
-        ["Reviewers", plainList("review_panel", a.review_panel)],
-        ["Confirm the result on data it never saw", a.phased === true ? "yes: explore first, then run the frozen design once more" : "no"],
-    ], [REVIEW_SCREEN.checks_sentences[use], `Cost: ${REVIEW_SCREEN.cost_notes[use]}${
-        (a.ensemble_profile ?? "off") !== "off" && parseEnsembleModels(a.ensemble_models).length >= ENSEMBLE_MIN_MODELS
-            ? "; the ensemble multiplies that" : ""}`]);
-    const modelRows: [string, string][] = [["Model", modelName ? `${modelName} (picked in the Chat view)` : "the model picked in the Chat view"]];
-    if (a.result_use !== "explore") {
-        modelRows.push([SECOND_REVIEWER_LABEL, a.second_reviewer_model
-            ? (a.second_reviewer_model === ONE_MODEL_ANSWER ? "I only have one model" : a.second_reviewer_model)
-            : "not chosen yet: asked before launch"]);
     }
-    card(models.title, modelRows, ["Ready? Your VS Code chat model: VS Code signs you in, nothing else to set up."]);
-    card(data.title, [
-        ["Research approach", a.survey_mode === true ? "literature synthesis (no experiment, no data)" : a.no_simulation ? "observational: real-world data" : "computational: a Python script makes the data"],
-        ["Look up the literature", a.knowledge_enabled ? "on" : "off: the model's own knowledge only"],
-        ["Web research", a.web_research === false ? "off" : "on"],
-        ["Pause for your own papers or data", { never: "never", after_literature: "after the literature", after_design: "after the design", after_paper: "after the first draft", both: "after the design and the first draft" }[a.pause_for_user_input ?? "never"] ?? String(a.pause_for_user_input)],
-    ]);
-    card(outputs.title, [
-        ["Short name (used for the folder)", a.title],
-        ["Outputs", plainList("output_kinds", a.output_kinds)],
-        ["Paper format / venue", a.paper_format],
-        ["Study depth", a.study_depth],
-        ["Paper audience", a.audience === "internal" ? "internal: keeps every reference" : "external: journal / open web"],
-        ["Paper byline (optional)", bylineText(a)],
-    ]);
     // Advanced: only what was changed is listed; everything else is under "Edit an advanced field".
     const ext = a.knowledge_external_top_k;
     const changed: string[] = [];
@@ -652,12 +663,14 @@ function reviewBlockMarkdown(a: InterviewAnswers, modelName?: string): string {
     if (a.reasoning_effort !== undefined && a.reasoning_effort !== "default") changed.push(`reasoning effort: ${a.reasoning_effort}`);
     if ((a.ensemble_profile ?? "off") !== "off") changed.push(`multi-model ensemble: ${a.ensemble_profile} (${a.ensemble_models || "no models named: no ensemble"})`);
     if (ext !== undefined && ext !== 20) changed.push(`web results per quest: ${ext}`);
+    if (a.knowledge_top_k !== undefined && a.knowledge_top_k !== 8 && a.knowledge_top_k !== 12) changed.push(`saved-library passages per quest: ${a.knowledge_top_k}`);
     if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") changed.push(`poster size: ${a.poster_size}`);
     if (a.paper_style !== undefined && a.paper_style !== "latex") changed.push(`paper style: ${a.paper_style}`);
     if (a.max_iterations !== 2) changed.push(`revise rounds: ${a.max_iterations}`);
     if (typeof a.page_limit === "number") changed.push(`page limit: ${a.page_limit} pages`);
     if (a.pause_for_plan === true) changed.push("stop to read and edit the plan");
     if (a.supply_papers === false) changed.push("do not pause for paywalled papers");
+    if (a.clarify_mode && a.clarify_mode !== "when_present") changed.push(`talk the topic over first: ${a.clarify_mode}`);
     lines.push(changed.length
         ? `_Advanced (changed):_ ${changed.map((c) => esc(c)).join(" · ")}`
         : "_Advanced: the rarer settings keep their defaults (\"Edit an advanced field\" to see them)._");

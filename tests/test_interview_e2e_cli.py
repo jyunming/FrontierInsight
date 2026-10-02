@@ -356,3 +356,37 @@ def test_a_custom_list_answer_survives_a_blank_answer(monkeypatch: pytest.Monkey
     own = ["paper_md", "poster"]
     assert _cli_prompt_for(q, {"output_kinds": own}, {}) == own
     assert "now: paper_md, poster; press Enter to keep it" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_research_chosen_on_the_review_screen_asks_the_reviewer_model_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exploring on the first screen (no second reviewer asked), research on the review screen: the reviewer's model is
+    asked there, so the research quest does not launch only to stop at its first node for it."""
+    cfg = await _new(tmp_path, monkeypatch, [
+        "Changed my mind probe", "3", "1", "1",              # topic, exploring, provider, model
+        _review_row("result_use", {"result_use": "explore"}), "1",  # review: research
+        "1",                                                 # the second reviewer's model, asked now
+        "",                                                  # launch
+    ])
+    assert cfg.rigor_profile == "research"
+    assert (cfg.provider.node_models or {}).get("review_panel.statistician") == "gpt-5-mini"
+
+
+@pytest.mark.asyncio
+async def test_a_provider_changed_on_the_review_screen_asks_its_models_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.interview import PROVIDER_CHOICES
+
+    other = str([c.value for c in PROVIDER_CHOICES].index("ollama") + 1)
+    cfg = await _new(tmp_path, monkeypatch, [
+        "Provider change probe", "", "1", "1", "1",          # research: openai, gpt-5, gpt-5-mini
+        _review_row("provider"), other,                      # review: another provider
+        "1", "1",                                            # its model, and a reviewer on another of its models
+        "",                                                  # launch
+    ])
+    assert cfg.provider.name == "ollama"
+    stat = (cfg.provider.node_models or {}).get("review_panel.statistician")
+    assert stat and stat != cfg.provider.model

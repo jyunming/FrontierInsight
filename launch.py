@@ -2490,7 +2490,10 @@ async def run_one(
     from_step: str | None = None,
     approved_by: str | None = None,
     headless: bool = False,
+    ask_byline: bool = False,
 ) -> dict[str, object]:
+    # ``ask_byline``: a single quest run from a terminal (--config, --new) may ask the paper byline once before the
+    # paper (_ask_byline_once); a fleet, the web server, --emit and --watch never do.
     # Engine may be constructed by the caller (e.g. `gated()` builds it
     # once so the status-line `quest_id` matches the quest that actually
     # runs — instead of creating a second Engine here with a fresh
@@ -2567,7 +2570,7 @@ async def run_one(
     # re-invoke the LLM for slides/poster/speech that already rendered.
     return await _finish_outputs(
         cfg, art, supervisor=supervisor,
-        skip_existing=resume_quest_id is not None,
+        skip_existing=resume_quest_id is not None, ask_byline=ask_byline,
     )
 
 
@@ -2578,6 +2581,7 @@ async def _finish_outputs(
     supervisor: ProxySupervisor,
     skip_existing: bool = False,
     on_failure: Callable[[str, BaseException], None] | None = None,
+    ask_byline: bool = False,
 ) -> dict[str, object]:
     """Everything a quest gets after ``Engine.run`` returns: the output pass
     (paper, slides, poster, talk, visual check) and
@@ -2587,7 +2591,7 @@ async def _finish_outputs(
     ``_run_generators``."""
     written = await _run_generators(
         cfg, art, supervisor=supervisor,
-        skip_existing=skip_existing, on_failure=on_failure,
+        skip_existing=skip_existing, on_failure=on_failure, ask_byline=ask_byline,
     )
     from core.quest_title import current_title
 
@@ -2829,35 +2833,79 @@ def _existing_output(art: QuestArtifacts, kind: str) -> Path | None:
 _BYLINE_WAIT_S = 120.0
 
 
-def _read_line_or_none(prompt: str) -> asyncio.Future[str | None]:
-    """``input(prompt)`` in a daemon thread, as a future that resolves to the line, or None on EOF / Ctrl-C. A daemon
-    thread, not ``asyncio.to_thread``: a question nobody answers must not keep the process from exiting (the default
-    executor's threads are joined at exit)."""
-    import threading
+def _read_line_until(prompt: str, timeout_s: float) -> str | None:
+    """One line typed at the terminal, or None when nothing was finished within ``timeout_s`` (or on EOF / Ctrl-C).
+    Polls the terminal instead of blocking in ``input()``, so nothing is left reading stdin afterwards to swallow the
+    next line a later prompt asks for. Runs in a worker thread (``_ask_byline_once``); returns by its deadline."""
+    print(prompt, end="", flush=True)
+    deadline = time.monotonic() + timeout_s
+    if os.name == "nt":
+        import msvcrt
 
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future[str | None] = loop.create_future()
+        typed: list[str] = []
+        while time.monotonic() < deadline:
+            if not msvcrt.kbhit():
+                time.sleep(0.05)
+                continue
+            ch = msvcrt.getwche()
+            if ch in ("\r", "\n"):
+                print(flush=True)
+                return "".join(typed)
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch == "\x08":
+                if typed:
+                    typed.pop()
+                    print(" \b", end="", flush=True)
+                continue
+            typed.append(ch)
+        print(flush=True)
+        return None
+    import select
 
-    def read() -> None:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(flush=True)
+            return None
         try:
-            line: str | None = input(prompt)
-        except (EOFError, KeyboardInterrupt, OSError, ValueError):
-            line = None
-        try:
-            loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(line))
-        except RuntimeError:
-            pass  # answered after the quest went on and its loop closed: nobody is waiting any more
-
-    threading.Thread(target=read, name="fi-byline-question", daemon=True).start()
-    return fut
+            ready, _w, _x = select.select([sys.stdin], [], [], min(remaining, 0.5))
+        except (OSError, ValueError):
+            return None
+        if ready:
+            line = sys.stdin.readline()
+            return None if line == "" else line.rstrip("\n")
 
 
-async def _ask_byline_once(cfg: Config) -> None:
+#: Where a quest keeps the byline its person gave before its first paper, so a later --resume / --emit of the same
+#: quest prints it too (the quest's config.yaml is not rewritten).
+_QUEST_BYLINE = Path(".fi") / "byline.json"
+
+
+def _apply_quest_byline(cfg: Config, quest_root: Path) -> None:
+    """A byline this quest was given before its paper (``_ask_byline_once``), when its config has none."""
+    from core import profile as _profile
+
+    if any(str(getattr(cfg.output, k, "") or "").strip() for k in _profile.FIELDS):
+        return
+    try:
+        kept = json.loads((quest_root / _QUEST_BYLINE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(kept, dict):
+        for k in _profile.FIELDS:
+            value = " ".join(str(kept.get(k) or "").split())
+            if value:
+                setattr(cfg.output, k, value)
+
+
+async def _ask_byline_once(cfg: Config, quest_root: Path | None = None) -> None:
     """The paper byline, asked once in a person's first quest, just before the paper is written: only when the quest
     has none, none was ever kept (core/profile.py has no file), the quest makes a paper, slides or poster, and a person
     is at a terminal. An answer is used for this quest and kept for the next; Enter keeps the Frontier Insight byline
     and is kept too (so it is not asked again); no answer within ``_BYLINE_WAIT_S`` goes on without one and asks again
-    next time. Never blocks a quest: no terminal (web, VS Code, CI) skips it silently."""
+    next time. Never blocks a quest: no terminal (web, VS Code, CI) skips it silently, and only a single quest run
+    from a terminal calls this (``ask_byline``). An answer is also kept in the quest (``_QUEST_BYLINE``)."""
     from core import profile as _profile
 
     output = cfg.output
@@ -2872,15 +2920,21 @@ async def _ask_byline_once(cfg: Config) -> None:
     print(f"  Type it, or press Enter for the Frontier Insight byline (asked only this once; "
           f"going on by itself in {_BYLINE_WAIT_S:.0f} s).")
     try:
-        name = await asyncio.wait_for(_read_line_or_none("  Your name: "), timeout=_BYLINE_WAIT_S)
-    except asyncio.TimeoutError:
-        print("\n  (no answer: the paper is written with the Frontier Insight byline; asked again next time)")
-        return
+        name = await asyncio.to_thread(_read_line_until, "  Your name: ", _BYLINE_WAIT_S)
+    except KeyboardInterrupt:
+        name = None
     if name is None:
+        print("  (no answer: the paper is written with the Frontier Insight byline; asked again next time)")
         return
     name = " ".join(name.split())
     if name:
         output.author = name
+        if quest_root is not None:
+            try:
+                (quest_root / _QUEST_BYLINE).parent.mkdir(parents=True, exist_ok=True)
+                (quest_root / _QUEST_BYLINE).write_text(json.dumps({"author": name}), encoding="utf-8")
+            except OSError:
+                pass
     try:
         _profile.save({"author": name, "affiliation": "", "contact_email": "", "url": ""})
         print(f"  (kept in {_profile.path()} for the next quests; change it on any quest's review screen)")
@@ -2895,6 +2949,7 @@ async def _run_generators(
     supervisor: ProxySupervisor,
     skip_existing: bool = False,
     on_failure: Callable[[str, BaseException], None] | None = None,
+    ask_byline: bool = False,
 ) -> dict[str, Path]:
     """Run each generator in turn; one failure does not abort the rest.
 
@@ -2911,7 +2966,9 @@ async def _run_generators(
     written: dict[str, Path] = {}
     carried: set[str] = set()
     _apply_paper_venue_override(cfg, art)
-    await _ask_byline_once(cfg)
+    _apply_quest_byline(cfg, Path(art.quest_root))
+    if ask_byline:
+        await _ask_byline_once(cfg, Path(art.quest_root))
 
     def _already(kind: str) -> Path | None:
         if not skip_existing:
@@ -3677,6 +3734,7 @@ async def main_async(args: argparse.Namespace) -> int:
                 reopen=_reopen,
                 from_step=_from_step,
                 approved_by=args.approve_as or None,
+                ask_byline=True,
             )
             return 0
 
@@ -4199,6 +4257,39 @@ async def _run_new(
     if saved_profile is not None:
         partial.update(saved_profile)
 
+    def research_like() -> bool:
+        return str(partial.get("result_use") or "research") != "explore"
+
+    def model_problem(qid: str) -> str:
+        """Why the model answers as they stand would not do (research needs the quest's model named and one reviewer
+        on another model; the quest would otherwise stop at its first node to ask), or ""."""
+        if qid == "provider_model" and research_like() and not str(partial.get("provider_model") or "").strip():
+            return "research needs the quest's model named, so one reviewer can use a different one"
+        if qid == "second_reviewer_model" and research_like():
+            second = partial.get("second_reviewer_model")
+            if not str(second or "").strip():
+                return "research needs a different model for one reviewer, or 'I only have one model'"
+            if second == partial.get("provider_model"):
+                return "that is the model the quest runs on; pick another, or 'I only have one model'"
+        return ""
+
+    def ask_checked(q):  # type: ignore[no-untyped-def]
+        """Ask ``q`` until the answer does (``model_problem``); None when the person cancels."""
+        answer = _cli_prompt_for(q, partial, {})
+        while answer is not None:
+            held = partial.get(q.id)
+            partial[q.id] = answer
+            problem = model_problem(q.id)
+            if held is None:
+                partial.pop(q.id, None)
+            else:
+                partial[q.id] = held
+            if not problem:
+                return answer
+            print(f"    ({problem})")
+            answer = _cli_prompt_for(q, partial, {})
+        return None
+
     # ---- Stage 1: three steps -- the research question, what the result is for, the model ----
     step_of = {qid: (n, title) for n, (_sid, title, qids) in enumerate(FIRST_STEPS, 1) for qid in qids}
     shown_step = 0
@@ -4211,16 +4302,8 @@ async def _run_new(
                 shown_step = n
                 print()
                 print(f"── Step {n} of {len(FIRST_STEPS)}: {title} ──")
-            answer = _cli_prompt_for(q, partial, {})
-            while (q.id == "provider_model" and answer is not None and not str(answer).strip()
-                   and str(partial.get("result_use") or "research") != "explore"):
-                # Research or a decision: the quest's model is named, so another one can be picked for a reviewer.
-                print("    (research needs the quest's model named, so one reviewer can use a different one)")
-                answer = _cli_prompt_for(q, partial, {})
-            while q.id == "second_reviewer_model" and answer is not None and answer == partial.get("provider_model"):
-                # The same model again would leave every reviewer on it, and the quest would stop to ask for another.
-                print("    (that is the model the quest runs on; pick another, or 'I only have one model')")
-                answer = _cli_prompt_for(q, partial, {})
+            # Research or a decision: the quest's model named, and one reviewer on another (``model_problem``).
+            answer = ask_checked(q)
             if answer is None:
                 print()
                 print("— interview cancelled.")
@@ -4326,19 +4409,33 @@ async def _run_new(
                         "configured (FI does not pick models for you)."
                     )
             if row["tier"] == 1:  # an answer of the first screen: what follows from it is worked out again
-                if row["id"] == "second_reviewer_model" and new_val == partial.get("provider_model"):
-                    print("    (that is the model the quest runs on; pick another, or 'I only have one model')")
-                    continue
+                before = dict(partial)
                 partial[row["id"]] = new_val
+                redo: set[str] = set()
                 if row["id"] == "provider" and new_val != row["value"]:
                     # Another provider: its models, and (research or a decision) a reviewer on another one of them.
-                    for mid in ("provider_model", "second_reviewer_model"):
-                        partial.pop(mid, None)
-                        mq = next(q for q in tier1 if q.id == mid)
-                        if question_applies(mq, partial):
-                            picked = _cli_prompt_for(mq, partial, {})
-                            if picked is not None:
-                                partial[mid] = picked
+                    partial.pop("provider_model", None)
+                    partial.pop("second_reviewer_model", None)
+                    redo = {"provider_model", "second_reviewer_model"}
+                # The checks of the first screen hold here too (a model named for research, one reviewer on another,
+                # asked when exploring became research): asked until they do; a cancel puts the answers back.
+                cancelled = False
+                for mid in ("provider_model", "second_reviewer_model"):
+                    mq = next(q for q in tier1 if q.id == mid)
+                    if not question_applies(mq, partial) or (mid not in redo and not model_problem(mid)):
+                        continue
+                    if mid != row["id"] or mid in redo:
+                        print(f"    ({model_problem(mid) or 'the model changed with the provider'})")
+                    picked = ask_checked(mq)
+                    if picked is None:
+                        cancelled = True
+                        break
+                    partial[mid] = picked
+                if cancelled:
+                    partial.clear()
+                    partial.update(before)
+                    print("    (cancelled; the earlier answers are kept)")
+                    continue
                 fresh = derive_tier2({**partial, **{k: v for k, v in derived.items() if k in edited}})
                 derived.update({k: v for k, v in fresh.items() if k not in edited})
                 fresh3 = derive_tier3({**partial, **derived})
@@ -4492,6 +4589,7 @@ async def _run_new(
             profile=False,
             interactive=interactive,
             source_yaml_path=yaml_path.resolve(),
+            ask_byline=True,
         )
         return 0
     except Exception as e:

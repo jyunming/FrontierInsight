@@ -759,6 +759,8 @@
       sel.replaceWith(replacement);
       sel = replacement;
     }
+    // The model already picked stays picked when the list is replaced (the live list after the static one).
+    const before = sel.value;
     sel.innerHTML = '';
     const blank = document.createElement('option');
     blank.value = '';
@@ -782,6 +784,9 @@
       sel.appendChild(other);
     }
     providerModelList = models;
+    // Still listed (the same provider's live list after its static one): it stays picked. Another provider's model
+    // is not listed, so a provider change never carries it over.
+    if (before && before !== '__OTHER__' && [...sel.options].some((o) => o.value === before)) sel.value = before;
     applyPendingModel('provider_model');
     renderSecondReviewerOptions();
   }
@@ -1032,7 +1037,7 @@
   function bylineText() {
     const parts = (schema.byline_fields || PROFILE_FIELDS)
       .map((k) => String(pendingAnswers[k] || '').split(/\s+/).filter(Boolean).join(' ')).filter(Boolean);
-    return parts.length ? parts.join(', ') : (schema.byline_empty || 'none yet');
+    return parts.length ? parts.join(', ') : ((schema.byline_empty || {}).serve || 'none');
   }
 
   function cardRows(ids) {
@@ -1317,12 +1322,19 @@
   }
 
   // The newest copy of this interview's answers: the server's (the id in the address) or this browser's.
+  // The server is asked about this browser's copy too: answers it says were launched (410) are dropped, so a closed tab
+  // after a lost Launch answer never brings back a quest that already started.
   async function loadSavedAnswers() {
-    const id = new URLSearchParams(window.location.search).get('d');
     const local = readLocalSaved();
-    if (!id) return (local && local.id) ? local : null;
+    const id = new URLSearchParams(window.location.search).get('d') || (local && local.id) || null;
+    if (!id) return null;
     let server = null;
-    try { server = await fetchJson(`/api/interview/draft/${encodeURIComponent(id)}`); } catch (_) { server = null; }
+    try {
+      server = await fetchJson(`/api/interview/draft/${encodeURIComponent(id)}`);
+    } catch (e) {
+      if (e.status === 410) { if (local && local.id === id) clearLocalSaved(); return null; }
+      server = null;
+    }
     const mine = local && local.id === id ? local : null;
     if (server && mine) return (server.rev || 0) >= (mine.rev || 0) ? server : mine;
     return server || mine;
@@ -1477,7 +1489,12 @@
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;
     }
-    if (!asUpdate) forgetSavedAnswers();
+    if (!asUpdate) {
+      // Written as a draft, not launched: later changes are saved under a new id (the old one is marked launched).
+      forgetSavedAnswers();
+      startSavedAnswers();
+      rememberSavedId(savedState.id);
+    }
     // An update is how a change to the settings that decide how strictly the quest is checked gets approved: say which.
     const approved = Array.isArray(body.approved_settings_changes) ? body.approved_settings_changes : [];
     const approvedHtml = approved.length

@@ -281,8 +281,10 @@ class ProcessTree:
     def _kill_posix(self, deadline: float) -> None:
         # The program leads its own session, so its process group id is its pid; the group outlives its
         # leader, which is what catches a helper whose parent has already exited. While any member is left the
-        # id stays reserved, so it cannot name an unrelated group; call this only before the program has been
-        # waited for with its group empty (``close()`` checks ``poll()`` first; the callers kill on a timeout).
+        # id stays reserved, so it cannot name an unrelated group. Once the leader has been reaped and the group is
+        # empty the id is free again; it could name another group only after the system has handed out every other
+        # pid in between, far longer than the moment between a reaped leader and this stop (``close()`` checks
+        # ``poll()`` first; the web launcher's Cancel kills right after its polite stop, also once the leader exited).
         pgid = self.proc.pid
         try:
             os.killpg(pgid, signal.SIGKILL)

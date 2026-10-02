@@ -215,6 +215,8 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
     async def get_draft(draft_id: str) -> JSONResponse:
         """The answers saved for an interview that was not launched yet (``PUT`` below)."""
         path = _draft_path(draft_id)
+        if path.with_suffix(".launched").exists():
+            raise HTTPException(410, "these answers were launched as a quest")
         try:
             return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
         except FileNotFoundError:
@@ -239,6 +241,8 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         if not isinstance(data, dict):
             raise HTTPException(400, "the saved answers must be a JSON object")
         data["saved_at"] = time.time()
+        if path.with_suffix(".launched").exists():  # launched while this save was on its way
+            raise HTTPException(409, "these answers were launched as a quest; a new interview has a new id")
         try:
             _write_atomic(path, json.dumps(data, ensure_ascii=False))
         except OSError as e:
@@ -252,9 +256,16 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             return None
         return record if isinstance(record, dict) and isinstance(record.get("body"), dict) else None
 
-    def _keep_submit_record(key: str, payload: dict[str, Any]) -> None:
+    def _answers_hash(body: dict[str, Any]) -> str:
+        import hashlib
+
+        answers = {k: v for k, v in body.items() if k not in ("submit_key", "draft_id", "profile_seen")}
+        return hashlib.sha256(json.dumps(answers, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+    def _keep_submit_record(key: str, payload: dict[str, Any], answers: str) -> None:
         try:
-            _write_atomic(submits_dir / f"{key}.json", json.dumps({"at": time.time(), "body": payload}))
+            _write_atomic(submits_dir / f"{key}.json",
+                          json.dumps({"at": time.time(), "answers": answers, "body": payload}))
             cutoff = time.time() - _SUBMIT_KEPT_S
             for old in submits_dir.glob("*.json"):
                 try:
@@ -276,13 +287,20 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             return await _submit_new(request, body)
         async with submit_lock:
             done = _submit_record(key)
+            answers = _answers_hash(body)
             if done is not None:
+                if done.get("answers") not in (None, answers):
+                    # The same Launch with other answers: the first ones were launched already. Said, never dropped.
+                    first = done["body"].get("quest_id") or done["body"].get("yaml_path") or ""
+                    raise HTTPException(
+                        409, f"these answers were already launched, as quest {first}, before they were changed; "
+                             "start a new interview for the changed ones")
                 # Already submitted (the answer was lost on the way, or Launch was pressed twice): the same answer,
                 # and no second quest.
                 return JSONResponse(done["body"], headers={"Idempotent-Replayed": "true"})
             response = await _submit_new(request, body)
             if response.status_code == 200:
-                _keep_submit_record(key, json.loads(bytes(response.body)))
+                _keep_submit_record(key, json.loads(bytes(response.body)), answers)
             return response
 
     async def _submit_new(request: Request, body: dict[str, Any]) -> JSONResponse:

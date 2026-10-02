@@ -186,7 +186,7 @@ def test_launch_stops_before_spending_when_the_model_is_not_ready(
 
 def test_interview_page_shows_the_reason_and_keeps_the_answers() -> None:
     html = (STATIC / "interview.html").read_text(encoding="utf-8")
-    assert "res.status === 409" in html
+    assert "e.status === 409" in html  # fetchJson's error carries the HTTP status
     assert "Your answers are kept" in html
     assert "/api/providers/availability?provider=" in html  # the picked provider's state under the picker
 

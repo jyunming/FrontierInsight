@@ -163,10 +163,10 @@ def test_kept_answers_are_removed_once_the_quest_is_launched(tmp_path: Path) -> 
     res = client.post("/api/interview/submit?launch=true",
                       json={**_ok_answers_payload(), "submit_key": KEY, "draft_id": DRAFT})
     assert res.status_code == 200
-    assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 404
+    assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 410
     # A save the page sent just before Launch, arriving after it, does not bring them back.
     assert client.put(f"/api/interview/draft/{DRAFT}", json={"id": DRAFT, "form": {"topic": "x"}}).status_code == 409
-    assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 404
+    assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 410
 
 
 @pytest.mark.parametrize("bad_id", ["short", "has space here", "..%2F..%2Fx1234567", "a" * 65])
@@ -182,3 +182,24 @@ def test_kept_answers_must_be_a_small_json_object(tmp_path: Path) -> None:
     assert client.put(f"/api/interview/draft/{DRAFT}", content=b"{not json").status_code == 400
     big = {"form": {"topic": "x" * (300 * 1024)}}
     assert client.put(f"/api/interview/draft/{DRAFT}", json=big).status_code == 413
+
+
+def test_the_same_key_with_changed_answers_is_refused_not_dropped(tmp_path: Path) -> None:
+    """The answer was lost, the person changed something, and pressed Launch again: the first quest is named, the
+    change is not silently replaced by it."""
+    launches: list[str] = []
+    client = TestClient(_app(tmp_path / "out", launches))
+    first = client.post("/api/interview/submit?launch=true", json={**_ok_answers_payload(), "submit_key": KEY})
+    changed = client.post("/api/interview/submit?launch=true",
+                          json={**_ok_answers_payload(), "provider_model": "gpt-5", "submit_key": KEY})
+    assert changed.status_code == 409
+    assert first.json()["quest_id"] in changed.json()["detail"]
+    assert len(launches) == 1
+
+
+def test_launched_answers_are_gone_for_a_later_visit(tmp_path: Path) -> None:
+    client = TestClient(_app(tmp_path / "out", []))
+    client.put(f"/api/interview/draft/{DRAFT}", json={"id": DRAFT, "form": {"topic": "x"}})
+    client.post("/api/interview/submit?launch=true",
+                json={**_ok_answers_payload(), "submit_key": KEY, "draft_id": DRAFT})
+    assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 410
