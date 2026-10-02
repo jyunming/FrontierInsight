@@ -1,10 +1,11 @@
 """The person's own details, asked once and kept for every later quest: name, affiliation, email, web page.
 
-The new-quest interview used to ask for the author line every time. It is now asked the first time only and kept in
-``~/.frontier-insight/profile.json`` (``FI_PROFILE_PATH`` overrides it), which the CLI, the web page and the VS Code
-extension all read and write, so a person types their name once on whichever they use first. A later interview fills the
-author line from it without asking and shows it in the settings summary, where it can be changed; a change there is kept
-for later quests too. The file existing means the person has been asked, even when they left every field blank.
+The new-quest interview does not ask for the byline: it is a folded "Paper byline (optional)" line of the review screen,
+and the first time a paper is written from a terminal the name is asked once (launch._ask_byline_once). What is given is
+kept in ``~/.frontier-insight/profile.json`` (``FI_PROFILE_PATH`` overrides it), which the CLI, the web page and the VS
+Code extension all read and write. A later interview fills the byline from it and shows it on the review screen, where it
+can be changed; a change there is kept for later quests too. The file existing means the person has been asked, even
+when they left every field blank (the interviews do not write a blank byline while none was ever given).
 """
 
 from __future__ import annotations

@@ -41,7 +41,7 @@ The first run asks once to install its own packages into `.venv/` (usually 30-90
 
 If something is missing (a key, a sign-in, a local model), `demo` says what and how to fix it before anything is spent (so do `--new` and the web form before they launch). If a run stops with `paused`, FI is asking for you: read `outputs/<quest_id>/NEXT_STEP.md`, then `python launch.py --resume <quest_id>`. The whole walk-through, step by step: **[docs/first-quest.md](docs/first-quest.md)**. Setup and cost of each provider: [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
-**Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks the topic, what the result is for, (CLI and web) the model and, for research or a decision, a second model for one reviewer, works the rest out from the topic for you to review, and writes the config. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
+**Prefer to be asked?** `python launch.py --new` (CLI), the web form, or `@fi /new` (VSCode) asks three things (your research question, what the result is for, and the model, with, for research or a decision, a second model for one reviewer), shows the rest worked out for you on four short cards to change before launch, and writes the config. `fi` with nothing after it offers the three next steps: a new quest, the web app, or a setup check. **Web UI:** `python launch.py --serve`, then open http://127.0.0.1:8765. **VSCode:** install the `vscode-frontier-insight` extension and type `@fi /help`.
 
 ---
 

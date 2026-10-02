@@ -261,6 +261,13 @@ same PR that adds, splits or renames one.
   some earlier answer carries `ask_if`, checked by `question_applies` (the web page and VS Code mirror it; today only
   `second_reviewer_model`, for research or a decision); `core/interview_update.py` is mid-quest re-entry. The
   clarify-mode default `CLARIFY_WHEN_PRESENT` is never written, so `pauses.clarify` stays unset unless a person chose.
+  What a first-time person sees is defined here once: `FIRST_STEPS` (the three first steps: the research question,
+  what the result is for, the model), `REVIEW_CARDS` (the four review cards, each with its shown and advanced rows;
+  every question on exactly one), `PLAIN_VALUES` / `plain_value` (no internal names on a card), `COST_NOTES` /
+  `cost_note`, `CHECKS_SENTENCES`, `BYLINE_FIELDS` / `byline_text` (the folded "Paper byline (optional)" row; the
+  byline is tier 2). The schema exports them (`first_steps`, `review_cards`, ...): the web page reads them there,
+  VS Code from `interview-core.ts` `REVIEW_SCREEN` (a generated copy; `tests/test_interview_review_cards.py` keeps it
+  equal), the CLI through `launch._build_review_rows` / `_print_review`.
 - `core/provider.py` — every transport (`LLMClient`), `ProxySupervisor`, `missing_api_key`, model pricing; `LAST_CALL` (who answered the current task's last call, and why its answer ended); `ModelAnswerTruncated` / `ModelAnswerFiltered` / `outcome_of` (an answer cut off at its limit or withheld is never returned as whole; `Engine._pause_for_model_output` turns either into a `model_output` pause); `node_output_limit` (`provider.node_max_tokens` per step); `quest_run_log` (a failed call made outside the engine still reaches the quest's run.log); `_http_streams` / `_post_streamed` (Moonshot calls are streamed). The HTTP retry policy waits out a server outage or rate limit (`_http_outage_status`, `_http_retry_wait` / `_http_retry_stop` / `_http_retry_sleep`: six attempts on `_HTTP_OUTAGE_WAITS_S`, a sane `Retry-After` up to `_RETRY_AFTER_MAX_S`, at most `_HTTP_OUTAGE_MAX_WAIT_S` per call, the `FI_MAX_CONCURRENT_LLM_CALLS` slot given back while waiting); a used-up quota is `_is_exhausted_quota`; `FallbackLLMClient` sets `short_retry` (`_http_short_retry`) while a later provider's circuit is closed.
 - `core/provider_models_discover.py` — runtime model-list discovery for the provider picker.
 - `core/provider_readiness.py` — how far a provider is set up, as a ladder of plain states (`Readiness`: not
@@ -305,9 +312,10 @@ same PR that adds, splits or renames one.
 - `core/trial_runner.py` — the trial contract: FI runs `run_trial` / `run_cell` of `simulate.py` for every setting,
   one process per setting, writes `raw/ledger.jsonl` and `raw/trials.json` itself (`TrialsRunner` in `_node_execute`,
   `measure_oracles` in `_oracle_gate`: it calls the simulation on each oracle's case via `run_case`, and `run_oracle` only for an oracle without a case); `recorded_values_by_cell` / `given_values_not_run` hold each reported value to the trials of its own settings; under research `recorded_rows_by_cell` / `given_rows_problems` (via `Engine._given_row_findings`) check a mean over a subset trial by trial; the harness hands every trial the protocol's thresholds as `FI_THRESHOLDS` (`run_oracle` too; the proportion's 0/1 under its id and the averaged quantity under the mean's own id, `RETURN_MEMBERSHIP`); the older self-looping contract stays in `core/split_run.py` as `self_reported`. On a cluster (`execution.background_jobs`) `prepare_cluster` / `collect_cluster` run the settings as a job array submitted by `code/submit.py` (`TrialsRunner(submit=...)`); `code_changed_while_queued` compares the code at submission with the code at collection.
-- `core/profile.py` — the person's author line, asked on the first interview and kept in
-  `~/.frontier-insight/profile.json` for the CLI (`launch._run_new`), the web page (`/api/profile`, saved on
-  submit) and VS Code (`interview.ts` `loadProfile` / `saveProfile`).
+- `core/profile.py` — the person's paper byline, kept in `~/.frontier-insight/profile.json` for the CLI
+  (`launch._run_new`), the web page (`/api/profile`, saved on submit) and VS Code (`interview.ts` `loadProfile` /
+  `saveProfile`); not asked up front: a review-screen row, and `launch._ask_byline_once` asks it once before the
+  first paper (a terminal only, bounded wait). A blank byline is not saved while none was ever given.
 - `core/fi_home.py` — `fi_home()`: the per-person state folder `~/.frontier-insight` (`FI_HOME` overrides; the tests set
   it in `tests/conftest.py::_isolate_fi_home`). New per-person files go through it; `vscode-frontier-insight/src/fi-home.ts`
   (`fiHome`) is the same rule. (Older files — profile, skills, caches, pip lock — still build the path themselves.)
@@ -378,7 +386,9 @@ same PR that adds, splits or renames one.
   waits until all of it is gone. `AsyncProcessTree` is the same around `asyncio.create_subprocess_exec`
   (`await AsyncProcessTree.start(...)`, `await kill()`, `await aclose()` in a `finally` for cancellation; a test's
   stand-in process gets no job or group). Used where a timeout or a cancellation must stop a whole tree:
-  `scripts/import_scientist_skills.py` (`_git`), `generation/_office_pdf.py` (`_run`), the provider proxies
+  `scripts/import_scientist_skills.py` (`_git`), `generation/_office_pdf.py` (`_run`), `core/engine.py`
+  (`_record_environment`'s `pip freeze`), `generation/slides.py` (`_run_cli`), `web/quest_launcher.py` (detached:
+  `ProcessTree(detached=True)`, no kill-on-close job, only an explicit `kill()` stops it), the provider proxies
   (`core/provider.py::ProxySupervisor._spawn` / `_terminate`, `ProcessTree`), the experiment script
   (`core/execution.py::VenvExecutor.execute`, also `SharedInterpreterExecutor`) and the CLI providers
   (`core/provider.py::_run_cli` and `_kill_and_reap`), both `AsyncProcessTree`.
@@ -470,6 +480,8 @@ same PR that adds, splits or renames one.
 
 ## Command-line tools and the web/VS Code surfaces
 
+- `launch.py:_start_menu` (`START_CHOICES`) — bare `fi`: three next steps in a terminal (`--new`, `--serve`,
+  `--doctor`), else the short help on stderr and exit 2.
 - `launch.py:_bootstrap_or_reraise`, `_relaunch` — the self-setup a missing dependency triggers at the top-level
   import (installs into an activated venv/conda env in place, silently relaunches into an already-complete
   `.venv/`, or does the full ask-and-install-and-relaunch dance); see `docs/capabilities-reference.md#getting-started`
@@ -482,8 +494,18 @@ same PR that adds, splits or renames one.
   The Settings page's knowledge-base card: `_knowledge_config_info` (`GET /api/knowledge/info`, settings only) and
   `_knowledge_inventory` (`POST /api/knowledge/inventory`, opens the store; on request, in a thread, time-limited).
 - `web/interview_routes.py`, `web/skills_routes.py`, `web/tools_routes.py` — the web UI's interview, skills and
-  CLI-tools surfaces.
-- `web/quest_launcher.py` — the subprocess pool for quests started from the web UI. Its children (and the quest page's
+  CLI-tools surfaces. The interview keeps an interview's answers as they are typed (`GET/PUT
+  /api/interview/draft/<id>`, `_drafts/.interview/<id>.json`, removed and marked `.launched` on launch) and makes
+  submit idempotent (`Idempotency-Key` / `submit_key`: one submit at a time, the first answer kept in
+  `_drafts/.submits/<key>.json` and returned to a retry). The page (`web/static/interview.html`) has `fetchJson`
+  (time limit, `res.ok`, plain error), a Retry panel (`showStartError`), saved answers (`saveAnswersSoon` /
+  `restoreSavedAnswers`, localStorage + server, id in `?d=`) and one Launch at a time.
+- `web/static/vendor/` — the fonts, the icon font and the Tailwind script every page loads, served by FI so a page
+  works offline (`README.md` there; `scripts/vendor_web_fonts.py` refreshes the fonts). Tests drive the pages in a
+  real browser with no network through `tests/web_browser_harness.py` (Playwright routes to the app in-process,
+  with fault injection).
+- `web/quest_launcher.py` — the subprocess pool for quests started from the web UI, each a detached
+  `core/proc_tree.py` `ProcessTree` (it outlives the server; Cancel stops the whole tree). Its children (and the quest page's
   Resume) run with `FI_WEB_ANSWERS=1`, so `launch.py` `_web_page_clarify_callback` asks the setup questions on the
   quest page (`.fi/clarify_questions.json` → `.fi/clarify_answer.json`, with `.fi/clarify_waiting.json` holding the
   waiting child's pid); `web/server.py` `_clarify_run_waiting` reads that file, so `POST /api/quests/{id}/clarify`
