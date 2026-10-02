@@ -689,7 +689,7 @@ def _load_run(quest_root: Path, key: str) -> TrialRun | None:
 
 async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, entry: str, cell: dict[str, Any],
                    seed: int | None, timeout_s: int, env: dict[str, str] | None, thresholds: dict[str, Any] | None,
-                   label: str) -> tuple[dict[str, float] | None, str]:
+                   label: str, trial: int = 0) -> tuple[dict[str, float] | None, str]:
     """Call one entry function once in its own process: ``(values, "")``, or ``(None, why)`` when it could not."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
@@ -700,7 +700,7 @@ async def _run_one(executor: Any, python: Path | str, quest_root: Path, module: 
     out.unlink(missing_ok=True)
     nonce = hashlib.sha256(f"oracle|{time.time_ns()}".encode()).hexdigest()[:24]
     spec.write_text(json.dumps({"module": str(module).replace(chr(92), "/"), "entry": entry, "cell": cell,
-                                "trials": [{"trial": 0, "seed": seed}], "nonce": nonce,
+                                "trials": [{"trial": int(trial), "seed": seed}], "nonce": nonce,
                                 "thresholds": dict(thresholds or {})}, default=str), encoding="utf-8")
     result = await executor.execute(
         [str(python), HARNESS_PATH.as_posix(), spec.relative_to(quest_root).as_posix(), out.relative_to(quest_root).as_posix()],
@@ -766,16 +766,16 @@ async def run_oracle(executor: Any, python: Path | str, quest_root: Path, module
 
 async def run_case(executor: Any, python: Path | str, quest_root: Path, module: Path | str, *, cell: dict[str, Any],
                    timeout_s: int, env: dict[str, str] | None = None, thresholds: dict[str, Any] | None = None,
-                   ) -> tuple[dict[str, float] | None, str]:
-    """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial 0 with the seed FI gives every
-    trial 0 of that cell, or ``run_cell``): ``(the metrics it returned, "")``, or ``(None, why)``. This is how an oracle is
-    measured without asking the script for the number."""
+                   trial: int = 0) -> tuple[dict[str, float] | None, str]:
+    """The ENGINE calls the simulation function itself on one case (``run_trial`` at trial ``trial``, 0 unless asked,
+    with the seed FI gives that trial of that cell, or ``run_cell``): ``(the metrics it returned, "")``, or ``(None,
+    why)``. This is how an oracle is measured without asking the script for the number."""
     have = entries(Path(module) if Path(module).is_absolute() else Path(quest_root) / module)
     entry = "run_trial" if "run_trial" in have else "run_cell"
     base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
-    seed = trial_seed(base, cell_key(cell), 0) if entry == "run_trial" else None
+    seed = trial_seed(base, cell_key(cell), int(trial)) if entry == "run_trial" else None
     return await _run_one(executor, python, quest_root, module, entry=entry, cell=dict(cell), seed=seed, timeout_s=timeout_s,
-                          env=env, thresholds=thresholds, label=f"{entry}()")
+                          env=env, thresholds=thresholds, label=f"{entry}()", trial=int(trial))
 
 
 def _same_value(a: Any, b: Any) -> bool:

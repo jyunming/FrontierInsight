@@ -217,7 +217,7 @@ def test_a_formula_the_simulation_cannot_answer_is_named_and_one_that_divides_by
     ({**CONSERVATION, "measure": "violation"}, 0.0, "reads as the violation"),  # the live failure
     ({"name": "x", "kind": "invariant", "expected": 0.0, "tolerance": 1e-6, "measure": "ratio", "case": {}}, 1.0,
      "reads as a ratio"),
-    ({"name": "x", "kind": "special_case", "expected": 0.3679, "tolerance": 1e-3}, 36.79, "orders of magnitude"),
+    ({"name": "x", "kind": "special_case", "expected": 0.3679, "tolerance": 1e-3}, 3679.0, "orders of magnitude"),  # (x100 is named as a per cent)
     ({"name": "x", "kind": "published_value", "expected": 2.5, "tolerance": 0.1}, 0.0, "exactly 0"),
     ({"name": "x", "kind": "special_case", "expected": -1.2, "tolerance": 0.1}, 1.2, "the sign the other way"),
 ])

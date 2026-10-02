@@ -457,10 +457,13 @@ def request(requests: list[str], *, last: bool = True) -> str:
 _ORDERS = 100.0
 
 
-def mismatch(oracle: dict[str, Any], value: Any, formula_problem: str = "", *, engine: bool = True) -> str | None:
+def mismatch(oracle: dict[str, Any], value: Any, formula_problem: str = "", *, engine: bool = True,
+             broad: bool = True) -> str | None:
     """A sentence when the number a check measured on its test run says the plan and the simulation mean different
     things by it (its definition, not the simulation, looks wrong), or ``None``. A value within its tolerance is never
-    a mismatch; one that is simply outside it is the simulation's to explain (a repair), not this."""
+    a mismatch; one that is simply outside it is the simulation's to explain (a repair), not this. ``broad``: also
+    name the reciprocal and a count of the case (:func:`unit_multiple`), which the card says but the test run, whose
+    sentences go to the plan as a request, does not."""
     name = str(oracle.get("name") or "?").strip()
     raw_measure = oracle.get("measure")
     measure = raw_measure.strip() if isinstance(raw_measure, str) else ""
@@ -483,6 +486,9 @@ def mismatch(oracle: dict[str, Any], value: Any, formula_problem: str = "", *, e
     if kind in VIOLATION_KINDS and expected == 0 and not outer_abs and abs(number - 1.0) <= max(limit, 1e-12):
         return (f"the check {name!r} is {_describe(kind)} and expects 0 (its worst violation), but its test run measured "
                 f"{_fmt(number)}: that reads as a ratio that is kept at 1, not as a violation")
+    multiple = unit_multiple(oracle, number, broad=broad)
+    if multiple:
+        return multiple
     if expected != 0 and number == 0:
         return (f"the check {name!r} expects {_fmt(expected)}, but its test run measured exactly 0: either the simulation "
                 "returns another quantity than the one the check means, or it fails to compute it; which one must follow "
@@ -499,6 +505,61 @@ def mismatch(oracle: dict[str, Any], value: Any, formula_problem: str = "", *, e
             return (f"the check {name!r} expects {_fmt(expected)}, but its test run measured {_fmt(number)}: the same "
                     "size with the other sign, so either the simulation or the check has the sign the other way; the "
                     "check's sign must follow from its `reference`, not from this number")
+    return None
+
+
+#: The factors one representation of a quantity differs from another by, and how a person says each.
+_UNIT_FACTORS: tuple[tuple[float, str, str], ...] = (
+    (100.0, "100", "a per cent and a fraction"),
+    (1e3, "1000", "two units a thousand apart (milli- and the unit, or the unit and kilo-)"),
+    (1e6, "10^6", "two units a million apart (micro- and the unit, or the unit and mega-)"),
+    (1e9, "10^9", "two units a billion apart (nano- and the unit, or the unit and giga-)"),
+    (2 * math.pi, "2π", "an angular frequency and a frequency (radians and cycles)"),
+)
+
+
+#: Case keys that count things a total sums over (a total and a mean differ by one of them).
+_COUNT_KEY = re.compile(r"^(n|N|num|count|size|samples?|trials?|runs?|reps?|replicates?|agents?|particles?|customers?|"
+                        r"nodes?|individuals?|people|population|members?|items?)$|^(n|num)_|_count$|^n[A-Z]")
+
+
+def unit_multiple(oracle: dict[str, Any], value: Any, *, broad: bool = True) -> str | None:
+    """A sentence when a measured value that fails its check would pass it after one of the usual changes of
+    representation: times or divided by 100 (a per cent and a fraction), 1000, 10^6 or 10^9 (a unit prefix), 2π (an
+    angular frequency and a frequency), the reciprocal (a rate and a time), or a whole-number count of the check's own
+    case (a total and a mean over N; ``broad`` only, with the reciprocal). ``None`` otherwise. Only when the converted
+    value lands within the check's own tolerance (never on a ratio that is merely close to a factor), the gap is at
+    least ten tolerances (a factor the tolerance can tell apart), and never for an expected value of 0. Said, never a
+    verdict: the check still fails."""
+    number = _num(value)
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if number is None or expected is None or limit is None or number == 0 or expected == 0:
+        return None
+    if abs(number - expected) < 10 * limit:
+        return None
+    name = str(oracle.get("name") or "?").strip()
+
+    def fits(x: float) -> bool:
+        return abs(x - expected) <= limit
+
+    factors = list(_UNIT_FACTORS)
+    case = oracle.get("case")
+    for key, n in (case.items() if isinstance(case, dict) and broad else []):
+        count = _num(n)
+        if (count is not None and count >= 2 and float(count).is_integer() and _COUNT_KEY.search(str(key))
+                and count not in (f for f, _t, _d in factors)):
+            factors.append((count, f"{key}={_fmt(count)}", f"a total and a mean over the case's {key}={_fmt(count)}"))
+    head = f"the check {name!r} expects {_fmt(expected)}, but its test run measured {_fmt(number)}"
+    for factor, shown, what in factors:
+        if fits(number / factor):
+            return (f"{head}, which is {shown} times the expected value: it looks like {what} (divided by {shown} it "
+                    "would pass); which side is right must follow from the check's `reference`, not from this number")
+        if fits(number * factor):
+            return (f"{head}, which is 1/{shown} of the expected value: it looks like {what} (times {shown} it would "
+                    "pass); which side is right must follow from the check's `reference`, not from this number")
+    if broad and abs(abs(expected) - 1) > limit and fits(1 / number):
+        return (f"{head}, which is the reciprocal of the expected value: it looks like a rate and a time (or a quantity "
+                "and its inverse); which side is right must follow from the check's `reference`, not from this number")
     return None
 
 
@@ -521,7 +582,7 @@ def mismatches(oracles: list[dict[str, Any]], checks: list[dict[str, Any]] | Non
             continue
         engine = check.get("measured_by") == "engine"
         why = mismatch(oracle, check.get("value"), str(check.get("formula_problem") or "") if engine else "",
-                       engine=engine)
+                       engine=engine, broad=False)
         if why:
             out.append(why)
     return out

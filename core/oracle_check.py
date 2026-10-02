@@ -881,8 +881,10 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
         disputed = _num(j.get("disputed_expected"))
         if disputed is not None and j.get("passed_by_engine") is False:
+            who = ("FI's own recomputation of it (another model, not shown the measured value) says"
+                   if j.get("disputed_by") == "recompute" else "a repair says")
             verdict += (
-                f"; a repair says the expected value the protocol declares is itself wrong and proposes {_fmt(disputed)}, "
+                f"; {who} the expected value the protocol declares is itself wrong and proposes {_fmt(disputed)}, "
                 "but nobody has approved that change, so the check counts as failed (say so: the check failed and its "
                 "expected value is disputed)"
             )
@@ -1016,8 +1018,8 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
     contract and never the FI_ORACLE / ORACLE_JSON one, which does not exist there."""
     declared_block = json.dumps(oracles, indent=2)
     set_aside = (
-        "Checks an earlier repair already said are wrong themselves: " + ", ".join(repr(str(n)) for n in disputed) + ". "
-        "Their proposed changes are recorded and wait for a person. Do not change the script for these checks (do not "
+        "Checks already found to be wrong themselves (by an earlier repair, or by FI's own look at them): " + ", ".join(repr(str(n)) for n in disputed) + ". "
+        "What was found is recorded and waits for a person. Do not change the script for these checks (do not "
         "change how their values are computed to reach the declared expected value, skip them or hard-code their "
         "values): they go on failing until a person decides. If one of them is listed below as not checked or not a "
         "number, restore its honest measurement, nothing more. Fix only what is listed below.\n\n"

@@ -218,7 +218,8 @@ def test_a_disputed_check_shows_the_proposal_and_offers_it_as_one_step(tmp_path:
     assert "the local error of one step" in cause["evidence"]
     accept = next(a for a in card["actions"] if a["id"] == "accept_proposal")
     assert accept["prefill"] == oc.proposal_request(proposal)
-    assert "not carried over" in card["actions"][0]["detail"], "a resume does not remember the dispute (yet)"
+    # A resume keeps the dispute (core/oracle_triage.py), so "try again" would only stop here again: not offered.
+    assert not any(a["id"] == "resume" for a in card["actions"])
     assert any("kept as it was" in t for t in card["tried"])
 
 
