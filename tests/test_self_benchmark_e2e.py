@@ -88,6 +88,10 @@ def _fake(calls: list[str]):
             return _claim_for(prompt)
         if prompt.lstrip().startswith("**Persona:"):
             return _FAKE_RESPONSES["review"]
+        if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the checks
+            return json.dumps({"checks": [{"name": o["name"], "appropriate": "yes", "discriminating": "yes",
+                                           "well_defined": "yes"} for o in PROTO["oracles"]],
+                               "summary": "the checks test the model"})
         return _fake_response_for(prompt)
 
     return fake_chat
@@ -96,7 +100,9 @@ def _fake(calls: list[str]):
 def _base(root: Path, **knowledge: Any) -> Config:
     return Config.model_validate({
         "topic": "smoke topic for the self-benchmark", "title": "self-benchmark", "rigor_profile": "research",
-        "provider": {"name": "openai", "node_models": {"review_panel.statistician": "m-other"}},
+        # Research needs one reviewer and the second reading of the checks on another model.
+        "provider": {"name": "openai", "node_models": {"review_panel.statistician": "m-other",
+                                                       "oracle_review": "m-reviewer"}},
         "engine": {"max_iterations": 1, "review_loop": False, "execute_replicates": 3, "pilot_run": False},
         "execution": {"sandbox": "venv", "timeout_s": 300},
         "knowledge": {"enabled": False, **knowledge},
