@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>New Quest — Frontier Insight</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/vendor/fonts.css"/>
 <script src="/static/theme.js"></script>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="/static/vendor/tailwindcss-3.4.17-forms-container-queries.js"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
@@ -26,7 +26,7 @@
     <div class="bg-surface-high border border-white/10 rounded-full px-4 py-2 flex items-center gap-2 shadow-[0_0_40px_rgba(195,192,255,0.1)] backdrop-blur-md">
       <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
       <span class="font-label-sm text-label-sm uppercase text-on-surface tracking-wider">
-        <span id="progress-total">12</span> questions
+        <span id="progress-total"></span> questions
       </span>
     </div>
   </div>
@@ -94,7 +94,7 @@
 
 <script>
   // Web interview — drives the same question schema the CLI and
-  // VSCode flows use. Schema fetched from /api/interview/schema.
+  // VSCode flows use (core/interview.py). Schema fetched from /api/interview/schema.
 
   const updateQuestId = window.__fi_update_quest_id || null;
   const isUpdate = !!updateQuestId;
@@ -120,6 +120,64 @@
     div.textContent = message;
   }
 
+  // How long a request may take before the page says so (a test sets window.__fi_fetch_timeout_ms).
+  const FETCH_TIMEOUT_MS = window.__fi_fetch_timeout_ms || 20000;
+
+  // fetch() that gives up after FETCH_TIMEOUT_MS and throws a plain-words Error for a dropped connection, a
+  // timeout, an HTTP error or a reply that is not JSON. ``err.status`` is the HTTP status when there was one.
+  async function fetchJson(url, opts = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(url, { ...opts, signal: ctrl.signal });
+    } catch (e) {
+      const err = new Error(ctrl.signal.aborted
+        ? `the server did not answer within ${Math.round(timeoutMs / 1000)} s`
+        : 'the server could not be reached (is `fi --serve` still running?)');
+      err.network = true;
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    let text = '';
+    try { text = await res.text(); } catch (_) { text = ''; }
+    if (!res.ok) {
+      let detail = text;
+      try { const j = JSON.parse(text); detail = j.detail || j.error || text; } catch (_) {}
+      if (typeof detail !== 'string') detail = JSON.stringify(detail);
+      const err = new Error(`the server answered ${res.status}${detail ? `: ${String(detail).slice(0, 400)}` : ''}`);
+      err.status = res.status;
+      err.detail = String(detail || '').slice(0, 400);
+      throw err;
+    }
+    try { return JSON.parse(text); } catch (_) {
+      const err = new Error('the server sent an answer that could not be read');
+      err.network = true;
+      throw err;
+    }
+  }
+
+  // The page could not load what it needs: say why, in place of "Loading questions…", with a way to try again.
+  function showStartError(what, err) {
+    const subtitle = document.getElementById('page-subtitle');
+    subtitle.innerHTML = '';
+    const box = document.createElement('div');
+    box.id = 'load-error';
+    box.setAttribute('role', 'alert');
+    box.className = 'fi-banner fi-banner-error max-w-3xl flex flex-col gap-3 items-start';
+    const msg = document.createElement('p');
+    msg.textContent = `Could not load ${what}: ${err && err.message ? err.message : err}. Your answers so far are kept.`;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.id = 'load-retry';
+    retry.className = 'bg-primary-container text-on-primary-container font-label-sm text-label-sm uppercase px-4 py-2 rounded';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => { box.remove(); subtitle.textContent = 'Loading questions…'; loadSchema(); });
+    box.append(msg, retry);
+    subtitle.appendChild(box);
+  }
+
   async function loadSchema() {
     // Schema + (in update mode) the quest's current answers are
     // independent fetches — kick them off in parallel so the form
@@ -127,32 +185,36 @@
     // is fatal: a defaults-seeded form silently overwrites the
     // user's config on submit, so we refuse to render rather than
     // fail-open.
-    const schemaP = fetch('/api/interview/schema').then((r) => r.json());
+    const schemaP = fetchJson('/api/interview/schema');
     const answersP = isUpdate
-      ? fetch(`/api/quests/${encodeURIComponent(updateQuestId)}/answers`)
+      ? fetchJson(`/api/quests/${encodeURIComponent(updateQuestId)}/answers`)
       : null;
-    schema = await schemaP;
+    if (answersP) answersP.catch(() => {});  // awaited below; a failure there is reported there
+    try {
+      schema = await schemaP;
+      if (!schema || !Array.isArray(schema.questions)) throw new Error('the questions it sent are incomplete');
+    } catch (e) {
+      schema = null;
+      showStartError('the questions', e);
+      return;
+    }
     if (!isUpdate) {
       try {
-        savedProfile = (await (await fetch('/api/profile')).json()).profile || null;
-      } catch (_) { savedProfile = null; }
+        savedProfile = (await fetchJson('/api/profile')).profile || null;
+      } catch (_) { savedProfile = null; }  // not needed to start: the saved author line is filled in when there is one
     }
     const title = document.getElementById('page-title');
     const subtitle = document.getElementById('page-subtitle');
     if (isUpdate) {
       title.textContent = `Update Quest`;
-      subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
       try {
-        const ar = await answersP;
-        if (!ar.ok) {
-          showLoadError(`Could not load quest answers (HTTP ${ar.status}). Refusing to render the form — submitting would overwrite your config with defaults.`);
-          return;
-        }
-        updateAnswers = await ar.json();
+        updateAnswers = await answersP;
       } catch (e) {
-        showLoadError(`Error fetching quest answers: ${e}. Refusing to render the form.`);
+        // Refusing to render the form: submitting a defaults-seeded form would overwrite the quest's config.
+        showStartError("this quest's current answers", e);
         return;
       }
+      subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
     } else {
       title.textContent = 'New Research Quest';
       // No fixed count here (the schema has grown before and will again) — the progress pill names
@@ -162,6 +224,12 @@
       loadDrafts();
     }
     renderForm();
+    // Answers saved from an earlier visit (a failed Launch, a closed tab, a server restart) come back first.
+    if (!isUpdate) {
+      const saved = await loadSavedAnswers();
+      if (saved) restoreSavedAnswers(saved);
+      else startSavedAnswers();
+    }
     // Honor ?draft=<filename> in URL: auto-load that draft into the form.
     const params = new URLSearchParams(window.location.search);
     const draftFilename = params.get('draft');
@@ -500,7 +568,7 @@
     // submits the patch immediately.
     const submitRow = document.createElement('div');
     submitRow.innerHTML = `
-      <button type="submit" class="w-full md:w-auto self-start bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
+      <button type="submit" id="form-submit-btn" class="w-full md:w-auto self-start bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
         <span>${isUpdate ? 'Update Quest' : 'Continue to Review'}</span>
         <span class="material-symbols-outlined text-[20px]">${isUpdate ? 'edit' : 'arrow_forward'}</span>
       </button>
@@ -934,6 +1002,7 @@
     document.getElementById('interview-form').classList.add('hidden');
     document.getElementById('progress-pill').classList.add('hidden');
     renderReview();
+    saveAnswersSoon();
     document.getElementById('review-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
     return false;
   }
@@ -1031,7 +1100,7 @@
     // Launch button.
     const launchRow = document.createElement('div');
     launchRow.innerHTML = `
-      <button type="button" onclick="launchFromReview()" class="w-full md:w-auto bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
+      <button type="button" id="launch-btn" onclick="launchFromReview()" class="w-full md:w-auto bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
         <span>Launch quest</span>
         <span class="material-symbols-outlined text-[20px]">rocket_launch</span>
       </button>
@@ -1132,6 +1201,7 @@
     const savedQ = schema.questions.find((x) => x.id === id);
     document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value, savedQ);
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
+    saveAnswersSoon();
     if (id === 'paper_format' || id === 'study_depth') {
       rederive();
     } else if (id === 'phased') {
@@ -1153,6 +1223,7 @@
       pendingAnswers[k] = v;
     }
     renderReview();
+    saveAnswersSoon();
   }
 
   window.cancelReviewEdit = function (id) {
@@ -1162,12 +1233,14 @@
   window.toggleAdvanced = function () {
     reviewShowAdvanced = !reviewShowAdvanced;
     renderReview();
+    saveAnswersSoon();
   };
 
   window.backToForm = function () {
     document.getElementById('review-section').classList.add('hidden');
     document.getElementById('interview-form').classList.remove('hidden');
     document.getElementById('progress-pill').classList.remove('hidden');
+    saveAnswersSoon();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -1175,49 +1248,198 @@
     return submitToServer(pendingAnswers, /*isUpdate=*/ false);
   }
 
+  // ─── Saved answers ─────────────────────────────────────────────
+  // Every answer is kept as it is typed: in this browser (localStorage, a convenience for this viewer) and on the
+  // server (/api/interview/draft/<id>, the id is in the address as ?d=), so a failed Launch, a closed tab or a server
+  // restart never loses them. Removed once the quest is launched. ``submit_key`` goes with the Launch: the server
+  // answers a retry with the same key with the first answer and starts no second quest.
+  const SAVED_KEY = 'fi-interview-draft';
+  let savedState = null;   // {id, submit_key, rev, stage, form, other, review}
+  let saveTimer = null;
+
+  function newToken() {
+    const raw = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+    return raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+  }
+  function readLocalSaved() {
+    try { const raw = localStorage.getItem(SAVED_KEY); return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
+  }
+  function writeLocalSaved(d) { try { localStorage.setItem(SAVED_KEY, JSON.stringify(d)); } catch (_) {} }
+  function clearLocalSaved() { try { localStorage.removeItem(SAVED_KEY); } catch (_) {} }
+  function rememberSavedId(id) {
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('d') !== id) { url.searchParams.set('d', id); history.replaceState(null, '', url); }
+    } catch (_) {}
+  }
+
+  function startSavedAnswers() {
+    savedState = { id: newToken(), submit_key: newToken(), rev: 0 };
+  }
+
+  // The newest copy of this interview's answers: the server's (the id in the address) or this browser's.
+  async function loadSavedAnswers() {
+    const id = new URLSearchParams(window.location.search).get('d');
+    const local = readLocalSaved();
+    if (!id) return (local && local.id) ? local : null;
+    let server = null;
+    try { server = await fetchJson(`/api/interview/draft/${encodeURIComponent(id)}`); } catch (_) { server = null; }
+    const mine = local && local.id === id ? local : null;
+    if (server && mine) return (server.rev || 0) >= (mine.rev || 0) ? server : mine;
+    return server || mine;
+  }
+
+  function captureAnswers() {
+    if (isUpdate || !schema || !savedState) return null;
+    const form = {};
+    const other = {};
+    const formEl = document.getElementById('interview-form');
+    for (const q of schema.questions) {
+      const el = formEl.querySelector(`#q-${q.id}`);
+      if (el) form[q.id] = el.value;
+      const o = formEl.querySelector(`#q-${q.id}-other`);
+      if (o && o.value) other[q.id] = o.value;
+    }
+    const inReview = !document.getElementById('review-section').classList.contains('hidden');
+    savedState = {
+      ...savedState, rev: (savedState.rev || 0) + 1, stage: inReview ? 'review' : 'form', form, other,
+      review: inReview ? { answers: pendingAnswers, edited: [...editedFields], show_advanced: reviewShowAdvanced } : null,
+    };
+    return savedState;
+  }
+
+  // Saved a moment after the last change (this browser at once, the server after a short pause).
+  function saveAnswersSoon() {
+    const d = captureAnswers();
+    if (!d) return;
+    writeLocalSaved(d);
+    rememberSavedId(d.id);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      fetchJson(`/api/interview/draft/${encodeURIComponent(d.id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(savedState),
+      }).catch(() => {});  // this browser's copy is still there; the next change tries the server again
+    }, 500);
+  }
+
+  function setFormValue(qid, value, typed) {
+    const el = document.querySelector(`#interview-form #q-${qid}`);
+    if (!el || value === undefined || value === null) return;
+    if (el.tagName !== 'SELECT') { el.value = String(value); return; }
+    if ([...el.options].some((o) => o.value === String(value))) {
+      el.value = String(value);
+      if (qid === 'provider') populateProviderModel(el.value);
+      handleOtherSelection(el, schema.questions.find((x) => x.id === qid) || { label: qid });
+      const o = document.getElementById(`q-${qid}-other`);
+      if (o && el.value === '__OTHER__' && typed) o.value = typed;
+    } else if ((qid === 'provider_model' || qid === 'second_reviewer_model') && value) {
+      // A model only the live list has (it arrives after this): selected once it is there.
+      pendingModelValues[qid] = String(value);
+      if (qid === 'second_reviewer_model') renderSecondReviewerOptions(); else applyPendingModel(qid);
+    }
+  }
+
+  function restoreSavedAnswers(d) {
+    savedState = { id: d.id, submit_key: d.submit_key || newToken(), rev: d.rev || 0 };
+    rememberSavedId(d.id);
+    const form = d.form || {};
+    const other = d.other || {};
+    // The provider first: the model lists follow from it.
+    if ('provider' in form) setFormValue('provider', form.provider, other.provider);
+    for (const [qid, value] of Object.entries(form)) {
+      if (qid === 'provider') continue;
+      const typed = other[qid];
+      setFormValue(qid, value === '__OTHER__' && typed ? '__OTHER__' : value, typed);
+      if ((qid === 'provider_model' || qid === 'second_reviewer_model') && value === '__OTHER__' && typed) {
+        pendingModelValues[qid] = typed;
+        if (qid === 'second_reviewer_model') renderSecondReviewerOptions(); else applyPendingModel(qid);
+      }
+    }
+    refreshConditionalQuestions();
+    if (d.stage === 'review' && d.review && d.review.answers) {
+      pendingAnswers = d.review.answers;
+      editedFields.clear();
+      for (const k of d.review.edited || []) editedFields.add(k);
+      reviewShowAdvanced = !!d.review.show_advanced;
+      document.getElementById('interview-form').classList.add('hidden');
+      document.getElementById('progress-pill').classList.add('hidden');
+      renderReview();
+    }
+    const div = document.getElementById('result');
+    div.classList.remove('hidden');
+    div.className = 'fi-banner fi-banner-info max-w-3xl';
+    div.textContent = 'Your answers from before are back. Change anything, or go on where you left off. ';
+    const fresh = document.createElement('button');
+    fresh.type = 'button';
+    fresh.className = 'underline font-bold';
+    fresh.textContent = 'Start a new quest instead';
+    fresh.addEventListener('click', () => { forgetSavedAnswers(); window.location.href = '/interview'; });
+    div.appendChild(fresh);
+  }
+
+  function forgetSavedAnswers() {
+    clearTimeout(saveTimer);
+    clearLocalSaved();
+    savedState = null;
+  }
+
+  for (const id of ['interview-form', 'review-section']) {
+    const host = document.getElementById(id);
+    host.addEventListener('input', () => saveAnswersSoon());
+    host.addEventListener('change', () => saveAnswersSoon());
+  }
+
+  // Launch (or Update) can be pressed once at a time; a failure says why and leaves the button ready to retry.
+  let submitting = false;
+
   async function submitToServer(payload, asUpdate) {
+    if (submitting) return false;
     const endpoint = asUpdate
       ? `/api/interview/update/${encodeURIComponent(updateQuestId)}`
       : '/api/interview/submit?launch=true';
+    const button = document.getElementById(asUpdate ? 'form-submit-btn' : 'launch-btn');
     const div = document.getElementById('result');
     div.classList.remove('hidden');
     div.className = 'fi-banner fi-banner-info max-w-3xl';
     div.textContent = asUpdate ? 'Submitting update…' : 'Checking the model, then launching the quest…';
-    let res;
+    const headers = { 'Content-Type': 'application/json' };
+    let sent = payload;
+    if (!asUpdate) {
+      if (!savedState) startSavedAnswers();
+      headers['Idempotency-Key'] = savedState.submit_key;
+      sent = { ...payload, submit_key: savedState.submit_key, draft_id: savedState.id };
+    }
+    submitting = true;
+    if (button) { button.disabled = true; button.classList.add('opacity-60', 'cursor-wait'); }
+    let body;
     try {
-      res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      body = await fetchJson(endpoint, { method: 'POST', headers, body: JSON.stringify(sent) }, Math.max(FETCH_TIMEOUT_MS, 60000));
     } catch (e) {
-      // The answers stay on this page: Launch can be pressed again.
       div.className = 'fi-banner fi-banner-error max-w-3xl';
-      div.textContent = `Could not reach the FI server (${e}). Your answers are still here; try again.`;
+      div.setAttribute('role', 'alert');
+      div.textContent = asUpdate
+        ? `The update was not applied: ${e.message}. Your changes are still in the form; press Update Quest to try again.`
+        : e.status === 409
+          // The chosen model is not ready (core/provider_readiness.py); the sentence says why and how to fix it.
+          ? `The quest was not started. ${e.detail || e.message} Your answers are kept: fix that, then press Launch again (or go back and pick another model).`
+          : (e.status === 503
+          ? `FI is already running as many quests as it may at once: ${e.message}. Your answers are kept; press Launch again when one has finished.`
+          : `The quest was not launched: ${e.message}. Your answers are kept; press Launch again to retry (a retry never starts a second quest).`);
       return false;
+    } finally {
+      submitting = false;
+      if (button) { button.disabled = false; button.classList.remove('opacity-60', 'cursor-wait'); }
     }
-    if (!res.ok) {
-      div.className = 'fi-banner fi-banner-error max-w-3xl';
-      const raw = await res.text();
-      let detail = raw;
-      try {
-        const j = JSON.parse(raw);
-        detail = (typeof j.detail === 'string' && j.detail) || j.error || raw;
-      } catch (_) { /* not JSON: shown as it came */ }
-      // 409: the chosen model is not ready (core/provider_readiness.py); the sentence says why and how to fix it.
-      div.textContent = res.status === 409
-        ? `The quest was not started. ${detail} Your answers are kept: fix that, then press Launch again (or go back and pick another model).`
-        : `Error ${res.status}: ${detail}`;
-      return false;
-    }
-    const body = await res.json();
     if (!asUpdate && body.profile_saved === false) {
       alert('The quest was created, but your author line could not be kept for the next quests (the server log says why).');
     }
     if (!asUpdate && body.quest_id) {
+      forgetSavedAnswers();
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;
     }
+    if (!asUpdate) forgetSavedAnswers();
     // An update is how a change to the settings that decide how strictly the quest is checked gets approved: say which.
     const approved = Array.isArray(body.approved_settings_changes) ? body.approved_settings_changes : [];
     const approvedHtml = approved.length
