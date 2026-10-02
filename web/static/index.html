@@ -291,8 +291,9 @@
     const res = await fetch('/api/interview/schema');
     if (!res.ok) return;
     const schema = await res.json();
-    const n = (schema.questions || []).filter(q => q.tier === 1 && (!q.frontends || q.frontends.includes('serve'))).length;
-    if (n > 0) document.getElementById('question-count').textContent = `up to ${n} short questions`;
+    // Counted in steps (the research question, what the result is for, the model), as the new-quest page numbers them.
+    const n = (schema.first_steps || []).length;
+    if (n > 0) document.getElementById('question-count').textContent = `${n} short questions`;
   } catch (_) { /* keep the words already there */ }
 })();
 </script>

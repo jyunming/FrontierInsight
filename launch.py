@@ -389,6 +389,38 @@ Less common
 """
 
 
+#: What bare `fi` offers in a terminal: (label, what it runs). Each is an existing command, nothing new to learn.
+START_CHOICES: tuple[tuple[str, list[str]], ...] = (
+    ("Start a new quest (answer three questions)", ["--new"]),
+    ("Open the web app", ["--serve"]),
+    ("Check my setup (a few seconds, no network)", ["--doctor"]),
+)
+
+
+def _start_menu(*, ask: Callable[[str], str] = input) -> list[str]:
+    """Bare ``fi``: in a terminal, three plain next steps and the command each one is; anywhere else (a script, CI, a
+    pipe), the short help on stderr and exit 2. Returns the argv of the chosen step; Enter or 'q' leaves (exit 0)."""
+    if not (_stdin_is_terminal() and sys.stdout.isatty()):
+        print(_SHORT_HELP, file=sys.stderr)
+        raise SystemExit(2)
+    print("Frontier Insight: what would you like to do?\n")
+    for i, (label, cmd) in enumerate(START_CHOICES, 1):
+        print(f"  {i}. {label:<46} (fi {' '.join(cmd)})")
+    print("\n  `fi --help` lists the commands; `fi demo` runs a small example quest first.")
+    while True:
+        try:
+            raw = ask(f"\nPick 1-{len(START_CHOICES)} (Enter to leave): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            # Windows reports a terminal for stdin redirected from NUL; nothing to read is the same as leaving.
+            print()
+            raise SystemExit(0) from None
+        if raw in ("", "q", "quit", "exit"):
+            raise SystemExit(0)
+        if raw.isdigit() and 1 <= int(raw) <= len(START_CHOICES):
+            return list(START_CHOICES[int(raw) - 1][1])
+        print(f"  (type a number from 1 to {len(START_CHOICES)}, or press Enter to leave)")
+
+
 # `--from` given with no value: list the steps the quest can be run again from.
 _LIST_STEPS = "<list the steps>"
 
@@ -2793,6 +2825,66 @@ def _existing_output(art: QuestArtifacts, kind: str) -> Path | None:
     return None
 
 
+#: How long the before-the-paper byline question waits for an answer before the paper is written without one.
+_BYLINE_WAIT_S = 120.0
+
+
+def _read_line_or_none(prompt: str) -> asyncio.Future[str | None]:
+    """``input(prompt)`` in a daemon thread, as a future that resolves to the line, or None on EOF / Ctrl-C. A daemon
+    thread, not ``asyncio.to_thread``: a question nobody answers must not keep the process from exiting (the default
+    executor's threads are joined at exit)."""
+    import threading
+
+    loop = asyncio.get_running_loop()
+    fut: asyncio.Future[str | None] = loop.create_future()
+
+    def read() -> None:
+        try:
+            line: str | None = input(prompt)
+        except (EOFError, KeyboardInterrupt, OSError, ValueError):
+            line = None
+        loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(line))
+
+    threading.Thread(target=read, name="fi-byline-question", daemon=True).start()
+    return fut
+
+
+async def _ask_byline_once(cfg: Config) -> None:
+    """The paper byline, asked once in a person's first quest, just before the paper is written: only when the quest
+    has none, none was ever kept (core/profile.py has no file), the quest makes a paper, slides or poster, and a person
+    is at a terminal. An answer is used for this quest and kept for the next; Enter keeps the Frontier Insight byline
+    and is kept too (so it is not asked again); no answer within ``_BYLINE_WAIT_S`` goes on without one and asks again
+    next time. Never blocks a quest: no terminal (web, VS Code, CI) skips it silently."""
+    from core import profile as _profile
+
+    output = cfg.output
+    if any(str(getattr(output, k, "") or "").strip() for k in _profile.FIELDS):
+        return
+    if not ({"paper_pdf", "paper_md", "slides", "poster"} & set(output.kinds or [])):
+        return
+    if not (_stdin_is_terminal() and sys.stdout.isatty()) or _profile.load() is not None:
+        return
+    print()
+    print("Paper byline (optional): the name printed on the paper, slides and poster.")
+    print(f"  Type it, or press Enter for the Frontier Insight byline (asked only this once; "
+          f"going on by itself in {_BYLINE_WAIT_S:.0f} s).")
+    try:
+        name = await asyncio.wait_for(_read_line_or_none("  Your name: "), timeout=_BYLINE_WAIT_S)
+    except asyncio.TimeoutError:
+        print("\n  (no answer: the paper is written with the Frontier Insight byline; asked again next time)")
+        return
+    if name is None:
+        return
+    name = " ".join(name.split())
+    if name:
+        output.author = name
+    try:
+        _profile.save({"author": name, "affiliation": "", "contact_email": "", "url": ""})
+        print(f"  (kept in {_profile.path()} for the next quests; change it on any quest's review screen)")
+    except OSError as e:
+        print(f"  (could not keep it for the next quests: {e})")
+
+
 async def _run_generators(
     cfg: Config,
     art: QuestArtifacts,
@@ -2816,6 +2908,7 @@ async def _run_generators(
     written: dict[str, Path] = {}
     carried: set[str] = set()
     _apply_paper_venue_override(cfg, art)
+    await _ask_byline_once(cfg)
 
     def _already(kind: str) -> Path | None:
         if not skip_existing:
@@ -4062,7 +4155,7 @@ async def _run_new(
     # Only the symbols _run_new actually uses. _cli_prompt_for
     # imports its own (smart_defaults + model_choices_for).
     from core.interview import (
-        QUESTIONS, InterviewAnswers, answers_to_yaml,
+        BYLINE_FIELDS, QUESTIONS, InterviewAnswers, answers_to_yaml,
         derive_tier2, derive_tier3, parse_fixed_temperature_answer, parse_page_limit_answer,
         preflight_clarify, question_applies, questions_for_tier, resolve_review_panel, slugify,
     )
@@ -4093,22 +4186,28 @@ async def _run_new(
 
     tier1 = questions_for_tier(1, frontend)
     tier2_qs = questions_for_tier(2, frontend)
-    tier3_qs = questions_for_tier(3, frontend)
 
-    # The author line is asked on the first interview only, then kept (core/profile.py) and shown for editing below.
+    # The paper byline is not asked here: it comes from the profile (core/profile.py), is folded on the review screen,
+    # and is asked once before the first paper is written when it is still empty (_ask_byline_once).
     from core import profile as _profile
+    from core.interview import FIRST_STEPS
 
     saved_profile = _profile.load()
     if saved_profile is not None:
         partial.update(saved_profile)
 
-    # ---- Stage 1: ask tier-1 sequentially ----
+    # ---- Stage 1: three steps -- the research question, what the result is for, the model ----
+    step_of = {qid: (n, title) for n, (_sid, title, qids) in enumerate(FIRST_STEPS, 1) for qid in qids}
+    shown_step = 0
     try:
         for q in tier1:
-            if saved_profile is not None and q.id in _profile.FIELDS:
-                continue
             if not question_applies(q, partial):  # the second reviewer's model: research or a decision only
                 continue
+            n, title = step_of.get(q.id, (0, ""))
+            if n and n != shown_step:
+                shown_step = n
+                print()
+                print(f"── Step {n} of {len(FIRST_STEPS)}: {title} ──")
             answer = _cli_prompt_for(q, partial, {})
             while (q.id == "provider_model" and answer is not None and not str(answer).strip()
                    and str(partial.get("result_use") or "research") != "explore"):
@@ -4153,16 +4252,14 @@ async def _run_new(
         if preflight_cache.get(k):
             advanced[k] = preflight_cache[k]
 
-    # ---- Stage 3: review-and-edit loop ----
+    # ---- Stage 3: review-and-edit loop: four plain cards, the rest under Advanced ----
     show_advanced = False
     edited: set[str] = set()
-    author_qs = tuple(q for q in tier1 if q.id in _profile.FIELDS)
     try:
         while True:
-            rows = _build_review_rows(derived, advanced, tier2_qs, tier3_qs, show_advanced,
-                                      author=(author_qs, partial))
-            _print_plan_summary({**partial, **derived, **advanced})
-            _print_review(rows, show_advanced=show_advanced)
+            values = {**partial, **derived, **advanced}
+            rows = _build_review_rows(values, show_advanced=show_advanced)
+            _print_review(rows, show_advanced=show_advanced, values=values)
             choice = input(
                 "\nEdit which? [number to edit, "
                 + ("'h' to hide" if show_advanced else "'a' to show advanced")
@@ -4184,6 +4281,15 @@ async def _run_new(
                 print(f"  ⚠ number out of range; pick 1-{len(rows)}.")
                 continue
             row = rows[idx]
+            if row["id"] == "byline":
+                # The folded "Paper byline (optional)" row: its four fields, each optional.
+                for bq in (q for q in tier2_qs if q.id in BYLINE_FIELDS):
+                    typed = _cli_prompt_for(bq, {**partial, **derived}, {})
+                    if typed is None:
+                        break
+                    derived[bq.id] = " ".join(str(typed).split())
+                    edited.add(bq.id)
+                continue
             new_val = _cli_prompt_for(row["question"], {**partial, **derived, **advanced}, preflight_cache)
             if new_val is None:
                 continue  # user aborted single-field edit; stay in review
@@ -4216,9 +4322,28 @@ async def _run_new(
                         f"    ⚠ fewer than {ENSEMBLE_MIN_MODELS} models named — no ensemble will be "
                         "configured (FI does not pick models for you)."
                     )
-            if row["tier"] == 1:  # the author line: this quest, and kept in the profile for later ones
+            if row["tier"] == 1:  # an answer of the first screen: what follows from it is worked out again
+                if row["id"] == "second_reviewer_model" and new_val == partial.get("provider_model"):
+                    print("    (that is the model the quest runs on; pick another, or 'I only have one model')")
+                    continue
                 partial[row["id"]] = new_val
-                edited.add(row["id"])
+                if row["id"] == "provider" and new_val != row["value"]:
+                    # Another provider: its models, and (research or a decision) a reviewer on another one of them.
+                    for mid in ("provider_model", "second_reviewer_model"):
+                        partial.pop(mid, None)
+                        mq = next(q for q in tier1 if q.id == mid)
+                        if question_applies(mq, partial):
+                            picked = _cli_prompt_for(mq, partial, {})
+                            if picked is not None:
+                                partial[mid] = picked
+                fresh = derive_tier2({**partial, **{k: v for k, v in derived.items() if k in edited}})
+                derived.update({k: v for k, v in fresh.items() if k not in edited})
+                fresh3 = derive_tier3({**partial, **derived})
+                advanced.update({k: v for k, v in fresh3.items()
+                                 if k not in edited and k not in ("comparative_baseline", "success_metric", "budget")})
+                if row["id"] == "result_use":
+                    derived["review_panel"] = resolve_review_panel(
+                        list(derived.get("review_panel") or []), str(new_val or "research"))  # type: ignore[arg-type]
             elif row["tier"] == 2:
                 derived[row["id"]] = new_val
                 edited.add(row["id"])
@@ -4291,10 +4416,10 @@ async def _run_new(
         ensemble_profile=str(advanced.get("ensemble_profile") or "off"),
         ensemble_models=str(advanced.get("ensemble_models") or ""),
         max_iterations=int(advanced.get("max_iterations", 2) or 2),
-        author=" ".join(str(partial.get("author") or "").split()),
-        affiliation=" ".join(str(partial.get("affiliation") or "").split()),
-        contact_email=" ".join(str(partial.get("contact_email") or "").split()),
-        url=" ".join(str(partial.get("url") or "").split()),
+        author=" ".join(str(derived.get("author") or "").split()),
+        affiliation=" ".join(str(derived.get("affiliation") or "").split()),
+        contact_email=" ".join(str(derived.get("contact_email") or "").split()),
+        url=" ".join(str(derived.get("url") or "").split()),
         poster_size=str(advanced.get("poster_size") or "a1_portrait"),
         reasoning_effort=str(advanced.get("reasoning_effort") or "default"),
         # Checked when it was typed on the review screen; blank is no set limit.
@@ -4311,9 +4436,10 @@ async def _run_new(
     yaml_path = drafts_dir / f"{stamp}-{slugify(answers.title)}.yaml"
     yaml_path.write_text(yaml_text, encoding="utf-8")
 
-    # The author line, once the quest's config is written: kept for later quests when it is new or was changed here.
+    # The byline, once the quest's config is written: kept for later quests when it was typed or changed here. A blank
+    # one is not kept while none was ever given: it is then asked once before the first paper (_ask_byline_once).
     line = {k: getattr(answers, k) for k in _profile.FIELDS}
-    if saved_profile != line:
+    if saved_profile != line and (saved_profile is not None or any(line.values())):
         try:
             _profile.save(line)
             print(f"  (your author line is kept in {_profile.path()} for the next quests)")
@@ -4370,96 +4496,76 @@ async def _run_new(
         return 1
 
 
-def _print_plan_summary(partial: dict[str, object]) -> None:
-    """The answers that set what the quest costs and how strictly it is checked, above the editable rows, so the
-    confirm screen shows them before launch (they were asked first and never shown again)."""
-    from core.interview import RESULT_USE_CHOICES
+def _build_review_rows(values: dict[str, object], *, show_advanced: bool, frontend: str = "cli") -> list[dict[str, object]]:
+    """The review screen's numbered rows, card by card (``core.interview.REVIEW_CARDS``): each card's shown rows, then,
+    when ``show_advanced``, each card's advanced rows. The four byline fields are one folded row, "Paper byline
+    (optional)" (id ``byline``). Each row carries its Question so the edit handler re-prompts that exact slot."""
+    from core.interview import BYLINE_FIELDS, QUESTIONS, REVIEW_CARDS, byline_text, question_applies
 
-    use = str(partial.get("result_use") or "research")
-    label = next((c.label for c in RESULT_USE_CHOICES if c.value == use), use)
-    print()
-    print("─── The plan ──────────────────────────────────────────")
-    print(f"  Result for   : {label}")
-    if use == "explore":
-        print("  Checks       : a preliminary draft, never ready to publish as it stands; skips the idea self-critique,")
-        print("                 the per-finding cross-check and the redesign after the analysis")
-    else:
-        print("  Checks       : every check stops the quest; the plan waits for you; clean environment per quest")
-    phased = partial.get("phased")
-    if phased is True:
-        print("  Confirm      : explore first, then run the frozen design once more on data or seeds it never saw")
-        print("                 (one more full run of the experiment; a quest with no experiment of its own skips it)")
-    elif phased is False and use != "explore":
-        print("  Confirm      : off: the result is not confirmed on data or seeds it never saw")
-    model = partial.get("provider_model") or "(provider default)"
-    print(f"  Model        : {partial.get('provider') or 'openai'} / {model}")
-    second = str(partial.get("second_reviewer_model") or "")
-    if use != "explore" and second:
-        from core.interview import ONE_MODEL_ANSWER
-        print("  Reviewers    : " + ("all on the one model (the result says so, and is not marked publication-ready)"
-                                     if second == ONE_MODEL_ANSWER else f"the statistics reviewer uses {second}"))
-    ensemble = str(partial.get("ensemble_profile") or "off")
-    if ensemble != "off":
-        print(f"  Ensemble     : {ensemble} ({partial.get('ensemble_models') or 'no models named'})")
-    byline = ", ".join(str(partial.get(k)) for k in ("author", "affiliation") if partial.get(k))
-    print(f"  Author line  : {byline or '(none: the Frontier Insight byline)'}")
-
-
-def _build_review_rows(
-    derived: dict[str, object],
-    advanced: dict[str, object],
-    tier2_qs: tuple,  # type: ignore[type-arg]
-    tier3_qs: tuple,  # type: ignore[type-arg]
-    show_advanced: bool,
-    author: tuple | None = None,  # type: ignore[type-arg]
-) -> list[dict[str, object]]:
-    """Pack tier-2 (always) + tier-3 (when ``show_advanced``) into a
-    numbered list the review screen prints. Each row carries the
-    Question so the edit handler can re-prompt that exact slot. ``author``
-    is ``(questions, answers)`` for the author line, listed last among the
-    always-shown rows so it can be changed (and kept) here."""
+    by_id = {q.id: q for q in QUESTIONS if frontend in q.frontends}
     rows: list[dict[str, object]] = []
-    for q in tier2_qs:
-        rows.append({
-            "id": q.id, "tier": 2, "label": q.label,
-            "value": derived.get(q.id), "question": q,
-        })
-    if author is not None:
-        author_qs, answers = author
-        for q in author_qs:
-            rows.append({
-                "id": q.id, "tier": 1, "label": q.label,
-                "value": answers.get(q.id) or "", "question": q,
-            })
-    if show_advanced:
-        for q in tier3_qs:
-            rows.append({
-                "id": q.id, "tier": 3, "label": q.label,
-                "value": advanced.get(q.id), "question": q,
-            })
+    for part in ("shown", "advanced") if show_advanced else ("shown",):
+        for card in REVIEW_CARDS:
+            for qid in card[part]:
+                if qid in BYLINE_FIELDS:
+                    if qid == BYLINE_FIELDS[0]:
+                        rows.append({"id": "byline", "card": card["id"], "advanced": part == "advanced", "tier": 2,
+                                     "label": "Paper byline (optional)", "value": byline_text(values),
+                                     "question": None})
+                    continue
+                q = by_id.get(qid)
+                if q is None or not question_applies(q, values):
+                    continue
+                rows.append({"id": qid, "card": card["id"], "advanced": part == "advanced", "tier": q.tier,
+                             "label": q.label, "value": values.get(qid), "question": q})
     return rows
 
 
-def _print_review(rows: list[dict[str, object]], *, show_advanced: bool) -> None:
-    """Render the numbered review table. Tier-2 rows always show;
-    tier-3 rows appear under an "Advanced" subheading when the user
-    toggled them on with `a`."""
+def _model_ready_line(values: dict[str, object]) -> str:
+    """Card 2's readiness line: how far the chosen provider is set up on this computer (local only, at once;
+    core/provider_readiness.py). The full check runs again before launch."""
+    provider = str(values.get("provider") or "")
+    if not provider:
+        return "no provider chosen"
+    try:
+        from core.provider_readiness import check_local, one_line
+
+        return one_line(check_local(provider, model=str(values.get("provider_model") or "") or None,
+                                    base_url=str(values.get("provider_base_url") or ""),
+                                    api_key_env=str(values.get("provider_api_key_env") or "")))
+    except Exception as e:  # noqa: BLE001 -- a line on a screen; the launch check is what counts
+        return f"could not check it here ({e.__class__.__name__}); it is checked again before launch"
+
+
+def _print_review(rows: list[dict[str, object]], *, show_advanced: bool, values: dict[str, object] | None = None) -> None:
+    """The review screen: four plain cards (how strictly it is checked and what it costs; the model and whether it
+    is ready; data, sources and pauses; what you get), numbered rows to edit, and an "Advanced" part, folded unless
+    the person typed 'a'. Internal names (paper_md, methodologist, ...) are shown in plain words."""
+    from core.interview import REVIEW_CARDS, checks_sentence, cost_note, plain_value
+
+    values = values or {}
     print()
     print("─── Review before launch ──────────────────────────────")
-    in_advanced_section = False
+    titles = {c["id"]: c["title"] for c in REVIEW_CARDS}
+    shown_card = None
+    in_advanced = False
     for i, r in enumerate(rows, 1):
-        if r["tier"] == 3 and not in_advanced_section:
+        if r["advanced"] and not in_advanced:
+            in_advanced = True
+            shown_card = None
             print()
-            print("  ── Advanced (preflight-LLM suggested) ──")
-            in_advanced_section = True
-        val = r["value"]
-        if isinstance(val, list):
-            val_str = f"[{', '.join(str(v) for v in val)}]" if val else "(none)"
-        elif val == "":
-            val_str = "(empty)"
-        else:
-            val_str = str(val)
-        print(f"  {i:>2}. {r['label']:<28} {val_str}")
+            print("  ══ Advanced ══")
+        if r["card"] != shown_card:
+            shown_card = r["card"]
+            print()
+            print(f"  [{titles[str(r['card'])]}]" if not in_advanced else f"  ── {titles[str(r['card'])]} ──")
+            if not in_advanced and r["card"] == "checks":
+                print(f"      {checks_sentence(values)}")
+                print(f"      Cost: {cost_note(values)}")
+            if not in_advanced and r["card"] == "models":
+                print(f"      Ready? {_model_ready_line(values)}")
+        val_str = str(r["value"]) if r["id"] == "byline" else plain_value(str(r["id"]), r["value"])
+        print(f"  {i:>2}. {r['label']:<34} {val_str}")
     if not show_advanced:
         print()
         print("      (type 'a' to show advanced fields)")
@@ -6985,6 +7091,9 @@ def main() -> int:
     # SEMANTIC_SCHOLAR_API_KEY / FI_* at Config construction time).
     _load_dotenvs()
     argv = sys.argv[1:]
+    if not argv:
+        # Bare `fi`: three plain next steps in a terminal, the short help (exit 2) elsewhere -- never the flag wall.
+        argv = _start_menu()
     if argv[:1] == ["demo"]:
         # `fi demo` (core/demo.py): writes the example quest and checks the model; a yes runs it as `--config`.
         went_on = _demo(argv[1:])

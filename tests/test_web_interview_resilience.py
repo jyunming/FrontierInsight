@@ -164,6 +164,9 @@ def test_kept_answers_are_removed_once_the_quest_is_launched(tmp_path: Path) -> 
                       json={**_ok_answers_payload(), "submit_key": KEY, "draft_id": DRAFT})
     assert res.status_code == 200
     assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 404
+    # A save the page sent just before Launch, arriving after it, does not bring them back.
+    assert client.put(f"/api/interview/draft/{DRAFT}", json={"id": DRAFT, "form": {"topic": "x"}}).status_code == 409
+    assert client.get(f"/api/interview/draft/{DRAFT}").status_code == 404
 
 
 @pytest.mark.parametrize("bad_id", ["short", "has space here", "..%2F..%2Fx1234567", "a" * 65])

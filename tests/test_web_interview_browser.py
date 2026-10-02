@@ -170,3 +170,35 @@ def test_after_a_launch_a_new_interview_starts_empty(tmp_path: Path) -> None:
         page.wait_for_timeout(300)
         assert page.input_value("#q-topic") == ""
         assert not list((site.output_root / "_drafts" / ".interview").glob("*.json"))
+
+
+def test_a_first_time_user_sees_three_steps_then_four_plain_cards(tmp_path: Path) -> None:
+    """The first screen asks only the research question, what the result is for and the model (numbered as three
+    steps, the byline not among them); the review screen is the four cards of core/interview.py REVIEW_CARDS, in plain
+    words, with the rarer settings folded under Advanced."""
+    from core.interview import REVIEW_CARDS
+
+    site = _site(tmp_path)
+    with browser_page(site) as page:
+        page.goto(f"{BASE}/interview")
+        page.wait_for_selector("#q-topic")
+        legends = page.eval_on_selector_all(
+            "#interview-form fieldset:not(.hidden) legend", "els => els.map((e) => e.innerText.trim())")
+        import re
+
+        assert {int(re.match(r"\s*(\d+)", text).group(1)) for text in legends} == {1, 2, 3}, legends
+        assert "your research question" in legends[0].lower()
+        assert not page.query_selector("#q-author"), "the byline is asked on the first screen"
+        assert page.inner_text("#progress-pill").strip().lower().endswith("3 steps")
+        _to_review(page)
+        review = page.inner_text("#review-section")
+        for card in REVIEW_CARDS:
+            assert card["title"].lower() in review.lower()
+        assert "paper byline (optional)" in review.lower()
+        assert "Cost: " in review
+        page.wait_for_function("() => !document.getElementById('review-ready').innerText.includes('Checking')")
+        assert page.inner_text("#review-ready").startswith("Ready? ")
+        shown = review.split("Advanced", 1)[0]
+        for raw in ("paper_md", "paper_pdf", "methodologist", "devil_advocate", "Axon", "(unset)", "Title (short slug)"):
+            assert raw not in shown, f"{raw!r} on the review cards"
+        assert page.is_hidden("#review-advanced .space-y-4")

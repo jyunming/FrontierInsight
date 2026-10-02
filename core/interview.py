@@ -94,18 +94,20 @@ class Question:
     # Interview presentation tier. Frontends consult this to decide
     # which questions to show by default:
     #
-    #   tier=1 — always-ask: the topic, what the result is for, and on
-    #            CLI/web the provider + model. The author line is tier 1
-    #            too but asked only while no profile is saved
-    #            (core/profile.py): the first interview asks it, later
-    #            ones fill it from the profile.
+    #   tier=1 — always-ask, in three steps (``FIRST_STEPS``): the research
+    #            question, what the result is for, and the model (CLI/web:
+    #            provider + model, and for research or a decision a
+    #            different model for one reviewer; VS Code: the chat model).
     #
     #   tier=2 — auto-derive. Smart defaults populate these from tier-1
     #            answers (title from slug, paper format, deliverables,
     #            study depth, no_simulation from format, knowledge from
     #            Axon-sidecar status, etc.). Frontends still SHOW them on
     #            a review screen so the user can click-to-edit before
-    #            launch.
+    #            launch. The paper byline (author, affiliation, contact
+    #            email, link) is tier 2 too: filled from the saved profile
+    #            (core/profile.py), folded on the review screen, and asked
+    #            once before the first paper is written when it is empty.
     #
     #   tier=3 — advanced. Topic-tuned slots whose default is good
     #            enough for 95% of quests (the preflight LLM call
@@ -512,7 +514,7 @@ QUESTIONS: tuple[Question, ...] = (
     # ─── Tier 1 — always-ask ──────────────────────────────────────────
     Question(
         id="topic",
-        label="Topic",
+        label="Research question",
         prompt="What do you want to study? Be specific about the question, what's known, and what success looks like.",
         kind="text",
         placeholder="e.g. Compare three numerical integrators on a damped harmonic oscillator and report energy drift.",
@@ -636,7 +638,7 @@ QUESTIONS: tuple[Question, ...] = (
     # ─── Tier 2 — auto-derive, shown in review screen ────────────────
     Question(
         id="title",
-        label="Title (short slug)",
+        label="Short name (used for the folder)",
         prompt="Short identifier for this quest. Used in folder names. Auto-slugged from your topic; edit if you want something different.",
         kind="text",
         mid_quest_editable=False,
@@ -678,7 +680,7 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         id="review_panel",
-        label="Reviewer panel",
+        label="Reviewers",
         prompt=(
             "Recommended: 3-persona panel — the methodologist is the must-flag-rule reviewer; "
             "dropping the panel loses those checks. Single-reviewer is cheaper but ships "
@@ -692,7 +694,7 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         id="pause_for_user_input",
-        label="Pause for user-supplied papers / datasets",
+        label="Pause for your own papers or data",
         prompt="Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-literature stops once the literature is saved, so the experiment is designed with it in hand; after-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
         kind="single",
         choices=(
@@ -713,7 +715,7 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         id="knowledge_enabled",
-        label="Knowledge layer (Axon)",
+        label="Look up the literature",
         prompt="Auto-detected from the Axon sidecar status. Override only if you have a specific reason.",
         kind="single",
         choices=KNOWLEDGE_CHOICES,
@@ -805,7 +807,7 @@ QUESTIONS: tuple[Question, ...] = (
     ),
     Question(
         id="knowledge_top_k",
-        label="Axon hits per quest",
+        label="Saved-library passages per quest",
         prompt="Dense-embedding retrievals from Axon fed to the writer. Small-k is precision (8 default); bump to 12-15 for comprehensive reviews. External web hits are sized separately via 'External hits per quest'.",
         kind="text",
         default=8,
@@ -918,51 +920,180 @@ QUESTIONS: tuple[Question, ...] = (
         mid_quest_editable=True,
         tier=3,
     ),
-    # ─── Author line (tier 1, every field optional) ──────────────────
-    # Printed on the paper, slides and poster. Asked on the first
-    # interview on any frontend and kept in the profile
-    # (core/profile.py); later interviews fill it from there.
+    # ─── Paper byline (tier 2, every field optional) ─────────────────
+    # Printed on the paper, slides and poster. Not asked up front: filled
+    # from the profile (core/profile.py), folded on the review screen
+    # ("Paper byline (optional)"), and asked once before the first paper
+    # is written when it is still empty (launch.py:_ask_byline_once).
     Question(
         id="author",
-        label="Author (optional)",
+        label="Byline: your name",
         prompt="Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
         kind="text",
         placeholder="e.g. Jane Chen",
         default="",
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
     Question(
         id="affiliation",
-        label="Affiliation (optional)",
+        label="Byline: affiliation",
         prompt="Lab, company or school to print under the author. Leave blank to omit.",
         kind="text",
         placeholder="e.g. Materials Lab, Example University",
         default="",
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
     Question(
         id="contact_email",
-        label="Contact email (optional)",
+        label="Byline: contact email",
         prompt="Printed on the poster and under the paper title so readers can reach you. It goes only into your own output files. Leave blank to omit.",
         kind="text",
         placeholder="e.g. jane@example.org",
         default="",
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
     Question(
         id="url",
-        label="Project link (optional)",
+        label="Byline: project link",
         prompt="A web page for this work, such as a repository or lab page. The poster prints it as a QR code. Leave blank for no QR code.",
         kind="text",
         placeholder="e.g. https://github.com/you/project",
         default="",
         mid_quest_editable=True,
-        tier=1,
+        tier=2,
     ),
 )
+
+
+# ---------------------------------------------------------------------------
+# What a first-time person sees: three questions, then four cards
+# ---------------------------------------------------------------------------
+
+#: The paper byline: printed on the paper, slides and poster; kept in the profile (core/profile.py).
+BYLINE_FIELDS: tuple[str, ...] = ("author", "affiliation", "contact_email", "url")
+
+#: The first screen, in three steps. A frontend asks the tier-1 questions of a step that apply to it (``frontends``,
+#: ``ask_if``) and numbers the steps, not the questions. Mirrored in vscode-frontier-insight/src/interview-core.ts
+#: (FIRST_STEPS); tests/test_interview_review_cards.py keeps them equal.
+FIRST_STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("question", "Your research question", ("topic",)),
+    ("use", "What the result is for", ("result_use",)),
+    ("model", "The model", ("provider", "provider_model", "second_reviewer_model")),
+)
+
+#: The review screen: four plain cards, each with the rows it shows and the ones it keeps under "Advanced". Every
+#: question is on exactly one card (tests/test_interview_review_cards.py). The byline rows are folded into one
+#: "Paper byline (optional)" row on the outputs card. Mirrored in vscode-frontier-insight/src/interview-core.ts
+#: (REVIEW_CARDS).
+REVIEW_CARDS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "checks",
+        "title": "How strictly it is checked, and what it costs",
+        "shown": ("result_use", "review_panel", "phased"),
+        "advanced": ("pause_for_plan", "max_iterations"),
+    },
+    {
+        "id": "models",
+        "title": "The model, and whether it is ready",
+        "shown": ("provider", "provider_model", "second_reviewer_model"),
+        "advanced": ("reasoning_effort", "ensemble_profile", "ensemble_models", "node_models", "provider_base_url",
+                     "provider_api_key_env", "provider_fixed_temperature"),
+    },
+    {
+        "id": "data",
+        "title": "Data, sources and pauses",
+        "shown": ("no_simulation", "survey_mode", "knowledge_enabled", "web_research", "pause_for_user_input"),
+        "advanced": ("supply_papers", "clarify_mode", "comparative_baseline", "success_metric", "budget",
+                     "knowledge_top_k", "knowledge_external_top_k"),
+    },
+    {
+        "id": "outputs",
+        "title": "What you get",
+        "shown": ("title", "output_kinds", "paper_format", "study_depth", "audience", *BYLINE_FIELDS),
+        "advanced": ("page_limit", "paper_style", "poster_size"),
+    },
+)
+
+#: Plain words for the values a review card would otherwise show as internal names (``paper_md``, ``methodologist``).
+PLAIN_VALUES: dict[str, dict[str, str]] = {
+    "output_kinds": {"paper_md": "paper (Markdown)", "paper_pdf": "paper (PDF)", "slides": "slides",
+                     "poster": "poster", "speech": "talk script"},
+    "review_panel": {"methodologist": "method", "statistician": "statistics", "devil_advocate": "devil's advocate",
+                     "reproducibility": "reproducibility"},
+}
+
+#: What a quest costs, in model calls (measured on earlier quests: a research quest took 47-90 calls). Exploring skips
+#: three call-heavy steps; no measured range for it yet, so it is said as "fewer". A multi-model ensemble multiplies the
+#: nodes it covers (``estimate_ensemble_cost_multiplier``).
+COST_NOTES: dict[str, str] = {
+    "research": "about 50-90 model calls (what earlier research quests took)",
+    "explore": "fewer model calls than research (no idea self-critique, per-finding cross-check or redesign)",
+}
+
+
+def plain_value(question_id: str, value: Any) -> str:
+    """A review-card value in plain words: a choice's label, internal names translated (``PLAIN_VALUES``), a list
+    joined, and "(none)" / "(not set)" for nothing."""
+    names = PLAIN_VALUES.get(question_id)
+    if isinstance(value, list):
+        q = next((x for x in QUESTIONS if x.id == question_id), None)
+        if q is not None and question_id != "review_panel":
+            hit = next((c for c in q.choices if c.value == value), None)
+            if hit is not None:
+                return hit.label
+        if not value:
+            return "single reviewer" if question_id == "review_panel" else "(none)"
+        return ", ".join(names.get(str(v), str(v)) if names else str(v) for v in value)
+    q = next((x for x in QUESTIONS if x.id == question_id), None)
+    if q is not None:
+        hit = next((c for c in q.choices if c.value == value and not isinstance(c.value, (list, dict))), None)
+        if hit is not None:
+            return hit.label
+    if value is None or value == "":
+        return "(not set)"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return str(value)
+
+
+def cost_note(answers: dict[str, Any]) -> str:
+    """The estimated cost line of the "how strictly it is checked" card."""
+    use = str(answers.get("result_use") or "research")
+    note = COST_NOTES["explore" if use == "explore" else "research"]
+    profile = str(answers.get("ensemble_profile") or "off")
+    if profile != "off" and len(parse_ensemble_models(answers.get("ensemble_models"))) >= ENSEMBLE_MIN_MODELS:
+        note += f"; the ensemble multiplies that by about {estimate_ensemble_cost_multiplier(profile):g}"
+    return note
+
+
+#: How strictly the quest is checked, in one sentence (the first line of the "checks" card).
+CHECKS_SENTENCES: dict[str, str] = {
+    "research": ("Every check stops the quest instead of only reporting; the experiment runs in its own clean "
+                 "environment; the reviewers below read the paper."),
+    "explore": "A preliminary draft: fewer checks, never marked ready to publish as it stands.",
+}
+
+#: The folded "Paper byline (optional)" row when nothing is set.
+BYLINE_EMPTY = "none yet: asked once before the first paper (else the Frontier Insight byline)"
+
+
+def checks_sentence(answers: dict[str, Any]) -> str:
+    return CHECKS_SENTENCES["explore" if str(answers.get("result_use") or "research") == "explore" else "research"]
+
+
+def byline_text(answers: dict[str, Any]) -> str:
+    """The folded "Paper byline (optional)" row: what is printed, or what happens when nothing is."""
+    parts = [" ".join(str(answers.get(k) or "").split()) for k in BYLINE_FIELDS]
+    parts = [p for p in parts if p]
+    return ", ".join(parts) if parts else BYLINE_EMPTY
+
+
+def review_cards_json() -> list[dict[str, Any]]:
+    return [{"id": c["id"], "title": c["title"], "shown": list(c["shown"]), "advanced": list(c["advanced"])}
+            for c in REVIEW_CARDS]
 
 
 # ---------------------------------------------------------------------------
@@ -1294,7 +1425,10 @@ def derive_tier2(tier1_answers: dict[str, Any]) -> dict[str, Any]:
     for q in QUESTIONS:
         if q.tier != 2:
             continue
-        if q.id in SMART_DEFAULTS:
+        if q.id in BYLINE_FIELDS:
+            # The saved byline (core/profile.py) when the caller has it, else blank.
+            out[q.id] = str(tier1_answers.get(q.id) or "")
+        elif q.id in SMART_DEFAULTS:
             out[q.id] = SMART_DEFAULTS[q.id](merged)
         elif q.default is not None:
             out[q.id] = q.default
@@ -2031,6 +2165,14 @@ def export_schema_json() -> dict[str, Any]:
         "required_review_roles": list(REQUIRED_REVIEW_ROLES),
         "research_review_panel": list(RESEARCH_REVIEW_PANEL),
         "editable_fields": sorted(EDITABLE_FIELDS),
+        # What a first-time person sees: the three first steps, then the four review cards (and their words).
+        "first_steps": [{"id": i, "title": t, "questions": list(qs)} for i, t, qs in FIRST_STEPS],
+        "review_cards": review_cards_json(),
+        "plain_values": PLAIN_VALUES,
+        "cost_notes": COST_NOTES,
+        "checks_sentences": CHECKS_SENTENCES,
+        "byline_empty": BYLINE_EMPTY,
+        "byline_fields": list(BYLINE_FIELDS),
         "stage_invalidation": {
             field: list(stages) for field, stages in STAGE_INVALIDATION.items()
         },

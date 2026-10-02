@@ -115,12 +115,12 @@ async def test_run_new_draft_only_produces_valid_config_yaml(
     assert cfg.provider.model == first_model
 
 
-def _review_row(qid: str) -> str:
-    """The number the review screen gives ``qid`` once Advanced is shown: tier 2, then the author line, then tier 3."""
-    from core.interview import questions_for_tier
+def _review_row(qid: str, values: dict | None = None) -> str:
+    """The number the review screen gives ``qid`` once Advanced is shown: the four cards' rows, then their advanced
+    ones (launch._build_review_rows); the byline's four fields are one row, ``byline``."""
+    from launch import _build_review_rows
 
-    author = [q.id for q in questions_for_tier(1, "cli") if q.id in ("author", "affiliation", "contact_email", "url")]
-    rows = [q.id for q in questions_for_tier(2, "cli")] + author + [q.id for q in questions_for_tier(3, "cli")]
+    rows = [str(r["id"]) for r in _build_review_rows(values or {}, show_advanced=True)]
     return str(rows.index(qid) + 1)
 
 
@@ -147,19 +147,24 @@ async def _new(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: list[str]
 
 
 @pytest.mark.asyncio
-async def test_run_new_asks_the_author_line_once_and_keeps_it_for_the_next_quest(
+async def test_run_new_folds_the_byline_and_keeps_it_for_the_next_quest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first interview asks the author line after the topic, what the result is for and the model; it is kept
-    (core/profile.py) and the next interview asks only the first four and fills the author line from it."""
+    """The first interview asks only the question, what the result is for and the model; the byline is one folded row
+    of the review screen ("Paper byline (optional)"). Typed there, it is kept (core/profile.py) and the next interview
+    fills it from the profile without asking."""
     from core import profile
 
     assert profile.load() is None
+    blank = await _new(tmp_path, monkeypatch, ["Byline left blank", "", "1", "1", "1", ""])
+    assert blank.output.author == ""
+    assert profile.load() is None, "a blank byline was kept: it would never be asked before the first paper"
     cfg = await _new(tmp_path, monkeypatch, [
         "Author line probe topic",   # topic
         "",                          # result_use (default research)
         "1", "1",                    # provider, provider_model
         "1",                         # second reviewer's model (research)
+        _review_row("byline"),       # review screen: open the folded byline
         "  Jane   Chen ",            # author
         "R&D Lab",                   # affiliation
         "",                          # contact_email (skipped)
@@ -176,7 +181,8 @@ async def test_run_new_asks_the_author_line_once_and_keeps_it_for_the_next_quest
         "Jane Chen", "R&D Lab", "https://example.org/p")
 
     # Changed on the review screen: this quest and the next ones.
-    changed = await _new(tmp_path, monkeypatch, ["A third topic", "", "1", "1", "1", _review_row("affiliation"), "New Lab", ""])
+    changed = await _new(tmp_path, monkeypatch, ["A third topic", "", "1", "1", "1", _review_row("byline"), "",
+                                                  "New Lab", "", "", ""])
     assert changed.output.affiliation == "New Lab" and profile.load()["affiliation"] == "New Lab"
 
 
@@ -187,7 +193,7 @@ async def test_run_new_writes_the_ensemble_named_in_advanced(
     """The ensemble is in Advanced now. Picked there with the models the person named, it is written as they named it;
     FI adds none."""
     cfg = await _new(tmp_path, monkeypatch, [
-        "Ensemble probe topic", "", "1", "1", "1", "", "", "", "",  # topic, result_use, provider, model, 2nd reviewer, author
+        "Ensemble probe topic", "", "1", "1", "1",  # topic, result_use, provider, model, 2nd reviewer
         "a", _review_row("ensemble_profile"), "4",              # Advanced: the full profile
         _review_row("ensemble_models"), "model-a, model-b, model-c",
         "",                                                     # launch
@@ -203,7 +209,7 @@ async def test_run_new_configures_no_ensemble_when_the_user_names_no_models(
     """Picking a fan-out profile but naming no models must not fall back to models FI likes: the quest runs
     single-model."""
     cfg = await _new(tmp_path, monkeypatch, [
-        "Ensemble without models probe", "", "1", "1", "1", "", "", "", "",
+        "Ensemble without models probe", "", "1", "1", "1",
         "a", _review_row("ensemble_profile"), "4", "",
     ])
     assert not cfg.provider.node_ensemble
@@ -218,7 +224,7 @@ async def test_run_new_takes_a_paper_format_changed_on_the_review_screen_and_wha
 
     essay = str([c.value for c in PAPER_FORMATS].index("essay") + 1)
     cfg = await _new(tmp_path, monkeypatch, [
-        "A history of the printing press", "", "1", "1", "1", "", "", "", "",
+        "A history of the printing press", "", "1", "1", "1",
         _review_row("paper_format"), essay, "",
     ])
     assert cfg.output.paper_format == "essay"
@@ -247,7 +253,6 @@ async def test_run_new_writes_a_page_limit_typed_on_the_review_screen(
         "",                          # result_use (default research)
         "1", "1",                    # provider, provider_model
         "1",                         # second reviewer's model (research)
-        "", "", "", "",              # author line
         "a", row, "four",            # review screen: show advanced, a typo (refused)
         row, "4",                    # the page limit
         "",                          # launch
@@ -290,7 +295,7 @@ async def test_run_new_writes_what_the_result_is_for(
     # topic, result_use, (three blanks the provider question re-asks), provider, provider_model, and for research or a
     # decision the second reviewer's model (not asked when exploring); then Enter to launch.
     second = [] if pick == "3" else ["1"]
-    answers = iter(["Result use probe topic", pick, "", "", "", "1", "1", *second, "", "", "", "", "", ""])
+    answers = iter(["Result use probe topic", pick, "", "", "", "1", "1", *second, "", ""])
     reads = {"n": 0}
 
     def fake_input(prompt: str = "") -> str:
@@ -317,7 +322,7 @@ async def test_run_new_writes_what_the_result_is_for(
         # The review screen shows the panel that runs, reproducibility included, before launch.
         assert "reproducibility" in shown.split("Review before launch", 1)[1]
         assert "reproducibility" in cfg.engine.review_panel
-    assert "Result for" in shown
+    assert "What is the result for?" in shown.split("Review before launch", 1)[1]
 
 
 def test_a_blank_answer_keeps_the_value_the_caller_holds(monkeypatch: pytest.MonkeyPatch) -> None:

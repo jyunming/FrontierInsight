@@ -1,113 +1,87 @@
-"""CLI --new review screen + numbered-edit loop.
+"""CLI --new review screen: four plain cards, internal names only under Advanced.
 
-Pin the structure of the review table that ``python launch.py --new``
-shows between tier-1 collection and quest launch. We don't try to
-drive the full interactive loop (that needs a real TTY); we just
-assert the helpers produce the right shape so a future edit can't
-silently shuffle rows or drop the advanced section.
+``python launch.py --new`` shows, between the three first questions and the launch, four cards (how strictly it is
+checked and what it costs; the model and whether it is ready; data, sources and pauses; what you get), built from
+``core.interview.REVIEW_CARDS``, the same cards the web page and VS Code show. Each card's advanced rows are folded
+under "Advanced" until the person types 'a'; the byline's four fields are one folded row. We don't drive the full
+interactive loop here (tests/test_interview_e2e_cli.py does); we pin the structure.
 """
 from __future__ import annotations
 
 import io
 from contextlib import redirect_stdout
 
-from core.interview import questions_for_tier
+from core.interview import REVIEW_CARDS, derive_tier2, derive_tier3
 from launch import _build_review_rows, _print_review
 
-
-def _stub_tier_qs():
-    return (
-        questions_for_tier(2, "cli"),
-        questions_for_tier(3, "cli"),
-    )
+_ANSWERS = {"topic": "Heat flow through a cooling fin", "result_use": "research", "provider": "openai",
+            "provider_model": "gpt-5", "second_reviewer_model": "gpt-5-mini"}
 
 
-def test_review_rows_default_view_is_tier2_only() -> None:
-    """Without ``show_advanced``, the review screen lists only the
-    6 tier-2 rows. Tier-3 fields stay hidden behind the toggle."""
-    t2, t3 = _stub_tier_qs()
-    derived = {q.id: q.default for q in t2}
-    advanced = {q.id: q.default for q in t3}
-    rows = _build_review_rows(derived, advanced, t2, t3, show_advanced=False)
-
-    assert len(rows) == len(t2), f"expected {len(t2)} tier-2 rows, got {len(rows)}"
-    assert all(r["tier"] == 2 for r in rows)
-    assert [r["id"] for r in rows] == [q.id for q in t2]
+def _values() -> dict:
+    derived = derive_tier2(_ANSWERS)
+    return {**_ANSWERS, **derived, **derive_tier3({**_ANSWERS, **derived})}
 
 
-def test_review_rows_expanded_view_appends_tier3() -> None:
-    """With ``show_advanced``, tier-3 rows append after tier-2 — the
-    numbered list grows but the tier-2 numbers don't shift."""
-    t2, t3 = _stub_tier_qs()
-    derived = {q.id: q.default for q in t2}
-    advanced = {q.id: (q.default if q.default is not None else "") for q in t3}
-    rows = _build_review_rows(derived, advanced, t2, t3, show_advanced=True)
-
-    assert len(rows) == len(t2) + len(t3)
-    # First block is still tier-2 in the same order.
-    assert [r["id"] for r in rows[: len(t2)]] == [q.id for q in t2]
-    # Second block is tier-3.
-    assert [r["id"] for r in rows[len(t2):]] == [q.id for q in t3]
-
-
-def test_review_rows_each_carry_their_question_object() -> None:
-    """The edit handler re-prompts via the carried Question, so each
-    row must reference its source question (not just an id string)."""
-    t2, t3 = _stub_tier_qs()
-    rows = _build_review_rows(
-        {q.id: q.default for q in t2},
-        {q.id: (q.default if q.default is not None else "") for q in t3},
-        t2, t3, show_advanced=True,
-    )
-    for r in rows:
-        assert r["question"] is not None
-        assert r["question"].id == r["id"]
-
-
-def test_print_review_groups_advanced_under_subheading() -> None:
-    """When advanced is expanded, the printed table prints a visible
-    sub-heading right before the tier-3 rows so the user can tell
-    where the basic block ends and the advanced block begins."""
-    t2, t3 = _stub_tier_qs()
-    rows = _build_review_rows(
-        {q.id: q.default for q in t2},
-        {q.id: (q.default if q.default is not None else "") for q in t3},
-        t2, t3, show_advanced=True,
-    )
+def _shown(show_advanced: bool) -> str:
+    values = _values()
     buf = io.StringIO()
     with redirect_stdout(buf):
-        _print_review(rows, show_advanced=True)
-    text = buf.getvalue()
-
-    assert "Review before launch" in text
-    assert "Advanced" in text
-    # The advanced subheading must appear AFTER all tier-2 row labels
-    # (we check the position of the first tier-3 label vs the heading).
-    first_t3_label = t3[0].label
-    advanced_pos = text.find("Advanced")
-    t3_pos = text.find(first_t3_label)
-    assert advanced_pos < t3_pos, (
-        "advanced subheading should print before the first tier-3 row"
-    )
+        _print_review(_build_review_rows(values, show_advanced=show_advanced), show_advanced=show_advanced, values=values)
+    return buf.getvalue()
 
 
-def test_print_review_hides_advanced_subheading_when_collapsed() -> None:
-    """When advanced is collapsed, the user sees a hint instead of
-    the Advanced subheading + tier-3 rows."""
-    t2, t3 = _stub_tier_qs()
-    rows = _build_review_rows(
-        {q.id: q.default for q in t2},
-        {q.id: (q.default if q.default is not None else "") for q in t3},
-        t2, t3, show_advanced=False,
-    )
+def test_the_default_view_is_the_four_cards_shown_rows_in_card_order() -> None:
+    rows = _build_review_rows(_values(), show_advanced=False)
+    assert not any(r["advanced"] for r in rows)
+    order = [c["id"] for c in REVIEW_CARDS]
+    assert [order.index(str(r["card"])) for r in rows] == sorted(order.index(str(r["card"])) for r in rows)
+    expected = [qid for c in REVIEW_CARDS for qid in c["shown"]
+                if qid not in ("affiliation", "contact_email", "url")]
+    assert [r["id"] for r in rows] == ["byline" if q == "author" else q for q in expected]
+
+
+def test_advanced_rows_follow_without_renumbering_the_shown_ones() -> None:
+    folded = _build_review_rows(_values(), show_advanced=False)
+    opened = _build_review_rows(_values(), show_advanced=True)
+    assert [r["id"] for r in opened[: len(folded)]] == [r["id"] for r in folded]
+    assert [r["id"] for r in opened[len(folded):]] == [qid for c in REVIEW_CARDS for qid in c["advanced"]]
+
+
+def test_each_row_carries_its_question_object() -> None:
+    for r in _build_review_rows(_values(), show_advanced=True):
+        if r["id"] == "byline":
+            assert r["question"] is None
+        else:
+            assert r["question"].id == r["id"]
+
+
+def test_the_cards_say_how_strict_what_it_costs_and_whether_the_model_is_ready() -> None:
+    text = _shown(False)
+    for card in REVIEW_CARDS:
+        assert card["title"] in text
+    assert "Cost: about 50-90 model calls" in text
+    assert "Ready?" in text
+    assert "Paper byline (optional)" in text and "asked once before the first paper" in text
+
+
+def test_internal_names_only_under_advanced() -> None:
+    folded = _shown(False)
+    for raw in ("paper_md", "paper_pdf", "methodologist", "devil_advocate", "Axon", "(unset)", "Title (short slug)"):
+        assert raw not in folded, f"{raw!r} on the review screen a first-time user sees"
+    assert "method, statistics, devil's advocate" in folded
+    assert "show advanced" in folded.lower()
+    assert "Advanced" not in folded.replace("show advanced", "")
+    opened = _shown(True)
+    assert "══ Advanced ══" in opened
+    assert opened.index("══ Advanced ══") < opened.index("Saved-library passages per quest")
+
+
+def test_exploring_says_fewer_calls_and_a_preliminary_draft() -> None:
+    values = {**_values(), "result_use": "explore"}
     buf = io.StringIO()
     with redirect_stdout(buf):
-        _print_review(rows, show_advanced=False)
+        _print_review(_build_review_rows(values, show_advanced=False), show_advanced=False, values=values)
     text = buf.getvalue()
-
-    assert "show advanced" in text.lower(), (
-        "collapsed view should hint that 'a' expands the advanced block"
-    )
-    # No tier-3 row labels appear yet.
-    for q in t3:
-        assert q.label not in text, f"tier-3 label {q.label!r} leaked into collapsed view"
+    assert "preliminary draft" in text and "fewer model calls" in text
+    assert "A different model for one reviewer" not in text

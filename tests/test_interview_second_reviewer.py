@@ -87,16 +87,17 @@ async def test_the_cli_asks_it_and_writes_it(
 ) -> None:
     from tests.test_interview_e2e_cli import _new
 
-    cfg = await _new(tmp_path, monkeypatch, ["Second reviewer probe", use, "1", "1", *typed, "", "", "", "", ""])
+    cfg = await _new(tmp_path, monkeypatch, ["Second reviewer probe", use, "1", "1", *typed, ""])
     shown = capsys.readouterr().out
     assert ("A different model for one reviewer" in shown) is bool(typed)
     assert cfg.provider.model == "gpt-5"
     assert (cfg.provider.node_models or {}).get("review_panel.statistician") == statistician
     assert cfg.engine.one_model_review is one
     if typed:
-        plan = shown.split("The plan", 1)[1]
-        assert "Reviewers    :" in plan, "the confirm screen shows the answer"
-        assert ("the statistics reviewer uses gpt-5-mini" in plan) is (statistician is not None)
+        plan = shown.split("Review before launch", 1)[1]
+        assert "A different model for one reviewer" in plan, "the review screen's model card shows the answer"
+        assert ("gpt-5-mini" in plan) is (statistician is not None)
+        assert ("I only have one model" in plan) is one
 
 
 @pytest.mark.asyncio
@@ -107,7 +108,7 @@ async def test_the_cli_does_not_take_the_quests_own_model_typed_in(
     from tests.test_interview_e2e_cli import _new
 
     other = str(len(second_reviewer_choices("openai", "gpt-5")) + 1)
-    cfg = await _new(tmp_path, monkeypatch, ["Same model probe", "", "1", "1", other, "gpt-5", "2", "", "", "", "", ""])
+    cfg = await _new(tmp_path, monkeypatch, ["Same model probe", "", "1", "1", other, "gpt-5", "2", ""])
     assert "the model the quest runs on" in capsys.readouterr().out
     assert (cfg.provider.node_models or {}).get("review_panel.statistician") == "gpt-4o"
 
@@ -328,7 +329,7 @@ async def test_the_cli_asks_again_when_other_is_left_empty(
     from tests.test_interview_e2e_cli import _new
 
     other = str(len(second_reviewer_choices("openai", "gpt-5")) + 1)
-    cfg = await _new(tmp_path, monkeypatch, ["Empty other probe", "", "1", "1", other, "", "1", "", "", "", "", ""])
+    cfg = await _new(tmp_path, monkeypatch, ["Empty other probe", "", "1", "1", other, "", "1", ""])
     assert "nothing typed" in capsys.readouterr().out
     assert (cfg.provider.node_models or {}).get("review_panel.statistician") == "gpt-5-mini"
 

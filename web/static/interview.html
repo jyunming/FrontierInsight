@@ -26,7 +26,7 @@
     <div class="bg-surface-high border border-white/10 rounded-full px-4 py-2 flex items-center gap-2 shadow-[0_0_40px_rgba(195,192,255,0.1)] backdrop-blur-md">
       <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
       <span class="font-label-sm text-label-sm uppercase text-on-surface tracking-wider">
-        <span id="progress-total"></span> questions
+        <span id="progress-total"></span> <span id="progress-unit">questions</span>
       </span>
     </div>
   </div>
@@ -219,7 +219,7 @@
       title.textContent = 'New Research Quest';
       // No fixed count here (the schema has grown before and will again) — the progress pill names
       // the real count once the form renders.
-      subtitle.textContent = 'A few questions, then a review of the auto-derived defaults. Edit anything before you launch.';
+      subtitle.textContent = 'Three questions, then four short cards with everything worked out for you. Change anything before you launch.';
       // Show the proposal-draft picker for new quests (skip on update flow).
       loadDrafts();
     }
@@ -421,10 +421,17 @@
 
   function escapeAttr(s) { return escapeHtml(s); }
 
-  // Tier 1: the topic, what the result is for, the provider and model; the author line only while no profile is saved.
+  // Tier 1, in three steps (core/interview.py FIRST_STEPS): the research question, what the result is for, the model.
+  // The paper byline is not asked here: it is folded on the review screen.
   function firstScreenQuestions() {
-    return schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1
-      && !(savedProfile && PROFILE_FIELDS.includes(q.id)));
+    return schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
+  }
+
+  // The step a first-screen question belongs to: {n, title}.
+  function stepOf(qid) {
+    const steps = schema.first_steps || [];
+    const i = steps.findIndex((st) => st.questions.includes(qid));
+    return i < 0 ? null : { n: i + 1, title: steps[i].title, single: steps[i].questions.length === 1 };
   }
 
   // Mirrors core/interview.py:question_applies: a question with ``ask_if`` is asked only when that earlier answer is
@@ -449,24 +456,19 @@
     return out;
   }
 
-  // Shows a question only when it applies (the second reviewer's model: research or a decision), and numbers the
-  // shown ones in order.
+  // Shows a question only when it applies (the second reviewer's model: research or a decision). The first screen is
+  // numbered by step, not by question: three steps, whatever the model step asks.
   function refreshConditionalQuestions() {
     const answers = formAnswers();
-    let n = 0;
-    let shown = 0;
     for (const q of firstScreenQuestions()) {
       const fs = document.getElementById(`fs-${q.id}`);
       if (!fs) continue;
-      const applies = questionApplies(q, answers);
-      fs.classList.toggle('hidden', !applies);
-      if (applies) {
-        n += 1; shown += 1;
-        const num = fs.querySelector('.q-num');
-        if (num) num.textContent = String(n);
-      }
+      fs.classList.toggle('hidden', !questionApplies(q, answers));
     }
-    if (!isUpdate) document.getElementById('progress-total').textContent = shown;
+    if (!isUpdate) {
+      document.getElementById('progress-total').textContent = (schema.first_steps || []).length || 3;
+      document.getElementById('progress-unit').textContent = 'steps';
+    }
   }
 
   // The models listed for the provider (static, then live), kept so the second reviewer's list can leave out the one
@@ -548,7 +550,9 @@
         : 'relative bg-surface-mid border border-white/10 p-8 rounded-lg opacity-60 group transition-all duration-300';
       const legend = document.createElement('legend');
       legend.className = 'absolute -top-3 left-6 px-2 bg-surface-mid font-label-sm text-label-sm uppercase tracking-wider flex items-center gap-2 ' + (editable ? 'text-primary' : 'text-on-surface-variant');
-      legend.innerHTML = `<span class="q-num">${idx}</span>. ${escapeHtml(q.label)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
+      const step = isUpdate ? null : stepOf(q.id);
+      const heading = step ? (step.single ? step.title : `${step.title}: ${q.label}`) : q.label;
+      legend.innerHTML = `<span class="q-num">${step ? step.n : idx}</span>. ${escapeHtml(heading)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
       fs.appendChild(legend);
       const inner = document.createElement('div');
       inner.className = 'space-y-4 relative z-10' + (editable ? '' : ' pointer-events-none');
@@ -1008,94 +1012,99 @@
   }
 
   // ─── Review screen ─────────────────────────────────────────────
-  // Explore first, then confirm once (engine.phased), as the summary card says it.
-  function phasedSummary() {
-    if (pendingAnswers.phased === true) {
-      return 'yes: explore first, then run the frozen design once more (one more full run; change under Advanced)';
+  // ─── Review screen: four plain cards (core/interview.py REVIEW_CARDS) ─────────────
+  // How strictly it is checked and what it costs; the model and whether it is ready; data, sources and pauses; what you
+  // get. The same cards the CLI and VS Code show. Each card's rarer settings are under one "Advanced" part, and the
+  // byline's four fields are one folded row. Internal names (paper_md, methodologist) are shown in plain words.
+  function useKind() { return (pendingAnswers.result_use || 'research') === 'explore' ? 'explore' : 'research'; }
+
+  function costNote() {
+    let note = (schema.cost_notes || {})[useKind()] || '';
+    const prof = pendingAnswers.ensemble_profile || 'off';
+    const named = String(pendingAnswers.ensemble_models || '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+    const mult = (schema.ensemble_cost_multipliers || {})[prof];
+    if (prof !== 'off' && named.length >= (schema.ensemble_min_models || 2) && mult) {
+      note += `; the ensemble multiplies that by about ${mult}`;
     }
-    return (pendingAnswers.result_use || 'research') !== 'explore'
-      ? 'no: the result is not confirmed on data or seeds it never saw (change under Advanced)' : 'no';
+    return note;
+  }
+
+  function bylineText() {
+    const parts = (schema.byline_fields || PROFILE_FIELDS)
+      .map((k) => String(pendingAnswers[k] || '').split(/\s+/).filter(Boolean).join(' ')).filter(Boolean);
+    return parts.length ? parts.join(', ') : (schema.byline_empty || 'none yet');
+  }
+
+  function cardRows(ids) {
+    const rows = [];
+    const bylineFields = schema.byline_fields || PROFILE_FIELDS;
+    for (const id of ids) {
+      if (bylineFields.includes(id)) {
+        if (id !== bylineFields[0]) continue;
+        const qs = bylineFields.map((k) => schema.questions.find((x) => x.id === k)).filter(Boolean);
+        rows.push(`
+          <details id="review-byline" class="py-2 border-b border-white/5 last:border-0">
+            <summary class="cursor-pointer flex items-center justify-between gap-4">
+              <span class="flex-grow min-w-0">
+                <span class="block font-body-md text-body-md text-on-surface">Paper byline (optional)</span>
+                <span class="block font-code-md text-code-md text-on-surface-variant truncate" id="review-val-byline">${escapeHtml(bylineText())}</span>
+              </span>
+              <span class="font-label-sm text-label-sm uppercase text-on-surface-variant">Change</span>
+            </summary>
+            <div class="pl-4 mt-2">${qs.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}</div>
+          </details>`);
+        continue;
+      }
+      const q = schema.questions.find((x) => x.id === id && x.frontends.includes('serve'));
+      if (!q || !questionApplies(q, pendingAnswers)) continue;
+      rows.push(renderReviewRow(q, pendingAnswers[q.id]));
+    }
+    return rows.join('');
   }
 
   function renderReview() {
     const sec = document.getElementById('review-section');
     sec.innerHTML = '';
-
-    // Tier-1 summary card (read-only, click "Edit" to go back to form).
-    const tier1 = firstScreenQuestions().filter((q) => questionApplies(q, pendingAnswers));
-    const t1Card = document.createElement('div');
-    t1Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-    t1Card.innerHTML = `
-      <div class="flex items-center justify-between gap-3 mb-4">
-        <h2 class="font-headline-md text-headline-md font-bold text-on-surface">Your answers</h2>
-        <button type="button" onclick="backToForm()" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1">
-          <span class="material-symbols-outlined text-[16px]">edit</span> Edit
-        </button>
-      </div>
-      <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
-        ${tier1.map((q) => `
-          <div>
-            <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">${escapeHtml(q.label)}</dt>
-            <dd class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(formatReviewValue(pendingAnswers[q.id], q))}</dd>
-          </div>
-        `).join('')}
-          <div>
-            <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">Confirm the result on data it never saw</dt>
-            <dd id="review-phased-summary" class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(phasedSummary())}</dd>
-          </div>
-      </dl>
-    `;
-    sec.appendChild(t1Card);
-
-    // Tier-2 derived defaults — each row has an inline [edit] button.
-    const tier2 = schema.questions.filter((q) => q.tier === 2);
-    const t2Card = document.createElement('div');
-    t2Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-    t2Card.innerHTML = `
-      <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">Defaults (auto-derived)</h2>
-      <p class="font-body-md text-body-md text-on-surface-variant mb-4">
-        FI picked these from your topic + format. Click <strong>Edit</strong> on any row to override.
-      </p>
-      <div class="space-y-1">
-        ${tier2.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
-      </div>
-    `;
-    sec.appendChild(t2Card);
-
-    // The saved author line: filled from the profile, changed here for this quest and the next ones.
-    if (savedProfile) {
-      const authorQs = schema.questions.filter((q) => PROFILE_FIELDS.includes(q.id));
-      const aCard = document.createElement('div');
-      aCard.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-      aCard.innerHTML = `
-        <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">Author line</h2>
-        <p class="font-body-md text-body-md text-on-surface-variant mb-4">
-          From your saved details. A change here is kept for your next quests too.
-        </p>
-        <div class="space-y-1">
-          ${authorQs.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
-        </div>
-      `;
-      sec.appendChild(aCard);
+    const cards = schema.review_cards || [];
+    for (const card of cards) {
+      const el = document.createElement('div');
+      el.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+      el.id = `review-card-${card.id}`;
+      let lead = '';
+      if (card.id === 'checks') {
+        lead = `<p class="font-body-md text-body-md text-on-surface mb-1">${escapeHtml((schema.checks_sentences || {})[useKind()] || '')}</p>
+          <p class="font-body-md text-body-md text-on-surface-variant mb-3" id="review-cost">Cost: ${escapeHtml(costNote())}</p>`;
+      } else if (card.id === 'models') {
+        lead = '<p class="font-body-md text-body-md text-on-surface-variant mb-3" id="review-ready">Ready? Checking…</p>';
+      }
+      el.innerHTML = `
+        <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">${escapeHtml(card.title)}</h2>
+        ${lead}
+        <div class="space-y-1">${cardRows(card.shown)}</div>`;
+      sec.appendChild(el);
     }
+    void showReviewReadiness();
 
-    // Tier-3 advanced (toggle).
-    const tier3 = schema.questions.filter((q) => q.tier === 3);
-    const t3Card = document.createElement('div');
-    t3Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-    t3Card.innerHTML = `
+    // Advanced: each card's rarer settings, folded.
+    const adv = document.createElement('div');
+    adv.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+    adv.id = 'review-advanced';
+    adv.innerHTML = `
       <button type="button" onclick="toggleAdvanced()" class="w-full flex items-center justify-between font-headline-md text-headline-md font-bold text-on-surface hover:text-primary transition-colors">
         <span>Advanced</span>
         <span class="material-symbols-outlined text-[24px]">${reviewShowAdvanced ? 'expand_less' : 'expand_more'}</span>
       </button>
       <p class="font-body-md text-body-md text-on-surface-variant mt-2 mb-4">
-        Topic-tuned slots the engine's clarify pass will fill at quest start. Override here only if you want to lock a specific value upfront.
+        Settings most quests never change. The engine fills the topic-specific ones itself at the start of the quest.
       </p>
-      <div class="space-y-1 ${reviewShowAdvanced ? '' : 'hidden'}">
-        ${tier3.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
+      <div class="space-y-4 ${reviewShowAdvanced ? '' : 'hidden'}">
+        ${cards.map((card) => {
+          const rows = cardRows(card.advanced);
+          return rows ? `<div><h3 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant mb-1">${escapeHtml(card.title)}</h3><div class="space-y-1">${rows}</div></div>` : '';
+        }).join('')}
       </div>
     `;
-    sec.appendChild(t3Card);
+    sec.appendChild(adv);
 
     // Launch button.
     const launchRow = document.createElement('div');
@@ -1109,34 +1118,63 @@
     sec.classList.remove('hidden');
   }
 
+  // Card 2's "Ready?" line: how far the chosen provider and model are set up here (core/provider_readiness.py, the
+  // words of the Settings page and `fi --doctor`). The full check runs again when Launch is pressed.
+  let reviewReadySeq = 0;
+  async function showReviewReadiness() {
+    const line = document.getElementById('review-ready');
+    if (!line) return;
+    const provider = pendingAnswers.provider || '';
+    if (!provider) { line.textContent = 'Ready? No provider chosen.'; return; }
+    const mine = ++reviewReadySeq;
+    try {
+      const model = pendingAnswers.provider_model || '';
+      const body = await fetchJson(`/api/providers/availability?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`);
+      const pr = (body.providers || [])[0];
+      if (mine !== reviewReadySeq || !document.getElementById('review-ready')) return;
+      line.textContent = pr ? `Ready? ${pr.state_label} — ${pr.sentence}${pr.fix ? ' To fix: ' + pr.fix : ''}` : 'Ready? Checked again when you press Launch.';
+    } catch (_) {
+      if (mine === reviewReadySeq && document.getElementById('review-ready')) {
+        line.textContent = 'Ready? Could not check it now; it is checked again when you press Launch.';
+      }
+    }
+  }
+
   function renderReviewRow(q, value) {
+    // An answer of the first screen is changed there (its model list follows the provider): "Change" goes back.
+    const onFirstScreen = q.tier === 1;
+    const action = onFirstScreen ? 'backToForm()' : `editReviewField('${q.id}')`;
     return `
       <div class="flex items-center justify-between gap-4 py-2 border-b border-white/5 last:border-0" id="review-row-${q.id}">
         <div class="flex-grow min-w-0">
           <div class="font-body-md text-body-md text-on-surface">${escapeHtml(q.label)}</div>
           <div class="font-code-md text-code-md text-on-surface-variant truncate" id="review-val-${q.id}">${escapeHtml(formatReviewValue(value, q))}</div>
         </div>
-        <button type="button" onclick="editReviewField('${q.id}')" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 flex-shrink-0">
-          <span class="material-symbols-outlined text-[16px]">edit</span> Edit
+        <button type="button" onclick="${action}" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 flex-shrink-0">
+          <span class="material-symbols-outlined text-[16px]">edit</span> ${onFirstScreen ? 'Change' : 'Edit'}
         </button>
       </div>
       <div id="review-edit-${q.id}" class="hidden py-3 px-4 bg-surface-low rounded mt-2 mb-2"></div>
     `;
   }
 
-  // ``q`` is optional so a caller with no question in hand still gets a safe fallback, but every real
-  // call site below has one and should pass it: a single-choice question's ``choices`` carry the label
-  // written for exactly this ("Computational — a Python script can produce the data", not a bare
-  // ``false``); skipping it is how a "Research approach" row once showed the word "false".
+  // A value in plain words (mirrors core/interview.py:plain_value): a choice's label (a list-valued choice too),
+  // internal names translated (schema.plain_values), "(not set)" for nothing. Never the raw YAML word.
   function formatReviewValue(v, q) {
-    if (v === null || v === undefined) return '(unset)';
+    const id = q && q.id;
+    const names = (schema.plain_values || {})[id];
     if (q && Array.isArray(q.choices)) {
-      const choice = q.choices.find((c) => c.value === v);
+      const enc = JSON.stringify(v);
+      const choice = q.choices.find((c) => (Array.isArray(v) ? id !== 'review_panel' && JSON.stringify(c.value) === enc : c.value === v));
       if (choice) return choice.label;
     }
-    if (typeof v === 'boolean') return v ? 'true' : 'false';
-    if (Array.isArray(v)) return v.length ? `[${v.join(', ')}]` : '(none)';
-    if (v === '') return '(empty)';
+    if (id === 'second_reviewer_model' && v === '__one_model__') return 'I only have one model';
+    if (Array.isArray(v)) {
+      if (!v.length) return id === 'review_panel' ? 'single reviewer' : '(none)';
+      return v.map((x) => (names && names[x]) || String(x)).join(', ');
+    }
+    if (v === null || v === undefined || v === '') return '(not set)';
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
     return String(v);
   }
 
@@ -1200,14 +1238,14 @@
     editedFields.add(id);
     const savedQ = schema.questions.find((x) => x.id === id);
     document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value, savedQ);
+    const byline = document.getElementById('review-val-byline');
+    if (byline) byline.textContent = bylineText();
+    const cost = document.getElementById('review-cost');
+    if (cost) cost.textContent = `Cost: ${costNote()}`;
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
     saveAnswersSoon();
     if (id === 'paper_format' || id === 'study_depth') {
       rederive();
-    } else if (id === 'phased') {
-      // The summary at the top shows it too (updated in place: other open edits are kept).
-      const summary = document.getElementById('review-phased-summary');
-      if (summary) summary.textContent = phasedSummary();
     }
   };
 

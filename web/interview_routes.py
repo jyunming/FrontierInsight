@@ -227,6 +227,8 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
         """Keep the answers of an interview as they are typed: the page saves here (and in the browser) so a failed
         Launch, a closed tab or a server restart does not lose them. Removed once the quest is launched."""
         path = _draft_path(draft_id)
+        if path.with_suffix(".launched").exists():
+            raise HTTPException(409, "these answers were launched as a quest; a new interview has a new id")
         raw = await request.body()
         if len(raw) > _DRAFT_MAX_BYTES:
             raise HTTPException(413, "the saved answers are too large")
@@ -327,6 +329,8 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             if not _local(request):
                 return None
             saved = profile.load()
+            if saved is None and not any(line.values()):
+                return None  # nothing typed and none kept: the byline is asked once before the first paper instead
             if saved == line or (saved is not None and isinstance(seen, dict)
                                  and {k: str(seen.get(k) or "") for k in profile.FIELDS} == line):
                 return None
@@ -341,6 +345,9 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             draft = _token(body.get("draft_id"))
             if draft is not None:
                 try:
+                    # A marker first: a save the page sent just before Launch, arriving after it, is refused.
+                    (drafts_dir / f"{draft}.launched").parent.mkdir(parents=True, exist_ok=True)
+                    (drafts_dir / f"{draft}.launched").write_text("", encoding="utf-8")
                     (drafts_dir / f"{draft}.json").unlink(missing_ok=True)
                 except OSError:
                     pass

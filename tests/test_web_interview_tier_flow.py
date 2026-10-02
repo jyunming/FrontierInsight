@@ -71,16 +71,15 @@ def test_continue_to_review_button_replaces_launch_button(html: str) -> None:
     assert "onclick=\"launchFromReview()\"" in html
 
 
-def test_review_renders_three_cards_tier1_tier2_advanced(html: str) -> None:
-    """The review section shows three cards: tier-1 summary,
-    tier-2 derived defaults, and a collapsible Advanced block."""
-    assert "Your answers" in html, "tier-1 summary card title missing"
-    assert "Defaults (auto-derived)" in html, "tier-2 card title missing"
-    # Advanced card has a button toggling visibility; its label is
-    # the literal string "Advanced".
+def test_review_renders_the_four_cards_and_a_folded_advanced_part(html: str) -> None:
+    """The review section is built from the schema's four cards (core/interview.py REVIEW_CARDS), each with its rows,
+    plus one collapsible Advanced part with each card's rarer settings."""
+    assert "schema.review_cards" in html, "the review must be built from the schema's cards"
+    assert "card.shown" in html and "card.advanced" in html
     assert ">Advanced<" in html or "'Advanced'" in html or '"Advanced"' in html, (
         "advanced toggle label missing"
     )
+    assert "Paper byline (optional)" in html
 
 
 def test_per_row_edit_buttons_present(html: str) -> None:
@@ -91,7 +90,7 @@ def test_per_row_edit_buttons_present(html: str) -> None:
     # Two Edit buttons: one for the tier-1 summary card ("Edit"
     # back to form), one per derived row.
     # We just need the JS hook + the visible label.
-    assert ">Edit<" in html or 'aria-label="Edit"' in html
+    assert ">Edit<" in html or 'aria-label="Edit"' in html or "'Change' : 'Edit'" in html
 
 
 def test_axon_status_probed_for_knowledge_enabled_default(html: str) -> None:
