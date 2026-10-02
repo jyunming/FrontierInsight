@@ -14,7 +14,7 @@ exit code 0 + that ``out/extension.js`` and ``out/bridge.js`` exist.
 This is a structural / typing test only — it does NOT exercise the
 actual ``vscode.lm`` runtime (impossible outside VSCode). For that,
 manually install the extension via "Developer: Install Extension
-from Location..." and run ``@fi /start examples/integrator_bakeoff/config.yaml``.
+from Location..." and run ``@fi /start fi-demo.yaml`` (written by ``fi demo``).
 """
 
 from __future__ import annotations

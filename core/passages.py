@@ -23,6 +23,7 @@ import math
 import os
 import re
 from collections import Counter
+from pathlib import Path
 
 _log = logging.getLogger("frontier_insight.passages")
 
@@ -135,6 +136,52 @@ def _embed_model():
         _log.info("passages: embeddings unavailable (%s); using lexical ranking", e)
         _EMBED_MODEL = None
     return _EMBED_MODEL
+
+
+_EMBED_REPO = "sentence-transformers/all-MiniLM-L6-v2"
+
+
+def _hf_cache_dirs() -> list[Path]:
+    """Where a downloaded copy of the model can be, in the order the Hugging Face libraries look (plus
+    ``FI_MODELS_DIR``, which FI turns into ``HF_HOME``; see ``core.knowledge._apply_offline_env``)."""
+    env = os.environ.get
+    out: list[Path] = []
+    for v in (env("HF_HUB_CACHE"), env("HUGGINGFACE_HUB_CACHE")):
+        if v:
+            out.append(Path(v).expanduser())
+    for home in (env("HF_HOME"), env("FI_MODELS_DIR")):
+        if home:
+            out.append(Path(home).expanduser() / "hub")
+    xdg = env("XDG_CACHE_HOME")
+    out.append((Path(xdg).expanduser() if xdg else Path.home() / ".cache") / "huggingface" / "hub")
+    return out
+
+
+def embed_model_cached() -> tuple[bool, str]:
+    """Whether the embedding model can be used, read from what is on disk only: the package is importable (looked
+    up, not imported -- importing it loads torch) and a downloaded copy of all-MiniLM-L6-v2 is in a model cache.
+    No network and nothing loaded; ``fi --doctor`` (the quick one) uses this, ``fi --doctor --deep`` loads it.
+    Returns ``(usable, what was found)``."""
+    import importlib.util
+
+    try:
+        if importlib.util.find_spec("sentence_transformers") is None:
+            return False, "sentence-transformers is not installed"
+    except (ImportError, ValueError):
+        return False, "sentence-transformers is not installed"
+    folder = "models--" + _EMBED_REPO.replace("/", "--")
+    for cache in _hf_cache_dirs():
+        snaps = cache / folder / "snapshots"
+        try:
+            if any(p.is_file() for p in snaps.glob("*/config.json")):
+                return True, f"all-MiniLM-L6-v2 downloaded ({cache})"
+        except OSError:
+            continue
+    st_home = os.environ.get("SENTENCE_TRANSFORMERS_HOME")
+    legacy = (Path(st_home).expanduser() if st_home else Path.home() / ".cache" / "torch" / "sentence_transformers")
+    if (legacy / _EMBED_REPO.replace("/", "_") / "config.json").is_file():
+        return True, f"all-MiniLM-L6-v2 downloaded ({legacy})"
+    return False, "all-MiniLM-L6-v2 is not downloaded yet (the first quest downloads it, about 90 MB)"
 
 
 def _embed_scores(chunks: list[str], query: str) -> list[float] | None:

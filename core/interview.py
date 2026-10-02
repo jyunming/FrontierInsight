@@ -32,9 +32,7 @@ static placeholders so the interview never blocks on LLM availability.
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -448,7 +446,7 @@ PROVIDER_CHOICES: tuple[Choice, ...] = (
     Choice("codex", "codex — HTTP direct (ChatGPT Plus/Pro OAuth backend)",
            "Same transport as openai, points at ChatGPT's backend. Needs OPENAI_API_KEY."),
     Choice("claude_cli", "claude_cli — local Claude Code CLI",
-           "Needs `claude` binary on PATH + `claude login`. Uses your Claude Pro/Max OAuth."),
+           "Needs `claude` binary on PATH + `claude auth login`. Uses your Claude Pro/Max OAuth."),
     Choice("codex_cli", "codex_cli — local Codex CLI",
            "Needs `codex` binary on PATH + `codex login`. Uses your ChatGPT Plus/Pro OAuth."),
     Choice("copilot_cli", "copilot_cli — local GitHub Copilot CLI",
@@ -1362,26 +1360,19 @@ def slugify(s: str) -> str:
 # Provider availability
 # ---------------------------------------------------------------------------
 
-# Map provider id → environment probe. The interview uses this to
-# decide which providers to highlight as "available" in the CLI
-# picker. A provider that fails its probe is still selectable (the
-# user may know they're about to set up auth), but it shows a hint.
-_PROVIDER_PROBES: dict[str, Callable[[], bool]] = {
-    "openai": lambda: bool(os.environ.get("OPENAI_API_KEY", "").strip()),
-    "codex": lambda: bool(os.environ.get("OPENAI_API_KEY", "").strip()),
-    "claude_cli": lambda: shutil.which("claude") is not None,
-    "codex_cli": lambda: shutil.which("codex") is not None,
-    "copilot_cli": lambda: shutil.which("gh") is not None,
-    "gemini_cli": lambda: shutil.which("gemini") is not None,
-    "ollama": lambda: shutil.which("ollama") is not None,
-}
-
-
 def available_providers() -> list[str]:
-    """Return the subset of provider ids whose environment probe
-    passes. CLI frontends mark these with a "✓ ready" hint; the
-    others fall through with an "ⓘ needs setup" hint."""
-    return [name for name, probe in _PROVIDER_PROBES.items() if probe()]
+    """The providers of ``PROVIDER_CHOICES`` that are at least installed (a CLI on PATH, Ollama's command) or have
+    their key set, by the local check only (``core.provider_readiness.check_local``: no subprocess, no network).
+    This says nothing about being signed in or the model being there: the interview and the Settings page show the
+    readiness sentence, and a quest is checked again before it is launched (``provider_readiness.preflight``)."""
+    from core.provider_readiness import check_local
+
+    out: list[str] = []
+    for c in PROVIDER_CHOICES:
+        r = check_local(str(c.value))
+        if r.state in ("installed", "key_present"):
+            out.append(str(c.value))
+    return out
 
 
 def model_choices_for(provider: str) -> tuple[Choice, ...]:

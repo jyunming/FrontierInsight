@@ -14,7 +14,7 @@ git clone https://github.com/jyunming/FrontierInsight
 cd FrontierInsight
 ```
 
-That's it — nothing to `pip install` yet. The first time you run FI (step 4), it asks once to set up its own `.venv/` (usually 30-90s) and continues straight into the quest; every run after that skips straight past it. This page writes every command as `python launch.py`, which always works, whether or not you've activated a venv. Prefer to install it yourself first? `python -m venv .venv`, activate it (`.venv\Scripts\activate`, macOS/Linux `source .venv/bin/activate`), `pip install -e .` — that also gives you `fi` as a shorter name for the same command, once that venv is activated. Optional extras (LaTeX for typeset PDFs, the knowledge layer) are in [INSTALL.md](INSTALL.md); you do not need them for this page.
+That's it — nothing to `pip install` yet. (Installed with pip instead? Then every `python launch.py` below is `fi`, and step 4 is `fi demo`.) The first time you run FI (step 4), it asks once to set up its own `.venv/` (usually 30-90s) and then continues where you were; every run after that skips straight past it. This page writes every command as `python launch.py`, which always works, whether or not you've activated a venv. Prefer to install it yourself first? `python -m venv .venv`, activate it (`.venv\Scripts\activate`, macOS/Linux `source .venv/bin/activate`), `pip install -e .` — that also gives you `fi` as a shorter name for the same command, once that venv is activated. Optional extras (LaTeX for typeset PDFs, the knowledge layer) are in [INSTALL.md](INSTALL.md); you do not need them for this page.
 
 ## 3. Tell FI which model to use
 
@@ -24,13 +24,15 @@ Set the key in your terminal (or in a file called `.env` in the folder you run f
 export OPENAI_API_KEY=sk-...          # PowerShell: $env:OPENAI_API_KEY = "sk-..."
 ```
 
-Using another provider? Open `examples/integrator_bakeoff/config.yaml` and change `provider: name:` (the comment above it lists the choices). If a key is missing, FI tells you which variable before it starts anything.
+Using another provider (a signed-in `claude` or `codex` command, Gemini, a local Ollama)? Step 4 finds it; `python launch.py --doctor` lists what is set up on this computer, in a few seconds.
 
-## 4. Run the bundled example
+## 4. Run the example
 
 ```bash
-python launch.py --config examples/integrator_bakeoff/config.yaml
+python launch.py demo
 ```
+
+It writes a small example quest, `fi-demo.yaml`, into the folder you are in (never over a file that is there), checks at no cost that your model can be used — a key the service accepts, a CLI signed in, a local model downloaded: what can be checked without paying for a call; if not, it says what to fix — and asks before running it. To use another model, change `provider: name:` in `fi-demo.yaml` (the comment above it lists the choices), then run it with `python launch.py --config fi-demo.yaml`.
 
 It compares three numerical integrators on a damped oscillator, so it needs no data. It takes a while, and the screen shows one line for each stage as it starts — not the internal detail behind it (that goes only into `.fi/run.log` in the quest folder, for when you want it). Lines beginning with `[<quest id>]` are FI's own; the stages, in order:
 

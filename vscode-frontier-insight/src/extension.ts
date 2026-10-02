@@ -1455,7 +1455,7 @@ async function runQuest(
     const paths = where ? [where.configPath] : promptArgs.split(/\s+/).filter((s) => s.length > 0);
     if (paths.length === 0) {
         stream.markdown(
-            "Need at least one YAML path. Example: `@fi /start examples/integrator_bakeoff/config.yaml`",
+            "Need at least one YAML path. Example: `@fi /start fi-demo.yaml` (`fi demo` in a terminal writes that small example quest into the folder it runs in).",
         );
         return;
     }

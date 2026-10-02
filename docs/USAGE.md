@@ -92,11 +92,20 @@ See [`PROVIDERS.md`](PROVIDERS.md).
 
 ## From the command line
 
-After `pip install frontier-insight`, the `fi` command is on your PATH.
+After installing (see [INSTALL.md](INSTALL.md)), the `fi` command is on your PATH. From a checkout, `python launch.py`
+is the same command.
 
 ```bash
+# The first step: writes fi-demo.yaml here, checks your model at no cost, asks before running it:
+fi demo
+
+# What this machine has (LaTeX, a browser, Marp, the model providers), in a few seconds, no network;
+# --deep also checks sign-in and the network, and loads the embedding model:
+fi --doctor
+fi --doctor --deep
+
 # Single quest:
-fi --config examples/integrator_bakeoff/config.yaml
+fi --config fi-demo.yaml
 
 # Fleet of quests in parallel:
 fi --fleet a.yaml b.yaml c.yaml --max-concurrent 4

@@ -43,7 +43,7 @@
           },
           {
             "name": "start",
-            "description": "Start a quest from an existing YAML. Example: @fi /start examples/integrator_bakeoff/config.yaml"
+            "description": "Start a quest from an existing YAML in your workspace. Example: @fi /start fi-demo.yaml (`fi demo` in a terminal writes that small example quest)."
           },
           {
             "name": "fleet",

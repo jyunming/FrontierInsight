@@ -17,7 +17,7 @@ but resolves to one of three transports:
     user's `codex login` ChatGPT Plus/Pro OAuth. Prompt is piped on
     stdin (not argv) so it does not appear in local process listings.
   - `claude_cli` — `claude --print --output-format text` reusing the
-    user's `claude login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
+    user's `claude auth login` Claude Pro/Max OAuth (no `ANTHROPIC_API_KEY`
     needed; OAuth from the CLI's keychain is honored). Prompt on stdin.
   - `copilot_cli` — `copilot -s --allow-all-tools -p <prompt>` reusing
     the user's `gh auth login` Copilot Pro/Business credentials.
@@ -2171,7 +2171,7 @@ async def _run_cli(
     if resolved is None:
         raise RuntimeError(
             f"CLI provider binary {binary_name!r} not found on PATH. "
-            f"Install and log in (`claude login`, `codex login`, or "
+            f"Install and log in (`claude auth login`, `codex login`, or "
             f"`copilot` via GitHub Copilot CLI) before using this provider."
         )
     # Inject explicit model selection right after the resolved binary,
@@ -2329,7 +2329,7 @@ async def _run_cli(
         except FileNotFoundError as e:
             raise RuntimeError(
                 f"CLI provider binary {argv[0]!r} not found on PATH. "
-                f"Install and log in (`claude login` or `codex login`) "
+                f"Install and log in (`claude auth login` or `codex login`) "
                 f"before using this provider."
             ) from e
 

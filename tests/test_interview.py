@@ -403,7 +403,7 @@ def test_available_providers_returns_subset(monkeypatch: pytest.MonkeyPatch) -> 
     When no CLIs are installed, the binary-based providers should
     NOT appear."""
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    monkeypatch.setattr(interview_mod.shutil, "which", lambda _: None)
+    monkeypatch.setattr("core.provider_readiness.shutil.which", lambda _: None)
     avail = available_providers()
     assert "openai" in avail
     assert "codex" in avail
@@ -412,7 +412,7 @@ def test_available_providers_returns_subset(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_available_providers_empty_when_no_keys_or_clis(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setattr(interview_mod.shutil, "which", lambda _: None)
+    monkeypatch.setattr("core.provider_readiness.shutil.which", lambda _: None)
     assert available_providers() == []
 
 

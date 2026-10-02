@@ -290,7 +290,7 @@
         {
           "value": "claude_cli",
           "label": "claude_cli — local Claude Code CLI",
-          "description": "Needs `claude` binary on PATH + `claude login`. Uses your Claude Pro/Max OAuth."
+          "description": "Needs `claude` binary on PATH + `claude auth login`. Uses your Claude Pro/Max OAuth."
         },
         {
           "value": "codex_cli",
@@ -1303,7 +1303,7 @@
     {
       "value": "claude_cli",
       "label": "claude_cli — local Claude Code CLI",
-      "description": "Needs `claude` binary on PATH + `claude login`. Uses your Claude Pro/Max OAuth."
+      "description": "Needs `claude` binary on PATH + `claude auth login`. Uses your Claude Pro/Max OAuth."
     },
     {
       "value": "codex_cli",

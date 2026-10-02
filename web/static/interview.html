@@ -93,7 +93,7 @@
 </footer>
 
 <script>
-  // Web interview — drives the same 14-question schema the CLI and
+  // Web interview — drives the same question schema the CLI and
   // VSCode flows use. Schema fetched from /api/interview/schema.
 
   const updateQuestId = window.__fi_update_quest_id || null;
@@ -625,7 +625,35 @@
     }
   }
 
+  // Under the provider picker: how far the picked provider is set up on this computer, in the words the Settings
+  // page and the CLI use (core/provider_readiness.py). The full check runs again when Launch is pressed.
+  let readinessSeq = 0;
+  async function showProviderReadiness(providerName) {
+    const sel = document.getElementById('q-provider');
+    if (!sel) return;
+    let line = document.getElementById('q-provider-readiness');
+    if (!line) {
+      line = document.createElement('p');
+      line.id = 'q-provider-readiness';
+      line.className = 'font-body-md text-body-md text-on-surface-variant mt-2';
+      (sel.parentElement || sel).insertAdjacentElement('afterend', line);
+    }
+    if (!providerName) { line.textContent = ''; return; }
+    const mine = ++readinessSeq;
+    line.textContent = 'Checking whether it is set up on this computer…';
+    try {
+      const res = await fetch(`/api/providers/availability?provider=${encodeURIComponent(providerName)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const p = ((await res.json()).providers || [])[0];
+      if (mine !== readinessSeq) return;  // another provider was picked meanwhile
+      line.textContent = p ? `${p.state_label} \u2014 ${p.sentence}${p.fix ? ' To fix: ' + p.fix : ''}` : '';
+    } catch (_) {
+      if (mine === readinessSeq) line.textContent = '';
+    }
+  }
+
   function populateProviderModel(providerName) {
+    void showProviderReadiness(providerName);
     // Render the static curated list immediately, then upgrade to
     // the live list if the discovery endpoint returns one. Same
     // pattern as tools.html so the picker is never blank during
@@ -1154,15 +1182,32 @@
     const div = document.getElementById('result');
     div.classList.remove('hidden');
     div.className = 'fi-banner fi-banner-info max-w-3xl';
-    div.textContent = asUpdate ? 'Submitting update…' : 'Launching quest…';
-    const res = await fetch(endpoint, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
+    div.textContent = asUpdate ? 'Submitting update…' : 'Checking the model, then launching the quest…';
+    let res;
+    try {
+      res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      // The answers stay on this page: Launch can be pressed again.
+      div.className = 'fi-banner fi-banner-error max-w-3xl';
+      div.textContent = `Could not reach the FI server (${e}). Your answers are still here; try again.`;
+      return false;
+    }
     if (!res.ok) {
       div.className = 'fi-banner fi-banner-error max-w-3xl';
-      div.textContent = `Error ${res.status}: ${await res.text()}`;
+      const raw = await res.text();
+      let detail = raw;
+      try {
+        const j = JSON.parse(raw);
+        detail = (typeof j.detail === 'string' && j.detail) || j.error || raw;
+      } catch (_) { /* not JSON: shown as it came */ }
+      // 409: the chosen model is not ready (core/provider_readiness.py); the sentence says why and how to fix it.
+      div.textContent = res.status === 409
+        ? `The quest was not started. ${detail} Your answers are kept: fix that, then press Launch again (or go back and pick another model).`
+        : `Error ${res.status}: ${detail}`;
       return false;
     }
     const body = await res.json();

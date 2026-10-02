@@ -447,6 +447,99 @@ _UPLOAD_TARGETS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 
 
+#: The Settings page's knowledge-layer card: how long reading its settings may take, and how long the inventory may.
+_KNOWLEDGE_INFO_TIMEOUT_S = 3.0
+_KNOWLEDGE_INVENTORY_TIMEOUT_S = 60.0
+
+_SECRET_ATTR_RE = re.compile(r"(_?(api_)?(key|token|secret|password))$", re.I)
+
+
+def _knowledge_config_info(knowledge_mod: Any, axon_config_cls: Any) -> dict[str, Any]:
+    """The knowledge layer's settings and where its store is: ``AxonConfig()`` only, which reads a config file. It
+    does not open the store or load an index (that is :func:`_knowledge_inventory`, on request). Runs in a thread."""
+    info: dict[str, Any] = {"available": True}
+    try:
+        ac = axon_config_cls()  # default
+        # AxonConfig isn't a pydantic BaseModel (no model_dump); enumerate plain attributes. REDACT anything that
+        # looks like a secret -- the real AxonConfig holds api_key, brave_api_key, etc. in plaintext, and returning
+        # them to the browser would leak into network logs + DevTools history.
+        cfg_dump: dict[str, Any] = {}
+        for attr in sorted(dir(ac)):
+            if attr.startswith("_"):
+                continue
+            try:
+                val = getattr(ac, attr)
+            except Exception:
+                continue
+            if callable(val):
+                continue
+            # Coerce paths + simple types only; skip nested objects.
+            if not isinstance(val, (str, int, float, bool, list, type(None))):
+                val = str(val)
+            if _SECRET_ATTR_RE.search(attr) and isinstance(val, str) and val:
+                val = f"<redacted len={len(val)}>"
+            cfg_dump[attr] = val
+        info["axon_config"] = cfg_dump
+        # The store base -- Axon's layout is ``<store_base>/AxonStore/<user>/<project>/``, the bm25 index inside it.
+        base = getattr(ac, "axon_store_base", None)
+        bm25 = getattr(ac, "bm25_path", None)
+        if base:
+            info["store_path"] = str(base)
+        if bm25:
+            info["bm25_path"] = str(bm25)
+    except Exception as e:
+        info["config_error"] = repr(e)
+    # The FI project name, so the page says "we're operating in the FrontierInsight project, not Axon's default".
+    info["project"] = getattr(knowledge_mod, "FI_AXON_PROJECT", "default")
+    return info
+
+
+def _knowledge_inventory(axon_brain_cls: Any, axon_config_cls: Any, project: str) -> dict[str, Any]:
+    """Count FI's knowledge-base documents by source. Opens the store (AxonBrain), so it is the slow part of the
+    Settings card and runs only when the person asks; in a thread.
+
+    AxonBrain's ``list_documents`` returns one entry per PARENT doc (grouped by source) with a chunk count; the
+    ``kind`` FI's engine writes lives in per-chunk metadata, so this is the source x chunks breakdown -- what a
+    person wants to see ("did my re-ingest land?")."""
+    out: dict[str, Any] = {}
+    try:
+        brain = axon_brain_cls(axon_config_cls())
+        # Match the engine's project setup so the counts are the FI project's, not Axon's default.
+        try:
+            from axon.projects import ensure_project as _ensure_project
+            _ensure_project(project, description="Frontier Insight corpus")
+            brain.switch_project(project)
+        except Exception as e:
+            out["project_error"] = f"could not switch to project {project!r}: {e!r}"
+        try:
+            docs = brain.list_documents()
+        except Exception as e:
+            out["counts_error"] = f"list_documents() failed: {e!r}."
+            docs = []
+        by_source: dict[str, int] = {}
+        total_chunks = 0
+        total_docs = 0
+        for d in docs or []:
+            total_docs += 1
+            if not isinstance(d, dict):
+                continue
+            src = str(d.get("source") or "<unknown>")
+            chunks = int(d.get("chunks") or 0)
+            by_source[src] = by_source.get(src, 0) + chunks
+            total_chunks += chunks
+        out["doc_counts_by_source"] = by_source
+        out["total_documents"] = total_docs
+        out["total_chunks"] = total_chunks
+        out["counts_note"] = (
+            "Each parent doc carries multiple text chunks. Counts above are CHUNKS grouped by source. Engine "
+            "write-back uses source='fi_quest_paper' etc.; /api/knowledge/reingest tags new docs as "
+            "source='web-reingest'."
+        )
+    except Exception as e:
+        out["counts_error"] = repr(e)
+    return out
+
+
 def _dir_size(path: Path) -> int:
     """Recursive byte count of a directory. Used by the trash listing
     so the user can see at a glance which trashed quests are large.
@@ -931,8 +1024,8 @@ def make_app(
 
     @app.get("/api/knowledge/info")
     async def knowledge_info() -> JSONResponse:
-        """Surface the AxonStore knowledge-base location + corpus
-        stats on the Settings page.
+        """Surface the AxonStore knowledge-base location and settings on the Settings page (the document counts are
+        ``/api/knowledge/inventory``, on request).
 
         ``core.knowledge`` exports ``_AXON_AVAILABLE`` always, but
         ``_AXON_IMPORT_ERROR`` only exists when the import FAILED
@@ -967,105 +1060,42 @@ def make_app(
                 ),
             })
 
-        info: dict[str, Any] = {"available": True}
+        # Cheap only: the config and where the store is. The document inventory (which opens the store, and loads its
+        # search index) runs when the person asks for it (/api/knowledge/inventory, the "Inspect knowledge base"
+        # button): opening Settings used to start the whole knowledge layer, even under --no-axon-sidecar.
         try:
-            ac = AxonConfig()  # default
-            # AxonConfig isn't a pydantic BaseModel (no model_dump);
-            # enumerate plain attributes. REDACT anything that looks
-            # like a secret — the real AxonConfig holds api_key,
-            # brave_api_key, etc. in plaintext. Returning them to the
-            # browser would leak into network logs + DevTools history.
-            secret_re = re.compile(r"(_?(api_)?(key|token|secret|password))$", re.I)
-            cfg_dump: dict[str, Any] = {}
-            for attr in sorted(dir(ac)):
-                if attr.startswith("_"):
-                    continue
-                try:
-                    val = getattr(ac, attr)
-                except Exception:
-                    continue
-                if callable(val):
-                    continue
-                # Coerce paths + simple types only; skip nested objects.
-                if not isinstance(val, (str, int, float, bool, list, type(None))):
-                    val = str(val)
-                if secret_re.search(attr) and isinstance(val, str) and val:
-                    val = f"<redacted len={len(val)}>"
-                cfg_dump[attr] = val
-            info["axon_config"] = cfg_dump
-            # The actual store base — Axon's directory layout is
-            # ``<store_base>/AxonStore/<user>/<project>/`` and the
-            # bm25 index lives inside that. Surface both.
-            base = getattr(ac, "axon_store_base", None)
-            bm25 = getattr(ac, "bm25_path", None)
-            if base:
-                info["store_path"] = str(base)
-            if bm25:
-                info["bm25_path"] = str(bm25)
-        except Exception as e:
-            info["config_error"] = repr(e)
-
-        # Surface the FI project name so the Settings page can
-        # explicitly show "we're operating in the FrontierInsight
-        # project, not Axon's default."
-        info["project"] = getattr(_knowledge_mod, "FI_AXON_PROJECT", "default")
-
-        # Document inventory via the real `list_documents` API.
-        # AxonBrain returns one entry per PARENT doc (grouped by
-        # source) with a chunk count — the `kind` field FI's engine
-        # writes lives inside the per-chunk metadata, not at the
-        # parent level, so a "count by kind" view requires drilling
-        # into individual chunks. For the dashboard we just surface
-        # the source × chunks breakdown — which is what the user
-        # actually wants to see ("did my re-ingest land?").
-        try:
-            brain = AxonBrain(AxonConfig())
-            # Match the engine's project setup so the counts we
-            # report are the FI project's, not Axon's default.
-            # ``ensure_project`` creates the project if it doesn't
-            # exist yet; then ``switch_project`` activates it.
-            try:
-                from axon.projects import ensure_project as _ensure_project
-                _ensure_project(
-                    info["project"],
-                    description="Frontier Insight corpus",
-                )
-                brain.switch_project(info["project"])
-            except Exception as e:
-                info["project_error"] = (
-                    f"could not switch to project {info['project']!r}: {e!r}"
-                )
-            try:
-                docs = brain.list_documents()
-            except Exception as e:
-                info["counts_error"] = (
-                    f"list_documents() failed: {e!r}."
-                )
-                docs = []
-            by_source: dict[str, int] = {}
-            total_chunks = 0
-            total_docs = 0
-            for d in docs or []:
-                total_docs += 1
-                if not isinstance(d, dict):
-                    continue
-                src = str(d.get("source") or "<unknown>")
-                chunks = int(d.get("chunks") or 0)
-                by_source[src] = by_source.get(src, 0) + chunks
-                total_chunks += chunks
-            info["doc_counts_by_source"] = by_source
-            info["total_documents"] = total_docs
-            info["total_chunks"] = total_chunks
-            info["counts_note"] = (
-                "Each parent doc carries multiple text chunks. "
-                "Counts above are CHUNKS grouped by source. Engine "
-                "write-back uses source='fi_quest_paper' etc.; "
-                "/api/knowledge/reingest tags new docs as "
-                "source='web-reingest'."
-            )
-        except Exception as e:
-            info["counts_error"] = repr(e)
+            info = await asyncio.wait_for(asyncio.to_thread(_knowledge_config_info, _knowledge_mod, AxonConfig),
+                                          timeout=_KNOWLEDGE_INFO_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            info = {"available": True, "config_error": (
+                f"reading the knowledge layer's settings took more than {_KNOWLEDGE_INFO_TIMEOUT_S:g} s")}
+        info["inventory"] = "on request"
         return JSONResponse(info)
+
+    @app.post("/api/knowledge/inventory")
+    async def knowledge_inventory() -> JSONResponse:
+        """The documents in FI's knowledge-base project, counted by source: opens the store (and its search index),
+        so it runs only when asked (the Settings page's "Inspect knowledge base" button), in a worker thread with a
+        time limit, never on the event loop."""
+        try:
+            from core import knowledge as _knowledge_mod
+        except Exception as e:
+            return JSONResponse({"available": False, "reason": f"knowledge module unavailable: {e!r}"})
+        AxonBrain = getattr(_knowledge_mod, "AxonBrain", None)
+        AxonConfig = getattr(_knowledge_mod, "AxonConfig", None)
+        if not getattr(_knowledge_mod, "_AXON_AVAILABLE", False) or AxonBrain is None or AxonConfig is None:
+            return JSONResponse({"available": False, "reason": "axon package not installed."})
+        project = getattr(_knowledge_mod, "FI_AXON_PROJECT", "default")
+        try:
+            out = await asyncio.wait_for(
+                asyncio.to_thread(_knowledge_inventory, AxonBrain, AxonConfig, project),
+                timeout=_KNOWLEDGE_INVENTORY_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # The worker thread cannot be stopped from here; it finishes on its own and its answer is dropped.
+            return JSONResponse({"available": True, "project": project, "counts_error": (
+                f"the knowledge base did not answer within {_KNOWLEDGE_INVENTORY_TIMEOUT_S:g} s; try again later")})
+        return JSONResponse({"available": True, "project": project, **out})
 
     @app.post("/api/knowledge/reingest")
     async def reingest_quests() -> JSONResponse:
@@ -1121,23 +1151,36 @@ def make_app(
         })
 
     @app.get("/api/providers/availability")
-    async def provider_availability() -> JSONResponse:
-        """Probe which providers have working auth on this host so
-        the Settings page can show ✓/⚠ next to each. Reuses the same
-        helper the CLI interview's smart-default uses."""
-        from core.interview import (
-            available_providers, PROVIDER_CHOICES,
-        )
-        avail = set(available_providers())
+    async def provider_availability(provider: str = "", model: str = "") -> JSONResponse:
+        """How far each provider is ready on this host, for the Settings page and the interview's provider picker:
+        a state (not installed, installed, signed in, ... model available), a plain sentence and how to fix it
+        (core/provider_readiness.py, the same words as `fi --doctor` and the CLI interview). The CLIs' own sign-in
+        status commands run (each with a short time limit, all at once) and a local Ollama server is asked for its
+        models; no request leaves this computer for an API-key provider, whose state is "key present". ``available``
+        is kept for older pages: true when nothing found stops a launch. ``?provider=`` (and ``&model=``) checks one."""
+        from core.interview import PROVIDER_CHOICES
+        from core.provider_readiness import check_all
+
+        choices = [c for c in PROVIDER_CHOICES if not provider or c.value == provider]
+        if provider and not choices:
+            # A provider the picker offers without being in the CLI list (vscode_extension from a VS Code terminal).
+            from core.interview import Choice
+            choices = [Choice(provider, provider, "")]
+        states = await check_all([str(c.value) for c in choices], model=model or None, sign_in=True,
+                                 call_service=False, timeout_s=5.0)
         return JSONResponse({
             "providers": [
                 {
                     "name": c.value,
                     "label": c.label,
                     "description": c.description,
-                    "available": c.value in avail,
+                    "available": not r.blocked and r.state != "not_installed",
+                    "state": r.state,
+                    "state_label": r.label,
+                    "sentence": r.sentence,
+                    "fix": r.fix,
                 }
-                for c in PROVIDER_CHOICES
+                for c, r in zip(choices, states)
             ],
         })
 

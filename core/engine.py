@@ -16927,7 +16927,7 @@ class Engine:
             f"the YAML's `provider.model` matches what Copilot "
             f"actually exposes.\n"
             f"- **Provider auth / quota** — re-authenticate "
-            f"(`claude login`, `gh auth refresh`, etc.) and retry.\n"
+            f"(`claude auth login`, `gh auth refresh`, etc.) and retry.\n"
             f"\n"
             f"This file is auto-deleted on the next successful run "
             f"of this quest.\n"
