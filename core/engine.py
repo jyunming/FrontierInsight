@@ -9448,7 +9448,7 @@ class Engine:
             if found and oracles and not incomplete and self.config.engine.oracle_check == "block":
                 # A person chose to go on although these checks failed, bound to the checks as they are and to this
                 # code: honoured before anything (a plan change, a repair) could change either and undo the choice.
-                went_on = self._chosen_go_on(found, oracles, attempts[-1]["judged"], seed_path)
+                went_on = self._chosen_go_on(found, run_oracles, attempts[-1]["judged"], seed_path)
                 if went_on:
                     break
             if oracles and not incomplete and not test_run_read:
@@ -9545,7 +9545,7 @@ class Engine:
                 guard = (code_before, new_code_before, held, package_before)
         # What the stop may offer: "mark it unconfirmed and go on", only when every problem is a check that was measured
         # and failed (core/accepted_checks.py::offer), bound to the checks' conditions and to this version of the code.
-        go_on_checks, go_on_why_not = (_accepted.offer(found, oracles, attempts[-1].get("judged") or [])
+        go_on_checks, go_on_why_not = (_accepted.offer(found, run_oracles, attempts[-1].get("judged") or [])
                                        if found else ([], ""))
         version = self._measuring_code_version(seed_path)
         if found and not went_on and go_on_checks and self._goes_on_by_itself():
@@ -9652,10 +9652,18 @@ class Engine:
         """The version of the code that measured the known-answer checks: the script the checks ran and the model's
         package in ``code/`` (core/accepted_checks.py::script_version). A choice to go on with a failed check is bound to
         it."""
-        try:
-            files = {self._rel_to_quest(seed_path): seed_path.read_text(encoding="utf-8")}
-        except OSError:
-            files = {}
+        files: dict[str, str] = {}
+        code = self.quest_root / "code"
+        # The seed and the helper modules beside it it may import (FI's own scripts and the other main script are not
+        # what measured the checks), then the model's package.
+        other = "experiment.py" if seed_path.name == _split_run.SIMULATE_NAME else _split_run.SIMULATE_NAME
+        skip = {other, _trial_runner.SUBMIT_NAME, "run.py", _code_project.SEARCH, "replot_figures.py",
+                "replot_layout.py", "web_plots.py"}
+        for path in [seed_path, *sorted(p for p in code.glob("*.py") if p.name not in skip and p != seed_path)]:
+            try:
+                files[self._rel_to_quest(path)] = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
         files.update({f"code/{rel}": text for rel, text in self._package_snapshot().items()})
         return _accepted.script_version(files)
 
@@ -9669,9 +9677,11 @@ class Engine:
             return []
         version = self._measuring_code_version(seed_path)
         out: list[dict[str, Any]] = []
+        covered = True
         for check in checks:
             entry = _accepted.went_on_by(self.quest_root, check, version)
             if entry is None:
+                covered = False
                 why = _accepted.no_longer_applies(self.quest_root, check, version)
                 said = self.__dict__.setdefault("_go_on_lapsed_said", set())
                 if why and (check["name"], why) not in said:  # once per check and reason, not on every repair round
@@ -9680,10 +9690,10 @@ class Engine:
                                       "judged again", check["name"], why)
                     print(f"[FI] the choice to go on with the known-answer check {check['name']!r} no longer applies "
                           f"({why}): it is judged again.")
-                return []
+                continue
             out.append({**check, "by": entry.get("by"), "via": entry.get("via"), "at": entry.get("at"),
                         "script": entry.get("script"), "script_version": version})
-        return out
+        return out if covered else []
 
     async def _record_criteria(self, state: QuestState, *, attempt: str | None = None, result: Any = None,
                                repaired: bool = False) -> None:

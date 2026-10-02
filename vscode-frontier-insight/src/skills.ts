@@ -690,14 +690,23 @@ export async function runAcceptChecks(
     // A stop at a known-answer check that was measured and failed: the choice marks it unconfirmed, and is bound to the
     // check's conditions and the code that measured it; both are shown before the name is asked for.
     let failed: any = null;
+    let atOracle = false;
     try {
         const pause = JSON.parse(await fs.readFile(path.join(outputsDir, questId, ".fi", "pause.json"), "utf8"));
-        if (pause && pause.kind === "oracle") {
+        atOracle = !!pause && pause.kind === "oracle";
+        if (atOracle) {
             const record = JSON.parse(await fs.readFile(path.join(outputsDir, questId, "needs", "ORACLE_CHECK.json"), "utf8"));
             failed = record && record.status === "stopped" && record.go_on ? record.go_on : null;
         }
     } catch {
         failed = null;  // not stopped there, or a quest in another folder: FI says what it is stopped for
+    }
+    if (atOracle && !failed) {
+        // Stopped at the known-answer checks, but the stop names no offer (a stop written by an older FI): never the
+        // unsourced-checks text; resuming once makes the stop say which checks failed.
+        stream.markdown("This quest stopped at its known-answer checks, but the stop does not say which failed check " +
+            `could be marked unconfirmed. Resume it once (\`@fi /resume ${questId}\`) and the stop says.\n`);
+        return undefined;
     }
     if (failed) {
         if (!failed.offered) {

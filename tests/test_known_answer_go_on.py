@@ -59,6 +59,24 @@ def test_only_a_check_that_was_measured_and_failed_is_offered() -> None:
     nothing, why = ac.offer(oc.problems([ORACLE, other], both, 0), [ORACLE, other], oc.judged([ORACLE, other], both))
     assert nothing == [] and "'second'" in why
     assert ac.offer([], [], [])[0] == []
+    # Two checks under one name: a failure cannot be told apart from the other's.
+    twin = {**ORACLE, "expected": 0.5}
+    nothing, why = ac.offer(oc.problems([ORACLE, twin], REPORTED, 0), [ORACLE, twin], oc.judged([ORACLE, twin], REPORTED))
+    assert nothing == [] and "cannot tell them apart" in why
+
+
+def test_the_web_page_offers_it_only_while_the_quest_is_stopped_there(tmp_path: Path) -> None:
+    """A stale record of the stop at the checks must not show the failed-check choice while the quest is stopped at the
+    plan: the endpoint would record the plan's choice, and the person would have read one thing and signed another."""
+    quest = tmp_path / "q-1"
+    _stopped_record(quest)
+    assert ac.failing_pending(quest) is not None
+    (quest / ".fi" / "pause.json").write_text(json.dumps({"kind": "plan"}), encoding="utf-8")
+    assert ac.failing_pending(quest) is None
+    (quest / ".fi" / "pause.json").unlink()
+    assert ac.failing_pending(quest) is not None
+    ac.write_pending(quest, [{"name": "a", "why": "w", "expected": 1.0, "fingerprint": "f"}], plan_version=1)
+    assert ac.failing_pending(quest) is None, "with no live stop, the plan's own record decides, as accept() does"
 
 
 # --- the three surfaces record a name, the conditions and the code version ------------------------------------------
@@ -161,6 +179,12 @@ def test_the_engine_judges_again_when_the_script_or_the_check_changed(tmp_path: 
     assert went["by"] == "Jun" and went["via"] == "cli"
     changed = {**ORACLE, "tolerance": 0.06}
     assert engine._chosen_go_on(oc.problems([changed], REPORTED, 1), [changed], oc.judged([changed], REPORTED), script) == []
+    # A helper module beside the script is part of the code that measured the check; FI's own scripts are not.
+    before = engine._measuring_code_version(script)
+    (script.parent / "run.py").write_text("# FI's own runner\n", encoding="utf-8")
+    assert engine._measuring_code_version(script) == before
+    (script.parent / "helpers.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    assert engine._measuring_code_version(script) != before
     script.write_text(_FAILING + "\n# edited\n", encoding="utf-8")
     assert engine._chosen_go_on(found, [ORACLE], judged, script) == []
     log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")

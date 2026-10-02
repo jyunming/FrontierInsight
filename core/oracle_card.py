@@ -677,7 +677,8 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
             "detail": (f"Go on although the check failed, with your name recorded: {listed}; measured by {script_at}. "
                        "The check stays failed and marked unconfirmed: the result does not count as checked against "
                        "known answers (never publication-ready), and the paper says so. If the check's expected value, "
-                       "tolerance, case or measure changes, or that code changes, the check is judged again."),
+                       "tolerance, case or measure changes, or that code changes (by you, or by a later fix FI makes), "
+                       "the check is judged again."),
             "cli": f"python launch.py --accept-checks {quest_id} --approve-as <you>",
             "web": "Go on with it marked unconfirmed",
             "vscode": f"@fi /accept-checks {quest_id}",

@@ -246,6 +246,9 @@ def offer(found: list[str], oracles: list[dict[str, Any]],
         return [], "the plan has no known-answer check, so there is no failed check to go on with"
     if _oracle.unjudgeable(oracles):
         return [], "a check gives no number to compare with, so nothing was judged and there is no failure to record"
+    duplicate = _oracle.duplicate_names(oracles)
+    if duplicate:
+        return [], f"{duplicate[0]}, so a failure cannot be told apart from the other check's"
     by_name = {str(j.get("name") or "").strip().lower(): j for j in judged or [] if isinstance(j, dict)}
     failing: list[dict[str, Any]] = []
     unmeasured: list[str] = []
@@ -298,6 +301,11 @@ def conditions_text(check: dict[str, Any]) -> str:
 def failing_pending(quest_root: Path) -> dict[str, Any] | None:
     """What the stop at the known-answer checks offers to go on with (``needs/ORACLE_CHECK.json``'s ``go_on``: ``checks``,
     ``script``, ``script_version``), or ``None`` when the quest is not stopped there or the stop offers nothing."""
+    # The same rule `accept` follows: only while the live stop is this one (an older stopped record must not offer a
+    # choice the endpoint would then record against the plan's stop).
+    paused = _paused_kind(quest_root)
+    if paused not in ("oracle", None) or (paused is None and pending(quest_root) is not None):
+        return None
     record = _stopped_record(quest_root)
     go_on = (record or {}).get("go_on")
     if isinstance(go_on, dict) and go_on.get("offered") and isinstance(go_on.get("checks"), list) and go_on["checks"]:
@@ -341,8 +349,9 @@ def accept_failing(quest_root: Path, who: str, *, via: str) -> tuple[bool, str]:
     return True, (f"recorded: {who} goes on although {len(names)} known-answer check(s) failed: {listed}, measured by "
                   f"{go_on.get('script') or 'the script'} (version {short_version(go_on.get('script_version'))}). Each "
                   f"is marked {UNCONFIRMED}: the result does not count as checked against known answers, and the paper "
-                  "says so. If the check's expected value, tolerance, case or measure changes, or that code changes, the "
-                  "check is judged again. Resume the quest to go on.")
+                  "says so. If the check's expected value, tolerance, case or measure changes, or that code changes "
+                  "(by you since the stop, or by a later fix FI makes), the check is judged again and FI asks again. "
+                  "Resume the quest to go on.")
 
 
 def went_on_by(quest_root: Path, check: dict[str, Any], version: str) -> dict[str, Any] | None:
