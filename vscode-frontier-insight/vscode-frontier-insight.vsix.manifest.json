@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "c0b1e7929acfac05e05143195e0d285cedde3204bc8b81eb38c221ce01cc8fcc",
+  "vsix_sha256": "2a8a720c01f0885e3f592c8a64706f223e4c247aa16ce2b2740ec0cc8bf43c27",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -26,12 +26,12 @@
       "bytes": 1037
     },
     "extension/media/quest_map.css": {
-      "sha256": "9a627d7b1991983e3f7b9cd06aa0f18ef113c45c87cf9213fa083ff80efbb537",
-      "bytes": 6705
+      "sha256": "e3030972676f85d4e70beec45bc76ab300565adaa5c9e5cabdb7b67c920a9f46",
+      "bytes": 6621
     },
     "extension/media/quest_map.js": {
-      "sha256": "21148627ee1051aeaad8f4c6e33f3daef11d108d78c9c48dac7624e47095ad04",
-      "bytes": 12301
+      "sha256": "c2e54b7981462318b385e163a432d63213f1f45d7eac87e343b9f8c273a6a798",
+      "bytes": 12046
     },
     "extension/out/axon-endpoint.js": {
       "sha256": "82288d27a7478ea725d8d0a575ec81ece50818839c3fa73f8f97569a7235c5bd",
@@ -54,12 +54,12 @@
       "bytes": 2087
     },
     "extension/out/interview-core.js": {
-      "sha256": "8f2c77b0943b25f2a9348b8936bf5f284ec40f4edf1f1abac465ad3ae05725b9",
-      "bytes": 31312
+      "sha256": "ea3f23f43881154a310de10844089c41a7102c87cc0afbbcfc63ab297c756e78",
+      "bytes": 27202
     },
     "extension/out/interview.js": {
-      "sha256": "35b07b309331907974b7a876652496eb43b5242b747fe0b475b08ee293df2960",
-      "bytes": 72683
+      "sha256": "3fb000395f7010db6e46894bd4db6511eb6999bfac124f340d28a1120221e52b",
+      "bytes": 71669
     },
     "extension/out/lm-messages.js": {
       "sha256": "a6e48de4ca3a016994188c86e2875040d7173118c5c25822474e0972766eb3ba",
