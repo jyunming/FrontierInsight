@@ -221,11 +221,12 @@ async def test_a_script_that_finishes_keeps_its_output_and_exit_code(tmp_path: P
 # --- the CLI providers (core/provider.py) -----------------------------------------------------------------------------
 
 
-def _fake_cli(tmp_path: Path, output_via: str) -> tuple[object, Path, float, float]:
-    """A CLI provider spec whose binary is ``_PROGRAM``: it starts its helpers and then says nothing."""
+def _fake_cli(tmp_path: Path, output_via: str, late_in: float | None = None) -> tuple[object, Path, float, float]:
+    """A CLI provider spec whose binary is ``_PROGRAM``: it starts its helpers and then says nothing. ``late_in``: when
+    a surviving helper writes its marker (default: a few seconds after the timeout)."""
     helper, program, folder = _write_programs(tmp_path)
     timeout_s = 12.0
-    late_at = time.time() + timeout_s + 4
+    late_at = time.time() + (late_in if late_in is not None else timeout_s + 4)
     spec = dataclasses.replace(
         _CLI_SPECS["claude_cli"], argv=(sys.executable, str(program), str(helper), str(folder), str(late_at), "stay"),
         output_via=output_via,
@@ -245,7 +246,9 @@ async def test_a_timed_out_cli_stops_with_the_helpers_it_started(tmp_path: Path,
 @pytest.mark.asyncio
 @pytest.mark.parametrize("output_via", ["stream_json", "stdout"])
 async def test_a_cancelled_cli_call_stops_with_the_helpers_it_started(tmp_path: Path, output_via: str) -> None:
-    spec, folder, _timeout_s, _late_at = _fake_cli(tmp_path, output_via)
+    # Cancelled once the helpers beat, which can take a while on a loaded runner: their marker comes long after that,
+    # so a marker can only mean a helper outlived the cancel.
+    spec, folder, _timeout_s, _late_at = _fake_cli(tmp_path, output_via, late_in=80)
     task = asyncio.create_task(_run_cli(spec, "hi", timeout_s=300, inactivity_timeout_s=600))
     await _wait_until_beating(folder)
     task.cancel()
