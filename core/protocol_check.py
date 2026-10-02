@@ -173,14 +173,22 @@ def _numeric_sequence(node: ast.AST) -> list[float] | None:
     return None
 
 
-def _mentions_pilot(test: ast.AST) -> bool:
-    return any(isinstance(n, ast.Constant) and n.value == _PILOT for n in ast.walk(test)) or any(
-        isinstance(n, ast.Name) and n.id == _PILOT for n in ast.walk(test)
+def _mentions_pilot(test: ast.AST, flag: str = _PILOT) -> bool:
+    return any(isinstance(n, ast.Constant) and n.value == flag for n in ast.walk(test)) or any(
+        isinstance(n, ast.Name) and n.id == flag for n in ast.walk(test)
     )
 
 
+#: The known-answer checks' own code: the script's ``oracle()`` and its ``FI_ORACLE`` branch. Their run counts are the
+#: checks' (two live quests were stopped as "the script sets 20000 runs per setting" for ``ORACLE_RUNS = 20000`` used
+#: only in ``oracle()``, and for ``n2_runs = 5000`` inside it), never the main experiment's runs per setting.
+_ORACLE = "FI_ORACLE"
+_ORACLE_FUNCTIONS = {"oracle"}
+
+
 class _Reader(ast.NodeVisitor):
-    """Collects the numeric lists and the scalar counts a script assigns, outside any ``FI_PILOT`` branch."""
+    """Collects the numeric lists and the scalar counts a script assigns, outside any ``FI_PILOT`` branch and outside the
+    known-answer checks' own code (``oracle()``, the ``FI_ORACLE`` branch, a name that says it is the oracle's)."""
 
     def __init__(self, script: str) -> None:
         self.script = script
@@ -188,15 +196,32 @@ class _Reader(ast.NodeVisitor):
         self.scalars: list[_Found] = []
 
     def visit_If(self, node: ast.If) -> None:  # noqa: N802
-        if _mentions_pilot(node.test):
-            # The branch taken when FI_PILOT is set is the smoke test; the other one is the real run.
-            negated = any(isinstance(n, (ast.Not, ast.NotEq)) for n in ast.walk(node.test))
-            for child in node.body if negated else node.orelse:
-                self.visit(child)
-            return
+        for flag in (_PILOT, _ORACLE):
+            if _mentions_pilot(node.test, flag):
+                # The branch taken when FI_PILOT (FI_ORACLE) is set is the smoke test (the checks); the other one is the
+                # real run.
+                # `not ...`, `!= "1"`, or `== "0"` (the flag off) select the real run as the body.
+                negated = any(isinstance(n, (ast.Not, ast.NotEq)) for n in ast.walk(node.test)) or any(
+                    isinstance(n, ast.Compare) and any(isinstance(op, ast.Eq) for op in n.ops)
+                    and any(isinstance(c, ast.Constant) and c.value in ("0", "", "false", "False", 0, False)
+                            for c in n.comparators)
+                    for n in ast.walk(node.test))
+                for child in node.body if negated else node.orelse:
+                    self.visit(child)
+                return
         self.generic_visit(node)
 
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:  # noqa: N802
+        if node.name not in _ORACLE_FUNCTIONS:
+            self.generic_visit(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:  # noqa: N802
+        if node.name not in _ORACLE_FUNCTIONS:
+            self.generic_visit(node)
+
     def _record(self, name: str, value: ast.AST, line: int) -> None:
+        if "oracle" in _tokens(name):
+            return  # ORACLE_RUNS, oracle_cases: the checks' own numbers
         seq = _numeric_sequence(value)
         if seq is not None:
             self.lists.append(_Found(name, seq, line, self.script))
@@ -284,6 +309,23 @@ def rng_reuse(source: str) -> list[tuple[str, int]]:
     return out
 
 
+def _oracle_only_names(tree: ast.AST) -> set[str]:
+    """The names read inside ``oracle()`` and nowhere else in the script."""
+    inside: set[str] = set()
+    outside: set[str] = set()
+
+    def walk(node: ast.AST, in_oracle: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            here = in_oracle or (isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                 and child.name in _ORACLE_FUNCTIONS)
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                (inside if here else outside).add(child.id)
+            walk(child, here)
+
+    walk(tree, False)
+    return inside - outside
+
+
 def _read(scripts: dict[str, str]) -> tuple[list[_Found], list[_Found], set[float]]:
     lists: list[_Found] = []
     scalars: list[_Found] = []
@@ -296,8 +338,11 @@ def _read(scripts: dict[str, str]) -> tuple[list[_Found], list[_Found], set[floa
             continue
         reader = _Reader(name)
         reader.visit(tree)
-        lists += reader.lists
-        scalars += reader.scalars
+        # A module-level name only the checks' own code reads (``CHECK_RUNS = 20000`` used in ``oracle()`` alone) is
+        # theirs too.
+        only = _oracle_only_names(tree)
+        lists += [f for f in reader.lists if f.name not in only]
+        scalars += [f for f in reader.scalars if f.name not in only]
         numbers |= code_numbers(source)
     return lists, scalars, numbers
 

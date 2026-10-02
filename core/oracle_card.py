@@ -255,6 +255,11 @@ def build(
     reported_by_name = {str(c.get("name") or "").strip().lower(): c for c in last_checks or [] if isinstance(c, dict)}
     entry = next((e for e in ("run_trial", "run_cell") if trial and e in _entries(script)), "run_cell")
     run_text = "; ".join(found) + "\n" + (stderr_tail or "")
+    # What FI's own look at the failing checks found (core/oracle_triage.py), in the order it looked.
+    triage = [t for a in attempts for t in a.get("triage") or [] if isinstance(t, dict)]
+    by_fi = any(p.get("source") == "recompute" for p in proposals) or any(
+        t.get("points_to") == "tolerance" for t in triage)
+    by_repair = any(p.get("source") != "recompute" for p in proposals)
 
     checks: list[dict[str, Any]] = []
     causes: list[dict[str, str]] = []
@@ -328,8 +333,16 @@ def build(
         proposal = by_proposal.get(key)
         if proposal is not None:
             check["proposal"] = dict(proposal)
+        own_look = [t for t in triage if str(t.get("check") or "").strip().lower() == key]
+        if any(t.get("points_to") == "tolerance" for t in own_look):
+            check["set_aside"] = True  # FI did not rewrite the script for it: the tolerance is what its look points to
         checks.append(check)
+        # What FI's own look found that points away from the script comes first (it is evidence about this check, not a
+        # guess), then a proposal and the rest, then what it found that points to the script.
+        looked = [t for t in own_look if isinstance(t.get("cause"), dict)]
+        causes += [dict(t["cause"]) for t in looked if t.get("points_to") != "script"]
         causes += _causes_for(check, oracle, proposal, reported_by_name.get(key), attempts)
+        causes += [dict(t["cause"]) for t in looked if t.get("points_to") == "script"]
 
     # A run that names no check (a crash before any check, no ORACLE_JSON line): its error is the cause for all of them.
     run_error = ""
@@ -343,6 +356,7 @@ def build(
                 "evidence": run_error + (f" (at {at})" if at else "")
                 + _same_each_time(attempts, run_error),
             })
+    causes += [dict(t["cause"]) for t in triage if not t.get("check") and isinstance(t.get("cause"), dict)]
     for sentence in _oracle.duplicate_names(oracles, {"checks": last_checks} if last_checks else None):
         causes.append({"text": "Two checks share one name, so a value may have been judged against the other "
                                "check's expected value.", "evidence": sentence[0].upper() + sentence[1:] + "."})
@@ -370,7 +384,8 @@ def build(
             causes.insert(0, {"text": "The script stopped with an error.", "evidence": error + (f" (at {at})" if at else "")})
     else:
         summary = (f"FI stopped before the main run: {n_failed} of {len(oracles)} known-answer check(s) did not pass"
-                   + (" and FI's repair says the check itself is wrong" if kept else "")
+                   + ((" and FI's repair says the check itself is wrong" if by_repair or not by_fi else
+                       " and FI's own look at it points to the check, not the script") if kept else "")
                    + (f"; {len(checks) - n_failed} more could not be measured or judged" if len(checks) > n_failed
                       else "")
                    + ".")
@@ -389,16 +404,21 @@ def build(
         # a non-zero exit. Nothing the record says is left off the card.
         "also_found": [_plain(f) for f in found if not any(repr(c["id"]) in f for c in checks)] if oracles else [],
         "causes": causes,
-        "tried": _tried(attempts, kept=kept, script=script),
+        "tried": _tried(attempts, kept=kept, script=script, by_fi=by_fi and not by_repair),
         "actions": _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
                             repairs=repairs, kept=kept, quest_root=quest_root, script=script),
         "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + [
             # After the freeze a proposal cannot be applied from here: say the one way it can be used.
-            ("This research quest cannot take the repair's proposed change (its protocol is frozen); to use it, start "
-             "a new quest whose plan states it: " if research else
-             "Accepting the repair's proposed change needs an amendment: ask, at the review, for this change: ")
+            (f"This research quest cannot take the {_whose(p)} proposed change (its protocol is frozen); to use it, "
+             "start a new quest whose plan states it: " if research else
+             f"Accepting the {_whose(p)} proposed change needs an amendment: ask, at the review, for this change: ")
             + _oracle.proposal_request(p) for p in proposals if frozen],
     }
+
+
+def _whose(proposal: dict[str, Any] | None) -> str:
+    """Who proposed a change to a check, as a possessive: FI's recomputation of its expected value, or a repair."""
+    return "recomputation's" if (proposal or {}).get("source") == "recompute" else "repair's"
 
 
 def _entries(script: Path) -> set[str]:
@@ -431,8 +451,12 @@ def _causes_for(check: dict[str, Any], oracle: dict[str, Any], proposal: dict[st
             verdict = (f" The script measured {_oracle.fmt_digits(value)}: accepting this makes that measurement pass, "
                        "so check the reason, not the result." if abs(value - expected) <= limit else
                        f" The script measured {_oracle.fmt_digits(value)}, which would still fail it.")
+        recomputed = proposal.get("source") == "recompute"
         out.append({
-            "text": f"The check may be what is wrong: FI's repair judged the check `{name}` itself wrong.",
+            "text": (f"The expected value of `{name}` may be what is wrong: worked out again without the measured value, "
+                     f"it comes out as {_oracle.fmt_digits(proposal['expected'])}, near what was measured, not as the "
+                     f"plan's {check.get('expected_text') or '?'}." if recomputed else
+                     f"The check may be what is wrong: FI's repair judged the check `{name}` itself wrong."),
             "evidence": f"It proposes expected {_oracle.fmt_digits(proposal['expected'])}, tolerance "
                         f"{_oracle.fmt_digits(proposal['tolerance'])} ({proposal.get('tolerance_mode') or 'absolute'})"
                         + (f", check: {proposal['check']}" if proposal.get("check") else "")
@@ -480,7 +504,7 @@ def _plain(sentence: str) -> str:
     return text[:1].upper() + text[1:] + ("" if text.endswith(".") else ".")
 
 
-def _tried(attempts: list[dict[str, Any]], *, kept: str | None, script: Path) -> list[str]:
+def _tried(attempts: list[dict[str, Any]], *, kept: str | None, script: Path, by_fi: bool = False) -> list[str]:
     out: list[str] = []
     if any(a.get("test_run_mismatches") for a in attempts):
         out.append("Before any repair, FI asked the plan once to look at the checks' definitions (the numbers of a "
@@ -491,6 +515,8 @@ def _tried(attempts: list[dict[str, Any]], *, kept: str | None, script: Path) ->
         out.append(f"FI asked the plan {asked_plan} time(s) to add or complete a known-answer check.")
     n = 0
     for a in attempts:
+        # FI's own look at the failing checks, as it happened (before the repair of the same run).
+        out += [str(t["tried"]) for t in a.get("triage") or [] if isinstance(t, dict) and t.get("tried")]
         outcome = a.get("repair")
         if not outcome:
             continue
@@ -502,9 +528,12 @@ def _tried(attempts: list[dict[str, Any]], *, kept: str | None, script: Path) ->
                                              if outcome == "applied" else "")
                    + (f" — “{summary}”" if summary and outcome == "applied" else "") + ".")
     if kept == "as_it_was":
-        out.append("The script was kept as it was: the repair says the failing checks are what is wrong, not the script.")
+        out.append("The script was kept as it was: FI's own look says the failing checks, not the script, are what is "
+                   "wrong." if by_fi else
+                   "The script was kept as it was: the repair says the failing checks are what is wrong, not the script.")
     elif kept == "for_disputed":
-        out.append("After the repair disputed the failing check(s), the script was not changed for them.")
+        out.append("After FI's own look pointed to the failing check(s), the script was not changed for them." if by_fi
+                   else "After the repair disputed the failing check(s), the script was not changed for them.")
     if not n and not out:
         out.append("No repair was made.")
     return out
@@ -554,18 +583,16 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
     # A check with no numbers (or no check at all) is the plan's to complete: the gate asks the plan, not a repair of
     # the script, and after the freeze it asks nobody (Engine._oracle_gate).
     plan_incomplete = not oracles or any(c["status"] == "cannot_judge" for c in checks)
-    # 1. Resume as it is. Each resume gives the gate a fresh budget; the repair's earlier view that a check is wrong is
-    # not carried into it, so say both. After the freeze an incomplete plan stops here again: no such action then.
+    # 1. Resume as it is. Each resume gives the gate a fresh budget. What FI or a repair found about a failing check is
+    # kept while the check is unchanged, so when every failing check is such a one (``kept``) a resume would only stop
+    # here again: no such action then, nor after the freeze for an incomplete plan.
     if plan_incomplete and not frozen:
         again = (f"FI asks the plan to {'add a known-answer check' if not oracles else 'give the check its numbers'} "
                  f"(up to {repairs} time(s)) and then checks the script with it.")
     else:
         again = (f"FI measures the checks again and, if one still does not pass, repairs the script up to {repairs} "
                  "more time(s).")
-    if kept:
-        again += (" The repair's earlier view that the check is wrong is not carried over, so a new repair may change "
-                  "the script towards the declared value: read the reason above first.")
-    if not (plan_incomplete and frozen):
+    if not (plan_incomplete and frozen) and not kept:
         actions.append({"id": "resume", "label": "Let FI try again", "detail": "Resume as it is: " + again,
                         "cli": resume_cli, "web": "Resume", "vscode": f"@fi /resume {quest_id}"})
     # 2. Fix it yourself: the script at the line that computes the number, or the check in plan.md (before the freeze).
@@ -614,9 +641,10 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
             proposal = next((c["proposal"] for c in checks if c.get("proposal")), None)
             actions.append({
                 "id": "accept_proposal" if proposal else "revise_check",
-                "label": "Accept the repair's proposed change" if proposal else "Have the check worked out again",
-                "detail": ("Ask the plan for the change the repair proposes (check its reason, not only that the "
-                           "measured value would pass), then resume." if proposal else
+                "label": f"Accept the {_whose(proposal)} proposed change" if proposal else
+                         "Have the check worked out again",
+                "detail": (f"Ask the plan for the change the {_whose(proposal)[:-2]} proposes (check its reason, not "
+                           "only that the measured value would pass), then resume." if proposal else
                            "Ask the plan to work the check out again from its own source, then resume. FI does not "
                            "put the measured value in as the expected one."),
                 "prefill": text,

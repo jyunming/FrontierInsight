@@ -1,7 +1,7 @@
 ---
 title: How FI judges correctness
-sources: [core/oracle_check.py, core/oracle_card.py, core/todo.py, core/engine.py, core/trial_runner.py, core/evidence.py, core/acceptance.py, core/config.py]
-updated: 2026-10-01
+sources: [core/oracle_check.py, core/oracle_card.py, core/oracle_triage.py, core/todo.py, core/engine.py, core/trial_runner.py, core/evidence.py, core/acceptance.py, core/config.py]
+updated: 2026-10-02
 ---
 # How FI judges correctness
 
@@ -48,7 +48,9 @@ Every screen calls an oracle a **known-answer check**. When the checks stop the 
 - the case and the measure;
 - the file and line where the script computes the number.
 
-Then the card gives the most likely cause, using only what FI already has: a repair's proposal and its reason, the test run's size verdict, two checks under one name, or the error and line when nothing was measured. It also lists what FI tried and two or three ways on, each with its command. Resuming repairs the script again, up to `engine.oracle_repair_attempts` times; a check with no numbers is sent back to the plan instead. A change to the check is filled in as a request to work the expected value out again from its source; it never takes the measured value. The card reports the verdict and never changes it. (A check that names no source for its expected value stops earlier, at the plan, with its own "go on as it is": [[oracle-provenance|Oracle provenance]].)
+Then the card gives the most likely cause, using only what FI already has: a repair's proposal and its reason, the test run's size verdict, two checks under one name, or the error and line when nothing was measured. It also lists what FI tried and two or three ways on, each with its command. Resuming repairs the script again, up to `engine.oracle_repair_attempts` times (not offered when every failing check is disputed or set aside: that finding is kept); a check with no numbers is sent back to the plan instead. A change to the check is filled in as a request to work the expected value out again from its source; it never takes the measured value. The card reports the verdict and never changes it.
+
+Before the first repair of a failing check, FI looks itself (`core/oracle_triage.py`). Another model works out the expected value again without seeing the measured one; if it lands near the measurement, the expected value is disputed and offered as a proposal (never for a violation expecting 0). A deterministic check with a step is run at half and a quarter of it and extrapolated to step 0; if it converges at the declared order (or 1.5 or more) to the expected value, the gap is the method's own error. A random check gets three more seeds; a spread larger than the tolerance, with a mean that agrees, is noise. A usual unit factor (×100, ×1000, ×2π, the reciprocal, a count) is named on the card. The same exception after a repair stops the repairs, and a timed-out run gets one retry at twice the time. A check the recompute, the smaller step or the seeds point to is not repaired for, and it still fails. Every finding is under `attempts[].triage` in `needs/ORACLE_CHECK.json` and on the card. A dispute survives a resume while the check is unchanged. (A check that names no source for its expected value stops earlier, at the plan, with its own "go on as it is": [[oracle-provenance|Oracle provenance]].)
 
 ## What counts as independent evidence
 

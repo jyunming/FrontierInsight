@@ -73,6 +73,7 @@ from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
 from . import oracle_card as _oracle_card
+from . import oracle_triage as _oracle_triage
 from . import code_layout as _code_layout
 from . import changelog as _changelog
 from . import code_project as _code_project
@@ -214,6 +215,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "figures",
     "write.trim",
     "oracle_review",  # a referee's verdict on the plan's checks
+    "oracle_review.recompute",  # a failing check's expected value worked out again (core/oracle_triage.py)
 })
 
 
@@ -9304,6 +9306,17 @@ class Engine:
         # The checks a repair called wrong while they were not passing: the script is not changed for them. (A proposal
         # about a check that passed is shown to the person but does not excuse that check failing later.)
         self._oracle_disputed: set[str] = set()
+        # The failing checks FI's own look (core/oracle_triage.py) found are not the script's to fix: a tolerance tighter
+        # than the method's own error at its step, or than one random trial's noise. Name -> the finding. They still fail;
+        # the script is just not rewritten for them.
+        self._oracle_set_aside: dict[str, str] = {}
+        self._oracle_noisy: set[str] = set()  # those set aside as one random trial's noise
+        # A dispute outlives a stop: the checks the last run of this gate found disputed, while they are as they were then
+        # (a person who changed one, or accepted its proposal, starts it afresh).
+        self._restore_oracle_disputes(_oracle.declared(protocol))
+        self_check_calls, self_check_runs = 0, 0  # what FI's own look at the failing checks cost this run
+        looked: set[str] = set()  # the checks it looked at (once each)
+        timeout_retried = False  # a run of the checks that ran out of time is run once more, at twice the time
         env = {
             **_replicate_env(exec_env, 0, stride), "FI_ORACLE": "1",
             _split_run.RAW_DIR_ENV: _split_run.env_value(oracle_raw_dir, self.quest_root),
@@ -9327,34 +9340,38 @@ class Engine:
             protocol = self._protocol_block(state) or protocol  # a plan edit, or the oracle declared just now
             oracles = _oracle.declared(protocol)
             incomplete = _oracle.unjudgeable(oracles)  # the engine judges: an oracle with no numbers to judge by is not run
-            reported: dict[str, Any] | None = None
-            returncode, timed_out = 0, False
-            stderr_tail = ""
-            trial_problems: list[str] = []
-            if oracles and not incomplete and getattr(self, "_trial_mode", False):
-                # The trial contract. An oracle with a case is measured by the ENGINE: it calls the simulation function on
-                # that case in its own process and reads the measure from what comes back, so no number of the script's own
-                # making stands in for the simulation. The rest fall back to the script's oracle().
-                # A search for the best design calls the simulation with the conditions held fixed and the search's
-                # numerical settings: an oracle's case (the baseline, say) is run with them too.
-                run_oracles = [{**o, "case": _optimise.complete_case(protocol, o["case"])}
-                               if _optimise.block_of(protocol) is not None and isinstance(o.get("case"), dict) else o
-                               for o in oracles]
-                try:
-                    checks, trial_problems, _ = await _trial_runner.measure_oracles(
-                        self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(), run_oracles,
-                        timeout_s=timeout, env=env,
-                        thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                        case_env=dict(_replicate_env(exec_env, 0, stride)),
-                    )
-                except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
-                    checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
-                reported = {"checks": checks, "engine_measured": True}
-                stderr_tail = getattr(self, "_packages_note", "") + "; ".join(trial_problems)
-            elif oracles and not incomplete:
+            # A search for the best design calls the simulation with the conditions held fixed and the search's
+            # numerical settings: an oracle's case (the baseline, say) is run with them too.
+            run_oracles = [{**o, "case": _optimise.complete_case(protocol, o["case"])}
+                           if _optimise.block_of(protocol) is not None and isinstance(o.get("case"), dict) else o
+                           for o in oracles]
+
+            async def measure(limit_s: int) -> tuple[dict[str, Any] | None, int, bool, str, list[str]]:
+                """One run of the checks: (what was reported, exit code, ran out of time, the error output, the trial
+                contract's problems)."""
+                reported: dict[str, Any] | None = None
+                returncode, timed_out, stderr_tail = 0, False, ""
+                trial_problems: list[str] = []
+                if getattr(self, "_trial_mode", False):
+                    # The trial contract. An oracle with a case is measured by the ENGINE: it calls the simulation function
+                    # on that case in its own process and reads the measure from what comes back, so no number of the
+                    # script's own making stands in for the simulation. The rest fall back to the script's oracle().
+                    try:
+                        # (A case that ran out of time says so among the problems: the retry below reads it there.)
+                        checks, trial_problems, _ = await _trial_runner.measure_oracles(
+                            self.executor, py, self.quest_root, seed_path.relative_to(self.quest_root).as_posix(),
+                            run_oracles, timeout_s=limit_s, env=env,
+                            thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
+                            case_env=dict(_replicate_env(exec_env, 0, stride)),
+                        )
+                    except Exception as e:  # noqa: BLE001 -- a run that cannot start is a problem to report
+                        checks, trial_problems = [], [f"the oracles could not be run: {e!r}"[:300]]
+                    reported = {"checks": checks, "engine_measured": True}
+                    stderr_tail = getattr(self, "_packages_note", "") + "; ".join(trial_problems)
+                    return reported, returncode, False, stderr_tail, trial_problems
                 try:
                     ran = await self.executor.execute(
-                        [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=timeout, env=env,
+                        [str(py), str(seed_path)], cwd=self.quest_root, timeout_s=limit_s, env=env,
                     )
                     reported, returncode, timed_out = _oracle.parse(ran.stdout), ran.returncode, ran.timed_out
                     if isinstance(reported, dict):
@@ -9365,15 +9382,45 @@ class Engine:
                     returncode, stderr_tail = -1, repr(e)
                 if reported is None and returncode not in (0, -1):
                     self._log.info("[oracle] the script exited %s without ORACLE_JSON; stderr_tail=%s", returncode, stderr_tail[-300:])
+                return reported, returncode, timed_out, stderr_tail, trial_problems
+
+            reported: dict[str, Any] | None = None
+            returncode, timed_out, stderr_tail = 0, False, ""
+            trial_problems: list[str] = []
+            retried: dict[str, Any] | None = None
+            if oracles and not incomplete:
+                reported, returncode, timed_out, stderr_tail, trial_problems = await measure(timeout)
+                ran_out = timed_out or any("ran out of time" in p for p in trial_problems)
+                if ran_out and not timeout_retried:
+                    # A case that needs a little longer than the pre-check allows is not a failure of the script: one
+                    # more run at twice the time, once per gate, before it counts.
+                    timeout_retried = True
+                    self._log.warning("[oracle] the run of the checks ran out of time (%d s); running it once more with "
+                                      "%d s", timeout, timeout * 2)
+                    self_check_runs += 1
+                    reported, returncode, timed_out, stderr_tail, trial_problems = await measure(timeout * 2)
+                    retried = _oracle_triage.timeout_entry(
+                        timeout, timed_out or any("ran out of time" in p for p in trial_problems))
+                    timeout *= 2  # the rest of this gate's runs get the time the case needed
             found = incomplete or _oracle.problems(oracles, reported, returncode, timed_out)
             if trial_problems and not incomplete:
                 # The trial contract: there is no FI_ORACLE run and no ORACLE_JSON line; say why a value is missing.
                 found = _oracle.with_run_problems(trial_problems, found, oracles)
+            judged_list = _oracle.judged(oracles, reported) if reported is not None else []
+            # The last exception of a run that left a check unmeasured: on the card, in the repair request, and compared
+            # with the next run's (the same one after a repair stops the repairs early).
+            exception = (_oracle_triage.exception_of(stderr_tail, found)
+                         if found and oracles and not incomplete
+                         and (reported is None or any(j.get("value") is None for j in judged_list)) else "")
+            if re.match(r"^[\w.]*Warning\b", exception):
+                exception = ""  # a warning is not what stopped it
             attempts.append({
                 "attempt": attempt, "oracles": [o["name"] for o in oracles], "problems": found,
                 "checks": (reported or {}).get("checks"),
                 # What the engine made of each: the script's value against the protocol's expected value and tolerance.
-                "judged": _oracle.judged(oracles, reported) if reported is not None else [],
+                "judged": judged_list,
+                **({"exception": exception} if exception else {}),
+                **({"triage": [retried]} if retried else {}),
             })
             attempt += 1
             if guard is not None:
@@ -9413,17 +9460,38 @@ class Engine:
             # is never rewritten towards it. When every problem left is such a check, the script is kept as it is and no
             # more repairs are spent (a real quest's repairs, told the check was wrong, kept rewriting a correct script
             # until it crashed and the quest had no result at all).
+            # Before a repair is spent on a failing check, FI looks itself whether the check is what is wrong (its
+            # expected value worked out again by another model, its case at a smaller step or with more seeds): see
+            # core/oracle_triage.py. Once per check per gate run; nothing here changes a verdict.
+            calls, runs = await self._look_at_failing_checks(
+                state, py, seed_path, oracles, run_oracles, attempts[-1], looked, protocol=protocol, timeout=timeout,
+                case_env=dict(_replicate_env(exec_env, 0, stride)))
+            self_check_calls, self_check_runs = self_check_calls + calls, self_check_runs + runs
             disputed = [n for n in self._oracle_proposals if n in self._oracle_disputed]
-            to_fix = _oracle.undisputed(found, disputed)
+            # Not the script's to fix either: a check whose tolerance FI found tighter than its method's error or noise.
+            aside = [n for n in self._oracle_set_aside if n not in disputed]
+            to_fix = _oracle.undisputed(found, disputed + aside)
             judged_now = attempts[-1]["judged"]
             if not to_fix:
                 self._log.warning(
-                    "[oracle] the script is kept as it is: the repair says the check(s) %s are what is wrong, not the "
-                    "script; a person decides whether to change them",
-                    ", ".join(repr(n) for n in _oracle.disputed_failing(judged_now, disputed)),
+                    "[oracle] the script is kept as it is: %s; a person decides whether to change the check(s)",
+                    "; ".join(
+                        [f"the check {n!r} is disputed ({'FI worked its expected value out again' if (self._oracle_proposals.get(n) or {}).get('source') == 'recompute' else 'the repair says it is wrong'})"
+                         for n in _oracle.disputed_failing(judged_now, disputed)]
+                        + [f"the check {n!r}: {self._oracle_set_aside[n]}" for n in aside]),
                 )
                 break
             if repairs_left == 0:
+                break
+            measured_to_fix = [j for j in judged_now if j.get("passed_by_engine") is False
+                               and str(j.get("name")) not in disputed + aside]
+            again = "" if measured_to_fix else _oracle_triage.same_exception(attempts)
+            if again:
+                # The repair changed the script and the same error came back: another rewrite of the same kind would not
+                # reach it. The repairs left are kept, and the card says what the error is and where.
+                attempts[-1].setdefault("triage", []).append(_oracle_triage.same_exception_entry(again, repairs_left))
+                self._log.warning("[oracle] the same error came back after the repair (%s): no more repairs are spent on "
+                                  "it", again)
                 break
             self._log.warning(
                 "[oracle] %d problem(s): %s; asking for a repair (%d of %d)",
@@ -9432,7 +9500,11 @@ class Engine:
             code_before, new_code_before = seed_path.read_text(encoding="utf-8"), new_code
             package_before = self._package_snapshot()
             text, call_failed, outcome = await self._repair_script_for_oracle(
-                state, seed_path, oracles, to_fix, stderr_tail, disputed=disputed,
+                state, seed_path, oracles, to_fix,
+                # The error that stopped the run, said first: the repair goes to it, not to a symptom.
+                (f"The run of the checks stopped with: {attempts[-1]['exception']}\n" if attempts[-1].get("exception")
+                 else "") + stderr_tail,
+                disputed=disputed + aside,
                 passing=[str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True],
             )
             attempts[-1]["repair"] = outcome
@@ -9456,7 +9528,7 @@ class Engine:
             # Every disputed check not passing now, measured or not: a repair that restores a missing measurement must
             # not restore it bent to the disputed number either.
             passing_now = {str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True}
-            held = {n for n in disputed if n not in passing_now}
+            held = {n for n in disputed + aside if n not in passing_now and n not in self._oracle_noisy}
             if outcome == "applied" and held:
                 guard = (code_before, new_code_before, held, package_before)
         status = "ok" if not found else ("warned" if self.config.engine.oracle_check == "warn" else "stopped")
@@ -9470,16 +9542,36 @@ class Engine:
             for j in attempts[-1].get("judged") or []:
                 if j.get("name") in disputed_failing:
                     j["disputed_expected"] = by_name[j["name"]]["expected"]
+                    if by_name[j["name"]].get("source") == "recompute":
+                        j["disputed_by"] = "recompute"
         loose = [w for w in (_oracle.loose_tolerance(o) for o in oracles) if w]
         for warning in loose:
             self._log.warning("[oracle] %s", warning)
+        aside_failing = [n for n in self._oracle_set_aside if found and n not in disputed_failing and any(
+            j.get("name") == n and j.get("passed_by_engine") is False for j in attempts[-1].get("judged") or [])]
         self._oracle_record({
             "status": status, "judged_by": "engine", "attempts": attempts, "problems": found,
             **({"contract": "trial"} if getattr(self, "_trial_mode", False) else {}),
             **({"warnings": loose} if loose else {}),
             **({"proposed_changes": proposed} if proposed else {}),
             **({"disputed": disputed_failing} if disputed_failing else {}),
+            **({"set_aside": {n: self._oracle_set_aside[n] for n in aside_failing}} if aside_failing else {}),
+            # Each check's version, so the next run keeps a dispute only while the check is as it was.
+            "fingerprints": {str(o["name"]).strip(): _oracle_triage.fingerprint(o) for o in oracles},
+            **({"self_checks": {"model_calls": self_check_calls, "extra_runs": self_check_runs}}
+               if self_check_calls or self_check_runs else {}),
         })
+        if self_check_calls or self_check_runs:
+            line = _oracle_triage.cost_line(self_check_calls, self_check_runs)
+            noted = _oracle_triage.read(self.fi_dir)
+            # Written when this run asked a model, or the first time: a resume that only ran the cases again is not.
+            if noted.get("plan_line") != line and (self_check_calls or not noted.get("plan_line")):
+                try:
+                    self._write_plan_section(_plan.plan_path(self.quest_root), ["", "- " + line],
+                                             note="what FI's own look at the failing known-answer checks cost")
+                    _oracle_triage.write(self.fi_dir, {**noted, "plan_line": line})
+                except OSError as e:
+                    self._log.warning("[oracle] couldn't write what the look at the checks cost into plan.md: %r", e)
         if not found:
             self._log.info(
                 "[oracle] %d oracle(s) passed before the main run%s", len(attempts[-1]["oracles"]),
@@ -9489,11 +9581,12 @@ class Engine:
         if self.config.engine.oracle_check == "warn":
             self._log.warning(
                 "[oracle] the oracles did not pass: %s;%s going on (engine.oracle_check: warn)", "; ".join(found),
-                f" the expected value of {', '.join(repr(n) for n in disputed_failing)} is disputed by the repair (not "
-                "approved, so the check counts as failed);" if disputed_failing else "",
+                f" the expected value of {', '.join(repr(n) for n in disputed_failing)} is disputed (not approved, so "
+                "the check counts as failed);" if disputed_failing else "",
             )
             return new_code
-        all_disputed = bool(disputed_failing) and not _oracle.undisputed(found, disputed_failing)
+        all_disputed = (bool(disputed_failing or aside_failing)
+                        and not _oracle.undisputed(found, disputed_failing + aside_failing))
         for duplicate in _oracle.duplicate_names(oracles, {"checks": attempts[-1].get("checks") or []}):
             self._log.warning("[oracle] %s", duplicate)
         self._pause_for_oracle(
@@ -10149,6 +10242,158 @@ class Engine:
             self._audit_check("oracle", path, status=str(payload.get("status")), problems=payload.get("problems"))
         except OSError:
             pass  # a record that cannot be written must never stop a quest
+
+    def _restore_oracle_disputes(self, oracles: list[dict[str, Any]]) -> None:
+        """Read back what the last run of the oracle gate found disputed (``needs/ORACLE_CHECK.json``): its proposals,
+        and the checks whose expected value is disputed, for each check still exactly as it was then (its fingerprint:
+        expected value, tolerance, case, measure, statement). A resume after a stop therefore never rewrites the script
+        towards a value already disputed, and a check a person changed (or whose proposal they accepted) starts afresh."""
+        prior = self._oracle_record_read() or {}
+        prints = prior.get("fingerprints") if isinstance(prior.get("fingerprints"), dict) else {}
+        now = {str(o.get("name") or "").strip(): _oracle_triage.fingerprint(o) for o in oracles}
+        disputed = {str(n).strip() for n in prior.get("disputed") or []}
+        for proposal in prior.get("proposed_changes") or []:
+            name = str((proposal or {}).get("name") or "").strip() if isinstance(proposal, dict) else ""
+            if not name or name not in now or prints.get(name) != now[name]:
+                continue
+            self._oracle_proposals[name] = dict(proposal)
+            if name in disputed:
+                self._oracle_disputed.add(name)
+                self._log.info("[oracle] kept from the last run: the expected value of %r is disputed (proposed %s); the "
+                               "script is not rewritten for it", name, proposal.get("expected"))
+
+    async def _look_at_failing_checks(
+        self, state: QuestState, py: Any, seed_path: Path, oracles: list[dict[str, Any]],
+        run_oracles: list[dict[str, Any]], record: dict[str, Any], looked: set[str], *, protocol: dict[str, Any],
+        timeout: int, case_env: dict[str, str],
+    ) -> tuple[int, int]:
+        """FI's own look at each check failing in ``record`` (one run of the gate) and not looked at yet, before a repair
+        is spent on it (core/oracle_triage.py): its expected value worked out again by another model, never shown the
+        measured value; then, when FI runs its case itself (the trial contract), the case at a smaller step (a
+        deterministic check) or with more seeds (a random one). What each found goes into ``record["triage"]``; a
+        recomputed value that disputes the plan's becomes a proposal, and a tolerance found tighter than the method's
+        error or the noise sets the check aside from the repairs. Returns ``(model calls, extra runs)``."""
+        by_name = {str(o["name"]).strip(): o for o in oracles}
+        cases = {str(o["name"]).strip(): o for o in run_oracles}
+        trial = bool(getattr(self, "_trial_mode", False))
+        rel = seed_path.relative_to(self.quest_root).as_posix()
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None
+        random_trials: bool | None = None
+        calls = runs = 0
+        entries: list[dict[str, Any]] = []
+        for j in record.get("judged") or []:
+            name = str(j.get("name") or "").strip()
+            value = _oracle_triage.num(j.get("value"))
+            if (j.get("passed_by_engine") is not False or value is None or name in looked or name not in by_name
+                    or name in self._oracle_disputed or name in self._oracle_set_aside):
+                continue
+            looked.add(name)
+            oracle = by_name[name]
+            entry, called = await self._recompute_expected(state, oracle, value)
+            calls += int(called)
+            entries.append(entry)
+            if entry["verdict"] == "disputed":
+                self._oracle_proposals[name] = _oracle_triage.recompute_proposal(oracle, entry)
+                self._oracle_disputed.add(name)
+                self._log.warning(
+                    "[oracle] the expected value of %r is disputed: worked out again without the measured value it is %s "
+                    "(the plan says %s, measured %s); the script is not rewritten for it", name,
+                    _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
+                    _oracle.fmt_digits(value))
+            own = _oracle.case_of(cases.get(name) or oracle)
+            if not trial or own is None or j.get("measured_by") != "engine":
+                continue  # FI runs a case itself only under the trial contract, for a check it measured
+            case, measure = own
+            if random_trials is None:
+                try:
+                    random_trials = "run_trial" in _trial_runner.entries(seed_path)
+                except (ValueError, OSError):
+                    random_trials = False
+
+            async def at(cell: dict[str, Any], trial_no: int = 0) -> float | None:
+                try:
+                    values, _why = await _trial_runner.run_case(
+                        self.executor, py, self.quest_root, rel, cell=cell, timeout_s=timeout, env=case_env,
+                        thresholds=thresholds, trial=trial_no)
+                except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
+                    self._log.warning("[oracle] an extra run of %r's case could not be made: %r", name, e)
+                    return None
+                return _oracle_triage.value_of(values, measure)
+
+            found: dict[str, Any] | None = None
+            if random_trials:
+                more = [await at(case, t) for t in range(1, _oracle_triage.EXTRA_SEEDS + 1)]
+                runs += _oracle_triage.EXTRA_SEEDS
+                result = _oracle_triage.seeds_verdict(oracle, [value, *[v for v in more if v is not None]])
+                if result is not None:
+                    found = _oracle_triage.seeds_entry(oracle, result)
+            elif _oracle.kind_of(oracle) != "convergence_rate" and (step := _oracle_triage.step_of(case)) is not None:
+                key, size, counts = step
+                order = _oracle_triage.num(oracle.get("order"))
+                levels = 2  # three values give the order the scheme really shows
+                smaller = [_oracle_triage.refined(case, key, counts, k) for k in range(1, levels + 1)]
+                values = [value]
+                for cell in smaller:
+                    values.append(await at(cell))
+                    runs += 1
+                    if values[-1] is None:
+                        break
+                if None not in values:
+                    result = _oracle_triage.step_verdict(oracle, values, order=order)
+                    if result is not None:
+                        found = _oracle_triage.step_entry(oracle, key, [size, *[float(c[key]) for c in smaller]], result)
+            if found is None:
+                continue
+            entries.append(found)
+            if found["points_to"] == "tolerance" and found.get("cause"):
+                self._oracle_set_aside[name] = found["cause"]["text"]
+                if found["kind"] == "seeds":
+                    self._oracle_noisy.add(name)
+            self._log.warning("[oracle] %s %s", found["tried"], (found.get("cause") or {}).get("text") or "")
+        if entries:
+            record.setdefault("triage", []).extend(entries)
+        return calls, runs
+
+    async def _recompute_expected(self, state: QuestState, oracle: dict[str, Any], value: float | None,
+                                  ) -> tuple[dict[str, Any], bool]:
+        """A failing check's expected value worked out again (prompt ``oracle_recompute``) by the model named for
+        ``oracle_review`` (else the main model, which the record and the card say), from the check's statement, case and
+        reference: never the measured value. One call per version of a check, kept in ``.fi/oracle_triage.json``, so a
+        resume never asks again. ``(the triage entry, whether a call was made)``."""
+        kept = _oracle_triage.read(self.fi_dir)
+        fp = _oracle_triage.recompute_key(oracle)
+        answers = kept.get("recompute") if isinstance(kept.get("recompute"), dict) else {}
+        named = self._model_for_node(_review.NODE)
+        planner = self._model_for_node("plan") or self.config.provider.model or ""
+        called = False
+        if isinstance(answers.get(fp), dict):
+            answer = answers[fp]
+        else:
+            prompt = _oracle_triage.recompute_prompt(
+                self._prompts["oracle_recompute"], topic=str(state.get("topic") or self.config.topic or ""),
+                oracle=oracle)
+            parsed: Any = None
+            error = ""
+            try:
+                reply = await self._chat(prompt, node=_oracle_triage.NODE)
+                parsed = _parse_json_lenient(reply, node=_oracle_triage.NODE)
+            except Exception as e:  # noqa: BLE001 -- a look that could not be had never stops a quest
+                error = str(e)[:200] or type(e).__name__
+                self._log.warning("[oracle] the expected value of %r could not be worked out again: %s",
+                                  str(oracle.get("name")), error)
+            called = True
+            recomputed, how = _oracle_triage.parse_recompute(parsed)
+            answer = {"name": str(oracle.get("name") or "").strip(), "recomputed": recomputed, "how": how,
+                      "model": named or planner or "the provider's default model",
+                      "same_model": not named or named == planner, **({"error": error} if error else {})}
+            if not error:  # a call that got no answer is asked again on the next run (once per run, at most)
+                _oracle_triage.write(self.fi_dir, {**kept, "recompute": {**answers, fp: answer}})
+        recomputed = _oracle_triage.num(answer.get("recomputed"))
+        verdict = _oracle_triage.recompute_verdict(oracle, recomputed, value)
+        entry = _oracle_triage.recompute_entry(oracle, verdict, recomputed, value, str(answer.get("how") or ""),
+                                               model=str(answer.get("model") or ""),
+                                               same_model=bool(answer.get("same_model")))
+        return entry, called
 
     async def _declare_oracles(self, incomplete: list[str] | None = None) -> bool:
         """Ask for the plan to be rewritten with at least one oracle in its protocol (or, with ``incomplete``, with the numbers
@@ -18166,7 +18411,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "oracle_review",                    # a second model reads the plan's checks against known answers
-        "implement",                        # legacy one-shot (resume fallback)
+        "oracle_recompute",                 # a failing check's expected value worked out again, blind to the measurement
+        "implement",                      # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies

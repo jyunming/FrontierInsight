@@ -92,3 +92,9 @@ Sources: core/phased.py, core/phased_data.py, core/phased_isolation.py, core/eng
 Pages updated: [[oracle-provenance|Oracle provenance]] (under research a second, different model must read the checks, as the record of the calls names the models, and invariant, symmetry and second-implementation checks run again at a setting the code never saw), [[how-fi-judges-correctness|How FI judges correctness]] (both added to what independently validated needs).
 
 Sources: core/oracle_review.py, core/hidden_check.py, core/evidence.py, core/engine.py.
+
+## 2026-10-02 — FI looks at a failing known-answer check itself before repairing
+
+Pages updated: [[how-fi-judges-correctness|How FI judges correctness]] (before the first repair of a failing check: the expected value worked out again by another model blind to the measurement, a smaller step with Richardson extrapolation, three more seeds, a unit factor, an early stop on the same exception, one retry at twice the time; findings under `attempts[].triage` and on the card; disputes kept across a resume while the check is unchanged).
+
+Sources: core/oracle_triage.py, core/engine.py, core/oracle_card.py, core/oracle_forms.py, core/protocol_check.py, core/trial_runner.py, agents/oracle_recompute.md.
