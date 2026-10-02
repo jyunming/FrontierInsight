@@ -242,6 +242,7 @@ def build(
     repairs: int = 2,
     kept: str | None = None,
     stderr_tail: str = "",
+    go_on: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The card for a stop at the known-answer checks (see the module docstring). Pure: reads ``script`` to say where a
     number is computed, nothing else."""
@@ -406,8 +407,11 @@ def build(
         "causes": causes,
         "tried": _tried(attempts, kept=kept, script=script, by_fi=by_fi and not by_repair),
         "actions": _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
-                            repairs=repairs, kept=kept, quest_root=quest_root, script=script),
-        "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + [
+                            repairs=repairs, kept=kept, quest_root=quest_root, script=script, go_on=go_on),
+        "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + (
+            # Why "mark it unconfirmed and go on" is not among the ways on: said, so nobody looks for it.
+            [f"Going on with a check marked unconfirmed is not offered here: {go_on['why_not']}."]
+            if isinstance(go_on, dict) and not go_on.get("offered") and go_on.get("why_not") and oracles else []) + [
             # After the freeze a proposal cannot be applied from here: say the one way it can be used.
             (f"This research quest cannot take the {_whose(p)} proposed change (its protocol is frozen); to use it, "
              "start a new quest whose plan states it: " if research else
@@ -576,7 +580,7 @@ def _revise_text(checks: list[dict[str, Any]], oracles: list[dict[str, Any]]) ->
 
 def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str, Any]], *, frozen: bool,
              research: bool, interview_made: bool, repairs: int, kept: str | None, quest_root: Path,
-             script: Path) -> list[dict[str, Any]]:
+             script: Path, go_on: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     resume_cli = f"python launch.py --resume {quest_id}"
     actions: list[dict[str, Any]] = []
     nothing_measured = bool(checks) and all(c["status"] == "not_measured" for c in checks)
@@ -608,7 +612,14 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
             "detail": ("This quest is set up for research and its protocol is frozen, so a check cannot be added or "
                        "completed inside it: start a new quest whose plan states the check with its numbers." if research
                        else "The protocol is frozen, so a check can be added or completed only through an amendment "
-                       "approved at the review (to get there, go on with the failure recorded, below)."),
+                       "approved at the review. To get to the review, set `engine.oracle_check: warn` in the quest's "
+                       "config.yaml and "
+                       + (f"go on with `python launch.py --update {quest_id}` (it shows the changed setting, records "
+                          "your approval and resumes; a plain resume would stop again to ask about it)."
+                          if interview_made else "resume.")),
+            # (A plain resume is not listed as its command: run before the setting is changed, it only stops here again.)
+            **({"cli": f"python launch.py --update {quest_id}", "web": "Update settings",
+                "vscode": f"@fi /update {quest_id}"} if interview_made else {}),
         })
     else:
         if plan_incomplete:
@@ -652,21 +663,24 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
                 "web": "Ask for this change (the Plan box), then Resume",
                 "vscode": f"@fi /plan {quest_id} {text}",
             })
-    elif not research:
-        how = ("set `engine.oracle_check: warn` in the quest's config.yaml, then approve that change: "
-               f"`python launch.py --update {quest_id}` (web: the quest page's Update settings; VS Code: `@fi /update "
-               f"{quest_id}`), which records it and resumes (this quest's settings were approved when it started, so "
-               "a plain resume would stop again to ask)") if interview_made else (
-               "set `engine.oracle_check: warn` in the quest's YAML and resume")
+    # 4. Mark the failed check unconfirmed and go on: one step, with a name, bound to the check's conditions and to the
+    # version of the code that measured it (core/accepted_checks.py). Offered only when every check still failing was
+    # measured; otherwise a note says why not. (It replaces the advice to set `engine.oracle_check: warn`, which on a
+    # quest the interview wrote stopped the quest a second time to ask about the changed setting.)
+    if isinstance(go_on, dict) and go_on.get("offered") and go_on.get("checks"):
+        from .accepted_checks import conditions_text, short_version
+
+        listed = "; ".join(f"'{c.get('name')}': {conditions_text(c)}" for c in go_on["checks"])
+        script_at = f"{go_on.get('script') or _rel(script, quest_root)} (version {short_version(go_on.get('script_version'))})"
         actions.append({
-            "id": "go_on_recorded", "label": "Go on with the failure recorded",
-            "detail": f"The protocol is frozen, so editing plan.md does not change it. To go on: {how}. The failure is "
-                      "recorded, the result does not count as checked against known answers, and the check can be "
-                      "changed later through an amendment: ask for the change when the quest is refined at the review "
-                      "and approve the amendment it asks for.",
-            "cli": f"python launch.py --update {quest_id}" if interview_made else resume_cli,
-            "web": "Update settings" if interview_made else "Resume",
-            "vscode": f"@fi /update {quest_id}" if interview_made else f"@fi /resume {quest_id}",
+            "id": "go_on_failing", "label": "Mark the check unconfirmed and go on",
+            "detail": (f"Go on although the check failed, with your name recorded: {listed}; measured by {script_at}. "
+                       "The check stays failed and marked unconfirmed: the result does not count as checked against "
+                       "known answers (never publication-ready), and the paper says so. If the check's expected value, "
+                       "tolerance, case or measure changes, or that code changes, the check is judged again."),
+            "cli": f"python launch.py --accept-checks {quest_id} --approve-as <you>",
+            "web": "Go on with it marked unconfirmed",
+            "vscode": f"@fi /accept-checks {quest_id}",
         })
     return actions
 

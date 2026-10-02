@@ -13,6 +13,18 @@ to go on), the audit trace records the choice, and the paper is told to say so p
 
 Two records under ``needs/``: ``UNSOURCED_CHECKS.json`` (written by the stop: which checks, why, the plan version) and
 ``UNSOURCED_CHECKS_ACCEPTED.json`` (written by the choice).
+
+The same choice, with the same command, exists for a check that WAS measured and failed (the stop at the known-answer
+checks, ``Engine._oracle_gate``): *mark it unconfirmed and go on*. It is offered only when every problem the stop found is
+a check with a measured number outside its tolerance (:func:`offer`); a check that measured nothing (the script crashed,
+printed nothing) has no failure to record, and the card says so. The choice binds to the check's conditions (its
+:func:`fingerprint`) AND to the version of the code that computed the number (:func:`script_version`: the script the
+check ran and the model's package in ``code/``); when either changes, the choice no longer applies and the check is
+judged again. ``needs/ORACLE_CHECK.json`` holds what the stop offered (``go_on``) and, once the quest went on, what it
+went on with (status ``went_on_failing``, ``went_on``); ``needs/FAILED_CHECKS_ACCEPTED.json`` holds the person's choice.
+An exploration quest (not ``rigor_profile: research``, ``result_use`` explore) goes on by itself in the same way, recorded
+as automatic, never as a person's choice. Either way the evidence keeps the result below *independently validated*
+(:func:`gap`), so never publication-ready, and the paper says so (:func:`failing_disclosure`).
 """
 
 from __future__ import annotations
@@ -107,11 +119,19 @@ def accepted(quest_root: Path) -> dict[str, Any] | None:
 
 
 def accept(quest_root: Path, who: str, *, via: str) -> tuple[bool, str]:
-    """Record that ``who`` goes on with the checks the stop named, as they are. ``(ok, what to tell the person)``."""
+    """Record that ``who`` goes on with the checks the stop named, as they are. ``(ok, what to tell the person)``.
+
+    One command for both stops it serves: the quest stopped at its known-answer checks (a check measured and failed:
+    :func:`accept_failing`), or at the plan for checks with no stated source. Which one is read from the live stop
+    (``.fi/pause.json``), so an older record of the other stop never takes the choice."""
     who = " ".join(str(who or "").split())
     if not who:
-        return False, ("say who is choosing to go on (--approve-as <you>): going on with checks whose expected value "
-                       "has no stated source is a choice a person makes, and it is recorded with their name")
+        return False, ("say who is choosing to go on (--approve-as <you>): going on with a check that failed, or with "
+                       "checks whose expected value has no stated source, is a choice a person makes, and it is "
+                       "recorded with their name")
+    paused = _paused_kind(quest_root)
+    if paused == "oracle" or (paused is None and pending(quest_root) is None and _stopped_record(quest_root)):
+        return accept_failing(quest_root, who, via=via)
     record = pending(quest_root)
     if record is None:
         return False, ("this quest is not stopped for checks without a stated source (needs/UNSOURCED_CHECKS.json is "
@@ -178,3 +198,193 @@ def disclosure(quest_root: Path, names: list[str]) -> str:
         "limitations): each check shows the code agrees with the value the plan expected, not that the value itself is "
         "right. Do not describe these checks as validated against an independent source."
     )
+
+
+# --- A check that was measured and failed: mark it unconfirmed and go on -------------------------------------------
+
+ORACLE_RECORD = "ORACLE_CHECK.json"
+FAILED_ACCEPTED_NAME = "FAILED_CHECKS_ACCEPTED.json"
+#: The status of ``needs/ORACLE_CHECK.json`` when the quest went on although a check failed.
+WENT_ON = "went_on_failing"
+#: Who went on, when nobody chose it: an exploration quest goes on by itself.
+AUTOMATIC = "automatic"
+#: The word a person reads for a failed check the quest went on with.
+UNCONFIRMED = "unconfirmed"
+
+
+def _paused_kind(quest_root: Path) -> str | None:
+    record = _read(Path(quest_root) / ".fi" / "pause.json")
+    return str(record.get("kind")) if record and record.get("kind") else None
+
+
+def _stopped_record(quest_root: Path) -> dict[str, Any] | None:
+    record = _read(_needs(quest_root) / ORACLE_RECORD)
+    return record if record and record.get("status") == "stopped" else None
+
+
+def script_version(files: dict[str, str]) -> str:
+    """The version of the code that computed a check's number: one hash of each file's path and text (the script the
+    check ran and the model's package in ``code/``). Any change to any of them is a new version."""
+    import hashlib
+
+    body = json.dumps(sorted((str(k), str(v)) for k, v in (files or {}).items()), ensure_ascii=False)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+def short_version(version: Any) -> str:
+    return str(version or "")[:12]
+
+
+def offer(found: list[str], oracles: list[dict[str, Any]],
+          judged: list[dict[str, Any]] | None) -> tuple[list[dict[str, Any]], str]:
+    """Whether the stop may offer "mark it unconfirmed and go on": ``(checks, "")`` when every problem in ``found`` is a
+    check that was measured and is outside its tolerance (each check: its name, conditions, fingerprint and the measured
+    value), else ``([], why not)``, in words a person reads on the card. The one rule the engine and the card share."""
+    from . import oracle_check as _oracle
+
+    if not oracles:
+        return [], "the plan has no known-answer check, so there is no failed check to go on with"
+    if _oracle.unjudgeable(oracles):
+        return [], "a check gives no number to compare with, so nothing was judged and there is no failure to record"
+    by_name = {str(j.get("name") or "").strip().lower(): j for j in judged or [] if isinstance(j, dict)}
+    failing: list[dict[str, Any]] = []
+    unmeasured: list[str] = []
+    for oracle in oracles:
+        name = str(oracle.get("name") or "").strip()
+        j = by_name.get(name.lower()) or {}
+        value = _oracle._num(j.get("value"))  # noqa: SLF001 -- the one finite-number test the checks use
+        if value is None:
+            unmeasured.append(name)
+        elif j.get("passed_by_engine") is False:
+            expected, limit, mode = _oracle.limit_of(oracle)
+            failing.append({
+                "name": name, "fingerprint": fingerprint(oracle), "expected": expected, "limit": limit,
+                "tolerance": oracle.get("tolerance"), "tolerance_mode": mode, "case": oracle.get("case"),
+                "measure": oracle.get("measure"), "measured": value, "measured_by": j.get("measured_by") or "",
+            })
+    if unmeasured:
+        return [], (f"nothing was measured for {', '.join(repr(n) for n in unmeasured)} (the run stopped before it "
+                    "reported a number, or reported no number), so there is no failure to record: the script has to "
+                    "be fixed first")
+    names = [repr(c["name"]) for c in failing]
+    other = [f for f in found or [] if not any(n in f for n in names)]
+    if other:
+        return [], f"the run has a problem besides the failed checks ({other[0][:200]}), which going on would not record"
+    if not failing:
+        return [], "no check failed with a measured number"
+    return failing, ""
+
+
+def conditions_text(check: dict[str, Any]) -> str:
+    """A failed check's conditions in one line: expected ± limit, case, measure, and what was measured."""
+    from . import oracle_check as _oracle
+
+    expected, measured, limit = check.get("expected"), check.get("measured"), check.get("limit")
+    try:
+        shown_measured, shown_expected = _oracle.fmt_pair(measured, expected, limit)
+    except (OverflowError, ValueError, TypeError):
+        shown_measured, shown_expected = str(measured), str(expected)
+    case = check.get("case")
+    case_text = ", ".join(f"{k}={v}" for k, v in case.items()) if isinstance(case, dict) and case else ""
+    parts = [f"expected {shown_expected} within ±{_oracle.fmt_digits(limit)} ({check.get('tolerance_mode') or 'absolute'})"]
+    if case_text:
+        parts.append(f"case {case_text}")
+    if check.get("measure"):
+        parts.append(f"measure `{check['measure']}`")
+    parts.append(f"measured {shown_measured}")
+    return "; ".join(parts)
+
+
+def failing_pending(quest_root: Path) -> dict[str, Any] | None:
+    """What the stop at the known-answer checks offers to go on with (``needs/ORACLE_CHECK.json``'s ``go_on``: ``checks``,
+    ``script``, ``script_version``), or ``None`` when the quest is not stopped there or the stop offers nothing."""
+    record = _stopped_record(quest_root)
+    go_on = (record or {}).get("go_on")
+    if isinstance(go_on, dict) and go_on.get("offered") and isinstance(go_on.get("checks"), list) and go_on["checks"]:
+        return go_on
+    return None
+
+
+def failing_accepted(quest_root: Path) -> dict[str, Any] | None:
+    """The person's choices to go on with a failed check (``chosen``: per check), or ``None``."""
+    record = _read(_needs(quest_root) / FAILED_ACCEPTED_NAME)
+    return record if record and isinstance(record.get("chosen"), dict) else None
+
+
+def accept_failing(quest_root: Path, who: str, *, via: str) -> tuple[bool, str]:
+    """Record that ``who`` goes on although the checks the stop names failed: each marked unconfirmed, bound to its
+    conditions and to the version of the code that measured it. ``(ok, what to tell the person)``."""
+    record = _stopped_record(quest_root)
+    if record is None:
+        return False, ("this quest is not stopped at a known-answer check that failed (needs/ORACLE_CHECK.json does not "
+                       "say so): nothing to go on with")
+    go_on = record.get("go_on") if isinstance(record.get("go_on"), dict) else {}
+    if not go_on.get("offered") or not go_on.get("checks"):
+        why = str(go_on.get("why_not") or "the stop did not say which checks failed; resume the quest and it says")
+        return False, f"going on with the check marked {UNCONFIRMED} is not offered at this stop: {why}"
+    earlier = failing_accepted(quest_root)
+    chosen = dict((earlier or {}).get("chosen") or {})
+    at = _now()
+    for c in go_on["checks"]:
+        chosen[_key(c.get("name"))] = {
+            **{k: c.get(k) for k in ("name", "fingerprint", "expected", "limit", "tolerance", "tolerance_mode", "case",
+                                     "measure", "measured")},
+            "script": go_on.get("script"), "script_version": go_on.get("script_version"),
+            "by": who, "via": via, "at": at,
+        }
+    names = [str(c.get("name")) for c in go_on["checks"]]
+    entry = {"chosen": chosen,
+             "history": [*((earlier or {}).get("history") or []), {"by": who, "via": via, "at": at, "checks": names}]}
+    if not _write(_needs(quest_root) / FAILED_ACCEPTED_NAME, entry):
+        return False, "the choice could not be written to needs/ (check the folder can be written to)"
+    listed = "; ".join(f"'{c.get('name')}' ({conditions_text(c)})" for c in go_on["checks"])
+    return True, (f"recorded: {who} goes on although {len(names)} known-answer check(s) failed: {listed}, measured by "
+                  f"{go_on.get('script') or 'the script'} (version {short_version(go_on.get('script_version'))}). Each "
+                  f"is marked {UNCONFIRMED}: the result does not count as checked against known answers, and the paper "
+                  "says so. If the check's expected value, tolerance, case or measure changes, or that code changes, the "
+                  "check is judged again. Resume the quest to go on.")
+
+
+def went_on_by(quest_root: Path, check: dict[str, Any], version: str) -> dict[str, Any] | None:
+    """The person's choice that covers ``check`` (an entry of :func:`offer`) as it is now, measured by the code at
+    ``version``; ``None`` when nobody chose it, or its conditions or the code changed since."""
+    entry = ((failing_accepted(quest_root) or {}).get("chosen") or {}).get(_key(check.get("name")))
+    if (isinstance(entry, dict) and entry.get("fingerprint") == check.get("fingerprint")
+            and entry.get("script_version") == version):
+        return entry
+    return None
+
+
+def no_longer_applies(quest_root: Path, check: dict[str, Any], version: str) -> str:
+    """Why a choice to go on with ``check`` no longer applies ("" when there is none, or it still applies)."""
+    entry = ((failing_accepted(quest_root) or {}).get("chosen") or {}).get(_key(check.get("name")))
+    if not isinstance(entry, dict):
+        return ""
+    if entry.get("fingerprint") != check.get("fingerprint"):
+        return "its expected value, tolerance, case or measure changed since"
+    if entry.get("script_version") != version:
+        return "the code that measures it changed since"
+    return ""
+
+
+def gap(entry: dict[str, Any]) -> str:
+    """The evidence's sentence for one failed check the quest went on with."""
+    name = str(entry.get("name") or "")
+    how = conditions_text(entry)
+    if entry.get("by") == AUTOMATIC:
+        return (f"FI went on by itself (this quest explores) although the known-answer check '{name}' failed ({how}); "
+                f"it is marked {UNCONFIRMED}")
+    return f"{entry.get('by')} chose to go on although the known-answer check '{name}' failed ({how})"
+
+
+def failing_disclosure(record: Any) -> str:
+    """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``."""
+    if not isinstance(record, dict) or record.get("status") != WENT_ON:
+        return ""
+    entries = [e for e in record.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
+    if not entries:
+        return ""
+    lines = "; ".join(gap(e) for e in entries)
+    return (f"These known-answer checks FAILED and the run went on anyway: {lines}. Say so plainly where the checks are "
+            "described and in the limitations: the result is not validated against these known answers, and nothing "
+            "here may be described as checked against them.")

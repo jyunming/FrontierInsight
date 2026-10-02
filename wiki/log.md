@@ -98,3 +98,9 @@ Sources: core/oracle_review.py, core/hidden_check.py, core/evidence.py, core/eng
 Pages updated: [[how-fi-judges-correctness|How FI judges correctness]] (before the first repair of a failing check: the expected value worked out again by another model blind to the measurement, a smaller step with Richardson extrapolation, three more seeds, a unit factor, an early stop on the same exception, one retry at twice the time; findings under `attempts[].triage` and on the card; disputes kept across a resume while the check is unchanged).
 
 Sources: core/oracle_triage.py, core/engine.py, core/oracle_card.py, core/oracle_forms.py, core/protocol_check.py, core/trial_runner.py, agents/oracle_recompute.md.
+
+## 2026-10-03 — Going on although a known-answer check failed
+
+Pages updated: [[how-fi-judges-correctness|How FI judges correctness]] (a named "mark the check unconfirmed and go on" for a check that was measured and failed, bound to the check's conditions and the version of the code that measured it; not offered when nothing was measured; an exploration goes on by itself, recorded as automatic; research and decision quests stop; the evidence gap, the audit trace and the paper's disclosure; the old advice to set `engine.oracle_check: warn` replaced).
+
+Sources: core/accepted_checks.py, core/engine.py, core/oracle_card.py, core/evidence.py, core/todo.py, web/static/quest.html, vscode-frontier-insight/src/skills.ts, vscode-frontier-insight/src/stop-card.ts.

@@ -142,7 +142,7 @@
       <div id="next-step-card-actions" class="hidden flex flex-wrap items-center gap-3"></div>
       <!-- The plan's checks do not say where their expected values come from: the person may go on as it is, with their name. -->
       <div id="next-step-accept" class="hidden flex flex-col gap-2 pt-2 border-t border-white/10">
-        <span class="text-on-surface-variant text-body-sm">Or go on as it is: the checks still run and are still judged, each is marked <em>source not confirmed</em>, and the result and the paper say so. Your name is recorded with the choice.</span>
+        <span id="accept-checks-text" class="text-on-surface-variant text-body-sm">Or go on as it is: the checks still run and are still judged, each is marked <em>source not confirmed</em>, and the result and the paper say so. Your name is recorded with the choice.</span>
         <div class="flex flex-wrap items-center gap-3">
           <input id="accept-checks-who" type="text" placeholder="your name" class="bg-surface-low border border-white/10 rounded px-3 py-2 font-code-md text-code-md text-on-surface focus:border-primary focus:outline-none"/>
           <button id="accept-checks-btn" onclick="acceptChecks()" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Go on as it is</button>
@@ -516,7 +516,7 @@
     renderVisualCheck(data.visual_check);
     renderEvidence(data.evidence);
     renderAmendment(data.amendment);
-    renderUnsourcedChecks(data.unsourced_checks);
+    renderUnsourcedChecks(data.unsourced_checks, data.failed_checks);
 
     if (data.paper_preview) {
       const sec = document.getElementById('paper-section');
@@ -664,7 +664,9 @@
       // "Let FI try again" resumes where the quest stopped, never from a step left chosen in the Redo menu.
       if (a.id === 'resume') run = () => { const sel = document.getElementById('rerun-from'); if (sel) sel.value = ''; resumeQuest(); };
       else if ((a.id === 'revise_check' || a.id === 'accept_proposal') && a.prefill) run = () => fillPlanRequest(a.prefill);
-      else if (a.id === 'go_on_recorded' && a.web === 'Update settings') run = () => document.getElementById('update-link').click();
+      else if (a.id === 'amend' && a.web === 'Update settings') run = () => document.getElementById('update-link').click();
+      // Mark the failed check unconfirmed and go on: the name box below, which repeats the check's conditions.
+      else if (a.id === 'go_on_failing') run = () => { const el = document.getElementById('accept-checks-who'); if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus(); } };
       if (!run) continue;
       const btn = document.createElement('button');
       btn.className = (a.id === 'resume' ? 'cyber-border-active' : 'cyber-border') + ' text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors';
@@ -1304,11 +1306,30 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
   }
   document.getElementById('amendment-approve').addEventListener('click', approveAmendment);
 
-  // The quest stopped because some checks do not say where their expected value comes from: offer "Go on as it is".
-  function renderUnsourcedChecks(pending) {
+  // The quest stopped because some checks do not say where their expected value comes from, or at a known-answer check
+  // that was measured and failed: offer "Go on as it is" with a name (one endpoint, the same as --accept-checks). For a
+  // failed check the box repeats what the choice binds to: the check's conditions and the code that measured it.
+  function renderUnsourcedChecks(pending, failed) {
     const box = document.getElementById('next-step-accept');
     if (!box) return;
-    box.classList.toggle('hidden', !(pending && (pending.checks || []).length));
+    const failing = failed && (failed.checks || []).length ? failed.checks : null;
+    const text = document.getElementById('accept-checks-text');
+    if (text && text.dataset.plain === undefined) text.dataset.plain = text.innerHTML;
+    if (text && !failing) text.innerHTML = text.dataset.plain;
+    if (text && failing) {
+      const listed = failing.map((c) => {
+        const caseText = c.case && typeof c.case === 'object' ? Object.entries(c.case).map(([k, v]) => `${k}=${v}`).join(', ') : '';
+        return `'${c.name}': expected ${c.expected} within ±${c.limit}` + (caseText ? `, case ${caseText}` : '')
+          + (c.measure ? `, measure ${c.measure}` : '') + `, measured ${c.measured}`;
+      }).join('; ');
+      text.textContent = `Or mark the failed check unconfirmed and go on: ${listed}; measured by ${failed.script || 'the script'} `
+        + `(version ${String(failed.script_version || '').slice(0, 12)}). The check stays failed: the result does not count `
+        + 'as checked against known answers, and the paper says so. If the check or that code changes, it is judged again. '
+        + 'Your name is recorded with the choice.';
+    }
+    const btn = document.getElementById('accept-checks-btn');
+    if (btn) btn.textContent = failing ? 'Go on with it marked unconfirmed' : 'Go on as it is';
+    box.classList.toggle('hidden', !(failing || (pending && (pending.checks || []).length)));
     try { const who = localStorage.getItem('fi_approver'); const el = document.getElementById('accept-checks-who'); if (who && !el.value) el.value = who; } catch (e) { /* no storage */ }
   }
   async function acceptChecks() {

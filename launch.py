@@ -375,7 +375,8 @@ While a quest is running, or after
   --why QUEST_ID [ABOUT] Why it stopped, why the review asked for a revision, why the evidence is at its level.
   --update QUEST_ID      Re-open the setup questions for a running quest's editable answers.
   --approve-amendment QUEST_ID   Approve a change to a quest's frozen protocol that it stopped to ask about.
-  --accept-checks QUEST_ID       Go on with checks that do not say where their expected value comes from (needs --approve-as).
+  --accept-checks QUEST_ID       Go on with a known-answer check that failed (marked unconfirmed), or with checks that do
+                                 not say where their expected value comes from (needs --approve-as).
 
 Skills (what FI has learned about driving one piece of software on this machine)
   --skills               List them, and whether each is approved.
@@ -802,11 +803,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--accept-checks",
         metavar="QUEST",
         default="",
-        help="Go on as it is when a quest stopped because some of its checks do not say where their expected value "
-             "comes from (the stop lists them in needs/UNSOURCED_CHECKS.json). The checks still run and are still "
-             "judged; each is marked 'source not confirmed', and the result and the paper say so. QUEST is the quest id "
-             "(looked up under --output-root) or its folder. Pair with --approve-as: your name is recorded with the "
-             "choice. Then resume the quest.",
+        help="Go on as it is when a quest stopped at a known-answer check that was measured and failed (the check "
+             "is marked unconfirmed; the choice holds while the check's numbers and the code that measured it stay as "
+             "they were), or because some of its checks do not say where their expected value comes from (each is "
+             "marked 'source not confirmed'). The checks still run and are still judged, and the result and the paper "
+             "say so. QUEST is the quest id (looked up under --output-root) or its folder. Pair with --approve-as: your "
+             "name is recorded with the choice. Then resume the quest.",
     )
     mode.add_argument(
         "--trace",
@@ -6901,8 +6903,8 @@ def _approve_amendment(quest: str, approved_by: str, output_root: Path) -> int:
 
 
 def _accept_checks(quest: str, approved_by: str, output_root: Path) -> int:
-    """Record a person's choice to go on with the checks a quest stopped for (their expected values say nowhere where
-    they come from), as they are."""
+    """Record a person's choice to go on with the checks a quest stopped for, as they are: a known-answer check that
+    was measured and failed (marked unconfirmed), or checks whose expected values say nowhere where they come from."""
     from core import accepted_checks
 
     root = next((c for c in (Path(quest), output_root / quest) if (c / ".fi").is_dir()), None)

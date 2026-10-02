@@ -180,6 +180,8 @@ _PROTOCOL = {"runs_per_setting": 300}
 def _cfg(tmp_path: Path, **engine: Any) -> Config:
     return Config(
         topic="smoke topic for the oracle gate", title="oracle-smoke", provider=ProviderConfig(name="openai"),
+        # A quest whose result is for a decision stops at a failed check; an exploration goes on by itself.
+        result_use="decision",
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1,
                             pilot_run=False, **engine),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=False),
@@ -926,20 +928,26 @@ async def test_the_analyze_prompt_carries_the_engines_verdicts(tmp_path: Path, m
 
 
 def test_a_stop_after_the_freeze_says_how_an_oracle_can_still_change(tmp_path: Path) -> None:
-    """Once frozen, a plan edit changes nothing, and a quest stopped here never reaches the review where an amendment is
-    asked for: the stop says how to get there instead of only that an amendment is needed."""
-    from core import frozen_protocol
+    """Once frozen, a plan edit changes nothing: the stop offers the one named step that goes on (mark the failed check
+    unconfirmed), never a setting to change (which, on a quest the interview wrote, stopped it a second time), and says
+    how the proposed change could still be made."""
+    from core import accepted_checks, frozen_protocol
 
     engine = Engine(_cfg(tmp_path))
     engine.quest_root.mkdir(parents=True, exist_ok=True)
     frozen_protocol.freeze(engine.quest_root, {**_PROTOCOL, "oracles": [ORACLE]}, approved_by="test", source="plan.md")
     proposal = {"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute", "reason": "own error 0.5"}
+    judged = oc.judged([ORACLE], {"checks": [{"name": ORACLE["name"], "value": 0.5}]})
+    found = oc.problems([ORACLE], {"checks": [{"name": ORACLE["name"], "value": 0.5}]}, 0)
+    checks, _ = accepted_checks.offer(found, [ORACLE], judged)
     with pytest.raises(BaseException):  # the pause interrupts; outside a graph that raises
-        engine._pause_for_oracle(["the oracle failed"], engine.quest_root / "code" / "experiment.py", [proposal],
-                                 [{"name": ORACLE["name"], "value": 0.5}], [ORACLE])
+        engine._pause_for_oracle(found, engine.quest_root / "code" / "experiment.py", [proposal], judged, [ORACLE],
+                                 go_on={"offered": True, "checks": checks, "script": "code/experiment.py",
+                                        "script_version": "ab" * 32})
     text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
     assert "The protocol is frozen, so editing plan.md does not change it" in text
-    assert "`engine.oracle_check: warn`" in text and "refined at the review" in text
+    assert "oracle_check: warn" not in text
+    assert f"python launch.py --accept-checks {engine.quest_id} --approve-as <you>" in text
     assert "--revise-plan" not in text and "Change the oracle 'final size closed form' to expected 1, tolerance 0.6" in text
 
 

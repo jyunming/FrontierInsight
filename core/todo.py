@@ -200,8 +200,9 @@ _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
         False: "This quest is set up for research, so the known-answer checks cannot be relaxed: fix the script and "
                "resume, or, if a check itself is wrong, change it in the plan (`--revise-plan`) and resume.",
         True: "This quest is set up for research and its protocol is frozen, so the known-answer checks cannot be "
-              "relaxed or changed inside this quest: fix the script and resume, or, if a check itself is wrong, "
-              "start a new quest whose plan states the right one.",
+              "relaxed or changed inside this quest: fix the script and resume; or, if a check was measured and you "
+              "judge the check itself wrong, mark it unconfirmed and go on (with your name: the result then says the "
+              "check failed and is never publication-ready); or start a new quest whose plan states the right check.",
     },
     "split": {
         False: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "
@@ -347,6 +348,16 @@ def waiting(quest_root: Path) -> list[Item]:
             out.append(Item("warned", f"The check of {what} found differences and was set to warn, so the quest went "
                                       f"on (needs/{name}).",
                             recommended="Read the differences; nothing to do if they are expected."))
+    oracle = _read_json(needs / "ORACLE_CHECK.json")
+    if isinstance(oracle, dict) and oracle.get("status") == "went_on_failing":
+        from .accepted_checks import gap as _went_on_gap
+
+        sentences = [_went_on_gap(e) for e in oracle.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
+        out.append(Item("went_on", "A known-answer check failed and the quest went on: "
+                                   + ("; ".join(sentences) or "see needs/ORACLE_CHECK.json") + ".",
+                        recommended="Compare the measured value with the expected one and where it comes from: if the "
+                                    "check is right, the simulation is wrong; if the check is wrong, change it. Until "
+                                    "then the result does not count as checked against known answers."))
     wanted = needs / "WANTED_PAPERS.md"
     if wanted.is_file() and not _supplied_since(root / "inputs" / "papers", wanted):
         out.append(Item("papers", "Some papers could not be downloaded (needs/WANTED_PAPERS.md lists them, most "
