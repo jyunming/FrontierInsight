@@ -1713,6 +1713,10 @@ def make_app(
             "kind": descriptor.get("kind") or "",
             "upload_targets": descriptor.get("upload_targets") or [],
             "markdown": markdown,
+            # The structured "why it stopped" card (core/oracle_card.py) when the stop has one: the markdown above is
+            # its text; the page adds a button for each of its actions.
+            "card": descriptor.get("card") if isinstance(descriptor.get("card"), dict) else None,
+            "proposed_changes": descriptor.get("proposed_changes") or [],
             # The to-do card's items (core/todo.py): at a pause the first is the pause itself; a finished quest can
             # still have things worth a look (a check that warned, papers that could not be fetched).
             "items": fi_todo.read(quest_root / ".fi"),

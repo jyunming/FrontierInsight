@@ -139,6 +139,8 @@
         <button onclick="document.getElementById('plan-section').scrollIntoView({ behavior: 'smooth', block: 'start' })" class="cyber-border text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors">Go to the plan ↓</button>
         <button onclick="resumeQuest()" class="cyber-border-active text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:opacity-90 transition-opacity">Resume with this plan</button>
       </div>
+      <!-- A stop with a "why it stopped" card (a known-answer check): one button per way on the card names. -->
+      <div id="next-step-card-actions" class="hidden flex flex-wrap items-center gap-3"></div>
       <!-- The plan's checks do not say where their expected values come from: the person may go on as it is, with their name. -->
       <div id="next-step-accept" class="hidden flex flex-col gap-2 pt-2 border-t border-white/10">
         <span class="text-on-surface-variant text-body-sm">Or go on as it is: the checks still run and are still judged, each is marked <em>source not confirmed</em>, and the result and the paper say so. Your name is recorded with the choice.</span>
@@ -497,7 +499,7 @@
       badge.innerHTML = '<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (human review)</span>';
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.pending_action) {
-      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'oracle', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', code_project: 'code files', figures: 'figure model', model_output: 'model answer', results: 'background job', review: 'review', clarify: 'setup', review_unavailable: 'review', plan_changed: 'changed settings', review_models: 'reviewer model', review_models_collapsed: 'reviewer model', replicate_seed_unrepairable: 'seed', data_split: 'which rows belong together' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
+      const kind = { papers: 'papers', supply: 'files', data: 'data', plan: 'plan', protocol: 'protocol', oracle: 'known-answer check', numeric: 'numeric', amendment: 'protocol amendment', manifest: 'run manifest', split: 'two scripts', code_project: 'code files', figures: 'figure model', model_output: 'model answer', results: 'background job', review: 'review', clarify: 'setup', review_unavailable: 'review', plan_changed: 'changed settings', review_models: 'reviewer model', review_models_collapsed: 'reviewer model', replicate_seed_unrepairable: 'seed', data_split: 'which rows belong together' }[data.pending_action] || (String(data.pending_action || '').endsWith('_unknown') ? 'a check' : 'input');
       badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-status-warning"></span><span class="text-status-warning">Paused (${kind})</span>`;
       badge.className = baseCls + ' bg-surface-mid';
     } else if (data.summary) {
@@ -649,6 +651,40 @@
     list.innerHTML = rest.map((i) => `<li><b>${escapeHtml(i.why || '')}</b> ${escapeHtml(i.recommended || '')}</li>`).join('');
   }
 
+  // The ways on that a "why it stopped" card names (core/oracle_card.py; the banner's text above is the same card), as
+  // buttons: Resume runs it; a change to a check puts the card's own words in the Plan box (read them, press Rewrite
+  // the plan, then Resume); going on with a setting changed opens Update settings. An action the page has no button
+  // for is still in the card's text, with its command.
+  function renderCardActions(card) {
+    const box = document.getElementById('next-step-card-actions');
+    if (!box) return;
+    const actions = (card && Array.isArray(card.actions)) ? card.actions : [];
+    box.innerHTML = '';
+    for (const a of actions) {
+      let run = null;
+      // "Let FI try again" resumes where the quest stopped, never from a step left chosen in the Redo menu.
+      if (a.id === 'resume') run = () => { const sel = document.getElementById('rerun-from'); if (sel) sel.value = ''; resumeQuest(); };
+      else if ((a.id === 'revise_check' || a.id === 'accept_proposal') && a.prefill) run = () => fillPlanRequest(a.prefill);
+      else if (a.id === 'go_on_recorded' && a.web === 'Update settings') run = () => document.getElementById('update-link').click();
+      if (!run) continue;
+      const btn = document.createElement('button');
+      btn.className = (a.id === 'resume' ? 'cyber-border-active' : 'cyber-border') + ' text-on-surface px-6 py-2 rounded-full font-label-sm text-label-sm uppercase hover:bg-surface-high transition-colors';
+      btn.textContent = a.label || a.id;
+      btn.title = a.detail || '';
+      btn.onclick = run;
+      box.appendChild(btn);
+    }
+    box.classList.toggle('hidden', !box.children.length);
+  }
+  function fillPlanRequest(text) {
+    const el = document.getElementById('plan-request');
+    if (!el) return;
+    el.value = text;
+    document.getElementById('plan-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.focus();
+    planStatus('plan-revise-status', 'Read the request (edit it if you like), press Rewrite the plan, then Resume.', false);
+  }
+
   async function refreshNextStep() {
     const banner = document.getElementById('next-step-banner');
     const answerEl = document.getElementById('next-step-answer');
@@ -682,6 +718,7 @@
       if (resultsEl) resultsEl.classList.toggle('hidden', data.kind !== 'results');
       const planEl = document.getElementById('next-step-plan');
       if (planEl) planEl.classList.toggle('hidden', data.kind !== 'plan');
+      renderCardActions(data.card);
       if (data.interaction === 'answer') {
         answerEl.classList.remove('hidden');
         supplyEl.classList.add('hidden');

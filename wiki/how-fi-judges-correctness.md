@@ -1,6 +1,6 @@
 ---
 title: How FI judges correctness
-sources: [core/oracle_check.py, core/engine.py, core/trial_runner.py, core/evidence.py, core/acceptance.py, core/config.py]
+sources: [core/oracle_check.py, core/oracle_card.py, core/todo.py, core/engine.py, core/trial_runner.py, core/evidence.py, core/acceptance.py, core/config.py]
 updated: 2026-10-01
 ---
 # How FI judges correctness
@@ -36,6 +36,19 @@ The result is in `needs/ORACLE_CHECK.json`.
 ## Repairs never bend the check
 
 A failing check asks the model to repair the script, up to `engine.oracle_repair_attempts` times (default 2). It is told to find out whether the simulation, the measurement or the check is wrong, and never to loosen, skip or hard-code a check. If it concludes the *check* is wrong (a miscalculated expected value, or a tolerance smaller than the method's own error), it may only **propose** new numbers. Its code is set aside and the script on disk is kept as it is. With `engine.oracle_check: block` the quest then stops with the proposal: before the protocol is frozen, you accept it by editing the oracle in `plan.md` or asking for the change with `--revise-plan`; after the freeze the stop explains how to ask for an amendment instead (and a quest under the research profile cannot change the check inside that quest at all). With `warn` the run goes on with the failure recorded. Nothing changes without you.
+
+## What you see when the checks stop the quest
+
+Every screen calls an oracle a **known-answer check**. When the checks stop the quest, FI builds one card (`core/oracle_card.py`). The terminal, `NEXT_STEP.md`, the web quest page and the VS Code chat all show it, from one payload kept in `.fi/pause.json` and `.fi/todo.json`. For each check that did not pass, the card shows:
+
+- what it checks, and its kind;
+- the expected value and where it comes from;
+- the measured value and who measured it (FI on the check's case, or the script itself);
+- the tolerance, and the gap: how far off, how many times the tolerance, and the measured value as a multiple of the expected one;
+- the case and the measure;
+- the file and line where the script computes the number.
+
+Then the card gives the most likely cause, using only what FI already has: a repair's proposal and its reason, the test run's size verdict, two checks under one name, or the error and line when nothing was measured. It also lists what FI tried and two or three ways on, each with its command. Resuming repairs the script again, up to `engine.oracle_repair_attempts` times; a check with no numbers is sent back to the plan instead. A change to the check is filled in as a request to work the expected value out again from its source; it never takes the measured value. The card reports the verdict and never changes it. (A check that names no source for its expected value stops earlier, at the plan, with its own "go on as it is": [[oracle-provenance|Oracle provenance]].)
 
 ## What counts as independent evidence
 

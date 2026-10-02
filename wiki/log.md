@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-01 — the card when a known-answer check stops the quest
+
+Updated by hand: [[how-fi-judges-correctness|How FI judges correctness]] (one plain name, "known-answer check", on every screen; when the checks stop the quest one card, from one payload in `.fi/pause.json` and `.fi/todo.json`, shows each failing check's expected value and source, the measured value and who measured it, the tolerance and gap, the case, and where the script computes the number, then the likely cause from what FI already has, what FI tried and two or three ways on; the same in the terminal, NEXT_STEP.md, the web page and VS Code; no verdict changes). Sources: core/oracle_card.py, core/todo.py, core/oracle_check.py, core/engine.py, core/trial_runner.py, web/static/quest.html, vscode-frontier-insight/src/stop-card.ts.
+
 ## 2026-10-01 — a copied quest judges its own paper
 
 Updated by hand: [[doing-a-step-again|Doing a step again]] (a copied or moved quest rerun from the claims or the review reads the paper in its current folder; found by the self-benchmark's copies, `dev/evaluation/bench/`). Sources: core/rerun_from.py, core/engine.py, core/evidence.py.
