@@ -701,3 +701,137 @@ function stamp(): string {
 export function truncate(s: string, n: number): string {
     return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
+
+// BEGIN REVIEW_SCREEN (generated from core/interview.py: FIRST_STEPS, REVIEW_CARDS, PLAIN_VALUES, COST_NOTES,
+// CHECKS_SENTENCES, BYLINE_EMPTY, BYLINE_FIELDS; tests/test_interview_review_cards.py keeps it equal. Strict JSON.)
+export const REVIEW_SCREEN = {
+    "first_steps": [
+        {
+            "id": "question",
+            "title": "Your research question",
+            "questions": [
+                "topic"
+            ]
+        },
+        {
+            "id": "use",
+            "title": "What the result is for",
+            "questions": [
+                "result_use"
+            ]
+        },
+        {
+            "id": "model",
+            "title": "The model",
+            "questions": [
+                "provider",
+                "provider_model",
+                "second_reviewer_model"
+            ]
+        }
+    ],
+    "review_cards": [
+        {
+            "id": "checks",
+            "title": "How strictly it is checked, and what it costs",
+            "shown": [
+                "result_use",
+                "review_panel",
+                "phased"
+            ],
+            "advanced": [
+                "pause_for_plan",
+                "max_iterations"
+            ]
+        },
+        {
+            "id": "models",
+            "title": "The model, and whether it is ready",
+            "shown": [
+                "provider",
+                "provider_model",
+                "second_reviewer_model"
+            ],
+            "advanced": [
+                "reasoning_effort",
+                "ensemble_profile",
+                "ensemble_models",
+                "node_models",
+                "provider_base_url",
+                "provider_api_key_env",
+                "provider_fixed_temperature"
+            ]
+        },
+        {
+            "id": "data",
+            "title": "Data, sources and pauses",
+            "shown": [
+                "no_simulation",
+                "survey_mode",
+                "knowledge_enabled",
+                "web_research",
+                "pause_for_user_input"
+            ],
+            "advanced": [
+                "supply_papers",
+                "clarify_mode",
+                "comparative_baseline",
+                "success_metric",
+                "budget",
+                "knowledge_top_k",
+                "knowledge_external_top_k"
+            ]
+        },
+        {
+            "id": "outputs",
+            "title": "What you get",
+            "shown": [
+                "title",
+                "output_kinds",
+                "paper_format",
+                "study_depth",
+                "audience",
+                "author",
+                "affiliation",
+                "contact_email",
+                "url"
+            ],
+            "advanced": [
+                "page_limit",
+                "paper_style",
+                "poster_size"
+            ]
+        }
+    ],
+    "plain_values": {
+        "output_kinds": {
+            "paper_md": "paper (Markdown)",
+            "paper_pdf": "paper (PDF)",
+            "slides": "slides",
+            "poster": "poster",
+            "speech": "talk script"
+        },
+        "review_panel": {
+            "methodologist": "method",
+            "statistician": "statistics",
+            "devil_advocate": "devil's advocate",
+            "reproducibility": "reproducibility"
+        }
+    },
+    "cost_notes": {
+        "research": "about 50-90 model calls (what earlier research quests took)",
+        "explore": "fewer model calls than research (no idea self-critique, per-finding cross-check or redesign)"
+    },
+    "checks_sentences": {
+        "research": "Every check stops the quest instead of only reporting; the experiment runs in its own clean environment; the reviewers below read the paper.",
+        "explore": "A preliminary draft: fewer checks, never marked ready to publish as it stands."
+    },
+    "byline_empty": "none yet: asked once before the first paper (else the Frontier Insight byline)",
+    "byline_fields": [
+        "author",
+        "affiliation",
+        "contact_email",
+        "url"
+    ]
+} as const;
+// END REVIEW_SCREEN

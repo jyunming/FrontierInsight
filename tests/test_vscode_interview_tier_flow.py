@@ -32,11 +32,13 @@ def core_ts() -> str:
 
 
 def test_the_first_screen_asks_only_the_topic_and_what_it_is_for(interview_ts: str) -> None:
-    """runInterview asks the topic and what the result is for (and the author line while no profile is saved); the
-    paper format, deliverables and study depth are review-screen pickers, not questions asked up front."""
+    """runInterview asks the research question and what the result is for (and, for research or a decision, a second
+    chat model for one reviewer); the paper format, deliverables, study depth and the byline are review-screen
+    pickers, not questions asked up front."""
     run = interview_ts[interview_ts.index("export async function runInterview("):]
     run = run[:run.index("\n}\n")]
-    assert "quest topic" in run.lower() and "what is the result for?" in run.lower()
+    assert "REVIEW_SCREEN.first_steps[0].title" in run and "what is the result for?" in run.lower()
+    assert "askAuthorLine(" not in run
     for asked_before in ("pickPaperFormat(", "pickOutputKinds(", "pickStudyDepth(", "pickEnsemble("):
         assert asked_before not in run, f"{asked_before} is asked up front again"
     assert "paperFormatFor(topic)" in run and "studyDepthFor(paperFormat, topic)" in run

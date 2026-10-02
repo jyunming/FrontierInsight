@@ -2843,7 +2843,10 @@ def _read_line_or_none(prompt: str) -> asyncio.Future[str | None]:
             line: str | None = input(prompt)
         except (EOFError, KeyboardInterrupt, OSError, ValueError):
             line = None
-        loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(line))
+        try:
+            loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result(line))
+        except RuntimeError:
+            pass  # answered after the quest went on and its loop closed: nobody is waiting any more
 
     threading.Thread(target=read, name="fi-byline-question", daemon=True).start()
     return fut

@@ -21,7 +21,9 @@ import {
     ONE_MODEL_ANSWER,
     OTHER_NODES,
     PaperFormat,
+    REVIEW_SCREEN,
     answersToYaml,
+    parseEnsembleModels,
     parseNodeModelsAnswer,
     resolveReviewPanel,
     rigorProfileFor,
@@ -133,7 +135,7 @@ export async function pickSecondReviewerModel(primary?: vscode.LanguageModelChat
     items.push({ label: "$(edit) Other (type a model name)", id: "__OTHER__" });
     for (;;) {
         const picked = await vscode.window.showQuickPick(items, {
-            title: `Frontier Insight — ${SECOND_REVIEWER_LABEL.toLowerCase()}`,
+            title: `Frontier Insight — 3 of 3: ${SECOND_REVIEWER_LABEL.toLowerCase()}`,
             placeHolder: SECOND_REVIEWER_PROMPT,
             matchOnDescription: true,
             matchOnDetail: true,
@@ -348,12 +350,12 @@ export async function runInterview(
     primaryModel?: vscode.LanguageModelChat,
 ): Promise<InterviewAnswers | undefined> {
     stream.markdown(
-        "🧪 **Let's set up a new research quest.** A few questions (and your author line the first time), then I'll show you the defaults worked out from your topic — edit anything before launch.\n\n",
+        "🧪 **Let's set up a new research quest.** Three questions: your research question, what the result is for, and (for research or a decision) a second chat model for one reviewer. Then four short cards with everything worked out for you — change anything before launch.\n\n",
     );
 
     // 1. Topic — the only mandatory input.
     const topic = await vscode.window.showInputBox({
-        title: "Frontier Insight — quest topic",
+        title: `Frontier Insight — 1 of ${REVIEW_SCREEN.first_steps.length}: ${REVIEW_SCREEN.first_steps[0].title.toLowerCase()}`,
         prompt: "What do you want to study? Be specific about the question, what's known, and what success looks like.",
         placeHolder:
             "e.g. Compare three numerical integrators on a damped harmonic oscillator and report energy drift.",
@@ -397,7 +399,7 @@ export async function runInterview(
             },
         ],
         {
-            title: "Frontier Insight — what is the result for?",
+            title: `Frontier Insight — 2 of ${REVIEW_SCREEN.first_steps.length}: what is the result for?`,
             placeHolder: "Research or a decision gets every check; exploring is a cheaper, preliminary draft.",
             ignoreFocusOut: true,
         },
@@ -423,18 +425,10 @@ export async function runInterview(
     const missingNote = missingToolsNote(outputKinds);
     if (missingNote) stream.markdown(missingNote);
 
-    // Author line — asked on the first interview only, then kept in the profile every interface reads
-    // (core/profile.py); a later interview fills it from there and shows it below to change.
+    // The paper byline is not asked: it comes from the profile every interface reads (core/profile.py), is one folded
+    // row of the review cards ("Paper byline (optional)"), and the CLI asks it once before the first paper.
     const savedProfile = loadProfile();
-    let authorLine: AuthorLine | undefined = savedProfile ?? undefined;
-    if (!authorLine) {
-        authorLine = await askAuthorLine();
-        if (!authorLine) return undefined;
-    }
-    const byline = formatAuthorLine(authorLine);
-    if (byline) {
-        stream.markdown(`  **Author line:** ${truncate(byline, 200)}${savedProfile ? " _(from your saved details)_" : ""}\n\n`);
-    }
+    const authorLine: AuthorLine = savedProfile ?? { author: "", affiliation: "", contact_email: "", url: "" };
 
     // ─── Tier-2 derivation (mirrors core/interview.py SMART_DEFAULTS) ───
     // title — slug from topic; no_simulation — prose vs scientific;
@@ -506,7 +500,7 @@ export async function runInterview(
     // Fields changed by hand here: a changed paper format works the others out again, never these.
     const edited = new Set<string>();
     while (true) {
-        stream.markdown(reviewBlockMarkdown(answers));
+        stream.markdown(reviewBlockMarkdown(answers, primaryModel?.name));
         const action = await vscode.window.showQuickPick(
             [
                 { label: "$(rocket) Launch quest", value: "launch" },
@@ -590,72 +584,83 @@ function secondReviewerText(answer: string): string {
         : `the statistics reviewer uses \`${answer}\``;
 }
 
-function reviewBlockMarkdown(a: InterviewAnswers): string {
-    const lines: string[] = [];
-    lines.push("\n### Review before launch\n");
-    lines.push("| Field | Value |");
-    lines.push("|---|---|");
-    lines.push(`| Paper format | \`${a.paper_format}\` |`);
-    lines.push(`| Deliverables | ${a.output_kinds.join(", ")} |`);
-    lines.push(`| Study depth | \`${a.study_depth}\` |`);
-    lines.push(`| Title (auto-slug) | \`${a.title}\` |`);
-    lines.push(`| Research approach | ${a.survey_mode === true ? "literature synthesis (survey — no experiment/data)" : a.no_simulation ? "observational" : "computational"} |`);
-    lines.push(`| Clarify mode | ${a.clarify_mode === "when_present"
-        ? "ask me if I'm there, otherwise answer for itself"
-        : `\`${a.clarify_mode}\``} |`);
-    lines.push(`| Reviewer panel | ${a.review_panel.length === 0 ? "single reviewer" : a.review_panel.join(", ")} |`);
-    lines.push(`| Knowledge layer (Axon) | ${a.knowledge_enabled ? "enabled (sidecar detected)" : "disabled"} |`);
-    lines.push(`| Web research (download sources) | ${a.web_research === false ? "off" : "on"} |`);
-    lines.push(`| Supply paywalled papers | ${a.supply_papers === false ? "off" : "pause for my PDFs"} |`);
-    lines.push(`| Stop to read and edit the plan | ${a.pause_for_plan === true ? "yes (plan.md)" : "no"} |`);
-    lines.push(`| Confirm the result on data it never saw | ${a.phased === true ? "yes: explore first, then run the frozen design once more (one more full run)" : a.result_use !== "explore" ? "no: the result is not confirmed on data or seeds it never saw" : "no"} |`);
-    lines.push(`| Result for | ${a.result_use === "explore" ? "exploring: a cheaper preliminary draft (no idea self-critique, no per-finding cross-check, no redesign after the analysis)" : `${a.result_use ?? "research"}: every check stops the quest, the plan waits for you, a clean environment per quest`} |`);
+/** A value in plain words (mirrors core/interview.py:plain_value for what the VS Code cards show). */
+function plainList(field: "output_kinds" | "review_panel", values: readonly string[]): string {
+    if (values.length === 0) return field === "review_panel" ? "single reviewer" : "(none)";
+    const names: Record<string, string> = REVIEW_SCREEN.plain_values[field];
+    return values.map((v) => names[v] ?? v).join(", ");
+}
+
+function bylineText(a: InterviewAnswers): string {
+    return formatAuthorLine(a) || REVIEW_SCREEN.byline_empty;
+}
+
+/**
+ * The review screen: the four cards of core/interview.py REVIEW_CARDS (how strictly it is checked and what it costs;
+ * the model and whether it is ready; data, sources and pauses; what you get), in plain words, the same cards the CLI and
+ * the web page show. The rarer settings stay under "Edit an advanced field"; only the ones changed are listed.
+ */
+function reviewBlockMarkdown(a: InterviewAnswers, modelName?: string): string {
+    const esc = (v: unknown) => String(v ?? "").replace(/\|/g, "\\|");
+    const use = a.result_use === "explore" ? "explore" : "research";
+    const [checks, models, data, outputs] = REVIEW_SCREEN.review_cards;
+    const lines: string[] = ["\n### Review before launch\n"];
+    const card = (title: string, rows: [string, string][], lead: string[] = []) => {
+        lines.push(`**${title}**\n`);
+        for (const l of lead) lines.push(`${l}\n`);
+        lines.push("| | |");
+        lines.push("|---|---|");
+        for (const [k, v] of rows) lines.push(`| ${esc(k)} | ${esc(v)} |`);
+        lines.push("");
+    };
+    const resultUse = { research: "Research", decision: "A decision", explore: "Exploring (cheaper draft)" }[a.result_use ?? "research"] ?? "Research";
+    card(checks.title, [
+        ["What is the result for?", resultUse],
+        ["Reviewers", plainList("review_panel", a.review_panel)],
+        ["Confirm the result on data it never saw", a.phased === true ? "yes: explore first, then run the frozen design once more" : "no"],
+    ], [REVIEW_SCREEN.checks_sentences[use], `Cost: ${REVIEW_SCREEN.cost_notes[use]}${
+        (a.ensemble_profile ?? "off") !== "off" && parseEnsembleModels(a.ensemble_models).length >= ENSEMBLE_MIN_MODELS
+            ? "; the ensemble multiplies that" : ""}`]);
+    const modelRows: [string, string][] = [["Model", modelName ? `${modelName} (picked in the Chat view)` : "the model picked in the Chat view"]];
     if (a.result_use !== "explore") {
-        lines.push(`| Reviewers' models | ${a.second_reviewer_model ? secondReviewerText(a.second_reviewer_model).replace(/\|/g, "\\|") : "not chosen yet: asked before launch"} |`);
+        modelRows.push([SECOND_REVIEWER_LABEL, a.second_reviewer_model
+            ? (a.second_reviewer_model === ONE_MODEL_ANSWER ? "I only have one model" : a.second_reviewer_model)
+            : "not chosen yet: asked before launch"]);
     }
-    lines.push(`| Pause for my papers / datasets | \`${a.pause_for_user_input ?? "never"}\` |`);
-    lines.push(`| Multi-model ensemble | \`${a.ensemble_profile ?? "off"}\` |`);
-    if ((a.ensemble_profile ?? "off") !== "off") {
-        lines.push(`| Ensemble models (your choice) | ${a.ensemble_models ? a.ensemble_models : "none named: no ensemble"} |`);
-    }
-    lines.push(`| Paper audience | \`${a.audience}\` |`);
-    const authorCell = formatAuthorLine(a).replace(/\|/g, "\\|");
-    lines.push(`| Author line | ${authorCell || "Frontier Insight (no author set)"} |`);
-    // ``knowledge_top_k`` is Tier-2 in core/interview.py — show it in
-    // the always-visible review block alongside the other defaults so
-    // the VSCode flow matches the schema-backed web/CLI tiering.
-    lines.push(`| Axon hits per quest (top_k) | \`${a.knowledge_top_k}\` |`);
-    // Tier-3 fields only render when the user set them (anything other
-    // than the static defaults). External cap default = 20.
+    card(models.title, modelRows, ["Ready? Your VS Code chat model: VS Code signs you in, nothing else to set up."]);
+    card(data.title, [
+        ["Research approach", a.survey_mode === true ? "literature synthesis (no experiment, no data)" : a.no_simulation ? "observational: real-world data" : "computational: a Python script makes the data"],
+        ["Look up the literature", a.knowledge_enabled ? "on" : "off: the model's own knowledge only"],
+        ["Web research", a.web_research === false ? "off" : "on"],
+        ["Pause for your own papers or data", { never: "never", after_literature: "after the literature", after_design: "after the design", after_paper: "after the first draft", both: "after the design and the first draft" }[a.pause_for_user_input ?? "never"] ?? String(a.pause_for_user_input)],
+    ]);
+    card(outputs.title, [
+        ["Short name (used for the folder)", a.title],
+        ["Outputs", plainList("output_kinds", a.output_kinds)],
+        ["Paper format / venue", a.paper_format],
+        ["Study depth", a.study_depth],
+        ["Paper audience", a.audience === "internal" ? "internal: keeps every reference" : "external: journal / open web"],
+        ["Paper byline (optional)", bylineText(a)],
+    ]);
+    // Advanced: only what was changed is listed; everything else is under "Edit an advanced field".
     const ext = a.knowledge_external_top_k;
-    const hasOverride = (
-        a.comparative_baseline || a.success_metric || a.budget || a.node_models
-        || (a.reasoning_effort !== undefined && a.reasoning_effort !== "default")
-        || (ext !== undefined && ext !== 20)
-        || (a.poster_size !== undefined && a.poster_size !== "a1_portrait")
-        || (a.paper_style !== undefined && a.paper_style !== "latex")
-        || a.max_iterations !== 2
-        || typeof a.page_limit === "number"
-    );
-    if (hasOverride) {
-        lines.push("\n_Advanced overrides:_");
-        if (a.comparative_baseline) lines.push(`  • baseline: ${a.comparative_baseline}`);
-        if (a.success_metric) lines.push(`  • metric: ${a.success_metric}`);
-        if (a.budget) lines.push(`  • budget: ${a.budget}`);
-        if (a.node_models) lines.push(`  • per-node models: ${a.node_models}`);
-        if (a.reasoning_effort !== undefined && a.reasoning_effort !== "default") {
-            lines.push(`  • reasoning effort: ${a.reasoning_effort}`);
-        }
-        if (ext !== undefined && ext !== 20) lines.push(`  • external_top_k (web): ${ext}`);
-        if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") {
-            lines.push(`  • poster size: ${a.poster_size}`);
-        }
-        if (a.paper_style !== undefined && a.paper_style !== "latex") {
-            lines.push(`  • paper style: ${a.paper_style}`);
-        }
-        if (a.max_iterations !== 2) lines.push(`  • iteration budget: ${a.max_iterations}`);
-        if (typeof a.page_limit === "number") lines.push(`  • page limit: ${a.page_limit} pages`);
-    }
+    const changed: string[] = [];
+    if (a.comparative_baseline) changed.push(`baseline: ${a.comparative_baseline}`);
+    if (a.success_metric) changed.push(`success measure: ${a.success_metric}`);
+    if (a.budget) changed.push(`time budget: ${a.budget}`);
+    if (a.node_models) changed.push(`per-step models: ${a.node_models}`);
+    if (a.reasoning_effort !== undefined && a.reasoning_effort !== "default") changed.push(`reasoning effort: ${a.reasoning_effort}`);
+    if ((a.ensemble_profile ?? "off") !== "off") changed.push(`multi-model ensemble: ${a.ensemble_profile} (${a.ensemble_models || "no models named: no ensemble"})`);
+    if (ext !== undefined && ext !== 20) changed.push(`web results per quest: ${ext}`);
+    if (a.poster_size !== undefined && a.poster_size !== "a1_portrait") changed.push(`poster size: ${a.poster_size}`);
+    if (a.paper_style !== undefined && a.paper_style !== "latex") changed.push(`paper style: ${a.paper_style}`);
+    if (a.max_iterations !== 2) changed.push(`revise rounds: ${a.max_iterations}`);
+    if (typeof a.page_limit === "number") changed.push(`page limit: ${a.page_limit} pages`);
+    if (a.pause_for_plan === true) changed.push("stop to read and edit the plan");
+    if (a.supply_papers === false) changed.push("do not pause for paywalled papers");
+    lines.push(changed.length
+        ? `_Advanced (changed):_ ${changed.map((c) => esc(c)).join(" · ")}`
+        : "_Advanced: the rarer settings keep their defaults (\"Edit an advanced field\" to see them)._");
     lines.push("");
     return lines.join("\n");
 }
@@ -928,6 +933,8 @@ export function keepAuthorLine(a: InterviewAnswers): void {
         contact_email: a.contact_email ?? "", url: a.url ?? "",
     };
     const saved = loadProfile();
+    // A blank byline is not kept while none was ever given: the CLI then asks it once before the first paper.
+    if (!saved && !Object.values(line).some((v) => v.trim())) return;
     if (!saved || JSON.stringify(saved) !== JSON.stringify(line)) saveProfile(line);
 }
 
@@ -1066,21 +1073,21 @@ async function editTier2Field(
             // Asked for research or a decision only (core/interview.py: ask_if), so offered here only then.
             ...(a.result_use !== "explore" ? [{ label: SECOND_REVIEWER_LABEL, value: "second_reviewer_model" }] : []),
             { label: "Paper format / venue", value: "paper_format" },
-            { label: "Deliverables", value: "output_kinds" },
+            { label: "Outputs", value: "output_kinds" },
             { label: "Study depth", value: "study_depth" },
-            { label: "Title (folder slug)", value: "title" },
-            { label: "Research approach (no_simulation)", value: "no_simulation" },
-            { label: "Clarify mode", value: "clarify_mode" },
-            { label: "Reviewer panel", value: "review_panel" },
-            { label: "Knowledge layer (Axon)", value: "knowledge_enabled" },
+            { label: "Short name (used for the folder)", value: "title" },
+            { label: "Research approach", value: "no_simulation" },
+            { label: "Talk the topic over first", value: "clarify_mode" },
+            { label: "Reviewers", value: "review_panel" },
+            { label: "Look up the literature", value: "knowledge_enabled" },
             { label: "Web research (download sources)", value: "web_research" },
             { label: "Supply paywalled papers", value: "supply_papers" },
             { label: "Stop to read and edit the plan", value: "pause_for_plan" },
             { label: "What is the result for?", value: "result_use" },
-            { label: "Pause for my papers / datasets", value: "pause_for_user_input" },
+            { label: "Pause for your own papers or data", value: "pause_for_user_input" },
             { label: "Paper audience", value: "audience" },
-            { label: "Axon (RAG) retrievals per quest (top_k)", value: "knowledge_top_k" },
-            { label: "Author line (author, affiliation, email, link)", value: "author_line" },
+            { label: "Saved-library passages per quest", value: "knowledge_top_k" },
+            { label: "Paper byline (optional)", value: "author_line" },
         ],
         { title: "Edit which default?", ignoreFocusOut: true },
     );
