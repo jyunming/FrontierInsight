@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "0ddffa2e87394b5f561123bd37b0127cd4c59c9c05cf4e659be875933f4a2bde",
+  "vsix_sha256": "dc9245f337efc263adb994b69f587c25d5af4e0384e89035532293e13b40a1f1",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -46,8 +46,8 @@
       "bytes": 43103
     },
     "extension/out/extension.js": {
-      "sha256": "68071f77fac648cb42fb452bf3381c0206f3c8f17b309eadc28cf8484b64507e",
-      "bytes": 121644
+      "sha256": "c46762de7ff16cbf40fc9ccf22d1d4495da24a7ef05a0030aee6e0290263472b",
+      "bytes": 122603
     },
     "extension/out/fi-home.js": {
       "sha256": "ae836799badc78f90e5899bfd8e598d03e1d0f830777c51917ddf4292c1980f0",
@@ -101,6 +101,10 @@
       "sha256": "480c7c99bac6c15dea7cf971329e703849e66a171ce4ef6242b364d2b71f106b",
       "bytes": 28160
     },
+    "extension/out/stop-card.js": {
+      "sha256": "4c41aecd5a170dffb9e276e634552e2846f471c7637ae478100b7e2e3d2b2a5e",
+      "bytes": 2566
+    },
     "extension/out/terminal-command.js": {
       "sha256": "93ad8b7ae61222ec9469c2070360f842d4f10c5d6817a4e9b14c62651435c9e3",
       "bytes": 8357
@@ -118,8 +122,8 @@
       "bytes": 15345
     },
     "extension/readme.md": {
-      "sha256": "171698474b2497565606b6bf20a975cd61d48063dbc46dc7fff0fafde4e99f5d",
-      "bytes": 83622
+      "sha256": "6be1aa8b20a4fdcb8e3fd8c323b7092d4d6bd71f1c3d88714cb836341d0ce25c",
+      "bytes": 84153
     }
   }
 }
