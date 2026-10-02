@@ -144,11 +144,13 @@
     try { text = await res.text(); } catch (_) { text = ''; }
     if (!res.ok) {
       let detail = text;
-      try { const j = JSON.parse(text); detail = j.detail || j.error || text; } catch (_) {}
+      let body = null;
+      try { body = JSON.parse(text); detail = body.detail || body.error || text; } catch (_) {}
       if (typeof detail !== 'string') detail = JSON.stringify(detail);
       const err = new Error(`the server answered ${res.status}${detail ? `: ${String(detail).slice(0, 400)}` : ''}`);
       err.status = res.status;
       err.detail = String(detail || '').slice(0, 400);
+      err.body = body;
       throw err;
     }
     try { return JSON.parse(text); } catch (_) {
@@ -1440,6 +1442,33 @@
     host.addEventListener('change', () => saveAnswersSoon());
   }
 
+  // The first Launch did start a quest (its answer was lost), and the answers were changed since: say so, link to it,
+  // and offer the changed answers as a new quest (a new id and key), keeping them on the page.
+  function showAlreadyLaunched(div, body) {
+    div.textContent = '';
+    const p = document.createElement('p');
+    p.textContent = 'Your first Launch did start a quest, before these answers were changed. ';
+    if (body.quest_id) {
+      const a = document.createElement('a');
+      a.href = `/quest/${encodeURIComponent(body.quest_id)}`;
+      a.className = 'underline font-bold';
+      a.textContent = `Open quest ${body.quest_id}`;
+      p.appendChild(a);
+    }
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.id = 'launch-changed-btn';
+    again.className = 'mt-2 bg-primary-container text-on-primary-container font-label-sm text-label-sm uppercase px-4 py-2 rounded';
+    again.textContent = 'Launch the changed answers as a new quest';
+    again.addEventListener('click', () => {
+      startSavedAnswers();
+      rememberSavedId(savedState.id);
+      saveAnswersSoon();
+      launchFromReview();
+    });
+    div.append(p, again);
+  }
+
   // Launch (or Update) can be pressed once at a time; a failure says why and leaves the button ready to retry.
   let submitting = false;
 
@@ -1468,6 +1497,10 @@
     } catch (e) {
       div.className = 'fi-banner fi-banner-error max-w-3xl';
       div.setAttribute('role', 'alert');
+      if (!asUpdate && e.body && e.body.error === 'already_launched') {
+        showAlreadyLaunched(div, e.body);
+        return false;
+      }
       div.textContent = asUpdate
         ? `The update was not applied: ${e.message}. Your changes are still in the form; press Update Quest to try again.`
         : e.status === 409

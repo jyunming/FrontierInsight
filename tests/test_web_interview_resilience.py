@@ -193,6 +193,8 @@ def test_the_same_key_with_changed_answers_is_refused_not_dropped(tmp_path: Path
     changed = client.post("/api/interview/submit?launch=true",
                           json={**_ok_answers_payload(), "provider_model": "gpt-5", "submit_key": KEY})
     assert changed.status_code == 409
+    assert changed.json()["error"] == "already_launched"
+    assert changed.json()["quest_id"] == first.json()["quest_id"]
     assert first.json()["quest_id"] in changed.json()["detail"]
     assert len(launches) == 1
 

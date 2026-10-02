@@ -202,3 +202,23 @@ def test_a_first_time_user_sees_three_steps_then_four_plain_cards(tmp_path: Path
         for raw in ("paper_md", "paper_pdf", "methodologist", "devil_advocate", "Axon", "(unset)", "Title (short slug)"):
             assert raw not in shown, f"{raw!r} on the review cards"
         assert page.is_hidden("#review-advanced .space-y-4")
+
+
+def test_answers_changed_after_a_lost_launch_answer_are_offered_as_a_new_quest(tmp_path: Path) -> None:
+    """The first Launch started a quest but its answer was lost; the person changed an answer and pressed Launch again.
+    The page names the quest that started, and launches the changed answers only when asked, as a new quest."""
+    site = _site(tmp_path)
+    with browser_page(site) as page:
+        page.goto(f"{BASE}/interview")
+        _to_review(page)
+        site.lose_answer_once(SUBMIT)
+        page.click("#launch-btn")
+        page.wait_for_selector("#result.fi-banner-error")
+        page.evaluate("() => { pendingAnswers.title = 'a-changed-name'; }")
+        page.click("#launch-btn")
+        page.wait_for_selector("#launch-changed-btn")
+        assert site.launches[0] in page.inner_text("#result")
+        assert len(site.launches) == 1
+        page.click("#launch-changed-btn")
+        page.wait_for_url(f"{BASE}/quest/**")
+        assert len(site.launches) == 2 and page.url.endswith(site.launches[1])

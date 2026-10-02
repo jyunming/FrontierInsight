@@ -291,10 +291,12 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             if done is not None:
                 if done.get("answers") not in (None, answers):
                     # The same Launch with other answers: the first ones were launched already. Said, never dropped.
-                    first = done["body"].get("quest_id") or done["body"].get("yaml_path") or ""
-                    raise HTTPException(
-                        409, f"these answers were already launched, as quest {first}, before they were changed; "
-                             "start a new interview for the changed ones")
+                    first = done["body"].get("quest_id") or ""
+                    return JSONResponse({
+                        "error": "already_launched", "quest_id": first,
+                        "detail": (f"these answers were already launched, as quest {first}, before they were changed"
+                                   if first else "these answers were already written before they were changed"),
+                    }, status_code=409)
                 # Already submitted (the answer was lost on the way, or Launch was pressed twice): the same answer,
                 # and no second quest.
                 return JSONResponse(done["body"], headers={"Idempotent-Replayed": "true"})

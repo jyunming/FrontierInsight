@@ -123,7 +123,7 @@ def _typed(monkeypatch: pytest.MonkeyPatch, answer, asked: list | None = None) -
     """What the person types at the byline question (launch._read_line_until reads the terminal itself)."""
     import launch
 
-    def read(prompt: str, timeout_s: float):  # noqa: ANN202
+    def read(prompt: str, timeout_s: float, stop=None):  # noqa: ANN001, ANN202
         if asked is not None:
             asked.append(prompt)
         return answer(timeout_s) if callable(answer) else answer
@@ -214,6 +214,12 @@ def test_the_terminal_reader_gives_up_by_its_deadline_and_leaves_nothing_reading
     assert launch._read_line_until("? ", 0.4) is None
     assert time.monotonic() - started < 3
     assert threading.active_count() <= before
+    # Interrupted (Ctrl-C cancels the waiting task): it returns at once, not at the end of its wait.
+    stop = threading.Event()
+    stop.set()
+    started = time.monotonic()
+    assert launch._read_line_until("? ", 60, stop) is None
+    assert time.monotonic() - started < 3
 
 
 # --- bare `fi` ----------------------------------------------------------------------------------------------------------

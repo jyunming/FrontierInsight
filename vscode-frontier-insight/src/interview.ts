@@ -608,7 +608,7 @@ export const VSCODE_CARD_ROWS: Record<string, [string, (a: InterviewAnswers) => 
     second_reviewer_model: [SECOND_REVIEWER_LABEL, (a) => (a.second_reviewer_model
         ? (a.second_reviewer_model === ONE_MODEL_ANSWER ? "I only have one model" : a.second_reviewer_model)
         : "not chosen yet: asked before launch")],
-    no_simulation: ["Research approach", (a) => (a.no_simulation ? "observational: real-world data" : "computational: a Python script makes the data")],
+    no_simulation: ["Research approach", (a) => (a.survey_mode === true ? "literature synthesis (no experiment, no data)" : a.no_simulation ? "observational: real-world data" : "computational: a Python script makes the data")],
     survey_mode: ["Literature synthesis (survey) mode", (a) => (a.survey_mode === true ? "yes: no experiment, no data" : "no")],
     knowledge_enabled: ["Look up the literature", (a) => (a.knowledge_enabled ? "on" : "off: the model's own knowledge only")],
     web_research: ["Web research", (a) => (a.web_research === false ? "off" : "on")],

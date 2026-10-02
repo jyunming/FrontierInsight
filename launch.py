@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -2833,21 +2834,28 @@ def _existing_output(art: QuestArtifacts, kind: str) -> Path | None:
 _BYLINE_WAIT_S = 120.0
 
 
-def _read_line_until(prompt: str, timeout_s: float) -> str | None:
+def _read_line_until(prompt: str, timeout_s: float, stop: threading.Event | None = None) -> str | None:
     """One line typed at the terminal, or None when nothing was finished within ``timeout_s`` (or on EOF / Ctrl-C).
     Polls the terminal instead of blocking in ``input()``, so nothing is left reading stdin afterwards to swallow the
-    next line a later prompt asks for. Runs in a worker thread (``_ask_byline_once``); returns by its deadline."""
+    next line a later prompt asks for. Runs in a worker thread (``_ask_byline_once``); returns by its deadline, or at
+    once when ``stop`` is set (the quest was interrupted)."""
     print(prompt, end="", flush=True)
     deadline = time.monotonic() + timeout_s
+    stop = stop or threading.Event()
     if os.name == "nt":
         import msvcrt
 
         typed: list[str] = []
-        while time.monotonic() < deadline:
+        while time.monotonic() < deadline and not stop.is_set():
             if not msvcrt.kbhit():
                 time.sleep(0.05)
                 continue
-            ch = msvcrt.getwche()
+            ch = msvcrt.getwch()
+            if ch in ("\x00", "\xe0"):  # an arrow or function key: two characters, neither part of a name
+                msvcrt.getwch()
+                continue
+            if ch not in ("\r", "\n", "\x03", "\x08"):
+                print(ch, end="", flush=True)
             if ch in ("\r", "\n"):
                 print(flush=True)
                 return "".join(typed)
@@ -2856,7 +2864,7 @@ def _read_line_until(prompt: str, timeout_s: float) -> str | None:
             if ch == "\x08":
                 if typed:
                     typed.pop()
-                    print(" \b", end="", flush=True)
+                    print("\b \b", end="", flush=True)  # not echoed by getwch: step back, blank it, step back
                 continue
             typed.append(ch)
         print(flush=True)
@@ -2865,7 +2873,7 @@ def _read_line_until(prompt: str, timeout_s: float) -> str | None:
 
     while True:
         remaining = deadline - time.monotonic()
-        if remaining <= 0:
+        if remaining <= 0 or stop.is_set():
             print(flush=True)
             return None
         try:
@@ -2917,12 +2925,16 @@ async def _ask_byline_once(cfg: Config, quest_root: Path | None = None) -> None:
         return
     print()
     print("Paper byline (optional): the name printed on the paper, slides and poster.")
+    stop = threading.Event()
     print(f"  Type it, or press Enter for the Frontier Insight byline (asked only this once; "
           f"going on by itself in {_BYLINE_WAIT_S:.0f} s).")
     try:
-        name = await asyncio.to_thread(_read_line_until, "  Your name: ", _BYLINE_WAIT_S)
+        name = await asyncio.to_thread(_read_line_until, "  Your name: ", _BYLINE_WAIT_S, stop)
     except KeyboardInterrupt:
         name = None
+    except asyncio.CancelledError:
+        stop.set()  # Ctrl-C: the reader returns at once instead of holding the exit for its whole wait
+        raise
     if name is None:
         print("  (no answer: the paper is written with the Frontier Insight byline; asked again next time)")
         return
@@ -4424,8 +4436,7 @@ async def _run_new(
                     mq = next(q for q in tier1 if q.id == mid)
                     if not question_applies(mq, partial) or (mid not in redo and not model_problem(mid)):
                         continue
-                    if mid != row["id"] or mid in redo:
-                        print(f"    ({model_problem(mid) or 'the model changed with the provider'})")
+                    print(f"    ({model_problem(mid) or 'the provider changed, so its models are asked again'})")
                     picked = ask_checked(mq)
                     if picked is None:
                         cancelled = True
@@ -4604,6 +4615,10 @@ def _build_review_rows(values: dict[str, object], *, show_advanced: bool, fronte
     from core.interview import BYLINE_FIELDS, QUESTIONS, REVIEW_CARDS, byline_text, question_applies
 
     by_id = {q.id: q for q in QUESTIONS if frontend in q.frontends}
+    from core import profile as _profile
+
+    # Asked before the first paper only while no byline was ever kept (else it says how to change it here).
+    byline_frontend = "cli" if _profile.load() is None else "serve"
     rows: list[dict[str, object]] = []
     for part in ("shown", "advanced") if show_advanced else ("shown",):
         for card in REVIEW_CARDS:
@@ -4611,7 +4626,8 @@ def _build_review_rows(values: dict[str, object], *, show_advanced: bool, fronte
                 if qid in BYLINE_FIELDS:
                     if qid == BYLINE_FIELDS[0]:
                         rows.append({"id": "byline", "card": card["id"], "advanced": part == "advanced", "tier": 2,
-                                     "label": "Paper byline (optional)", "value": byline_text(values),
+                                     "label": "Paper byline (optional)",
+                                     "value": byline_text(values, byline_frontend),
                                      "question": None})
                     continue
                 q = by_id.get(qid)
