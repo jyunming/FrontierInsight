@@ -10403,17 +10403,24 @@ class Engine:
         calls = _attempts.read(self.fi_dir, _attempts.MODEL_CALLS)
         return [*_review.independence_gaps(self._oracle_review_read(), calls,
                                            configured=bool(self._model_for_node(_review.NODE)), protocol=protocol),
-                *_hidden.evidence_gaps(self.quest_root, protocol, self._hidden_check_written())]
+                *_hidden.evidence_gaps(self.quest_root, protocol, self._hidden_check_written(),
+                                       trace_ok=self._trace_checks_out())]
 
     def _hidden_check_written(self) -> list[dict[str, Any]]:
         """The trace's ``hidden_check`` events, oldest first: the hash of each record FI wrote, its status and code.
         None from a trace whose hash chain does not check out (the simulation's code could have added one)."""
+        if not self._trace_checks_out():
+            return []
         try:
-            if not _audit_log.verify(self.audit.path).ok:
-                return []
             return [e for e in _audit_log.read(self.audit.path) if e.get("kind") == "hidden_check"]
         except Exception:  # noqa: BLE001 -- an unreadable trace names no record, which is a gap, never a pass
             return []
+
+    def _trace_checks_out(self) -> bool:
+        try:
+            return bool(_audit_log.verify(self.audit.path).ok)
+        except Exception:  # noqa: BLE001 -- a trace that cannot be read does not check out
+            return False
 
     def _oracle_review_path(self) -> Path:
         return self.fi_dir / "oracle_review.json"

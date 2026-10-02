@@ -385,6 +385,10 @@ def test_a_hidden_check_that_passes_is_no_gap(tmp_path: Path) -> None:
     (root / "code" / "replot_figures.json").write_text('{"plans": [1]}', encoding="utf-8")
     (root / "code" / "replot_figures.py").write_text("pass\n", encoding="utf-8")
     assert hc.evidence_gaps(root, GRID_PROTOCOL, written) == []
+    # A file of the model's own package is code, whatever its name.
+    (root / "code" / "sim").mkdir()
+    (root / "code" / "sim" / "run.py").write_text("x = 1\n", encoding="utf-8")
+    assert "changed after FI ran them" in hc.evidence_gaps(root, GRID_PROTOCOL, written)[0]
 
 
 def test_a_record_fi_did_not_write_is_not_trusted_nor_reused(tmp_path: Path) -> None:
@@ -466,7 +470,8 @@ def test_the_engine_runs_the_hidden_check_after_the_run_and_the_evidence_reads_i
         with (engine.fi_dir / "audit.jsonl").open("a", encoding="utf-8") as trace:
             trace.write(json.dumps({"kind": "hidden_check", "sha256": "0" * 64}) + "\n")
         assert engine._hidden_check_written() == []
-        assert any("is not the one FI wrote" in g for g in engine._independence_gaps(GRID_PROTOCOL))
+        assert any("decision trace (.fi/audit.jsonl) does not check out" in g
+                   for g in engine._independence_gaps(GRID_PROTOCOL))
     # Outside research there is no hidden check and no such gap.
     plain = Engine(_config(tmp_path / "plain", research=False))
     assert plain._independence_gaps(GRID_PROTOCOL) == []

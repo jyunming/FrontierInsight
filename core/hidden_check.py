@@ -168,7 +168,8 @@ def code_sha(quest_root: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(p for p in code.rglob("*") if p.is_file()):
         rel = path.relative_to(code)
-        if (path.name in _NOT_THE_SIMULATION or path.suffix.lower() == ".md"
+        # FI's own scripts are named only at the top of code/: a file of the model's package with such a name is code.
+        if ((len(rel.parts) == 1 and path.name in _NOT_THE_SIMULATION) or path.suffix.lower() == ".md"
                 or any(part in _NOT_THE_SIMULATION_DIRS for part in rel.parts)):
             continue
         try:
@@ -287,7 +288,7 @@ async def run(executor: Any, python: Path | str, quest_root: Path, protocol: dic
 
 
 def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
-                  written: list[dict[str, Any]] | None = None) -> list[str]:
+                  written: list[dict[str, Any]] | None = None, *, trace_ok: bool = True) -> list[str]:
     """Under research: why the hidden check keeps the result below ``independently_validated``, one sentence each.
     Empty when no declared check is of a kind it covers, or when FI's own record (its SHA-256 the last one ``written``
     names: the trace's ``hidden_check`` events, oldest first) says every check run at a hidden setting passed, on the
@@ -306,6 +307,9 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None,
     if record is None:
         return [*gaps, "FI did not run the checks at a setting the code never saw (it does so after each run of a "
                        "simulation in its own script, `code/simulate.py`, that FI can call on one case)"]
+    if not trace_ok:
+        return [*gaps, "the quest's decision trace (.fi/audit.jsonl) does not check out, so FI cannot show that the "
+                       f"record of the checks at a setting the code never saw ({RECORD}) is the one it wrote"]
     if not written or written[-1].get("sha256") != record_sha(quest_root):
         return [*gaps, f"the record of the checks at a setting the code never saw ({RECORD}) is not the one FI wrote"]
     if record.get("status") == "not_run":
