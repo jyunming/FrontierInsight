@@ -1,7 +1,7 @@
 ---
 title: Oracle provenance
-sources: [core/oracle_check.py, core/engine.py, core/accepted_checks.py]
-updated: 2026-09-30
+sources: [core/oracle_check.py, core/engine.py, core/accepted_checks.py, core/oracle_review.py, core/hidden_check.py]
+updated: 2026-10-01
 ---
 # Oracle provenance
 
@@ -24,6 +24,15 @@ Anything else, such as a paper recalled from memory, is a gap. It shows in the p
    - **change it yourself**: edit the `reference` in `plan.md`, or say what to change in words;
    - **go on as it is**: `--accept-checks <id> --approve-as <you>` (web *Go on as it is* button, `@fi /accept-checks <id>`). A name is required. The checks still run and are still judged. Each is marked "source not confirmed" in the evidence, which keeps the gap; the choice is in the audit trace and the frozen protocol's approval line; the paper is told to say so. It covers only the checks the stop named.
 3. A later stop says which plan version arrived since, which checks are now fine and what each remaining one lacks.
+
+## Who wrote the checks, and who read them (research)
+
+Provenance says where an expected value comes from; it does not say who checked it. The plan, its expected values and the code can all come from one model. So under `rigor_profile: research` two more things hold the result below *independently validated* ([[how-fi-judges-correctness|How FI judges correctness]]):
+
+- **A second, different model read the checks.** The `oracle_review` step reads the plan's checks at plan time. It counts only when it gave a usable answer, judged every check as it was frozen (a check added or changed afterwards was not read), and `.fi/model_calls.jsonl` shows that the model that answered it is none of the models that answered the plan, its rewrites, the design step or the design's critique. FI compares the models as the connection named them on each call, never the config's names; the same model under an alias, a dated id, an Ollama tag or another provider is the same model. A connection that does not name the answering model (anything but an HTTP API, the claude command-line tool or VS Code with a picked model; a proxy is not taken at its word) cannot show two models. Otherwise the gap reads *the plan's checks were not reviewed by a second, different model*, with the reason, and, when no model is set, how to set one: `oracle_review: <another model>` under `provider: node_models:` (for a quest past its plan, `--resume <id> --from plan --approve-as <you>`). A review that failed still never stops the quest.
+- **The checks held at a setting the code never saw.** After each run FI runs up to three invariant, symmetry or second-implementation checks again at a setting of its own choosing, drawn after the code is final (a smaller step, a value between the grid's settings, or else another grid value where no check runs), and judges them against the plan's own expected value (0) and tolerance. A failure is a gap, and so is a record FI did not write itself (its hash is in the trace) or an earlier failure of the same code; special cases, published values and convergence rates are not covered (their expected value belongs to their own setting). Record: `needs/HIDDEN_CHECK.json`.
+
+Outside research both are advice only: the plan says when the same model read its own checks.
 
 `@fi /resume <id> --revise-plan "..."` rewrites the plan like `@fi /plan`. It used to be read as a plain resume, which ran the quest into the same stop.
 

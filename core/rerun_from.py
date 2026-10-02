@@ -122,7 +122,7 @@ _CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.jso
 _EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json"]
 # What the run and its checks leave under needs/ (the run writes them again).
 _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json",
-                "needs/ENVIRONMENT.json"]
+                "needs/ENVIRONMENT.json", "needs/HIDDEN_CHECK.json"]
 # The frozen protocol: what a redesign replaces. The amendments and the saved versions stay, so the new protocol is
 # frozen as a change made after results were seen and the paper says so.
 _PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json"]

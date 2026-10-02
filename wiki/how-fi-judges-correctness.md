@@ -57,7 +57,8 @@ The evidence level says how strongly a result is backed. A result reaches **inde
 - the check ran and passed, judged by FI,
 - every declared oracle passed with a value FI measured itself (a check that judged no value is not evidence, and a value the script reported about itself never counts),
 - every expected value has a checkable source ([[oracle-provenance|Oracle provenance]]),
-- every equation that produces the numbers is labelled in the code ([[engine-callable-simulations|Engine-callable simulations]]).
+- every equation that produces the numbers is labelled in the code ([[engine-callable-simulations|Engine-callable simulations]]),
+- under `rigor_profile: research`: a second model, shown by the record of the calls to differ from the one that wrote the checks, read them and gave a usable answer, and each invariant, symmetry or second-implementation check also passed at a setting the code never saw ([[oracle-provenance|Oracle provenance]]).
 
 For a random simulation a case is one trial, so only checks one trial shows exactly can be run by FI. A probability or a mean stays the script's own answer and keeps the quest below this level.
 
@@ -69,6 +70,6 @@ If the plan had no usable oracle, FI rewrites the plan to add one. Such oracles 
 
 ## Limits
 
-FI cannot tell a strong check from a weak one. Expected values come from the plan, written by the same model. FI checks that a source is named, not that the derivation is right.
+FI cannot tell a strong check from a weak one. Expected values come from the plan; under research a second, different model reads them, but it does not work them out again, and outside research nothing requires another model. FI checks that a source is named, not that the derivation is right. A special case, a published value and a convergence rate are never run at a hidden setting.
 
 Related: [[model-behind-the-numbers|The model behind the numbers]], [[scoring-criteria|Scoring criteria]], [[skill-self-tests|Skill self-tests]].
