@@ -149,6 +149,8 @@ def test_doctor_reports_all_present(
     monkeypatch.setattr("generation._office_pdf.find_libreoffice", lambda *a, **k: "/l/soffice")
     monkeypatch.setattr("core.passages.embed_model_cached", lambda: (True, "all-MiniLM-L6-v2 downloaded"))
     monkeypatch.setattr("core.passages._embed_model", _never_load)
+    # A model provider is part of "everything": one key set (a machine with none is told to set one up).
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
 
     assert launch._doctor() == 0
     out = capsys.readouterr().out
