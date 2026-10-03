@@ -180,7 +180,7 @@ async def test_a_dismissed_prompt_or_a_yaml_title_or_an_unattended_start_never_s
 
 def test_the_web_clarify_payload_carries_the_title_choices_and_the_page_offers_them(tmp_path: Path) -> None:
     """The title question keeps its candidates as a plain list in the payload the quest page reads, and the page
-    turns them into choices on the answer box (the question text alone serves the terminal and VS Code)."""
+    turns them into buttons that fill the answer box (the question text alone serves the terminal and VS Code)."""
     from fastapi.testclient import TestClient
 
     from core.engine import _spell_out_title_options
@@ -195,4 +195,4 @@ def test_the_web_clarify_payload_carries_the_title_choices_and_the_page_offers_t
     got = TestClient(make_app(out)).get("/api/quests/q1/clarify").json()
     assert got["pending"] and got["questions"]["title"]["suggestions"] == ["A study of X", "Y in Z"]
     page = (Path(__file__).resolve().parent.parent / "web" / "static" / "quest.html").read_text(encoding="utf-8")
-    assert "val.suggestions" in page and "datalist" in page
+    assert "val.suggestions" in page and "clarify-suggestions" in page
