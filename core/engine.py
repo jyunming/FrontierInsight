@@ -5827,6 +5827,49 @@ class Engine:
                     await self.supervisor.release(self.config.provider.name)
                 self._client = None
 
+    async def _usable_design_block(self, revised: str, *, ask: bool) -> tuple[str, str, bool]:
+        """``(the rewritten plan, "", asked)`` when its design block can be used, else ``(it, why not, asked)``; ``asked``
+        says whether the block alone was asked for. A block that is not valid YAML is first repaired where that changes
+        no key and no value (:func:`core.plan.repair_block`); then, with ``ask``, the model is asked ONCE for the block
+        alone, told exactly where it is broken (only the block and the parser's message are sent, not the plan again).
+        A file with no design block, or a block that is valid YAML but not a usable design (a missing hypothesis: fixing
+        it needs the plan and the request), is left to the caller's whole-file retry."""
+        parsed = _plan.parse(revised)
+        if parsed.design is not None:
+            return revised, "", False
+        why = parsed.error or "no design"
+        found = _plan.design_block(revised)
+        if found is None or _plan.yaml_problem(found[2]) is None:
+            return revised, why, False
+        fixed, notes = _plan.repair_design(revised)
+        if fixed is not None:
+            repaired = _plan.parse(fixed)
+            if repaired.design is None:
+                # Valid YAML once repaired, but not a usable design (a missing hypothesis): the whole-file retry.
+                return revised, repaired.error or "no design", False
+            self._log.info("[plan] the rewritten plan's design block was not valid YAML (%s); repaired without asking "
+                           "again: %s", why, "; ".join(notes))
+            return fixed, "", False
+        if not ask:
+            return revised, why, False
+        self._log.warning("[plan] the rewritten plan's design block could not be used (%s); asking the model once for "
+                          "the block alone, with where it is broken", why)
+        self._progress("Asking the model to correct the plan's design block")
+        reply = await self._chat(_plan.block_fix_request(found[2], why), node="plan_revise")
+        block = _plan.block_from_reply(reply)
+        candidate = _plan.replace_design_block(revised, block) if block is not None else None
+        if candidate is None:
+            return revised, f"{why}; asked once for the corrected block alone, and none came back", True
+        again = _plan.parse(candidate)
+        if again.design is None:
+            fixed, notes = _plan.repair_design(candidate)
+            if fixed is None or _plan.parse(fixed).design is None:
+                return revised, (f"{why}; asked once for the corrected block alone, and it still could not be used "
+                                 f"({again.error or 'no design'})"), True
+            candidate = fixed
+        self._log.info("[plan] the model corrected the plan's design block (asked once, for the block alone)")
+        return candidate, "", True
+
     async def _rewrite_plan(self, request: str, path: Path, *, by: str = "request") -> dict[str, Any]:
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
@@ -5844,11 +5887,10 @@ class Engine:
                 node="plan_revise",
             )
             revised = _plan.strip_outer_fence(reply)
-            parsed = _plan.parse(revised)
-            if parsed.design is not None:
-                why = ""
-                break
-            why = parsed.error or "no design"
+            # The block alone is asked for at most once, after the first answer: at most two calls in all.
+            revised, why, asked = await self._usable_design_block(revised, ask=_attempt == 1)
+            if not why or asked:
+                break  # used, or a block that could not be used even when asked for alone: not asked for again
         if why:
             raise ValueError(f"the revised plan could not be used ({why}); plan.md is unchanged")
         # The model section is shown from the block and never read back: shown again from the block as rewritten, so the

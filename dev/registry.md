@@ -55,7 +55,13 @@ same PR that adds, splits or renames one.
   answered; not on a later pass, nor on a plan.md that cannot be read) a targeted
   `_rewrite_plan(_fill_request(...), by="engine")`, put back when `_fill_changed_more` finds anything but sources,
   kinds and the model changed. `_rewrite_plan` gives every rewrite `_plan_checks_note` (what FI reads and what is
-  missing, `$checks` in `agents/plan_revise.md`). The stop (`_pause_for_plan(unsourced_checks=...)`) offers three ways
+  missing, `$checks` in `agents/plan_revise.md`). A rewrite whose design block cannot be used goes through
+  `Engine._usable_design_block`: `plan.repair_design` / `repair_block` first (only repairs that change no key or value:
+  a plain value with `: ` in it as a folded block, tab-only indentation), then ONE call for the block alone
+  (`plan.block_fix_request`: `plan.yaml_problem`'s line, column, parser message and the lines around it; the reply is
+  read by `plan.block_from_reply` and spliced back with `plan.replace_design_block`). At most two calls a rewrite.
+  `oracle_check._code_list` keeps code lists (`y0=[1, 0]`, `[0, 1]`) from being read as citations, and
+  `oracle_check._not_found` / `labels_note` name the quest's real source numbers when one cited does not exist. The stop (`_pause_for_plan(unsourced_checks=...)`) offers three ways
   on and writes `needs/UNSOURCED_CHECKS.json`.
 - `core/accepted_checks.py` — going on with checks whose expected value has no stated source: `write_pending` /
   `pending` / `clear_pending` (what the stop named, and what the stop before named, so the next stop says what changed),

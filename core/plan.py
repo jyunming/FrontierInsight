@@ -776,6 +776,206 @@ def parse(text: str) -> Parsed:
     return Parsed(design, why)
 
 
+# --- a design block that is not valid YAML ------------------------------------------------------------------------
+#
+# A model that rewrites the plan returns the whole file, and the design block in it is sometimes not valid YAML (most
+# often a value that runs over several lines and has `: ` in it). The rest of the reply is good. So, before the rewrite
+# is given up: a repair that changes no value is tried first (:func:`repair_block`), and only then is the model asked
+# once more, for the block alone, with exactly where it is broken (:func:`block_fix_request`).
+
+# A `key: value` line whose value is a plain (unquoted, not a block or a flow) scalar.
+_PLAIN_ENTRY_RE = re.compile(r"^(?P<indent>[ ]*)(?P<dash>-[ ]+)?(?P<key>[^\s#'\"\-?:,\[\]{}&*!|>%@`][^:#]*?):[ ]+"
+                             r"(?P<value>[^\s'\"|>\[{&*!#%@`].*)$")
+#: At most this many places in one block are repaired (each pass repairs the place the parser stops at).
+_MAX_REPAIRS = 40
+
+
+def design_block(text: str) -> tuple[int, int, str] | None:
+    """``(start, end, block)``: where the design block's YAML is in ``text``, and the block; ``None`` when there is none."""
+    heading = _HEADING_RE.search(text or "")
+    fenced = _FENCE_RE.search(text, heading.end()) if heading else None
+    if fenced is None:
+        return None
+    return fenced.start(1), fenced.end(1), fenced.group(1)
+
+
+def replace_design_block(text: str, block: str) -> str | None:
+    """``text`` with its design block's YAML replaced by ``block``; ``None`` when ``text`` has no design block."""
+    found = design_block(text)
+    if found is None:
+        return None
+    start, end, _old = found
+    return text[:start] + block.strip("\n") + text[end:]
+
+
+def yaml_problem(block: str) -> dict[str, Any] | None:
+    """Where ``block`` stops being valid YAML: ``{line, column, problem, lines}`` (1-based line and column; ``lines`` the
+    numbered lines around the place, that one marked), or ``None`` when it is valid."""
+    try:
+        yaml.safe_load(block)
+        return None
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        problem = str(getattr(e, "problem", "") or "").strip() or str(e).splitlines()[0][:200]
+        if mark is None:
+            return {"line": None, "column": None, "problem": problem, "lines": []}
+        rows = block.split("\n")
+        low, high = max(0, mark.line - 3), min(len(rows), mark.line + 2)
+        width = len(str(high))
+        lines = [f"{'>' if i == mark.line else ' '} {str(i + 1).rjust(width)} | {rows[i]}" for i in range(low, high)]
+        return {"line": mark.line + 1, "column": mark.column + 1, "problem": problem, "lines": lines}
+
+
+# A word written as the design's keys are written (``tolerance``, ``expected``, ``result_assertions``).
+_KEYLIKE_RE = re.compile(r"^[a-z_][a-z0-9_]*:?$")
+# A line that starts with such a key (``  tolerance: 1e-8``, ``- name: x``, ``sub:``).
+_LINE_KEY_RE = re.compile(r"^\s*(?:-\s+)?([a-z_][a-z0-9_]*):(?:\s|$)")
+# Any one-word name followed by `:` and nothing, or by a number, true/false or null (``T: 5``, ``relTol: 1e-8``,
+# ``Sub:``): a key whatever its case (a grid axis may be ``N`` or ``R0``), never a sentence going on.
+_SCALAR_ENTRY_RE = re.compile(r"(?:^|\s)(?:-\s+)?[A-Za-z_][\w.\-]*:\s*(?:[-+]?(?:\d[\d_]*\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+                              r"|true|false|null|~)?\s*$", re.IGNORECASE)
+
+
+def _keys_in(value: Any) -> set[str]:
+    """Every mapping key anywhere in ``value``, as text."""
+    if isinstance(value, dict):
+        return {str(k) for k in value} | {k for v in value.values() for k in _keys_in(v)}
+    if isinstance(value, list):
+        return {k for v in value for k in _keys_in(v)}
+    return set()
+
+
+def _owner_of(rows: list[str], line: int, column: int) -> int | None:
+    """The line whose plain value runs on to (or holds) the `: ` the parser stopped at, or ``None``."""
+    entry = _PLAIN_ENTRY_RE.match(rows[line])
+    if entry is not None and column >= entry.start("value"):
+        return line  # the stray `: ` is inside this line's own value
+    indent = len(rows[line]) - len(rows[line].lstrip(" "))
+    for j in range(line - 1, -1, -1):
+        if not rows[j].strip():
+            continue
+        if len(rows[j]) - len(rows[j].lstrip(" ")) < indent:
+            return j if _PLAIN_ENTRY_RE.match(rows[j]) else None
+    return None
+
+
+def _fold_plain_value(rows: list[str], owner: int) -> list[str] | None:
+    """``rows`` with the plain value of line ``owner`` (and the lines it runs on to) written as a folded block (`>-`),
+    which reads as exactly the same text; ``None`` when that cannot be done without changing it."""
+    entry = _PLAIN_ENTRY_RE.match(rows[owner])
+    if entry is None:
+        return None
+    key_column = len(entry.group("indent")) + len(entry.group("dash") or "")
+    end = owner + 1
+    while end < len(rows) and (not rows[end].strip() or len(rows[end]) - len(rows[end].lstrip(" ")) > key_column):
+        end += 1
+    while end > owner + 1 and not rows[end - 1].strip():
+        end -= 1  # blank lines after the value are not part of it
+    parts = [entry.group("value")] + rows[owner + 1:end]
+    # A ` #` in a plain value starts a comment; in a folded block it would become text. Not repaired.
+    if any(" #" in p or "\t" in p or p.strip().startswith("#") for p in parts):
+        return None
+    # Nor a line that starts with a key: a key indented one level too far is not text the value runs on to.
+    if any(_LINE_KEY_RE.match(p) or _SCALAR_ENTRY_RE.match(p.strip()) for p in rows[owner + 1:end]):
+        return None
+    pad = " " * (key_column + 2)
+    head = rows[owner][:entry.end("key")] + ": >-"
+    body = [pad + p.strip() if p.strip() else "" for p in parts]
+    return rows[:owner] + [head] + body + rows[end:]
+
+
+def repair_block(block: str) -> tuple[str | None, list[str]]:
+    """``(the block repaired, what was repaired)`` when a repair that changes no key and no value makes ``block`` valid
+    YAML, else ``(None, [])``. Two repairs, nothing else: a plain value with `: ` in it is written as a folded block (the
+    same text), and an indentation made only of tabs is written with two spaces a tab."""
+    if yaml_problem(block) is None:
+        return block, []
+    rows = block.split("\n")
+    notes: list[str] = []
+    indented = [r for r in rows if r.strip() and r[:1] in (" ", "\t")]
+    if indented and all(re.match(r"^\t+(?=[^ \t])", r) for r in indented):
+        rows = [re.sub(r"^\t+", lambda m: "  " * len(m.group(0)), r) for r in rows]
+        notes.append("its indentation was made of tabs; written with spaces")
+    keys = {m.group(1) for m in (_LINE_KEY_RE.match(r) for r in block.split("\n")) if m}
+    for _ in range(_MAX_REPAIRS):
+        try:
+            loaded = yaml.safe_load("\n".join(rows))
+            # Every key written at the start of a line is still a key: a repair that made one into text is not used.
+            if keys - _keys_in(loaded):
+                return None, []
+            return "\n".join(rows), notes
+        except yaml.YAMLError as e:
+            mark = getattr(e, "problem_mark", None)
+            if mark is None or "mapping values are not allowed" not in str(getattr(e, "problem", "")):
+                return None, []
+            if not 0 <= mark.line < len(rows):
+                return None, []
+            # The `: ` the parser stopped at may be a key a model mis-indented or ran onto a line (`tolerance:`,
+            # `expected:`), not text: a word written as the design's keys are (snake_case) is never folded into a value.
+            before = re.search(r"(\S+)\s*$", rows[mark.line][:mark.column])
+            if before is not None and (_KEYLIKE_RE.match(before.group(1))
+                                       or _SCALAR_ENTRY_RE.match(rows[mark.line][before.start(1):])):
+                return None, []  # also a one-word name holding a number (`N: 100 T: 5`), whatever its case
+            owner = _owner_of(rows, mark.line, mark.column)
+            folded = _fold_plain_value(rows, owner) if owner is not None else None
+            if folded is None:
+                return None, []
+            key = _PLAIN_ENTRY_RE.match(rows[owner]).group("key").strip()  # type: ignore[union-attr]
+            rows = folded
+            notes.append(f"the value of `{key}` (line {owner + 1}) has `: ` in it; written as a folded block, same text")
+    return None, []
+
+
+def repair_design(text: str) -> tuple[str | None, list[str]]:
+    """``text`` with its design block repaired by :func:`repair_block` (``(None, [])`` when there is no block, the block
+    cannot be repaired that way, or it was valid already)."""
+    found = design_block(text)
+    if found is None or yaml_problem(found[2]) is None:
+        return None, []
+    fixed, notes = repair_block(found[2])
+    if fixed is None:
+        return None, []
+    return replace_design_block(text, fixed), notes
+
+
+def block_fix_request(block: str, why: str) -> str:
+    """The one request for the design block alone, after a rewrite whose block could not be used: the block, exactly
+    where (line and column) and why the parser stopped, the lines around that place, and what to return. Only the block
+    is sent, not the plan again."""
+    problem = yaml_problem(block)
+    parts = ["The plan you returned could not be used: its design block (the fenced `yaml` block under *The design "
+             "(used as written)*) " + (
+                 "is not valid YAML." if problem else f"could not be read ({why}).")]
+    if problem and problem["line"] is not None:
+        parts.append(f"Where: line {problem['line']}, column {problem['column']} of the block. The YAML parser says: "
+                     f"{problem['problem']}.\nThe lines around it (the line marked `>` is where it stopped):\n"
+                     + "\n".join(problem["lines"]))
+        if "mapping values are not allowed" in problem["problem"]:
+            parts.append("This usually means a value has `: ` in it (often on a line it runs on to): put the value in "
+                         "quotes, or write it as a folded block (`key: >-` with the text on the lines below, indented).")
+    elif problem:
+        parts.append(f"The YAML parser says: {problem['problem']}.")
+    parts.append("The whole block as you wrote it:\n\n```yaml\n" + block.strip("\n") + "\n```")
+    parts.append("Return ONLY the corrected block, as one fenced ```yaml block, and nothing else. Fix only what makes it "
+                 "unusable: keep every key and every value as they are, add nothing and leave nothing out.")
+    return "\n\n".join(parts)
+
+
+def block_from_reply(reply: str) -> str | None:
+    """The design block in a reply to :func:`block_fix_request`: the block of a whole plan when the model sent one back,
+    else its first fenced block, else the reply itself when it has no fence."""
+    found = design_block(reply or "")
+    if found is not None:
+        return found[2]
+    fenced = _FENCE_RE.search(reply or "")
+    if fenced is not None:
+        return fenced.group(1)
+    body = (reply or "").strip()
+    # Unfenced, it is used only when it starts as a block does, with a key: a sentence before it would become a key.
+    first = body.split("\n", 1)[0] if body else ""
+    return body if body and "```" not in body and _LINE_KEY_RE.match(first) else None
+
+
 def load_design(quest_root: Path) -> tuple[dict[str, Any] | None, str | None]:
     """The design in the quest's ``plan.md``. ``(None, None)`` when there is no plan file."""
     path = plan_path(quest_root)

@@ -338,7 +338,9 @@ def test_a_grouped_or_ranged_citation_of_retrieved_sources_is_a_source() -> None
     assert _gaps("[1, 2]", sources=three) == []
     assert _gaps("[1–3]", sources=three) == []
     (gap,) = _gaps("[1, 7]", sources=three)
-    assert "[7]" in gap and "[1]" not in gap
+    named = gap.split(" which ")[0]  # what is named as missing; the sentence then lists the real ones, [1]–[3]
+    assert "[7]" in named and "[1]" not in named
+    assert "(they are [1]–[3])" in gap
 
 
 def test_an_array_index_is_not_a_citation() -> None:
