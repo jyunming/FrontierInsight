@@ -1538,6 +1538,17 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       input.dataset.islist = Array.isArray(val.default) ? '1' : '0';
       input.value = Array.isArray(val.default) ? val.default.join(', ') : String(val.default ?? '');
       fs.appendChild(input);
+      // Suggested answers (the title question's candidate titles) become buttons that fill the box; typing your own still works.
+      if (Array.isArray(val.suggestions) && val.suggestions.length) {
+        const row = document.createElement('div'); row.className = 'clarify-suggestions flex flex-wrap gap-2 mt-2';
+        for (const s of val.suggestions) {
+          const b = document.createElement('button'); b.type = 'button'; b.textContent = String(s);
+          b.className = 'text-left px-3 py-1 rounded border border-white/20 font-label-sm text-label-sm';
+          b.onclick = () => { input.value = String(s); };
+          row.appendChild(b);
+        }
+        fs.appendChild(row);
+      }
       form.appendChild(fs);
     }
     const submit = document.createElement('div');
