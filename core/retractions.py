@@ -22,6 +22,12 @@ Each source's ``metadata["retraction"]`` becomes one of:
 
 A retracted source is marked ``[retracted]`` in every prior-work block (``core.engine._format_lit_header``) and in the
 claim check's source list, and :func:`apply_to_claims` makes every claim that rests on or cites one ``unsupported``.
+A paper the person pinned (``knowledge.local_papers``) or dropped into ``inputs/papers/`` usually has no DOI: its DOI
+is looked up by title in Crossref (:func:`find_doi_by_title`) and accepted only when a record's title is the same
+title (equal once case, accents and punctuation are ignored) and the first author and the year (within one) agree wherever the
+paper states them. A title that matches no record, or several different DOIs, or a lookup that fails, leaves it ``not_checked``: never a
+guess. The DOI found is kept as ``metadata["retraction_doi"]``; the paper's own ``doi`` field is left alone.
+
 The rows go to ``.fi/literature_queries.json`` (stage ``retractions``), the sealed record of the search, and
 :func:`summary_line` is the one line ``run.log`` gets. Nothing here raises: a lookup that fails leaves the sources
 ``not_checked`` and the quest goes on.
@@ -32,6 +38,7 @@ import asyncio
 import hashlib
 import json
 import re
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any, Callable
@@ -64,6 +71,15 @@ ARXIV_WHY = "an arXiv preprint: Crossref holds no arXiv record"
 #: What the notices' ``source`` field says, in words a reader knows.
 _SOURCE_NAMES = {"retraction-watch": "Retraction Watch", "publisher": "the publisher"}
 _UNREADABLE_DOI = "the DOI could not be read"
+#: Sources the person supplied: no DOI in their metadata, so the DOI is looked up by title.
+_OWN_SOURCES = frozenset({"local_paper", "user_supplied"})
+#: A first line of a PDF's text that is a page header, not a title.
+_HEADER_RE = re.compile(r"(?i)contents lists available|published as a|available online|journal homepage|arxiv|preprint|"
+                        r"^page \d|downloaded from|all rights reserved|copyright")
+_MIN_TITLE_WORDS = 4
+#: Title lookups per literature pass, so a folder of hundreds of papers cannot hold a quest up.
+_MAX_TITLE_LOOKUPS = 40
+NO_TITLE_MATCH = "no DOI found for this paper by its title"
 #: A citation in brackets ([1], [2, 3], [W1]): taken out when two texts are compared.
 _CITATION_RE = re.compile(r"\[[^\]]*\]")
 
@@ -240,6 +256,133 @@ def _content(entry: Any) -> str:
     return str((entry.get("content") if isinstance(entry, dict) else getattr(entry, "content", "")) or "")
 
 
+def _norm_title(text: Any) -> str:
+    t = unicodedata.normalize("NFKD", str(text or "")).encode("ascii", "ignore").decode("ascii").lower()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+
+
+def _first_author(meta: dict[str, Any]) -> str:
+    """The family name of the paper's first author when its metadata states one, else ""."""
+    a = meta.get("authors") or meta.get("author") or ""
+    if isinstance(a, (list, tuple)):
+        a = a[0] if a else ""
+    if isinstance(a, dict):
+        a = a.get("family") or a.get("name") or ""
+    a = str(a).split(";")[0].split(" and ")[0].strip()
+    if "," in a:
+        a = a.split(",")[0]
+    else:
+        a = a.split()[-1] if a.split() else ""
+    return _norm_title(a)
+
+
+def _own_titles(meta: dict[str, Any], content: str) -> list[str]:
+    """The titles a person's paper may go by: its metadata title (a local file's is its file name); only when it has
+    none, the first line of its text (unless that is a page header)."""
+    out = [str(meta.get("title") or "").strip()]
+    if not out[0]:
+        for line in (content or "").splitlines():
+            line = line.strip().lstrip("#").strip()
+            if line:
+                if not _HEADER_RE.search(line):
+                    out.append(line[:250])
+                break
+    return [t for t in dict.fromkeys(out) if len(_norm_title(t).split()) >= _MIN_TITLE_WORDS]
+
+
+def _record_matches(item: dict[str, Any], title: str, author: str, year: int | None) -> bool:
+    titles = item.get("title")
+    if not isinstance(titles, list) or not titles:
+        return False
+    want = _norm_title(title)
+    # Publishers rename a retracted work "RETRACTED: <title>": that is the work itself, unlike a "Retraction: ..." notice.
+    if want not in {_norm_title(re.sub(r"(?i)^\s*retracted\s*:\s*", "", str(t))) for t in titles}:
+        return False
+    if author:
+        first = (item.get("author") or [None])[0]
+        if not isinstance(first, dict) or _norm_title(first.get("family")) != author:
+            return False
+    if year:
+        try:
+            got = int(((item.get("issued") or {}).get("date-parts") or [[None]])[0][0])
+        except (TypeError, ValueError, IndexError):
+            return False
+        if abs(got - year) > 1:  # a preprint and its journal version differ by a year at most
+            return False
+    return True
+
+
+async def find_doi_by_title(
+    client: httpx.AsyncClient, titles: list[str], author: str = "", year: int | None = None,
+) -> tuple[str, str, bool]:
+    """``(doi, why, unreachable)``: the DOI of the one Crossref record that is this paper, or "" and why there is
+    none. ``unreachable`` is True when Crossref could not be reached (the caller stops asking)."""
+    found: set[str] = set()
+    for title in titles:
+        params = {"query.bibliographic": f"{title} {author}".strip(), "rows": "5", "select": "DOI,title,author,issued"}
+        try:
+            r = await client.get(CROSSREF_WORKS, params=params)
+        except httpx.TimeoutException:
+            return "", "Crossref did not answer in time", True
+        except Exception as e:  # noqa: BLE001 -- a lookup never stops a quest
+            return "", f"Crossref could not be reached: {_network_failure(e)}", True
+        if r.status_code != 200:
+            return "", f"Crossref answered with an error (status {r.status_code})", False
+        try:
+            items = r.json()["message"]["items"]
+            if not isinstance(items, list):
+                raise TypeError("no list of items")
+        except Exception:  # noqa: BLE001
+            return "", "Crossref's answer could not be read", False
+        found |= {d for d in (normalize_doi(i.get("DOI")) for i in items
+                              if isinstance(i, dict) and _record_matches(i, title, author, year)) if d}
+        if found:
+            break
+        await _sleep(_GAP_S)
+    if len(found) == 1:
+        return next(iter(found)), "", False
+    return "", (NO_TITLE_MATCH if not found else "several records match this title, so none is taken"), False
+
+
+async def _dois_for_own_papers(
+    wanted: list[tuple[int, dict[str, Any], str]], transport: httpx.AsyncBaseTransport | None,
+) -> dict[int, tuple[str, str]]:
+    """``{index: (doi, why)}`` for the papers the person supplied (``wanted``: index, metadata, content). One request
+    at a time, so the public pool is never over-asked; after Crossref cannot be reached no more are sent."""
+    out: dict[int, tuple[str, str]] = {}
+    if not wanted:
+        return out
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT_S, transport=transport, follow_redirects=True,
+                                     headers={"User-Agent": _USER_AGENT}) as client:
+            stopped = ""
+            asked = 0
+            for i, meta, content in wanted:
+                titles = _own_titles(meta, content)
+                if stopped:
+                    out[i] = ("", stopped)
+                elif not titles:
+                    out[i] = ("", "this paper has no title to look up")
+                elif asked >= _MAX_TITLE_LOOKUPS:
+                    out[i] = ("", "too many papers to look up by title in one pass")
+                else:
+                    if asked:
+                        await _sleep(_GAP_S)
+                    asked += 1
+                    try:
+                        year = int(str(meta.get("year") or "")[:4]) or None
+                    except ValueError:
+                        year = None
+                    doi, why, unreachable = await find_doi_by_title(client, titles, _first_author(meta), year)
+                    out[i] = (doi, why)
+                    if unreachable:
+                        stopped = why
+    except Exception as e:  # noqa: BLE001 -- a lookup never stops a quest
+        for i, _m, _c in wanted:
+            out.setdefault(i, ("", f"the lookup failed ({type(e).__name__})"))
+    return out
+
+
 async def check_literature(
     entries: list[Any], *, transport: httpx.AsyncBaseTransport | None = None,
 ) -> tuple[list[Any], list[dict[str, Any]]]:
@@ -255,6 +398,11 @@ async def check_literature(
             pending.append((i, meta, normalize_doi(meta.get("doi"))))
         if not pending:
             return list(entries), []
+        # A paper the person supplied has no DOI: find it by title (kept apart, never as the paper's own ``doi``).
+        by_title = await _dois_for_own_papers(
+            [(i, m, _content(entries[i])) for i, m, doi in pending
+             if not doi and not str(m.get("doi") or "").strip() and m.get("source") in _OWN_SOURCES], transport)
+        pending = [(i, m, doi or by_title.get(i, ("", ""))[0]) for i, m, doi in pending]
         answers = await check_dois([doi for _i, _m, doi in pending if doi], transport=transport)
         out = list(entries)
         rows: list[dict[str, Any]] = []
@@ -263,9 +411,15 @@ async def check_literature(
                 answer = answers.get(doi) or _not_checked("the lookup gave no answer")
             elif str(meta.get("doi") or "").strip():
                 answer = _not_checked(_UNREADABLE_DOI)  # a DOI is there: never "no DOI"
+            elif i in by_title:
+                answer = _not_checked(by_title[i][1] or NO_TITLE_MATCH)  # looked for by title: never "no DOI"
             else:
                 answer = {"status": NO_DOI, "why": "no DOI to look up", "notices": []}
             meta["retraction"] = answer["status"]
+            if doi and i in by_title:
+                meta["retraction_doi"] = doi
+            else:
+                meta.pop("retraction_doi", None)
             if answer["status"] == RETRACTED:
                 meta["retraction_note"] = answer["why"]
             else:

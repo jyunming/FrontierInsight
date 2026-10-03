@@ -297,7 +297,7 @@ same PR that adds, splits or renames one.
 - `core/passages.py` — relevance-ranked excerpt selection over fetched full text; `embed_model_cached` says whether
   the embedding model is downloaded, from the model caches on disk only (the quick `--doctor`), `_embed_model`
   loads it.
-- `core/retractions.py` — the retraction check: `check_literature` looks each DOI up in Crossref (`updated-by`
+- `core/retractions.py` — the retraction check: `check_literature` looks each DOI up in Crossref (a pinned / dropped paper with no DOI is first matched by exact title via `find_doi_by_title`; `updated-by`
   notices, Retraction Watch included) after the literature node's dedup and sets `metadata["retraction"]`
   (`retracted` / `not_retracted` / `not_checked` / `no_doi`); `apply_to_claims` makes a claim grounded in a retracted
   source, and any sentence citing one, unsupported after the claim check; `retracted_dois` keeps retracted papers off

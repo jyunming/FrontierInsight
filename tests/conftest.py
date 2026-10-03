@@ -111,7 +111,7 @@ def _no_crossref_retraction_lookup(request, monkeypatch):
     """The literature node looks every DOI up in Crossref for a retraction (core/retractions.py). Outside
     tests/test_retractions.py (which answers with httpx.MockTransport) the lookup answers "not checked" without a
     request, exactly as it would offline, so no engine test sends one."""
-    if request.module.__name__.endswith("test_retractions"):
+    if request.module.__name__.endswith(("test_retractions", "test_retractions_local_papers")):
         return
     import core.retractions as _ret
 
@@ -119,7 +119,11 @@ def _no_crossref_retraction_lookup(request, monkeypatch):
         return {d: _ret._not_checked("the lookup is off in tests")
                 for d in (_ret.normalize_doi(x) for x in dois) if d}
 
+    async def offline_titles(wanted, transport=None):
+        return {i: ("", "the lookup is off in tests") for i, _m, _c in wanted}
+
     monkeypatch.setattr(_ret, "check_dois", offline)
+    monkeypatch.setattr(_ret, "_dois_for_own_papers", offline_titles)
 
 
 
