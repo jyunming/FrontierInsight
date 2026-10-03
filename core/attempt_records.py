@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from . import frozen_protocol as _frozen
+from . import record_anchor as _record_anchor
 
 #: What an attempt came to. ``process_error``: it crashed or produced no result. ``protocol_mismatch``: it ran something
 #: other than what the protocol fixed. ``oracle_failure``: it did not pass the known-answer checks. ``inconclusive``: it
@@ -460,8 +461,11 @@ def append(fi_dir: Path, name: str, record: dict[str, Any]) -> str | None:
         record_id = str(record.get("record_id") or uuid.uuid4().hex)
         line = json.dumps({"at": time.time(), "schema": SCHEMA, **record, "record_id": record_id},
                           sort_keys=True, default=str, ensure_ascii=False)
-        with (fi_dir / name).open("a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        data = (line + "\n").encode("utf-8")
+        # FI notes how far it wrote the record before each line (core/record_anchor.py), so a line another program adds
+        # is told apart. Bytes, so the note and the file agree on every platform.
+        with _record_anchor.appending(fi_dir / name, data), (fi_dir / name).open("ab") as fh:
+            fh.write(data)
         return record_id
     except (OSError, TypeError, ValueError):
         return None

@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from . import record_anchor as _record_anchor
+
 SCHEMA = "fi.audit/v1"
 GENESIS = "0" * 64
 
@@ -47,6 +49,9 @@ KINDS = (
     "check_result",       # one check's verdict (protocol, oracle, run manifest, numeric warnings, evidence, design audit)
     "model_claim",        # the model's own rationale (provenance model_claim)
     "audit_repair",       # a torn last line was dropped when the file was reopened
+    "record_changed_outside_fi",  # when the quest started again, a record file held lines FI did not write (or its
+                          # earlier lines had changed): which file, what was found, how many lines were moved aside and
+                          # to which file (core/record_anchor.py); the evidence then keeps the result from publication-ready
     "quest_finalized",    # the seal a finished quest writes last: how many events came before it, how many could not
                           # be written in this run, and which steps completed (core/evidence.py reads it)
     "attempts_sealed",    # the hash and line count of .fi/attempts.jsonl and .fi/branch_ledger.jsonl at the quest's end
@@ -199,6 +204,9 @@ class AuditLog:
     def _open(self) -> None:
         """Continue the chain of an existing file (a resumed quest), dropping a torn last line if a crash left one."""
         self._opened = True
+        # Lines past FI's note of how far it wrote the trace (core/record_anchor.py) are moved aside first, so this run
+        # never chains onto a line another program added.
+        _record_anchor.before_reading(self.path)
         if not self.path.is_file():
             return
         data = self.path.read_bytes()
@@ -206,7 +214,8 @@ class AuditLog:
         if data and not data.endswith(b"\n"):
             cut = data.rfind(b"\n") + 1
             torn, data = data[cut:], data[:cut]
-            self.path.write_bytes(data)
+            with self.path.open("r+b") as fh:
+                fh.truncate(cut)
         last = None
         for line in data.split(b"\n"):
             if not line.strip():
@@ -256,8 +265,11 @@ class AuditLog:
                 record[key] = value
         record["hash"] = hash_of(self._prev, record)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("ab") as fh:
-            fh.write((canonical(record) + "\n").encode("utf-8"))
+        line = (canonical(record) + "\n").encode("utf-8")
+        # FI notes how far it wrote the trace before each line (core/record_anchor.py): a line another program adds is
+        # then told apart when the quest starts again.
+        with _record_anchor.appending(self.path, line), self.path.open("ab") as fh:
+            fh.write(line)
             fh.flush()
         self._seq, self._prev = record["seq"], record["hash"]
         self.last_kind, self.last_node = kind, node
@@ -380,7 +392,7 @@ DETAILS = ("summary", "checks", "debug")
 # What each detail level shows. ``summary``: the shape of the run and every decision. ``checks``: plus each check's verdict,
 # the artifacts and the model's stated reasons. ``debug``: everything, including each node's start.
 _SUMMARY_KINDS = {"quest_started", "node_completed", "node_paused", "node_failed", "pause_requested", "route_decision", "audit_repair",
-                  "quest_finalized", "title_changed", "model_changed", "result_accepted"}
+                  "quest_finalized", "title_changed", "model_changed", "result_accepted", "record_changed_outside_fi"}
 _CHECK_KINDS = _SUMMARY_KINDS | {"check_result", "artifact_created", "model_claim"}
 
 
@@ -435,6 +447,9 @@ def describe(e: dict[str, Any], *, tagged: bool = True) -> str:
         return f"{where}{e.get('topic', 'rationale')}: {e.get('claim', '')}{tail}{tag(e)}"
     if kind == "audit_repair":
         return f"a torn last line ({e.get('dropped_bytes')} bytes) was dropped"
+    if kind == "record_changed_outside_fi":
+        moved = f"; {e.get('lines')} line(s) moved aside to .fi/{e['moved_to']}" if e.get("moved_to") else ""
+        return f"the quest's record was changed outside FI: .fi/{e.get('file')} {e.get('reason', '')}{moved}"
     if kind == "quest_started":
         return f"quest {'resumed' if e.get('resumed') else 'started'}"
     if kind == "title_changed":

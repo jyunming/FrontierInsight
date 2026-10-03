@@ -226,6 +226,10 @@ same PR that adds, splits or renames one.
   `paper_trim.candidates` never offers a sentence inside an engine note (`<!-- fi:... -->`).
 - `core/audit_log.py` — the hash-chained, redacted per-quest trace (`STAGE_PROGRESS`/`_ProgressOnly` for the curated
   console/web view live in `core/engine.py`, next to `_quest_logger`).
+- `core/record_anchor.py` — FI's note of how far it wrote the trace and the `.fi/` record files
+  (`.fi/record_heads.sqlite`: `appending` around every line, `before_reading` in `AuditLog._open`; copied into
+  `QuestState.record_anchor` at each step's end by `Engine._audited`); `check_on_start` moves lines FI did not write
+  aside when a quest starts again (`Engine._check_records_changed_outside`), `evidence_gaps` feeds `core/evidence.py`.
 - `core/numeric_oracle.py`, `core/stat_claims.py`, `core/number_provenance.py` — the three paper-vs-results audits
   (`needs/{numeric,statistics,provenance}_audit.json`) that `internally_reconciled` requires all three of.
 - `core/numeric_warnings.py` — solver/runtime warnings from a run's own stderr that a paper must not be written over.

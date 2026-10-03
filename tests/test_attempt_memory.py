@@ -410,8 +410,10 @@ def _without_timing(value):
 
 def _normalized_state(artifacts, quest_root: Path) -> dict:
     """The final state with what names the quest folder replaced and the timing fields (:data:`_TIMING`, at any depth)
-    left out; nothing else is left out."""
-    text = json.dumps(artifacts.raw_state or {}, sort_keys=True, default=str)
+    left out, and FI's note of how far it wrote its record files (``record_anchor``, core/record_anchor.py: with the
+    recording on there is one more record file); nothing else is left out."""
+    state = {k: v for k, v in (artifacts.raw_state or {}).items() if k != "record_anchor"}
+    text = json.dumps(state, sort_keys=True, default=str)
     for old in (str(quest_root).replace("\\", "\\\\"), quest_root.as_posix(), str(quest_root), quest_root.name):
         text = text.replace(old, "<quest>")
     return _without_timing(json.loads(text))
