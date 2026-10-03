@@ -70,8 +70,11 @@ def test_a_resumed_quest_continues_the_same_chain(tmp_path: Path) -> None:
 def test_a_torn_last_line_is_dropped_and_said_so(tmp_path: Path) -> None:
     log = _log(tmp_path)
     log.append("node_started", node="plan")
-    with log.path.open("ab") as fh:
-        fh.write(b'{"schema":"fi.audit/v1","seq":2,"ki')       # a crash in the middle of a write
+    # A crash in the middle of a write: FI's note says the line is on its way (core/record_anchor.py; bytes added with
+    # no line of FI's on its way are another program's, and are set aside instead: tests/test_record_anchor.py).
+    from tests.test_record_anchor import _stopped_mid_line
+
+    _stopped_mid_line(log.path, b'{"schema":"fi.audit/v1","seq":2,"kind":"node_completed"}\n', 35)
     again = _log(tmp_path)
     again.append("node_completed", node="plan")
     events = al.read(again.path)

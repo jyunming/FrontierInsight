@@ -71,6 +71,7 @@ from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
 from . import audit_log as _audit_log
 from . import confirmations as _confirmations
+from . import record_anchor as _record_anchor
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
@@ -456,6 +457,9 @@ class QuestState(TypedDict, total=False):
     # The engine's own tally of the model calls it made, per step (``node`` key), for the quest's whole life: the record
     # of its calls (.fi/model_calls.jsonl) must hold at least this many lines per step (core/attempt_records.py).
     model_call_counts: dict[str, int]
+    # How far FI wrote each of the quest's record files at the end of the last step (core/record_anchor.py): checked when
+    # the quest starts again, so a line another program added is moved aside instead of taken for FI's.
+    record_anchor: dict[str, Any]
     # The improve loop (core/improve.py): the rounds spent in this quest (one budget, ``engine.improve_rounds``, shared by
     # every pass), whether the next run is the kept version's full run (``improve_rerun``), and what the loop did.
     improve_rounds_used: int
@@ -785,6 +789,9 @@ class Engine:
             (self.quest_root / "paper").mkdir(parents=True, exist_ok=True)
             self._log.info("starting quest %s", self.quest_id)
             _set_model_call_archive(self.fi_dir, bool(self.config.output.save_model_calls))
+            # Before anything is written: lines another program added to the quest's records since FI last wrote them
+            # are moved aside (core/record_anchor.py), so this run does not chain onto them.
+            await self._check_records_changed_outside()
             self._audit("quest_started", resumed=self.audit.event_count() > 0, reopen=bool(reopen), title=self.config.title)
             # Research explores first and confirms once by default (engine.phased); a research quest that began before
             # that default goes on as it began. Decided before the approved settings are compared, so a quest approved
@@ -1718,6 +1725,24 @@ class Engine:
         ".fi/literature_queries.json",
     )
 
+    async def _check_records_changed_outside(self) -> None:
+        """Compare the quest's record files with FI's note of how far it wrote them and its copy in the last checkpoint
+        (core/record_anchor.py): what FI did not write is moved aside (never used), said in run.log and recorded in the
+        trace; the evidence then reads the result as not publication-ready."""
+        try:
+            found = await asyncio.to_thread(_record_anchor.check_on_start, self.fi_dir)
+        except Exception as e:  # noqa: BLE001 -- a check that cannot run is said, and the quest goes on
+            self._log.warning("[records] FI could not compare the quest's records with its own note of them: %r", e)
+            return
+        for f in found:
+            self._log.warning("[records] %s", f.line())
+            self._audit(_record_anchor.EVENT, file=f.file, reason=f.reason, lines=f.lines, moved_to=f.moved_to)
+        if found:
+            moved = any(f.moved_to for f in found)
+            self._progress("The quest's records were changed outside FI since it last ran" +
+                           (": what FI did not write was set aside and is not used" if moved else "") +
+                           ", so the result will not count as publication-ready (see run.log).")
+
     def _audit(self, kind: str, *, node: str | None = None, provenance: str = _audit_log.DETERMINISTIC, **fields: Any) -> None:
         try:
             self.audit.append(kind, node=node or self._audit_node, provenance=provenance, **fields)
@@ -2091,6 +2116,10 @@ class Engine:
             counts = dict(self.__dict__.get("_model_call_counts") or {})
             if isinstance(out, dict) and counts != dict(state.get("model_call_counts") or {}):
                 out = {**out, "model_call_counts": counts}  # kept in the state, so a resumed quest keeps its tally
+            if isinstance(out, dict):
+                anchor = _record_anchor.snapshot(self.fi_dir)  # in the checkpoint: checked when the quest starts again
+                if anchor and anchor != state.get("record_anchor"):
+                    out = {**out, "record_anchor": anchor}
             return out
 
         return wrapper

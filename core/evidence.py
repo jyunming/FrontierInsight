@@ -644,6 +644,17 @@ def assess(
                 ready_gaps.append("the quest's decision trace (.fi/audit.jsonl) no longer checks out (its hash chain is broken)")
             else:
                 ready_gaps.extend(_trace_completeness_gaps(trace, _audit_log, sealing=bool(settings.get("sealing"))))
+    # Under any profile: a record file that held lines FI did not write when the quest started again (moved aside), or
+    # that does not match FI's own note of how far it wrote it now (core/record_anchor.py). A valid hash chain alone
+    # does not show this: a line chained onto the last one verifies.
+    from . import audit_log as _trace_log
+    from . import record_anchor as _record_anchor
+
+    try:
+        trace_events = _trace_log.read(quest_root / ".fi" / "audit.jsonl")
+    except Exception:  # noqa: BLE001 -- an unreadable trace is reported above under research
+        trace_events = []
+    ready_gaps.extend(_record_anchor.evidence_gaps(quest_root / ".fi", trace_events))
     # The evidence gate, the design methodology audit and the claim check must each have run and judged. Their receipts
     # (core/receipts.py) are read: a missing, unreadable or malformed receipt is a gap, as is a check the person turned
     # off; only an explicit pass counts. It used to be the other way round (a gap only when a check reported a failure),
