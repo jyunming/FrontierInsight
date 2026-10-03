@@ -415,7 +415,9 @@ same PR that adds, splits or renames one.
 - `core/execution.py` — `Executor` protocol, `VenvExecutor` / `SharedInterpreterExecutor` / `DockerExecutor`,
   `make_executor`. `DockerLimits` (from `execution.docker_memory_gb` / `docker_cpus` / `docker_max_processes`)
   and the container's isolation (`DockerExecutor._create_kwargs`: no network, the limits, `cap_drop=ALL`,
-  `no-new-privileges`; limits Docker cannot apply left out), the container environment (`_env_for`: host system/Python paths dropped (`_HOST_ONLY_VARS`), quest paths
+  `no-new-privileges`; limits Docker cannot apply left out), the mounts (`_volumes`: the quest at `/work`, `.fi/` and
+  `needs/` read-only over it, `.fi/trials` and `.fi/optimisation` writable for the harness's rows with their run
+  records read-only again: `_RECORD_DIRS` / `_SCRIPT_WRITABLE` / `_RECORD_FILES`), the container environment (`_env_for`: host system/Python paths dropped (`_HOST_ONLY_VARS`), quest paths
   as `/work`, thread counts; `_to_container` for command arguments too), the
   non-root user choice checked by a write in the quest folder (`_user_candidates` / `_resolve_user`, in `setup`;
   `_warn_root_owned`), and the plain `[FI]` line for a run stopped by a cap (`_limit_note`).

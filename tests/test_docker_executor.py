@@ -137,6 +137,12 @@ def test_docker_daemon_unreachable_yields_runtime_error() -> None:
             exe._docker()
 
 
+@pytest.fixture(autouse=True)
+def _run_in_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Runs use the current folder as the quest folder; the mount points DockerExecutor makes go in tmp_path."""
+    monkeypatch.chdir(tmp_path)
+
+
 def _make_fake_container(
     *,
     exit_code: int = 0,
@@ -196,10 +202,10 @@ def test_run_sync_passes_network_disabled_true() -> None:
     assert kwargs["working_dir"] == "/work"
     # The bind-mount uses the resolved cwd as the host source and /work as the target.
     volumes = kwargs["volumes"]
-    assert len(volumes) == 1
-    (host_src, spec), = volumes.items()
-    assert Path(host_src) == cwd.resolve()
-    assert spec == {"bind": "/work", "mode": "rw"}
+    # the quest folder at /work, with FI's records mounted read-only over it
+    # (see tests/test_docker_records_readonly.py)
+    assert volumes[str(cwd.resolve())] == {"bind": "/work", "mode": "rw"}
+    assert {v["bind"] for v in volumes.values() if v["mode"] == "ro"} == {"/work/.fi", "/work/needs"}
 
 
 def test_run_sync_translates_host_path_in_cmd_args() -> None:

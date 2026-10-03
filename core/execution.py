@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -606,11 +607,65 @@ _PROCESS_LIMIT_RE = re.compile(
 _THREAD_VARS = (
     "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "PYTHON_CPU_COUNT",
 )
+# Folders of the quest FI writes its records into: read-only in the container.
+_RECORD_DIRS = (".fi", "needs")
+# Inside .fi, the folders where FI's harness runs a script and the script's rows land,
+# and where its figures' records are kept.
+_SCRIPT_WRITABLE = (".fi/trials", ".fi/optimisation", ".fi/figure_records")
+# FI's own records inside those folders: read-only again.
+_RECORD_FILES = (".fi/trials/run.json", ".fi/trials/cluster.json",
+                 ".fi/optimisation/run.json", ".fi/optimisation/check.json")
+# A script that tried to write into FI's records.
+_RECORD_REFUSED_RE = re.compile(r"""Read-only file system[^\n]*(?:\.fi|\bneeds)(?:[/'"\s]|$)"""
+    r"""|(?:\.fi|\bneeds)(?:[/'"\s]|$)[^\n]*Read-only file system""")
 # Creates and removes one file in the quest folder: can this user write there?
 _WRITE_CHECK = (
     "import os, tempfile; fd, p = tempfile.mkstemp(dir='/work', prefix='.fi-write-check-'); "
     "os.close(fd); os.remove(p)"
 )
+
+
+def _is_link(st: os.stat_result, path: str) -> bool:
+    """Anything that is not a plain file or folder, as it is on disk: a symbolic link, a Windows junction, a
+    device. ``stat.S_ISLNK`` alone misses the link kinds Windows reports only through the reparse-point flag."""
+    if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+        return True
+    if not getattr(st, "st_file_attributes", 0) & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+        return False
+    tag = getattr(st, "st_reparse_tag", None)
+    if tag is not None:
+        # Only the kinds that name another place (symbolic link, junction, ...): a cloud-sync placeholder or a
+        # de-duplicated file also carries the flag and is a real file.
+        return bool(tag & 0x20000000)  # IO_REPARSE_TAG_NAME_SURROGATE
+    # Python before 3.12 does not report the kind: a link is what leads somewhere else.
+    return os.path.normcase(os.path.realpath(path)) != os.path.normcase(os.path.abspath(path))
+
+
+def _remove_links(host_root: Path, folders: Iterable[str]) -> None:
+    """After a run, remove every link a script left in a folder it could write in (only the link, never what it
+    points at). FI writes fixed file names there from the host; a link in their place would send FI's own write to
+    a record, or to a file outside the quest folder."""
+    for rel in folders:
+        top = host_root / rel
+        stack = [top]
+        while stack:
+            folder = stack.pop()
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    if _is_link(st, entry.path):
+                        try:
+                            os.unlink(entry.path)
+                        except (IsADirectoryError, PermissionError):
+                            os.rmdir(entry.path)  # a junction is removed as a folder, leaving its target alone
+                    elif stat.S_ISDIR(st.st_mode):
+                        stack.append(Path(entry.path))
+                except OSError:
+                    _log.warning("[docker] could not check %s for links left by the experiment", entry.path)
 
 
 def _owner_of(path: Path) -> tuple[int, int]:
@@ -952,13 +1007,38 @@ class DockerExecutor:
         self._skill_mounts = tuple(mounts)
 
     def _volumes(self, host_root: Path) -> dict[str, dict[str, str]]:
-        """The quest read-write at /work, plus each planned skill folder
-        read-only. A skill folder that is no longer what was planned (replaced
-        by a link since) is left out and said so: the container never gets a
-        path the plan did not check."""
+        """The quest read-write at /work, FI's own records read-only on top of it,
+        plus each planned skill folder read-only. A skill folder that is no longer
+        what was planned (replaced by a link since) is left out and said so: the
+        container never gets a path the plan did not check."""
         volumes: dict[str, dict[str, str]] = {
             str(host_root): {"bind": "/work", "mode": "rw"},
         }
+        # FI's records (.fi/: the trace, the attempts, the model calls, the run
+        # state; needs/: the frozen protocol and the checks) are written by FI on
+        # the host, never by a script. A script in the container reads them but
+        # cannot change them, so a record and the anchor kept for it cannot be
+        # edited together. The two folders FI's own harness writes its rows into
+        # stay writable, with the records FI keeps inside them read-only again.
+        # A mount point is made on the host first: Docker would make it itself,
+        # as a root-owned folder.
+        try:
+            for rel in _SCRIPT_WRITABLE + _RECORD_DIRS:
+                (host_root / rel).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            # A plain file where a folder belongs (an older run left one), or a quest folder that cannot be
+            # written: the records cannot be made read-only, so say so rather than run as if they were.
+            _log.warning("[docker] could not set up FI's records (.fi/, needs/) as read-only for the experiment "
+                         "(%s); they are NOT protected from it on this run", exc)
+            return volumes
+        _remove_links(host_root, _SCRIPT_WRITABLE)  # before the checks below follow a link left by an older run
+        for rel in _RECORD_DIRS:
+            volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "ro"}
+        for rel in _SCRIPT_WRITABLE:
+            volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "rw"}
+        for rel in _RECORD_FILES:
+            if (host_root / rel).is_file():
+                volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "ro"}
         for m in self._skill_mounts:
             try:
                 host = m.bind_host if m.still_safe() else None
@@ -972,6 +1052,20 @@ class DockerExecutor:
                 continue
             volumes[host] = m.volume
         return volumes
+
+    @staticmethod
+    def _clean_after_run(host_root: Path, mounted: set[str]) -> None:
+        """What a script left in the folders it could write in that FI would trust or follow: a link (FI writes
+        fixed names there from the host), and a copy of a run record FI keeps there (the record was not on disk to
+        be mounted read-only, so the script could make one; FI writes the real one after the run)."""
+        _remove_links(host_root, _SCRIPT_WRITABLE)
+        for rel in _RECORD_FILES:
+            path = host_root / rel
+            if str(path) not in mounted:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    _log.warning("[docker] could not remove %s, which the experiment made", path)
 
     def _docker(self) -> object:
         if self._client is not None:
@@ -1061,11 +1155,13 @@ class DockerExecutor:
         # setup() decides the user; without it, the best candidate, unchecked
         # (and not kept, so a later setup() still checks).
         user = self._user if self._user is not None else self._user_candidates(client, host_root)[0]
+        mounts = self._volumes(host_root)
+        mounted = set(mounts)
         container = client.containers.create(  # type: ignore[attr-defined]
             self.image,
             command=translated,
             working_dir="/work",
-            volumes=self._volumes(host_root),
+            volumes=mounts,
             environment=self._env_for(client, user, env, host_root),
             detach=True,
             **self._create_kwargs(client, user),
@@ -1084,6 +1180,10 @@ class DockerExecutor:
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
             note = "" if timed_out else self._limit_note(rc, stderr, _oom_killed(container))
+            if rc != 0 and _RECORD_REFUSED_RE.search(stderr):
+                self._say(logging.WARNING, "[docker] the experiment tried to write into FI's own records "
+                          "(.fi/ or needs/), which it can only read; it can write its results anywhere else "
+                          "in the quest folder")
             if note:
                 # The repair step and the error a person sees read the end of
                 # stderr; run.log gets the same sentence.
@@ -1102,6 +1202,7 @@ class DockerExecutor:
                 container.remove(force=True)
             except Exception:
                 pass
+            self._clean_after_run(host_root, mounted)
 
     def _limit_note(self, rc: int, stderr: str, oom: bool) -> str:
         """One plain sentence when a run was stopped by one of the container's

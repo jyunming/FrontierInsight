@@ -596,7 +596,9 @@ def test_a_container_is_isolated_only_when_nothing_it_mounts_holds_the_kept_file
     store = phased.store_dir(root)
     executor = DockerExecutor()
     assert phased_isolation.docker_mounts_clear(executor, root, store) == ""
-    assert set(executor._volumes(root.resolve())) == {str(root.resolve())}
+    mounts = executor._volumes(root.resolve())
+    # the quest, and FI's own records read-only over it: nothing else
+    assert {h for h, v in mounts.items() if not v["bind"].startswith(("/work/.fi", "/work/needs"))} == {str(root.resolve())}
 
     class _Mount:  # a skill folder that happens to be the output folder
         name, declared, volume = "s", str(tmp_path / "out"), {"bind": "/fi-skills/s", "mode": "ro"}
