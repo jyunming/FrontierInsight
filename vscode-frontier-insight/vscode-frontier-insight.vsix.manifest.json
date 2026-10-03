@@ -1,5 +1,5 @@
 {
-  "vsix_sha256": "5f943b4f9af3884325c5e4e587e1a45d0417df4a24c964b9a4cba95b0c7e53ee",
+  "vsix_sha256": "225100254fce69e68aa2d322e68411c51c7abd7c0e3e320cbdaf057c69321e17",
   "files": {
     "[Content_Types].xml": {
       "sha256": "fba48761c26671d8e4c0bcb18f1d6eb609741f3c3d2518ae1bfaf6d6e4c2702c",
@@ -46,8 +46,8 @@
       "bytes": 43103
     },
     "extension/out/extension.js": {
-      "sha256": "4b9c3d7f2ddae363e344b4b218bd35240bf61599558f5a31f8f07f5299db80a9",
-      "bytes": 122662
+      "sha256": "4f704ceefa3d93bf67ef7b237cb4a740287fef84c040c50b684361fd8239ca68",
+      "bytes": 123130
     },
     "extension/out/fi-home.js": {
       "sha256": "ae836799badc78f90e5899bfd8e598d03e1d0f830777c51917ddf4292c1980f0",
@@ -98,12 +98,12 @@
       "bytes": 2329
     },
     "extension/out/skills.js": {
-      "sha256": "480c7c99bac6c15dea7cf971329e703849e66a171ce4ef6242b364d2b71f106b",
-      "bytes": 28160
+      "sha256": "d929108b811701aa1dc0c6d72add106395fc288f519670152569ecd87fd78e34",
+      "bytes": 32331
     },
     "extension/out/stop-card.js": {
-      "sha256": "4c41aecd5a170dffb9e276e634552e2846f471c7637ae478100b7e2e3d2b2a5e",
-      "bytes": 2566
+      "sha256": "a1414b1a778acf2111e69d9eec19acfef6f5d1a34e59a06d5c063f0dd7f2495b",
+      "bytes": 3041
     },
     "extension/out/terminal-command.js": {
       "sha256": "93ad8b7ae61222ec9469c2070360f842d4f10c5d6817a4e9b14c62651435c9e3",
@@ -118,12 +118,12 @@
       "bytes": 13526
     },
     "extension/package.json": {
-      "sha256": "95b7de675dcf5fb4a17c49909aafe1c7bfac3b0bb7ac37112cddcf13a1fcca09",
-      "bytes": 15395
+      "sha256": "75c1a81cc50d502f32a3a21437609f2b94b96a9af210ca6b98a9517fe88f6061",
+      "bytes": 15468
     },
     "extension/readme.md": {
-      "sha256": "4e86be380746b638552e18f5a135e1bf543d3e2499e8dd43ed7dac2984343beb",
-      "bytes": 84498
+      "sha256": "c0945b5262273f65c21d5ecf5dc333c56a86982e184533bcceb994b2e27e740c",
+      "bytes": 85353
     }
   }
 }
