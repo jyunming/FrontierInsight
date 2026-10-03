@@ -69,7 +69,7 @@ same PR that adds, splits or renames one.
   and `GET .../plan/unsourced` (the quest page's *Go on as it is*), `@fi /accept-checks` (`skills.ts::runAcceptChecks`).
   Also going on although a known-answer check was measured and failed (the same flag, button and command; `accept`
   reads which stop it answers from `.fi/pause.json`): `offer(found, oracles, judged)` (offered only when every problem
-  is a measured failure; else why not), `script_version` (hash of the script the checks ran + the model's package),
+  is a measured failure; else why not), `script_version` (hash of the script the checks ran + helper modules beside it + the model's package),
   `accept_failing` (`needs/FAILED_CHECKS_ACCEPTED.json`, bound to the fingerprint and the code version),
   `failing_pending` (the stop's `go_on` in `needs/ORACLE_CHECK.json`; the web payload's `failed_checks`), `went_on_by`
   / `no_longer_applies`, `gap` (the evidence's sentence, person or `automatic`), `failing_disclosure` (the writer's

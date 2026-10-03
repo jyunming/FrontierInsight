@@ -370,7 +370,8 @@ def waiting(quest_root: Path) -> list[Item]:
                         recommended="Compare the measured value with the expected one and where it comes from: if the "
                                     "check is right, the simulation is wrong; if the check is wrong, change it. Until "
                                     "then the result does not count as checked against known answers."
-                                    + (" A change to the check was " + "; ".join(offers) + "." if offers else "")))
+                                    + (" A change to the check was " + "; ".join(offers) + " (once the protocol is "
+                                       "frozen, this becomes an amendment you approve)." if offers else "")))
     wanted = needs / "WANTED_PAPERS.md"
     if wanted.is_file() and not _supplied_since(root / "inputs" / "papers", wanted):
         out.append(Item("papers", "Some papers could not be downloaded (needs/WANTED_PAPERS.md lists them, most "

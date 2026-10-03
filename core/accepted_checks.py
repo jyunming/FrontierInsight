@@ -19,7 +19,7 @@ checks, ``Engine._oracle_gate``): *mark it unconfirmed and go on*. It is offered
 a check with a measured number outside its tolerance (:func:`offer`); a check that measured nothing (the script crashed,
 printed nothing) has no failure to record, and the card says so. The choice binds to the check's conditions (its
 :func:`fingerprint`) AND to the version of the code that computed the number (:func:`script_version`: the script the
-check ran and the model's package in ``code/``); when either changes, the choice no longer applies and the check is
+check ran, the helper modules beside it and the model's package in ``code/``); when either changes, the choice no longer applies and the check is
 judged again. ``needs/ORACLE_CHECK.json`` holds what the stop offered (``go_on``) and, once the quest went on, what it
 went on with (status ``went_on_failing``, ``went_on``); ``needs/FAILED_CHECKS_ACCEPTED.json`` holds the person's choice.
 An exploration quest (not ``rigor_profile: research``, ``result_use`` explore) goes on by itself in the same way, recorded
@@ -224,7 +224,7 @@ def _stopped_record(quest_root: Path) -> dict[str, Any] | None:
 
 def script_version(files: dict[str, str]) -> str:
     """The version of the code that computed a check's number: one hash of each file's path and text (the script the
-    check ran and the model's package in ``code/``). Any change to any of them is a new version."""
+    check ran, the helper modules beside it and the model's package in ``code/``). Any change to any of them is a new version."""
     import hashlib
 
     body = json.dumps(sorted((str(k), str(v)) for k, v in (files or {}).items()), ensure_ascii=False)
