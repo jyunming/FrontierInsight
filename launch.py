@@ -1448,6 +1448,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="With --resume: send your notes back to the writing step first. A number the study lacks is added to "
              "the existing script (which runs again); a request to arrange the figures differently redraws them from "
              "the saved data without running the experiment again; only a different study goes back to the design. "
+             "For a search for the best design, --refine \"push further\" or a target (\"at most 46 K\", \"6 K better "
+             "than the baseline\") continues the search from the best design so far and checks it again. "
              "e.g. --refine \"tighten the methods section\".",
     )
     p.add_argument(
@@ -2057,6 +2059,11 @@ async def _cli_human_feedback_callback(
     paper = snapshot.get("paper_md_path")
     if paper:
         print(f"  Paper        : {paper}")
+    # A search for the best design: a refine FI did not carry out (a new study, or unclear), and how to ask for more.
+    for line in snapshot.get("refine_not_done") or []:
+        print(f"  NOT DONE     : {line}")
+    if snapshot.get("search_further"):
+        print(f"  Search more  : {snapshot['search_further']}")
     print()
     print("Choose: accept (finalise), reject (abandon), refine (your notes go to the writing step first; "
           "the design only if a point needs a new experiment)")
@@ -2577,6 +2584,21 @@ async def run_one(
     )
 
 
+def _report_best_design(quest_root: Path, summary: dict[str, object]) -> None:
+    """A search for the best design: the best design in one line and the files a person opens, printed (the VS Code chat
+    shows the same two lines) and put into ``frontier_insight_summary.json`` (core/best_design_report.py)."""
+    from core import best_design_report as _best_report
+
+    best_line = _best_report.summary_line(Path(quest_root))
+    if not best_line:
+        return
+    best_files = _best_report.files(Path(quest_root))
+    summary["best_design"] = {"says": best_line, "files": best_files}
+    print(f"[FI] best design: {best_line}")
+    if best_files:
+        print(f"[FI] best design files: {', '.join(f['path'] for f in best_files)}")
+
+
 async def _finish_outputs(
     cfg: Config,
     art: QuestArtifacts,
@@ -2628,6 +2650,7 @@ async def _finish_outputs(
     if evidence is not None:
         summary["evidence"] = evidence
         print(f"[FI] evidence: {_evidence_line(evidence)}")
+    _report_best_design(art.quest_root, summary)
     # The visual check's per-output result, for the web quest page.
     visual_check = report_summary(art.quest_root)
     if visual_check is not None:

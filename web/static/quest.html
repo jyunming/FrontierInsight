@@ -106,6 +106,15 @@
       <span class="text-on-surface-variant">Each level needs the one before it; <code class="font-code-md">needs/EVIDENCE.json</code> lists every gap.</span>
     </div>
   </div>
+  <!-- A search for the best design: the best design in one line and the files to open (core/best_design_report.py). -->
+  <div id="best-design-banner" class="hidden fi-banner fi-banner-info">
+    <div class="font-body-md text-body-md text-on-surface flex flex-col gap-2 w-full">
+      <div class="flex flex-wrap items-center gap-2"><b>Best design</b></div>
+      <div id="best-design-says" class="font-code-md text-code-md"></div>
+      <div id="best-design-files" class="flex flex-wrap gap-2"></div>
+      <span class="text-on-surface-variant">Not satisfied? Refine with "push further" or a target (for example "at most 46 K"): FI searches on from this design and checks it again.</span>
+    </div>
+  </div>
 
   <!-- The screenshot + AI check of each output: one line per output. -->
   <div id="visual-check-banner" class="hidden fi-banner fi-banner-info">
@@ -515,6 +524,7 @@
     renderSourceFailures(data.source_failures);
     renderVisualCheck(data.visual_check);
     renderEvidence(data.evidence);
+    renderBestDesign(data.best_design);
     renderAmendment(data.amendment);
     renderUnsourcedChecks(data.unsourced_checks, data.failed_checks);
 
@@ -1171,6 +1181,25 @@
     ['protocol_runtime_matched', 'Protocol matched at runtime'], ['independently_validated', 'Independently validated'],
     ['statistically_adequate', 'Statistically adequate'], ['publication_ready', 'Publication ready'],
   ];
+  // A search for the best design: the line the CLI prints, and a link to each of its files.
+  function renderBestDesign(best) {
+    const banner = document.getElementById('best-design-banner');
+    if (!best || typeof best !== 'object' || !best.says) { banner.classList.add('hidden'); return; }
+    banner.classList.remove('hidden');
+    document.getElementById('best-design-says').textContent = best.says;
+    const box = document.getElementById('best-design-files');
+    box.innerHTML = '';
+    for (const f of (best.files || [])) {
+      const a = document.createElement('a');
+      a.href = `/api/quests/${encodeURIComponent(questId)}/file?path=${encodeURIComponent(f.path)}`;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.className = 'font-label-sm text-label-sm px-3 py-1 rounded-full border border-white/10 hover:text-primary';
+      a.textContent = f.label;
+      a.title = f.path;
+      box.appendChild(a);
+    }
+  }
   function renderEvidence(ev) {
     const banner = document.getElementById('evidence-banner');
     if (!ev || typeof ev !== 'object' || !ev.levels) { banner.classList.add('hidden'); return; }
@@ -1645,6 +1674,16 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
         '<div class="flex flex-wrap gap-2">' +
         gc.map(w => `<span class="border border-white/20 text-on-surface-variant rounded px-2 py-1 font-code-md text-code-md">${escapeHtml(w)}</span>`).join('') +
         '</div>');
+    }
+    // A search for the best design: a refine FI did not carry out (a new study, or unclear), and how to ask for more.
+    if (snap.search_further) {
+      summary.insertAdjacentHTML('beforeend',
+        '<div class="text-on-surface-variant font-label-sm">' + escapeHtml(snap.search_further) + '</div>');
+    }
+    const notDone = snap.refine_not_done || [];
+    if (notDone.length) {
+      summary.insertAdjacentHTML('afterbegin',
+        '<div class="text-error font-label-sm">' + notDone.map(n => escapeHtml(n)).join(' ') + '</div>');
     }
     // A figure request of the last refine that two tries at redrawing could not apply (the figures are as they were).
     const nr = snap.layout_not_redrawn || [];

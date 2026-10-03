@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-03 — what a search for the best design hands over, and searching further
+
+Updated by hand: [[study-types|Study types]] (the paper's *Best design found* section, written by FI from `results/best_design.json` and `needs/OPTIMUM_CHECK.json`; `results/best_design.md`; the one line and the files in the CLI, the web quest page and the VS Code chat; a refine with "push further", a target or more evaluations continues the search from the best design so far and checks it again, while a refine that changes the objective, a limit or a range is refused as a new study).
+
 ## 2026-10-01 — each version of the study is confirmed once
 
 Updated by hand: [[explore-then-confirm|Explore then confirm]] (a new section *One version, one confirmation*: each frozen version is a candidate, its code/protocol/environment hashed at the freeze; every verdict appended to `.fi/confirmations.jsonl` and named in the trace; a retry of the same version keeps both verdicts and the failure counts; a changed version is a new candidate confirmed on its own, never on held-back rows already read; no improve loop and no search after the freeze; the evidence reads the current version; the methods paragraph counts the versions and the failed confirmations; the to-do card line). Sources: core/phased.py, core/confirmations.py, core/optimise.py, core/disclosure.py, core/evidence.py, core/todo.py, core/engine.py.

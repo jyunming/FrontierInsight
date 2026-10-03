@@ -1122,7 +1122,9 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     # (accept/reject). Same ``revise``/``done`` labels the auto path uses.
     assert "human_feedback" in g.branches
     hf_branch = next(iter(g.branches["human_feedback"].values()))
-    assert hf_branch.ends == {"rewrite": "write", "revise": "design", "done": END}
+    # A refine of a search for the best design: search further (execute), or a refused request asked again.
+    assert hf_branch.ends == {"rewrite": "write", "revise": "design", "done": END, "search": "execute",
+                              "ask_again": "human_feedback"}
     reflect_branch = next(iter(g.branches["execute_reflect"].values()))
     assert reflect_branch.ends == {"retry": "execute", "proceed": "improve"}
     # improve → analyze, or back to execute once for a kept change to the simulation.

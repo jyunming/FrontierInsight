@@ -85,6 +85,9 @@ interface HumanReviewRequest {
         figure_caption_warnings?: string[];
         goal_coverage_notes?: string[];
         layout_not_redrawn?: string[];
+        /** A search for the best design: a refine FI did not carry out (a new study, or unclear), and how to ask for more. */
+        refine_not_done?: string[];
+        search_further?: string;
         feedback_history?: Array<{ iteration?: number; text?: string }>;
         paper_md_path?: string;
         /** Shown before an accept (core/acceptance.py): what the result does not guarantee, its gaps, one question. */
@@ -382,6 +385,10 @@ export class Bridge {
         const sugs = snap.suggestions || [];
         const history = snap.feedback_history || [];
         let md = "\n🟡 **Human review** — the engine paused after review.\n\n";
+        // A refine of a search for the best design that FI did not carry out: said first, with why.
+        for (const notDone of snap.refine_not_done || []) {
+            md += `- ⚠️ ${escapeMd(notDone)}\n`;
+        }
         // A figure request of the last refine that two tries at redrawing could not apply: said first.
         const notRedrawn = snap.layout_not_redrawn || [];
         if (notRedrawn.length) {
@@ -439,6 +446,9 @@ export class Bridge {
             for (const h of history) {
                 md += `  - round ${escapeMd(String(h.iteration ?? "?"))}: ${escapeMd(h.text || "")}\n`;
             }
+        }
+        if (snap.search_further) {
+            md += `\n${escapeMd(snap.search_further)}\n`;
         }
         this.opts.progress.markdown(md + "\n");
         const pick = await vscode.window.showQuickPick(

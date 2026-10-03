@@ -578,6 +578,7 @@ def build_traceable(
     config: Any = None,
     design: Any = None,
     oracle_checks: Any = None,
+    optimisation: Any = None,
 ) -> tuple[Traceable, int]:
     """Everything this run can account for, and how much of it came from the
     experiment itself (the second number gates the whole check: a run that
@@ -621,6 +622,13 @@ def build_traceable(
     # that reports "the energy drift was 1.25e-5, within 2e-5" quotes them.
     for path, value in flatten_numbers(oracle_checks or []):
         values.setdefault(f"oracle{path}", value)
+
+    # A search for the best design: FI's own record of the search and of its check at finer numerical settings
+    # (results/best_design.json, needs/OPTIMUM_CHECK.json: core/best_design_report.py). The paper's "Best design found"
+    # section prints them at every level of the numerical settings; they are numbers this run computed, not the
+    # script's, and FI wrote them.
+    for path, value in flatten_numbers(optimisation or {}):
+        values.setdefault(f"optimisation.{path}", value)
 
     # The run configuration, including numbers the user wrote into the topic.
     if config is not None:
@@ -678,6 +686,7 @@ def check(
     design: Any = None,
     oracle_checks: Any = None,
     n_seeds: int = 0,
+    optimisation: Any = None,
 ) -> ProvenanceReport:
     """Flag every number in the paper that nothing in this run accounts for.
 
@@ -694,7 +703,7 @@ def check(
         result_json=result_json, replicates=replicates, intervals=intervals,
         aggregate=aggregate, figure_records=figure_records,
         comparison_stats=comparison_stats, config=config, design=design,
-        oracle_checks=oracle_checks,
+        oracle_checks=oracle_checks, optimisation=optimisation,
     )
     report.traceable_values = len(traceable)
     # The experiment recorded nothing: it crashed, or its last RESULT_JSON is
