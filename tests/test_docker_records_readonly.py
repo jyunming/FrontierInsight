@@ -104,17 +104,29 @@ def test_a_run_removes_links_left_by_the_script(tmp_path: Path) -> None:
     client = MagicMock()
     container = _container()
 
-    def start() -> None:  # the script makes a link while it runs
+    def start() -> None:  # the script makes a link, and a record of its own, while it runs
+        (folder / "run.json").write_text("forged", encoding="utf-8")
         try:
-            (folder / "run.json").symlink_to(target)
+            (folder / "oracle.json").symlink_to(target)
         except OSError:
-            pass
+            pass  # this account cannot make symbolic links: only the record is checked
 
     container.start.side_effect = start
+    container.wait.side_effect = RuntimeError("the wait failed")  # the clean-up still runs
     client.containers.create.return_value = container
-    exe._run_sync(client, ["python", "-V"], tmp_path, 30, {})
-    assert not (folder / "run.json").is_symlink()
+    with pytest.raises(Exception):
+        exe._run_sync(client, ["python", "-V"], tmp_path, 30, {})
+    assert not (folder / "oracle.json").is_symlink()
+    assert not (folder / "run.json").exists()  # not on disk when the run began, so not mounted: not kept
     assert target.read_text(encoding="utf-8") == "x"
+
+
+def test_a_run_record_that_existed_is_kept(tmp_path: Path) -> None:
+    folder = tmp_path / ".fi" / "trials"
+    folder.mkdir(parents=True)
+    (folder / "run.json").write_text("{}", encoding="utf-8")
+    _binds(tmp_path)
+    assert (folder / "run.json").read_text(encoding="utf-8") == "{}"
 
 
 @pytest.fixture
