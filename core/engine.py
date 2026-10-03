@@ -67,6 +67,7 @@ from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
 
 from .vscode_bridge import BridgeError
+from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
 from . import audit_log as _audit_log
 from . import evidence as _evidence
@@ -197,6 +198,10 @@ _SKILL_MOUNTS_FILE = "skill_mounts.json"
 
 # Default sampling temperature for generative nodes (ideate, write, analyze…).
 _DEFAULT_CHAT_TEMPERATURE = 0.2
+
+# How long the environment record waits for `pip freeze` before it records the timeout and stops it (with everything it
+# started) instead.
+_PIP_FREEZE_TIMEOUT_S = 30.0
 # Judgment / gate / classifier nodes: their job is to reach a *verdict* or a
 # routing decision (sufficient vs broaden, accept vs revise, supported vs not),
 # where run-to-run flakiness means the same corpus can flip the route and
@@ -17686,23 +17691,26 @@ class Engine:
         }
         try:
             py = self.executor.python_path(self.quest_root)
-            proc = await asyncio.create_subprocess_exec(
+            # The whole tree (core/proc_tree.py): on Windows a venv's python.exe is a launcher that starts the real
+            # interpreter, and killing the launcher alone left a hung `pip freeze` running for the machine's uptime.
+            tree = await AsyncProcessTree.start(
                 str(py), "-m", "pip", "freeze",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
+            proc = tree.proc
+            aborted = False
             try:
-                out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=_PIP_FREEZE_TIMEOUT_S)
             except asyncio.TimeoutError:
-                # ``wait_for`` cancels the ``communicate()`` coroutine on timeout, but that does not
-                # touch the child process itself — left alone, a hung `pip freeze` leaks a background
-                # process for the rest of the machine's uptime. Kill it before re-raising to the outer
-                # handler below, which records the timeout as ``packages_error``.
-                proc.kill()
-                try:
-                    await proc.wait()
-                except ProcessLookupError:
-                    pass
+                # Stop it with everything it started before re-raising to the outer handler below, which records
+                # the timeout as ``packages_error``.
+                await tree.aclose(aborted=True)
                 raise
+            except asyncio.CancelledError:
+                aborted = True
+                raise
+            finally:
+                await tree.aclose(aborted=aborted)
             if proc.returncode != 0:
                 # The returncode is not optional to check: pip can exit non-zero with EMPTY stdout (a real case,
                 # found on this codebase's own dev machine — a corrupted dist-info makes `pip freeze` crash there),

@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>New Quest — Frontier Insight</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/vendor/fonts.css"/>
 <script src="/static/theme.js"></script>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="/static/vendor/tailwindcss-3.4.17-forms-container-queries.js"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
@@ -26,7 +26,7 @@
     <div class="bg-surface-high border border-white/10 rounded-full px-4 py-2 flex items-center gap-2 shadow-[0_0_40px_rgba(195,192,255,0.1)] backdrop-blur-md">
       <span class="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
       <span class="font-label-sm text-label-sm uppercase text-on-surface tracking-wider">
-        <span id="progress-total">12</span> questions
+        <span id="progress-total"></span> <span id="progress-unit">questions</span>
       </span>
     </div>
   </div>
@@ -94,7 +94,7 @@
 
 <script>
   // Web interview — drives the same question schema the CLI and
-  // VSCode flows use. Schema fetched from /api/interview/schema.
+  // VSCode flows use (core/interview.py). Schema fetched from /api/interview/schema.
 
   const updateQuestId = window.__fi_update_quest_id || null;
   const isUpdate = !!updateQuestId;
@@ -120,6 +120,66 @@
     div.textContent = message;
   }
 
+  // How long a request may take before the page says so (a test sets window.__fi_fetch_timeout_ms).
+  const FETCH_TIMEOUT_MS = window.__fi_fetch_timeout_ms || 20000;
+
+  // fetch() that gives up after FETCH_TIMEOUT_MS and throws a plain-words Error for a dropped connection, a
+  // timeout, an HTTP error or a reply that is not JSON. ``err.status`` is the HTTP status when there was one.
+  async function fetchJson(url, opts = {}, timeoutMs = FETCH_TIMEOUT_MS) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    let res;
+    try {
+      res = await fetch(url, { ...opts, signal: ctrl.signal });
+    } catch (e) {
+      const err = new Error(ctrl.signal.aborted
+        ? `the server did not answer within ${Math.round(timeoutMs / 1000)} s`
+        : 'the server could not be reached (is `fi --serve` still running?)');
+      err.network = true;
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+    let text = '';
+    try { text = await res.text(); } catch (_) { text = ''; }
+    if (!res.ok) {
+      let detail = text;
+      let body = null;
+      try { body = JSON.parse(text); detail = body.detail || body.error || text; } catch (_) {}
+      if (typeof detail !== 'string') detail = JSON.stringify(detail);
+      const err = new Error(`the server answered ${res.status}${detail ? `: ${String(detail).slice(0, 400)}` : ''}`);
+      err.status = res.status;
+      err.detail = String(detail || '').slice(0, 400);
+      err.body = body;
+      throw err;
+    }
+    try { return JSON.parse(text); } catch (_) {
+      const err = new Error('the server sent an answer that could not be read');
+      err.network = true;
+      throw err;
+    }
+  }
+
+  // The page could not load what it needs: say why, in place of "Loading questions…", with a way to try again.
+  function showStartError(what, err) {
+    const subtitle = document.getElementById('page-subtitle');
+    subtitle.innerHTML = '';
+    const box = document.createElement('div');
+    box.id = 'load-error';
+    box.setAttribute('role', 'alert');
+    box.className = 'fi-banner fi-banner-error max-w-3xl flex flex-col gap-3 items-start';
+    const msg = document.createElement('p');
+    msg.textContent = `Could not load ${what}: ${err && err.message ? err.message : err}. Your answers so far are kept.`;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.id = 'load-retry';
+    retry.className = 'bg-primary-container text-on-primary-container font-label-sm text-label-sm uppercase px-4 py-2 rounded';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => { box.remove(); subtitle.textContent = 'Loading questions…'; loadSchema(); });
+    box.append(msg, retry);
+    subtitle.appendChild(box);
+  }
+
   async function loadSchema() {
     // Schema + (in update mode) the quest's current answers are
     // independent fetches — kick them off in parallel so the form
@@ -127,41 +187,51 @@
     // is fatal: a defaults-seeded form silently overwrites the
     // user's config on submit, so we refuse to render rather than
     // fail-open.
-    const schemaP = fetch('/api/interview/schema').then((r) => r.json());
+    const schemaP = fetchJson('/api/interview/schema');
     const answersP = isUpdate
-      ? fetch(`/api/quests/${encodeURIComponent(updateQuestId)}/answers`)
+      ? fetchJson(`/api/quests/${encodeURIComponent(updateQuestId)}/answers`)
       : null;
-    schema = await schemaP;
+    if (answersP) answersP.catch(() => {});  // awaited below; a failure there is reported there
+    try {
+      schema = await schemaP;
+      if (!schema || !Array.isArray(schema.questions)) throw new Error('the questions it sent are incomplete');
+    } catch (e) {
+      schema = null;
+      showStartError('the questions', e);
+      return;
+    }
     if (!isUpdate) {
       try {
-        savedProfile = (await (await fetch('/api/profile')).json()).profile || null;
-      } catch (_) { savedProfile = null; }
+        savedProfile = (await fetchJson('/api/profile')).profile || null;
+      } catch (_) { savedProfile = null; }  // not needed to start: the saved author line is filled in when there is one
     }
     const title = document.getElementById('page-title');
     const subtitle = document.getElementById('page-subtitle');
     if (isUpdate) {
       title.textContent = `Update Quest`;
-      subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
       try {
-        const ar = await answersP;
-        if (!ar.ok) {
-          showLoadError(`Could not load quest answers (HTTP ${ar.status}). Refusing to render the form — submitting would overwrite your config with defaults.`);
-          return;
-        }
-        updateAnswers = await ar.json();
+        updateAnswers = await answersP;
       } catch (e) {
-        showLoadError(`Error fetching quest answers: ${e}. Refusing to render the form.`);
+        // Refusing to render the form: submitting a defaults-seeded form would overwrite the quest's config.
+        showStartError("this quest's current answers", e);
         return;
       }
+      subtitle.innerHTML = `Editing <code class="font-code-md text-secondary">${escapeHtml(updateQuestId)}</code>. Only research-shaping fields can be changed mid-quest; topic, title, provider, and model stay pinned.`;
     } else {
       title.textContent = 'New Research Quest';
       // No fixed count here (the schema has grown before and will again) — the progress pill names
       // the real count once the form renders.
-      subtitle.textContent = 'A few questions, then a review of the auto-derived defaults. Edit anything before you launch.';
+      subtitle.textContent = 'Three questions, then four short cards with everything worked out for you. Change anything before you launch.';
       // Show the proposal-draft picker for new quests (skip on update flow).
       loadDrafts();
     }
     renderForm();
+    // Answers saved from an earlier visit (a failed Launch, a closed tab, a server restart) come back first.
+    if (!isUpdate) {
+      const saved = await loadSavedAnswers();
+      if (saved) restoreSavedAnswers(saved);
+      else startSavedAnswers();
+    }
     // Honor ?draft=<filename> in URL: auto-load that draft into the form.
     const params = new URLSearchParams(window.location.search);
     const draftFilename = params.get('draft');
@@ -353,10 +423,17 @@
 
   function escapeAttr(s) { return escapeHtml(s); }
 
-  // Tier 1: the topic, what the result is for, the provider and model; the author line only while no profile is saved.
+  // Tier 1, in three steps (core/interview.py FIRST_STEPS): the research question, what the result is for, the model.
+  // The paper byline is not asked here: it is folded on the review screen.
   function firstScreenQuestions() {
-    return schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1
-      && !(savedProfile && PROFILE_FIELDS.includes(q.id)));
+    return schema.questions.filter((q) => q.frontends.includes('serve') && q.tier === 1);
+  }
+
+  // The step a first-screen question belongs to: {n, title}.
+  function stepOf(qid) {
+    const steps = schema.first_steps || [];
+    const i = steps.findIndex((st) => st.questions.includes(qid));
+    return i < 0 ? null : { n: i + 1, title: steps[i].title, single: steps[i].questions.length === 1 };
   }
 
   // Mirrors core/interview.py:question_applies: a question with ``ask_if`` is asked only when that earlier answer is
@@ -381,24 +458,19 @@
     return out;
   }
 
-  // Shows a question only when it applies (the second reviewer's model: research or a decision), and numbers the
-  // shown ones in order.
+  // Shows a question only when it applies (the second reviewer's model: research or a decision). The first screen is
+  // numbered by step, not by question: three steps, whatever the model step asks.
   function refreshConditionalQuestions() {
     const answers = formAnswers();
-    let n = 0;
-    let shown = 0;
     for (const q of firstScreenQuestions()) {
       const fs = document.getElementById(`fs-${q.id}`);
       if (!fs) continue;
-      const applies = questionApplies(q, answers);
-      fs.classList.toggle('hidden', !applies);
-      if (applies) {
-        n += 1; shown += 1;
-        const num = fs.querySelector('.q-num');
-        if (num) num.textContent = String(n);
-      }
+      fs.classList.toggle('hidden', !questionApplies(q, answers));
     }
-    if (!isUpdate) document.getElementById('progress-total').textContent = shown;
+    if (!isUpdate) {
+      document.getElementById('progress-total').textContent = (schema.first_steps || []).length || 3;
+      document.getElementById('progress-unit').textContent = 'steps';
+    }
   }
 
   // The models listed for the provider (static, then live), kept so the second reviewer's list can leave out the one
@@ -480,7 +552,9 @@
         : 'relative bg-surface-mid border border-white/10 p-8 rounded-lg opacity-60 group transition-all duration-300';
       const legend = document.createElement('legend');
       legend.className = 'absolute -top-3 left-6 px-2 bg-surface-mid font-label-sm text-label-sm uppercase tracking-wider flex items-center gap-2 ' + (editable ? 'text-primary' : 'text-on-surface-variant');
-      legend.innerHTML = `<span class="q-num">${idx}</span>. ${escapeHtml(q.label)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
+      const step = isUpdate ? null : stepOf(q.id);
+      const heading = step ? (step.single ? step.title : `${step.title}: ${q.label}`) : q.label;
+      legend.innerHTML = `<span class="q-num">${step ? step.n : idx}</span>. ${escapeHtml(heading)}${!editable ? '<span class="material-symbols-outlined text-[14px]">push_pin</span> <span>(pinned)</span>' : ''}`;
       fs.appendChild(legend);
       const inner = document.createElement('div');
       inner.className = 'space-y-4 relative z-10' + (editable ? '' : ' pointer-events-none');
@@ -500,7 +574,7 @@
     // submits the patch immediately.
     const submitRow = document.createElement('div');
     submitRow.innerHTML = `
-      <button type="submit" class="w-full md:w-auto self-start bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
+      <button type="submit" id="form-submit-btn" class="w-full md:w-auto self-start bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
         <span>${isUpdate ? 'Update Quest' : 'Continue to Review'}</span>
         <span class="material-symbols-outlined text-[20px]">${isUpdate ? 'edit' : 'arrow_forward'}</span>
       </button>
@@ -687,6 +761,8 @@
       sel.replaceWith(replacement);
       sel = replacement;
     }
+    // The model already picked stays picked when the list is replaced (the live list after the static one).
+    const before = sel.value;
     sel.innerHTML = '';
     const blank = document.createElement('option');
     blank.value = '';
@@ -710,6 +786,9 @@
       sel.appendChild(other);
     }
     providerModelList = models;
+    // Still listed (the same provider's live list after its static one): it stays picked. Another provider's model
+    // is not listed, so a provider change never carries it over.
+    if (before && before !== '__OTHER__' && [...sel.options].some((o) => o.value === before)) sel.value = before;
     applyPendingModel('provider_model');
     renderSecondReviewerOptions();
   }
@@ -934,104 +1013,110 @@
     document.getElementById('interview-form').classList.add('hidden');
     document.getElementById('progress-pill').classList.add('hidden');
     renderReview();
+    saveAnswersSoon();
     document.getElementById('review-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
     return false;
   }
 
   // ─── Review screen ─────────────────────────────────────────────
-  // Explore first, then confirm once (engine.phased), as the summary card says it.
-  function phasedSummary() {
-    if (pendingAnswers.phased === true) {
-      return 'yes: explore first, then run the frozen design once more (one more full run; change under Advanced)';
+  // ─── Review screen: four plain cards (core/interview.py REVIEW_CARDS) ─────────────
+  // How strictly it is checked and what it costs; the model and whether it is ready; data, sources and pauses; what you
+  // get. The same cards the CLI and VS Code show. Each card's rarer settings are under one "Advanced" part, and the
+  // byline's four fields are one folded row. Internal names (paper_md, methodologist) are shown in plain words.
+  function useKind() { return (pendingAnswers.result_use || 'research') === 'explore' ? 'explore' : 'research'; }
+
+  function costNote() {
+    let note = (schema.cost_notes || {})[useKind()] || '';
+    const prof = pendingAnswers.ensemble_profile || 'off';
+    const named = String(pendingAnswers.ensemble_models || '').split(/[,\n]/).map((x) => x.trim()).filter(Boolean);
+    const mult = (schema.ensemble_cost_multipliers || {})[prof];
+    if (prof !== 'off' && named.length >= (schema.ensemble_min_models || 2) && mult) {
+      note += `; the ensemble multiplies that by about ${mult}`;
     }
-    return (pendingAnswers.result_use || 'research') !== 'explore'
-      ? 'no: the result is not confirmed on data or seeds it never saw (change under Advanced)' : 'no';
+    return note;
+  }
+
+  function bylineText() {
+    const parts = (schema.byline_fields || PROFILE_FIELDS)
+      .map((k) => String(pendingAnswers[k] || '').split(/\s+/).filter(Boolean).join(' ')).filter(Boolean);
+    return parts.length ? parts.join(', ') : ((schema.byline_empty || {}).serve || 'none');
+  }
+
+  function cardRows(ids) {
+    const rows = [];
+    const bylineFields = schema.byline_fields || PROFILE_FIELDS;
+    for (const id of ids) {
+      if (bylineFields.includes(id)) {
+        if (id !== bylineFields[0]) continue;
+        const qs = bylineFields.map((k) => schema.questions.find((x) => x.id === k)).filter(Boolean);
+        rows.push(`
+          <details id="review-byline" class="py-2 border-b border-white/5 last:border-0">
+            <summary class="cursor-pointer flex items-center justify-between gap-4">
+              <span class="flex-grow min-w-0">
+                <span class="block font-body-md text-body-md text-on-surface">Paper byline (optional)</span>
+                <span class="block font-code-md text-code-md text-on-surface-variant truncate" id="review-val-byline">${escapeHtml(bylineText())}</span>
+              </span>
+              <span class="font-label-sm text-label-sm uppercase text-on-surface-variant">Change</span>
+            </summary>
+            <div class="pl-4 mt-2">${qs.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}</div>
+          </details>`);
+        continue;
+      }
+      const q = schema.questions.find((x) => x.id === id && x.frontends.includes('serve'));
+      if (!q || !questionApplies(q, pendingAnswers)) continue;
+      rows.push(renderReviewRow(q, pendingAnswers[q.id]));
+    }
+    return rows.join('');
   }
 
   function renderReview() {
     const sec = document.getElementById('review-section');
     sec.innerHTML = '';
-
-    // Tier-1 summary card (read-only, click "Edit" to go back to form).
-    const tier1 = firstScreenQuestions().filter((q) => questionApplies(q, pendingAnswers));
-    const t1Card = document.createElement('div');
-    t1Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-    t1Card.innerHTML = `
-      <div class="flex items-center justify-between gap-3 mb-4">
-        <h2 class="font-headline-md text-headline-md font-bold text-on-surface">Your answers</h2>
-        <button type="button" onclick="backToForm()" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1">
-          <span class="material-symbols-outlined text-[16px]">edit</span> Edit
-        </button>
-      </div>
-      <dl class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3">
-        ${tier1.map((q) => `
-          <div>
-            <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">${escapeHtml(q.label)}</dt>
-            <dd class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(formatReviewValue(pendingAnswers[q.id], q))}</dd>
-          </div>
-        `).join('')}
-          <div>
-            <dt class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant">Confirm the result on data it never saw</dt>
-            <dd id="review-phased-summary" class="font-body-md text-body-md text-on-surface mt-1">${escapeHtml(phasedSummary())}</dd>
-          </div>
-      </dl>
-    `;
-    sec.appendChild(t1Card);
-
-    // Tier-2 derived defaults — each row has an inline [edit] button.
-    const tier2 = schema.questions.filter((q) => q.tier === 2);
-    const t2Card = document.createElement('div');
-    t2Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-    t2Card.innerHTML = `
-      <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">Defaults (auto-derived)</h2>
-      <p class="font-body-md text-body-md text-on-surface-variant mb-4">
-        FI picked these from your topic + format. Click <strong>Edit</strong> on any row to override.
-      </p>
-      <div class="space-y-1">
-        ${tier2.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
-      </div>
-    `;
-    sec.appendChild(t2Card);
-
-    // The saved author line: filled from the profile, changed here for this quest and the next ones.
-    if (savedProfile) {
-      const authorQs = schema.questions.filter((q) => PROFILE_FIELDS.includes(q.id));
-      const aCard = document.createElement('div');
-      aCard.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-      aCard.innerHTML = `
-        <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">Author line</h2>
-        <p class="font-body-md text-body-md text-on-surface-variant mb-4">
-          From your saved details. A change here is kept for your next quests too.
-        </p>
-        <div class="space-y-1">
-          ${authorQs.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
-        </div>
-      `;
-      sec.appendChild(aCard);
+    const cards = schema.review_cards || [];
+    for (const card of cards) {
+      const el = document.createElement('div');
+      el.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+      el.id = `review-card-${card.id}`;
+      let lead = '';
+      if (card.id === 'checks') {
+        lead = `<p class="font-body-md text-body-md text-on-surface mb-1">${escapeHtml((schema.checks_sentences || {})[useKind()] || '')}</p>
+          <p class="font-body-md text-body-md text-on-surface-variant mb-3" id="review-cost">Cost: ${escapeHtml(costNote())}</p>`;
+      } else if (card.id === 'models') {
+        lead = '<p class="font-body-md text-body-md text-on-surface-variant mb-3" id="review-ready">Ready? Checking…</p>';
+      }
+      el.innerHTML = `
+        <h2 class="font-headline-md text-headline-md font-bold text-on-surface mb-2">${escapeHtml(card.title)}</h2>
+        ${lead}
+        <div class="space-y-1">${cardRows(card.shown)}</div>`;
+      sec.appendChild(el);
     }
+    void showReviewReadiness();
 
-    // Tier-3 advanced (toggle).
-    const tier3 = schema.questions.filter((q) => q.tier === 3);
-    const t3Card = document.createElement('div');
-    t3Card.className = 'hairline-border bg-surface-mid rounded-xl p-6';
-    t3Card.innerHTML = `
+    // Advanced: each card's rarer settings, folded.
+    const adv = document.createElement('div');
+    adv.className = 'hairline-border bg-surface-mid rounded-xl p-6';
+    adv.id = 'review-advanced';
+    adv.innerHTML = `
       <button type="button" onclick="toggleAdvanced()" class="w-full flex items-center justify-between font-headline-md text-headline-md font-bold text-on-surface hover:text-primary transition-colors">
         <span>Advanced</span>
         <span class="material-symbols-outlined text-[24px]">${reviewShowAdvanced ? 'expand_less' : 'expand_more'}</span>
       </button>
       <p class="font-body-md text-body-md text-on-surface-variant mt-2 mb-4">
-        Topic-tuned slots the engine's clarify pass will fill at quest start. Override here only if you want to lock a specific value upfront.
+        Settings most quests never change. The engine fills the topic-specific ones itself at the start of the quest.
       </p>
-      <div class="space-y-1 ${reviewShowAdvanced ? '' : 'hidden'}">
-        ${tier3.map((q) => renderReviewRow(q, pendingAnswers[q.id])).join('')}
+      <div class="space-y-4 ${reviewShowAdvanced ? '' : 'hidden'}">
+        ${cards.map((card) => {
+          const rows = cardRows(card.advanced);
+          return rows ? `<div><h3 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant mb-1">${escapeHtml(card.title)}</h3><div class="space-y-1">${rows}</div></div>` : '';
+        }).join('')}
       </div>
     `;
-    sec.appendChild(t3Card);
+    sec.appendChild(adv);
 
     // Launch button.
     const launchRow = document.createElement('div');
     launchRow.innerHTML = `
-      <button type="button" onclick="launchFromReview()" class="w-full md:w-auto bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
+      <button type="button" id="launch-btn" onclick="launchFromReview()" class="w-full md:w-auto bg-gradient-to-r from-primary-container to-secondary-container hover:from-primary hover:to-secondary text-white rounded-lg px-8 py-4 font-label-sm text-label-sm uppercase tracking-widest flex items-center justify-center gap-3 transition-all duration-300 hover:shadow-[0_0_30px_rgba(79,70,229,0.4)] border border-white/10">
         <span>Launch quest</span>
         <span class="material-symbols-outlined text-[20px]">rocket_launch</span>
       </button>
@@ -1040,34 +1125,63 @@
     sec.classList.remove('hidden');
   }
 
+  // Card 2's "Ready?" line: how far the chosen provider and model are set up here (core/provider_readiness.py, the
+  // words of the Settings page and `fi --doctor`). The full check runs again when Launch is pressed.
+  let reviewReadySeq = 0;
+  async function showReviewReadiness() {
+    const line = document.getElementById('review-ready');
+    if (!line) return;
+    const provider = pendingAnswers.provider || '';
+    if (!provider) { line.textContent = 'Ready? No provider chosen.'; return; }
+    const mine = ++reviewReadySeq;
+    try {
+      const model = pendingAnswers.provider_model || '';
+      const body = await fetchJson(`/api/providers/availability?provider=${encodeURIComponent(provider)}&model=${encodeURIComponent(model)}`);
+      const pr = (body.providers || [])[0];
+      if (mine !== reviewReadySeq || !document.getElementById('review-ready')) return;
+      line.textContent = pr ? `Ready? ${pr.state_label} — ${pr.sentence}${pr.fix ? ' To fix: ' + pr.fix : ''}` : 'Ready? Checked again when you press Launch.';
+    } catch (_) {
+      if (mine === reviewReadySeq && document.getElementById('review-ready')) {
+        line.textContent = 'Ready? Could not check it now; it is checked again when you press Launch.';
+      }
+    }
+  }
+
   function renderReviewRow(q, value) {
+    // An answer of the first screen is changed there (its model list follows the provider): "Change" goes back.
+    const onFirstScreen = q.tier === 1;
+    const action = onFirstScreen ? 'backToForm()' : `editReviewField('${q.id}')`;
     return `
       <div class="flex items-center justify-between gap-4 py-2 border-b border-white/5 last:border-0" id="review-row-${q.id}">
         <div class="flex-grow min-w-0">
           <div class="font-body-md text-body-md text-on-surface">${escapeHtml(q.label)}</div>
           <div class="font-code-md text-code-md text-on-surface-variant truncate" id="review-val-${q.id}">${escapeHtml(formatReviewValue(value, q))}</div>
         </div>
-        <button type="button" onclick="editReviewField('${q.id}')" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 flex-shrink-0">
-          <span class="material-symbols-outlined text-[16px]">edit</span> Edit
+        <button type="button" onclick="${action}" class="font-label-sm text-label-sm uppercase text-on-surface-variant hover:text-primary transition-colors flex items-center gap-1 flex-shrink-0">
+          <span class="material-symbols-outlined text-[16px]">edit</span> ${onFirstScreen ? 'Change' : 'Edit'}
         </button>
       </div>
       <div id="review-edit-${q.id}" class="hidden py-3 px-4 bg-surface-low rounded mt-2 mb-2"></div>
     `;
   }
 
-  // ``q`` is optional so a caller with no question in hand still gets a safe fallback, but every real
-  // call site below has one and should pass it: a single-choice question's ``choices`` carry the label
-  // written for exactly this ("Computational — a Python script can produce the data", not a bare
-  // ``false``); skipping it is how a "Research approach" row once showed the word "false".
+  // A value in plain words (mirrors core/interview.py:plain_value): a choice's label (a list-valued choice too),
+  // internal names translated (schema.plain_values), "(not set)" for nothing. Never the raw YAML word.
   function formatReviewValue(v, q) {
-    if (v === null || v === undefined) return '(unset)';
+    const id = q && q.id;
+    const names = (schema.plain_values || {})[id];
     if (q && Array.isArray(q.choices)) {
-      const choice = q.choices.find((c) => c.value === v);
+      const enc = JSON.stringify(v);
+      const choice = q.choices.find((c) => (Array.isArray(v) ? id !== 'review_panel' && JSON.stringify(c.value) === enc : c.value === v));
       if (choice) return choice.label;
     }
-    if (typeof v === 'boolean') return v ? 'true' : 'false';
-    if (Array.isArray(v)) return v.length ? `[${v.join(', ')}]` : '(none)';
-    if (v === '') return '(empty)';
+    if (id === 'second_reviewer_model' && v === '__one_model__') return 'I only have one model';
+    if (Array.isArray(v)) {
+      if (!v.length) return id === 'review_panel' ? 'single reviewer' : '(none)';
+      return v.map((x) => (names && names[x]) || String(x)).join(', ');
+    }
+    if (v === null || v === undefined || v === '') return '(not set)';
+    if (typeof v === 'boolean') return v ? 'yes' : 'no';
     return String(v);
   }
 
@@ -1131,13 +1245,14 @@
     editedFields.add(id);
     const savedQ = schema.questions.find((x) => x.id === id);
     document.getElementById(`review-val-${id}`).textContent = formatReviewValue(value, savedQ);
+    const byline = document.getElementById('review-val-byline');
+    if (byline) byline.textContent = bylineText();
+    const cost = document.getElementById('review-cost');
+    if (cost) cost.textContent = `Cost: ${costNote()}`;
     document.getElementById(`review-edit-${id}`).classList.add('hidden');
+    saveAnswersSoon();
     if (id === 'paper_format' || id === 'study_depth') {
       rederive();
-    } else if (id === 'phased') {
-      // The summary at the top shows it too (updated in place: other open edits are kept).
-      const summary = document.getElementById('review-phased-summary');
-      if (summary) summary.textContent = phasedSummary();
     }
   };
 
@@ -1153,6 +1268,7 @@
       pendingAnswers[k] = v;
     }
     renderReview();
+    saveAnswersSoon();
   }
 
   window.cancelReviewEdit = function (id) {
@@ -1162,12 +1278,14 @@
   window.toggleAdvanced = function () {
     reviewShowAdvanced = !reviewShowAdvanced;
     renderReview();
+    saveAnswersSoon();
   };
 
   window.backToForm = function () {
     document.getElementById('review-section').classList.add('hidden');
     document.getElementById('interview-form').classList.remove('hidden');
     document.getElementById('progress-pill').classList.remove('hidden');
+    saveAnswersSoon();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -1175,48 +1293,240 @@
     return submitToServer(pendingAnswers, /*isUpdate=*/ false);
   }
 
+  // ─── Saved answers ─────────────────────────────────────────────
+  // Every answer is kept as it is typed: in this browser (localStorage, a convenience for this viewer) and on the
+  // server (/api/interview/draft/<id>, the id is in the address as ?d=), so a failed Launch, a closed tab or a server
+  // restart never loses them. Removed once the quest is launched. ``submit_key`` goes with the Launch: the server
+  // answers a retry with the same key with the first answer and starts no second quest.
+  const SAVED_KEY = 'fi-interview-draft';
+  let savedState = null;   // {id, submit_key, rev, stage, form, other, review}
+  let saveTimer = null;
+
+  function newToken() {
+    const raw = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+    return raw.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+  }
+  function readLocalSaved() {
+    try { const raw = localStorage.getItem(SAVED_KEY); return raw ? JSON.parse(raw) : null; } catch (_) { return null; }
+  }
+  function writeLocalSaved(d) { try { localStorage.setItem(SAVED_KEY, JSON.stringify(d)); } catch (_) {} }
+  function clearLocalSaved() { try { localStorage.removeItem(SAVED_KEY); } catch (_) {} }
+  function rememberSavedId(id) {
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('d') !== id) { url.searchParams.set('d', id); history.replaceState(null, '', url); }
+    } catch (_) {}
+  }
+
+  function startSavedAnswers() {
+    savedState = { id: newToken(), submit_key: newToken(), rev: 0 };
+  }
+
+  // The newest copy of this interview's answers: the server's (the id in the address) or this browser's.
+  // The server is asked about this browser's copy too: answers it says were launched (410) are dropped, so a closed tab
+  // after a lost Launch answer never brings back a quest that already started.
+  async function loadSavedAnswers() {
+    const local = readLocalSaved();
+    const id = new URLSearchParams(window.location.search).get('d') || (local && local.id) || null;
+    if (!id) return null;
+    let server = null;
+    try {
+      server = await fetchJson(`/api/interview/draft/${encodeURIComponent(id)}`);
+    } catch (e) {
+      if (e.status === 410) { if (local && local.id === id) clearLocalSaved(); return null; }
+      server = null;
+    }
+    const mine = local && local.id === id ? local : null;
+    if (server && mine) return (server.rev || 0) >= (mine.rev || 0) ? server : mine;
+    return server || mine;
+  }
+
+  function captureAnswers() {
+    if (isUpdate || !schema || !savedState) return null;
+    const form = {};
+    const other = {};
+    const formEl = document.getElementById('interview-form');
+    for (const q of schema.questions) {
+      const el = formEl.querySelector(`#q-${q.id}`);
+      if (el) form[q.id] = el.value;
+      const o = formEl.querySelector(`#q-${q.id}-other`);
+      if (o && o.value) other[q.id] = o.value;
+    }
+    const inReview = !document.getElementById('review-section').classList.contains('hidden');
+    savedState = {
+      ...savedState, rev: (savedState.rev || 0) + 1, stage: inReview ? 'review' : 'form', form, other,
+      review: inReview ? { answers: pendingAnswers, edited: [...editedFields], show_advanced: reviewShowAdvanced } : null,
+    };
+    return savedState;
+  }
+
+  // Saved a moment after the last change (this browser at once, the server after a short pause).
+  function saveAnswersSoon() {
+    const d = captureAnswers();
+    if (!d) return;
+    writeLocalSaved(d);
+    rememberSavedId(d.id);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      fetchJson(`/api/interview/draft/${encodeURIComponent(d.id)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(savedState),
+      }).catch(() => {});  // this browser's copy is still there; the next change tries the server again
+    }, 500);
+  }
+
+  function setFormValue(qid, value, typed) {
+    const el = document.querySelector(`#interview-form #q-${qid}`);
+    if (!el || value === undefined || value === null) return;
+    if (el.tagName !== 'SELECT') { el.value = String(value); return; }
+    if ([...el.options].some((o) => o.value === String(value))) {
+      el.value = String(value);
+      if (qid === 'provider') populateProviderModel(el.value);
+      handleOtherSelection(el, schema.questions.find((x) => x.id === qid) || { label: qid });
+      const o = document.getElementById(`q-${qid}-other`);
+      if (o && el.value === '__OTHER__' && typed) o.value = typed;
+    } else if ((qid === 'provider_model' || qid === 'second_reviewer_model') && value) {
+      // A model only the live list has (it arrives after this): selected once it is there.
+      pendingModelValues[qid] = String(value);
+      if (qid === 'second_reviewer_model') renderSecondReviewerOptions(); else applyPendingModel(qid);
+    }
+  }
+
+  function restoreSavedAnswers(d) {
+    savedState = { id: d.id, submit_key: d.submit_key || newToken(), rev: d.rev || 0 };
+    rememberSavedId(d.id);
+    const form = d.form || {};
+    const other = d.other || {};
+    // The provider first: the model lists follow from it.
+    if ('provider' in form) setFormValue('provider', form.provider, other.provider);
+    for (const [qid, value] of Object.entries(form)) {
+      if (qid === 'provider') continue;
+      const typed = other[qid];
+      setFormValue(qid, value === '__OTHER__' && typed ? '__OTHER__' : value, typed);
+      if ((qid === 'provider_model' || qid === 'second_reviewer_model') && value === '__OTHER__' && typed) {
+        pendingModelValues[qid] = typed;
+        if (qid === 'second_reviewer_model') renderSecondReviewerOptions(); else applyPendingModel(qid);
+      }
+    }
+    refreshConditionalQuestions();
+    if (d.stage === 'review' && d.review && d.review.answers) {
+      pendingAnswers = d.review.answers;
+      editedFields.clear();
+      for (const k of d.review.edited || []) editedFields.add(k);
+      reviewShowAdvanced = !!d.review.show_advanced;
+      document.getElementById('interview-form').classList.add('hidden');
+      document.getElementById('progress-pill').classList.add('hidden');
+      renderReview();
+    }
+    const div = document.getElementById('result');
+    div.classList.remove('hidden');
+    div.className = 'fi-banner fi-banner-info max-w-3xl';
+    div.textContent = 'Your answers from before are back. Change anything, or go on where you left off. ';
+    const fresh = document.createElement('button');
+    fresh.type = 'button';
+    fresh.className = 'underline font-bold';
+    fresh.textContent = 'Start a new quest instead';
+    fresh.addEventListener('click', () => { forgetSavedAnswers(); window.location.href = '/interview'; });
+    div.appendChild(fresh);
+  }
+
+  function forgetSavedAnswers() {
+    clearTimeout(saveTimer);
+    clearLocalSaved();
+    savedState = null;
+  }
+
+  for (const id of ['interview-form', 'review-section']) {
+    const host = document.getElementById(id);
+    host.addEventListener('input', () => saveAnswersSoon());
+    host.addEventListener('change', () => saveAnswersSoon());
+  }
+
+  // The first Launch did start a quest (its answer was lost), and the answers were changed since: say so, link to it,
+  // and offer the changed answers as a new quest (a new id and key), keeping them on the page.
+  function showAlreadyLaunched(div, body) {
+    div.textContent = '';
+    const p = document.createElement('p');
+    p.textContent = 'Your first Launch did start a quest, before these answers were changed. ';
+    if (body.quest_id) {
+      const a = document.createElement('a');
+      a.href = `/quest/${encodeURIComponent(body.quest_id)}`;
+      a.className = 'underline font-bold';
+      a.textContent = `Open quest ${body.quest_id}`;
+      p.appendChild(a);
+    }
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.id = 'launch-changed-btn';
+    again.className = 'mt-2 bg-primary-container text-on-primary-container font-label-sm text-label-sm uppercase px-4 py-2 rounded';
+    again.textContent = 'Launch the changed answers as a new quest';
+    again.addEventListener('click', () => {
+      startSavedAnswers();
+      rememberSavedId(savedState.id);
+      saveAnswersSoon();
+      launchFromReview();
+    });
+    div.append(p, again);
+  }
+
+  // Launch (or Update) can be pressed once at a time; a failure says why and leaves the button ready to retry.
+  let submitting = false;
+
   async function submitToServer(payload, asUpdate) {
+    if (submitting) return false;
     const endpoint = asUpdate
       ? `/api/interview/update/${encodeURIComponent(updateQuestId)}`
       : '/api/interview/submit?launch=true';
+    const button = document.getElementById(asUpdate ? 'form-submit-btn' : 'launch-btn');
     const div = document.getElementById('result');
     div.classList.remove('hidden');
     div.className = 'fi-banner fi-banner-info max-w-3xl';
     div.textContent = asUpdate ? 'Submitting update…' : 'Checking the model, then launching the quest…';
-    let res;
+    const headers = { 'Content-Type': 'application/json' };
+    let sent = payload;
+    if (!asUpdate) {
+      if (!savedState) startSavedAnswers();
+      headers['Idempotency-Key'] = savedState.submit_key;
+      sent = { ...payload, submit_key: savedState.submit_key, draft_id: savedState.id };
+    }
+    submitting = true;
+    if (button) { button.disabled = true; button.classList.add('opacity-60', 'cursor-wait'); }
+    let body;
     try {
-      res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
+      body = await fetchJson(endpoint, { method: 'POST', headers, body: JSON.stringify(sent) }, Math.max(FETCH_TIMEOUT_MS, 60000));
     } catch (e) {
-      // The answers stay on this page: Launch can be pressed again.
       div.className = 'fi-banner fi-banner-error max-w-3xl';
-      div.textContent = `Could not reach the FI server (${e}). Your answers are still here; try again.`;
+      div.setAttribute('role', 'alert');
+      if (!asUpdate && e.body && e.body.error === 'already_launched') {
+        showAlreadyLaunched(div, e.body);
+        return false;
+      }
+      div.textContent = asUpdate
+        ? `The update was not applied: ${e.message}. Your changes are still in the form; press Update Quest to try again.`
+        : e.status === 409
+          // The chosen model is not ready (core/provider_readiness.py); the sentence says why and how to fix it.
+          ? `The quest was not started. ${e.detail || e.message} Your answers are kept: fix that, then press Launch again (or go back and pick another model).`
+          : (e.status === 503
+          ? `FI is already running as many quests as it may at once: ${e.message}. Your answers are kept; press Launch again when one has finished.`
+          : `The quest was not launched: ${e.message}. Your answers are kept; press Launch again to retry (a retry never starts a second quest).`);
       return false;
+    } finally {
+      submitting = false;
+      if (button) { button.disabled = false; button.classList.remove('opacity-60', 'cursor-wait'); }
     }
-    if (!res.ok) {
-      div.className = 'fi-banner fi-banner-error max-w-3xl';
-      const raw = await res.text();
-      let detail = raw;
-      try {
-        const j = JSON.parse(raw);
-        detail = (typeof j.detail === 'string' && j.detail) || j.error || raw;
-      } catch (_) { /* not JSON: shown as it came */ }
-      // 409: the chosen model is not ready (core/provider_readiness.py); the sentence says why and how to fix it.
-      div.textContent = res.status === 409
-        ? `The quest was not started. ${detail} Your answers are kept: fix that, then press Launch again (or go back and pick another model).`
-        : `Error ${res.status}: ${detail}`;
-      return false;
-    }
-    const body = await res.json();
     if (!asUpdate && body.profile_saved === false) {
       alert('The quest was created, but your author line could not be kept for the next quests (the server log says why).');
     }
     if (!asUpdate && body.quest_id) {
+      forgetSavedAnswers();
       window.location.href = `/quest/${encodeURIComponent(body.quest_id)}`;
       return false;
+    }
+    if (!asUpdate) {
+      // Written as a draft, not launched: later changes are saved under a new id (the old one is marked launched).
+      forgetSavedAnswers();
+      startSavedAnswers();
+      rememberSavedId(savedState.id);
     }
     // An update is how a change to the settings that decide how strictly the quest is checked gets approved: say which.
     const approved = Array.isArray(body.approved_settings_changes) ? body.approved_settings_changes : [];

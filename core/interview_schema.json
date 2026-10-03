@@ -3,7 +3,7 @@
   "questions": [
     {
       "id": "topic",
-      "label": "Topic",
+      "label": "Research question",
       "prompt": "What do you want to study? Be specific about the question, what's known, and what success looks like.",
       "kind": "text",
       "choices": [],
@@ -373,7 +373,7 @@
     },
     {
       "id": "title",
-      "label": "Title (short slug)",
+      "label": "Short name (used for the folder)",
       "prompt": "Short identifier for this quest. Used in folder names. Auto-slugged from your topic; edit if you want something different.",
       "kind": "text",
       "choices": [],
@@ -488,7 +488,7 @@
     },
     {
       "id": "review_panel",
-      "label": "Reviewer panel",
+      "label": "Reviewers",
       "prompt": "Recommended: 3-persona panel — the methodologist is the must-flag-rule reviewer; dropping the panel loses those checks. Single-reviewer is cheaper but ships without the non-bypassable design-quality enforcement.",
       "kind": "single",
       "choices": [
@@ -535,7 +535,7 @@
     },
     {
       "id": "pause_for_user_input",
-      "label": "Pause for user-supplied papers / datasets",
+      "label": "Pause for your own papers or data",
       "prompt": "Pause mid-quest so you can drop reference PDFs into inputs/papers/ and datasets into inputs/data/ before the engine continues. After-literature stops once the literature is saved, so the experiment is designed with it in hand; after-design lets you correct the methodology; after-paper lets you augment the first draft. Resume with `fi --resume <quest_id>`.",
       "kind": "single",
       "choices": [
@@ -579,7 +579,7 @@
     },
     {
       "id": "knowledge_enabled",
-      "label": "Knowledge layer (Axon)",
+      "label": "Look up the literature",
       "prompt": "Auto-detected from the Axon sidecar status. Override only if you have a specific reason.",
       "kind": "single",
       "choices": [
@@ -807,7 +807,7 @@
     },
     {
       "id": "knowledge_top_k",
-      "label": "Axon hits per quest",
+      "label": "Saved-library passages per quest",
       "prompt": "Dense-embedding retrievals from Axon fed to the writer. Small-k is precision (8 default); bump to 12-15 for comprehensive reviews. External web hits are sized separately via 'External hits per quest'.",
       "kind": "text",
       "choices": [],
@@ -1059,7 +1059,7 @@
     },
     {
       "id": "author",
-      "label": "Author (optional)",
+      "label": "Byline: your name",
       "prompt": "Your name as it should appear on the paper, slides and poster. Leave blank to keep the 'Frontier Insight' byline.",
       "kind": "text",
       "choices": [],
@@ -1072,12 +1072,12 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1,
+      "tier": 2,
       "ask_if": null
     },
     {
       "id": "affiliation",
-      "label": "Affiliation (optional)",
+      "label": "Byline: affiliation",
       "prompt": "Lab, company or school to print under the author. Leave blank to omit.",
       "kind": "text",
       "choices": [],
@@ -1090,12 +1090,12 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1,
+      "tier": 2,
       "ask_if": null
     },
     {
       "id": "contact_email",
-      "label": "Contact email (optional)",
+      "label": "Byline: contact email",
       "prompt": "Printed on the poster and under the paper title so readers can reach you. It goes only into your own output files. Leave blank to omit.",
       "kind": "text",
       "choices": [],
@@ -1108,12 +1108,12 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1,
+      "tier": 2,
       "ask_if": null
     },
     {
       "id": "url",
-      "label": "Project link (optional)",
+      "label": "Byline: project link",
       "prompt": "A web page for this work, such as a repository or lab page. The poster prints it as a QR code. Leave blank for no QR code.",
       "kind": "text",
       "choices": [],
@@ -1126,7 +1126,7 @@
         "serve"
       ],
       "allow_other": false,
-      "tier": 1,
+      "tier": 2,
       "ask_if": null
     }
   ],
@@ -1507,6 +1507,138 @@
     "supply_papers",
     "url",
     "web_research"
+  ],
+  "first_steps": [
+    {
+      "id": "question",
+      "title": "Your research question",
+      "questions": [
+        "topic"
+      ]
+    },
+    {
+      "id": "use",
+      "title": "What the result is for",
+      "questions": [
+        "result_use"
+      ]
+    },
+    {
+      "id": "model",
+      "title": "The model",
+      "questions": [
+        "provider",
+        "provider_model",
+        "second_reviewer_model"
+      ]
+    }
+  ],
+  "review_cards": [
+    {
+      "id": "checks",
+      "title": "How strictly it is checked, and what it costs",
+      "shown": [
+        "result_use",
+        "review_panel",
+        "phased"
+      ],
+      "advanced": [
+        "pause_for_plan",
+        "max_iterations"
+      ]
+    },
+    {
+      "id": "models",
+      "title": "The model, and whether it is ready",
+      "shown": [
+        "provider",
+        "provider_model",
+        "second_reviewer_model"
+      ],
+      "advanced": [
+        "reasoning_effort",
+        "ensemble_profile",
+        "ensemble_models",
+        "node_models",
+        "provider_base_url",
+        "provider_api_key_env",
+        "provider_fixed_temperature"
+      ]
+    },
+    {
+      "id": "data",
+      "title": "Data, sources and pauses",
+      "shown": [
+        "no_simulation",
+        "survey_mode",
+        "knowledge_enabled",
+        "web_research",
+        "pause_for_user_input"
+      ],
+      "advanced": [
+        "supply_papers",
+        "clarify_mode",
+        "comparative_baseline",
+        "success_metric",
+        "budget",
+        "knowledge_top_k",
+        "knowledge_external_top_k"
+      ]
+    },
+    {
+      "id": "outputs",
+      "title": "What you get",
+      "shown": [
+        "title",
+        "output_kinds",
+        "paper_format",
+        "study_depth",
+        "audience",
+        "author",
+        "affiliation",
+        "contact_email",
+        "url"
+      ],
+      "advanced": [
+        "page_limit",
+        "paper_style",
+        "poster_size"
+      ]
+    }
+  ],
+  "plain_values": {
+    "output_kinds": {
+      "paper_md": "paper (Markdown)",
+      "paper_pdf": "paper (PDF)",
+      "slides": "slides",
+      "poster": "poster",
+      "speech": "talk script"
+    },
+    "review_panel": {
+      "methodologist": "method",
+      "statistician": "statistics",
+      "devil_advocate": "devil's advocate",
+      "reproducibility": "reproducibility"
+    }
+  },
+  "cost_notes": {
+    "research": "about 50-90 model calls (what earlier research quests took)",
+    "explore": "fewer model calls than research (no idea self-critique, per-finding cross-check or redesign)"
+  },
+  "checks_sentences": {
+    "research": "Every check stops the quest instead of only reporting; the experiment runs in its own clean environment; the reviewers below read the paper.",
+    "explore": "A preliminary draft: fewer checks, never marked ready to publish as it stands."
+  },
+  "byline_empty": {
+    "cli": "none yet: asked once before the first paper (else the Frontier Insight byline)",
+    "serve": "none: the Frontier Insight byline (change it here)",
+    "vscode": "none: the Frontier Insight byline (change it with Edit a default)"
+  },
+  "byline_fields": [
+    "author",
+    "affiliation",
+    "contact_email",
+    "url"
   ],
   "stage_invalidation": {
     "paper_format": [

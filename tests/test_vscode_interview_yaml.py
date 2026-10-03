@@ -230,7 +230,7 @@ def test_vscode_interview_asks_the_newly_reachable_questions() -> None:
     assert '{ label: "Design-revise iteration budget", value: "max_iterations" }' in ts
     assert 'which.value === "max_iterations"' in ts
     # pause_for_user_input is a tier-2 default.
-    assert '{ label: "Pause for my papers / datasets", value: "pause_for_user_input" }' in ts
+    assert '{ label: "Pause for your own papers or data", value: "pause_for_user_input" }' in ts
     assert 'case "pause_for_user_input"' in ts
 
 

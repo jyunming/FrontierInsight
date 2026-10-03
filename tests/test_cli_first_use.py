@@ -67,9 +67,9 @@ async def test_launch_is_stopped_when_the_chosen_model_is_not_ready(
         ran.append("run")
 
     monkeypatch.setattr(launch, "run_one", fake_run_one)
-    # topic, result use (explore: no reviewer model), provider 3 (claude_cli), model 1, then the author line blank,
-    # then Enter on the review screen to launch.
-    typed = iter(["A topic", "3", "3", "1", "", "", "", "", ""])
+    # topic, result use (explore: no reviewer model), provider 3 (claude_cli), model 1, then Enter on the review
+    # screen to launch.
+    typed = iter(["A topic", "3", "3", "1", ""])
     monkeypatch.setattr("builtins.input", lambda prompt="": next(typed, ""))
     rc = await launch._run_new(
         output_root=tmp_path / "outputs", draft_only=False, vscode_bridge_port=0,

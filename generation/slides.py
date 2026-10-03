@@ -48,6 +48,7 @@ import string
 from pathlib import Path
 
 from core.config import Config
+from core.proc_tree import AsyncProcessTree
 from core.engine import (
     QuestArtifacts,
     cited_references,
@@ -468,7 +469,9 @@ async def _run_cli(
     generator either."""
     is_marp = label.startswith("marp ")
     try:
-        proc = await asyncio.create_subprocess_exec(
+        # The whole tree (core/proc_tree.py): Marp starts a headless browser, and on a timeout or a cancelled quest
+        # that browser must stop too, not keep running with the output pipes open.
+        tree = await AsyncProcessTree.start(
             *argv,
             cwd=str(cwd),
             # Marp reads stdin until it closes, even when given a file. A
@@ -492,21 +495,25 @@ async def _run_cli(
                 _MARP_INSTALL_RECIPE,
             )
         return False, None
+    proc = tree.proc
+    aborted = False
     try:
         _stdout, stderr = await asyncio.wait_for(
             proc.communicate(), timeout=timeout_s,
         )
     except asyncio.TimeoutError:
         _log.warning("%s timeout (%.0fs); skipped", label, timeout_s)
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        await tree.aclose(aborted=True)  # the whole tree, also a helper left holding the output pipe
         if is_marp:
             return False, _classify_marp_failure(
                 label=label, code=None, stderr_tail="", timed_out=True,
             )
         return False, None
+    except asyncio.CancelledError:
+        aborted = True  # the program may have exited while what it started still holds the output pipe
+        raise
+    finally:
+        await tree.aclose(aborted=aborted)
     if proc.returncode != 0:
         stderr_tail = stderr.decode("utf-8", errors="replace")[-400:]
         _log.warning(

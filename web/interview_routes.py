@@ -13,12 +13,22 @@ single source of truth. Two surfaces:
                                         returns the YAML path.
 * ``POST /api/interview/update/{id}``— Same shape; runs the
                                         mid-quest update flow.
+* ``GET/PUT /api/interview/draft/{id}`` — the answers of an interview not yet
+                                        launched, saved as the person types, so
+                                        a failed Launch or a server restart
+                                        keeps them.
+
+A submit carries a key (``Idempotency-Key`` header, or ``submit_key`` in the body): a retry with the same key -- the
+page's own retry after a lost response, or a double click -- gets the first answer back and starts no second quest.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import re
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -36,6 +46,24 @@ from core.interview import (
 
 _HERE = Path(__file__).resolve().parent
 _STATIC = _HERE / "static"
+
+# An interview draft's id and a submit's key: what the page makes up (a random id), nothing else.
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+# The most a saved draft may hold (the answers of one interview are a few KB).
+_DRAFT_MAX_BYTES = 256 * 1024
+# How long a submit's answer is kept for a retry with the same key.
+_SUBMIT_KEPT_S = 7 * 24 * 3600
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _token(value: Any) -> str | None:
+    return value if isinstance(value, str) and _TOKEN_RE.match(value) else None
 
 
 def register_interview_routes(app: FastAPI, output_root: Path) -> None:
@@ -172,9 +200,112 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             raise HTTPException(400, str(e))
         return JSONResponse(asdict(current))
 
+    drafts_dir = output_root / "_drafts" / ".interview"
+    submits_dir = output_root / "_drafts" / ".submits"
+    # One submit at a time: a retry with the same key waits for the first to finish, then gets its answer.
+    submit_lock = asyncio.Lock()
+
+    def _draft_path(draft_id: str) -> Path:
+        token = _token(draft_id)
+        if token is None:
+            raise HTTPException(400, "not a draft id")
+        return drafts_dir / f"{token}.json"
+
+    @app.get("/api/interview/draft/{draft_id}")
+    async def get_draft(draft_id: str) -> JSONResponse:
+        """The answers saved for an interview that was not launched yet (``PUT`` below)."""
+        path = _draft_path(draft_id)
+        if path.with_suffix(".launched").exists():
+            raise HTTPException(410, "these answers were launched as a quest")
+        try:
+            return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            raise HTTPException(404, "no saved answers under that id") from None
+        except (OSError, json.JSONDecodeError) as e:
+            raise HTTPException(404, f"the saved answers could not be read: {e}") from None
+
+    @app.put("/api/interview/draft/{draft_id}")
+    async def put_draft(draft_id: str, request: Request) -> JSONResponse:
+        """Keep the answers of an interview as they are typed: the page saves here (and in the browser) so a failed
+        Launch, a closed tab or a server restart does not lose them. Removed once the quest is launched."""
+        path = _draft_path(draft_id)
+        if path.with_suffix(".launched").exists():
+            raise HTTPException(409, "these answers were launched as a quest; a new interview has a new id")
+        raw = await request.body()
+        if len(raw) > _DRAFT_MAX_BYTES:
+            raise HTTPException(413, "the saved answers are too large")
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as e:
+            raise HTTPException(400, f"not JSON: {e}") from None
+        if not isinstance(data, dict):
+            raise HTTPException(400, "the saved answers must be a JSON object")
+        data["saved_at"] = time.time()
+        if path.with_suffix(".launched").exists():  # launched while this save was on its way
+            raise HTTPException(409, "these answers were launched as a quest; a new interview has a new id")
+        try:
+            _write_atomic(path, json.dumps(data, ensure_ascii=False))
+        except OSError as e:
+            raise HTTPException(500, f"the answers could not be saved: {e}") from None
+        return JSONResponse({"saved": True})
+
+    def _submit_record(key: str) -> dict[str, Any] | None:
+        try:
+            record = json.loads((submits_dir / f"{key}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return record if isinstance(record, dict) and isinstance(record.get("body"), dict) else None
+
+    def _answers_hash(body: dict[str, Any]) -> str:
+        import hashlib
+
+        answers = {k: v for k, v in body.items() if k not in ("submit_key", "draft_id", "profile_seen")}
+        return hashlib.sha256(json.dumps(answers, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+    def _keep_submit_record(key: str, payload: dict[str, Any], answers: str) -> None:
+        try:
+            _write_atomic(submits_dir / f"{key}.json",
+                          json.dumps({"at": time.time(), "answers": answers, "body": payload}))
+            cutoff = time.time() - _SUBMIT_KEPT_S
+            for old in submits_dir.glob("*.json"):
+                try:
+                    if old.stat().st_mtime < cutoff:
+                        old.unlink()
+                except OSError:
+                    pass
+        except OSError as e:
+            # The quest is launched either way; only a retry of this submit could start a second one.
+            _log.warning("the answer to submit %s could not be kept for a retry: %r", key, e)
+
     @app.post("/api/interview/submit")
     async def submit_new(request: Request) -> JSONResponse:
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "invalid answers payload: expected a JSON object")
+        key = _token(request.headers.get("idempotency-key")) or _token(body.get("submit_key"))
+        if key is None:
+            return await _submit_new(request, body)
+        async with submit_lock:
+            done = _submit_record(key)
+            answers = _answers_hash(body)
+            if done is not None:
+                if done.get("answers") not in (None, answers):
+                    # The same Launch with other answers: the first ones were launched already. Said, never dropped.
+                    first = done["body"].get("quest_id") or ""
+                    return JSONResponse({
+                        "error": "already_launched", "quest_id": first,
+                        "detail": (f"these answers were already launched, as quest {first}, before they were changed"
+                                   if first else "these answers were already written before they were changed"),
+                    }, status_code=409)
+                # Already submitted (the answer was lost on the way, or Launch was pressed twice): the same answer,
+                # and no second quest.
+                return JSONResponse(done["body"], headers={"Idempotent-Replayed": "true"})
+            response = await _submit_new(request, body)
+            if response.status_code == 200:
+                _keep_submit_record(key, json.loads(bytes(response.body)), answers)
+            return response
+
+    async def _submit_new(request: Request, body: dict[str, Any]) -> JSONResponse:
         try:
             answers = _parse_answers(body)
         except (KeyError, TypeError, ValueError) as e:
@@ -218,6 +349,8 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             if not _local(request):
                 return None
             saved = profile.load()
+            if saved is None and not any(line.values()):
+                return None  # nothing typed and none kept: the byline is asked once before the first paper instead
             if saved == line or (saved is not None and isinstance(seen, dict)
                                  and {k: str(seen.get(k) or "") for k in profile.FIELDS} == line):
                 return None
@@ -227,6 +360,17 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
             except OSError as e:
                 _log.warning("the author line could not be kept in %s: %r", profile.path(), e)
                 return False  # the quest goes on; the page says the line was not kept
+
+        def forget_draft() -> None:
+            draft = _token(body.get("draft_id"))
+            if draft is not None:
+                try:
+                    # A marker first: a save the page sent just before Launch, arriving after it, is refused.
+                    (drafts_dir / f"{draft}.launched").parent.mkdir(parents=True, exist_ok=True)
+                    (drafts_dir / f"{draft}.launched").write_text("", encoding="utf-8")
+                    (drafts_dir / f"{draft}.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         # Optional in-server launch. Triggered by the interview form's
         # "Launch immediately after submit" checkbox (default ON). The
@@ -279,6 +423,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                     status_code=503,
                     headers={"Retry-After": "30"},
                 )
+            forget_draft()
             return JSONResponse({
                 "profile_saved": keep_profile(),
                 "yaml_path": str(yaml_path),
@@ -288,6 +433,7 @@ def register_interview_routes(app: FastAPI, output_root: Path) -> None:
                 "next_step": f"GET /quest/{launched.quest_id} for live status",
             })
 
+        forget_draft()
         return JSONResponse({
             "profile_saved": keep_profile(),
             "yaml_path": str(yaml_path),

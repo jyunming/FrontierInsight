@@ -6,7 +6,7 @@
  * proven pattern is:
  *
  *   <script src="/static/theme.js"></script>     // sets window._fiConfig
- *   <script src="https://cdn.tailwindcss.com?..."></script>
+ *   <script src="/static/vendor/tailwindcss-3.4.17-forms-container-queries.js"></script>
  *   <script>tailwind.config = window._fiConfig;</script>
  *
  * Loading theme.js first stages the config blob; the inline script
@@ -108,16 +108,16 @@ window._fiConfig = {
       },
       fontFamily: {
         // Body — Geist (modern grotesque sans)
-        "body-lg":            ["Geist", "Inter", "sans-serif"],
-        "body-md":            ["Geist", "Inter", "sans-serif"],
+        "body-lg":            ["Geist", "Inter", "system-ui", "-apple-system", "Segoe UI", "Roboto", "Arial", "sans-serif"],
+        "body-md":            ["Geist", "Inter", "system-ui", "-apple-system", "Segoe UI", "Roboto", "Arial", "sans-serif"],
         // Display — Fraunces (variable serif, opsz 9..144 + wght 400..900)
         // Editorial gravitas for a research tool; falls back to Inter if loading.
-        "headline-xl":        ["Fraunces", "Inter", "serif"],
-        "headline-lg":        ["Fraunces", "Inter", "serif"],
-        "headline-lg-mobile": ["Fraunces", "Inter", "serif"],
+        "headline-xl":        ["Fraunces", "Georgia", "Cambria", "Times New Roman", "serif"],
+        "headline-lg":        ["Fraunces", "Georgia", "Cambria", "Times New Roman", "serif"],
+        "headline-lg-mobile": ["Fraunces", "Georgia", "Cambria", "Times New Roman", "serif"],
         // Mono — JetBrains Mono for code; labels in same to keep terminal vibe.
-        "code-md":            ["JetBrains Mono", "ui-monospace", "monospace"],
-        "label-sm":           ["JetBrains Mono", "ui-monospace", "monospace"],
+        "code-md":            ["JetBrains Mono", "ui-monospace", "Cascadia Mono", "Consolas", "Menlo", "monospace"],
+        "label-sm":           ["JetBrains Mono", "ui-monospace", "Cascadia Mono", "Consolas", "Menlo", "monospace"],
       },
       fontSize: {
         "body-lg":            ["18px", { lineHeight: "1.6", fontWeight: "400" }],

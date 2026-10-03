@@ -160,7 +160,7 @@ select {
   color: #e5e2e1;
   border-radius: 0.25rem;
   padding: 0.55rem 0.75rem;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.9375rem;
   line-height: 1.5;
   transition: border-color 0.12s, box-shadow 0.12s;
@@ -196,7 +196,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
 }
 .fi-card-title h3 {
   margin: 0;
-  font-family: 'Fraunces', 'Inter', serif;
+  font-family: 'Fraunces', Georgia, Cambria, 'Times New Roman', serif;
   font-size: 1.05rem;
   font-weight: 700;
   color: #e5e2e1;
@@ -212,7 +212,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
   gap: 0.4rem;
   padding: 0.25rem 0.7rem;
   border-radius: 999px;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace;
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -242,7 +242,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
   align-items: center;
   gap: 0.5rem;
   padding: 0.5rem 1.25rem;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace;
   font-size: 0.75rem;
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -287,7 +287,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
   background: #122131;
 }
 .fi-form legend {
-  font-family: 'Fraunces', 'Inter', serif;
+  font-family: 'Fraunces', Georgia, Cambria, 'Times New Roman', serif;
   font-weight: 700;
   color: #e5e2e1;
   padding: 0 0.5rem;
@@ -295,7 +295,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
 }
 .fi-form .prompt {
   color: #c7c4d8;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.875rem;
   margin: 0.3rem 0 0.9rem;
   line-height: 1.55;
@@ -320,7 +320,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: #4f46e5; }
 
 /* Code + monospace */
 pre, code, .fi-mono {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace;
 }
 pre {
   background: #0d1c2d;
@@ -342,7 +342,7 @@ code {
 
 /* Log tail (quest.html) */
 .fi-log {
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace;
   font-size: 0.8125rem;
   line-height: 1.6;
   background: #0d1c2d;
@@ -358,13 +358,13 @@ code {
 
 /* Rendered Markdown (paper preview, compare) */
 .fi-md-body {
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.9375rem;
   line-height: 1.65;
   color: #e5e2e1;
 }
 .fi-md-body h1, .fi-md-body h2, .fi-md-body h3 {
-  font-family: 'Fraunces', 'Inter', serif;
+  font-family: 'Fraunces', Georgia, Cambria, 'Times New Roman', serif;
   margin-top: 1.5em;
   margin-bottom: 0.3em;
   color: #e5e2e1;
@@ -430,7 +430,7 @@ code {
   padding: 0.9rem 1.1rem;
   border-radius: 0.25rem;
   margin-bottom: 1rem;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.9rem;
   border: 1px solid;
 }
@@ -466,7 +466,7 @@ section.fi-section {
   margin: 1.5rem 0;
 }
 section.fi-section > h2 {
-  font-family: 'Fraunces', 'Inter', serif;
+  font-family: 'Fraunces', Georgia, Cambria, 'Times New Roman', serif;
   margin: 0 0 0.8rem;
   font-size: 1.25rem;
   font-weight: 700;
@@ -475,14 +475,14 @@ section.fi-section > h2 {
 }
 section.fi-section > p.fi-subtitle {
   color: #c7c4d8;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.9rem;
   margin: 0 0 0.85rem;
 }
 
 .fi-subtitle {
   color: #c7c4d8;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.95rem;
 }
 
@@ -495,7 +495,7 @@ section.fi-section > p.fi-subtitle {
   padding: 0.6rem 1rem;
   margin-bottom: 1.25rem;
   color: #c7c4d8;
-  font-family: 'JetBrains Mono', monospace;
+  font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, Menlo, monospace;
   font-size: 0.7rem;
   font-weight: 600;
   letter-spacing: 0.1em;
@@ -511,7 +511,7 @@ section.fi-section > p.fi-subtitle {
   text-align: center;
   padding: 3rem 1rem;
   color: #c7c4d8;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-size: 0.95rem;
 }
 
@@ -521,7 +521,7 @@ section.fi-section > p.fi-subtitle {
   background: none;
   border: none;
   color: #c7c4d8;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   font-weight: 500;
   padding: 0.25rem 0;
   cursor: pointer;
@@ -553,7 +553,7 @@ section.fi-section > p.fi-subtitle {
   color: #e5e2e1;
   text-decoration: none;
   font-size: 0.875rem;
-  font-family: 'Geist', sans-serif;
+  font-family: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
   border-radius: 0.25rem;
   transition: background 0.1s;
 }

@@ -2364,7 +2364,8 @@ def make_app(
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_id = _resolve_quest_root(app.state.output_root, quest_id).name  # the full id the launcher knows
-        canceled = app.state.launcher.cancel(quest_id)
+        # Off the event loop: a cancel waits for the polite stop, then for the whole tree to be gone.
+        canceled = await asyncio.to_thread(app.state.launcher.cancel, quest_id)
         if not canceled:
             raise HTTPException(404, f"quest {quest_id} not tracked by web launcher")
         return JSONResponse({"quest_id": quest_id, "canceled": True})

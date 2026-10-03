@@ -35,6 +35,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from core.proc_tree import ProcessTree
+
 # How many ended runs the launcher keeps an exit code for.
 _FINISHED_KEPT = 64
 
@@ -52,6 +54,9 @@ class LaunchedQuest:
     # "the install actually crashed at step N" instead of just
     # "started" forever.
     log_path: Path | None = None
+    # The child and everything it starts (core/proc_tree.py), detached: it outlives the server, and a cancel stops the
+    # whole tree. None for an entry made without one (``process`` is then all there is to stop).
+    tree: ProcessTree | None = field(default=None, repr=False)
 
     def is_alive(self) -> bool:
         """Return True iff the OS reports the process still running.
@@ -176,23 +181,12 @@ class QuestLauncher:
             fi_dir.mkdir(parents=True, exist_ok=True)
             log_path = fi_dir / "launch.log"
             log_file = open(log_path, "wb")
-            proc = subprocess.Popen(
-                argv,
-                cwd=str(self.work_dir),
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                # detach the child so a server SIGINT doesn't cascade
-                # — quests should keep running until they finish (or
-                # are explicitly canceled). On POSIX, start_new_session
-                # gives a new process group. On Windows, the equivalent
-                # is CREATE_NEW_PROCESS_GROUP.
-                start_new_session=(os.name != "nt"),
-                creationflags=(
-                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                    if os.name == "nt" else 0
-                ),
-            )
+            # Detached: a server SIGINT or exit doesn't cascade -- quests keep running until they finish (or are
+            # explicitly canceled). On POSIX the child leads a new session (its own process group); on Windows it
+            # gets CREATE_NEW_PROCESS_GROUP (for the polite CTRL_BREAK_EVENT) and a job that groups everything it
+            # starts, so a cancel stops the experiment scripts and helpers too, not only the direct child.
+            tree = _start_detached(argv, cwd=str(self.work_dir), env=env, log_file=log_file)
+            proc = tree.proc
             entry = LaunchedQuest(
                 quest_id=quest_id,
                 yaml_path=yaml_path,
@@ -200,69 +194,64 @@ class QuestLauncher:
                 started_at=time.time(),
                 process=proc,
                 log_path=log_path,
+                tree=tree,
             )
             self._quests.append(entry)
             return entry
 
     def cancel(self, quest_id: str, *, grace_s: float = 5.0) -> bool:
-        """Send SIGTERM to the quest's child AND its descendants;
-        escalate to SIGKILL after ``grace_s`` seconds. Returns True
-        if a process was signaled, False if the quest_id isn't
-        tracked or already exited.
+        """Ask the quest to stop, then stop it and everything it started. Returns True if a process was signaled,
+        False if the quest_id isn't tracked or already exited.
 
-        The engine spawns experiment scripts (and venv-managed
-        subprocesses) as grandchildren of the launch.py child. A
-        plain ``Popen.terminate()`` only signals the direct child;
-        grandchildren are reparented to init and survive. On POSIX
-        we signal the whole process group (``os.killpg`` against the
-        new session created by ``start_new_session=True`` in
-        ``launch``). On Windows we use ``CTRL_BREAK_EVENT`` against
-        the process group created by ``CREATE_NEW_PROCESS_GROUP`` —
-        same effect."""
+        The engine spawns experiment scripts (and venv-managed subprocesses) as grandchildren of the launch.py
+        child; a plain ``Popen.terminate()`` or ``kill()`` only reaches the direct child, and the grandchildren
+        survive. First the polite stop, to the whole group: ``SIGTERM`` to the process group of the new session
+        (POSIX), ``CTRL_BREAK_EVENT`` to the process group created by ``CREATE_NEW_PROCESS_GROUP`` (Windows). After
+        ``grace_s`` -- whether or not the child stopped on its own -- the whole tree is stopped
+        (``ProcessTree.kill``: the job on Windows, the process group on POSIX), so a script that ignored the polite
+        stop, or one the child left behind, is not left running."""
         with self._lock:
             target = next(
                 (q for q in self._quests if q.quest_id == quest_id), None,
             )
         if target is None or not target.is_alive():
             return False
+        tree = target.tree
+        real = tree is not None and tree.real  # a test's stand-in Popen never reaches killpg with its made-up pid
+        polite = True
         try:
             if os.name == "nt":
                 # CTRL_BREAK_EVENT delivers to the whole process
                 # group created at spawn time.
                 target.process.send_signal(signal.CTRL_BREAK_EVENT)
-            else:
-                # Signal the whole process group. The pgid equals
-                # the child's pid because start_new_session=True
-                # made the child a session/group leader. SIGTERM
-                # the group; if the engine ignores it, the escalation
-                # below sends SIGKILL.
+            elif real:
+                # The pgid equals the child's pid because it leads its own session.
                 try:
                     os.killpg(target.pid, signal.SIGTERM)
                 except (ProcessLookupError, PermissionError):
                     # Group already gone or restricted — fall back
                     # to the direct child.
                     target.process.terminate()
+            else:
+                target.process.terminate()
         except (ProcessLookupError, OSError):
-            return False
+            # No polite stop possible (a server with no console cannot send CTRL_BREAK_EVENT): straight to the hard one.
+            polite = False
         # Wait briefly for cooperative shutdown.
-        try:
-            target.process.wait(timeout=grace_s)
-            return True
-        except subprocess.TimeoutExpired:
+        if polite:
             try:
-                if os.name == "nt":
-                    target.process.kill()
-                else:
-                    # SIGKILL the whole group on the escalation
-                    # path too — same orphan-prevention reason.
-                    try:
-                        os.killpg(target.pid, signal.SIGKILL)
-                    except (ProcessLookupError, PermissionError):
-                        target.process.kill()
-                target.process.wait(timeout=2.0)
-            except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+                target.process.wait(timeout=grace_s)
+            except subprocess.TimeoutExpired:
                 pass
-            return True
+        try:
+            if tree is not None:
+                tree.kill()
+            elif target.process.poll() is None:
+                target.process.kill()
+            target.process.wait(timeout=2.0)
+        except (ProcessLookupError, OSError, subprocess.TimeoutExpired):
+            pass
+        return True
 
     def list_alive(self) -> list[LaunchedQuest]:
         """Snapshot of currently-running quests. Reaping happens
@@ -436,19 +425,9 @@ class QuestLauncher:
             job_dir.mkdir(parents=True, exist_ok=True)
             log_path = job_dir / "launch.log"
             log_file = open(log_path, "wb")
-            proc = subprocess.Popen(
-                argv,
-                # A quest resumed from another folder runs from the folder it was started in (its relative paths).
-                cwd=str(cwd or self.work_dir),
-                env=env,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                start_new_session=(os.name != "nt"),
-                creationflags=(
-                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                    if os.name == "nt" else 0
-                ),
-            )
+            # A quest resumed from another folder runs from the folder it was started in (its relative paths).
+            tree = _start_detached(argv, cwd=str(cwd or self.work_dir), env=env, log_file=log_file)
+            proc = tree.proc
             # The job_id stands in for quest_id in the LaunchedQuest
             # tuple. yaml_path is the empty path — these tools don't
             # take a config file. status_for(job_id) lets the UI
@@ -460,9 +439,30 @@ class QuestLauncher:
                 started_at=time.time(),
                 process=proc,
                 log_path=log_path,
+                tree=tree,
             )
             self._quests.append(entry)
             return entry
+
+
+def _start_detached(argv: list[str], *, cwd: str, env: dict[str, str], log_file: Any) -> ProcessTree:
+    """Start ``argv`` as a detached process tree (core/proc_tree.py) writing to ``log_file``. The log handle is the
+    child's from then on: this process's copy is closed once the child has it."""
+    try:
+        return ProcessTree(
+            argv,
+            detached=True,
+            cwd=cwd,
+            env=env,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0),
+        )
+    finally:
+        try:
+            log_file.close()
+        except OSError:
+            pass
 
 
 class QuestLauncherFull(Exception):

@@ -36,7 +36,8 @@ def test_tier1_cli_asks_the_topic_what_it_is_for_and_the_model() -> None:
     quest is checked, so it is asked, never hidden) and the provider and model. The paper format, the deliverables and
     the study depth are worked out from the topic and shown on the review screen; the multi-model ensemble is in
     Advanced. For research or a decision the second reviewer's model follows (research needs one reviewer on another
-    model; see ``question_applies``). The author line comes last and is asked only while no profile is saved (core/profile.py)."""
+    model; see ``question_applies``). That is all: three steps (core/interview.py FIRST_STEPS). The paper byline is
+    not asked here (tier 2: folded on the review screen, asked once before the first paper when empty)."""
     ids = [q.id for q in questions_for_tier(1, "cli")]
     assert ids == [
         "topic",
@@ -44,11 +45,11 @@ def test_tier1_cli_asks_the_topic_what_it_is_for_and_the_model() -> None:
         "provider",
         "provider_model",
         "second_reviewer_model",
-        "author",
-        "affiliation",
-        "contact_email",
-        "url",
     ]
+    from core.interview import FIRST_STEPS
+
+    assert [qid for _sid, _title, qids in FIRST_STEPS for qid in qids] == ids
+    assert len(FIRST_STEPS) == 3
 
 
 def test_tier1_serve_matches_cli() -> None:
@@ -62,16 +63,13 @@ def test_tier1_serve_matches_cli() -> None:
 
 def test_tier1_vscode_asks_the_topic_and_what_it_is_for() -> None:
     """VSCode pins provider=vscode_extension and takes the Copilot model the person picked in the chat picker, so its
-    first screen is the topic and what the result is for (and the author line on the first interview)."""
+    first screen is the topic, what the result is for, and for research or a decision a different chat model for one
+    reviewer."""
     ids = [q.id for q in questions_for_tier(1, "vscode")]
     assert ids == [
         "topic",
         "result_use",
         "second_reviewer_model",
-        "author",
-        "affiliation",
-        "contact_email",
-        "url",
     ]
 
 
@@ -82,7 +80,7 @@ def test_author_line_questions_are_optional_one_line_text() -> None:
 
     for qid in ("author", "affiliation", "contact_email", "url"):
         q = next(q for q in QUESTIONS if q.id == qid)
-        assert (q.kind, q.default, q.tier, q.mid_quest_editable) == ("text", "", 1, True)
+        assert (q.kind, q.default, q.tier, q.mid_quest_editable) == ("text", "", 2, True)
         assert STAGE_INVALIDATION[qid] == ()
 
 
@@ -119,6 +117,11 @@ def test_tier2_covers_the_derived_fields() -> None:
         "web_research",
         "audience",
         "knowledge_top_k",
+        # The paper byline: filled from the profile, folded on the review screen.
+        "author",
+        "affiliation",
+        "contact_email",
+        "url",
     }
 
 

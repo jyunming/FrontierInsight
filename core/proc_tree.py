@@ -11,9 +11,11 @@ process in it when it is closed, so the tree also goes if this process dies. On 
 session, and the whole process group is killed.
 
 Two forms. ``ProcessTree`` wraps a blocking ``subprocess.Popen`` (``scripts/import_scientist_skills.py``,
-``generation/_office_pdf.py``, the provider proxies in ``core/provider.py``). ``AsyncProcessTree`` wraps
-``asyncio.create_subprocess_exec`` for the async callers: the experiment script run by ``core/execution.py`` and the
-CLI providers in ``core/provider.py``, whose timeouts and cancellations must not leave a pool of workers or a CLI's
+``generation/_office_pdf.py``, the provider proxies in ``core/provider.py``, and, detached, the quests and tool jobs
+``web/quest_launcher.py`` starts). ``AsyncProcessTree`` wraps
+``asyncio.create_subprocess_exec`` for the async callers: the experiment script run by ``core/execution.py``, the
+CLI providers in ``core/provider.py``, ``pip freeze`` in ``core/engine.py`` and Marp / pandoc in
+``generation/slides.py``, whose timeouts and cancellations must not leave a pool of workers or a CLI's
 helpers running.
 """
 
@@ -149,10 +151,12 @@ if os.name == "nt":  # pragma: no cover - exercised on Windows only
         finally:
             _kernel32.CloseHandle(handle)
 
-    def _new_job() -> int:
+    def _new_job(kill_on_close: bool = True) -> int:
         job = _kernel32.CreateJobObjectW(None, None)
         if not job:
             raise ctypes.WinError(ctypes.get_last_error())
+        if not kill_on_close:
+            return job  # a detached tree: the job only groups it, so ``kill()`` can still reach every process in it
         info = _JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not _kernel32.SetInformationJobObject(
@@ -178,10 +182,15 @@ class ProcessTree:
     Use it as a context manager, or call ``close()`` when done. Leaving the block (or ``close()``, or dropping the
     object) while the program still runs stops the whole tree; on Windows it also stops anything a finished program
     left running. So keep the ``ProcessTree``, not just its ``.proc``, for as long as the program should run.
+
+    ``detached=True`` is for a program meant to outlive this process (a quest the web server starts): only an explicit
+    ``kill()`` stops the tree. ``close()``, dropping the object and this process exiting leave it running; on Windows
+    its job then has no kill-on-close limit and only groups the tree, so ``kill()`` still reaches every process in it.
     """
 
-    def __init__(self, argv: list[str], **popen_kwargs: Any) -> None:
+    def __init__(self, argv: list[str], *, detached: bool = False, **popen_kwargs: Any) -> None:
         self._job: int | None = None
+        self._detached = detached
         if os.name == "nt":
             self._start_windows(argv, popen_kwargs)
         else:
@@ -199,7 +208,7 @@ class ProcessTree:
         try:
             handle = int(self.proc._handle)  # noqa: SLF001 - the only way to reach the process handle
             try:
-                job = _new_job()
+                job = _new_job(kill_on_close=not self._detached)
             except OSError as exc:
                 _log.warning("could not create a job for %s (%s); a timeout will fall back to taskkill", argv[0], exc)
                 job = None
@@ -272,8 +281,10 @@ class ProcessTree:
     def _kill_posix(self, deadline: float) -> None:
         # The program leads its own session, so its process group id is its pid; the group outlives its
         # leader, which is what catches a helper whose parent has already exited. While any member is left the
-        # id stays reserved, so it cannot name an unrelated group; call this only before the program has been
-        # waited for with its group empty (``close()`` checks ``poll()`` first; the callers kill on a timeout).
+        # id stays reserved, so it cannot name an unrelated group. Once the leader has been reaped and the group is
+        # empty the id is free again; it could name another group only after the system has handed out every other
+        # pid in between, far longer than the moment between a reaped leader and this stop (``close()`` checks
+        # ``poll()`` first; the web launcher's Cancel kills right after its polite stop, also once the leader exited).
         pgid = self.proc.pid
         try:
             os.killpg(pgid, signal.SIGKILL)
@@ -303,9 +314,10 @@ class ProcessTree:
 
     def close(self) -> None:
         """Stop the tree if the program is still running (an exception or Ctrl+C left the ``with`` block early),
-        then release the job (Windows; closing it also stops anything the program left running)."""
+        then release the job (Windows; closing it also stops anything the program left running). A detached tree is
+        left running: only the handle is released."""
         proc = getattr(self, "proc", None)
-        if proc is not None and proc.poll() is None:
+        if proc is not None and not getattr(self, "_detached", False) and proc.poll() is None:
             self.kill()
         job, self._job = self._job, None
         if job is not None and os.name == "nt":  # pragma: no cover - exercised on Windows only

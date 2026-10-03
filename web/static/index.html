@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Frontier Insight — Research Quests</title>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg"/>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400..900&amp;family=Geist:wght@400;500;600;700&amp;family=JetBrains+Mono:wght@400;500;600&amp;family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/vendor/fonts.css"/>
 <script src="/static/theme.js"></script>
-<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script src="/static/vendor/tailwindcss-3.4.17-forms-container-queries.js"></script>
 <script>tailwind.config = window._fiConfig;</script>
 <link rel="stylesheet" href="/static/style.css"/>
 <script defer src="/static/header.js"></script>
@@ -291,8 +291,9 @@
     const res = await fetch('/api/interview/schema');
     if (!res.ok) return;
     const schema = await res.json();
-    const n = (schema.questions || []).filter(q => q.tier === 1 && (!q.frontends || q.frontends.includes('serve'))).length;
-    if (n > 0) document.getElementById('question-count').textContent = `up to ${n} short questions`;
+    // Counted in steps (the research question, what the result is for, the model), as the new-quest page numbers them.
+    const n = (schema.first_steps || []).length;
+    if (n > 0) document.getElementById('question-count').textContent = `${n} short questions`;
   } catch (_) { /* keep the words already there */ }
 })();
 </script>

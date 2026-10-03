@@ -621,11 +621,16 @@ the title (and uses the author as the PDF's Author field), the slides put
 them on the title slide, and the poster puts them in its header, with the
 link as a QR code. Every field is optional: with no author set the byline
 stays "Frontier Insight", and a field left empty is simply not printed.
-The first interview on any of the three interfaces asks for them (press
-Enter to skip any); they are kept in `~/.frontier-insight/profile.json`
-(`FI_PROFILE_PATH` moves it), which all three read, so later interviews
-fill them in without asking and show them on the review screen, where a
-change is kept for the next quests too.
+The interview does not ask for them up front: they are one folded line,
+*Paper byline (optional)*, on the review screen's "What you get" card, and
+the first time a paper is written from a terminal FI asks the name once
+(Enter keeps the Frontier Insight byline; with no answer in two minutes the
+paper goes on without one and you are asked next time; the web page and
+VS Code never wait on it). What you give is kept in
+`~/.frontier-insight/profile.json` (`FI_PROFILE_PATH` moves it), which all
+three interfaces read, so later interviews fill it in without asking and
+show it on the review screen, where a change is kept for the next quests
+too.
 
 These values are written only into the quest's own files and your profile file on this machine (the web page
 reads and keeps it only for a page opened on this machine; a request that came through a proxy
