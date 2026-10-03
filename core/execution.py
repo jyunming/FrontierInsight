@@ -22,6 +22,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -608,18 +609,54 @@ _THREAD_VARS = (
 )
 # Folders of the quest FI writes its records into: read-only in the container.
 _RECORD_DIRS = (".fi", "needs")
-# Inside .fi, the folders where FI's harness runs a script and the script's rows land.
-_SCRIPT_WRITABLE = (".fi/trials", ".fi/optimisation")
+# Inside .fi, the folders where FI's harness runs a script and the script's rows land,
+# and where its figures' records are kept.
+_SCRIPT_WRITABLE = (".fi/trials", ".fi/optimisation", ".fi/figure_records")
 # FI's own records inside those folders: read-only again.
 _RECORD_FILES = (".fi/trials/run.json", ".fi/trials/cluster.json",
                  ".fi/optimisation/run.json", ".fi/optimisation/check.json")
 # A script that tried to write into FI's records.
-_RECORD_REFUSED_RE = re.compile(r"Read-only file system[^\n]*/work/(?:\.fi|needs)\b")
+_RECORD_REFUSED_RE = re.compile(r"""Read-only file system[^\n]*(?:\.fi|\bneeds)(?:[/'"\s]|$)""")
 # Creates and removes one file in the quest folder: can this user write there?
 _WRITE_CHECK = (
     "import os, tempfile; fd, p = tempfile.mkstemp(dir='/work', prefix='.fi-write-check-'); "
     "os.close(fd); os.remove(p)"
 )
+
+
+def _is_link(st: os.stat_result) -> bool:
+    """Anything that is not a plain file or folder, as it is on disk: a symbolic link, a Windows junction, a
+    device. ``stat.S_ISLNK`` alone misses the link kinds Windows reports only through the reparse-point flag."""
+    if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & 0x400)  # FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _remove_links(host_root: Path, folders: Iterable[str]) -> None:
+    """After a run, remove every link a script left in a folder it could write in (only the link, never what it
+    points at). FI writes fixed file names there from the host; a link in their place would send FI's own write to
+    a record, or to a file outside the quest folder."""
+    for rel in folders:
+        top = host_root / rel
+        stack = [top]
+        while stack:
+            folder = stack.pop()
+            try:
+                entries = list(os.scandir(folder))
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    if _is_link(st):
+                        try:
+                            os.unlink(entry.path)
+                        except (IsADirectoryError, PermissionError):
+                            os.rmdir(entry.path)  # a junction is removed as a folder, leaving its target alone
+                    elif stat.S_ISDIR(st.st_mode):
+                        stack.append(Path(entry.path))
+                except OSError:
+                    _log.warning("[docker] could not check %s for links left by the experiment", entry.path)
 
 
 def _owner_of(path: Path) -> tuple[int, int]:
@@ -980,7 +1017,7 @@ class DockerExecutor:
             for rel in _SCRIPT_WRITABLE + _RECORD_DIRS:
                 (host_root / rel).mkdir(parents=True, exist_ok=True)
         except OSError:
-            pass  # the quest folder itself is not writable: the run will say so
+            return volumes  # the quest folder itself is not writable: the run will say so
         for rel in _RECORD_DIRS:
             volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "ro"}
         for rel in _SCRIPT_WRITABLE:
@@ -1113,6 +1150,7 @@ class DockerExecutor:
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
             note = "" if timed_out else self._limit_note(rc, stderr, _oom_killed(container))
+            _remove_links(host_root, _SCRIPT_WRITABLE)
             if rc != 0 and _RECORD_REFUSED_RE.search(stderr):
                 self._say(logging.WARNING, "[docker] the experiment tried to write into FI's own records "
                           "(.fi/ or needs/), which it can only read; it can write its results anywhere else "
