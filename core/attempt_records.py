@@ -522,7 +522,8 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
                    usage: dict[str, Any] | None = None, call_id: str | None = None) -> dict[str, Any]:
     """One line of :data:`MODEL_CALLS`: which step asked (``node``, the ``attempt``-th call under it), which model was
     asked for and which answered (``served_model``, ``reported`` when the connection named it, ``vendor`` when it
-    did, ``fallback`` when a fallback provider took the call), hashes of the prompt and the answer (never their
+    did, ``fallback`` when a fallback provider took the call, ``switched_from`` when the connection itself answered
+    with another model than the one asked for), hashes of the prompt and the answer (never their
     text), the ``outcome`` (``ok``, ``truncated`` for an answer cut off at its output limit, ``content_filtered``, or
     the error's class), the ``finish_reason`` when the connection gave one, and the token counts when it gave them.
     ``reports_model``: the connection is one that names the model that answered (so ``reported`` false is a gap)."""
@@ -535,6 +536,9 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
         "requested_model": requested_model,
         "served_model": served.get("model"),
         **({"vendor": served["vendor"]} if served.get("vendor") else {}),
+        # The model the connection switched away from on its own (the claude CLI, after the asked-for model declined
+        # the request) when the answer kept is ``served_model``'s, not the asked-for model's.
+        **({"switched_from": served["switched_from"]} if served.get("switched_from") else {}),
         "reported": bool(served.get("reported")),
         "reports_model": bool(reports_model),
         "fallback": bool(served.get("fallback")),

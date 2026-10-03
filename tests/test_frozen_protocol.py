@@ -516,7 +516,7 @@ async def test_an_unknown_evidence_gate_under_research_profile_pauses_then_retri
         prompt = messages[-1]["content"]
         if _classify(prompt) == "EvidenceGate":
             calls["evidence_gate"] += 1
-            if calls["evidence_gate"] == 1:
+            if calls["evidence_gate"] <= 2:  # the call and its one short re-ask (Engine._chat_json)
                 return "not json at all"
             return json.dumps({"verdict": "sufficient", "rationale": "fine now", "gaps": []})
         return _fake_response_for(prompt)
@@ -526,14 +526,14 @@ async def test_an_unknown_evidence_gate_under_research_profile_pauses_then_retri
 
     first = Engine(cfg)
     await first.run()
-    assert calls["evidence_gate"] == 1, "must have tried the gate exactly once before pausing"
+    assert calls["evidence_gate"] == 2, "must have tried the gate once, and asked once more, before pausing"
     assert not (first.quest_root / "paper" / "paper.md").exists(), "must pause before write, not after"
     descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
     assert descriptor["kind"] == "evidence_gate_unknown" and descriptor["interaction"] == "supply"
 
     fixed = Engine(cfg, resume_quest_id=first.quest_id)
     artifacts = await fixed.run()
-    assert calls["evidence_gate"] == 2, "resume must retry the call, not skip it"
+    assert calls["evidence_gate"] == 3, "resume must retry the call, not skip it"
     assert artifacts.paper_md is not None
     assert artifacts.raw_state["evidence_assessment"]["status"] == "ok"
     receipt = json.loads((first.quest_root / "needs" / "receipts" / "evidence_gate.json").read_text(encoding="utf-8"))
@@ -558,10 +558,10 @@ async def test_a_gate_that_fails_again_after_the_retry_is_a_gap_and_the_quest_go
     cfg = _cfg(tmp_path).model_copy(update={"rigor_profile": "research"})
     first = Engine(cfg)
     await first.run()
-    assert calls["evidence_gate"] == 1 and (first.fi_dir / "pause.json").is_file()
+    assert calls["evidence_gate"] == 2 and (first.fi_dir / "pause.json").is_file()  # the call and its one re-ask
     resumed = Engine(cfg, resume_quest_id=first.quest_id)
     artifacts = await resumed.run()
-    assert calls["evidence_gate"] == 2 and artifacts.paper_md is not None, "went on after the second failure"
+    assert calls["evidence_gate"] == 4 and artifacts.paper_md is not None, "went on after the second failure"
     record = json.loads((first.quest_root / "needs" / "EVIDENCE.json").read_text(encoding="utf-8"))
     assert record["status"] != "publication_ready"
     assert any("evidence gate could not judge" in g for gaps in record["all_gaps"].values() for g in gaps)

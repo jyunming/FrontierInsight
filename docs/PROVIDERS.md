@@ -286,6 +286,20 @@ By default a retried call uses the same model as the first attempt. FI
 never switches models on its own: which models a quest pays for is your
 choice, and a model name is only valid for its own provider.
 
+The `claude` CLI can switch on its own, though: when the model you named
+declines a request, the CLI hands the request to another model, which can
+cost far more (a Haiku quest's `ideate` call was answered by a Fable model at
+about twelve times Haiku's price), and with a fallback model set up for the
+CLI it also switches when the model is unavailable. FI reads which model wrote each answer from the CLI's own output
+and records it truthfully in `.fi/model_calls.jsonl`. Whenever the CLI
+switched, FI says so in `.fi/run.log` (every time, not only the first). After
+a refusal it asks the model you named once more with the CLI's switching
+turned off. If it answers, its answer is used; the other model's answer was
+still paid for and is recorded as such. If it declines again, or the switch
+was for another reason, the other model's answer is used and run.log says
+that the call cost that model's price. A reply that is only a refusal is never
+used as an answer: the quest stops so you can pick another model for the step.
+
 A smaller model can stall on a long code-generation prompt (the `implement`
 and `write` nodes): it spends the whole time budget in extended thinking and
 never writes an answer, and retrying the same prompt on a stronger model

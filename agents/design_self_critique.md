@@ -43,7 +43,7 @@ After identifying issues, produce an amended design. The amended design must mat
 
 # Output format
 
-Respond with a single JSON object, no prose, no markdown fence:
+Respond with a single JSON object, no prose, no markdown fence. Print it once: do not also print the draft or the amended design on its own, before or after it. Keep each `objection` and `fix` to one or two sentences; the amended design is the only long part, and it repeats the draft except where a fix changes it.
 
 {
   "objections_addressed": [

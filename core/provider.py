@@ -372,6 +372,7 @@ def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
     it is the only provider that supplies it, and a real figure beats FI's
     per-token estimate.
     """
+    facts = _claude_stream_facts(raw)
     for line in reversed(raw.splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -380,20 +381,24 @@ def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
             evt = json.loads(line)
         except ValueError:
             continue
-        if evt.get("type") != "result":
+        if not isinstance(evt, dict) or evt.get("type") != "result":
             continue
-        # Which model actually answered, as the CLI reports it: the one that wrote the most (a helper model the CLI
-        # used on the side writes little). Read even when the token counts are missing.
-        served = None
+        # Which model actually answered, as the CLI reports it: the model of the message that carries the answer (the
+        # last assistant message), else the model the CLI says it switched to, else the one that wrote the most in
+        # ``modelUsage`` (a helper model the CLI used on the side writes little). Read even when the token counts are
+        # missing.
+        served = facts.pop("answer_model", None)
         by_model = evt.get("modelUsage")
-        if isinstance(by_model, dict) and by_model:
+        if not served and isinstance(facts.get("switched"), dict):
+            served = facts["switched"]["to"]
+        if not served and isinstance(by_model, dict) and by_model:
             best = max(by_model, key=lambda m: int((by_model[m] or {}).get("outputTokens") or 0)
                        if isinstance(by_model[m], dict) else 0)
             if isinstance(best, str) and best.strip():
                 served = best.strip()
         u = evt.get("usage") or {}
         if not u:
-            return {"served_model": served} if served else None
+            return {**({"served_model": served} if served else {}), **facts} or None
         fresh = int(u.get("input_tokens") or 0)
         cache_write = int(u.get("cache_creation_input_tokens") or 0)
         cache_read = int(u.get("cache_read_input_tokens") or 0)
@@ -415,8 +420,114 @@ def _extract_claude_usage(raw: str) -> dict[str, Any] | None:
             measured["cost_usd_reported"] = float(cost)
         if served:
             measured["served_model"] = served
+        measured.update(facts)
         return measured
+    facts.pop("answer_model", None)
+    return facts or None
+
+
+#: claude's stream-json ``system`` events that say the CLI answered with a model other than the one asked for: after
+#: the asked-for model declined the request (``model_refusal_fallback``: the CLI's own safety-refusal fallback, read
+#: from Claude Code 2.1.287; it then takes the answer from another model, a more expensive one in the case that showed
+#: it), when that model was unavailable (``model_fallback``), or by the account's model policy
+#: (``model_consent_fallback``). Each names ``original_model`` and ``fallback_model``.
+_CLAUDE_SWITCH_EVENTS = frozenset({"model_refusal_fallback", "model_fallback", "model_consent_fallback"})
+
+#: The environment variable that turns the claude CLI's refusal fallback off for one call (Claude Code 2.1.x): a
+#: request the asked-for model declines then comes back declined instead of being answered by another model.
+CLAUDE_NO_REFUSAL_FALLBACK_ENV = "CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"
+
+
+def _claude_stream_facts(raw: str) -> dict[str, Any]:
+    """What claude's stream says about who answered, beside the token counts: ``answer_model`` (the model of the last
+    assistant message, the one carrying the answer; ``<synthetic>`` messages the CLI makes itself are skipped),
+    ``switched`` (``{"from", "to", "why"}`` when the CLI said it answered with another model than the one asked for) and
+    ``refused`` (the answer is a refusal: the CLI said the request was declined with no other model to answer, or the
+    last model turn ended with ``stop_reason: refusal``)."""
+    facts: dict[str, Any] = {}
+    last_stop = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            evt = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(evt, dict):
+            continue
+        kind = evt.get("type")
+        if kind == "system":
+            sub = evt.get("subtype")
+            to = evt.get("fallback_model")
+            if sub in _CLAUDE_SWITCH_EVENTS and isinstance(to, str) and to.strip():
+                facts["switched"] = {"from": str(evt.get("original_model") or ""), "to": to.strip(), "kind": sub,
+                                     "why": str(evt.get("trigger") or "")}
+                # What the model switched away from said no longer ends the call: the other model answers next.
+                last_stop = None
+                facts.pop("refused", None)
+            elif sub == "model_refusal_no_fallback":
+                facts["refused"] = True
+        elif kind == "assistant":
+            model = (evt.get("message") or {}).get("model") if isinstance(evt.get("message"), dict) else None
+            if isinstance(model, str) and model.strip() and not model.startswith("<"):
+                facts["answer_model"] = model.strip()
+        elif kind == "stream_event":
+            event = evt.get("event") if isinstance(evt.get("event"), dict) else {}
+            if event.get("type") == "message_delta":
+                stop = (event.get("delta") or {}).get("stop_reason")
+                last_stop = str(stop) if stop else last_stop
+    if last_stop == "refusal":
+        facts["refused"] = True
+    return facts
+
+
+def _claude_stream_fact_line(raw: bytes) -> str | None:
+    """The part of one claude stream-json line :func:`_claude_stream_facts` reads, kept small (an assistant line can
+    be over 100 KB of thinking): a model-switch or refusal ``system`` event whole, an assistant message as its model
+    only, a turn's end as its stop reason only; ``None`` for any other line."""
+    head = raw[:200]
+    if b'"system"' in head and b"fallback" in raw:
+        return raw.decode("utf-8", errors="replace").strip()
+    if b'"assistant"' in head and b'"model"' in raw:
+        try:
+            msg = json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError:
+            return None
+        if not isinstance(msg, dict):
+            return None
+        model = (msg.get("message") or {}).get("model") if isinstance(msg.get("message"), dict) else None
+        if msg.get("type") == "assistant" and isinstance(model, str):
+            return json.dumps({"type": "assistant", "message": {"model": model}})
+        return None
+    if b'"message_delta"' in raw and b'"stop_reason"' in raw:
+        try:
+            msg = json.loads(raw.decode("utf-8", errors="replace"))
+        except ValueError:
+            return None
+        if not isinstance(msg, dict):
+            return None
+        event = msg.get("event") if isinstance(msg.get("event"), dict) else {}
+        stop = (event.get("delta") or {}).get("stop_reason") if event.get("type") == "message_delta" else None
+        if stop:
+            return json.dumps({"type": "stream_event", "event": {"type": "message_delta",
+                                                                 "delta": {"stop_reason": stop}}})
     return None
+
+
+def claude_model_family_differs(asked: str, served: str) -> bool:
+    """Whether ``served`` (a full claude model id) is plainly another model than ``asked`` (an alias such as
+    ``haiku`` or ``opus[1m]``, or a full id): their family words (haiku / sonnet / opus / fable) differ. ``False``
+    when either names no family it knows, so an alias it cannot read is never called a switch."""
+    families = ("haiku", "sonnet", "opus", "fable")
+
+    def family(name: str) -> str | None:
+        words = re.split(r"[-_.\[\]\s]+", (name or "").lower())
+        found = [f for f in families if f in words]
+        return found[0] if len(found) == 1 else None
+
+    a, s = family(asked), family(served)
+    return a is not None and s is not None and a != s
 
 
 def _extract_codex_reasoning(raw: str) -> str:
@@ -1498,6 +1609,16 @@ class _CliTransientError(RuntimeError):
     so the retry predicate can target it precisely."""
 
 
+class _OtherModelAnswer(RuntimeError):
+    """A claude CLI answer FI did not use because of which model gave it (``_ask_the_asked_model_again``): recorded as
+    a failed attempt with the token counts it cost, never raised."""
+
+    def __init__(self, message: str, *, usage: dict[str, Any] | None, outcome: str) -> None:
+        super().__init__(message)
+        self.usage = dict(usage) if isinstance(usage, dict) and usage else None
+        self.fi_outcome = outcome
+
+
 class _CliWedgeError(_CliTransientError):
     """The specific failure where a CLI streams (often minutes of
     extended-thinking) then closes stdout WITHOUT producing an answer and
@@ -2120,6 +2241,7 @@ async def _run_cli(
     node: str = "",
     usage_out: dict[str, Any] | None = None,
     reasoning_effort: str = "",
+    extra_env: dict[str, str] | None = None,
 ) -> str:
     """Spawn the CLI and collect its response. Three output modes:
 
@@ -2298,6 +2420,9 @@ async def _run_cli(
         # so the directory is still empty when the CLI starts.
         call_dir = tempfile.mkdtemp(prefix="fi_cli_call_")
         child_env = _child_env(spec)
+        if extra_env:
+            # This one call's own settings (the claude CLI kept on the asked-for model: _chat_cli).
+            child_env = {**(child_env if child_env is not None else os.environ), **extra_env}
         if spec.home_settings is not None:
             home_dir = tempfile.mkdtemp(prefix="fi_cli_home_")
             _write_cli_home(Path(home_dir), spec.home_settings)
@@ -2681,6 +2806,15 @@ async def _collect_via_streaming(
                     raw_line = line.decode("utf-8", errors="replace")
                     if '"type"' in raw_line and '"result"' in raw_line:
                         raw_result_lines.append(raw_line)
+                    else:
+                        # Who answered, beside the counts (claude's stream): a model switch, the answer's model, a
+                        # refused turn. Kept small; every other line is dropped as before.
+                        try:
+                            fact = _claude_stream_fact_line(line)
+                        except Exception:  # noqa: BLE001 -- a record of who answered never stops the call
+                            fact = None
+                        if fact is not None:
+                            raw_result_lines.append(fact)
                 text_delta, thinking_inc, err, is_result = (
                     _parse_stream_json_line(line)
                 )
@@ -4400,15 +4534,125 @@ class LLMClient:
                 # own system prompt and tool schema, which is most of the
                 # input and which the estimator cannot see at all.
                 served = measured.pop("served_model", None)
+                switched = measured.pop("switched", None)
+                if measured.pop("refused", False):
+                    # The model declined and no other model answered: what came back is a refusal, never an answer.
+                    # Like a content filter's withheld answer it is not retried (the same model declines again): the
+                    # quest stops for a person, and the call's cost is recorded with it.
+                    raise ModelAnswerFiltered(
+                        f"{spec.argv[0]}: {effective_model or 'the model'} declined this request (a refusal, not an "
+                        "answer)",
+                        node=node, usage=dict(measured) or None, provider=self.last_provider,
+                        model=served if isinstance(served, str) else (effective_model or None),
+                        finish_reason="refusal",
+                    )
+                kept_switch = None
+                if isinstance(switched, dict):
+                    text, served, measured, kept_switch = await self._ask_the_asked_model_again(
+                        spec, prompt, images=images, model=effective_model, switched=switched, first_text=text,
+                        first_served=served, first_measured=measured, timeout_s=attempt_timeout,
+                        inactivity_timeout_s=(effective_inactivity if self._cli_inactivity_timeout_s is not None
+                                              else attempt_timeout),
+                        node=node,
+                    )
                 if isinstance(served, str) and served:
                     # The CLI said which model answered this very call (claude_cli does). Set from this call's own
                     # reading, in this task's own record: calls running at the same time never see each other's.
                     self.last_model = served
-                    LAST_CALL.set({"provider": self.last_provider, "model": served, "reported": True})
+                    LAST_CALL.set({"provider": self.last_provider, "model": served, "reported": True,
+                                   # The model the CLI switched away from, when the answer kept is another model's.
+                                   **({"switched_from": kept_switch.get("from") or effective_model}
+                                      if kept_switch else {})})
                 if measured:
                     self.last_usage = measured
                 return text
         raise RuntimeError("unreachable: tenacity reraise=True must raise on exhaustion")
+
+    def _say_model(self, line: str) -> None:
+        """One plain warning about which model answered, in FI's log and the quest's run.log (every time, not once)."""
+        _log.warning("%s", line)
+        if self._run_log is not None:
+            try:
+                self._run_log.warning("%s", line)
+            except Exception:  # noqa: BLE001 -- a log line never stops a call
+                pass
+
+    async def _ask_the_asked_model_again(
+        self, spec: _CliSpec, prompt: str, *, images: list[tuple[str, bytes]], model: str, switched: dict[str, Any],
+        first_text: str, first_served: Any, first_measured: dict[str, Any], timeout_s: float,
+        inactivity_timeout_s: float, node: str,
+    ) -> tuple[str, Any, dict[str, Any], dict[str, Any] | None]:
+        """The claude CLI answered with another model than the one asked for (``switched``: it does so on its own when
+        the asked-for model declines a request, and that model can cost far more: a Haiku quest's ``ideate`` call was
+        answered by a Fable model at about twelve times Haiku's price). A quest pays for the model the person chose, so
+        this is never accepted silently: it is said in run.log every time, and the asked-for model is asked once more
+        with the CLI's switching turned off (``CLAUDE_NO_REFUSAL_FALLBACK_ENV``). One direct call, not another round
+        of retries: a model that declines twice would decline again.
+
+        Returns ``(text, served model, usage, switch kept)``: the asked-for model's answer when it gave one (the first
+        answer is then recorded as a paid attempt that was not used), else the first answer with its switch, said
+        plainly again."""
+        to = str(switched.get("to") or "another model")
+        asked = model or str(switched.get("from") or "") or "the asked-for model"
+        reason = {
+            "model_refusal_fallback": "declined this request",
+            "model_fallback": "was not available",
+            "model_consent_fallback": "is not allowed by the account's model settings",
+        }.get(str(switched.get("kind") or ""), "could not be used")
+        where = f"[model] {node}: " if node else "[model] "
+        if not model:
+            self._say_model(f"{where}the claude tool's default model {reason}, so it answered with {to} instead; "
+                            f"that answer is kept (no model is named in the config to ask again)")
+            return first_text, first_served or to, first_measured, switched
+        if switched.get("kind") != "model_refusal_fallback":
+            # Only the switch after a refusal can be turned off for one call; asking again after any other switch
+            # would only switch again, at the other model's price.
+            self._say_model(f"{where}{asked} {reason}, so the claude tool answered with {to} instead; that answer is "
+                            f"kept, and this call cost {to}'s price, not {asked}'s")
+            return first_text, first_served or to, first_measured, switched
+        self._say_model(f"{where}{asked} {reason}, so the claude tool answered with {to} instead; asking {asked} once "
+                        "more with switching turned off")
+        second: dict[str, Any] = {}
+        problem = ""
+        text2 = ""
+        served2: Any = None
+        try:
+            text2 = await _run_cli(
+                spec, prompt, images=images, model=model, timeout_s=timeout_s,
+                inactivity_timeout_s=inactivity_timeout_s, heartbeat_cb=self._heartbeat_cb, node=node,
+                usage_out=second, reasoning_effort=self.endpoint.reasoning_effort,
+                extra_env={CLAUDE_NO_REFUSAL_FALLBACK_ENV: "1"},
+            )
+            served2 = second.pop("served_model", None)
+            again = second.pop("switched", None)
+            label = ""
+            if second.pop("refused", False):
+                problem, label = "it declined again", "refused"
+            elif isinstance(again, dict):
+                problem, label = f"the tool switched again, to {again.get('to')}", "switched_again"
+            elif not (text2 or "").strip():
+                problem, label = "it gave no answer", "no_answer"
+            elif isinstance(served2, str) and claude_model_family_differs(model, served2):
+                problem, label = f"{served2} answered, not {asked}", "answered_by_other_model"
+            if problem:
+                _note_failed_attempt(self.last_provider, served2 or model,
+                                     _OtherModelAnswer(problem, usage=second, outcome=label))
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 -- the first answer is kept; the failure is said and recorded
+            problem = f"the call failed: {type(e).__name__}"
+            _note_failed_attempt(self.last_provider, model, e)
+        if not problem:
+            # The first answer is not used, but it was paid for: recorded as an attempt with its token counts.
+            _note_failed_attempt(self.last_provider, first_served or to,
+                                 _OtherModelAnswer(f"answered by {to}, not {asked}", usage=first_measured,
+                                                   outcome="answered_by_other_model"))
+            self._say_model(f"{where}{asked} answered when asked again; its answer is kept (the {to} answer it "
+                            "replaces was still paid for)")
+            return text2, served2 or model, second, None
+        self._say_model(f"{where}{asked} could not answer ({problem}); the {to} answer is kept, and this call cost "
+                        f"{to}'s price, not {asked}'s")
+        return first_text, first_served or to, first_measured, switched
 
 
 # ---------------------------------------------------------------------------
