@@ -1537,6 +1537,12 @@ Blind spots: ${(row.known_blind_spots || []).join(' ')}`;
       const input = document.createElement('input'); input.type = 'text'; input.name = key;
       input.dataset.islist = Array.isArray(val.default) ? '1' : '0';
       input.value = Array.isArray(val.default) ? val.default.join(', ') : String(val.default ?? '');
+      // Suggested answers (the title question's candidate titles) become choices on the same box; typing your own still works.
+      if (Array.isArray(val.suggestions) && val.suggestions.length) {
+        const dl = document.createElement('datalist'); dl.id = `clarify-sugg-${key}`;
+        for (const s of val.suggestions) { const o = document.createElement('option'); o.value = String(s); dl.appendChild(o); }
+        input.setAttribute('list', dl.id); fs.appendChild(dl);
+      }
       fs.appendChild(input);
       form.appendChild(fs);
     }
