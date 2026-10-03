@@ -409,6 +409,103 @@ async def test_an_incomplete_answer_to_the_fill_does_not_use_up_the_one_ask(tmp_
     assert "FI already asked" not in seen[-1]["steps"][0]
 
 
+# A real plan (claude haiku, 2026-10-03) named scipy as a second implementation and wrote its call into the reference:
+# `t_span=[0, 10], y0=[1, 0]` was read as citing sources [0], [10] and [1], and the quest stopped for a "[0]" it never
+# cited, even after the fill.
+_SCIPY_REFERENCE = ("Independent second implementation: scipy.integrate.solve_ivp(f, t_span=[0, 10], y0=[1, 0], "
+                    "rtol=1e-12); shares no code with the simulation.")
+
+
+def test_a_list_written_as_code_is_not_read_as_citing_sources() -> None:
+    oracle = {"name": "scipy_vs_exact", "kind": "second_implementation", "check": "x(10) by scipy", "expected": 0.0,
+              "tolerance": 1e-8, "reference": _SCIPY_REFERENCE}
+    assert oracle_check.reference_problem(oracle, None, SOURCES) is None
+    spaced = {**oracle, "reference": _SCIPY_REFERENCE.replace("y0=[1, 0]", "y0 = [1, 0]")}
+    assert oracle_check.reference_problem(spaced, None, SOURCES) is None
+    # A derivation over an interval that starts at 0 cites nothing either; a real citation in it still counts.
+    over = {**oracle, "kind": "analytic", "reference": "derivation: the integral of 2x over [0, 1] = 1, as in [2]"}
+    assert oracle_check.reference_problem(over, None, SOURCES) is None
+    assert oracle_check._cites(over["reference"], SOURCES) == (["[2]"], [])
+    # Each rule on its own: a list assigned to a name, and one passed to a call, with no 0 in either.
+    assert oracle_check._cites("y0=[1, 7] and t_span = [2, 9]", SOURCES) == ([], [])
+    assert oracle_check._cites("solve_ivp(f, [1, 10], y)", SOURCES) == ([], [])
+    # Still citations: one number alone, also after `=`; a group in prose, also in parentheses; a comparison.
+    assert oracle_check._cites("as in ref=[2]", SOURCES) == (["[2]"], [])
+    assert oracle_check._cites("the result (see [1, 2])", SOURCES) == (["[1]", "[2]"], [])
+    assert oracle_check._cites("x == [1, 2]", SOURCES) == (["[1]", "[2]"], [])
+
+
+def test_a_source_number_that_does_not_exist_is_named_with_the_ones_that_do() -> None:
+    oracle = {"name": "x_exact", "check": "x(10)", "expected": 0.3, "tolerance": 1e-6, "reference": "[0]"}
+    why = oracle_check.reference_problem(oracle, None, SOURCES + [{"label": "W1", "title": "a web page"}])
+    assert why is not None and "did not retrieve" in why
+    assert "[0] is not one of the sources this quest found (they are [1]–[2] and [W1])" in why
+    gap = SOURCES + [{"label": "5", "title": "t"}]
+    assert oracle_check.labels_note(gap) == "[1]–[2], [5]"
+
+
+@pytest.mark.asyncio
+async def test_the_fill_request_says_plainly_that_a_source_number_does_not_exist(tmp_path: Path) -> None:
+    eng, seen = _engine(tmp_path, [], oracles=[{**o, "reference": "[0]"} for o in _oracles()])
+    calls: list[tuple[str, str]] = []
+
+    async def chat(messages: Any, **kw: Any) -> str:
+        node = str(kw.get("node") or "")
+        calls.append((node, "\n".join(str(m.get("content")) for m in messages)))
+        if node == "plan":
+            return json.dumps({"hypothesis": "h", "method": "m", "plan": {"in_short": "x"},
+                               "protocol": {"grid": {"sigma": [0.3]}, "model": GOOD_MODEL,
+                                            "oracles": [{**o, "reference": "[0]"} for o in _oracles()]}})
+        if node == "plan_revise":
+            return _with(plan.plan_path(eng.quest_root).read_text(encoding="utf-8").replace("reference: '[0]'",
+                                                                                            "reference: ''"),
+                         "derivation: sum of S over the pupil = 1 by definition")
+        if node == "plan_criteria":
+            return json.dumps({"criteria": []})
+        return json.dumps({"objections_addressed": []})
+
+    eng._client = type("Stub", (), {"chat": staticmethod(chat)})()
+    await eng._node_plan(dict(STATE))
+    fills = [text for node, text in calls if node == "plan_revise"]
+    assert len(fills) == 1
+    assert "[0] is not one of the sources this quest found (they are [1]–[2])" in fills[0]
+
+
+@pytest.mark.asyncio
+async def test_a_fill_whose_design_block_breaks_is_asked_for_the_block_once_and_then_kept(tmp_path: Path) -> None:
+    eng, seen = _engine(tmp_path, [])
+    calls: list[tuple[str, str]] = []
+    filled: dict[str, str] = {}
+
+    async def chat(messages: Any, **kw: Any) -> str:
+        node = str(kw.get("node") or "")
+        text = "\n".join(str(m.get("content")) for m in messages)
+        calls.append((node, text))
+        if node == "plan":
+            return json.dumps({"hypothesis": "an annular source prints the line best", "method": "sweep sigma",
+                               "protocol": {"grid": {"sigma": [0.3, 0.5]}, "oracles": _oracles(), "model": GOOD_MODEL},
+                               "plan": {"in_short": "x"}})
+        if node == "plan_revise" and "Return ONLY the corrected block" not in text:
+            good = _with(plan.plan_path(eng.quest_root).read_text(encoding="utf-8"),
+                         "derivation: sum of S over the pupil = 1 by definition")
+            filled["block"] = plan.design_block(good)[2]
+            # An unclosed quote: no repair can say where the value was meant to end.
+            return good.replace("method: sweep sigma", "method: 'sweep sigma")
+        if node == "plan_revise":
+            return "```yaml\n" + filled["block"] + "\n```"
+        if node == "plan_criteria":
+            return json.dumps({"criteria": []})
+        return json.dumps({"objections_addressed": []})
+
+    eng._client = type("Stub", (), {"chat": staticmethod(chat)})()
+    await eng._node_plan(dict(STATE))
+    assert seen == [], "the corrected block filled the sources in, so the quest does not stop"
+    revise = [text for node, text in calls if node == "plan_revise"]
+    assert len(revise) == 2 and "Where: line" in revise[1] and "Fill in where" not in revise[1]
+    assert "from: derivation: sum of S over the pupil = 1 by definition" in plan.plan_path(eng.quest_root).read_text(
+        encoding="utf-8")
+
+
 def test_a_fill_may_only_add_sources_kinds_and_missing_parts_of_the_model() -> None:
     from core.engine import _fill_changed_more
 

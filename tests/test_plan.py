@@ -435,6 +435,147 @@ async def test_a_second_try_that_works_is_used(tmp_path: Path) -> None:
     assert plan.parse(path.read_text(encoding="utf-8")).design["method"] == "a better method"
 
 
+# A real rewrite (claude haiku, 2026-10-03) whose design block was not valid YAML: a value running over several lines
+# had `: ` on one of them. Twice; each whole-file answer cost ~30k characters and the plan was left unchanged.
+_BROKEN_METHOD = ("method: compare three strategies\n  on synthetic clips. Plot with\n"
+                  "  Matplotlib: one panel per strategy")
+_METHOD_AS_MEANT = "compare three strategies on synthetic clips. Plot with Matplotlib: one panel per strategy"
+
+
+def _with_broken_method(text: str) -> str:
+    out = text.replace("method: compare three strategies on synthetic clips", _BROKEN_METHOD)
+    assert out != text
+    return out
+
+
+def test_a_value_with_a_colon_on_a_line_it_runs_on_to_is_repaired_as_the_same_text() -> None:
+    block = plan.design_block(_with_broken_method(plan.render("OPC", EXTRA, DESIGN)))[2]
+    problem = plan.yaml_problem(block)
+    assert problem is not None and problem["line"] is not None and problem["column"] is not None
+    assert "mapping values are not allowed" in problem["problem"]
+    assert any(line.startswith(">") and "Matplotlib:" in line for line in problem["lines"])
+    fixed, notes = plan.repair_block(block)
+    assert fixed is not None and notes and "`method`" in notes[0]
+    assert yaml.safe_load(fixed)["method"] == _METHOD_AS_MEANT
+    # Everything else is read as it was written.
+    assert {k: v for k, v in yaml.safe_load(fixed).items() if k != "method"} == {
+        k: v for k, v in yaml.safe_load(plan.design_block(plan.render("OPC", EXTRA, DESIGN))[2]).items() if k != "method"}
+
+
+def test_a_colon_at_the_end_of_a_list_items_value_is_repaired_and_a_comment_is_not_guessed_at() -> None:
+    block = ("oracles:\n  - name: two_steps\n    check: Two steps by hand. Step 1:\n      x1 = 1. Step 2: x2 = 0.75.\n"
+             "    expected: 0.75\n")
+    fixed, _notes = plan.repair_block(block)
+    assert fixed is not None
+    assert yaml.safe_load(fixed)["oracles"][0] == {"name": "two_steps", "check": "Two steps by hand. Step 1: x1 = 1. "
+                                                   "Step 2: x2 = 0.75.", "expected": 0.75}
+    # A ` #` would be a comment in the value as written and text in a folded block: not repaired.
+    assert plan.repair_block("a: one\n  two: three # note\n") == (None, [])
+    # Indentation made only of tabs is written with spaces; a mix is not guessed at.
+    assert yaml.safe_load(plan.repair_block("a:\n\tb: 1\n\tc: 2\n")[0]) == {"a": {"b": 1, "c": 2}}
+    assert plan.repair_block("a:\n\tb: 1\n  c: 2\n") == (None, [])
+
+
+@pytest.mark.parametrize("block", [
+    # A key indented one level too far is not text the value above runs on to.
+    "oracles:\n  - name: norm\n    check: sum of S\n    expected: 1.0\n      tolerance: 1.0e-08\n",
+    "expected: 0.75\n  tolerance: 1e-6\n",
+    "method: foo\n  sub:\n    a: 1\n",
+    # Two keys run onto one line.
+    "oracles:\n  - name: norm\n    check: sum of S expected: 2.0\n    tolerance: 1.0e-08\n",
+    # Keys not written in snake_case (a grid axis), holding a number or nothing.
+    "variables:\n  N: 100\n    T: 5\n",
+    "expected: 1.0\n      relTol: 1e-8\n",
+    "method: m\n  max-iter: 5\n",
+    "grid:\n  N: 100 T: 5\n",
+])
+def test_a_key_is_never_folded_into_the_value_before_it(block: str) -> None:
+    assert plan.repair_block(block) == (None, [])
+
+
+def test_an_unfenced_corrected_block_is_used_only_when_it_starts_with_a_key() -> None:
+    assert plan.block_from_reply("hypothesis: h\nmethod: m") == "hypothesis: h\nmethod: m"
+    assert plan.block_from_reply("Here is the corrected block:\n\nhypothesis: h") is None
+    assert plan.block_from_reply("Sure.\n```yaml\nhypothesis: h\n```") == "hypothesis: h"
+
+
+@pytest.mark.asyncio
+async def test_a_broken_design_block_that_can_be_repaired_costs_no_second_call(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    eng._client = type("Stub", (), {"chat": AsyncMock(return_value=_with_broken_method(path.read_text(encoding="utf-8")))})()
+    await eng.revise_plan("say how the results are plotted")
+    assert eng._client.chat.await_count == 1
+    assert plan.parse(path.read_text(encoding="utf-8")).design["method"] == _METHOD_AS_MEANT
+
+
+@pytest.mark.asyncio
+async def test_a_broken_design_block_is_asked_for_once_alone_with_where_it_breaks(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    revised = plan.render("OPC", EXTRA, {**DESIGN, "method": "a better method"}).replace(
+        "# Plan", "# Plan\n\nA sentence the rewrite added.", 1)
+    good_block = plan.design_block(revised)[2]
+    # An unclosed quote: no repair can say where it was meant to end.
+    broken = revised.replace("method: a better method", "method: 'a better method")
+    assert plan.parse(broken).design is None and plan.repair_design(broken) == (None, [])
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[broken, "```yaml\n" + good_block + "\n```"])})()
+
+    await eng.revise_plan("better method")
+
+    assert eng._client.chat.await_count == 2
+    ask = _prompt(eng._client.chat.await_args_list[1])
+    assert "Where: line" in ask and "column" in ask and "The YAML parser says:" in ask
+    assert "Return ONLY the corrected block" in ask and "method: 'a better method" in ask
+    assert "In short" not in ask and "What the person asked for" not in ask, "only the block is sent, not the plan"
+    text = path.read_text(encoding="utf-8")
+    assert plan.parse(text).design["method"] == "a better method"
+    assert "A sentence the rewrite added." in text, "the rest of the rewrite is kept"
+
+
+@pytest.mark.asyncio
+async def test_a_valid_yaml_block_that_is_not_a_usable_design_gets_the_whole_file_retry(tmp_path: Path) -> None:
+    # A missing hypothesis is fixed from the plan and the request, which the block alone does not carry.
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    no_hypothesis = path.read_text(encoding="utf-8").replace(f"hypothesis: {DESIGN['hypothesis']}\n", "")
+    assert plan.parse(no_hypothesis).design is None and plan.yaml_problem(plan.design_block(no_hypothesis)[2]) is None
+    good = plan.render("OPC", EXTRA, {**DESIGN, "method": "a better method"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[no_hypothesis, good])})()
+    await eng.revise_plan("better method")
+    assert eng._client.chat.await_count == 2
+    second = _prompt(eng._client.chat.await_args_list[1])
+    assert "could not be used" in second and "Return the whole file again" in second
+    assert plan.parse(path.read_text(encoding="utf-8")).design["method"] == "a better method"
+
+
+@pytest.mark.asyncio
+async def test_a_broken_block_that_once_repaired_is_still_not_a_design_gets_the_whole_file_retry(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    broken = _with_broken_method(path.read_text(encoding="utf-8")).replace(f"hypothesis: {DESIGN['hypothesis']}\n", "")
+    good = plan.render("OPC", EXTRA, {**DESIGN, "method": "a better method"})
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[broken, good])})()
+    await eng.revise_plan("better method")
+    assert eng._client.chat.await_count == 2
+    assert "Return the whole file again" in _prompt(eng._client.chat.await_args_list[1])
+    assert plan.parse(path.read_text(encoding="utf-8")).design["method"] == "a better method"
+
+
+@pytest.mark.asyncio
+async def test_a_block_still_broken_when_asked_alone_stops_with_the_reason_and_no_more_calls(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    path = _existing_plan(eng)
+    before = path.read_text(encoding="utf-8")
+    broken = before.replace("method: compare three strategies on synthetic clips", "method: 'compare")
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[broken, "```yaml\nmethod: 'still open\n```"])})()
+    with pytest.raises(ValueError, match="not valid YAML.*asked once for the corrected block alone.*unchanged"):
+        await eng.revise_plan("make it better")
+    assert eng._client.chat.await_count == 2
+    assert path.read_text(encoding="utf-8") == before
+    assert len(plan.history(eng.quest_root)) == 1
+
+
 @pytest.mark.asyncio
 async def test_a_request_needs_words_and_a_plan(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])

@@ -395,13 +395,75 @@ def _labels_in(group: str) -> list[str]:
     return out
 
 
+def _code_list(text: str, start: int, group: str) -> bool:
+    """Whether the bracket at ``start`` holding several numbers (``group``) is a list or an interval, not a citation:
+    one with a 0 in it (``[0, 1]``: no source is numbered 0), one assigned to a name (``y0=[1, 2]``,
+    ``t_span = [1, 10]``), or one passed to a call (``solve_ivp(f, [1, 10], y)``). One number alone is always read as a
+    citation, so a ``[0]`` is a citation of a source that does not exist."""
+    before = text[:start].rstrip()
+    numbers = re.split(r"\s*[,–\-]\s*", group.strip())
+    if len(numbers) < 2:
+        return False  # one number alone ([2], even `ref=[2]`) is read as a citation
+    if any(n.upper().lstrip("W").strip("0") == "" for n in numbers):
+        return True
+    # Assigned to a name (`y0=[1, 2]`, `t_span = [1, 10]`), not compared (`==`, `<=`).
+    if re.search(r"(?<![=<>!])[A-Za-z_]\w*\s*:?=$", before):
+        return True
+    # An argument of a call still open (`solve_ivp(f, [1, 10], y)`): just after `name(` or after a comma inside it.
+    depth = 0
+    for i in range(len(before) - 1, -1, -1):
+        ch = before[i]
+        if ch == ")":
+            depth += 1
+        elif ch == "(":
+            if depth == 0:
+                return bool(re.search(r"[A-Za-z_]\w*$", before[:i])) and before.endswith(("(", ","))
+            depth -= 1
+    return False
+
+
+def labels_note(sources: list[dict[str, str]]) -> str:
+    """The labels of the sources this quest found, as a reader can use them (``[1]–[14] and [W1]–[W3]``; a gap is
+    shown, ``[1]–[2], [5]``), or ``""``."""
+    def span(numbers: list[int], prefix: str) -> str:
+        runs: list[list[int]] = []
+        for n in sorted(set(numbers)):
+            if runs and n == runs[-1][1] + 1:
+                runs[-1][1] = n
+            else:
+                runs.append([n, n])
+        return ", ".join(f"[{prefix}{lo}]" if lo == hi else f"[{prefix}{lo}]–[{prefix}{hi}]" for lo, hi in runs)
+
+    labels = [str(s.get("label") or "").upper() for s in sources if isinstance(s, dict)] if isinstance(sources, list) else []
+    plain = [int(x) for x in labels if x.isdigit()]
+    web = [int(x[1:]) for x in labels if x.startswith("W") and x[1:].isdigit()]
+    return " and ".join(p for p in (span(plain, ""), span(web, "W")) if p)
+
+
+def _not_found(missing: list[str], sources: list[dict[str, str]]) -> str:
+    """``missing`` and why they cannot be used, plainly: ``[0] is not one of the sources this quest found (they are
+    [1]–[14])``. A DOI that is missing is said as before."""
+    labels = [m for m in missing if m.startswith("[")]
+    names = ", ".join(missing)
+    if not labels:
+        return f"{names}, which this quest did not retrieve"
+    found = labels_note(sources)
+    one = len(labels) == 1
+    return (f"{names}, which this quest did not retrieve: {', '.join(labels)} {'is' if one else 'are'} not "
+            f"{'one' if one else 'any'} of the sources this quest found ("
+            + (f"they are {found}" if found else "it found none it can number") + ")")
+
+
 def _cites(text: str, sources: list[dict[str, str]]) -> tuple[list[str], list[str]]:
     """``(what text cites that the quest retrieved, what it cites that it did not)``: a [n] label (alone, grouped or a
     range), a DOI, or the title of a retrieved source (five words or more) written into it."""
     sources = [s for s in sources if isinstance(s, dict)] if isinstance(sources, list) else []
     labels = {str(s.get("label") or "").upper() for s in sources}
     found, missing = [], []
-    for group in _LABEL_RE.findall(text):
+    for match in _LABEL_RE.finditer(text):
+        group = match.group(1)
+        if _code_list(text, match.start(), group):
+            continue
         for label in _labels_in(group):
             (found if label in labels else missing).append(f"[{label}]")
     dois = {_doi(s.get("doi")) for s in sources if s.get("doi")}
@@ -625,7 +687,7 @@ def _steps_problem(steps: str, sources: list[dict[str, str]]) -> str | None:
         return f"does not show how the value follows: {DERIVATION_RULE}"
     found, missing = _cites(steps, sources)
     if missing:
-        return f"rests on {', '.join(missing)}, which this quest did not retrieve"
+        return f"rests on {_not_found(missing, sources)}"
     named = [m.group(0).strip().rstrip(")") for m in _AUTHOR_YEAR_RE.finditer(steps)]
     if not found and (_RECALLED_RE.search(steps) or (_POINTER_RE.match(steps) and named)):
         return "takes its value from a source this quest did not retrieve, not from steps written out"
@@ -647,7 +709,7 @@ def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str |
         return f"equation {eid} is marked as a derivation, but it {why}" if why else None
     found, missing = _cites(source, sources)
     if missing:
-        return f"equation {eid} cites {', '.join(missing)}, which this quest did not retrieve"
+        return f"equation {eid} cites {_not_found(missing, sources)}"
     if found:
         return None
     return (f"equation {eid} cites a source this quest did not retrieve (“{source[:80]}”): a source recalled "
@@ -667,8 +729,7 @@ def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
         return f"the check {name!r} names a derivation for its expected value, but it {why}" if why else None
     found, missing = _cites(ref, sources)
     if missing:
-        return (f"the check {name!r} takes its expected value from {', '.join(missing)}, which this quest did not "
-                "retrieve")
+        return f"the check {name!r} takes its expected value from {_not_found(missing, sources)}"
     equations = _equations(protocol)
     cited = [eid for eid in equations
              if re.search(rf"(?<![\w.]){re.escape(eid)}(?!\w|\.\d)", ref, re.IGNORECASE)]
