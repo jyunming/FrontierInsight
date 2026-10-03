@@ -4732,12 +4732,11 @@ class Engine:
         audit_started = _receipts.now()
         before = json.loads(json.dumps(design, default=str))
         try:
-            critique_text = await self._chat(
-                critique_prompt, node="design_self_critique",
+            # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
+            _, critique = await self._chat_json(
+                critique_prompt, node="design_self_critique", want=("objections_addressed",),
+                usable=lambda p: isinstance(p.get("objections_addressed"), list),
             )
-            critique = _parse_json_lenient(
-                critique_text, node="design_self_critique",
-            ) or {}
         except Exception as e:  # noqa: BLE001 — see "Failure isolation" above
             failure = f"the audit call or its reply could not be used: {e!r}"
             self._log.warning(
@@ -5727,7 +5726,12 @@ class Engine:
         from .vscode_bridge import is_router_alias
 
         asked = str(self.config.provider.model or "").strip()
-        if asked and not is_router_alias({"id": asked}) and not self.same_model(asked, model, family):
+        # The claude CLI's short names (``haiku``, ``opus[1m]``) name the newest model of their family: the full id it
+        # reports for one is the same model, not a warning.
+        short = re.sub(r"\[[^\]]*\]$", "", asked.lower())
+        alias = (self.config.provider.name == "claude_cli" and short in ("haiku", "sonnet", "opus", "fable")
+                 and short in re.split(r"[-_.\[\]\s]+", model.lower()))
+        if asked and not alias and not is_router_alias({"id": asked}) and not self.same_model(asked, model, family):
             self._log.warning("[model] the config names %s; %s served %s", asked,
                               "VS Code" if self.config.provider.name == "vscode_extension" else "the connection", model)
         earlier = self.__dict__.get("_earlier_served_model")
@@ -6201,15 +6205,18 @@ class Engine:
                 alternatives = [f"Give `{key}` another model: `provider.node_models.{key}`, then go on."]
             steps += [steps_names, "Resuming runs this step again with the new setting; what the quest did before it is kept."]
         else:
-            headline = f"the provider withheld the answer at the {call} step with its content filter"
+            declined = getattr(e, "finish_reason", None) == "refusal"  # the model itself declined (the claude CLI)
+            headline = (f"the model declined to answer at the {call} step" if declined
+                        else f"the provider withheld the answer at the {call} step with its content filter")
             steps = [
-                f"{who} answered `{call}`, but the provider's content filter withheld the answer, so there is nothing "
-                "to use. Asking the same model the same thing again gives the same result.",
+                (f"{who} declined to answer `{call}`, so there is nothing to use. " if declined else
+                 f"{who} answered `{call}`, but the provider's content filter withheld the answer, so there is nothing "
+                 "to use. ") + "Asking the same model the same thing again gives the same result.",
                 f"Give that step another model: `provider: {{node_models: {{{key}: <model>}}}}` in the quest's "
                 f"`config.yaml`, then approve the change with `python launch.py --update {self.quest_id}` (it resumes "
                 "the quest too).",
                 "Or change what the quest asks (the topic, or the plan with `--revise-plan \"...\"`) if its wording is "
-                "what the filter refused, then resume.",
+                + ("what the model declined" if declined else "what the filter refused") + ", then resume.",
             ]
             recommended = f"Give `{key}` another model: `provider.node_models.{key}`, then go on."
             alternatives = ["Change the topic or the plan's wording, then go on."]
@@ -13991,8 +13998,11 @@ class Engine:
                     protocol_block=protocol.as_block(),
                     evidence_summary=json.dumps(summary, indent=2),
                 )
-                text = await self._chat(prompt, node="evidence_gate")
-                parsed = _parse_json_lenient(text, node="evidence_gate") or {}
+                _, parsed = await self._chat_json(
+                    prompt, node="evidence_gate", want=("verdict",),
+                    usable=lambda p: str(p.get("verdict") or "").strip().lower() in (
+                        "sufficient", "broaden", "insufficient"),
+                )
         except Exception as e:  # noqa: BLE001 — gate must never abort the quest
             status = "unknown"
             failure = f"{type(e).__name__}: {e}"[:300]
@@ -14626,7 +14636,10 @@ class Engine:
         # checked its new citations. The failure is recorded, the stale
         # grounding cleared, and the review forces ``citations_unchecked``.
         try:
-            text = await self._chat(prompt, node="claim_check")
+            # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
+            _, parsed = await self._chat_json(
+                prompt, node="claim_check", want=("claims",), usable=lambda p: isinstance(p.get("claims"), list),
+            )
         except _ModelAnswerProblem:
             raise
         except Exception as e:
@@ -14641,7 +14654,6 @@ class Engine:
             self._stop_once_for_check("claim_check", reason, look="the [claim_check] entry in .fi/run.log",
                                       inputs={"paper": checked_bytes})
             return {"claim_grounding": {}, "claim_check_failed": reason}
-        parsed = _parse_json_lenient(text) or {}
         # A reply that parses as JSON but never names a "claims" list at all is
         # not the same thing as one that names an EMPTY list — the former is
         # the model failing to answer in the expected shape, the latter is it
@@ -16843,6 +16855,48 @@ class Engine:
             }
         return response
 
+    #: A reply up to this long is shown back with the request for a re-answer, so the model can restate what it said; a
+    #: longer one (a real Haiku audit reply was 67,963 characters) is not repeated, and the request is answered afresh.
+    _REANSWER_ECHO_CHARS = 12000
+
+    async def _chat_json(
+        self, prompt: str, *, node: str, want: tuple[str, ...], usable: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> tuple[str, dict[str, Any]]:
+        """A call whose answer is one JSON object carrying ``want`` (a required check's: the design audit, the
+        evidence gate, the claim check). When the reply cannot be used (no such object in it, or ``usable`` says it
+        is not), the same request is asked ONCE more with a short instruction: one object of the asked-for shape, no
+        fence, no prose, no second object, nothing long. Returns the reply and the object read from it (``{}`` when
+        neither answer could be used: the caller's own rule for an unreadable answer then applies, unchanged)."""
+        ok = usable or (lambda p: all(k in p for k in want))
+        text = await self._chat(prompt, node=node)
+        parsed = _parse_json_lenient(text, node=node, want=want) or {}
+        if isinstance(parsed, dict) and ok(parsed):
+            return text, parsed
+        objects = _top_level_json_objects(text or "")
+        if not (text or "").strip():
+            wrong = "it was empty"
+        elif not objects:
+            wrong = f"it was {len(text):,} characters with no JSON object in it"
+        elif len(objects) > 1:
+            wrong = (f"it was {len(text):,} characters holding {len(objects)} separate JSON objects, not one object of "
+                     "the asked-for shape")
+        elif all(k in objects[0] for k in want):
+            wrong = f"it was {len(text):,} characters and its {', '.join(want)} was not one of the values asked for"
+        else:
+            wrong = f"it was {len(text):,} characters and its JSON object did not carry {', '.join(want)} as asked"
+        self._log.warning("[%s] the reply could not be used (%s); asking once more for one short JSON object", node,
+                          wrong)
+        echo = (f"\nYour previous reply, for reference (say the same things, in the asked-for shape):\n\n{text}\n"
+                if len(text) <= self._REANSWER_ECHO_CHARS else "")
+        retry = self._prompts["json_reanswer"].substitute(original_prompt=prompt, what_was_wrong=wrong, keys=", ".join(want), earlier_reply=echo)
+        text = await self._chat(retry, node=node)
+        parsed = _parse_json_lenient(text, node=node, want=want) or {}
+        if isinstance(parsed, dict) and ok(parsed):
+            self._log.info("[%s] the second, shorter answer could be read", node)
+            return text, parsed
+        self._log.warning("[%s] the second answer could not be used either (%d characters)", node, len(text or ""))
+        return text, parsed if isinstance(parsed, dict) else {}
+
     def _seed_call_counts(self, state: Any) -> None:
         """Start this run's tally of model calls from the one the quest's state kept (a resumed quest)."""
         if self.__dict__.get("_model_call_counts_seeded"):
@@ -18707,6 +18761,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "design", "design_self_critique",   # second-pass methodology audit
         "plan_revise",                      # --revise-plan: rewrite plan.md as the person asked
         "plan_criteria",                    # the plan named no check of correctness: ask once more
+        "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "oracle_review",                    # a second model reads the plan's checks against known answers
         "oracle_recompute",                 # a failing check's expected value worked out again, blind to the measurement
         "implement",                      # legacy one-shot (resume fallback)
@@ -23708,7 +23763,78 @@ def _format_figure_check(paper_md: str, state: QuestState) -> str:
 
 
 def _parse_json_lenient(
-    text: str, *, node: str = "", _log_truncate_chars: int = 500,
+    text: str, *, node: str = "", _log_truncate_chars: int = 500, want: tuple[str, ...] = (),
+) -> dict[str, Any] | None:
+    """Find and parse a JSON object inside arbitrary LLM output.
+
+    ``want`` (opt-in): the keys the asked-for object carries. When the usual parse below fails or returns an object
+    without them, every JSON object written at the top level of the reply is read, and the last one that carries all
+    of them is returned. A real Haiku audit reply held two fenced objects (the amended design alone, then the asked-for
+    object with its objections); the first-``{``-to-last-``}`` slice spanned both and the audit was called unreadable."""
+    if want:
+        parsed = _parse_json_lenient_once(text, node=node, _log_truncate_chars=_log_truncate_chars, _quiet=True)
+        if isinstance(parsed, dict) and all(k in parsed for k in want):
+            return parsed
+        found = [o for o in _top_level_json_objects(text or "") if all(k in o for k in want)]
+        if found:
+            return found[-1]
+        candidate = _strip_outer_fence(text or "").strip()
+        if parsed is None and candidate:
+            _log_parse_failure(candidate, node, _log_truncate_chars)
+        return parsed
+    return _parse_json_lenient_once(text, node=node, _log_truncate_chars=_log_truncate_chars)
+
+
+def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
+    """Every JSON object written at the top level of ``text`` (an object inside one already read is not counted
+    again), in order. Prose, fences and objects that do not parse between them are skipped."""
+    decoder = json.JSONDecoder()
+    out: list[dict[str, Any]] = []
+    i = text.find("{")
+    while i >= 0:
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except (ValueError, RecursionError):
+            # An object that does not parse (a trailing comma, a reply cut off) is skipped whole, to its matching
+            # brace: an object inside it is never read as one of the reply's own (an evidence gate's per-source
+            # "verdict" taken for the gate's). A brace in prose ("{ opens a set") is not an object: only the next
+            # character is skipped, so it cannot swallow the reply that follows it.
+            looks_like_object = text[i + 1:].lstrip()[:1] in ('"', "}")
+            i = text.find("{", _matching_brace_end(text, i) if looks_like_object else i + 1)
+            continue
+        if isinstance(obj, dict):
+            out.append(obj)
+        i = text.find("{", end)
+    return out
+
+
+def _matching_brace_end(text: str, start: int) -> int:
+    """The index just past the ``}`` that closes the ``{`` at ``start`` (braces inside JSON strings not counted), or
+    the end of ``text`` when it is never closed."""
+    depth = 0
+    in_string = escaped = False
+    for k in range(start, len(text)):
+        ch = text[k]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return k + 1
+    return len(text)
+
+
+def _parse_json_lenient_once(
+    text: str, *, node: str = "", _log_truncate_chars: int = 500, _quiet: bool = False,
 ) -> dict[str, Any] | None:
     """Find and parse a JSON object inside arbitrary LLM output.
 
@@ -23761,12 +23887,14 @@ def _parse_json_lenient(
             result = json.loads(candidate[start : end + 1])
             return result if isinstance(result, dict) else None
         except json.JSONDecodeError:
-            _log_parse_failure(candidate, node, _log_truncate_chars)
+            if not _quiet:
+                _log_parse_failure(candidate, node, _log_truncate_chars)
             return None
     # No braces found at all — the model didn't return JSON-ish output.
     # That's just as much a parse failure as the slice-attempt-failed
     # case above, and worth logging at the same WARNING level.
-    _log_parse_failure(candidate, node, _log_truncate_chars)
+    if not _quiet:
+        _log_parse_failure(candidate, node, _log_truncate_chars)
     return None
 
 

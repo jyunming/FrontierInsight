@@ -459,7 +459,8 @@ async def test_a_hand_edit_before_a_request_is_kept_as_its_own_version(tmp_path:
 async def test_a_design_already_in_state_is_never_replaced_by_the_plan(tmp_path: Path) -> None:
     """Even at iteration 0: a re-entry after results (the analysis asked for a new experiment) must draft
     from the diagnosis, not re-adopt the plan and run the same design again."""
-    eng = _engine(tmp_path, [json.dumps({**DESIGN, "hypothesis": "redesigned after the diagnosis"}), json.dumps({})])
+    eng = _engine(tmp_path, [json.dumps({**DESIGN, "hypothesis": "redesigned after the diagnosis"}),
+                             json.dumps({"objections_addressed": []})])
     path = plan.plan_path(eng.quest_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(plan.render("OPC", EXTRA, DESIGN), encoding="utf-8")
