@@ -108,6 +108,99 @@ def _sign(block: dict[str, Any]) -> float:
     return 1.0 if str(block["objective"].get("direction")) == "minimise" else -1.0
 
 
+# Units FI converts between by an SI prefix alone (9500 mK is 9.5 K). Anything else with a different unit is refused, not
+# guessed (a Celsius figure for a kelvin quantity, a W for a K).
+_BASES = {"K", "Pa", "W", "V", "A", "Hz", "J", "s", "m", "g", "N", "Ω", "ohm", "T", "F", "H", "C", "L", "mol", "eV",
+          "Wh", "B", "bar", "S"}
+_PREFIXES = {"p": 1e-12, "n": 1e-9, "µ": 1e-6, "μ": 1e-6, "u": 1e-6, "m": 1e-3, "": 1.0, "k": 1e3, "M": 1e6,
+             "G": 1e9, "T": 1e12}
+_PERCENT = re.compile(r"\s*(?:%|percent\b|per\s*cent\b)", re.I)
+_TOKEN = re.compile(r"\s*([A-Za-zµμΩ°][A-Za-z0-9µμΩ°/^·-]*)")
+# A unit written out in words, as the symbol it names.
+_NAMED = {"kelvin": "K", "kelvins": "K", "watt": "W", "watts": "W", "volt": "V", "volts": "V", "pascal": "Pa",
+          "pascals": "Pa", "hertz": "Hz", "joule": "J", "joules": "J", "seconds": "s", "meters": "m", "metres": "m",
+          "grams": "g", "celsius": "°C", "fahrenheit": "°F"}
+
+
+def _split_unit(text: str) -> tuple[float, str] | None:
+    """``(prefix factor, base unit)`` of a unit written as an SI prefix and a known base unit ("mK" is 1e-3 of K)."""
+    if text in _BASES:
+        return 1.0, text
+    if len(text) > 1 and text[0] in _PREFIXES and text[1:] in _BASES:
+        return _PREFIXES[text[0]], text[1:]
+    return None
+
+
+def _unit_after(rest: str, unit: str) -> str:
+    """The unit written right after a number (``rest`` is the text after it): ``"%"``, the objective's own unit, or a
+    known unit; ``""`` when the number is bare (or followed by a word that is not a unit)."""
+    unit = _sym(unit)
+    if _PERCENT.match(rest):
+        return "%"
+    m = _TOKEN.match(rest)
+    if not m:
+        return ""
+    token = m.group(1).rstrip("-/")
+    token = _NAMED.get(token.lower(), token)
+    # A unit of the objective's own, a known one, or a compound / degree one (K/s, °C), which FI cannot convert.
+    if (unit and token == unit) or _split_unit(token) or token.startswith("°") or re.search(r"[/^·]", token):
+        return token
+    return ""
+
+
+def _sym(unit: str) -> str:
+    """A unit written out in words ("kelvin") as its symbol ("K")."""
+    return _NAMED.get(unit.strip().lower(), unit.strip())
+
+
+# A word between a number and "better" that names a unit ("2 min better than the baseline").
+_SLOT = re.compile(r"\s*([^\s\d.;,%]{1,12})\s+(?:better|lower|higher|cooler|less|more|smaller|larger|faster)\b", re.I)
+_BETTER_WORDS = {"better", "lower", "higher", "cooler", "less", "more", "smaller", "larger", "faster", "improvement",
+                 "reduction", "gain"}
+
+
+def _is_percent_unit(unit: str) -> bool:
+    return unit.strip().lower() in {"%", "percent", "per cent", "pct"}
+
+
+def _with_unit(value: float, rest: str, unit: str, quantity: str, sign: float, relative_ok: bool = False) -> tuple[float, bool, str, str]:
+    """``(value in the objective's unit, whether it is a percent, the unit as written, a refusal)`` for a number
+    followed by ``rest``. A percent of a quantity that is not itself in percent is relative (the caller says to what);
+    a unit of its own is converted when it differs only by an SI prefix, else refused; a bare number is in the
+    objective's unit."""
+    written = _unit_after(rest, unit)
+    if not written and relative_ok:
+        slot = _SLOT.match(rest)
+        if slot and slot.group(1).lower() not in _BETTER_WORDS:
+            written = slot.group(1)  # a unit FI does not know: refused below, not read in the objective's unit
+    if not written or (_is_percent_unit(unit) and written == "%"):
+        return value, False, written, ""
+    if written == "%":
+        if not unit and not relative_ok:
+            return value, True, written, (
+                f"it gives a percent, but {quantity} has no unit, so FI cannot tell what it is a percent of. Give the "
+                f"value as a plain number (for example \"at {'most' if sign > 0 else 'least'} 0.85\")")
+        return value, True, written, ""
+    converted = value if written == _sym(unit) else _convert(value, written, unit)
+    if converted is None:
+        return value, False, written, (
+            f"it gives the target in {written}, but this study's {quantity} is in {unit or 'no unit'} and FI does not "
+            f"convert between them. Give the value in {unit or 'the same terms as the study'} (for example \"at "
+            f"{'most' if sign > 0 else 'least'} X{' ' + unit if unit else ''}\")")
+    return converted, False, written, ""
+
+
+def _convert(value: float, written: str, unit: str) -> float | None:
+    """``value`` written in ``written`` as a value in the objective's ``unit``, or ``None`` when FI cannot convert."""
+    unit = _sym(unit)
+    if written == unit:
+        return value
+    a, b = _split_unit(written), _split_unit(unit)
+    if a and b and a[1] == b[1]:
+        return float(f"{value * a[0] / b[0]:.12g}")
+    return None
+
+
 def _tied(note: str, m: re.Match[str], block: dict[str, Any]) -> bool:
     """Whether the number ``m`` matched is about the objective: the objective's unit right after it, or the objective
     named (its name, or a word of its meaning) next to it, or "than the baseline"."""
@@ -118,9 +211,19 @@ def _tied(note: str, m: re.Match[str], block: dict[str, Any]) -> bool:
         return True
     if re.search(r"\bthan\s+the\s+baseline\b", note[m.start():m.end() + 40], re.I):
         return True
+    written = _unit_after(rest, unit)
+    if written and written != "%" and not _is_percent_unit(unit) and written != _sym(unit) \
+            and _convert(1.0, written, unit) is None:
+        # A unit that does not fit the objective ("at most 100 s", "10 MB") is only read as a target, to be refused, where
+        # the comparison follows the objective's own name directly ("f at most 9.5 W", "f should be at most 9.5 W")
+        # or says "target" / "reach"; a note about the paper that merely names the quantity is an ordinary refine.
+        before = note[max(0, m.start() - 60):m.start()].replace("_", " ")
+        name = re.escape(str(objective.get("quantity") or "").replace("_", " "))
+        return bool(re.search(rf"(?<![\w-]){name}\s*(?:target\s+)?(?:(?:is|should\s+be|must\s+be|to\s+be)\s+)?:?\s*$", before, re.I)
+                    or re.fullmatch(_NEUTRAL, (m.groupdict().get("op") or "").strip(), re.I))
     # A number followed by a word of its own ("200 words", "3 significant figures") is about something else.
     word = re.match(r"([A-Za-z]+)", rest)
-    if word and not _BETTER.match(rest) and word.group(1).lower() not in _words(objective.get("quantity")):
+    if word and not written and not _BETTER.match(rest) and word.group(1).lower() not in _words(objective.get("quantity")):
         return False
     # The objective named next to the number, outside the comparison's own words ("below" is not a word of a meaning).
     near = note[max(0, m.start() - 50):m.start()] + " " + note[m.end():m.end() + 50]
@@ -222,7 +325,9 @@ def read_request(note: str, block: dict[str, Any] | None, best: dict[str, Any] |
                 "Your refine was not carried out: it asks for an improvement over the baseline, but the baseline has no "
                 "value in FI's record of the search, so the target cannot be worked out. Give the target as a value of "
                 f"{quantity} instead (for example \"at most ...{u}\"). Nothing was changed.")}
-        percent = (m.group("rest") or "").lstrip().startswith("%") and unit != "%"
+        amount, percent, _written, refusal = _with_unit(amount, m.group("rest") or "", unit, quantity, sign, True)
+        if refusal:
+            return {"kind": UNCLEAR, "says": f"Your refine was not carried out: {refusal}. Nothing was changed."}
         step = abs(amount) / 100.0 * abs(baseline) if percent else abs(amount)
         target = baseline - sign * step
         said = f"{_fmt(abs(amount))}%" if percent else f"{_fmt(abs(amount))}{u}"
@@ -233,22 +338,46 @@ def read_request(note: str, block: dict[str, Any] | None, best: dict[str, Any] |
         op = (compare.group("op") or compare.group("sym")).lower()
         low = re.fullmatch(_LOW, op, re.I) is not None
         high = re.fullmatch(_HIGH, op, re.I) is not None
+        # The unit written with the number decides what it means: a percent is relative to the best design so far, a
+        # unit of its own is converted to the objective's (or refused), a bare number is in the objective's unit.
         if value is None:
             compare = None
-        elif (low and sign > 0) or (high and sign < 0) or not (low or high):
-            target = value
-            read_as = f"{quantity} {'at most' if sign > 0 else 'at least'} {_fmt(target)}{u}"
-        elif high and sign > 0 and baseline is not None:
-            # "at least 6 K" of a quantity made as low as possible: an improvement of at least that much.
-            target = baseline - abs(value)
-            read_as = (f"{quantity} at most {_fmt(target)}{u} (at least {_fmt(abs(value))}{u} better than the "
-                       f"baseline's {_fmt(baseline)}{u} {base_where})")
+            written, percent, refusal = "", False, ""
         else:
-            return {"kind": UNCLEAR, "says": (
-                f"Your refine was not carried out: FI could not tell what \"{compare.group(0).strip()}\" asks of "
-                f"{quantity}, which this study makes as {'low' if sign > 0 else 'high'} as possible. Say \"at "
-                f"{'most' if sign > 0 else 'least'} X{u}\" for a value to reach, or \"X{u} better than the baseline\" "
-                "for an improvement. Nothing was changed.")}
+            value, percent, written, refusal = _with_unit(value, compare.group("rest") or "", unit, quantity, sign)
+        if refusal:
+            return {"kind": UNCLEAR, "says": f"Your refine was not carried out: {refusal}. Nothing was changed."}
+        if value is not None:
+            checked_now, current_now = _checked_value(best), _best_value(best)
+            ref_now = checked_now if checked_now is not None else current_now
+            ref_where = "at the finest settings" if checked_now is not None else "at the search's settings"
+            converted_from = f" (written as {compare.group(3)} {written})" if written and written != _sym(unit) \
+                and not percent and not _is_percent_unit(unit) else ""
+            if percent and ((low and sign > 0) or (high and sign < 0) or not (low or high)):
+                if ref_now is None:
+                    return {"kind": UNCLEAR, "says": (
+                        f"Your refine was not carried out: \"{compare.group(0).strip()}\" is a percent of the best "
+                        f"design, but the search has no recorded value of {quantity} to take it from. Give the target "
+                        f"as a value of {quantity}{' in ' + unit if unit else ''} instead. Nothing was changed.")}
+                target = ref_now - sign * abs(value) / 100.0 * abs(ref_now)
+                read_as = (f"{quantity} {'at most' if sign > 0 else 'at least'} {_fmt(target)}{u} ({_fmt(abs(value))}% "
+                           f"{'below' if sign > 0 else 'above'} the current best {_fmt(ref_now)}{u} {ref_where})")
+            elif (low and sign > 0) or (high and sign < 0) or not (low or high):
+                target = value
+                read_as = f"{quantity} {'at most' if sign > 0 else 'at least'} {_fmt(target)}{u}{converted_from}"
+            elif high and sign > 0 and baseline is not None:
+                # "at least 6 K" of a quantity made as low as possible: an improvement of at least that much.
+                step = abs(value) / 100.0 * abs(baseline) if percent else abs(value)
+                target = baseline - step
+                said = f"{_fmt(abs(value))}%" if percent else f"{_fmt(abs(value))}{u}"
+                read_as = (f"{quantity} at most {_fmt(target)}{u} (at least {said} better than the "
+                           f"baseline's {_fmt(baseline)}{u} {base_where})")
+            else:
+                return {"kind": UNCLEAR, "says": (
+                    f"Your refine was not carried out: FI could not tell what \"{compare.group(0).strip()}\" asks of "
+                    f"{quantity}, which this study makes as {'low' if sign > 0 else 'high'} as possible. Say \"at "
+                    f"{'most' if sign > 0 else 'least'} X{u}\" for a value to reach, or \"X{u} better than the baseline\" "
+                    "for an improvement. Nothing was changed.")}
     if target is None and added is None and not _PUSH.search(note):
         return {}
     # Whether the target is already reached is judged where it is reported: at the finest settings of FI's check when
