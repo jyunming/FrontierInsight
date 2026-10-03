@@ -297,16 +297,18 @@ def _reconcile(con: sqlite3.Connection, path: Path, row: Row | None, *, leave_to
         with path.open("r+b") as fh:
             fh.truncate(prev.size)
         return prev
-    base = prev if pending and size < now.size else now
-    if size > base.size:
-        tail = data[base.size:]
-        target = _move_tail(path, base.size, tail)
-        _record(con, Finding(path.name, f"had {_lines_in(tail)} line(s) after the last one FI wrote",
-                             _lines_in(tail), target))
-        return base
-    _record(con, Finding(path.name, "is shorter than what FI wrote: lines FI wrote were removed"))
-    # Recorded once (the evidence and the next start read it): FI goes on from the file as it now is.
+    # Something besides FI wrote here: compare line by line (rare, so the whole file is read only then).
     heads, torn = _walk(data)
+    for base in ((now, prev) if pending else (now,)):
+        if _find(heads, base) is not None and size > base.size:
+            tail = data[base.size:]  # FI's lines are intact: what follows them is not FI's
+            target = _move_tail(path, base.size, tail)
+            _record(con, Finding(path.name, f"had {_lines_in(tail)} line(s) after the last one FI wrote",
+                                 _lines_in(tail), target))
+            return base
+    _record(con, Finding(path.name, "is shorter than what FI wrote: lines FI wrote were removed" if size < now.size
+                         else "no longer holds the lines FI wrote (lines were changed or removed)"))
+    # Recorded once (the evidence and the next start read it): FI goes on from the file as it now is.
     if torn:
         target = _move_tail(path, heads[-1].size, torn)
         _record(con, Finding(path.name, "had a part-written line after the lines FI wrote", 1, target))
