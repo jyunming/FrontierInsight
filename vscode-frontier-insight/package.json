@@ -143,7 +143,7 @@
           },
           {
             "name": "accept-checks",
-            "description": "Go on as it is when a quest stopped because some checks do not say where their expected value comes from. Shows the checks, asks your name, then resumes. The checks still run; each is marked 'source not confirmed', and the result says so."
+            "description": "Go on as it is when a quest stopped at a known-answer check that was measured and failed (marked 'unconfirmed'), or because some checks do not say where their expected value comes from (marked 'source not confirmed'). Shows the checks, asks your name, then resumes. The checks still run, and the result says so."
           },
           {
             "name": "approve-all-skills",

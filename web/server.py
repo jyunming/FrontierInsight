@@ -1487,7 +1487,8 @@ def make_app(
     @app.post("/api/quests/{quest_id}/plan/accept-checks")
     async def accept_unsourced_checks(quest_id: str, request: Request) -> JSONResponse:
         """A person chooses to go on with the checks the quest stopped for, as they are: an act of its own, with their
-        name (the web surface of ``launch.py --accept-checks <quest> --approve-as <you>``). Resume the quest after it."""
+        name (the web surface of ``launch.py --accept-checks <quest> --approve-as <you>``): a known-answer check that
+        was measured and failed (marked unconfirmed), or checks with no stated source. Resume the quest after it."""
         if not _QUEST_ID_RE.match(quest_id):
             raise HTTPException(400, f"bad quest_id format: {quest_id!r}")
         quest_root = _resolve_quest_root(app.state.output_root, quest_id)
@@ -2515,6 +2516,9 @@ def make_app(
             # The checks the quest stopped for because they do not say where their expected value comes from, which a
             # person may choose to go on with as they are (core/accepted_checks.py); null when it is not stopped for them.
             "unsourced_checks": fi_accepted.pending(quest_root),
+            # The known-answer checks the quest stopped at that were measured and failed, which a person may mark
+            # unconfirmed and go on with (the same button and endpoint); null when the stop offers no such way on.
+            "failed_checks": fi_accepted.failing_pending(quest_root),
             "source_failures": source_failures,
             # How each output's visual check went (.fi/visual_check.json).
             "visual_check": report_summary(quest_root),

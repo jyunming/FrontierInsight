@@ -512,7 +512,7 @@ def test_the_web_page_offers_go_on_as_it_is(tmp_path: Path) -> None:
     ok = client.post("/api/quests/p1/plan/accept-checks", json={"who": "Jun"})
     assert ok.status_code == 200 and ok.json()["accepted"] is True
     page = (Path(__file__).resolve().parents[1] / "web" / "static" / "quest.html").read_text(encoding="utf-8")
-    assert "Go on as it is" in page and "/plan/accept-checks" in page and "renderUnsourcedChecks(data.unsourced_checks)" in page
+    assert "Go on as it is" in page and "/plan/accept-checks" in page and "renderUnsourcedChecks(data.unsourced_checks, data.failed_checks)" in page
 
 
 def test_vs_code_reads_revise_plan_after_resume_and_says_what_it_does_not_understand() -> None:

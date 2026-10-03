@@ -860,8 +860,9 @@ def not_passed(judged_list: list[dict[str, Any]]) -> list[str]:
 
 def last_judged(record: Any) -> list[dict[str, Any]]:
     """The engine's verdicts from the last attempt of a ``needs/ORACLE_CHECK.json`` record that let the main run go on
-    (``ok`` or ``warned``); empty for anything else."""
-    if not isinstance(record, dict) or record.get("status") not in ("ok", "warned"):
+    (``ok``, ``warned``, or ``went_on_failing``: a failed check a person or an exploration went on with); empty for
+    anything else."""
+    if not isinstance(record, dict) or record.get("status") not in ("ok", "warned", "went_on_failing"):
         return []
     attempts = record.get("attempts")
     last = attempts[-1] if isinstance(attempts, list) and attempts and isinstance(attempts[-1], dict) else {}

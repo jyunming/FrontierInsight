@@ -641,7 +641,7 @@ def run_outcome(*, returncode: int | None, has_result: bool, manifest_status: st
     running), which is recorded when it does."""
     if manifest_status == "pending":
         return None
-    if oracle_status in ("failed", "stopped", "warned"):
+    if oracle_status in ("failed", "stopped", "warned", "went_on_failing"):
         return "oracle_failure"
     if manifest_status in ("stopped", "repairing", "warned") or protocol_status in ("stopped", "warned"):
         return "protocol_mismatch"

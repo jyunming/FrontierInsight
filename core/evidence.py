@@ -436,6 +436,14 @@ def assess(
     oracle_record = _json(needs / "ORACLE_CHECK.json")
     if settings.get("oracle_check") == "off":
         valid_gaps.append("the oracle check was turned off")
+    elif protocol is not None and isinstance(oracle_record, dict) and oracle_record.get("status") == "went_on_failing":
+        # A check failed and the quest went on: a person's named choice, or automatic for an exploration. Each is a gap
+        # in its own plain words (core/accepted_checks.py), so the result never reaches this level or the ones above.
+        from .accepted_checks import gap as _went_on_gap
+
+        entries = [e for e in oracle_record.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
+        valid_gaps.extend([_went_on_gap(e) for e in entries]
+                          or ["a known-answer check failed and the quest went on (oracle check: went_on_failing)"])
     elif protocol is not None and (not isinstance(oracle_record, dict) or oracle_record.get("status") != "ok"):
         status = oracle_record.get("status") if isinstance(oracle_record, dict) else "not run"
         valid_gaps.append(f"the script did not pass an independent oracle (oracle check: {status})")

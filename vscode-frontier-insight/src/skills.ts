@@ -663,7 +663,9 @@ export async function runApproveAmendment(
 
 /**
  * `@fi /accept-checks <quest_id>` — go on as it is when a quest stopped because some of its checks do not say where
- * their expected value comes from (`rigor_profile: research`).
+ * their expected value comes from (`rigor_profile: research`), or at a known-answer check that was measured and failed
+ * (the check is then marked unconfirmed; its conditions and the code that measured it are shown first, and the choice
+ * holds only while both stay as they were).
  *
  * The checks the stop named are shown first, then the person's name is asked for: typed, never filled in silently.
  * The checks still run and are still judged; each is marked "source not confirmed", and the result and the paper say
@@ -685,16 +687,71 @@ export async function runAcceptChecks(
     const outputDirSetting = cfg.get<string>("outputDir") || "outputs";
     const outputsDir = path.isAbsolute(outputDirSetting) ? outputDirSetting : path.join(env.workDir, outputDirSetting);
 
+    // A stop at a known-answer check that was measured and failed: the choice marks it unconfirmed, and is bound to the
+    // check's conditions and the code that measured it; both are shown before the name is asked for.
+    let failed: any = null;
+    let atOracle = false;
+    let pauseRead = false;
+    try {
+        const pause = JSON.parse(await fs.readFile(path.join(outputsDir, questId, ".fi", "pause.json"), "utf8"));
+        pauseRead = true;
+        atOracle = !!pause && pause.kind === "oracle";
+        if (atOracle) {
+            const record = JSON.parse(await fs.readFile(path.join(outputsDir, questId, "needs", "ORACLE_CHECK.json"), "utf8"));
+            failed = record && record.status === "stopped" && record.go_on ? record.go_on : null;
+        }
+    } catch {
+        failed = null;  // not stopped there, or a quest in another folder: FI says what it is stopped for
+    }
+    if (atOracle && !failed) {
+        // Stopped at the known-answer checks, but the stop names no offer (a stop written by an older FI): never the
+        // unsourced-checks text; resuming once makes the stop say which checks failed.
+        stream.markdown("This quest stopped at its known-answer checks, but the stop does not say which failed check " +
+            `could be marked unconfirmed. Resume it once (\`@fi /resume ${questId}\`) and the stop says.\n`);
+        return undefined;
+    }
+    if (failed) {
+        if (!failed.offered) {
+            stream.markdown(`Going on with the check marked *unconfirmed* is not offered at this stop: ${String(failed.why_not || "")}.\n`);
+            return undefined;
+        }
+        const conditions = (c: any): string => {
+            const caseText = c.case && typeof c.case === "object"
+                ? Object.entries(c.case).map(([k, v]) => `${k}=${v}`).join(", ") : "";
+            return `expected ${c.expected} within ±${c.limit}` + (caseText ? `; case ${caseText}` : "")
+                + (c.measure ? `; measure \`${c.measure}\`` : "") + `; measured ${c.measured}`;
+        };
+        stream.markdown(
+            `**These known-answer checks of \`${questId}\` were measured and failed:**\n\n` +
+                (failed.checks || []).map((c: any) => `- '${String(c.name)}': ${conditions(c)}`).join("\n") +
+                `\n\nMeasured by \`${String(failed.script || "the script")}\` (version ` +
+                `\`${String(failed.script_version || "").slice(0, 12)}\`).\n\n` +
+                "Going on marks each *unconfirmed*: the check stays failed, the result does not count as checked " +
+                "against known answers (never publication-ready), and the paper says so. Your name is recorded with " +
+                "the choice. If the check's expected value, tolerance, case or measure changes, or that code changes " +
+                "(by you, or by a later fix FI makes), the check is judged again.\n\n",
+        );
+    }
+    if (!pauseRead) {
+        // The quest is not under this output folder (FI finds it by its id): which stop the choice answers is not known
+        // here, so nothing specific is shown; FI says what it recorded, and refuses if the quest is stopped for neither.
+        stream.markdown(
+            `\`${questId}\` is not under this workspace's output folder, so its stop cannot be shown here. Going on ` +
+            "answers the stop the quest is at: a known-answer check that was measured and failed (marked *unconfirmed*), " +
+            "or checks with no stated source (marked *source not confirmed*). Either way the check still runs, your " +
+            "name is recorded, the result and the paper say so, and FI prints what it recorded.\n\n",
+        );
+    }
     const pendingFile = path.join(outputsDir, questId, "needs", "UNSOURCED_CHECKS.json");
     let pending: any = null;
     try {
-        pending = JSON.parse(await fs.readFile(pendingFile, "utf8"));
+        pending = failed ? null : JSON.parse(await fs.readFile(pendingFile, "utf8"));
     } catch {
         // A quest in another folder (FI finds it by its id): FI lists its checks and refuses if it is not stopped for them.
         pending = null;
     }
     const checks: any[] = pending && Array.isArray(pending.checks) ? pending.checks : [];
-    stream.markdown(
+    if (!failed && pauseRead) stream.markdown(
         `**These checks of \`${questId}\` do not say where their expected value comes from:**\n\n` +
             (checks.length ? checks.map((c) => `- ${String(c.why || c.name)}`).join("\n")
                 : "- (listed in the quest's `needs/UNSOURCED_CHECKS.json`; FI refuses if the quest is not stopped for them)") +
@@ -703,8 +760,10 @@ export async function runAcceptChecks(
             `\`@fi /plan ${questId} fill in where each check's expected value comes from\`.)\n\n`,
     );
     const who = await vscode.window.showInputBox({
-        title: `Go on as it is: ${questId}`,
-        prompt: "Enter your name. The choice to go on without a stated source is recorded against it.",
+        title: failed ? `Mark the failed check unconfirmed and go on: ${questId}` : `Go on as it is: ${questId}`,
+        prompt: failed ? "Enter your name. The choice to go on although the check failed is recorded against it."
+            : pauseRead ? "Enter your name. The choice to go on without a stated source is recorded against it."
+            : "Enter your name. The choice to go on is recorded against it.",
         value: cfg.get<string>("approveAs") || "",
         ignoreFocusOut: true,
         validateInput: (v) => (v.trim() ? null : "The choice is recorded with a name: there is no anonymous one."),

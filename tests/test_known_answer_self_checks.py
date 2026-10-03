@@ -52,6 +52,8 @@ class _Model:
 def _config(tmp_path: Path, **engine: Any) -> Config:
     return Config(
         topic="numerical methods checked against known answers", title="self-checks", provider=ProviderConfig(name="openai"),
+        # A quest whose result is for a decision stops at a failed check; an exploration goes on by itself.
+        result_use="decision",
         engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True, execute_replicates=1,
                             pilot_run=False, **engine),
         execution=ExecutionConfig(sandbox="venv", timeout_s=120, split_analysis=True),
