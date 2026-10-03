@@ -120,12 +120,33 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
     return _sha(b"\1".join(parts) + json.dumps([block, base, entry, thresholds], sort_keys=True, default=str).encode())
 
 
+def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
+    """What a frozen study's search record must have been made from: :func:`_run_key` without the seed, each file read
+    the way ``core/phased.py`` decides what is the same version (line endings and comments do not count), so a study
+    the confirm stage takes for the same version always finds its search."""
+    from . import phased as _phased
+
+    parts: list[bytes] = []
+    code = Path(quest_root) / "code"
+    for path in sorted([Path(simulate), *(p for p in code.glob("*.py") if p.name not in _NOT_THE_SIMULATION
+                                          and p.resolve() != Path(simulate).resolve())]):
+        try:
+            parts.append(path.name.encode() + b"\0" + _phased._code_digest(path).encode())
+        except OSError:
+            parts.append(path.name.encode() + b"\0")
+    parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
+    parts.append(Path(_search.__file__).read_bytes())
+    return _sha(b"\1".join(parts) + json.dumps([block, entry, thresholds], sort_keys=True, default=str).encode())
+
+
 def _files(ledger_text: str, best_text: str, record_text: str) -> dict[str, str]:
     return {LEDGER_PATH.as_posix(): ledger_text, BEST_PATH.as_posix(): best_text, RECORD.as_posix(): record_text}
 
 
-def _save(quest_root: Path, key: str, ledger_text: str, best_text: str, stderr: str, scan: bool) -> str:
-    record = {"key": key, "ledger": {"sha256": _sha(ledger_text.encode("utf-8")), "text": ledger_text},
+def _save(quest_root: Path, key: str, ledger_text: str, best_text: str, stderr: str, scan: bool,
+          study_key: str = "") -> str:
+    record = {"key": key, "study_key": study_key,
+              "ledger": {"sha256": _sha(ledger_text.encode("utf-8")), "text": ledger_text},
               "best": {"sha256": _sha(best_text.encode("utf-8")), "text": best_text},
               "stderr": stderr[-_STDERR_KEEP:], "scan": scan}
     text = json.dumps(record)
@@ -321,9 +342,16 @@ async def _drive(executor: Any, python: Any, quest_root: Path, spec: dict[str, A
 
 
 async def run_search(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], *,
-                     base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None) -> SearchRun:
+                     base_seed: int, timeout_s: int, env: dict[str, str] | None = None, log: Any = None,
+                     frozen: bool = False) -> SearchRun:
     """Run the search for the best design (see the module docstring) and write its record. ``module`` is the simulation
-    file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included."""
+    file relative to ``quest_root``; ``timeout_s`` bounds the whole search, the coarse scan included.
+
+    ``frozen``: the study is frozen for its confirm run (explore, then confirm: ``core/phased.py``). The search is not
+    run again: the best design exploration's search found, for this same simulation and plan, is kept, and only FI's
+    check of it (with the confirm run's new seeds, :mod:`core.optimum_check`) runs. Searching again on the confirm seeds
+    would choose the design on the data meant only to confirm it. A frozen study whose search record is not there to
+    keep cannot be confirmed without searching again: it gets no result."""
     quest_root = Path(quest_root)
     raw_block = block_of(protocol)
     if raw_block is None:
@@ -343,12 +371,26 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                "them for each design the search tries")
         return SearchRun(record={}, rows=[], load_error=why, problems=[why])
     key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds)
+    # The same simulation and plan whatever the seed: what a frozen study's search record must have been made from.
+    study_key = _study_key(quest_root, simulate, block, entry, thresholds)
     try:
         record_text = (quest_root / RECORD).read_text(encoding="utf-8")
         record = json.loads(record_text)
     except (OSError, ValueError):
         record_text, record = "", None
-    if isinstance(record, dict) and record.get("key") == key:
+    if frozen and isinstance(record, dict) and not record.get("study_key"):
+        # A search record from before FI kept its study key: it is exploration's when its key is one exploration's
+        # seeds give (core/phased.py keeps them).
+        from . import phased as _phased
+
+        seeds = (_phased.load(quest_root) or {}).get("explore_seed_bases") or []
+        if record.get("key") in {_run_key(quest_root, simulate, block, int(s), entry, thresholds) for s in seeds}:
+            record = {**record, "study_key": study_key}
+    if frozen and not (isinstance(record, dict) and record.get("study_key") == study_key):
+        why = ("the study is frozen for its confirm run, and the search exploration ran for this simulation and plan is "
+               "not kept, so its best design cannot be confirmed without searching again on the confirm seeds")
+        return SearchRun(record={}, rows=[], problems=[why])
+    if isinstance(record, dict) and (record.get("key") == key or frozen):
         files = _record_files(record, record_text)
         rows = [json.loads(line) for line in files.get(LEDGER_PATH.as_posix(), "").splitlines() if line.strip()]
         try:
@@ -361,15 +403,27 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         limit = ((best or {}).get("time") or {}).get("limit_seconds")
         # A search the clock stopped stands for the same limit (an analysis repair), not for a longer one.
         timely = stopped != "time" or (isinstance(limit, (int, float)) and int(timeout_s) <= limit)
-        if isinstance(best, dict) and scan_there and worked and stopped not in _NOT_REUSED and timely:
+        if isinstance(best, dict) and worked and scan_there and (frozen or (stopped not in _NOT_REUSED and timely)):
             restore(quest_root, files)
             if log is not None:
-                log.info("[optimise] the simulation and the plan are unchanged: the search FI already ran is used")
+                log.info("[optimise] %s", "confirm run: the best design exploration's search found is kept and checked "
+                         "once more on new seeds; the search is not run again (that would choose the design on the "
+                         "confirm seeds)" if frozen else
+                         "the simulation and the plan are unchanged: the search FI already ran is used")
                 for line in summary_lines(best):
                     log.info("%s", line)
             return SearchRun(record=best, rows=[r for r in rows if r.get("event") == "evaluation"],
                              stderr=str(record.get("stderr") or ""), reused=True, scan=bool(record.get("scan")),
                              files=files)
+    if frozen:
+        why = ("the study is frozen for its confirm run, and the search exploration ran found no design to keep, so "
+               "nothing can be confirmed without searching again on the confirm seeds")
+        if isinstance(record, dict) and record.get("scan") \
+                and not (quest_root / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file():
+            why = (f"the study is frozen for its confirm run, and the coarse scan of exploration's search "
+                   f"({_trials.RAW_DIRNAME}/{_trials.SUMMARY_NAME}) is missing, so the kept search cannot be used as it "
+                   "was and nothing can be confirmed without searching again on the confirm seeds")
+        return SearchRun(record={}, rows=[], problems=[why])
     work = quest_root / WORK_DIR
     work.mkdir(parents=True, exist_ok=True)
     # An earlier search's record and files never stand beside this one's (a search cut short is not kept either).
@@ -490,7 +544,7 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     (quest_root / BEST_PATH).parent.mkdir(parents=True, exist_ok=True)
     (quest_root / BEST_PATH).write_bytes(best_text.encode("utf-8"))
     stderr = "\n".join(p for p in stderr_parts if p)[-_STDERR_KEEP:]
-    record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows))
+    record_text = _save(quest_root, key, ledger_text, best_text, stderr, bool(scan_rows), study_key)
     record = json.loads(best_text)
     return SearchRun(record=record, rows=outcome.get("rows") or [], stderr=stderr, scan=bool(scan_rows),
                      load_error=load_error, files=_files(ledger_text, best_text, record_text))
@@ -613,8 +667,11 @@ class OptimisationRunner:
     search for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, simulate: Path, analysis: Path,
-                 log: Any = None) -> None:
+                 log: Any = None, frozen: Any = False) -> None:
         self.executor = executor
+        #: Whether the study is frozen for its confirm run (a bool, or a callable asked at each run): the search is
+        #: then not run again (:func:`run_search`).
+        self._frozen = frozen
         self.quest_root = Path(quest_root)
         self._protocol = protocol
         self.simulate = Path(simulate)
@@ -624,6 +681,9 @@ class OptimisationRunner:
         self.last: SearchRun | None = None
         #: FI's check at finer settings, from memory: ``(its text, the key it is kept under)``.
         self.last_check: tuple[str | None, str | None] = (None, None)
+
+    def _is_frozen(self) -> bool:
+        return bool(self._frozen() if callable(self._frozen) else self._frozen)
 
     def put_back(self) -> bool:
         """Put FI's own record of the search and of its check back, from memory, wherever a script changed them."""
@@ -662,7 +722,8 @@ class OptimisationRunner:
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
         run = await run_search(self.executor, cmd[0], self.quest_root,
                                self.simulate.relative_to(self.quest_root).as_posix(), protocol, base_seed=base,
-                               timeout_s=timeout_s, env=env, log=self.log)
+                               timeout_s=timeout_s, env=env, log=self.log,
+                               frozen=self._is_frozen())
         self.last = run
         if self.log is not None and not run.reused:
             for line in summary_lines(run.record):
@@ -733,7 +794,9 @@ class OptimisationRunner:
         try:
             check, text, key = await _check.run_check(
                 self.executor, python, self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(),
-                protocol, run, base_seed=base, timeout_s=timeout_s, env=env, log=self.log)
+                protocol, run, base_seed=base, timeout_s=timeout_s, env=env, log=self.log,
+                # The confirm run of a frozen search: the kept best design is checked once more, on the new seeds.
+                fresh=self._is_frozen())
         except Exception as exc:  # noqa: BLE001 -- the check reports; it never stops the quest
             if self.log is not None:
                 self.log.warning("[optimise] the check at finer numerical settings could not run (%s: %s); the best "

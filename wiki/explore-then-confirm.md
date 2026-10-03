@@ -1,6 +1,6 @@
 ---
 title: Explore then confirm
-sources: [core/phased.py, core/phased_data.py, core/phased_isolation.py, core/engine.py, core/evidence.py, core/config.py, core/interview.py, core/plan.py, core/disclosure.py]
+sources: [core/phased.py, core/phased_data.py, core/phased_isolation.py, core/confirmations.py, core/engine.py, core/evidence.py, core/config.py, core/interview.py, core/plan.py, core/disclosure.py, core/optimise.py, core/todo.py]
 updated: 2026-10-01
 ---
 # Explore then confirm
@@ -41,11 +41,22 @@ A literature survey and `--analyze` have no design to run once more. The status 
 
 ## During the confirm run
 
-A request to redesign or read more literature is not followed; a protocol change is an amendment (it needs your approval, see [[how-fi-judges-correctness|How FI judges correctness]]); running on the confirm data twice is recorded as reuse.
+A request to redesign or read more literature is not followed; a protocol change is an amendment (it needs your approval, see [[how-fi-judges-correctness|How FI judges correctness]]); running on the confirm data twice is recorded as reuse. The improve loop does not run (`Engine._improve_skip`), and a search for the best design is not run again: `optimise.run_search(frozen=True)` keeps exploration's best design (matched by `study_key`, the search's key without the seed; an older record by its key for one of exploration's seeds) and only the check at finer settings runs again, never reused (`run_check(fresh=True)`), on the new seeds; with no such record the confirm run gets no result rather than searching on the confirm seeds.
+
+## One version, one confirmation
+
+The stages go one way: exploring → frozen → confirmed. Each frozen version is a **candidate** (`candidate` in `.fi/phased.json`, 1 for the first):
+
+- **Frozen.** `enter_confirm` records `frozen_at_confirm` (`phased.fingerprint`): the hash of `code/` (without the redraw, run and description files FI writes there, `_NOT_THE_STUDY`, dot-folders and `.md` notes, so a redraw is not a new version; `optimise._study_key` reads files the same way), of the frozen protocol and of the environment (recorded, not compared).
+- **Verdict, append-only.** `record_confirm` appends the verdict to `.fi/confirmations.jsonl` (`core/confirmations.py`): version, hashes, strategy, seed base, result hash, verdict, time, and `prev_sha256` (the line before). `Engine._phased_seal_confirmations` (from `_phased_log`) writes one `confirmation_recorded` event per line into the hash-chained trace; `confirmations.problems` finds a broken chain or a named line that is gone, and `phased.record_gap` also finds a record that says *confirmed* while a verdict line of the same version does not: both are `publication_ready` gaps (`phased_record_gap`).
+- **Same version again** (nothing in code or protocol changed: a retry after a failed confirm, `--from` with the same code): a second line beside the first, status `confirm_reused`; `confirmations.worst` makes a failure count.
+- **What is a change.** Code is hashed by `_code_digest` (CRLF = LF; Python by its tokens without comments, stable across Python versions). A change before the confirm run began (`confirm_executions == 0`, and for held-back data before the step was handed the held-back part, `note_confirm_handed`) only ends the freeze: same version, back to `explore`, no verdict, exploration's part of the data put back (`prepare`). Code that changed during the confirm run itself (a repair inside the step) is caught by `record_confirm` comparing `fingerprint` with `frozen_at_confirm`: `not_confirmable`.
+- **Changed version** (`phased.new_candidate`, called by `Engine._phased_before_first_run` before each experiment run, and by `data_quest_gate` with the design's hash before a data quest's reading): a confirm run with no verdict yet is recorded `confirm_failed`; the record goes back to `explore` as candidate N+1 (`earlier_candidates`, `earlier_confirm_seed_bases`, so its confirm seeds avoid every earlier confirm's). Held-back rows were read by the first confirm, so a new candidate of a held-back or data quest is `not_confirmable` (`held_back_used`, `HELD_BACK_USED`) and the whole files go back.
+- **What counts.** The evidence reads the current candidate only (`phased.version`, `phased.earlier_versions` in `needs/EVIDENCE.json`; the stage gap names the version). The methods paragraph ([[how-fi-judges-correctness|How FI judges correctness]], `disclosure.confirmations`) says how many versions were confirmed and how many confirmations did not hold, inside its closed grammar. A failed verdict for the current version adds the to-do card line (`todo.confirm_item`, `todo.CONFIRM_FAILED`) and the run.log line `phased.ONE_SHOT`.
 
 ## What the result says
 
-`.fi/phased.json` records the status: explore, confirming, confirmed, confirm_failed, confirm_reused, compromised, not_confirmable or not_applicable. Anything but *confirmed* (or *not_applicable*, which adds no gap) keeps the result below publication-ready. The paper carries a note saying which kind of confirmation ran.
+`.fi/phased.json` records the status of the current version: explore, confirming, confirmed, confirm_failed, confirm_reused, compromised, not_confirmable or not_applicable. Anything but *confirmed* (or *not_applicable*, which adds no gap) keeps the result below publication-ready. The paper carries a note saying which kind of confirmation ran.
 
 A confirmed result with held-back data also needs `isolation` to be `docker` or `encrypted+scanned`, and a split that was decided (a quest that held rows back one by one before the split was decided shows that as a gap).
 

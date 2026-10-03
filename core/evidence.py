@@ -599,6 +599,16 @@ def assess(
     # A quest run in two stages (engine.phased, core/phased.py): only the confirm run's result, on data or seeds the
     # exploration never saw, is more than preliminary.
     phased_gap = _PHASED_GAPS.get(str(settings.get("phased") or ""))
+    if settings.get("phased") == "not_confirmable" and settings.get("phased_unconfirmable_why"):
+        # A changed version of a study whose held-back rows an earlier version's confirm run already read.
+        phased_gap = (f"this version of the study cannot be confirmed: {settings['phased_unconfirmable_why']}; the "
+                      "numbers are exploratory")
+    elif phased_gap and settings.get("phased_candidate"):
+        # Only this version's own confirmation counts: an earlier version's (kept in .fi/confirmations.jsonl) does not.
+        phased_gap += (f" (this is version {settings['phased_candidate']} of the study, changed after an earlier "
+                       "version was confirmed; that confirmation does not count for it)")
+    if settings.get("phased_record_gap"):
+        ready_gaps.append(str(settings["phased_record_gap"]))
     if settings.get("phased") == "confirmed":
         # Held back is not unseen unless exploration could not read it (core/phased_isolation.py), and rows of one
         # subject or site split one by one are not unseen either (core/phased_data.py).
@@ -746,6 +756,10 @@ def assess(
         if settings.get("phased_differs"):
             # A data quest's confirm numbers that differ from exploration's (core/phased_data.compare): not a gap.
             record["phased"]["confirm_differs"] = settings["phased_differs"]
+        if settings.get("phased_candidate"):
+            # Which version of the study this is, and what became of the earlier ones (core/confirmations.py).
+            record["phased"]["version"] = int(settings["phased_candidate"])
+            record["phased"]["earlier_versions"] = settings.get("phased_earlier") or ""
         if settings.get("phased_isolation"):
             # docker, encrypted+scanned, or isolation_unverified (core/phased_isolation.py).
             record["phased"]["isolation"] = settings["phased_isolation"]

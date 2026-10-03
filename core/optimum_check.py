@@ -893,10 +893,11 @@ def _clean(value: Any) -> Any:
 
 async def run_check(executor: Any, python: Any, quest_root: Path, module: str, protocol: dict[str, Any], search: Any,
                     *, base_seed: int, timeout_s: int, env: dict[str, str] | None = None,
-                    log: Any = None) -> tuple[dict[str, Any], str, str]:
+                    log: Any = None, fresh: bool = False) -> tuple[dict[str, Any], str, str]:
     """Check the search's best design (see the module docstring) and write ``needs/OPTIMUM_CHECK.json``:
     ``(the record, its text, the key it is kept under)``. ``search`` is the :class:`core.optimise.SearchRun`; ``timeout_s`` bounds the check alone.
-    Never raises for a problem of the simulation: a check that cannot finish is ``unverified``."""
+    Never raises for a problem of the simulation: a check that cannot finish is ``unverified``. ``fresh``: never reuse
+    a kept check (the confirm run of a frozen search: its check runs once more, on the confirm run's new seeds)."""
     from . import optimise as _optimise
 
     quest_root = Path(quest_root)
@@ -918,7 +919,8 @@ async def run_check(executor: Any, python: Any, quest_root: Path, module: str, p
         saved = json.loads((quest_root / RECORD).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         saved = None
-    if (isinstance(saved, dict) and saved.get("key") == key and search_key and isinstance(saved.get("text"), str)
+    if (not fresh and isinstance(saved, dict) and saved.get("key") == key and search_key
+            and isinstance(saved.get("text"), str)
             and kept_sha and _sha(saved["text"].encode("utf-8")) == kept_sha):
         try:
             again = json.loads(saved["text"])

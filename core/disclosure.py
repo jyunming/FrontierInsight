@@ -5,7 +5,10 @@ The records are kept as the quest runs: ``needs/DESIGN_HISTORY.json`` (each vers
 ``.fi/attempts.jsonl`` (one ``run`` line per complete run of the experiment, all its seeds together, with its outcome).
 A reader of the finished paper cannot see either, and a study whose design was revised after its first results looks
 the same as one whose design was fixed in advance, so the engine writes one paragraph into the paper's methods from
-those records (:func:`paragraph`, :func:`mark_paper`). The model never writes it: whatever the writer put between the
+those records (:func:`paragraph`, :func:`mark_paper`). When the study was confirmed more than once (a version changed
+after its confirmation is a new one, confirmed on its own: ``.fi/confirmations.jsonl``, ``core/confirmations.py``),
+the paragraph also says how many versions were confirmed and how many of those confirmations did not hold (failed ones
+included). The model never writes it: whatever the writer put between the
 markers, or under the paragraph's lead words, is removed, and the engine's paragraph is put in after the writer has
 finished.
 
@@ -145,11 +148,51 @@ def _runs_sentence(counts: dict[str, int]) -> str:
     return f"{head}; {which} discarded ({', '.join(items)})."
 
 
+#: How a study confirmed more than once (a version changed after its confirmation is a new one) says it.
+_CONFIRMS_HEAD = "confirmed once on data or seeds that exploration never saw (a version changed after its " \
+                 "confirmation is confirmed on its own)"
+_ALL_HELD = "every confirmation held"
+_LAST_UNCONFIRMED = "The current version was changed after the last confirmation and is not confirmed itself."
+
+
+def _versions(n: int) -> str:
+    return "1 version of the study was" if n == 1 else f"{n} versions of the study were"
+
+
+def confirmations(quest_root: Path) -> dict[str, int]:
+    """The versions of the study that reached a confirm run (``.fi/confirmations.jsonl``): ``versions``, ``failed``
+    (whose confirmation did not hold, or was run again after its result was seen) and ``current_unconfirmed`` (1 when the current version came
+    after the last confirmed one and has no confirmation of its own)."""
+    from . import confirmations as _confirmations
+    from . import phased as _phased
+
+    done = _confirmations.candidates(quest_root)
+    if not done:  # nothing was ever confirmed (and a quest without the two stages never reads their record)
+        return {"versions": 0, "failed": 0, "current_unconfirmed": 0}
+    current = _phased.candidate(_phased.load(Path(quest_root)))
+    last = max((c["candidate"] for c in done), default=0)
+    return {"versions": len(done), "failed": sum(1 for c in done if c["verdict"] != _confirmations.CONFIRMED),
+            "current_unconfirmed": int(bool(done) and current > last)}
+
+
+def _confirms_sentence(counts: dict[str, int]) -> str:
+    """Said only when there is more than one confirmed version, a confirmation that did not hold, or a version changed
+    after its confirmation: a study confirmed once, as planned, has the stage note under its title for that."""
+    n, failed, after = counts["versions"], counts["failed"], counts["current_unconfirmed"]
+    if not n or (n == 1 and not failed and not after):
+        return ""
+    held = _ALL_HELD if not failed else (
+        f"{'1 confirmation did not hold or was' if failed == 1 else f'{failed} confirmations did not hold or were'} "
+        "run again, and only the last version's own confirmation counts for the result")
+    return f"{_versions(n)} {_CONFIRMS_HEAD}; {held}." + (f" {_LAST_UNCONFIRMED}" if after else "")
+
+
 def paragraph(quest_root: Path, *, no_simulation: bool = False, survey: bool = False) -> str:
     """The paragraph the engine writes into the paper's methods, or ``""`` when there is nothing to say (no run of the
     experiment and no revision of the design). With no revision it still says so, in one short sentence: otherwise a
     reader cannot tell a design that was not revised from one whose revisions were not disclosed. A survey has no
-    numbers of its own, so its paragraph does not call any exploratory."""
+    numbers of its own, so its paragraph does not call any exploratory. A study confirmed more than once (each changed
+    version on its own, ``core/confirmations.py``) says how many versions were confirmed and how many did not hold."""
     study = kind(no_simulation=no_simulation, survey=survey)
     changed = revisions(quest_root)
     counts = runs(quest_root)
@@ -158,6 +201,8 @@ def paragraph(quest_root: Path, *, no_simulation: bool = False, survey: bool = F
     parts = [LEAD, _design_sentence(changed, study)]
     if counts["total"]:
         parts.append(_runs_sentence(counts))
+    if study != SURVEY and (confirms := _confirms_sentence(confirmations(quest_root))):
+        parts.append(confirms)
     if changed and study != SURVEY:
         parts.append(_EXPLORATORY)
     return " ".join(parts)
@@ -292,9 +337,14 @@ _RUNS = (
     + r"(?:; (?:1 of these runs was|" + _NUM + r" of these runs were) discarded \(" + _ITEM + r"(?:, " + _ITEM
     + r")*\))?\."
 )
+_CONFIRMS = (
+    r"(?:1 version of the study was|" + _NUM + r" versions of the study were) " + re.escape(_CONFIRMS_HEAD)
+    + r"; (?:" + re.escape(_ALL_HELD) + r"|(?:1 confirmation did not hold or was|" + _NUM + r" confirmations did not hold or "
+    r"were) run again, and only the last version's own confirmation counts for the result)\.(?: " + re.escape(_LAST_UNCONFIRMED) + r")?"
+)
 #: Everything the engine's paragraph can say, and nothing else.
 _CONTENT = re.compile(
-    re.escape(LEAD) + " " + _DESIGN + "(?: " + _RUNS + ")?(?: " + re.escape(_EXPLORATORY) + ")?"
+    re.escape(LEAD) + " " + _DESIGN + "(?: " + _RUNS + ")?(?: " + _CONFIRMS + ")?(?: " + re.escape(_EXPLORATORY) + ")?"
 )
 _BLOCK = re.compile(re.escape(BEGIN) + r"[ \t]*\r?\n(.*?)\r?\n[ \t]*" + re.escape(END), re.S)
 

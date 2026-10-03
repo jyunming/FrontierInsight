@@ -2,6 +2,10 @@
 
 Ingest history timeline. Newest entries on top.
 
+## 2026-10-01 — each version of the study is confirmed once
+
+Updated by hand: [[explore-then-confirm|Explore then confirm]] (a new section *One version, one confirmation*: each frozen version is a candidate, its code/protocol/environment hashed at the freeze; every verdict appended to `.fi/confirmations.jsonl` and named in the trace; a retry of the same version keeps both verdicts and the failure counts; a changed version is a new candidate confirmed on its own, never on held-back rows already read; no improve loop and no search after the freeze; the evidence reads the current version; the methods paragraph counts the versions and the failed confirmations; the to-do card line). Sources: core/phased.py, core/confirmations.py, core/optimise.py, core/disclosure.py, core/evidence.py, core/todo.py, core/engine.py.
+
 ## 2026-10-01 — the card when a known-answer check stops the quest
 
 Updated by hand: [[how-fi-judges-correctness|How FI judges correctness]] (one plain name, "known-answer check", on every screen; when the checks stop the quest one card, from one payload in `.fi/pause.json` and `.fi/todo.json`, shows each failing check's expected value and source, the measured value and who measured it, the tolerance and gap, the case, and where the script computes the number, then the likely cause from what FI already has, what FI tried and two or three ways on; the same in the terminal, NEXT_STEP.md, the web page and VS Code; no verdict changes). Sources: core/oracle_card.py, core/todo.py, core/oracle_check.py, core/engine.py, core/trial_runner.py, web/static/quest.html, vscode-frontier-insight/src/stop-card.ts.

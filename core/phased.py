@@ -54,6 +54,16 @@ A research quest that began before research turned this on by default (its confi
 on as it began, without the two stages: :func:`began_before_default` tells the engine so, and the engine says it in
 run.log.
 
+Each version that reaches a confirm run is a *candidate* (``candidate`` in the record, 1 for the first). When the
+confirm stage begins its code, protocol and environment are hashed (``frozen_at_confirm``, :func:`fingerprint`), and
+the confirm run's verdict is appended to ``.fi/confirmations.jsonl`` (``core/confirmations.py``), which is never
+rewritten. The same candidate run again on the confirm data or seeds adds a second verdict beside the first (the result
+is then preliminary, as before). A candidate whose code or protocol (a data quest: its design) changed after its
+confirm run began is replaced by a NEW candidate (:func:`new_candidate`): back in exploration, with its own confirm run
+to come on seeds no earlier run used; the earlier verdict stays. Held-back rows that a confirm run read are not unseen
+any more, so a new candidate of a quest that held rows back cannot be confirmed (``not_confirmable``, said why). The
+record here holds the current candidate only; the evidence reads it, checked against its verdict lines.
+
 This record (``.fi/phased.json``) is apart from the attempt records and the shadow recommendations
 (``core/attempt_records.py``, ``core/attempt_memory.py``): it reads neither, and neither decides anything here.
 """
@@ -856,6 +866,248 @@ def _design_versions(quest_root: Path) -> int:
     return len(history) if isinstance(history, list) else 0
 
 
+# ---- candidates: each frozen version is confirmed once, on its own ------------------------------------------------
+
+#: Files in ``code/`` that only redraw or show the results (written by FI's redraw and web steps), and notes (``.md``):
+#: changing them does not change the study, so it does not make a new version. Counting them would let a re-run of an
+#: unchanged study pass for a new version with a fresh confirm run.
+_NOT_THE_STUDY = frozenset({"replot_figures.py", "replot_figures.json", "replot_layout.py", "web_plots.py",
+                            # what FI writes beside the code to describe or repeat a run (core/code_project.py)
+                            "run.py", "fi_search.py", "requirements.txt", "test_oracles.py", "CHANGELOG.md",
+                            # derived from the protocol, which is compared on its own
+                            "study.json"})
+
+
+def fingerprint(quest_root: Path, *, protocol_sha256: str | None = None,
+                design_sha256: str | None = None) -> dict[str, str | None]:
+    """The hashes that say which version of the study this is: its code (every file of ``code/`` but
+    :data:`_NOT_THE_STUDY` and notes), its frozen protocol, and its environment (Python, packages: recorded, not
+    compared). ``protocol_sha256``: the frozen protocol's hash when the caller has it (else read here). A data quest
+    adds its design (``design_sha256``)."""
+    from . import frozen_protocol as _frozen
+
+    root = Path(quest_root)
+    # Read here, not through the attempt records (this record reads none of them).
+    code: dict[str, str] = {}
+    folder = root / "code"
+    if folder.is_dir():
+        for path in sorted(p for p in folder.rglob("*") if p.is_file()):
+            rel = path.relative_to(folder).as_posix()
+            # A folder whose name starts with a dot (.git, an editor's settings) is not the study.
+            if ("__pycache__" in path.parts or any(part.startswith(".") for part in path.relative_to(folder).parts)
+                    or path.name in _NOT_THE_STUDY
+                    or rel.lower().endswith((".md", ".pyc"))):
+                continue
+            try:
+                code[rel] = _code_digest(path)
+            except OSError:
+                code[rel] = ""
+    if protocol_sha256 is None:
+        frozen = _frozen.load(root)
+        protocol_sha256 = str(frozen["sha256"]) if frozen else None
+    out: dict[str, str | None] = {
+        "code_sha256": _sha(json.dumps(code, sort_keys=True).encode("utf-8")) if code else None,
+        "protocol_sha256": protocol_sha256,
+        "environment_sha256": _environment_sha(root),
+    }
+    if design_sha256:
+        out["design_sha256"] = design_sha256
+    return out
+
+
+def _code_digest(path: Path) -> str:
+    """One file's hash as a version of the study: line endings do not count (a checkout that turns them into CRLF is
+    not a change), and for Python only its tokens do (a comment or a blank line is not a new version). Tokens, not a
+    syntax tree, so the same code hashes the same under every Python version."""
+    raw = path.read_bytes().replace(b"\r\n", b"\n")
+    if path.suffix == ".py":
+        try:
+            return _sha(_python_tokens(raw.decode("utf-8")).encode("utf-8"))
+        except Exception:  # noqa: BLE001 -- not readable as Python: compared by its bytes
+            pass
+    return _sha(raw)
+
+
+def _python_tokens(text: str) -> str:
+    import io
+    import tokenize
+
+    skip = (tokenize.COMMENT, tokenize.NL, tokenize.ENCODING)
+    return json.dumps([(tok.type, tok.string) for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+                       if tok.type not in skip])
+
+
+def _environment_sha(root: Path) -> str | None:
+    """What the environment is (``needs/ENVIRONMENT.json``: Python, platform, sandbox, packages), not where it lives."""
+    try:
+        record = json.loads((root / "needs" / "ENVIRONMENT.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    keep = ("python", "platform", "sandbox", "shared_interpreter", "system_site_packages", "isolated", "packages")
+    return _sha(json.dumps({k: record.get(k) for k in keep}, sort_keys=True, default=str).encode("utf-8"))
+
+
+def candidate(record: dict[str, Any] | None) -> int:
+    """Which version of the study the record is about (1 for a record from before versions were counted)."""
+    try:
+        return max(1, int((record or {}).get("candidate") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _verdict_line(quest_root: Path, record: dict[str, Any], verdict: str, why: str) -> None:
+    """Append the current candidate's verdict to ``.fi/confirmations.jsonl`` (``core/confirmations.py``): never
+    rewritten. Best effort: a line that cannot be written leaves the candidate without a recorded verdict, which the
+    evidence reads as not confirmed (:func:`record_gap`)."""
+    from . import confirmations as _confirmations
+
+    frozen = record.get("frozen_at_confirm") if isinstance(record.get("frozen_at_confirm"), dict) else {}
+    entry = {
+        "candidate": candidate(record), "verdict": verdict, "why": why,
+        "strategy": record.get("strategy"), "data_quest": bool(record.get("data_quest")),
+        "confirm_seed_base": record.get("confirm_seed_base"),
+        "frozen": {**frozen, "protocol_sha256": frozen.get("protocol_sha256", record.get("frozen_sha256")),
+                   **({"design_sha256": record["design_sha256"]} if record.get("design_sha256") else {})},
+        "confirm_started_at": record.get("confirm_started_at"),
+        "confirm_executions": int(record.get("confirm_executions") or 0),
+        "confirm_result_sha256": record.get("confirm_result_sha256"),
+    }
+    try:
+        _confirmations.append(quest_root, entry)
+    except OSError:
+        pass
+
+
+#: Said in run.log when a version's confirmation did not hold: it is not tried again.
+ONE_SHOT = ("this version cannot be confirmed again: its confirm run was the one try (.fi/confirmations.jsonl keeps "
+            "it); a changed version is a new candidate and is confirmed on its own")
+
+#: Why a new version of a quest that held rows back cannot be confirmed.
+HELD_BACK_USED = ("the rows held back were read by the confirm run of an earlier version of this study, so no rows "
+                  "remain that no version has seen")
+
+
+def new_candidate(quest_root: Path, *, design_sha256: str | None = None, key: bytes | None = None,
+                  quest_id: str | None = None) -> list[str]:
+    """Called before the experiment runs (and before a data quest's data is read). When the confirm stage has begun
+    (or ended) and the study's code or protocol (a data quest: its design) is no longer the version frozen for it, that
+    version is done: its verdict stays (a confirm run that gave none is recorded as failed), and the changed study is a
+    NEW candidate, back in exploration, which needs a confirm run of its own on seeds no earlier run used. When rows were
+    held back, the confirm run has read them, so the new candidate cannot be confirmed on them: the whole files go back
+    and it is ``not_confirmable``. Nothing changed: nothing happens (the run is the same candidate's, counted as a
+    second run on the confirm data or seeds, as before). A change before the confirm run began (nothing was run on the
+    confirm data or seeds yet) only ends the freeze: the same version goes back to exploring, nothing is recorded as
+    failed, and exploration's part of the data is put back in place. Returns plain lines for run.log."""
+    root = Path(quest_root)
+    record = load(root)
+    if record is None or record.get("stage") not in (CONFIRM, CONFIRMED) or record.get("not_applicable"):
+        return []
+    frozen = record.get("frozen_at_confirm")
+    if not isinstance(frozen, dict):
+        return []  # a record from before versions were counted: it goes on as it did
+    now = fingerprint(root, design_sha256=design_sha256)
+    # A data quest's version is its design and protocol: what it reads the data with (its code/ is not what ran).
+    compared = (("protocol_sha256", "protocol"),) if record.get("data_quest") else (
+        ("code_sha256", "code"), ("protocol_sha256", "protocol"))
+    changed = [what for key_, what in compared if now.get(key_) != frozen.get(key_)]
+    if record.get("data_quest") and design_sha256 and record.get("design_sha256") \
+            and design_sha256 != record["design_sha256"]:
+        changed.append("design")
+    if not changed:
+        return []
+    old = candidate(record)
+    lines: list[str] = []
+    unread = not (record.get("strategy") == HELD_BACK and record.get("confirm_data_handed"))
+    if record.get("stage") == CONFIRM and not int(record.get("confirm_executions") or 0) and unread:
+        # Nothing ran on the confirm data or seeds yet: there is no verdict to keep, and the held-back rows are unread.
+        for field in ("confirm_started_at", "explore_result", "explore_result_sha256", "frozen_at_confirm",
+                      "frozen_sha256", "design_sha256", "design_revisions_at_confirm", "isolation", "isolation_why",
+                      "confirm_replicates", "confirm_run_result_sha256", "confirm_reading_done", "confirm_job_pending"):
+            record.pop(field, None)
+        record.update(stage=EXPLORE, confirm_seed_base=None, confirm_executions=0)
+        _save(root, record)
+        lines.append(f"the {' and '.join(changed)} changed before the confirm run began: version {old} goes back to "
+                     "exploring, and is frozen and confirmed once when exploration ends")
+        if record.get("strategy") == HELD_BACK and record.get("files"):
+            _record, more = prepare(root, quest_id or root.name, data_quest=bool(record.get("data_quest")), key=key)
+            lines += more
+        return lines
+    if record.get("stage") == CONFIRM:
+        # Its confirm run gave no verdict before the version was changed (a repair of a crashed confirm run, say).
+        why = (f"the {' and '.join(changed)} of version {old} changed during its confirm run, before the confirm "
+               "result was recorded")
+        _verdict_line(root, record, "confirm_failed", why)
+        verdict = "confirm_failed"
+    else:
+        verdict = status(record)
+    earlier = [*(record.get("earlier_candidates") or []), {"candidate": old, "verdict": verdict}]
+    # Every seed an earlier confirm run used (its base and each replicate's), apart from the next one's.
+    stride = max(1, int(record.get("seed_stride") or 1))
+    used = [*(record.get("earlier_confirm_seed_bases") or []),
+            *([int(record["confirm_seed_base"]) + i * stride
+               for i in range(max(1, int(record.get("confirm_replicates") or 1)))]
+              if record.get("confirm_seed_base") is not None else [])]
+    held_back = record.get("strategy") == HELD_BACK or bool(record.get("data_quest"))
+    files = list(record.get("files") or [])
+    # The current candidate's own fields go; what is about the quest's data and its exploration stays.
+    for field in ("confirm_started_at", "confirmed_at", "confirm_result_sha256", "confirm_run_result_sha256",
+                  "confirm_reading_done", "confirm_job_pending", "explore_result", "explore_result_sha256",
+                  "frozen_at_confirm", "frozen_sha256", "design_sha256", "design_revisions_at_confirm",
+                  "confirm_compared", "confirm_differs", "confirm_executions_recorded", "not_confirmable",
+                  "isolation", "isolation_why", "confirm_replicates", "confirm_data_handed"):
+        record.pop(field, None)
+    record.update(stage=EXPLORE, candidate=old + 1, earlier_candidates=earlier, earlier_confirm_seed_bases=sorted(set(used)),
+                  confirm_seed_base=None, confirm_executions=0, confirm_runs=0, results_seen_in_confirm=0,
+                  new_candidate_at=_now())
+    lines.append(f"version {old + 1} of the study: the {' and '.join(changed)} changed after version {old} was "
+                 f"frozen and confirmed on unseen data ({verdict.replace('_', ' ')}); that confirmation is kept as it "
+                 "was (.fi/confirmations.jsonl) and does not count for this version, which is confirmed on its own")
+    if held_back and not record.get("compromised"):
+        # The whole files go back first; a file that could not be put back stays in the record, so the next stop (or
+        # start) tries again (restore_inputs).
+        missed = _restore(root, files, key) if files else []
+        record.update(not_confirmable=HELD_BACK_USED, held_back_used=True, strategy=FRESH_SEEDS,
+                      why_no_data=HELD_BACK_USED, files=list(missed))
+        _save(root, record)
+        lines.append(f"version {old + 1} cannot be confirmed: {HELD_BACK_USED}; its numbers stay exploratory"
+                     + (" (the whole data files are back in place)" if files and not missed else ""))
+        lines += _not_restored(root, missed, key)
+        return lines
+    _save(root, record)
+    return lines
+
+
+def note_confirm_handed(quest_root: Path) -> None:
+    """The experiment's step is about to run in the confirm stage: from here the quest's code can read the held-back
+    part (a known-answer check runs before the confirm run itself is counted), so a change made after this is never
+    taken for one made before the confirm data was read (:func:`new_candidate`)."""
+    record = load(quest_root)
+    if record is not None and record.get("stage") == CONFIRM and not record.get("confirm_data_handed"):
+        record["confirm_data_handed"] = True
+        _save(quest_root, record)
+
+
+def record_gap(quest_root: Path, record: dict[str, Any] | None,
+               events: list[dict[str, Any]] | None = None) -> str:
+    """Why the current candidate's verdict cannot be read as the record says, or ``""``: its verdict lines
+    (``.fi/confirmations.jsonl``) were changed or are missing, or one of them says the confirmation did not hold while
+    the record says it did. ``events``: the decision trace's events, when there is one."""
+    from . import confirmations as _confirmations
+
+    gaps = _confirmations.problems(quest_root, events)
+    if record and isinstance(record.get("frozen_at_confirm"), dict) and status(record) == CONFIRMED:
+        mine = _confirmations.for_candidate(_confirmations.read(quest_root), candidate(record))
+        if not mine:
+            gaps.append("the confirmation of this version is not in its record (.fi/confirmations.jsonl)")
+        elif _confirmations.worst(mine) != CONFIRMED:
+            gaps.append(f"this version's confirmation did not hold on one of its confirm runs "
+                        f"({_confirmations.worst(mine).replace('_', ' ')}), and a run that did not hold is never "
+                        "replaced by a later one")
+    return "; ".join(gaps)
+
+
 def enter_confirm(quest_root: Path, *, explore_result: Any, frozen_sha256: str | None, stride: int,
                   replicates: int, explore_runs: int, design_sha256: str | None = None, key: bytes | None = None,
                   isolation: tuple[str, str] | None = None) -> tuple[dict[str, Any], list[str]]:
@@ -870,7 +1122,9 @@ def enter_confirm(quest_root: Path, *, explore_result: Any, frozen_sha256: str |
     if record.get("stage") != EXPLORE:
         return record, []
     explore_bases = [int(b) for b in record.get("explore_seed_bases") or []] or [0]
-    base = _pick_confirm_base(explore_bases, max(1, int(stride)), max(1, int(replicates)))
+    # A later version's confirm seeds are apart from every exploration run's and every earlier confirm run's.
+    earlier_confirms = [int(b) for b in record.get("earlier_confirm_seed_bases") or []]
+    base = _pick_confirm_base(explore_bases + earlier_confirms, max(1, int(stride)), max(1, int(replicates)))
     explore_runs = max(int(explore_runs), int(record.get("explore_runs") or 0))
     data_quest = bool(record.get("data_quest"))
     lines = [f"exploration ended after {explore_runs} "
@@ -894,7 +1148,14 @@ def enter_confirm(quest_root: Path, *, explore_result: Any, frozen_sha256: str |
                   explore_result=explore_result, confirm_executions=0, confirm_run_result_sha256=None,
                   # How many versions of the design there were when exploration ended: a later one was made after the
                   # confirm run began, which then no longer confirms it (core/disclosure.py).
-                  design_revisions_at_confirm=_design_versions(quest_root))
+                  design_revisions_at_confirm=_design_versions(quest_root),
+                  # This version as it is frozen: a change to its code or protocol after this makes a new version
+                  # (new_candidate), never a second confirm run of this one.
+                  candidate=candidate(record), confirm_replicates=max(1, int(replicates)),
+                  frozen_at_confirm=fingerprint(quest_root, protocol_sha256=frozen_sha256))
+    if candidate(record) > 1:
+        lines.append(f"version {candidate(record)} of the study is frozen and confirmed on its own; the confirmation of "
+                     "earlier versions stays as it was and does not count for it")
     if design_sha256:
         record["design_sha256"] = design_sha256
     if isolation and record.get("strategy") == HELD_BACK:
@@ -946,7 +1207,20 @@ def record_confirm(quest_root: Path, result: Any, *, design_sha256: str | None =
         record.update(stage=CONFIRMED, confirmed_at=_now(), confirm_result_sha256=digest, confirm_runs=1,
                       results_seen_in_confirm=1 if digest else 0, confirm_executions_recorded=runs)
         redesigned = bool(record.get("design_sha256") and design_sha256 and design_sha256 != record["design_sha256"])
-        if replayed:
+        frozen_at = record.get("frozen_at_confirm") if isinstance(record.get("frozen_at_confirm"), dict) else None
+        drifted: list[str] = []
+        if frozen_at is not None:
+            now = fingerprint(quest_root)
+            drifted = [what for key_, what in ((("protocol_sha256", "protocol"),) if record.get("data_quest") else
+                                               (("code_sha256", "code"), ("protocol_sha256", "protocol")))
+                       if now.get(key_) != frozen_at.get(key_)]
+        if drifted and not replayed and not redesigned:
+            # Changed during the confirm run itself (a known-answer check's repair, say): what ran is not the version
+            # that was frozen, so it confirms nothing; the changed version is a new one at its next run.
+            record["not_confirmable"] = (f"the {' and '.join(drifted)} changed during the confirm run, after the "
+                                         "version was frozen")
+            lines.append(f"confirm stage: {record['not_confirmable']}, so nothing in this quest is confirmed by it")
+        elif replayed:
             record["compromised"] = ("the result that reached the paper is not the one the confirm run produced (a run "
                                      "from an earlier step brought back exploration's result)")
             lines.append(f"confirm stage: {record['compromised']}, so nothing in this quest is confirmed")
@@ -978,6 +1252,11 @@ def record_confirm(quest_root: Path, result: Any, *, design_sha256: str | None =
                 record["confirm_compared"] = compared["compared"]
                 record["confirm_differs"] = compared["differs"]
                 lines += _data.compare_lines(compared)
+        if isinstance(record.get("frozen_at_confirm"), dict):
+            # The verdict is kept for good (core/confirmations.py), whatever happens to this version afterwards.
+            _verdict_line(quest_root, record, status(record), lines[0] if lines else "")
+            if status(record) != CONFIRMED:
+                lines.append(ONE_SHOT)
         _save(quest_root, record)
         missed = _restore(quest_root, record.get("files") or [], key)
         if record.get("files") and not missed:
@@ -994,6 +1273,9 @@ def record_confirm(quest_root: Path, result: Any, *, design_sha256: str | None =
         record["confirm_result_sha256"] = digest
     lines.append(f"the frozen design was run again after the confirm numbers were seen ({runs} runs on the confirm data "
                  "or seeds in all): the numbers are no longer from one untouched confirm run, so they are preliminary")
+    if isinstance(record.get("frozen_at_confirm"), dict):
+        # The same version confirmed again: both verdicts are kept, and the second run does not replace the first.
+        _verdict_line(quest_root, record, status(record), lines[-1])
     _save(quest_root, record)
     return record, lines
 
@@ -1082,7 +1364,7 @@ def mark_not_applicable(quest_root: Path, why: str, key: bytes | None = None) ->
 
 def data_quest_gate(quest_root: Path, quest_id: str, *, declared: dict[str, Any] | None = None,
                     answer: str | None = None, grouping: list[str] | None = None, research: bool = False,
-                    key: bytes | None = None) -> tuple[list[str], str]:
+                    key: bytes | None = None, design_sha256: str | None = None) -> tuple[list[str], str]:
     """Called each time a data quest's data-reading step (``data_load``) is about to read the data. In exploration: the
     data supplied since is taken in, the split is decided the first time (:func:`decide_split`, with the plan's
     ``declared`` split, the ``answer`` in plan.md and the plan's variables as ``grouping``), and the reading is
@@ -1092,14 +1374,23 @@ def data_quest_gate(quest_root: Path, quest_id: str, *, declared: dict[str, Any]
     again, after a redesign the review asked for), counted the same way, so the result is preliminary again.
 
     Returns ``(lines for run.log, question)``: a question (research, nothing says which rows belong together) means
-    nothing may be read yet; the caller stops and asks it."""
+    nothing may be read yet; the caller stops and asks it.
+
+    ``design_sha256``: the design the data is about to be read with. After the confirm stage began, a design that is
+    not the frozen one makes a new version (:func:`new_candidate`), which the held-back rows can no longer confirm."""
     quest_root = Path(quest_root)
     record = load(quest_root)
     if record is None or not record.get("data_quest") or record.get("not_applicable"):
         return [], ""
     lines: list[str] = []
+    if design_sha256 and record.get("stage") in (CONFIRM, CONFIRMED):
+        changed = new_candidate(quest_root, design_sha256=design_sha256, key=key, quest_id=quest_id)
+        if changed:
+            more, question = data_quest_gate(quest_root, quest_id, declared=declared, answer=answer, grouping=grouping,
+                                             research=research, key=key)
+            return changed + more, question
     if record.get("stage") == EXPLORE:
-        if record.get("compromised"):
+        if record.get("compromised") or record.get("not_confirmable"):
             return [], ""
         record, lines = prepare(quest_root, quest_id, data_quest=True, key=key)
         if record.get("compromised"):
@@ -1214,6 +1505,26 @@ def evidence_settings(quest_root: Path) -> dict[str, str]:
                 "phased_why_no_data": str((record or {}).get("not_applicable") or "")}
     out = {"phased": status(record), "phased_strategy": str((record or {}).get("strategy") or FRESH_SEEDS),
            "phased_why_no_data": str((record or {}).get("why_no_data") or "")}
+    # Only the current version's confirmation counts; earlier versions' verdicts are said, never counted for it.
+    if candidate(record) > 1:
+        out["phased_candidate"] = str(candidate(record))
+        out["phased_earlier"] = "; ".join(
+            f"version {e.get('candidate')}: {str(e.get('verdict') or '').replace('_', ' ')}"
+            for e in (record or {}).get("earlier_candidates") or [] if isinstance(e, dict))
+        if (record or {}).get("held_back_used"):
+            out["phased_unconfirmable_why"] = HELD_BACK_USED
+    from . import audit_log as _audit_log
+    from . import confirmations as _confirmations
+
+    if _confirmations.path(quest_root).is_file() or isinstance((record or {}).get("frozen_at_confirm"), dict):
+        trace = Path(quest_root) / ".fi" / "audit.jsonl"
+        try:
+            events = _audit_log.read(trace) if trace.is_file() else None
+        except Exception:  # noqa: BLE001 -- a trace that cannot be read is its own gap elsewhere
+            events = None
+        gap = record_gap(quest_root, record, events)
+        if gap:
+            out["phased_record_gap"] = gap
     differs = [str(d.get("name")) for d in (record or {}).get("confirm_differs") or [] if isinstance(d, dict)]
     if differs:
         # A data quest's confirm numbers that differ from exploration's: said, never a gap.
@@ -1272,8 +1583,21 @@ def _how_confirmed(record: dict[str, Any]) -> str:
 
 def summary(record: dict[str, Any] | None) -> str:
     """One plain sentence on which numbers are exploratory and which are confirmed (no numbers of the result in it: the
-    paper's number audits hold every number in the paper to the results)."""
+    paper's number audits hold every number in the paper to the results). A later version of the study (a candidate
+    after the first) says so: an earlier version's confirmation is kept and does not count for it."""
+    text = _summary(record)
+    if candidate(record) > 1 and status(record) != NOT_APPLICABLE and not (record or {}).get("held_back_used"):
+        text += (" The study was changed after an earlier version of it had been confirmed this way; that earlier "
+                 "confirmation is kept as it was and does not count for these numbers.")
+    return text
+
+
+def _summary(record: dict[str, Any] | None) -> str:
     state = status(record)
+    if state == "not_confirmable" and (record or {}).get("held_back_used"):
+        return ("An earlier version of the study was confirmed on data held back from exploration, and the study was "
+                "changed after that confirmation; no data remains that no version has seen, so this version is not "
+                "confirmed. Treat the numbers as exploratory.")
     if state == NOT_APPLICABLE:
         return ("This quest runs no experiment of its own, so there was no design to run once more on data or seeds that "
                 "exploration never saw; nothing here is confirmed that way.")
