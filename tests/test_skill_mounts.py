@@ -316,8 +316,13 @@ def _client() -> MagicMock:
     return client
 
 
+def _without_records(volumes: dict[str, Any]) -> dict[str, Any]:
+    """The mounts but FI's own records (read-only .fi/ and needs/, covered in test_docker_records_readonly.py)."""
+    return {h: v for h, v in volumes.items() if not v["bind"].startswith(("/work/.fi", "/work/needs"))}
+
+
 def _volumes(client: MagicMock, call: int = -1) -> dict[str, Any]:
-    return client.containers.create.call_args_list[call].kwargs["volumes"]
+    return _without_records(client.containers.create.call_args_list[call].kwargs["volumes"])
 
 
 def test_the_container_gets_the_quest_read_write_and_each_skill_read_only(env, tmp_path) -> None:
@@ -606,7 +611,7 @@ async def test_every_container_of_the_experiment_gets_the_skill_read_only(env, t
     creates = client.containers.create.call_args_list
     assert len(creates) >= 3, "pilot + run + replicate at least"
     for c in creates:
-        volumes = c.kwargs["volumes"]
+        volumes = _without_records(c.kwargs["volumes"])
         assert volumes[str(folder.resolve())] == {"bind": "/fi-skills/ext-one", "mode": "ro"}
         assert sorted(v["bind"] for v in volumes.values()) == ["/fi-skills/ext-one", "/work"]
         assert all(v["mode"] == "ro" for v in volumes.values() if v["bind"] != "/work")
