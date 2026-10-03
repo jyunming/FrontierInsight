@@ -326,6 +326,32 @@ def _supplied_since(folder: Path, record: Path) -> bool:
         return False
 
 
+#: What the card says when the current version's confirmation on unseen data did not hold (``core/confirmations.py``).
+CONFIRM_FAILED = ("The confirmation on unseen data did not agree; this version cannot be confirmed again — a changed "
+                  "version is a new candidate and is confirmed on its own.")
+
+
+def confirm_item(quest_root: Path) -> Item | None:
+    """The card's line when the current version of the study had its one confirm run and it did not hold (or it was
+    run again): the result stays exploratory, and only a changed version, confirmed on its own, can do better."""
+    from . import confirmations as _confirmations
+    from . import phased as _phased
+
+    if not _confirmations.path(Path(quest_root)).is_file():
+        return None  # nothing confirmed yet (and a quest without the two stages never reads their record)
+    record = _phased.load(Path(quest_root))
+    if record is None:
+        return None
+    mine = _confirmations.for_candidate(_confirmations.read(Path(quest_root)), _phased.candidate(record))
+    verdict = _confirmations.worst(mine)
+    if not mine or verdict == _confirmations.CONFIRMED:
+        return None
+    return Item("confirm", f"{CONFIRM_FAILED} ({verdict.replace('_', ' ')}; .fi/confirmations.jsonl)",
+                recommended="Nothing to do if the exploratory result is enough. To try a changed version, say what to "
+                            "change (`--refine \"...\"`): it is run, explored and confirmed once on its own; the "
+                            "earlier confirmation stays in the record and the paper counts it.")
+
+
 def waiting(quest_root: Path) -> list[Item]:
     """Things that did not stop the quest but are waiting for the person: each from a record the quest already keeps."""
     root = Path(quest_root)
@@ -405,6 +431,9 @@ def waiting(quest_root: Path) -> list[Item]:
                                      f"({named}). The paper must not cite them.",
                         recommended="Make sure the paper does not cite them; the claim check marks any sentence that "
                                     "does as unsupported (.fi/literature_queries.json lists the retraction notices)."))
+    confirm = confirm_item(root)
+    if confirm is not None:
+        out.append(confirm)
     from .evidence import read as _read_evidence  # with its seal checked, as every surface shows it
 
     evidence = _read_evidence(root)

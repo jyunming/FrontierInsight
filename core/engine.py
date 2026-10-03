@@ -70,6 +70,7 @@ from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
 from . import audit_log as _audit_log
+from . import confirmations as _confirmations
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
@@ -2666,6 +2667,21 @@ class Engine:
                 self._progress("[phased] Part of your data is held back, encrypted with a key only this run of FI "
                                "holds: if FI is killed rather than stopped, those rows cannot be put back, so keep your "
                                "own copy of the file.")
+        self._phased_seal_confirmations()
+
+    def _phased_seal_confirmations(self) -> None:
+        """Each verdict line of ``.fi/confirmations.jsonl`` the decision trace does not name yet gets its event
+        (``confirmation_recorded``, with the line's hash), so a line changed or removed later is found
+        (``core/confirmations.problems``)."""
+        if not _confirmations.path(self.quest_root).is_file():
+            return
+        try:
+            events = _audit_log.read(self.audit.path) if self.audit.path.is_file() else []
+            for digest, entry in _confirmations.unsealed(self.quest_root, events):
+                self._audit(_confirmations.EVENT, line_sha256=digest, candidate=entry.get("candidate"),
+                            verdict=entry.get("verdict"))
+        except Exception as e:  # noqa: BLE001 -- the trace is a record; it must never stop a quest
+            self._log.debug("[audit] could not record the confirmations: %r", e)
 
     def _phased_keep_off_if_began_before(self) -> None:
         """A research quest whose config does not set ``engine.phased`` has it on by default. One that began before that
@@ -2823,8 +2839,12 @@ class Engine:
     def _phased_before_first_run(self, state: QuestState) -> str:
         """Right before the experiment's code first runs: which rows are held back is decided
         (``core/phased.decide_split``). Returns the question to ask when a research quest cannot tell which rows belong
-        together, else ``""``."""
+        together, else ``""``. After the confirm stage began, a study whose code or protocol changed since it was frozen
+        is a new version first (``core/phased.new_candidate``): it is confirmed on its own, never as a second try of the
+        earlier version."""
         try:
+            self._phased_log(_phased.new_candidate(self.quest_root, key=self._phased_key(), quest_id=self.quest_id))
+            _phased.note_confirm_handed(self.quest_root)
             _record, lines, question = _phased.decide_split(
                 self.quest_root, self.quest_id, **self._phased_split_inputs(state),
                 research=self.config.rigor_profile == "research", key=self._phased_key(),
@@ -2856,7 +2876,8 @@ class Engine:
         try:
             lines, question = _phased.data_quest_gate(
                 self.quest_root, self.quest_id, **self._phased_split_inputs(state),
-                research=self.config.rigor_profile == "research", key=self._phased_key())
+                research=self.config.rigor_profile == "research", key=self._phased_key(),
+                design_sha256=_frozen.sha256(state.get("design") or {}))
         except OSError as e:
             self._log.warning("[phased] the data held back could not be kept apart from exploration (%r); nothing in "
                               "this quest can be confirmed, so its numbers stay exploratory", e)
@@ -11536,6 +11557,9 @@ class Engine:
             runner = _optimise.OptimisationRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 simulate=simulate_path, analysis=code_path, log=self._log,
+                # Frozen for its confirm run (or after it): exploration's best design is kept, never searched for again.
+                frozen=lambda: _phased.enabled(self.config) and _phased.stage(self.quest_root) in (
+                    _phased.CONFIRM, _phased.CONFIRMED),
             )
         elif split and self._trial_mode:
             runner = _trial_runner.TrialsRunner(
