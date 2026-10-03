@@ -606,6 +606,15 @@ _PROCESS_LIMIT_RE = re.compile(
 _THREAD_VARS = (
     "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "PYTHON_CPU_COUNT",
 )
+# Folders of the quest FI writes its records into: read-only in the container.
+_RECORD_DIRS = (".fi", "needs")
+# Inside .fi, the folders where FI's harness runs a script and the script's rows land.
+_SCRIPT_WRITABLE = (".fi/trials", ".fi/optimisation")
+# FI's own records inside those folders: read-only again.
+_RECORD_FILES = (".fi/trials/run.json", ".fi/trials/cluster.json",
+                 ".fi/optimisation/run.json", ".fi/optimisation/check.json")
+# A script that tried to write into FI's records.
+_RECORD_REFUSED_RE = re.compile(r"Read-only file system[^\n]*/work/(?:\.fi|needs)\b")
 # Creates and removes one file in the quest folder: can this user write there?
 _WRITE_CHECK = (
     "import os, tempfile; fd, p = tempfile.mkstemp(dir='/work', prefix='.fi-write-check-'); "
@@ -952,13 +961,33 @@ class DockerExecutor:
         self._skill_mounts = tuple(mounts)
 
     def _volumes(self, host_root: Path) -> dict[str, dict[str, str]]:
-        """The quest read-write at /work, plus each planned skill folder
-        read-only. A skill folder that is no longer what was planned (replaced
-        by a link since) is left out and said so: the container never gets a
-        path the plan did not check."""
+        """The quest read-write at /work, FI's own records read-only on top of it,
+        plus each planned skill folder read-only. A skill folder that is no longer
+        what was planned (replaced by a link since) is left out and said so: the
+        container never gets a path the plan did not check."""
         volumes: dict[str, dict[str, str]] = {
             str(host_root): {"bind": "/work", "mode": "rw"},
         }
+        # FI's records (.fi/: the trace, the attempts, the model calls, the run
+        # state; needs/: the frozen protocol and the checks) are written by FI on
+        # the host, never by a script. A script in the container reads them but
+        # cannot change them, so a record and the anchor kept for it cannot be
+        # edited together. The two folders FI's own harness writes its rows into
+        # stay writable, with the records FI keeps inside them read-only again.
+        # A mount point is made on the host first: Docker would make it itself,
+        # as a root-owned folder.
+        try:
+            for rel in _SCRIPT_WRITABLE + _RECORD_DIRS:
+                (host_root / rel).mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass  # the quest folder itself is not writable: the run will say so
+        for rel in _RECORD_DIRS:
+            volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "ro"}
+        for rel in _SCRIPT_WRITABLE:
+            volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "rw"}
+        for rel in _RECORD_FILES:
+            if (host_root / rel).is_file():
+                volumes[str(host_root / rel)] = {"bind": f"/work/{rel}", "mode": "ro"}
         for m in self._skill_mounts:
             try:
                 host = m.bind_host if m.still_safe() else None
@@ -1084,6 +1113,10 @@ class DockerExecutor:
             stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
             stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
             note = "" if timed_out else self._limit_note(rc, stderr, _oom_killed(container))
+            if rc != 0 and _RECORD_REFUSED_RE.search(stderr):
+                self._say(logging.WARNING, "[docker] the experiment tried to write into FI's own records "
+                          "(.fi/ or needs/), which it can only read; it can write its results anywhere else "
+                          "in the quest folder")
             if note:
                 # The repair step and the error a person sees read the end of
                 # stderr; run.log gets the same sentence.
