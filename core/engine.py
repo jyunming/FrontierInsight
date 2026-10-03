@@ -9649,7 +9649,7 @@ class Engine:
             return Path(path).name
 
     def _measuring_code_version(self, seed_path: Path) -> str:
-        """The version of the code that measured the known-answer checks: the script the checks ran and the model's
+        """The version of the code that measured the known-answer checks: the script the checks ran, the helper modules beside it and the model's
         package in ``code/`` (core/accepted_checks.py::script_version). A choice to go on with a failed check is bound to
         it."""
         files: dict[str, str] = {}
