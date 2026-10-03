@@ -675,7 +675,9 @@ def _record(block, search_record, info, base, cands, probes, *, rows, finished, 
                          "before every starting point converged",
                "share": "at least one starting point used its whole share of the budget before it converged",
                "time": "the search's time limit (execution.timeout_s) was reached before every starting point "
-                       "converged"}.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
+                       "converged",
+               "target": "the continued search stopped as soon as a design reached the target asked for"
+               }.get(stopped, f"the search stopped because {stopped or 'of an unknown reason'}")
         checks["budget"] = {"status": FAILED, "says": (
             f"{why}: the design is the best of {ev.get('search')} evaluations, not shown to be the best the search "
             "would find with more")}
@@ -1084,9 +1086,13 @@ def evidence_gaps(quest_root: Path, protocol: dict[str, Any] | None) -> dict[str
                 rows.append(row)
         budget = _plan.evaluations(block)[0]
         counted = sum(1 for r in rows if r.get("counted", True))
-        if budget is not None and counted > budget:
+        # A person's request to search further adds to the plan's budget, by the amount FI recorded for it
+        # (core/optimise_refine.py): the rounds in FI's own file, for this plan, not the search record's word for it.
+        added = sum(int(r["added"]) for r in _optimise.read_rounds(quest_root, block))
+        if budget is not None and counted > budget + added:
             out["protocol_runtime_matched"].append(
-                f"the search's record holds {counted} evaluations, more than the {budget} the plan allows")
+                f"the search's record holds {counted} evaluations, more than the {budget + added} the plan allows"
+                + (f" ({budget} planned and {added} added at the person's request)" if added else ""))
         space = _search.Space(block["design_variables"])
         outside = [r for r in rows if isinstance(r.get("design"), dict) and (
             set(r["design"]) != set(space.names) or not space.inside(r["design"]))]

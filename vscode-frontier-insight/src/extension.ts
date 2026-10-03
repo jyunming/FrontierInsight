@@ -1399,6 +1399,17 @@ async function runLaunchInChat(
             stream.markdown(`  🔎 evidence: \`${evidenceLine[1]}\`\n\n`);
             return;
         }
+        // A search for the best design: the best design in one line, then the files to open (core/best_design_report.py).
+        const bestFiles = line.match(/^\[FI\] best design files: (.+)$/);
+        if (bestFiles) {
+            stream.markdown(`  📂 best design files: ${bestFiles[1].split(", ").map((f) => `\`${f}\``).join(", ")}\n\n`);
+            return;
+        }
+        const bestLine = line.match(/^\[FI\] best design: (.+)$/);
+        if (bestLine) {
+            stream.markdown(`  🏁 best design: \`${bestLine[1].replace(/`/g, "'")}\`\n\n`);
+            return;
+        }
         // The quest's model changed since it last ran (core/engine.py _take_model_change): said, never a stop.
         const model = line.match(/^\[FI\] model: (.+)$/);
         if (model) {

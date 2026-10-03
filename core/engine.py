@@ -108,6 +108,8 @@ from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
 from . import optimise as _optimise
+from . import optimise_refine as _optimise_refine
+from . import best_design_report as _best_report
 from . import protocol_check as _protocol
 from . import retractions as _retractions
 from . import split_run as _split_run
@@ -481,6 +483,10 @@ class QuestState(TypedDict, total=False):
     # The layout notes whose redraw failed on both tries (the figures are as they were): the review gate tells the
     # person their request was not applied, and clears this once they answer.
     layout_not_redrawn: list[str]
+    # A refine of a search for the best design, read without a model (core/optimise_refine.py): ``kind`` "search" (the
+    # search goes on from the best design so far: human_feedback -> execute), "new_study" or "unclear" (nothing is
+    # changed and the review pause says why), with its plain sentence ``says``. Empty for any other refine.
+    optimise_refine: dict[str, Any]
     # A script extended for a refine: what was asked (``asked``) and the result names the results held before it
     # (``before``), so each write after the run can check that what it added is in the paper. ``extend_unreported``:
     # what the paper still leaves out after the writer was asked once more; the review pause says so.
@@ -1007,6 +1013,8 @@ class Engine:
                                     "iteration": _it + 1,
                                     "refine_written_for": _answered,
                                     "feedback_rounds_from": len((prior_snapshot.values or {}).get("feedback_history") or []),
+                                    # A request to search further (core/optimise_refine.py) belongs to its own pass.
+                                    "optimise_refine": {},
                                 },
                                 as_node="human_feedback",
                             )
@@ -1719,6 +1727,8 @@ class Engine:
         "raw/optimisation_ledger.jsonl", "results/best_design.json", ".fi/optimisation/run.json",
         # FI's check of the best design at finer numerical settings (core/optimum_check.py).
         "needs/OPTIMUM_CHECK.json", ".fi/optimisation/check.json",
+        # The rounds of a continued search a person asked for (core/optimise_refine.py).
+        ".fi/optimisation/continue.json",
         # What the quest tried (core/attempt_records.py): anchored in the trace, so an edit after the fact shows.
         ".fi/attempts.jsonl", ".fi/branch_ledger.jsonl",
         # The search queries used: a change between steps shows in the trace, the seal covers the rest.
@@ -2481,7 +2491,9 @@ class Engine:
         g.add_conditional_edges(
             "human_feedback",
             self._audited_route("human_feedback", self._route_after_human_feedback),
-            {"rewrite": "write", "revise": "design", "done": END},
+            # A refine of a search for the best design that asks to search further goes back to the search itself;
+            # one that asks for a new study (or cannot be read) changes nothing and asks again (core/optimise_refine.py).
+            {"rewrite": "write", "revise": "design", "done": END, "search": "execute", "ask_again": "human_feedback"},
         )
         return g
 
@@ -3256,6 +3268,11 @@ class Engine:
         hf = state.get("human_feedback") or {}
         action = hf.get("action", "accept")
         if action == "refine":
+            kind = (state.get("optimise_refine") or {}).get("kind")
+            if kind == _optimise_refine.SEARCH:
+                return "search"
+            if kind in (_optimise_refine.NEW_STUDY, _optimise_refine.UNCLEAR):
+                return "ask_again"
             # A refine with no notes is FI re-opening a finished quest (``--reopen``, ``--update``): the steps its
             # changed settings affect run again, from the design, as before.
             notes = str(hf.get("feedback") or "").strip()
@@ -4609,9 +4626,11 @@ class Engine:
         # later revise pass honours every prior ask, not just the most
         # recent one. Falls back to the single-shot ``human_feedback``
         # dict for legacy state shapes (resumed pre-history checkpoints).
-        history = list(state.get("feedback_history") or [])
+        # (A note the search for the best design answered is not a change to the design: core/optimise_refine.py.)
+        history = [h for h in state.get("feedback_history") or [] if not (isinstance(h, dict) and h.get("answered_by"))]
         hf = state.get("human_feedback") or {}
-        if not history and hf.get("action") == "refine" and hf.get("feedback"):
+        if not history and hf.get("action") == "refine" and hf.get("feedback") and not any(
+                isinstance(h, dict) and h.get("answered_by") for h in state.get("feedback_history") or []):
             history = [{"iteration": state.get("iteration", 1) - 1,
                         "text": hf["feedback"]}]
         if history:
@@ -14119,6 +14138,9 @@ class Engine:
         improved = _improve.write_note(self.quest_root)
         if improved:
             evidence_note = f"{evidence_note}\n\n{improved}".strip()
+        if _optimise.block_of(self._protocol_block(state)) is not None and (best_note := _best_report.write_note(
+                self.quest_root)):
+            evidence_note = f"{evidence_note}\n\n{best_note}".strip()
         if once_note := self._ran_once_note():
             evidence_note = f"{evidence_note}\n\n{once_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
@@ -14234,7 +14256,7 @@ class Engine:
             markdown = await self._write_whole_paper(state, persona_block, refine_round=refine_round)
         # Whatever the writer put where the engine's paragraph goes is not the paper's text: out before any step reads
         # the draft (its citations, figures and numbers), and the engine's own goes in at the end (core/disclosure.py).
-        markdown = _disclosure.without_block(markdown)
+        markdown = _best_report.without_block(_disclosure.without_block(markdown))
         needs_experiment: list[str] = []
         extend: list[str] = []
         layout: list[str] = []
@@ -14319,6 +14341,8 @@ class Engine:
         markdown = _disclosure.mark_paper(markdown, _disclosure.paragraph(
             self.quest_root, no_simulation=bool(state.get("no_simulation_resolved")),
             survey=bool(state.get("survey_mode_resolved"))))
+        # A search for the best design: the engine's "Best design found" section, from FI's own records.
+        markdown = self._mark_best_design(state, markdown)
         paper_path = self.quest_root / "paper" / "paper.md"
         paper_path.write_text(markdown, encoding="utf-8")
         self._log.info("[write] wrote %s (%d bytes)", paper_path, len(markdown))
@@ -14527,8 +14551,10 @@ class Engine:
         started = _receipts.now()
         checked_bytes = Path(paper_md).read_bytes()
         # The engine's paragraph on how the result was reached is not a claim of the paper's (core/disclosure.py).
-        paper_text = _paper_for_prompt(_disclosure.strip_for_checks(Path(paper_md).read_text(encoding="utf-8")),
-                                       "claim_check", self._log)
+        paper_raw = Path(paper_md).read_text(encoding="utf-8")
+        # Nor is the "Best design found" section, when it is exactly FI's (core/best_design_report.py).
+        paper_raw = _best_report.strip_for_checks(paper_raw, self._best_design_section(state, paper_raw))
+        paper_text = _paper_for_prompt(_disclosure.strip_for_checks(paper_raw), "claim_check", self._log)
         literature = state.get("literature") or []
         audience = self.config.output.audience
         refs = build_references(literature, audience=audience)
@@ -15590,6 +15616,80 @@ class Engine:
             self._log.warning("[stat_claims] %s", f.describe())
         return [f"mislabelled_statistic: {f.describe()}" for f in report.findings]
 
+    def _best_design_section(self, state: QuestState, markdown: str) -> str:
+        """The "Best design found" section FI puts into ``markdown`` (core/best_design_report.py); ``""`` for a study
+        that is not a search for the best design, or one with no record of its search."""
+        block = _optimise.block_of(self._protocol_block(state))
+        if block is None:
+            return ""
+        try:
+            normal, _why = _optim.normalize(block)
+            return _best_report.for_paper(self.quest_root, normal or block, markdown)
+        except Exception as exc:  # noqa: BLE001 -- a section FI cannot build is left out, never a reason to stop
+            self._log.warning("[write] the \"Best design found\" section could not be built (%s: %s)",
+                              type(exc).__name__, str(exc)[:200])
+            return ""
+
+    def _mark_best_design(self, state: QuestState, markdown: str) -> str:
+        """``markdown`` with FI's "Best design found" section (and ``results/best_design.md``, the same text as a file),
+        or with any copy of it taken out when there is none."""
+        text = self._best_design_section(state, markdown)
+        if text:
+            block = _optimise.block_of(self._protocol_block(state))
+            try:
+                normal, _why = _optim.normalize(block)
+                _best_report.write_readable(self.quest_root, normal or block)
+            except Exception:  # noqa: BLE001 -- a convenience copy
+                pass
+            self._log.info("[write] FI's \"Best design found\" section is in the paper (from results/best_design.json "
+                           "and needs/OPTIMUM_CHECK.json)")
+        return _best_report.mark_paper(markdown, text)
+
+    def _optimise_refine_request(self, state: QuestState, feedback: str) -> dict[str, Any]:
+        """What a refine asks of a search for the best design (core/optimise_refine.py); ``{}`` for any other study or
+        an ordinary refine. A request to search further is recorded as a round of the search here."""
+        block_raw = _optimise.block_of(self._protocol_block(state))
+        if block_raw is None or not str(feedback or "").strip():
+            return {}
+        try:
+            block, _why = _optim.normalize(block_raw)
+            if block is None:
+                return {}
+            request = _optimise_refine.read_request(feedback, block, _best_report.records(self.quest_root)["best_design"])
+            if request.get("kind") == _optimise_refine.SEARCH and _phased.enabled(self.config) and _phased.stage(
+                    self.quest_root) in (_phased.CONFIRM, _phased.CONFIRMED):
+                # After the freeze the search is never run again (core/phased.py): searching on would choose the design
+                # on the data meant to confirm it.
+                return {"kind": _optimise_refine.UNCLEAR, "says": (
+                    "Your refine was not carried out: this study's best design was frozen and confirmed on runs the "
+                    "search never saw, and searching further now would choose the design on those runs. Nothing was "
+                    "changed. To search further, start a new quest from this one's plan.")}
+            if request.get("kind") == _optimise_refine.SEARCH:
+                rounds = _optimise_refine.add_round(self.quest_root, block,
+                                                    {**request["round"], "refine": _refine_count(state) + 1})
+                self._log.info("[optimise] the person asked to search further (round %d): %s%s", len(rounds),
+                               request["says"], f" Read as: {request['round']['read_as']}." if
+                               request["round"].get("read_as") else "")
+                # (The round's file is in the audit trace's watched files; the route the request takes is a route
+                # decision there.)
+                self._progress(str(request["says"]))
+        except Exception as exc:  # noqa: BLE001 -- an unreadable request is an ordinary refine, never a stop
+            self._log.warning("[optimise] the refine could not be read as a request to the search (%s: %s); it goes to "
+                              "the writer", type(exc).__name__, str(exc)[:200])
+            return {}
+        return {k: v for k, v in request.items() if k in ("kind", "says", "round")}
+
+    def _optimise_refine_hint(self, state: QuestState) -> str:
+        """How to ask a search for the best design for more, for the review pause; ``""`` for any other study."""
+        try:
+            block_raw = _optimise.block_of(self._protocol_block(state))
+            if block_raw is None:
+                return ""
+            block, _why = _optim.normalize(block_raw)
+            return _optimise_refine.hint(block)
+        except Exception:  # noqa: BLE001 -- a hint
+            return ""
+
     def _number_provenance_hits(
         self, paper_md: str, state: QuestState,
     ) -> list[str]:
@@ -15646,6 +15746,8 @@ class Engine:
                 design=state.get("design") or {},
                 oracle_checks=_oracle.last_judged(self._oracle_record_read()),
                 n_seeds=len(replicates),
+                optimisation=(_best_report.records(self.quest_root)
+                              if _optimise.block_of(self._protocol_block(state)) is not None else None),
             )
         except Exception as e:  # noqa: BLE001 - never fail a quest over the checker
             self._log.warning("[number_provenance] check failed (%s); skipping", e)
@@ -16530,6 +16632,16 @@ class Engine:
         not_redrawn = [str(n) for n in state.get("layout_not_redrawn") or [] if str(n).strip()]
         if not_redrawn:
             snapshot["layout_not_redrawn"] = not_redrawn
+        # A search for the best design: the person's last refine FI did not carry out (a new study, or unclear), and
+        # how to ask for more (core/optimise_refine.py).
+        refused = state.get("optimise_refine") or {}
+        not_done = ([str(refused.get("says"))] if refused.get("kind") in (_optimise_refine.NEW_STUDY,
+                                                                          _optimise_refine.UNCLEAR) else [])
+        if not_done:
+            snapshot["refine_not_done"] = not_done
+        search_hint = self._optimise_refine_hint(state)
+        if search_hint:
+            snapshot["search_further"] = search_hint
         # Before a person accepts: what the result does not guarantee, its most important evidence gaps, and the one
         # question they answer (core/acceptance.py). Worked out here, written nowhere.
         before_accept = _acceptance.shown(self._write_evidence(state, write=False))
@@ -16553,6 +16665,7 @@ class Engine:
                 f"review the result yourself: no reviewer gave a verdict (review status {review.get('status')})"
             ),
             steps=[
+                *not_done,
                 *([f"Your figure request was NOT applied: {'; '.join(n[:200] for n in not_redrawn)}. Two tries at "
                    "redrawing the figures did not work, so they are as they were (the error is in .fi/run.log). Refine again to "
                    "retry, or say it another way."] if not_redrawn else []),
@@ -16572,6 +16685,7 @@ class Engine:
                 "to record your name rather than your login name.",
                 "Refine sends your notes back to the writing step first; if a point needs a new "
                 "experiment, FI goes back to the design.",
+                *([search_hint] if search_hint else []),
             ],
             payload={"human_review": snapshot},
         )
@@ -16601,6 +16715,7 @@ class Engine:
             "human_feedback": {"action": action, "feedback": feedback},
             # Told at this review; the next review tells only what the next refine could not do.
             "layout_not_redrawn": [],
+            "optimise_refine": {},
             # Who accepted it (the run loop stamps it: a person with their answer, or automatic). An accept the run
             # loop did not stamp is recorded as automatic: nobody is recorded as having looked.
             "acceptance": {},
@@ -16633,6 +16748,15 @@ class Engine:
         # goes through multiple revise passes and the user wants the
         # rewriter to honour all prior asks, not just the last.
         if action == "refine":
+            # A search for the best design reads the refine first (core/optimise_refine.py). A request it does not
+            # carry out (a new study, or unclear) is not kept: no later step may act on it, and the pause says why.
+            request = self._optimise_refine_request(state, feedback)
+            update["optimise_refine"] = request
+            if request.get("kind") in (_optimise_refine.NEW_STUDY, _optimise_refine.UNCLEAR):
+                self._log.warning("[optimise] %s", request.get("says"))
+                self._progress(str(request.get("says")))
+                return update
+        if action == "refine":
             update["iteration"] = state.get("iteration", 0) + 1
             history = list(state.get("feedback_history") or [])
             # The review is shown the notes of this gate answer, not the ones an earlier gate answered.
@@ -16642,6 +16766,16 @@ class Engine:
                 "text": feedback,
             })
             update["feedback_history"] = history
+            if (update.get("optimise_refine") or {}).get("kind") == _optimise_refine.SEARCH:
+                # The search answers this refine, not the writer: the paper written after it is a whole new draft,
+                # whose "Best design found" section says what the continued search found and whether the target was
+                # reached. The note is kept (it counts as a refine) but marked, so neither the writer, the review nor a
+                # later design reads it as a change to make; the run starts with fresh repair counters, as after a new
+                # script.
+                history[-1] = {**history[-1], "answered_by": "search"}
+                update["feedback_rounds_from"] = len(history)
+                update["refine_written_for"] = _refine_count({**state, **update})  # type: ignore[arg-type]
+                update.update(_FRESH_SCRIPT)  # type: ignore[typeddict-item]
             self._log.info(
                 "[human_feedback] refine → iteration %d (feedback len=%d, total entries=%d)",
                 update["iteration"], len(feedback), len(history),
@@ -22112,6 +22246,8 @@ def _auto_accepts(snapshot: dict[str, Any]) -> bool:
         and snapshot.get("review_status", "ok") == "ok"
         # A figure request the redraw could not apply is told to the person, not accepted for them.
         and not (snapshot.get("layout_not_redrawn") or [])
+        # Nor is a refine of a search for the best design FI did not carry out (core/optimise_refine.py).
+        and not (snapshot.get("refine_not_done") or [])
     )
 
 
@@ -22668,6 +22804,8 @@ def _user_feedback_review_block(state: QuestState) -> str:
     history = [h for h in state.get("feedback_history") or [] if isinstance(h, dict)]
     start = state.get("feedback_rounds_from")
     history = history[int(start):] if isinstance(start, int) else history[-1:]
+    # (A note the search for the best design answered is not one for the paper: core/optimise_refine.py.)
+    history = [h for h in history if not h.get("answered_by")]
     rounds = [str(h.get("text") or "").strip() for h in history]
     rounds = [r for r in rounds if r]
     if not rounds:
@@ -22720,7 +22858,7 @@ def _format_review_for_writer(state: QuestState, *, refine_round: bool = False) 
         ]
     rounds = [
         h for h in state.get("feedback_history") or []
-        if isinstance(h, dict) and str(h.get("text") or "").strip()
+        if isinstance(h, dict) and str(h.get("text") or "").strip() and not h.get("answered_by")
     ]
     if rounds:
         lines += [

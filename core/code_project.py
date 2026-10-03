@@ -211,7 +211,7 @@ def search(study):
 
     # A search FI stopped at its time limit is repeated to the same point, not further.
     outcome = fi_search.run_sync(block, evaluate, seed=base, method=study.get("method"), scan_step=scan,
-                                 max_evaluations=study.get("max_evaluations"))
+                                 max_evaluations=study.get("max_evaluations"), rounds=study.get("rounds"))
     record = fi_search.best_design(outcome, block, seed=base, check=study.get("check_settings"))
     (WORK / "raw" / "optimisation_ledger.jsonl").write_bytes(
         ("\n".join(fi_search.ledger_lines(outcome, block)) + "\n").encode("utf-8"))
@@ -388,6 +388,12 @@ def study_of(code_dir: Path, protocol: dict[str, Any] | None, *, split: bool = T
         }
         if evaluations.get("stopped_because") == "time" and isinstance(evaluations.get("search"), int):
             study["max_evaluations"] = evaluations["search"]
+        # The rounds a person asked the search to continue with (core/optimise_refine.py): run.py continues it the same.
+        from . import optimise as _optimise
+
+        rounds = _optimise.read_rounds(code_dir.parent, block)
+        if rounds:
+            study["rounds"] = [{k: r[k] for k in ("added", "target", "search_target") if k in r} for r in rounds]
         return study
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
     metrics = protocol.get("metrics") or []

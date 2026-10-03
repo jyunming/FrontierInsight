@@ -190,6 +190,19 @@ same PR that adds, splits or renames one.
   `with_fi_record` (FI's numbers added to the analysis's RESULT_JSON as `fi_search`, the check's under `fi_search.check`),
   `searches_itself` (an optimiser in the simulation's code: a warning). `Engine._node_execute` calls
   `_stop_if_the_search_cannot_start` too.
+- `core/best_design_report.py` — what a search for the best design hands over: `section` / `for_paper` (the paper's
+  "Best design found" section from `results/best_design.json` and `needs/OPTIMUM_CHECK.json`), `mark_paper` /
+  `without_block` (between `<!-- fi:best-design -->` markers; `Engine._mark_best_design` in `_node_write`),
+  `strip_for_checks` (the claim check), `records` (what `number_provenance.check(optimisation=)` traces the
+  section to), `write_note` (the writer's note), `summary_line` / `files` (the `[FI] best design:` lines in
+  `launch._report_best_design`, the web quest API's `best_design`, the VS Code chat), `write_readable`
+  (`results/best_design.md`).
+- `core/optimise_refine.py` — a refine of a search for the best design, read without a model: `read_request` (search
+  further / a new study / unclear, said back in plain words), `add_round` (`.fi/optimisation/continue.json`,
+  read by `optimise.read_rounds`; `optimise_search.search(rounds=)` runs the rounds, `optimise.run_search`
+  replays the search before them from FI's record), `hint` (the review pause). Engine side:
+  `Engine._optimise_refine_request`, `QuestState.optimise_refine`, the `human_feedback` routes `search` (→ `execute`)
+  and `ask_again` (→ `human_feedback`).
 - `core/optimum_check.py` — the engine checks the search's best design at finer numerical settings, through the same
   harness (`optimise._evaluate`, fresh seeds for `run_trial` via `check_seeds`): `check` (a generator of evaluate
   requests, like `optimise_search.search`; `check_sync` drives it in one process for the tests), `levels_of` (the finer

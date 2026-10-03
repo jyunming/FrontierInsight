@@ -259,6 +259,20 @@ def _quest_output_status(quest_root: Path) -> dict[str, object]:
     }
 
 
+def _best_design_view(quest_root: Path) -> dict[str, Any] | None:
+    """A search for the best design, for the quest page: the one line (as the CLI prints it), the files a person opens,
+    and FI's records as written (``results/best_design.json``, ``needs/OPTIMUM_CHECK.json``). ``None`` without one."""
+    from core import best_design_report as fi_best
+
+    try:
+        line = fi_best.summary_line(quest_root)
+        if not line:
+            return None
+        return {"says": line, "files": fi_best.files(quest_root), **fi_best.records(quest_root)}
+    except Exception:  # noqa: BLE001 -- a view of files on disk; a page never fails over it
+        return None
+
+
 def _amendment_view(quest_root: Path) -> dict[str, Any]:
     """What the quest page shows about the frozen protocol and any amendment waiting for a person."""
     frozen = fi_frozen.load(quest_root)
@@ -2511,6 +2525,9 @@ def make_app(
             "summary": summary,
             # How much of the result has been checked against something other than itself (needs/EVIDENCE.json).
             "evidence": fi_evidence.read(quest_root),
+            # A search for the best design: the same line the CLI prints, the files to open, and FI's two records
+            # (core/best_design_report.py); null for any other study.
+            "best_design": _best_design_view(quest_root),
             # The frozen protocol and any amendment waiting for a person (core/frozen_protocol.py).
             "amendment": _amendment_view(quest_root),
             # The checks the quest stopped for because they do not say where their expected value comes from, which a

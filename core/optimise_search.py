@@ -18,6 +18,12 @@ So the caller owns every evaluation (FI runs each in a process of its own and wr
 same without FI), and the search owns the budget: it never asks for more evaluations than ``starts × per_start``, and
 a design already evaluated is not evaluated (or counted) again.
 
+A search can be continued (``rounds``: a person asked, after seeing the result, to search further, perhaps toward a
+target value of the objective). Each round adds its evaluations to the budget and runs the local search again from the
+best design found so far (and, when the added budget holds more than one start's share, from new points of a Latin
+hypercube sample), and stops as soon as a design that meets every limit reaches the round's target. The search before
+the rounds is the same search, with the same seed: what the rounds add is recorded under ``continued``.
+
 Methods (``search_method`` in the plan):
 
 * ``bounded_local``: a Nelder-Mead simplex inside the ranges from each starting point, each with ``per_start``
@@ -343,8 +349,14 @@ def effective_method(block):
 # --- the search ------------------------------------------------------------------------------------------------------
 
 
+def _reached(value, target, sign):
+    """Whether an objective ``value`` reaches ``target`` (a minimised objective at or below it, a maximised one at or
+    above it)."""
+    return bool(_number(value) and _number(target) and sign * (value - target) <= 0)
+
+
 class _Search:
-    def __init__(self, block, seed, method):
+    def __init__(self, block, seed, method, rounds=None):
         self.block = block
         self.space = Space(block["design_variables"])
         self.sign = _sign(block)
@@ -367,6 +379,11 @@ class _Search:
         self.failures_in_a_row = 0
         self.any_ok = False
         self.baseline = self.space.canonical(block["baseline"]["values"])
+        # A continued search (see the module docstring): each round asked for, and what it did.
+        self.rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+        self.round_log = []
+        self.target = None
+        self.local_stage = "local"
 
     def _take_scan(self, scan):
         """The coarse scan's evaluated designs (not counted against the budget)."""
@@ -389,7 +406,8 @@ class _Search:
         row = {"event": "evaluation", "n": len(self.rows) + 1, "stage": stage, "start": start, "design": dict(design),
                "objective": judged["objective"], "constraints": dict(judged["constraints"]),
                "feasible": judged["feasible"], "status": judged["status"],
-               "method": "scan" if stage == "scan" else self.method_used, "counted": counted,
+               "method": ("scan" if stage == "scan" else "bounded_local" if stage == "continued" else
+                          self.method_used), "counted": counted,
                "elapsed_s": elapsed if _number(elapsed) else None}
         if judged.get("reason"):
             row["reason"] = judged["reason"]
@@ -422,6 +440,10 @@ class _Search:
         self._row(design, judged, stage, start, reply.get("elapsed_s"))
         if judged["status"] == "ok":
             self.any_ok, self.failures_in_a_row = True, 0
+            if self.target is not None and judged["feasible"] and _reached(judged["objective"], self.target, self.sign):
+                # A continued search stops as soon as a design that meets every limit reaches the person's target.
+                self.stopped = "target"
+                raise _Stop()
         else:
             self.failures_in_a_row += 1
             if not self.any_ok and self.failures_in_a_row >= _FAILURES_BEFORE_GIVING_UP:
@@ -506,7 +528,64 @@ class _Search:
             # Every starting point converged, or used its share of the budget before it did (``share``).
             self.stopped = ("budget" if self.used >= self.total else
                             "share" if any(s["stopped_because"] == "budget" for s in self.start_log) else "converged")
+        for index, spec in enumerate(self.rounds):
+            yield from self._round(index, spec)
         return self._outcome()
+
+    # a continued search
+
+    def _best_row(self):
+        feasible = [r for r in self.rows if r["status"] == "ok" and r["feasible"]]
+        return min(feasible, key=lambda r: (self.sign * r["objective"], r["n"])) if feasible else None
+
+    def _round(self, index, spec):
+        """One round of a continued search: ``added`` more evaluations, from the best design so far, toward the target
+        when one is given (``search_target``, the person's target moved to the search's own settings, when the check
+        at finer settings showed how far apart they are)."""
+        added = max(1, int(spec.get("added") or self.per_start))
+        target = float(spec["target"]) if _number(spec.get("target")) else None
+        aim = float(spec["search_target"]) if _number(spec.get("search_target")) else target
+        before = self._best_row()
+        log = {"round": index + 1, "added": added, "target": target, "asked": str(spec.get("asked") or "")[:300],
+               "from": dict(before["design"]) if before else dict(self.baseline),
+               "best_before": before["objective"] if before else None, "evaluations": 0}
+        if aim is not None and aim != target:
+            log["search_target"] = aim
+        # The round spends what it was given, never what an earlier part of the search left unused; the budget the
+        # record states is the plan's and every round's.
+        budget_after = self.total + added
+        if self.stopped in ("time", "failures", "the simulation could not be loaded"):
+            log.update(stopped_because="not_run", not_run_because=self.stopped)
+        elif aim is not None and before is not None and _reached(before["objective"], aim, self.sign):
+            log.update(stopped_because="target")
+        else:
+            used, starts_before = self.used, len(self.start_log)
+            first = 1 + max((r["start"] for r in self.rows if isinstance(r.get("start"), int)), default=-1)
+            self.total = self.used + added
+            self.stopped, self.target, self.local_stage = None, aim, "continued"
+            try:
+                # From the best design so far, with the whole added budget; what it leaves when it converges goes to new
+                # starting points (a share of ``per_start`` each), so the search does not stay in one valley.
+                yield from self._local(self.space.unit(log["from"]), first, self.total)
+                left = self.total - self.used
+                if left > 0:
+                    yield from self._local_starts(self._lhs(max(1, left // self.per_start)), offset=first + 1)
+            except _Stop:
+                pass
+            finally:
+                self.target, self.local_stage = None, "local"
+            if self.stopped is None:
+                mine = self.start_log[starts_before:]
+                self.stopped = ("budget" if self.used >= self.total else
+                                "share" if any(s["stopped_because"] == "budget" for s in mine) else "converged")
+            log.update(evaluations=self.used - used, stopped_because=self.stopped)
+        self.total = budget_after
+        after = self._best_row()
+        log.update(best_after=after["objective"] if after else None,
+                   design_after=dict(after["design"]) if after else None,
+                   target_reached=bool(target is not None and after is not None
+                                       and _reached(after["objective"], target, self.sign)))
+        self.round_log.append(log)
 
     def _fall_back(self, why):
         self.method_why = f"{why}; the built-in bounded_local search was used instead"
@@ -516,7 +595,7 @@ class _Search:
                 row["method"] = "bounded_local"
         self.method_used = "bounded_local"
 
-    def _local_starts(self, points, *, first_cap=None):
+    def _local_starts(self, points, *, first_cap=None, offset=0):
         for index, u0 in enumerate(points):
             if self.used >= self.total:
                 self.stopped = "budget"
@@ -526,7 +605,8 @@ class _Search:
             first = index == 0 and first_cap is not None
             cap = first_cap if first else self.used + share
             # The first starting point is the baseline, whose evaluation (the search's first) is its own.
-            yield from self._local(u0, index, min(cap, self.total), began=cap - self.per_start if first else None)
+            yield from self._local(u0, offset + index, min(cap, self.total),
+                                   began=cap - self.per_start if first else None)
 
     def _local(self, u0, start, cap, began=None):
         began = self.used if began is None else max(0, began)
@@ -563,7 +643,7 @@ class _Search:
             simplex.append(p)
         values = []
         for p in simplex:
-            values.append((yield from self._f(p, "local", start, cap)))
+            values.append((yield from self._f(p, self.local_stage, start, cap)))
         proposals, most = 0, 20 * self.per_start + 50
         while True:
             order = sorted(range(d + 1), key=lambda k: values[k])
@@ -586,10 +666,10 @@ class _Search:
                 return [min(1.0, max(0.0, c + t * (c - w))) for c, w in zip(centroid, worst)]
 
             reflected = along(1.0)
-            fr = yield from self._f(reflected, "local", start, cap)
+            fr = yield from self._f(reflected, self.local_stage, start, cap)
             if fr < values[0]:
                 expanded = along(2.0)
-                fe = yield from self._f(expanded, "local", start, cap)
+                fe = yield from self._f(expanded, self.local_stage, start, cap)
                 simplex[-1], values[-1] = (expanded, fe) if fe < fr else (reflected, fr)
                 continue
             if fr < values[-2]:
@@ -597,11 +677,11 @@ class _Search:
                 continue
             if fr < values[-1]:
                 contracted = along(0.5)
-                fc = yield from self._f(contracted, "local", start, cap)
+                fc = yield from self._f(contracted, self.local_stage, start, cap)
                 accepted = fc <= fr
             else:
                 contracted = along(-0.5)
-                fc = yield from self._f(contracted, "local", start, cap)
+                fc = yield from self._f(contracted, self.local_stage, start, cap)
                 accepted = fc < values[-1]
             if accepted:
                 simplex[-1], values[-1] = contracted, fc
@@ -609,7 +689,7 @@ class _Search:
             best = simplex[0]
             for k in range(1, d + 1):
                 simplex[k] = [b + 0.5 * (p - b) for b, p in zip(best, simplex[k])]
-                values[k] = yield from self._f(simplex[k], "local", start, cap)
+                values[k] = yield from self._f(simplex[k], self.local_stage, start, cap)
 
     def _global_then_local(self):
         if not any(r["stage"] == "scan" for r in self.rows):
@@ -755,12 +835,14 @@ class _Search:
             "best": ({"design": dict(best["design"]), "objective": best["objective"],
                       "constraints": dict(best["constraints"]), "feasible": True, "evaluation": best["n"],
                       "start": best["start"], "stage": best["stage"]} if best else None),
+            "rounds": list(self.round_log),
         }
 
 
-def search(block, *, seed, method=None):
-    """The search as a generator of requests (see the module docstring); returns the outcome."""
-    return (yield from _Search(block, seed, method).run())
+def search(block, *, seed, method=None, rounds=None):
+    """The search as a generator of requests (see the module docstring); returns the outcome. ``rounds``: the rounds of
+    a continued search, in order (each ``{"added": evaluations, "target": a value of the objective or None}``)."""
+    return (yield from _Search(block, seed, method, rounds).run())
 
 
 def grid_cells(grid):
@@ -770,13 +852,13 @@ def grid_cells(grid):
 
 
 def run_sync(block, evaluate, *, seed, method=None, scan_step=None, drive_step=None, deadline=None,
-             max_evaluations=None):
+             max_evaluations=None, rounds=None):
     """Run the search here, calling ``evaluate(cell) -> dict`` for each design (an exception is a failed evaluation),
     ``scan_step(grid) -> rows`` for the coarse scan (default: ``evaluate`` on each of its cells) and
     ``drive_step(spec)`` (default: :func:`drive` in this process) for a library's method. ``deadline`` is a
     ``time.monotonic()`` time after which no evaluation starts; ``max_evaluations`` stops the search where an earlier
     one was stopped by its time limit (so ``code/run.py`` repeats that search, not a longer one)."""
-    gen = search(block, seed=seed, method=method)
+    gen = search(block, seed=seed, method=method, rounds=rounds)
     done = 0
     names = [str(v["name"]) for v in block["design_variables"]]
 
@@ -872,6 +954,10 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
                 says += ", less than the plan's threshold for better"
             says += ")"
         says += "."
+    rounds = [r for r in outcome.get("rounds") or [] if isinstance(r, dict)]
+    if rounds:
+        says += (f" The search was continued {len(rounds)} time(s) at the person's request "
+                 f"({sum(int(r.get('added') or 0) for r in rounds)} more evaluation(s) allowed).")
     says += (" Found and scored at the search's own numerical settings only; it has not been recomputed at finer "
              "settings.")
     record = {
@@ -892,9 +978,19 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
         "notes": outcome["notes"],
         "says": says,
     }
+    asked = next((r for r in reversed(rounds) if _number(r.get("target"))), None)
+    if asked is not None:
+        # The person's latest target (a refine) is the one the result is held to.
+        target_value, where = asked["target"], "refine"
+    else:
+        where = "plan"
     if _number(target_value):
-        record["target"] = {"value": target_value,
+        record["target"] = {"value": target_value, "from": where,
                             "reached": bool(best is not None and sign * (best["objective"] - target_value) <= 0)}
+    if rounds:
+        record["continued"] = rounds
+        record["evaluations"]["planned_budget"] = outcome["starts"] * outcome["per_start"]
+        record["evaluations"]["added_budget"] = sum(int(r.get("added") or 0) for r in rounds)
     if extra:
         record.update(extra)
     return json.loads(json.dumps(record, allow_nan=False, default=str))

@@ -25,6 +25,12 @@ it evaluates the best designs and the baseline again at the finer settings the p
 the starting points, and writes ``needs/OPTIMUM_CHECK.json``; ``results/best_design.json`` then carries the check's
 verdict under ``check`` (``checked_at_finer_settings`` is true), and run.log says what each check found. The analysis
 runs after the check, with ``FI_OPTIMUM_CHECK`` naming the check's file.
+
+A person who sees the result can ask FI to search further, perhaps toward a target value of the objective (a refine;
+:mod:`core.optimise_refine` reads the request and writes ``.fi/optimisation/continue.json``). The search is then the same
+search followed by the rounds asked for (:mod:`core.optimise_search`): the part already run is answered from FI's own
+record of it when the simulation and the plan are unchanged (nothing is evaluated twice), the rounds' evaluations are
+new, and the check runs again on the result.
 """
 
 from __future__ import annotations
@@ -46,6 +52,8 @@ BEST_PATH = Path("results") / "best_design.json"
 WORK_DIR = Path(".fi") / "optimisation"
 RECORD = WORK_DIR / "run.json"
 SEARCH_SOURCE = WORK_DIR / "optimise_search.py"
+#: The rounds of a continued search a person asked for (core/optimise_refine.py), kept for the plan they were asked under.
+ROUNDS_PATH = WORK_DIR / "continue.json"
 #: The environment variables that tell the analysis script where FI's record of the search is.
 LEDGER_ENV = "FI_OPTIMISATION"
 BEST_ENV = "FI_BEST_DESIGN"
@@ -103,7 +111,32 @@ _NOT_THE_SIMULATION = {"experiment.py", "run.py", "fi_search.py", "submit.py", "
                        "web_plots.py"}
 
 
-def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any) -> str:
+def block_sha(block: dict[str, Any]) -> str:
+    """The plan's optimisation block, as a hash: the rounds of a continued search hold only for the plan they were asked
+    under (a new plan is a new study)."""
+    return _sha(json.dumps(block, sort_keys=True, default=str).encode("utf-8"))
+
+
+def read_rounds(quest_root: Path, block: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The rounds of a continued search asked for under this plan (``block``, normalised), in order; none for another
+    plan or without a request."""
+    try:
+        data = json.loads((Path(quest_root) / ROUNDS_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or block is None or data.get("block_sha256") != block_sha(block):
+        return []
+    return [r for r in data.get("rounds") or [] if isinstance(r, dict) and isinstance(r.get("added"), int)
+            and r["added"] > 0]
+
+
+def _key_rounds(rounds: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"added": int(r.get("added") or 0), "target": r.get("target"),
+             **({"search_target": r["search_target"]} if r.get("search_target") is not None else {})} for r in rounds]
+
+
+def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int, entry: str, thresholds: Any,
+             rounds: list[dict[str, Any]] | None = None) -> str:
     """What decides a search: the simulation and the modules beside it, the optimisation block, the seed, the entry,
     the thresholds, and FI's own harness and search code. (A package installed since is not in it: a search that got no
     result is never kept, so a search that failed for a missing package runs again anyway.)"""
@@ -117,7 +150,11 @@ def _run_key(quest_root: Path, simulate: Path, block: dict[str, Any], base: int,
             parts.append(path.name.encode() + b"\0")
     parts.append(_trials.HARNESS_SOURCE.encode("utf-8"))
     parts.append(Path(_search.__file__).read_bytes())
-    return _sha(b"\1".join(parts) + json.dumps([block, base, entry, thresholds], sort_keys=True, default=str).encode())
+    what: list[Any] = [block, base, entry, thresholds]
+    if rounds:
+        # A continued search is another search; without rounds the key is the one an earlier version of FI kept.
+        what.append(_key_rounds(rounds))
+    return _sha(b"\1".join(parts) + json.dumps(what, sort_keys=True, default=str).encode())
 
 
 def _study_key(quest_root: Path, simulate: Path, block: dict[str, Any], entry: str, thresholds: Any) -> str:
@@ -370,7 +407,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         why = (f"{Path(module).name} defines neither run_cell(cell) nor run_trial(cell, trial_id, seed): FI calls one of "
                "them for each design the search tries")
         return SearchRun(record={}, rows=[], load_error=why, problems=[why])
-    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds)
+    rounds = read_rounds(quest_root, block)
+    key = _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds)
     # The same simulation and plan whatever the seed: what a frozen study's search record must have been made from.
     study_key = _study_key(quest_root, simulate, block, entry, thresholds)
     try:
@@ -390,6 +428,38 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
         why = ("the study is frozen for its confirm run, and the search exploration ran for this simulation and plan is "
                "not kept, so its best design cannot be confirmed without searching again on the confirm seeds")
         return SearchRun(record={}, rows=[], problems=[why])
+    # A continued search repeats the search it continues: when FI's record of that one (the same simulation, plan, seed
+    # and the rounds before this one) is on disk, its evaluations are answered from the record, not run again.
+    replay: dict[str, dict[str, Any]] = {}
+    replay_scan: list[dict[str, Any]] | None = None
+    if rounds and not frozen and isinstance(record, dict) and record.get("key") != key and any(
+            record.get("key") == _run_key(quest_root, simulate, block, int(base_seed), entry, thresholds, rounds[:k])
+            for k in range(len(rounds))):
+        earlier = _record_files(record, record_text).get(LEDGER_PATH.as_posix(), "")
+        space = _search.Space(block["design_variables"])
+        quantity = str(block["objective"]["quantity"])
+        scan_seen: list[dict[str, Any]] = []
+        for line in earlier.splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(row, dict) or row.get("event") != "evaluation" or not isinstance(row.get("design"), dict):
+                continue
+            answer: dict[str, Any] = ({"values": {quantity: row["objective"], **(row.get("constraints") or {})}}
+                                      if row.get("status") == "ok" else {"failed": str(row.get("reason") or "failed")})
+            answer["elapsed_s"] = row.get("elapsed_s")
+            if row.get("stage") == "scan":
+                scan_seen.append({"design": row["design"], "values": answer.get("values"),
+                                  "reason": answer.get("failed", ""), "elapsed_s": row.get("elapsed_s")})
+            else:
+                replay[space.key(space.canonical(row["design"]))] = answer
+        if scan_seen and (quest_root / _trials.RAW_DIRNAME / _trials.SUMMARY_NAME).is_file():
+            replay_scan = scan_seen
+        if log is not None and replay:
+            log.info("[optimise] continuing the search FI already ran (%d evaluation(s) of it are taken from its record, "
+                     "not run again), with %d more evaluation(s) asked for", len(replay),
+                     sum(int(r.get("added") or 0) for r in rounds[-1:]))
     if isinstance(record, dict) and (record.get("key") == key or frozen):
         files = _record_files(record, record_text)
         rows = [json.loads(line) for line in files.get(LEDGER_PATH.as_posix(), "").splitlines() if line.strip()]
@@ -428,7 +498,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
     work.mkdir(parents=True, exist_ok=True)
     # An earlier search's record and files never stand beside this one's (a search cut short is not kept either).
     # The same goes for an earlier search's check at finer settings (core/optimum_check.py).
-    for rel in (RECORD, LEDGER_PATH, BEST_PATH, Path("needs") / "OPTIMUM_CHECK.json", WORK_DIR / "check.json"):
+    for rel in (RECORD, LEDGER_PATH, BEST_PATH, Path("needs") / "OPTIMUM_CHECK.json", WORK_DIR / "check.json",
+                Path("results") / "best_design.md"):
         (quest_root / rel).unlink(missing_ok=True)
     (quest_root / _trials.HARNESS_PATH).parent.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -456,6 +527,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
 
     async def scan(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
         """The coarse scan, through the trial runner itself (``raw/trials.json``, which the analysis can plot)."""
+        if replay_scan is not None:
+            return replay_scan
         left = deadline - time.monotonic()
         if left <= 0:
             return []
@@ -475,7 +548,8 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                      "the search's budget", len(rows), sum(1 for r in rows if r.get("values") is not None))
         return rows
 
-    gen = _search.search(block, seed=int(base_seed), method=method)
+    gen = _search.search(block, seed=int(base_seed), method=method, rounds=rounds)
+    replay_space = _search.Space(block["design_variables"]) if replay else None
     load_error = ""
     done_outcome: dict[str, Any] | None = None
     last_note = time.monotonic()
@@ -488,8 +562,12 @@ async def run_search(executor: Any, python: Any, quest_root: Path, module: str, 
                 scan_rows = list(reply)
             elif request["kind"] == "evaluate":
                 left = deadline - time.monotonic()
-                if load_error:
-                    reply: dict[str, Any] = {"stop": "the simulation could not be loaded"}
+                replayed = (replay.get(replay_space.key(replay_space.canonical(request["design"])))
+                            if replay_space is not None and isinstance(request.get("design"), dict) else None)
+                if replayed is not None:
+                    reply: dict[str, Any] = dict(replayed)
+                elif load_error:
+                    reply = {"stop": "the simulation could not be loaded"}
                 elif left <= 0:
                     reply = {"stop": "time"}
                 else:
@@ -561,6 +639,8 @@ _STOPPED = {
     "failures": "the first evaluations all failed",
     "library_error": "the library's method stopped with an error",
     "the simulation could not be loaded": "the simulation could not be loaded",
+    "target": "a design reached the target asked for",
+    "not_run": "it did not run: the search before it had stopped (its time limit, or every evaluation failed)",
 }
 
 
@@ -606,6 +686,13 @@ def summary_lines(record: dict[str, Any]) -> list[str]:
         if imp and imp.get("better") and imp.get("beyond_threshold") is False:
             change += ", less than the plan's threshold for better"
         lines.append(f"[optimise] the baseline ({_design(baseline.get('design') or {})}) gives {base_text}{change}")
+    for r in record.get("continued") or []:
+        target = f", toward {quantity} = {_fmt(r['target'])}{unit}" if r.get("target") is not None else ""
+        reached = ("; the target was reached at the search's settings" if r.get("target_reached") else
+                   "; the target was not reached at the search's settings" if r.get("target") is not None else "")
+        lines.append(f"[optimise] continued at the person's request (round {r.get('round')}): {r.get('evaluations')} of "
+                     f"{r.get('added')} more evaluation(s){target}, from {_design(r.get('from') or {})}; stopped "
+                     f"because {_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}{reached}")
     settings = record.get("search_settings") or {}
     at = f" ({_design(settings)})" if settings else ""
     if not CHECKS_AT_FINER_SETTINGS:
@@ -634,6 +721,16 @@ def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any], text: 
         return
     summary = _check.attach_summary(check, text)
     best["check"] = summary
+    target = best.get("target")
+    if isinstance(target, dict):
+        # Whether the target holds for the design FI checked, at the finest settings (the number a person relies on).
+        direction = str((best.get("objective") or {}).get("direction") or "minimise")
+        sign = 1.0 if direction == "minimise" else -1.0
+        value = summary.get("objective")
+        target["reached_at_finest_settings"] = (
+            bool(sign * (float(value) - float(target["value"])) <= 0)
+            if isinstance(value, (int, float)) and not isinstance(value, bool) and check.get("finished") is not False
+            else None)
     # Only a check that finished and had finer settings to use checked anything at finer settings.
     best["checked_at_finer_settings"] = bool(
         check.get("finished") and (check.get("settings") or {}).get("named")
@@ -681,6 +778,28 @@ class OptimisationRunner:
         self.last: SearchRun | None = None
         #: FI's check at finer settings, from memory: ``(its text, the key it is kept under)``.
         self.last_check: tuple[str | None, str | None] = (None, None)
+        #: The rounds a person asked for (``.fi/optimisation/continue.json``) as FI wrote them, before any script ran.
+        self._rounds: bytes | None = None
+        self._rounds_read = False
+
+    def _put_back_rounds(self) -> bool:
+        """Put back the rounds file FI wrote, wherever a script changed or removed it (its budget is the evidence
+        ladder's allowance)."""
+        if not self._rounds_read:
+            return False
+        path = self.quest_root / ROUNDS_PATH
+        try:
+            now = path.read_bytes() if path.is_file() else None
+        except OSError:
+            now = None
+        if now == self._rounds:
+            return False
+        if self._rounds is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self._rounds)
+        return True
 
     def _is_frozen(self) -> bool:
         return bool(self._frozen() if callable(self._frozen) else self._frozen)
@@ -689,7 +808,9 @@ class OptimisationRunner:
         """Put FI's own record of the search and of its check back, from memory, wherever a script changed them."""
         from . import optimum_check as _check
 
-        put_back = restore(self.quest_root, self.last.files) if self.last is not None and self.last.files else False
+        put_back = self._put_back_rounds()
+        put_back = (restore(self.quest_root, self.last.files) if self.last is not None and self.last.files
+                    else False) or put_back
         text, key = self.last_check
         if text is not None:
             put_back = _check.restore(self.quest_root, text, key) or put_back
@@ -720,6 +841,12 @@ class OptimisationRunner:
                                           "trial_id, seed)), which FI calls once for each design it tries; the analysis "
                                           f"is {self.analysis.name}. Nothing was searched.")
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
+        try:
+            self._rounds = (self.quest_root / ROUNDS_PATH).read_bytes() if (self.quest_root / ROUNDS_PATH).is_file() \
+                else None
+        except OSError:
+            self._rounds = None
+        self._rounds_read = True
         run = await run_search(self.executor, cmd[0], self.quest_root,
                                self.simulate.relative_to(self.quest_root).as_posix(), protocol, base_seed=base,
                                timeout_s=timeout_s, env=env, log=self.log,
@@ -761,7 +888,8 @@ class OptimisationRunner:
             analysis_env[_trials.RESULTS_ENV] = (Path(_trials.RAW_DIRNAME) / _trials.SUMMARY_NAME).as_posix()
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         # FI's own copy, from memory: a script that also rewrote FI's record of the files cannot make its version stand.
-        put_back = restore(self.quest_root, run.files or None)
+        put_back = self._put_back_rounds()
+        put_back = restore(self.quest_root, run.files or None) or put_back
         if check_text is not None:
             from . import optimum_check as _check
 
@@ -813,6 +941,10 @@ class OptimisationRunner:
                 return None, None
         try:
             attach_check(self.quest_root, run, check, text)
+            # The same, readable: results/best_design.md (core/best_design_report.py).
+            from . import best_design_report as _report
+
+            _report.write_readable(self.quest_root, _plan.normalize(block_of(protocol))[0] or block_of(protocol))
             if self.log is not None:
                 for line in _check.summary_lines(check):
                     self.log.info("%s", line)
@@ -838,7 +970,11 @@ def _record_numbers(record: dict[str, Any]) -> list[float]:
             if key == "relative":
                 out.append(float(imp[key]) * 100.0)
     ev = record.get("evaluations") or {}
-    out += [float(ev[k]) for k in ("search", "budget", "scan") if isinstance(ev.get(k), (int, float))]
+    out += [float(ev[k]) for k in ("search", "budget", "scan", "planned_budget", "added_budget")
+            if isinstance(ev.get(k), (int, float))]
+    target = record.get("target") or {}
+    if isinstance(target.get("value"), (int, float)) and not isinstance(target.get("value"), bool):
+        out.append(float(target["value"]))
     # What FI's check at finer settings measured (results/best_design.json's ``check``).
     check = record.get("check") or {}
     for key in ("objective", "baseline_objective", "improvement", "improvement_numerical_error",
@@ -884,6 +1020,7 @@ def with_fi_record(stdout: str, record: dict[str, Any]) -> tuple[str, list[str]]
         "improvement": (record.get("improvement") or {}).get("value"),
         "evaluations": (record.get("evaluations") or {}).get("search"),
         "checked_at_finer_settings": record.get("checked_at_finer_settings"),
+        **({"target": record["target"]} if isinstance(record.get("target"), dict) else {}),
         **({"not_in_fi_record": differs} if differs else {}),
     }
     check = record.get("check") or {}
