@@ -247,9 +247,12 @@ def test_a_check_whose_number_is_an_error_at_a_finite_step_is_not_called_method_
     assert got is not None and got["verdict"] == "converges_elsewhere"
     with_order = ot.step_verdict({**RK4, "order": 4}, [3.33241e-07, 1.99761e-08, 1.22274e-09], order=4)
     assert with_order is not None and with_order["verdict"] == "converges_elsewhere"
-    # A wrong constant does not move with the step at all.
+    # A wrong constant does not move with the step at all: said as staying the same, never as "does not settle".
     flat = ot.step_verdict({**VERLET, "tolerance": 1e-6}, [0.25, 0.25, 0.25], order=None)
-    assert flat is not None and flat["verdict"] == "not_converging"
+    assert flat is not None and flat["verdict"] == "steady_elsewhere"
+    # Values that jump about without shrinking still do not converge.
+    jumpy = ot.step_verdict({**VERLET, "tolerance": 1e-6}, [0.25, 0.30, 0.22], order=None)
+    assert jumpy is not None and jumpy["verdict"] == "not_converging"
 
 
 def _euler(dt: float) -> float:
