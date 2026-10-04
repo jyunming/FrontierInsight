@@ -381,8 +381,6 @@ def waiting(quest_root: Path) -> list[Item]:
     if isinstance(oracle, dict) and oracle.get("status") == "went_on_failing":
         from .accepted_checks import gap as _went_on_gap
 
-        from .oracle_check import proposal_request
-
         sentences = [_went_on_gap(e) for e in oracle.get("went_on") or []
                      if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
         # (A change a repair proposed is in the record; it is not offered here: whether a check is right is FI's to work

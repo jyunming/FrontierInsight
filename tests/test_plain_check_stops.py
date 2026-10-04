@@ -341,7 +341,8 @@ async def test_improve_never_optimises_against_a_check_fi_could_not_confirm(tmp_
     from core import criteria as crit
 
     eng = _engine_with_plan(tmp_path, EXACT_90)
-    criterion = {"name": "exact error", "oracle": "exact_90_deg", "use": "error", "direction": "lower"}
+    criterion = {"name": "exact error", "oracle": "exact_90_deg", "use": "error", "direction": "lower",
+                 "target": 0.0, "tolerance": 1.0e-6}
     protocol = {"grid": {"amplitude_deg": [90]}, "oracles": [EXACT_90], "criteria": [criterion]}
     monkeypatch.setattr(eng, "_draft_protocol", lambda state: protocol)
     monkeypatch.setattr(eng, "_improve_skip", lambda state: None)
@@ -384,3 +385,53 @@ def test_the_paper_is_told_when_no_check_could_be_judged() -> None:
     record = {"status": accepted_checks.WENT_ON,
               "went_on": [{"name": "", "measured": None, "unmeasured": "the plan declares no oracle"}]}
     assert "no known-answer check could be judged" in accepted_checks.failing_disclosure(record)
+
+
+# --- after the second review -------------------------------------------------------------------------------------------
+
+
+def test_a_check_corrected_to_another_models_value_is_never_independent_evidence(tmp_path: Path) -> None:
+    from core import evidence, frozen_protocol
+
+    quest = tmp_path / "q"
+    (quest / "needs").mkdir(parents=True)
+    frozen_protocol.freeze(quest, {"oracles": [EXACT_90]}, approved_by="t", source="plan.md")
+
+    def level_with(source: str) -> str:
+        (quest / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(
+            {"status": "ok", "judged_by": "engine",
+             "corrected": {"exact_90_deg": {"from": 1.18034, "to": 2.3678, "source": source}}}), encoding="utf-8")
+        return json.dumps(evidence.assess(quest, {}, settings={}))
+
+    assert "corrected to another model's value" in level_with("recompute")
+    assert "corrected to another model's value" not in level_with("arithmetic"), "the plan's own arithmetic is no gap"
+
+
+def test_the_fitted_mark_lives_with_the_record_of_the_engines_plan_changes(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng._oracles_added_write({"oracles": ["exact_90_deg"], "shown": False, "fitted": ["exact_90_deg"]})
+    assert eng._fitted_to_test_run([EXACT_90]) == ["exact_90_deg"]
+    from core import rerun_from
+
+    assert ".fi/oracles_added.json" not in rerun_from._FROM_DESIGN, "a redesign keeps it, as it keeps plan.md"
+
+
+def test_a_recheck_by_any_model_that_writes_the_checks_is_not_independent(tmp_path: Path) -> None:
+    from core.config import ProviderConfig as PC
+
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng.config = eng.config.model_copy(update={"provider": PC(name="openai", model="B",
+                                                              node_models={"plan": "A", "oracle_review": "B"})})
+    eng._client = type("M", (), {"chat": AsyncMock(return_value='{"expected": 2.3678, "how": "x"}')})()
+    eng._prompts = {**getattr(eng, "_prompts", {}), "oracle_recompute": __import__("string").Template("$topic $check")}
+    import core.oracle_triage as ot
+
+    original = ot.recompute_prompt
+    ot.recompute_prompt = lambda template, **kw: "prompt"
+    try:
+        import asyncio
+
+        entry, _ = asyncio.run(eng._recompute_expected({"topic": "t"}, EXACT_90, MEASURED))
+    finally:
+        ot.recompute_prompt = original
+    assert entry["same_model"] is True, "plan_revise answers with B, the same model that rechecks"

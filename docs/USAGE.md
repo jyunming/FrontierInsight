@@ -222,8 +222,7 @@ The steps before the skills are the plan. To change it, use `--revise-plan "<wha
 out, not yours: you are never asked to compare numbers, set a tolerance or fix a script. What FI does instead:
 
 - **A check that does not say where its expected value comes from** (`rigor_profile: research`): FI asks a model once to
-  fill it in (the model named for `oracle_review` when there is one, so a second model, not the one that wrote the
-  plan). When none is found, the quest goes on; the check still runs and is still judged, and it is marked "source not
+  fill it in. When none is found, the quest goes on; the check still runs and is still judged, and it is marked "source not
   confirmed" in the evidence and the paper. One line in the console says which checks.
 - **A check FI added or changed after you read the plan** (`pauses.plan: ask`): one line in the console names it.
   FI checks its expected value itself when it runs, and the frozen protocol says you did not approve it.

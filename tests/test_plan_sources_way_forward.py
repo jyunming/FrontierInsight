@@ -4,8 +4,7 @@ A real quest (rigor_profile: research, a search for the best design, a Copilot m
 the numbers showed only "Where it holds", and whose three checks had no kind and no reference. It stopped at the plan;
 `@fi /resume <id> --revise-plan "..."` resumed it into the same stop (the words were dropped), and the only ways on were
 to edit plan.md by hand. These are that quest's failures, one test each. Where a check's expected value comes from is
-not a question a person is asked: FI fills it in once itself (a second model, when one is named for checking the
-checks), and when it finds none the quest goes on by itself with each such check marked "source not confirmed" in the
+not a question a person is asked: FI fills it in once itself, and when it finds none the quest goes on by itself with each such check marked "source not confirmed" in the
 evidence, the freeze and the paper. A person can still change the plan in words, or go on under their own name.
 """
 
@@ -568,6 +567,7 @@ def test_the_cli_records_going_on_with_a_name(tmp_path: Path, capsys: pytest.Cap
     _stopped_quest(tmp_path)
     args = launch.parse_args(["--accept-checks", "q-1", "--approve-as", "Jun", "--output-root", str(tmp_path)])
     assert args.accept_checks == "q-1" and args.approve_as == "Jun"
+    assert launch._accept_checks("q-1", "", tmp_path) == 2
     assert launch._accept_checks("nope", "Jun", tmp_path) == 1
     assert launch._accept_checks("q-1", "Jun", tmp_path) == 0
     assert "--resume q-1" in capsys.readouterr().out

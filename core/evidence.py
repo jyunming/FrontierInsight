@@ -434,6 +434,14 @@ def assess(
     # independently validated
     valid_gaps = gaps["independently_validated"]
     oracle_record = _json(needs / "ORACLE_CHECK.json")
+    corrected = oracle_record.get("corrected") if isinstance(oracle_record, dict) else None
+    if protocol is not None and isinstance(corrected, dict):
+        # A correction to another model's value: that value was taken because it lies near what was measured, so the
+        # check it makes pass confirms nothing independent. (A correction from the plan's own arithmetic was not chosen
+        # by the measurement, and is no gap.)
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to another model's value "
+                          "that agrees with the measurement: nothing independent confirms it"
+                          for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "recompute")
     fitted = oracle_record.get("fitted_to_test_run") if isinstance(oracle_record, dict) else None
     if protocol is not None and isinstance(fitted, list) and fitted:
         # The plan changed these checks after FI's test run measured them, and the change makes that measurement pass:
