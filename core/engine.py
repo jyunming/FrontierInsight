@@ -9613,7 +9613,9 @@ class Engine:
                     if by_name[j["name"]].get("source") == "recompute":
                         # Said differently when the recheck was not independent (the plan's own model, or working that
                         # does not add up): the analysis and the paper never call it another model.
-                        j["disputed_by"] = ("recompute" if self._independent_value(by_name[j["name"]])
+                        proposal = by_name[j["name"]]
+                        j["disputed_by"] = ("recompute" if self._independent_value(proposal)
+                                            else "recompute_unsound" if proposal.get("how_slip")
                                             else "recompute_same_model")
         loose = [w for w in (_oracle.loose_tolerance(o) for o in oracles) if w]
         for warning in loose:

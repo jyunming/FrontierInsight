@@ -134,6 +134,10 @@ async def test_rk4_expected_value_off_20x_is_disputed_by_a_blind_recompute_and_t
     (entry,) = _triage(record, "recompute")
     # The model that wrote the plan, asked again: said, never counted as independent evidence.
     assert entry["verdict"] == "disputed" and entry["points_to"] == "" and entry["same_model"] is True
+    judged = record["attempts"][-1]["judged"][0]
+    assert judged["disputed_by"] == "recompute_same_model", "the paper never calls the plan's own model another one"
+    kept = json.loads((engine.fi_dir / "oracle_triage.json").read_text(encoding="utf-8"))["recompute"]
+    assert all(a.get("same_model") is True for a in kept.values()), "a kept answer says who answered it"
     assert "same model that wrote the plan" in entry["tried"]
     proposal = record["proposed_changes"][0]
     assert proposal["source"] == "recompute" and proposal["expected"] == pytest.approx(3.3324e-07)
