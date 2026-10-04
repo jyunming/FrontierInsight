@@ -3343,7 +3343,8 @@ async def run_fleet(
             raise r
     failed = [r for r in results if isinstance(r, BaseException)]
     for r in failed:
-        print(f"[FI fleet] FAILURE: {r!r}", file=sys.stderr)
+        if not getattr(r, "_fi_failure_shown", False):  # already said in plain words by run_one
+            print(f"[FI fleet] FAILURE: {r!r}", file=sys.stderr)
     return 1 if failed else 0
 
 

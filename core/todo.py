@@ -368,8 +368,7 @@ def waiting(quest_root: Path) -> list[Item]:
                                         "stopped.)".strip()))
         else:
             out.append(Item("failed", "The last run stopped with an error (quest_failed.md says where).",
-                            recommended="Read quest_failed.md; once the cause is fixed, go on: the quest continues "
-                                        "from the step that failed."))
+                            recommended="Continue with `--resume`: the quest picks up at the step that stopped."))
     pending = _read_json(needs / "PROTOCOL_AMENDMENT_PENDING.json")
     if isinstance(pending, dict):
         changes = pending.get("changes") or []

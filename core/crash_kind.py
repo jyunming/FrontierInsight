@@ -62,7 +62,6 @@ _MODEL_MISSING_WORDS = ("model not found", "model_not_found", "no such model", "
 _TRANSIENT_WORDS = ("timed out", "timeout", "temporarily", "temporary failure", "try again", "rate limit",
                     "ratelimit", "overloaded", "server error", "bad gateway", "service unavailable",
                     "connection reset", "connection aborted", "remote end closed", "remoteprotocolerror")
-_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 _BRIDGE_GONE = ("bridge connection dropped", "bridge write failed", "bridge closed", "bridge is not connected")
 
 
@@ -129,16 +128,29 @@ def _is_model_call(exc: BaseException) -> bool:
     """An error from a call to a model: an HTTP error or transport error, a CLI or bridge error the provider raised, or
     any error the provider marked with its ``[FI] provider=`` note. Only these can mean "the service does not know the
     model" (a missing input file or a docker 404 cannot)."""
-    try:
-        import httpx
-
-        if isinstance(exc, (httpx.HTTPStatusError, httpx.TransportError)):
-            return True
-    except ImportError:
-        pass
     if type(exc).__module__.startswith("core.provider") or type(exc).__name__ in ("BridgeError", "_CliTransientError"):
         return True
     return any(str(n).startswith("[FI] provider=") for n in getattr(exc, "__notes__", ()) or ())
+
+
+def _host(exc: BaseException) -> str:
+    """The host an HTTP error was for ('' when it carries no request: httpx raises when ``.request`` is unset)."""
+    try:
+        return str(exc.request.url.host or "")  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _inputs_problem(exc: BaseException, text: str) -> bool:
+    """A file the person named in the quest's settings (``execution.inputs``, ``knowledge.local_papers``) that is not
+    there or cannot be used: theirs to put right, so it is a setup problem, not FI's."""
+    try:
+        frames = traceback.extract_tb(exc.__traceback__)
+        raised_in = Path(frames[-1].filename).name if frames else ""
+    except Exception:  # noqa: BLE001
+        raised_in = ""
+    return raised_in == "example_inputs.py" or text.split(" ", 1)[-1].startswith(
+        ("execution.inputs", "knowledge.local_papers", "local_papers"))
 
 
 def _quota_used_up(exc: BaseException) -> bool:
@@ -154,16 +166,19 @@ def _quota_used_up(exc: BaseException) -> bool:
 
 
 def _program_name(exc: FileNotFoundError) -> str | None:
-    """The program a failed start named, '' when the start named none (Windows reports a missing program as
-    ``[WinError 2]`` with no file name), None when this is a missing data file, not a missing program."""
+    """The program a failed start named ('' when the start named none: Windows reports a missing program as
+    ``[WinError 2]`` with no file name), or None when this is not a failed start of a program (a missing data file,
+    or FI's own environment, whose loss is not something to install)."""
+    try:
+        frames = traceback.extract_tb(exc.__traceback__)
+    except Exception:  # noqa: BLE001
+        frames = []
+    starting = bool(frames) and Path(frames[-1].filename).name in ("subprocess.py", "base_subprocess.py",
+                                                                    "windows_utils.py", "unix_events.py")
     name = str(getattr(exc, "filename", "") or "")
-    if not name:
-        started = getattr(exc, "winerror", None) == 2 or getattr(exc, "errno", None) == errno.ENOENT
-        return "" if started else None
-    p = Path(name)
-    if p.suffix.lower() in (".exe", ".cmd", ".bat") or (len(p.parts) == 1 and not p.suffix):
-        return p.name
-    return None
+    if not starting or ".venv" in name.replace("\\", "/").split("/"):
+        return None
+    return Path(name).name if name else ""
 
 
 def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | None:
@@ -171,26 +186,38 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     text = _text(exc)
     status = _status(exc)
     service = provider or "the model service"
+    model_call = _is_model_call(exc)
     has_http_answer = status is not None
-    if _quota_used_up(exc) or (not has_http_answer and any(w in text for w in _QUOTA_WORDS)):
+    if _inputs_problem(exc, text):
+        return (f"A file named in the quest's settings cannot be used: {_one_line(exc, 160)}",
+                "Put the file in place or change the settings to name the right one, then continue the quest.")
+    if model_call and (_quota_used_up(exc) or (not has_http_answer and any(w in text for w in _QUOTA_WORDS))):
         return (f"The account FI uses for {service} has used up its allowance (a usage limit or credit balance).",
                 "Add credits or wait until the limit resets, then continue the quest.")
-    if status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS)):
+    if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
         return (f"FI could not sign in to {service}.",
-                "Sign in to it again (`fi --doctor` shows how), then continue the quest.")
-    if _is_model_call(exc) and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)):
+                "Sign in to it again (the setup check, `python launch.py --doctor`, shows how), then continue the quest.")
+    if model_call and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)):
         named = f"`{model}`" if model else "named in the settings"
         return (f"{service} does not know the model {named}.",
-                "Choose a model this machine can use (`fi --doctor` lists them), then continue the quest.")
+                "Choose a model this machine can use (the setup check, `python launch.py --doctor`, lists them), then continue the quest.")
     try:
         import httpx
 
         if isinstance(exc, (httpx.UnsupportedProtocol, httpx.LocalProtocolError)):
             return (f"The address set for {service} is not a valid web address.",
-                    "Correct the address in the quest's settings (`fi --doctor` checks it), then continue the quest.")
-        if isinstance(exc, httpx.ConnectError) and any(h in text for h in _LOCAL_HOSTS + ("actively refused",
-                                                                                         "connection refused")):
-            return (f"The model service on this machine ({service}) is not running.",
+                    "Correct the address in the quest's settings (the setup check, `python launch.py --doctor`, checks it), then continue the quest.")
+        host = _host(exc)
+        if isinstance(exc, httpx.ConnectError) and host.strip("[]") in ("127.0.0.1", "localhost", "::1"):
+            if model_call:
+                return (f"The model service on this machine ({service}) is not running.",
+                        "Start it, then continue the quest.")
+            port = ""
+            try:
+                port = f":{exc.request.url.port}" if exc.request.url.port else ""  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                port = ""
+            return (f"A service on this machine that FI uses ({host}{port}) is not running.",
                     "Start it, then continue the quest.")
     except ImportError:
         pass
@@ -204,17 +231,17 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     if isinstance(exc, ModuleNotFoundError):
         name = getattr(exc, "name", "") or ""
         return (f"A Python package FI needs is not installed{f' ({name})' if name else ''}.",
-                "Install what `fi --doctor` names, then continue the quest.")
+                "Install what the setup check (`python launch.py --doctor`) names, then continue the quest.")
     if isinstance(exc, FileNotFoundError):
         program = _program_name(exc)
         if program is not None:
             return (f"A program FI needs was not found on this machine{f' ({program})' if program else ''}.",
-                    "Install what `fi --doctor` names, then continue the quest.")
+                    "Install what the setup check (`python launch.py --doctor`) names, then continue the quest.")
     if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
         return ("The disk is full.", "Free some space on the disk, then continue the quest.")
     if type(exc).__name__ == "AxonUnavailable":
         return ("The knowledge store (Axon) could not be reached.",
-                "Start it (`fi --doctor` says how), then continue the quest.")
+                "Start it (the setup check, `python launch.py --doctor`, says how), then continue the quest.")
     return None
 
 
@@ -304,7 +331,7 @@ def _classify(exc: BaseException, *, node: str, provider: str, model: str, retri
     if any(_transient(e) for e in chain):
         tried = f"FI already tried the step again {retries} time(s) by itself. " if retries else ""
         return Failure("transient",
-                       f"The model service or the network had a passing problem{where} ({_one_line(exc, 120)}).",
+                       f"The model service or the network had a passing problem{where}.",
                        f"{tried}Nothing for you to fix: continue the quest in a few minutes and it picks up at the "
                        f"step that stopped.",
                        detail, node, retries)

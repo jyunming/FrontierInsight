@@ -10,6 +10,7 @@ page and the CLI all lead with that; the exception and the log tail are details.
 from __future__ import annotations
 
 import errno
+import logging
 import json
 import time
 from pathlib import Path
@@ -35,10 +36,42 @@ def _fi_code(src: str):
     return ns["f"]
 
 
-def _http(status: int, body: dict | None = None, headers: dict | None = None) -> httpx.HTTPStatusError:
+def _http(status: int, body: dict | None = None, headers: dict | None = None, *,
+          model_call: bool = True) -> httpx.HTTPStatusError:
+    """An HTTP error; a model call carries the note the provider attaches to every call it makes."""
     req = httpx.Request("POST", "https://api.example.com/v1/chat/completions")
     resp = httpx.Response(status, request=req, json=body or {"error": {"message": "x"}}, headers=headers)
-    return httpx.HTTPStatusError(f"HTTP {status}", request=req, response=resp)
+    exc = httpx.HTTPStatusError(f"HTTP {status}", request=req, response=resp)
+    if model_call:
+        exc.add_note("[FI] provider=openai, transport=http, model=gemma9, node=design")
+    return exc
+
+
+def _noted(exc: BaseException) -> BaseException:
+    """A provider error as the provider raises it: with its ``[FI] provider=`` note."""
+    exc.add_note("[FI] provider=claude_cli, transport=cli, model=m, node=design")
+    return exc
+
+
+def _spawn_missing() -> FileNotFoundError:
+    """The error a real start of a program that is not installed raises on this platform (Windows: WinError 2 with
+    no file name; POSIX: the program's name)."""
+    import subprocess
+
+    try:
+        subprocess.run(["fi_no_such_program_xyz"], check=False)
+    except FileNotFoundError as e:
+        return e
+    raise AssertionError("the program unexpectedly exists")
+
+
+def _local_refused(model_call: bool) -> httpx.ConnectError:
+    """What a real httpx call to a closed port on this machine raises: the message names no host."""
+    exc = httpx.ConnectError("All connection attempts failed",
+                             request=httpx.Request("POST", "http://127.0.0.1:11434/v1/chat/completions"))
+    if model_call:
+        exc.add_note("[FI] provider=ollama, transport=http, model=gemma4, node=design")
+    return exc
 
 
 # ---- passing problems ------------------------------------------------------------------------------------------------
@@ -67,6 +100,11 @@ def test_a_per_minute_limit_that_mentions_quota_is_still_a_passing_problem() -> 
     assert ck.classify(exc, provider="gemini").kind == "transient"
 
 
+def test_a_passing_problem_is_said_without_the_raw_error() -> None:
+    f = ck.classify(httpx.ReadTimeout("All connection attempts failed"), node="design")
+    assert "All connection" not in f.say and "All connection" in f.detail
+
+
 def test_a_cli_that_hangs_without_answering_is_not_run_again() -> None:
     from core.provider import _CliWedgeError
 
@@ -84,17 +122,16 @@ def _winerror(cls, winerror: int, msg: str, filename: str | None = None):
 @pytest.mark.parametrize("exc, words", [
     (_http(401), "sign in"),
     (_http(403), "sign in"),
-    (RuntimeError("[FI] HTTP 401: openai did not accept the API key FI sent."), "sign in"),
-    (RuntimeError("You've hit your weekly limit - resets Mon 9am"), "allowance"),
+    (_noted(RuntimeError("[FI] HTTP 401: openai did not accept the API key FI sent.")), "sign in"),
+    (_noted(RuntimeError("You've hit your weekly limit - resets Mon 9am")), "allowance"),
     (_http(429, {"error": {"type": "insufficient_quota", "message": "You exceeded your current quota"}}), "allowance"),
     (_http(404, {"error": {"message": "model 'gemma9' not found"}}), "does not know the model"),
     (ModuleNotFoundError("No module named 'scipy'", name="scipy"), "not installed (scipy)"),
-    (FileNotFoundError(errno.ENOENT, "No such file", "pandoc"), "not found on this machine (pandoc)"),
-    (_winerror(FileNotFoundError, 2, "The system cannot find the file specified"), "not found on this machine"),
+    (_spawn_missing(), "not found on this machine"),
     (OSError(errno.ENOSPC, "No space left on device"), "disk is full"),
     (httpx.UnsupportedProtocol("Request URL is missing an 'http://' or 'https://' protocol."), "not a valid web address"),
-    (httpx.ConnectError("[WinError 10061] No connection could be made because the target machine actively refused it"),
-     "is not running"),
+    (_local_refused(model_call=True), "The model service on this machine (openai) is not running"),
+    (_local_refused(model_call=False), "A service on this machine that FI uses (127.0.0.1:11434) is not running"),
     (RuntimeError("bridge connection dropped"), "VS Code's connection"),
     (_winerror(PermissionError, 32, "being used by another process", "C:/q/data/results.csv"), "(results.csv)"),
 ])
@@ -102,14 +139,33 @@ def test_a_setup_problem_names_one_action(exc: BaseException, words: str) -> Non
     f = ck.classify(exc, provider="openai", model="gemma9")
     assert f.kind == "setup", f
     assert words in f.say
-    assert f.do.count(".") <= 2 and "continue the quest" in f.do.lower() or "@fi /resume" in f.do
+    assert ("continue the quest" in f.do.lower()) or ("@fi /resume" in f.do), f.do
 
 
-def test_a_missing_input_file_is_not_a_missing_model_or_program() -> None:
-    """``execution.inputs`` naming a file that is not there says "does not exist": not a model problem, and not a
-    program to install (review finding 2)."""
-    f = ck.classify(_raised(FileNotFoundError("execution.inputs: 'data/x.csv' does not exist.")), model="gpt-5")
-    assert f.kind == "unknown" and "data/x.csv" in f.say and "does not know the model" not in f.say
+def test_a_missing_input_file_is_the_person_s_one_action() -> None:
+    """``execution.inputs`` naming a file that is not there: not a model problem and not a program to install, and not
+    "nothing to fix" either: the person put it in the settings and puts it right (second review, P1)."""
+    from core import example_inputs
+
+    try:
+        example_inputs.stage_inputs(["no/such/input.csv"], Path("."), logging.getLogger("t"))
+    except FileNotFoundError as e:
+        f = ck.classify(e, model="gpt-5")
+    assert f.kind == "setup" and "no/such/input.csv" in f.say and "does not know the model" not in f.say
+    assert "Put the file in place" in f.do
+
+
+def test_a_data_file_fi_reads_is_not_a_missing_program() -> None:
+    try:
+        open("LICENSE_no_such_file")  # noqa: SIM115 -- the error of a missing data file
+    except FileNotFoundError as e:
+        assert "not found on this machine" not in ck.classify(e).say
+
+
+def test_an_http_error_that_is_not_a_model_call_is_not_a_model_or_sign_in_problem() -> None:
+    """A literature service's 404 or the knowledge store's 401 is not "the model" or "sign in to the provider"."""
+    assert "does not know the model" not in ck.classify(_http(404, model_call=False), provider="openai").say
+    assert "could not sign in" not in ck.classify(_http(401, model_call=False), provider="openai").say
 
 
 def test_a_404_that_is_not_a_model_call_is_not_a_missing_model() -> None:

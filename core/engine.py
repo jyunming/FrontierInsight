@@ -770,7 +770,7 @@ class Engine:
         run_config: dict[str, Any] | None = None
         # This run's automatic retries per step (core/crash_kind.py), and when it began: a failure record written
         # before then is an earlier run's (launch.py prints only this run's).
-        self._step_retries: dict[str, int] = {}
+        self._step_retries: dict[str, tuple[str, int]] = {}
         self._run_started_at = time.time()
         self._clarify_answerable = (
             clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
@@ -1064,6 +1064,7 @@ class Engine:
                     #       sees the files and proceeds without pausing.
                     data_paused = False
                     while True:
+                        self._invoke_started_at = time.time()
                         try:
                             final_state = await graph.ainvoke(payload, config=fork_config or run_config)
                         except (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError):
@@ -17434,25 +17435,35 @@ class Engine:
         ``len(RETRY_WAITS_S)`` times for the same step, and only when the step had not been running long (a long
         experiment is never repeated for a problem that may not have passed). Waits first, and says so on the screen.
         Never raises: a doubt means no retry, and the error goes on as it was."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         try:
             if _crash_kind.classify(exc).kind != "transient":
                 return False
             snap = await graph.aget_state(run_config)
             step = ", ".join(getattr(snap, "next", None) or ()) or "(start)"
-            done = self._step_retries.get(step, 0)
+            # Counted per entry into the step: the checkpoint it starts from. A later pass through the same step (after
+            # a review sent the quest back, say) starts from another checkpoint and has its own retries.
+            entry = str(((getattr(snap, "config", None) or {}).get("configurable") or {}).get("checkpoint_id") or "")
+            seen_entry, done = self._step_retries.get(step, ("", 0))
+            if seen_entry != entry:
+                done = 0
             if done >= len(_crash_kind.RETRY_WAITS_S):
                 return False
+            # How long the step had been working: since it last started in this process (never counting the time
+            # between an earlier run and a resume, nor a wait before a retry), or since the checkpoint it started from
+            # when that is later (a step after others in the same call).
+            began = float(getattr(self, "_invoke_started_at", 0.0) or 0.0)
             created = getattr(snap, "created_at", None)
             if created:
-                ran_s = (datetime.now(timezone.utc) - datetime.fromisoformat(str(created))).total_seconds()
-                if ran_s > _crash_kind.RETRY_ONLY_UNDER_S:
-                    self._log.warning("[run] a passing problem stopped the step %s after %d s of work; not running "
-                                      "it again by itself", step, int(ran_s))
-                    return False
+                began = max(began, datetime.fromisoformat(str(created)).timestamp())
+            ran_s = time.time() - began if began else 0.0
+            if ran_s > _crash_kind.RETRY_ONLY_UNDER_S:
+                self._log.warning("[run] a passing problem stopped the step %s after %d s of work; not running it "
+                                  "again by itself", step, int(ran_s))
+                return False
             wait_s = _crash_kind.RETRY_WAITS_S[done]
-            self._step_retries[step] = done + 1
+            self._step_retries[step] = (entry, done + 1)
             self._log.warning("[run] a passing problem stopped the step %s (%s); trying it again in %d s (%d of %d)",
                               step, _crash_kind._one_line(exc, 160), int(wait_s), done + 1,
                               len(_crash_kind.RETRY_WAITS_S))
@@ -17662,7 +17673,7 @@ class Engine:
         # exception, the provider and the log tail are details for a bug report, below.
         failure = _crash_kind.classify(
             exc, node=failing_node, provider=provider_name, model=self.config.provider.model or "",
-            retries=int((getattr(self, "_step_retries", None) or {}).get(failing_node, 0)))
+            retries=int((getattr(self, "_step_retries", None) or {}).get(failing_node, ("", 0))[1]))
         try:
             _crash_kind.write(self.fi_dir, failure)
         except OSError as e:
@@ -17684,7 +17695,7 @@ class Engine:
             f"\n"
             f"(or `fi --resume {self.quest_id}`, or Resume on the web quest page or in VS Code.)\n"
             f"\n"
-            f"## Details (for a bug report)\n"
+            f"## Details (for FI's maintainers)\n"
             f"\n"
             f"**Quest ID:** `{self.quest_id}`\n"
             f"**Topic:** {topic_one_line}\n"
