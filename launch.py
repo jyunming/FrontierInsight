@@ -375,8 +375,8 @@ While a quest is running, or after
   --why QUEST_ID [ABOUT] Why it stopped, why the review asked for a revision, why the evidence is at its level.
   --update QUEST_ID      Re-open the setup questions for a running quest's editable answers.
   --approve-amendment QUEST_ID   Approve a change to a quest's frozen protocol that it stopped to ask about.
-  --accept-checks QUEST_ID       Go on with a known-answer check that failed (marked unconfirmed), or with checks that do
-                                 not say where their expected value comes from (needs --approve-as).
+  --accept-checks QUEST_ID       For a quest an earlier FI stopped at its known-answer checks: go on with them marked
+                                 unconfirmed (needs --approve-as). Today's FI decides this itself and never stops there.
 
 Skills (what FI has learned about driving one piece of software on this machine)
   --skills               List them, and whether each is approved.
@@ -803,7 +803,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--accept-checks",
         metavar="QUEST",
         default="",
-        help="Go on as it is when a quest stopped at a known-answer check that was measured and failed (the check "
+        help="For a quest an earlier FI stopped at its known-answer checks (today's FI decides this itself and never "
+             "stops there): go on as it is when it stopped at a known-answer check that was measured and failed (the check "
              "is marked unconfirmed; the choice holds while the check's numbers and the code that measured it stay as "
              "they were), or because some of its checks do not say where their expected value comes from (each is "
              "marked 'source not confirmed'). The checks still run and are still judged, and the result and the paper "
@@ -2786,7 +2787,7 @@ def _plan_sources_status(path: Path) -> list[str]:
 
 
 def _plan_sources_lines(path: Path) -> list[str]:
-    from core import accepted_checks, oracle_check, plan as _plan_mod
+    from core import oracle_check, plan as _plan_mod
 
     try:
         text = path.read_text(encoding="utf-8")
@@ -2804,11 +2805,9 @@ def _plan_sources_lines(path: Path) -> list[str]:
         lines.append(f"  still missing: {still[name]}" if name in still
                      else f"  the check {name!r} says where its expected value comes from: {oracle_check.reference_of(oracle)[:120]}")
     missing = oracle_check.model_missing(protocol)
-    stopped = accepted_checks.pending(path.parent) is not None
     head = ("every check now says where its expected value comes from" if not still else
-            f"{len(still)} of {len(oracles)} check(s) still do not say where their expected value comes from (ask "
-            "again, or edit plan.md" + (", or go on as it is with --accept-checks <quest> --approve-as <you>"
-                                        if stopped else "") + ")")
+            f"{len(still)} of {len(oracles)} check(s) still do not say where their expected value comes from. Nothing "
+            "to do: FI goes on, and the result says these checks are not confirmed")
     return [head, *lines, *([f"the model behind the numbers still leaves out {', '.join(missing)}"] if missing else [])]
 
 

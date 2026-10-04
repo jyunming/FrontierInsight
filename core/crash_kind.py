@@ -59,7 +59,10 @@ _QUOTA_WORDS = ("monthly usage limit", "weekly limit", "session limit", "usage l
                 "insufficient_quota", "insufficient quota", "exceeded your current quota", "exceeded_current_quota",
                 "payment required", "credit balance", "add usage credits")
 _MODEL_MISSING_WORDS = ("model not found", "model_not_found", "no such model", "unknown model", "not a valid model",
-                        "pull model manifest", "is not available for your account", "does not exist")
+                        "pull model manifest", "is not available for your account")
+#: Too general alone ("file ... does not exist" in a CLI's stderr): read as a missing model only from an HTTP answer or
+#: when the text names the model.
+_MODEL_MISSING_LOOSE = ("does not exist",)
 _TRANSIENT_WORDS = ("timed out", "timeout", "temporarily", "temporary failure", "try again", "rate limit",
                     "ratelimit", "overloaded", "server error", "bad gateway", "service unavailable",
                     "connection reset", "connection aborted", "remote end closed", "remoteprotocolerror")
@@ -254,7 +257,9 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
         return (f"FI could not sign in to {service}.",
                 "Sign in to it again (the setup check, `python launch.py --doctor`, shows how), then continue the quest.")
-    if model_call and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)):
+    names_model = bool(model) and model.lower() in text
+    if model_call and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)
+                       or ((has_http_answer or names_model) and any(w in text for w in _MODEL_MISSING_LOOSE))):
         named = f"`{model}`" if model else "named in the settings"
         return (f"{service} does not know the model {named}.",
                 "Choose a model this machine can use (the setup check, `python launch.py --doctor`, lists them), then continue the quest.")
@@ -332,7 +337,9 @@ def _transient(exc: BaseException) -> bool:
     status = _status(exc)
     if status is not None:
         return status == 429 or status >= 500
-    return any(w in _text(exc) for w in _TRANSIENT_WORDS)
+    # The words alone ("timeout", "try again") are read only from a call to a model: in another error (one of FI's own
+    # messages, say) they would cost two retries and a card that blames the network.
+    return _is_model_call(exc) and any(w in _text(exc) for w in _TRANSIENT_WORDS)
 
 
 def _fi_frame(exc: BaseException) -> bool:

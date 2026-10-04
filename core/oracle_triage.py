@@ -496,6 +496,17 @@ def _is_arithmetic(text: str) -> bool:
     return any(isinstance(n, (ast.BinOp, ast.Call)) for n in ast.walk(tree))
 
 
+# A bare ``log(`` can mean base 10 or base e, and a trig function of a bare number can mean degrees or radians: the
+# calculator would pick one and could call a correct derivation a slip (``log(1000) = 3``, ``sin(30) = 0.5``). Such a
+# step is never counted as a slip (``log10(``, ``ln(``, ``30 deg`` and ``pi/6`` are unambiguous and still are).
+_AMBIGUOUS = _re.compile(r"(?<![\w.])log\s*\(|(?<![\w.])(?:sin|cos|tan|asin|acos|atan)\s*\(\s*[-+]?(?:\d+\.?\d*|\.\d+)\s*\)")
+
+
+def ambiguous(expression: str) -> bool:
+    """Whether ``expression`` uses a bare ``log(`` or a trig function of a bare number (see ``_AMBIGUOUS``)."""
+    return _AMBIGUOUS.search(str(expression or "")) is not None
+
+
 def arithmetic_slip(text: Any, expected: Any = None) -> dict[str, Any] | None:
     """A written-out step of ``text`` whose arithmetic does not give the number written after it, as
     ``{"expression", "computes", "written"}``; ``None`` when there is none.
@@ -518,7 +529,7 @@ def arithmetic_slip(text: Any, expected: Any = None) -> dict[str, Any] | None:
         if want is not None and not _close(want, float(written), written):
             continue
         expression = left.split(":")[-1].strip()
-        if not _is_arithmetic(expression):
+        if not _is_arithmetic(expression) or ambiguous(expression):
             continue
         computes = calculate(expression)
         if computes is None or _close(computes, float(written), written, approximate=sign in ("≈", "~=")):

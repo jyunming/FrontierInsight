@@ -198,14 +198,14 @@ _SETTING_RE = re.compile(r"`(?:(?P<section>engine|execution|pauses)\.)?(?P<key>\
 #: a stop before the review, so after the freeze nothing here points at the plan.
 _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
     "oracle": {
-        False: "This quest is set up for research, so the known-answer checks cannot be relaxed: fix the script and "
-               "resume, or, if a check itself is wrong, change it in the plan (`--revise-plan`) and resume; or, if it "
-               "was measured and you judge the check wrong, mark it unconfirmed and go on (with your name: the result "
-               "then says the check failed and is never publication-ready).",
-        True: "This quest is set up for research and its protocol is frozen, so the known-answer checks cannot be "
-              "relaxed or changed inside this quest: fix the script and resume; or, if a check was measured and you "
-              "judge the check itself wrong, mark it unconfirmed and go on (with your name: the result then says the "
-              "check failed and is never publication-ready); or start a new quest whose plan states the right check.",
+        # FI decides about its own checks (it repairs the script, corrects a check only from an independent value, or
+        # goes on with it marked unconfirmed): a person is never asked to debug or to judge a check.
+        False: "This quest is set up for research, so the known-answer checks are never relaxed. Nothing for you to "
+               "fix: resume, and FI repairs the script or goes on with a check it cannot confirm marked unconfirmed "
+               "(the result then counts as exploratory).",
+        True: "This quest is set up for research and its protocol is frozen, so the known-answer checks are never "
+              "relaxed or changed inside it. Nothing for you to fix: resume, and FI repairs the script or goes on with "
+              "a check it cannot confirm marked unconfirmed (the result then counts as exploratory).",
     },
     "split": {
         False: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "

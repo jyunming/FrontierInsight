@@ -256,7 +256,8 @@ def build(
     attempts = [a for a in attempts or [] if isinstance(a, dict)]
     judged = [j for j in judged or [] if isinstance(j, dict)]
     by_judged = {str(j.get("name") or "").strip().lower(): j for j in judged}
-    proposals = [p for p in proposals or [] if isinstance(p, dict) and p.get("name")]
+    # A copy (of the list and of each proposal): the card never changes what the gate passed in.
+    proposals = [dict(p) for p in proposals or [] if isinstance(p, dict) and p.get("name")]
     by_proposal = {str(p["name"]).strip().lower(): p for p in proposals}
     disputed_set = {str(n).strip().lower() for n in disputed or []}
     last_checks = attempts[-1].get("checks") if attempts else None

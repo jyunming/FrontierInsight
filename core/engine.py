@@ -615,6 +615,11 @@ _SURVEY_WRITE_NOTE = (
 )
 
 
+#: Graph steps that may hand work to background or cluster jobs (``execution.background_jobs``): a passing problem in
+#: one of them is never retried by itself (core/crash_kind.py), so the same jobs are never submitted twice.
+_OUTSIDE_WORK_STEPS = frozenset({"execute", "execute_reflect", "improve"})
+
+
 class Engine:
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
@@ -9713,6 +9718,14 @@ class Engine:
         out |= {str(n) for n in record.get("disputed") or []}
         out |= {str(n) for n in (record.get("set_aside") or {})}
         out |= {str(n) for n in record.get("fitted_to_test_run") or []}
+        # Under ``engine.oracle_check: warn`` a failing check is only warned about: still not confirmed.
+        if record.get("status") == "warned":
+            last = (record.get("attempts") or [{}])[-1] if isinstance(record.get("attempts"), list) else {}
+            out |= {str(j.get("name")) for j in (last or {}).get("judged") or []
+                    if isinstance(j, dict) and j.get("name") and j.get("passed_by_engine") is False}
+        # A check corrected to another model's value: nothing independent confirms it (core/evidence.py says so too).
+        out |= {str(n) for n, c in (record.get("corrected") or {}).items()
+                if isinstance(c, dict) and c.get("source") == "recompute"}
         return out
 
     _CORRECTIONS = "oracle_corrections.json"
@@ -9789,10 +9802,24 @@ class Engine:
         _plan.record_version(self.quest_root, new, by="engine", note=note[:300])
         self._note_engine_change(names, reason="FI corrected an expected value it worked out independently of the "
                                                "measurement")
+        measured = {str(j.get("name") or "").strip(): _oracle_triage.num(j.get("value")) for j in judged}
+
+        def agrees(n: str) -> bool:
+            """Whether the corrected value lies within the check's own tolerance of what was measured: said in the
+            record and the console, so a reader knows the check now confirms the plan's own formula was computed, not a
+            fact found independently of both."""
+            value, new_expected = measured.get(n), todo[n]["expected"]
+            tol = _oracle_triage.num(declared[n].get("tolerance")) or 0.0
+            if value is None:
+                return False
+            if str(declared[n].get("tolerance_mode") or "").strip().lower() == "relative":
+                return abs(value - new_expected) <= tol * abs(new_expected)
+            return abs(value - new_expected) <= tol
+
         record = {**done}
         for n in names:
             record[n] = {"from": before[n], "to": todo[n]["expected"], "source": todo[n].get("source"),
-                         "why": why[n], "at": _frozen.now()}
+                         "why": why[n], "at": _frozen.now(), **({"agrees_with_measurement": True} if agrees(n) else {})}
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / self._CORRECTIONS).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -9809,6 +9836,9 @@ class Engine:
                               n, before[n], _oracle.fmt_digits(todo[n]["expected"]), why[n])
             print(f"[FI] FI corrected an expected value the plan had worked out wrongly: '{n}' {before[n]} -> "
                   f"{_oracle.fmt_digits(todo[n]['expected'])}, because {why[n][:1].lower() + why[n][1:]}")
+            if record[n].get("agrees_with_measurement"):
+                print(f"[FI] The corrected value of '{n}' matches what was measured: this check now shows the simulation "
+                      "computes the plan's own formula correctly, not that the formula itself is right.")
         return names
 
     def _rel_to_quest(self, path: Path) -> str:
@@ -10540,7 +10570,8 @@ class Engine:
             if not name or name not in now or prints.get(name) != now[name]:
                 continue
             self._oracle_proposals[name] = dict(proposal)
-            if name in disputed:
+            # A recheck that is not independent never sets a check aside from the repairs (an earlier FI recorded it so).
+            if name in disputed and (proposal.get("source") != "recompute" or self._independent_value(proposal)):
                 self._oracle_disputed.add(name)
                 self._log.info("[oracle] kept from the last run: the expected value of %r is disputed (proposed %s); the "
                                "script is not rewritten for it", name, proposal.get("expected"))
@@ -10589,14 +10620,25 @@ class Engine:
             entries.append(entry)
             if entry["verdict"] == "disputed" and (self._oracle_proposals.get(name) or {}).get("source") != "arithmetic":
                 # (A value FI worked out from the plan's own arithmetic stays: it is deterministic, a model's is not.)
-                self._oracle_proposals[name] = {**_oracle_triage.recompute_proposal(oracle, entry),
-                                                **({"how_slip": True} if entry.get("how_slip") else {})}
-                self._oracle_disputed.add(name)
-                self._log.warning(
-                    "[oracle] the expected value of %r is disputed: worked out again without the measured value it is %s "
-                    "(the plan says %s, measured %s); the script is not rewritten for it", name,
-                    _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
-                    _oracle.fmt_digits(value))
+                proposal = {**_oracle_triage.recompute_proposal(oracle, entry),
+                            **({"how_slip": True} if entry.get("how_slip") else {})}
+                self._oracle_proposals[name] = proposal
+                if self._independent_value(proposal):
+                    self._oracle_disputed.add(name)
+                    self._log.warning(
+                        "[oracle] the expected value of %r is disputed: worked out again without the measured value it "
+                        "is %s (the plan says %s, measured %s); the script is not rewritten for it", name,
+                        _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
+                        _oracle.fmt_digits(value))
+                else:
+                    # The plan's own model asked again, or a recheck whose own working does not add up, is recorded but
+                    # never decides: the check stays with the repairs (a script bug is not left unfixed on its word).
+                    self._log.info(
+                        "[oracle] a recheck of %r got %s (the plan says %s, measured %s), but it is not independent (%s): "
+                        "recorded only; the script is still repaired for this check", name,
+                        _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
+                        _oracle.fmt_digits(value),
+                        "its own working does not add up" if entry.get("how_slip") else "the plan's own model answered")
             own = _oracle.case_of(cases.get(name) or oracle)
             if not trial or own is None or j.get("measured_by") != "engine":
                 continue  # FI runs a case itself only under the trial contract, for a check it measured
@@ -10684,10 +10726,13 @@ class Engine:
             recomputed, how = _oracle_triage.parse_recompute(parsed)
             answer = {"name": str(oracle.get("name") or "").strip(), "recomputed": recomputed, "how": how,
                       "model": named or planner or "the provider's default model",
-                      "same_model": not named or any(_review.same_model(named, w) for w in writers if w),
                       **({"error": error} if error else {})}
             if not error:  # a call that got no answer is asked again on the next run (once per run, at most)
                 _oracle_triage.write(self.fi_dir, {**kept, "recompute": {**answers, fp: answer}})
+        # Whether the plan's own model answered, worked out now (never taken from a kept answer an earlier FI wrote).
+        # A writer whose model is unknown (the provider's default) counts as the same model: fail closed.
+        same = not named or "" in writers or any(_review.same_model(named, w) for w in writers)
+        answer = {**answer, "same_model": same}
         recomputed = _oracle_triage.num(answer.get("recomputed"))
         verdict = _oracle_triage.recompute_verdict(oracle, recomputed, value)
         entry = _oracle_triage.recompute_entry(oracle, verdict, recomputed, value, str(answer.get("how") or ""),
@@ -10749,9 +10794,13 @@ class Engine:
         gone = [str(n) for n in earlier.get("removed") or []] if unseen else []
         reasons = [str(earlier["reason"])] if unseen and earlier.get("reason") else []
         merged = " ".join([*reasons, reason]).strip()
+        # ``fitted`` (checks the test run was fitted to) is never dropped by a later change: losing it would let such a
+        # check count as independently validated (``_fitted_to_test_run``).
+        fitted = sorted({str(n) for n in earlier.get("fitted") or []})
         self._oracles_added_write({
             "oracles": list(dict.fromkeys([*carried, *changed])), "removed": list(dict.fromkeys([*gone, *(removed or [])])),
             "shown": False, "at": _frozen.now(), **({"reason": merged} if merged else {}),
+            **({"fitted": fitted} if fitted else {}),
         })
 
     def _planned_oracles(self) -> dict[str, dict[str, Any]]:
@@ -17461,6 +17510,23 @@ class Engine:
             except asyncio.CancelledError:
                 pass
 
+    def _model_calls_since(self, began: float) -> int:
+        """How many model calls ``.fi/model_calls.jsonl`` records since ``began`` (a Unix time): what a retry repeats."""
+        n = 0
+        fi_dir = getattr(self, "fi_dir", None)
+        if fi_dir is None:
+            return 0
+        try:
+            with (fi_dir / "model_calls.jsonl").open(encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        n += float(json.loads(line).get("at") or 0.0) >= began
+                    except (ValueError, AttributeError, TypeError):
+                        continue
+        except OSError:
+            return 0
+        return n
+
     async def _try_step_again(self, graph: Any, run_config: dict[str, Any], exc: Exception) -> bool:
         """Whether to run the step that just failed again by itself (core/crash_kind.py): only for a passing problem (a
         timeout, a dropped connection, a 429 or 5xx the provider's own retries did not outlast), at most
@@ -17480,9 +17546,21 @@ class Engine:
             if seen_entry != entry:
                 done = 0
                 self._step_retries[step] = (entry, 0)
-            if _crash_kind.classify(exc).kind != "transient":
+            # The same provider and model the failure card is sorted with, so the retry and the card never disagree.
+            config = getattr(self, "config", None)
+            prov = getattr(config, "provider", None)
+            kind = _crash_kind.classify(exc, node=step, provider=str(getattr(prov, "name", "") or ""),
+                                        model=str(getattr(prov, "model", "") or "")).kind
+            if kind != "transient":
                 return False
             if done >= len(_crash_kind.RETRY_WAITS_S):
+                return False
+            jobs = bool(getattr(getattr(config, "execution", None), "background_jobs", False))
+            if jobs and any(n in _OUTSIDE_WORK_STEPS for n in (getattr(snap, "next", None) or ())):
+                # A step that hands work to a cluster or a background job is never run again by itself: a second pass
+                # could submit the same jobs twice.
+                self._log.warning("[run] a passing problem stopped the step %s, which hands work to background jobs; "
+                                  "not running it again by itself", step)
                 return False
             # How long the step had been working: since it last started in this process (never counting the time
             # between an earlier run and a resume, nor a wait before a retry), or since the checkpoint it started from
@@ -17498,9 +17576,10 @@ class Engine:
                 return False
             wait_s = _crash_kind.RETRY_WAITS_S[done]
             self._step_retries[step] = (entry, done + 1)
-            self._log.warning("[run] a passing problem stopped the step %s (%s); trying it again in %d s (%d of %d)",
+            self._log.warning("[run] a passing problem stopped the step %s (%s); trying it again in %d s (%d of %d); "
+                              "the step's %d model call(s) since it started are made again",
                               step, _crash_kind._one_line(exc, 160), int(wait_s), done + 1,
-                              len(_crash_kind.RETRY_WAITS_S))
+                              len(_crash_kind.RETRY_WAITS_S), self._model_calls_since(began))
             minutes = max(1, round(wait_s / 60))
             self._progress(f"The model service or the network had a passing problem; FI tries the step again in "
                            f"{minutes} minute{'s' if minutes != 1 else ''}.")
