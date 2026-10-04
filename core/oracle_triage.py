@@ -480,17 +480,34 @@ def _digits(number: str) -> int:
     return len(_re.sub(r"[^0-9]", "", mantissa).lstrip("0")) or 1
 
 
-def _close(a: float, b: float, written: str, *, approximate: bool = False, limit: float | None = None) -> bool:
+#: After an "approximately" sign the comparison is never tighter than this (a truncated series written "≈ 1.0400" is the
+#: author saying the series is close, not a slip); a real slip, "(2/pi)*ellipk(sin(pi/8)**2) approx 1.031" for 1.0400,
+#: is 0.9% off.
+APPROX_FLOOR = 5e-3
+
+
+def _constants_precision(expression: str) -> float:
+    """The relative precision of the least precise non-integer number ``expression`` uses (``1.6336`` -> 5e-5), or 0
+    when it uses only whole numbers (and ``pi``): a step that multiplies rounded constants cannot be held to more
+    digits than they have."""
+    found = [n for n in _re.findall(_NUMBER, str(expression or "")) if _re.search(r"[.eE]", n)]
+    return max((5 * 10.0 ** (-_digits(n)) for n in found), default=0.0)
+
+
+def _close(a: float, b: float, written: str, *, approximate: bool = False, limit: float | None = None,
+           expression: str = "") -> bool:
     """Whether ``a`` (worked out) and ``b`` (the number written) agree to what the written number's digits can say
     (five times looser after an "approximately" sign), so a last digit rounded differently is never a slip. Without
     ``limit`` never tighter than 1%. With ``limit`` (the check's own tolerance, as an absolute amount) the 1% floor
-    gives way to it: a gap the check itself can tell apart, and the written digits cannot explain, is a slip (a real
-    quest's "(2/pi)*ellipk(sin(pi/8)**2) approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance)."""
-    digits = 5 * 10.0 ** (-_digits(written)) * (5 if approximate else 1)
+    gives way to it: a gap the check itself can tell apart is a slip (a real quest's "(2/pi)*ellipk(sin(pi/8)**2)
+    approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance) -- but never tighter than the precision of the
+    numbers the step itself uses (``expression``), nor than :data:`APPROX_FLOOR` after an "approximately" sign."""
+    relative = max(5 * 10.0 ** (-_digits(written)) * (5 if approximate else 1), _constants_precision(expression),
+                   APPROX_FLOOR if approximate else 0.0)
     if limit is None or limit <= 0:
-        slack_abs = max(1e-2 * (5 if approximate else 1), digits) * max(abs(a), abs(b))
+        slack_abs = max(1e-2 * (5 if approximate else 1), relative) * max(abs(a), abs(b))
     else:
-        slack_abs = max(digits * max(abs(a), abs(b)), limit)
+        slack_abs = max(relative * max(abs(a), abs(b)), limit)
     return abs(a - b) <= slack_abs or abs(a - b) < 1e-12
 
 
@@ -543,7 +560,7 @@ def ambiguous(expression: str) -> bool:
     # ellipk takes the parameter m = k**2 (SciPy's convention); a step that passes the modulus k itself means the
     # other convention, so only an argument written as a square is worked out.
     for m in _ELLIPK.finditer(text):
-        if not _re.search(r"(\*\*|\^)\s*2\s*\)?\s*$", _call_argument(text, m.end()).strip()):
+        if not _re.search(r"(\*\*|\^)\s*2\s*$", _call_argument(text, m.end()).strip()):
             return True
     return False
 
@@ -578,7 +595,7 @@ def arithmetic_slip(text: Any, expected: Any = None, limit: float | None = None)
             continue
         computes = calculate(expression)
         if computes is None or _close(computes, float(written), written, approximate=sign in _APPROXIMATE,
-                                      limit=limit):
+                                      limit=limit, expression=expression):
             continue
         return {"expression": expression, "computes": computes, "written": float(written)}
     return None
@@ -639,10 +656,10 @@ def arithmetic_proposal(oracle: dict[str, Any], slip: dict[str, Any]) -> dict[st
 # the card; never a verdict, and only against a value FI worked out itself (never the plan's number alone).
 
 _MULTIPLES: tuple[tuple[float, str, str], ...] = (
-    (0.5, "half", "half of the quantity (half a period, say)"),
-    (2.0, "twice", "the quantity twice over (two periods, say, or a sum counted twice)"),
-    (0.25, "a quarter of", "a quarter of the quantity (a quarter period, say)"),
-    (4.0, "four times", "the quantity four times over"),
+    (0.5, "half", "half of the quantity the check means (half a cycle, say, or half the range)"),
+    (2.0, "twice", "twice the quantity the check means (two cycles, say, or something counted twice)"),
+    (0.25, "a quarter of", "a quarter of the quantity the check means"),
+    (4.0, "four times", "four times the quantity the check means"),
 )
 
 
@@ -675,27 +692,6 @@ def multiple_entry(oracle: dict[str, Any], value: float, reference: float, found
             "hint": f"The check '{name}': {said}.",
             "cause": {"text": f"The simulation likely computes {what} for `{name}`.",
                       "evidence": said[0].upper() + said[1:] + "."}}
-
-
-def verified_value(oracle: dict[str, Any]) -> float | None:
-    """The check's expected value when FI can work the plan's own derivation of it out and gets the same number (the
-    expected value then rests on FI's own arithmetic, not on the plan's word); ``None`` otherwise."""
-    expected, limit, _mode = _oracle.limit_of(oracle)
-    if expected is None:
-        return None
-    pieces = _APPROX_SPLIT.split(str(_oracle.reference_of(oracle) or ""))
-    for i in range(0, len(pieces) - 2, 2):
-        right = pieces[i + 2].strip()
-        found = _re.match(rf"^({_NUMBER})", right)
-        if found is None or not _close(expected, float(found.group(1)), found.group(1)):
-            continue
-        expression = pieces[i].strip().split(":")[-1].strip()
-        if not _is_arithmetic(expression) or ambiguous(expression):
-            continue
-        computes = calculate(expression)
-        if computes is not None and _close(computes, expected, found.group(1), limit=limit):
-            return computes
-    return None
 
 
 # --- the gate's own: an exception that comes back, a run out of time ---------------------------------------------------

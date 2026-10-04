@@ -424,6 +424,13 @@ def assess(
             "the packages the run had could not be listed, so its environment cannot be reproduced "
             f"({str(environment['packages_error'])[:160]}; see needs/ENVIRONMENT.json)"
         )
+    elif isinstance(environment, dict) and environment.get("packages_source"):
+        # Listed without pip (pip freeze failed): versions are known, but an editable or direct install among them may
+        # not be installable again as it was.
+        matched_gaps.append(
+            "the packages the run had were listed without pip (pip freeze failed), so an editable or local install among "
+            "them may not be installable again as it was (see needs/ENVIRONMENT.json)"
+        )
     if isinstance(environment, dict) and environment.get("isolated") is False:
         matched_gaps.append(
             "the run shared its Python environment with other quests (execution.shared_interpreter / "

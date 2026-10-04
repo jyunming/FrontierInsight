@@ -1007,3 +1007,55 @@ def test_the_freeze_never_says_a_person_approved_what_they_were_not_shown(tmp_pa
     # A name the person removed at the stop is not named as part of the frozen protocol.
     gone = _freeze_with(tmp_path / "g", plan_mode="off", held=False, added={"oracles": ["removed at the stop"], "shown": False})
     assert "removed at the stop" not in gone and gone.startswith("auto: nobody approved this protocol")
+
+
+# --- a repair whose code cannot be used does not use one up (a live gemma4 quest, 2026-10-05) ----------------------------
+
+
+def _repairs_in_turn(calls: list[str], replies: list[str], protocol: dict[str, Any]):
+    inner = _fake(calls, implement=_FAILING, repair=_PASSING, protocol=protocol)
+    sent: list[int] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
+            calls.append("OracleRepair")
+            reply = replies[min(len(sent), len(replies) - 1)]
+            sent.append(1)
+            return json.dumps({"code": reply, "deps": [], "patch_summary": "a repair"})
+        return await inner(self, messages, **kw)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_a_repair_whose_code_cannot_be_used_does_not_use_one_up_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With one repair allowed: the first repair's code does not even parse (FI keeps the script as it is), so it is not
+    counted, and the next one, which passes, is still made."""
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat",
+                        _repairs_in_turn(calls, ["def broken(:\n    pass\n", _PASSING], protocol))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert calls.count("OracleRepair") == 2
+    assert _record(engine)["status"] == "ok"
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "does not count as one of the 1 repairs" in log
+
+
+@pytest.mark.asyncio
+async def test_unusable_repairs_are_exempt_only_once_so_the_loop_stays_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _repairs_in_turn(calls, ["def broken(:\n"], protocol))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    await engine.run()
+    # One free, then the one allowed: two calls, never more.
+    assert calls.count("OracleRepair") == 2
+    assert _record(engine)["status"] != "ok"

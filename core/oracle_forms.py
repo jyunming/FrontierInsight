@@ -161,10 +161,10 @@ def problem(text: Any) -> str | None:
     return None if tree is not None else why
 
 
-def names(text: Any) -> list[str]:
+def names(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> list[str]:
     """The names a formula takes from what the simulation returns (not its functions or constants), in order; empty
-    when it cannot be read."""
-    tree, _ = _tree(text)
+    when it cannot be read (with ``functions``, the functions it may call, as :func:`evaluate` reads it)."""
+    tree, _ = _tree(text, functions)
     if tree is None:
         return []
     calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
@@ -196,7 +196,8 @@ def evaluate(text: Any, values: dict[str, Any], *, special: bool = False) -> Eva
     tree, why = _tree(text, functions)
     if tree is None:
         return Evaluated(unreadable=why)
-    missing = [n for n in names(text) if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
+    missing = [n for n in names(text, functions)
+               if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
     if missing:
         return Evaluated(missing=missing)
 
@@ -227,8 +228,8 @@ def evaluate(text: Any, values: dict[str, Any], *, special: bool = False) -> Eva
         return Evaluated(problem="it divides by zero")
     except OverflowError:
         return Evaluated(problem="the number is too large")
-    except (ValueError, TypeError, RecursionError) as e:
-        return Evaluated(problem=f"it cannot be computed ({e})")
+    except (ValueError, TypeError, RecursionError, KeyError) as e:
+        return Evaluated(problem=f"it cannot be computed ({e!r})")
     if not finite:
         return Evaluated(problem=f"it gives {value}")
     return Evaluated(value=value)

@@ -461,7 +461,7 @@ _LOOK_SAID = {
     ("half_step", "not_converging"): "at a smaller step the result does not settle",
     ("half_step", "steady_elsewhere"): "at a smaller step the result stays the same, so the gap is not a step-size error",
     ("multiple", "factor"): "what was measured is {word} the value FI worked out itself, so the simulation likely "
-                            "computes a related quantity (half a period, say) instead of the one the check means",
+                            "computes a related quantity instead of the one the check means",
     ("seeds", "noise"): "repeated runs of the same case differ by more than the check allows, so one run cannot meet it",
     ("seeds", "beyond_noise"): "repeated runs of the same case agree with each other, and all miss the expected value",
     ("seeds", "varies"): "a rule every run must keep exactly changes from run to run",

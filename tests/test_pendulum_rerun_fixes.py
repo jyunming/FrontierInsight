@@ -71,6 +71,12 @@ def test_every_approximate_sign_is_read_and_a_right_answer_is_left_alone(sign: s
 
 
 @pytest.mark.parametrize("text, expected, limit", [
+    # The second review's counterexamples: rounded constants in the step, truncated series after an approximate sign.
+    ("derivation: (2/pi)*1.6336 = 1.0399733", 1.0399733, 1.04e-6),
+    ("derivation: T/T0 ≈ 1 + (pi/4)**2/16 ≈ 1.0400", 1.04, 1.04e-3),
+    ("derivation: x = 1 + (pi/4)**2/16 + 11*(pi/4)**4/3072 ~ 1.03997", 1.03997, 1.04e-5),
+    # ellipk given sqrt(...) of a square: the modulus convention, not worked out.
+    ("derivation: (2/pi)*ellipk(sqrt(1 - 0.5**2)) = 1.3733", 1.3733, 1e-3),
     # Rounded to the digits it writes: never a slip, however tight the check.
     ("derivation: T/T0 = (2/pi)*ellipk(sin(pi/8)**2) approx 1.04", 1.04, 1e-8),
     # ellipk given the modulus k (the other convention): not worked out, so never "corrected".
@@ -96,7 +102,7 @@ def test_without_a_tolerance_the_one_percent_floor_still_holds() -> None:
 
 def test_half_the_value_fi_worked_out_is_named_as_half_a_quantity() -> None:
     found = oracle_triage.multiple_of(HALF_STEPS[0], EXACT_45, 0.001 * EXACT_45)
-    assert found is not None and found[0] == 0.5 and "half a period" in found[2]
+    assert found is not None and found[0] == 0.5 and found[1] == "half"
     assert oracle_triage.multiple_of(EXACT_45 * 1.0001, EXACT_45, 0.001 * EXACT_45) is None, "agreeing is not a multiple"
     assert oracle_triage.multiple_of(0.7, EXACT_45, 0.001 * EXACT_45) is None
 
@@ -113,9 +119,10 @@ def test_the_hint_reaches_the_repair_and_points_to_the_script(tmp_path: Path) ->
     assert len(hints) == 1 and "half" in hints[0] and "0.519923" in hints[0]
     entry = attempt["triage"][0]
     assert entry["kind"] == "multiple" and entry["points_to"] == "script"
-    # Only against a value FI worked out itself: the plan's number alone (no derivation FI can work out) gives none.
-    plain = {**CHECK_45, "expected": EXACT_45, "reference": "the exact period (E2)"}
-    assert _engine(tmp_path / "other")._multiple_hints([plain], judged, {}, set()) == []
+    # Only against FI's own correction of the check: the plan's formula alone, even one FI can work out, gives none
+    # (a plan whose physics is off by two would send the repair to bend a correct script).
+    worked_out = {**CHECK_45, "expected": EXACT_45, "reference": "derivation: (2/pi)*ellipk(sin(pi/8)**2) = 1.0400"}
+    assert _engine(tmp_path / "other")._multiple_hints([worked_out], judged, {}, set()) == []
 
 
 def test_the_card_names_the_multiple_before_the_step_runs(tmp_path: Path) -> None:
@@ -129,17 +136,7 @@ def test_the_card_names_the_multiple_before_the_step_runs(tmp_path: Path) -> Non
     assert why.startswith("what was measured is half the value FI worked out itself"), why
 
 
-# --- 3. a repair whose code cannot be used is not spent (once) ----------------------------------------------------------
-
-
-def test_an_unusable_repair_is_not_counted_once_and_the_loop_stays_bounded() -> None:
-    import inspect
-
-    src = inspect.getsource(Engine._oracle_gate)
-    assert "unusable_left = 1" in src and 'outcome == "not_usable" and unusable_left > 0' in src
-    # The exemption comes before the line that spends a repair, and is used up once.
-    assert src.index('outcome == "not_usable" and unusable_left > 0') < src.index("repairs_left -= 1")
-    assert "unusable_left -= 1" in src
+# --- 3. a repair whose code cannot be used is not spent (once): tests/test_oracle_gate.py runs it through the gate
 
 
 # --- 4. the reason is the strongest evidence, a steady result is said as such, said once --------------------------------
@@ -163,11 +160,13 @@ def test_a_slip_in_the_plans_arithmetic_is_the_reason_given_first() -> None:
     assert why.startswith("the plan's own working for the expected value does not add up"), why
 
 
-def test_the_went_on_sentence_is_printed_once_per_quest_run() -> None:
-    import inspect
-
-    src = inspect.getsource(Engine._oracle_gate)
-    assert "_unconfirmed_said" in src and "if line not in said:" in src
+def test_the_same_sentence_is_said_once_per_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    eng = _engine(tmp_path)
+    eng._say_once("[FI] FI could not confirm 'x'")
+    eng._say_once("[FI] FI could not confirm 'x'")
+    eng._say_once("[FI] FI could not confirm 'y'")
+    out = capsys.readouterr().out
+    assert out.count("could not confirm 'x'") == 1 and out.count("could not confirm 'y'") == 1
 
 
 # --- 5. a pip freeze that crashes keeps a package list, and the record keeps one line ------------------------------------
@@ -186,7 +185,9 @@ def test_the_record_keeps_the_error_line_not_the_traceback() -> None:
 
 def test_the_installed_distributions_are_listed_without_pip() -> None:
     listed = asyncio.run(Engine._installed_distributions(sys.executable))
-    assert listed and all("==" in line for line in listed) and listed == sorted(listed)
+    assert listed and all("==" in line or " @ " in line for line in listed) and listed == sorted(listed)
+    names = [line.split("==")[0].split(" @ ")[0] for line in listed]
+    assert len(names) == len(set(names)), "the first distribution of a name is listed once"
     assert any(line.lower().startswith("pytest==") for line in listed)
 
 
@@ -223,3 +224,25 @@ async def test_a_crashing_pip_freeze_falls_back_and_says_why_in_one_line(tmp_pat
     assert record["packages_source"].endswith("(pip freeze failed: NotADirectoryError: [WinError 267] The directory "
                                               "name is invalid)")
     assert "Traceback" not in json.dumps(record)
+
+
+@pytest.mark.parametrize("text", ["derivation: T = 4*sqrt(L/g)*ellipk(sin(pi/8)**2) = 2.0866 s",
+                                  "derivation: (2/pi)*ellipk(k**2) approx 1.031"])
+def test_a_step_with_symbols_inside_ellipk_is_simply_not_worked_out(text: str) -> None:
+    oracle = {**CHECK_45, "reference": text}
+    assert oracle_triage.plan_slip(oracle) is None
+    assert oracle_triage.arithmetic_slip(text, None, 1e-3) is None
+    assert oracle_forms.evaluate("4*sqrt(L/g)*ellipk(0.5)", {}, special=True).value is None
+
+
+def test_a_list_made_without_pip_is_a_gap_in_the_evidence(tmp_path: Path) -> None:
+    from core import evidence
+
+    needs = tmp_path / "needs"
+    needs.mkdir()
+    (needs / "ENVIRONMENT.json").write_text(json.dumps({"isolated": True, "packages": ["agora @ file:///C:/dev/agora (editable)"],
+                                                        "packages_source": "the interpreter's installed distributions"}),
+                                            encoding="utf-8")
+    record = evidence.assess(tmp_path, {})
+    gaps = " ".join(g for level in record.get("all_gaps", {}).values() for g in level)
+    assert "listed without pip" in gaps

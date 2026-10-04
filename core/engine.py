@@ -9701,11 +9701,7 @@ class Engine:
             line = (f"[FI] FI could not confirm {names}" + (f" ({why})" if why else "") + ", so the result counts as "
                     "exploratory, not as checked against a known answer; the paper says so. Nothing to do (details: "
                     "needs/ORACLE_CHECK.json and run.log).")
-            # The gate runs again after a later repair of the run: the same sentence is said once per quest run.
-            said = getattr(self, "_unconfirmed_said", set())
-            if line not in said:
-                print(line)
-                self._unconfirmed_said = said | {line}
+            self._say_once(line)
             return new_code
         if self.config.engine.oracle_check == "warn":
             self._log.warning(
@@ -9719,10 +9715,11 @@ class Engine:
 
     def _multiple_hints(self, oracles: list[dict[str, Any]], measured: list[dict[str, Any]],
                         attempt: dict[str, Any], hinted: set[str]) -> list[str]:
-        """For each failing check measured at a simple multiple (half, twice ...) of a value FI worked out itself (its
-        correction from the plan's own arithmetic or an independent recheck, or the plan's derivation as FI works it
-        out): a triage entry pointing to the script, and the sentence for the repair request. Once per check per gate
-        run; never a verdict."""
+        """For each failing check measured at a simple multiple (half, twice ...) of a value FI worked out
+        independently of the plan's word (its correction from the plan's own arithmetic, or from an independent
+        recheck): a triage entry pointing to the script, and the sentence for the repair request. Never against the
+        plan's own formula alone (a plan whose physics is off by two would send the repair to bend a correct script).
+        Once per check per gate run; never a verdict."""
         corrected = self._corrections_read()
         declared = {str(o.get("name") or "").strip(): o for o in oracles}
         hints: list[str] = []
@@ -9732,12 +9729,11 @@ class Engine:
             if oracle is None:
                 continue
             fix = corrected.get(name) if isinstance(corrected.get(name), dict) else None
-            if fix and (fix.get("source") == "arithmetic" or fix.get("source") == "recompute"):
-                reference = _oracle_triage.num(fix.get("to"))
-                source = ("its correction of the plan's arithmetic" if fix.get("source") == "arithmetic"
-                          else "its correction from an independent recheck")
-            else:
-                reference, source = _oracle_triage.verified_value(oracle), "the plan's derivation, worked out"
+            if not fix or fix.get("source") not in ("arithmetic", "recompute"):
+                continue
+            reference = _oracle_triage.num(fix.get("to"))
+            source = ("its correction of the plan's arithmetic" if fix.get("source") == "arithmetic"
+                      else "its correction from an independent recheck")
             _expected, limit, _mode = _oracle.limit_of(oracle)
             found = _oracle_triage.multiple_of(j.get("value"), reference, limit)
             if found is None:
@@ -9750,13 +9746,36 @@ class Engine:
             hints.append(entry["hint"])
         return hints
 
+    def _say_once(self, line: str) -> None:
+        """Print ``line`` to the console unless this run already printed it (the checks run again after a later repair
+        of the run, and would say the same sentence twice)."""
+        said = getattr(self, "_said_lines", set())
+        if line not in said:
+            print(line)
+            self._said_lines = said | {line}
+
     @staticmethod
     async def _installed_distributions(py: Any) -> list[str] | None:
         """``name==version`` of every distribution the interpreter ``py`` has installed (importlib.metadata, no pip, no
         version-control probe), sorted; ``None`` when it cannot be listed."""
-        code = ("import importlib.metadata as m\n"
-                "rows = {(d.metadata['Name'] or '').strip(): d.version for d in m.distributions()}\n"
-                "print('\\n'.join(sorted(f'{n}=={v}' for n, v in rows.items() if n)))\n")
+        # The first distribution of a name on sys.path is the one imported (as pip lists it); an editable or direct
+        # install is written as pip would (``name @ url``) and marked, since its version alone cannot bring it back.
+        code = ("import importlib.metadata as m, json\n"
+                "rows = {}\n"
+                "for d in m.distributions():\n"
+                "    n = (d.metadata['Name'] or '').strip()\n"
+                "    if not n or n in rows:\n"
+                "        continue\n"
+                "    line = f'{n}=={d.version}'\n"
+                "    try:\n"
+                "        u = json.loads(d.read_text('direct_url.json') or 'null')\n"
+                "    except Exception:\n"
+                "        u = None\n"
+                "    if isinstance(u, dict) and u.get('url'):\n"
+                "        ed = (u.get('dir_info') or {}).get('editable')\n"
+                "        line = f\"{n} @ {u['url']}\" + (' (editable)' if ed else '')\n"
+                "    rows[n] = line\n"
+                "print('\\n'.join(sorted(rows.values())))\n")
         try:
             tree = await AsyncProcessTree.start(str(py), "-c", code, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.PIPE)
