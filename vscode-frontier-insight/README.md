@@ -604,11 +604,11 @@ happened. There is never anything to debug: after a passing
 problem with the model service or the network (which FI already
 tried again by itself) or a problem in FI itself, you only continue
 later; you are asked to act only when your machine or account needs
-it (sign in again, install something, close a file). `@fi /resume
+it (sign in again, install something, change a setting, close a file). `@fi /resume
 <quest_id>` picks up at the step that stopped. The engine writes the same to
 `quest_failed.md` in the quest folder, with the failing-node name,
 the exception text, a log tail and the provider context under
-Details for a bug report. This holds even when the failure does
+Details for FI's maintainers. This holds even when the failure does
 not arrive as an ordinary Python error — some failures reach the
 engine from outside Python's usual error hierarchy, and one of
 those used to leave an empty quest folder with nothing in it to

@@ -432,3 +432,114 @@ async def test_an_fi_bug_is_not_run_again(tmp_path, monkeypatch, _no_waits) -> N
     assert record and record["kind"] == "fi"
     body = (eng.quest_root / "quest_failed.md").read_text(encoding="utf-8")
     assert "This is a problem in FI itself" in body and "Nothing for you to fix" in body
+
+
+# ---- settings the person chose, FI's own helper, and the retry timing (third review) ----------------------------------
+
+@pytest.mark.parametrize("message, words", [
+    ("Docker daemon not reachable. Install Docker Desktop (Windows/macOS) or run `dockerd` (Linux), then retry.",
+     "Docker"),
+    ("[preflight] paper_pdf requested with output.require_pdf=True but pandoc not found on this host", "PDF"),
+    ("venv creation failed via py (python_version=3.9): rc=1", "(3.9)"),
+    ("engine.skills_required names skill(s) that cannot be used: foo (no skill by that name was found)",
+     "engine.skills_required"),
+])
+def test_a_refused_setting_is_the_person_s_one_action(message: str, words: str) -> None:
+    f = ck.classify(_raised(RuntimeError(message)))
+    assert f.kind == "setup" and words in f.say, f
+    assert "Nothing for you to fix" not in f.do and "continue the quest" in f.do
+
+
+def test_a_bug_in_the_inputs_module_is_not_blamed_on_the_person() -> None:
+    planted = compile("def f():\n    return None.size\n", str(ck._CORE / "example_inputs.py"), "exec")
+    ns: dict = {}
+    exec(planted, ns)  # noqa: S102
+    try:
+        ns["f"]()
+    except AttributeError as e:
+        f = ck.classify(e)
+    assert f.kind == "fi" and "file named in the quest's settings" not in f.say
+
+
+def test_fi_s_own_connection_helper_is_not_the_person_s_to_start() -> None:
+    exc = httpx.ConnectError("All connection attempts failed",
+                             request=httpx.Request("POST", "http://127.0.0.1:41234/v1/chat/completions"))
+    exc.add_note("[FI] provider=claude_code, transport=http, model=m, node=design")
+    f = ck.classify(exc, provider="claude_code")
+    assert "Start it" not in f.do and f.kind != "setup"
+
+
+def test_an_ipv6_address_is_written_with_brackets() -> None:
+    exc = httpx.ConnectError("All connection attempts failed",
+                             request=httpx.Request("GET", "http://[::1]:8000/health"))
+    assert "([::1]:8000)" in ck.classify(exc).say
+
+
+class _Snap:
+    def __init__(self, step: str, checkpoint: str, created_at: str | None) -> None:
+        self.next = (step,)
+        self.config = {"configurable": {"checkpoint_id": checkpoint}}
+        self.created_at = created_at
+
+
+class _Graph:
+    def __init__(self, snap: _Snap) -> None:
+        self.snap = snap
+
+    async def aget_state(self, _config):  # noqa: ANN001
+        return self.snap
+
+
+def _bare_engine():
+    import logging
+    from types import SimpleNamespace
+
+    from core.engine import Engine
+
+    eng = Engine.__new__(Engine)
+    eng._step_retries = {}
+    eng._log = logging.getLogger("test-crash-kind")
+    eng._last_progress = ""
+    eng._progress = lambda text: None  # type: ignore[method-assign]
+    return eng, SimpleNamespace
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_quest_s_first_step_can_be_run_again(monkeypatch) -> None:
+    """The last checkpoint is an earlier run's (hours old): the step's working time counts from its start in this run
+    (second review, finding 4)."""
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng._invoke_started_at = time.time() - 5
+    graph = _Graph(_Snap("design", "c1", "2026-01-01T00:00:00+00:00"))
+    assert await eng._try_step_again(graph, {}, httpx.ReadTimeout("t")) is True
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_worked_long_in_this_run_is_not_run_again(monkeypatch) -> None:
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng._invoke_started_at = time.time() - ck.RETRY_ONLY_UNDER_S - 60
+    graph = _Graph(_Snap("execute", "c1", None))
+    assert await eng._try_step_again(graph, {}, httpx.ReadTimeout("t")) is False
+
+
+@pytest.mark.asyncio
+async def test_retries_are_counted_per_entry_into_a_step(monkeypatch) -> None:
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng._invoke_started_at = time.time()
+    first = _Graph(_Snap("design", "c1", None))
+    assert await eng._try_step_again(first, {}, httpx.ReadTimeout("t")) is True
+    assert await eng._try_step_again(first, {}, httpx.ReadTimeout("t")) is True
+    assert await eng._try_step_again(first, {}, httpx.ReadTimeout("t")) is False  # this entry's two are used
+    later = _Graph(_Snap("design", "c2", None))  # the quest came back to the design from another checkpoint
+    assert await eng._try_step_again(later, {}, KeyError("x")) is False  # not a passing problem: no retry...
+    assert eng._step_retries["design"] == ("c2", 0)  # ...and the card counts this entry's retries, none
+
+
+def test_the_fleet_summary_does_not_repeat_a_failure_already_said(tmp_path, capsys) -> None:
+    import launch
+
+    source = Path(launch.__file__).read_text(encoding="utf-8")
+    assert 'if not getattr(r, "_fi_failure_shown", False):' in source

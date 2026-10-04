@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import re
 import time
 import traceback
 from dataclasses import asdict, dataclass
@@ -133,6 +134,16 @@ def _is_model_call(exc: BaseException) -> bool:
     return any(str(n).startswith("[FI] provider=") for n in getattr(exc, "__notes__", ()) or ())
 
 
+def _fi_runs_it(provider: str) -> bool:
+    """Whether FI itself starts the local service for this provider (a proxy ``ProxySupervisor`` runs)."""
+    try:
+        from core.provider import PROXY_PROVIDERS
+
+        return provider in PROXY_PROVIDERS
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _host(exc: BaseException) -> str:
     """The host an HTTP error was for ('' when it carries no request: httpx raises when ``.request`` is unset)."""
     try:
@@ -144,13 +155,43 @@ def _host(exc: BaseException) -> str:
 def _inputs_problem(exc: BaseException, text: str) -> bool:
     """A file the person named in the quest's settings (``execution.inputs``, ``knowledge.local_papers``) that is not
     there or cannot be used: theirs to put right, so it is a setup problem, not FI's."""
+    if not isinstance(exc, (FileNotFoundError, ValueError)):
+        return False
     try:
         frames = traceback.extract_tb(exc.__traceback__)
         raised_in = Path(frames[-1].filename).name if frames else ""
     except Exception:  # noqa: BLE001
         raised_in = ""
-    return raised_in == "example_inputs.py" or text.split(" ", 1)[-1].startswith(
-        ("execution.inputs", "knowledge.local_papers", "local_papers"))
+    return raised_in == "example_inputs.py" or text.split(" ", 1)[-1].startswith("execution.inputs")
+
+
+#: A refusal FI writes for the person names the setting it is about (``output.require_pdf``, ``engine.skills_required``
+#: ...): the setting is theirs, so changing it or setting up what it needs is their one action.
+_SETTING_NAMED = re.compile(r"\b(output|engine|execution|knowledge|provider|pauses)\.[a-z_]+")
+
+
+def _settings_refusal(exc: BaseException, text: str) -> tuple[str, str] | None:
+    """(say, do) for FI's own refusal of a setting the person chose, else None. Never for a programming error."""
+    if isinstance(exc, _PROGRAMMING_ERRORS) or not isinstance(exc, (RuntimeError, ValueError, OSError)):
+        return None
+    if "docker daemon not reachable" in text or "sandbox=docker requires" in text:
+        return ("The quest's settings run the experiment in Docker, which is not installed or not running here.",
+                "Start Docker Desktop (or install it), then continue the quest.")
+    if "require_pdf" in text:
+        return ("The quest's settings require a PDF of the paper, but the programs that make one are not installed "
+                "here.", "Install what the setup check (`python launch.py --doctor`) names for PDFs, then continue the "
+                         "quest.")
+    if "venv creation failed" in text and "python_version" in text:
+        version = re.search(r"python_version=([^)\s]+)", text)
+        named = f" ({version.group(1)})" if version else ""
+        return (f"The Python version the quest's settings ask for{named} could not be set up on this machine.",
+                "Install that Python version or change `execution.python_version` in the settings, then continue the "
+                "quest.")
+    named = _SETTING_NAMED.search(text)
+    if named:
+        return (f"A setting of the quest cannot be used here ({named.group(0)}): {_one_line(exc, 160)}",
+                "Change that setting or set up what it needs, then continue the quest.")
+    return None
 
 
 def _quota_used_up(exc: BaseException) -> bool:
@@ -191,6 +232,9 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     if _inputs_problem(exc, text):
         return (f"A file named in the quest's settings cannot be used: {_one_line(exc, 160)}",
                 "Put the file in place or change the settings to name the right one, then continue the quest.")
+    refused = _settings_refusal(exc, text)
+    if refused:
+        return refused
     if model_call and (_quota_used_up(exc) or (not has_http_answer and any(w in text for w in _QUOTA_WORDS))):
         return (f"The account FI uses for {service} has used up its allowance (a usage limit or credit balance).",
                 "Add credits or wait until the limit resets, then continue the quest.")
@@ -209,6 +253,8 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
                     "Correct the address in the quest's settings (the setup check, `python launch.py --doctor`, checks it), then continue the quest.")
         host = _host(exc)
         if isinstance(exc, httpx.ConnectError) and host.strip("[]") in ("127.0.0.1", "localhost", "::1"):
+            if model_call and _fi_runs_it(provider):
+                return None  # FI's own helper for this provider: FI starts it again on resume, nothing to start
             if model_call:
                 return (f"The model service on this machine ({service}) is not running.",
                         "Start it, then continue the quest.")
@@ -217,7 +263,8 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
                 port = f":{exc.request.url.port}" if exc.request.url.port else ""  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001
                 port = ""
-            return (f"A service on this machine that FI uses ({host}{port}) is not running.",
+            where = f"[{host.strip('[]')}]" if ":" in host else host
+            return (f"A service on this machine that FI uses ({where}{port}) is not running.",
                     "Start it, then continue the quest.")
     except ImportError:
         pass

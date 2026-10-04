@@ -17438,16 +17438,18 @@ class Engine:
         from datetime import datetime
 
         try:
-            if _crash_kind.classify(exc).kind != "transient":
-                return False
             snap = await graph.aget_state(run_config)
             step = ", ".join(getattr(snap, "next", None) or ()) or "(start)"
             # Counted per entry into the step: the checkpoint it starts from. A later pass through the same step (after
-            # a review sent the quest back, say) starts from another checkpoint and has its own retries.
+            # a review sent the quest back, say) starts from another checkpoint and has its own retries; the count kept
+            # is always this entry's, so the failure card never names an earlier pass's retries.
             entry = str(((getattr(snap, "config", None) or {}).get("configurable") or {}).get("checkpoint_id") or "")
             seen_entry, done = self._step_retries.get(step, ("", 0))
             if seen_entry != entry:
                 done = 0
+                self._step_retries[step] = (entry, 0)
+            if _crash_kind.classify(exc).kind != "transient":
+                return False
             if done >= len(_crash_kind.RETRY_WAITS_S):
                 return False
             # How long the step had been working: since it last started in this process (never counting the time
