@@ -841,7 +841,17 @@ def _read_quest_failed_md(quest_root: Path) -> dict[str, Any] | None:
         "path": str(path),
         "failing_node": None,
         "what_broke": None,
+        # What happened and the one thing to do, in plain words (core/crash_kind.py); None for an older file.
+        "kind": None,
+        "title": None,
+        "say": None,
+        "do": None,
     }
+    from core import crash_kind as _crash_kind
+
+    plain = _crash_kind.read(quest_root / ".fi")
+    if plain:
+        info.update({k: plain.get(k) for k in ("kind", "title", "say", "do")})
     # Templated lines in the engine's writer:
     #   **Failing node:** `<node>`
     #   ```\n<exception line>\n```

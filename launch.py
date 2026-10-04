@@ -2562,11 +2562,18 @@ async def run_one(
     hf_callback: object = None
     if cfg.pauses.review == "ask":
         hf_callback = _pick_human_feedback_callback(cfg, engine, interactive, approved_by or "")
-    art: QuestArtifacts = await _maybe_profiled(
-        engine, profile=profile, clarify_callback=callback,
-        human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
-        approved_by=approved_by,
-    )
+    try:
+        art: QuestArtifacts = await _maybe_profiled(
+            engine, profile=profile, clarify_callback=callback,
+            human_feedback_callback=hf_callback, reopen=reopen, from_step=from_step,
+            approved_by=approved_by,
+        )
+    except Exception as exc:
+        # The engine sorted the failure (core/crash_kind.py) and wrote quest_failed.md with the full detail; the
+        # person gets what happened and the one thing to do. The traceback is in .fi/run.log, not on the screen.
+        if _print_quest_failure(engine):
+            exc._fi_failure_shown = True  # type: ignore[attr-defined]
+        raise
     print(f"[FI] {art.quest_id} -> {art.quest_root}")
     _record_quest(Path(art.quest_root), cfg, started=False)  # the paper's title is known by now
     # The to-do card (core/todo.py): why it stopped, what to decide, the recommendation and the alternatives, or what
@@ -2582,6 +2589,21 @@ async def run_one(
         cfg, art, supervisor=supervisor,
         skip_existing=resume_quest_id is not None, ask_byline=ask_byline,
     )
+
+
+def _print_quest_failure(engine: Engine) -> bool:
+    """Print a stopped quest's failure in plain words (``.fi/failure.json``, core/crash_kind.py): what happened, the
+    one thing to do, how to continue. False when the engine did not record one (the caller keeps the traceback)."""
+    from core import crash_kind as _crash_kind
+
+    plain = _crash_kind.read(engine.fi_dir)
+    if not plain:
+        return False
+    print(f"[FI] {plain.get('title') or 'The quest stopped'}: {plain.get('say')}", file=sys.stderr)
+    print(f"     What you can do: {plain.get('do')}", file=sys.stderr)
+    print(f"     To continue: fi --resume {engine.quest_id}   (the details for a bug report: "
+          f"{(Path(engine.quest_root) / 'quest_failed.md').as_posix()})", file=sys.stderr)
+    return True
 
 
 def _report_best_design(quest_root: Path, summary: dict[str, object]) -> None:
@@ -7260,6 +7282,12 @@ def main() -> int:
     coro = main_async(args)
     try:
         return asyncio.run(coro)
+    except Exception as exc:
+        # A quest that stopped on an error and already said so in plain words (``_print_quest_failure``): exit 1
+        # without a traceback on the screen; the engine wrote it to the quest's .fi/run.log.
+        if getattr(exc, "_fi_failure_shown", False):
+            return 1
+        raise
     except KeyboardInterrupt:
         coro.close()
         # Ctrl-C on a long-running mode (--serve, --fleet, a single

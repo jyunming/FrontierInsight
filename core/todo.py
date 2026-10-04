@@ -359,9 +359,17 @@ def waiting(quest_root: Path) -> list[Item]:
     out: list[Item] = []
     failed = root / "quest_failed.md"
     if failed.is_file():
-        out.append(Item("failed", "The last run stopped with an error (quest_failed.md says where).",
-                        recommended="Read quest_failed.md; once the cause is fixed, go on: the quest continues from "
-                                    "the step that failed."))
+        from . import crash_kind as _crash_kind
+
+        plain = _crash_kind.read(root / ".fi")
+        if plain:
+            out.append(Item("failed", f"The last run stopped: {plain['say']}",
+                            recommended=f"{plain.get('do') or ''} (`--resume` continues from the step that stopped; the "
+                                        "details for a bug report are in quest_failed.md.)".strip()))
+        else:
+            out.append(Item("failed", "The last run stopped with an error (quest_failed.md says where).",
+                            recommended="Read quest_failed.md; once the cause is fixed, go on: the quest continues "
+                                        "from the step that failed."))
     pending = _read_json(needs / "PROTOCOL_AMENDMENT_PENDING.json")
     if isinstance(pending, dict):
         changes = pending.get("changes") or []

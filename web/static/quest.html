@@ -58,10 +58,15 @@
   <!-- Quest-failed banner (only when <quest_root>/quest_failed.md exists). -->
   <div id="quest-failed-banner" class="hidden fi-banner fi-banner-error">
     <div class="font-body-md text-body-md text-on-surface flex flex-col gap-1">
-      <b>Quest failed before producing a paper.</b>
-      <span id="quest-failed-node-line" class="text-on-surface-variant"></span>
-      <span id="quest-failed-what-line" class="text-on-surface-variant font-code-md text-code-md"></span>
-      <span class="text-on-surface-variant">Open <code class="font-code-md">quest_failed.md</code> in the quest folder for the full traceback, log tail, and resume command.</span>
+      <b id="quest-failed-title">The quest stopped on an error.</b>
+      <span id="quest-failed-say-line" class="text-on-surface"></span>
+      <span id="quest-failed-do-line" class="text-on-surface"></span>
+      <details class="text-on-surface-variant">
+        <summary>Details (for a bug report)</summary>
+        <span id="quest-failed-node-line" class="block"></span>
+        <span id="quest-failed-what-line" class="block font-code-md text-code-md"></span>
+        <span class="block">The full log tail and the command to continue are in <code class="font-code-md">quest_failed.md</code> in the quest folder.</span>
+      </details>
     </div>
   </div>
 
@@ -1149,6 +1154,10 @@
     const whatLine = document.getElementById('quest-failed-what-line');
     nodeLine.textContent = qf.failing_node ? `Failed in node: ${qf.failing_node}` : '';
     whatLine.textContent = qf.what_broke || '';
+    // What happened and the one thing to do, in plain words (absent in a file an older FI wrote).
+    document.getElementById('quest-failed-title').textContent = qf.title || 'The quest stopped on an error.';
+    document.getElementById('quest-failed-say-line').textContent = qf.say || '';
+    document.getElementById('quest-failed-do-line').textContent = qf.do ? `What you can do: ${qf.do}` : '';
     banner.classList.remove('hidden');
   }
 
