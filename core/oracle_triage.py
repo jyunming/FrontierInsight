@@ -486,24 +486,68 @@ def _digits(number: str) -> int:
 APPROX_FLOOR = 5e-3
 
 
-def _constants_precision(expression: str) -> float:
-    """The relative precision of the least precise non-integer number ``expression`` uses (``1.6336`` -> 5e-5), or 0
-    when it uses only whole numbers (and ``pi``): a step that multiplies rounded constants cannot be held to more
-    digits than they have."""
-    found = [n for n in _re.findall(_NUMBER, str(expression or "")) if _re.search(r"[.eE]", n)]
-    return max((5 * 10.0 ** (-_digits(n)) for n in found), default=0.0)
+# A decimal number inside a step (``1.6336``, ``12.3``, ``3.3e-7``); a whole number (and ``pi``) is exact.
+_DECIMAL = _re.compile(r"(?<![\w.])(?:\d+\.\d*|\.\d+)(?:[eE][-+]?\d+)?|(?<![\w.])\d+[eE][-+]?\d+")
+#: At most this many rounded constants are varied together (every corner); more are varied one at a time.
+_CORNERS_UP_TO = 6
 
 
-def _close(a: float, b: float, written: str, *, approximate: bool = False, limit: float | None = None,
-           expression: str = "") -> bool:
+def _half_unit(number: str) -> float:
+    """Half a unit in the last place a written number states: ``1.03`` 0.005, ``12.3`` 0.05, ``3.3e-7`` 5e-9."""
+    mantissa, _, exponent = number.lower().partition("e")
+    decimals = len(mantissa.split(".", 1)[1]) if "." in mantissa else 0
+    return 0.5 * 10.0 ** (-decimals) * 10.0 ** (int(exponent) if exponent else 0)
+
+
+def calculated_range(expression: str) -> tuple[float, float] | None:
+    """The least and greatest value ``expression`` can take when each decimal constant it uses is anywhere within half
+    a unit of its last written digit (a constant rounded to the digits shown), worked out with the same calculator;
+    ``None`` when some such value cannot be computed (a division that can reach zero, say: then nothing can be said).
+    A step with only whole numbers gives one value. Every corner is tried for up to six constants; beyond that each
+    is varied alone and the spreads are added (a wider range: a slip is called less often, never more)."""
+    import itertools
+
+    text = str(expression or "")
+    found = list(_DECIMAL.finditer(text))
+    base = calculate(text)
+    if base is None:
+        return None
+    if not found:
+        return base, base
+
+    def with_(shifts: tuple[int, ...]) -> float | None:
+        out, last = [], 0
+        for m, s in zip(found, shifts):
+            out.append(text[last:m.start()])
+            out.append(repr(float(m.group()) + s * _half_unit(m.group())))
+            last = m.end()
+        out.append(text[last:])
+        return calculate("".join(out))
+
+    if len(found) <= _CORNERS_UP_TO:
+        values = [with_(c) for c in itertools.product((-1, 1), repeat=len(found))]
+        if any(v is None for v in values):
+            return None
+        return min(values + [base]), max(values + [base])  # type: ignore[type-var]
+    spread_lo = spread_hi = 0.0
+    for i in range(len(found)):
+        for s in (-1, 1):
+            shifts = tuple(s if j == i else 0 for j in range(len(found)))
+            v = with_(shifts)
+            if v is None:
+                return None
+            spread_lo, spread_hi = max(spread_lo, base - v), max(spread_hi, v - base)
+    return base - len(found) * spread_lo, base + len(found) * spread_hi
+
+
+def _close(a: float, b: float, written: str, *, approximate: bool = False, limit: float | None = None) -> bool:
     """Whether ``a`` (worked out) and ``b`` (the number written) agree to what the written number's digits can say
     (five times looser after an "approximately" sign), so a last digit rounded differently is never a slip. Without
     ``limit`` never tighter than 1%. With ``limit`` (the check's own tolerance, as an absolute amount) the 1% floor
     gives way to it: a gap the check itself can tell apart is a slip (a real quest's "(2/pi)*ellipk(sin(pi/8)**2)
-    approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance) -- but never tighter than the precision of the
-    numbers the step itself uses (``expression``), nor than :data:`APPROX_FLOOR` after an "approximately" sign."""
-    relative = max(5 * 10.0 ** (-_digits(written)) * (5 if approximate else 1), _constants_precision(expression),
-                   APPROX_FLOOR if approximate else 0.0)
+    approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance) -- never tighter than :data:`APPROX_FLOOR`
+    after an "approximately" sign. Rounded constants inside the step are allowed for by :func:`calculated_range`."""
+    relative = max(5 * 10.0 ** (-_digits(written)) * (5 if approximate else 1), APPROX_FLOOR if approximate else 0.0)
     if limit is None or limit <= 0:
         slack_abs = max(1e-2 * (5 if approximate else 1), relative) * max(abs(a), abs(b))
     else:
@@ -594,8 +638,14 @@ def arithmetic_slip(text: Any, expected: Any = None, limit: float | None = None)
         if not _is_arithmetic(expression) or ambiguous(expression):
             continue
         computes = calculate(expression)
-        if computes is None or _close(computes, float(written), written, approximate=sign in _APPROXIMATE,
-                                      limit=limit, expression=expression):
+        approximate = sign in _APPROXIMATE
+        if computes is None or _close(computes, float(written), written, approximate=approximate, limit=limit):
+            continue
+        # The constants the step uses are rounded to the digits shown: the written number counts as a slip only
+        # outside every value they allow (worked out at each end), never because a rounding was carried through.
+        span = calculated_range(expression)
+        if span is None or span[0] <= float(written) <= span[1] or any(
+                _close(edge, float(written), written, approximate=approximate, limit=limit) for edge in span):
             continue
         return {"expression": expression, "computes": computes, "written": float(written)}
     return None

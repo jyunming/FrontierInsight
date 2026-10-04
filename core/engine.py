@@ -9734,7 +9734,9 @@ class Engine:
             reference = _oracle_triage.num(fix.get("to"))
             source = ("its correction of the plan's arithmetic" if fix.get("source") == "arithmetic"
                       else "its correction from an independent recheck")
-            _expected, limit, _mode = _oracle.limit_of(oracle)
+            expected_now, limit, _mode = _oracle.limit_of(oracle)
+            if reference is None or expected_now is None or limit is None or abs(expected_now - reference) > limit:
+                continue  # a correction no longer in force (the check was written again since): not FI's value now
             found = _oracle_triage.multiple_of(j.get("value"), reference, limit)
             if found is None:
                 continue

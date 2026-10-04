@@ -75,6 +75,9 @@ def test_every_approximate_sign_is_read_and_a_right_answer_is_left_alone(sign: s
     ("derivation: (2/pi)*1.6336 = 1.0399733", 1.0399733, 1.04e-6),
     ("derivation: T/T0 ≈ 1 + (pi/4)**2/16 ≈ 1.0400", 1.04, 1.04e-3),
     ("derivation: x = 1 + (pi/4)**2/16 + 11*(pi/4)**4/3072 ~ 1.03997", 1.03997, 1.04e-5),
+    # The second look's counterexamples: a subtraction or exp that carries the constants' rounding far.
+    ("derivation: y = 1/(1.04-1.03) = 104.1", 104.1, 0.1),
+    ("derivation: y = exp(12.3) = 229843", 229843.0, 1.0),
     # ellipk given sqrt(...) of a square: the modulus convention, not worked out.
     ("derivation: (2/pi)*ellipk(sqrt(1 - 0.5**2)) = 1.3733", 1.3733, 1e-3),
     # Rounded to the digits it writes: never a slip, however tight the check.
@@ -246,3 +249,25 @@ def test_a_list_made_without_pip_is_a_gap_in_the_evidence(tmp_path: Path) -> Non
     record = evidence.assess(tmp_path, {})
     gaps = " ".join(g for level in record.get("all_gaps", {}).values() for g in level)
     assert "listed without pip" in gaps
+
+
+def test_the_range_the_rounded_constants_allow_is_worked_out_at_each_end() -> None:
+    low, high = oracle_triage.calculated_range("exp(12.3)")
+    assert low < 229843 < high
+    assert oracle_triage.calculated_range("2*pi*sqrt(1/9)") == (oracle_triage.calculate("2*pi*sqrt(1/9)"),) * 2  # whole numbers: one value
+    low, high = oracle_triage.calculated_range("2*pi*sqrt(1/9.81)")
+    assert low < 2.0060666807106475 < high and high - low < 2e-3
+    # The real slips stay slips: whole numbers only, or a written number far outside what the constants allow.
+    assert oracle_triage.arithmetic_slip("derivation: x = 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 => 1.18034", 1.18034,
+                                         1e-5) is not None
+    assert oracle_triage.arithmetic_slip("derivation: T = 2*pi*sqrt(1/9.81) = 2.100", 2.1, 1e-3) is not None
+
+
+def test_a_correction_no_longer_in_force_gives_no_hint(tmp_path: Path) -> None:
+    eng = _engine(tmp_path)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "oracle_corrections.json").write_text(json.dumps(
+        {"large_amplitude_period": {"from": 1.031, "to": EXACT_45, "source": "arithmetic"}}), encoding="utf-8")
+    rewritten = {**CHECK_45, "expected": 2.0}  # the check was written again since the correction
+    judged = [{"name": "large_amplitude_period", "value": 1.0, "passed_by_engine": False}]
+    assert eng._multiple_hints([rewritten], judged, {}, set()) == []
