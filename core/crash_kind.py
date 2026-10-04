@@ -165,33 +165,43 @@ def _inputs_problem(exc: BaseException, text: str) -> bool:
     return raised_in == "example_inputs.py" or text.split(" ", 1)[-1].startswith("execution.inputs")
 
 
-#: A refusal FI writes for the person names the setting it is about (``output.require_pdf``, ``engine.skills_required``
-#: ...): the setting is theirs, so changing it or setting up what it needs is their one action.
-_SETTING_NAMED = re.compile(r"\b(output|engine|execution|knowledge|provider|pauses)\.[a-z_]+")
+#: How FI's own refusals of a setting the person chose begin (the message's first words, lower-cased): the setting is
+#: theirs, so changing it or setting up what it needs is their one action. Only these exact openings count, read from
+#: the start of the message alone (never its notes, a service's answer, or a file name further on).
+_SETTING_REFUSALS = (
+    "engine.skills_required names",
+    "[preflight] paper_pdf requested with output.require_pdf",
+    "execution.sandbox=docker requires",
+    "docker daemon not reachable",
+    "venv creation failed via",
+)
 
 
-def _settings_refusal(exc: BaseException, text: str) -> tuple[str, str] | None:
-    """(say, do) for FI's own refusal of a setting the person chose, else None. Never for a programming error."""
-    if isinstance(exc, _PROGRAMMING_ERRORS) or not isinstance(exc, (RuntimeError, ValueError, OSError)):
+def _settings_refusal(exc: BaseException) -> tuple[str, str] | None:
+    """(say, do) for FI's own refusal of a setting the person chose, else None. Only a ``RuntimeError`` or
+    ``ValueError`` FI raised with one of :data:`_SETTING_REFUSALS` as its opening; never a programming error, an OS
+    error or a provider's error (a CLI's output can say anything)."""
+    if (isinstance(exc, (_PROGRAMMING_ERRORS, OSError)) or not isinstance(exc, (RuntimeError, ValueError))
+            or _is_model_call(exc)):
         return None
-    if "docker daemon not reachable" in text or "sandbox=docker requires" in text:
+    head = " ".join(_one_line(exc, 400).split()).lower()
+    if not head.startswith(_SETTING_REFUSALS):
+        return None
+    if head.startswith(("execution.sandbox=docker requires", "docker daemon not reachable")):
         return ("The quest's settings run the experiment in Docker, which is not installed or not running here.",
-                "Start Docker Desktop (or install it), then continue the quest.")
-    if "require_pdf" in text:
+                "Start Docker (Docker Desktop on Windows or macOS), or install it, then continue the quest.")
+    if head.startswith("[preflight] paper_pdf"):
         return ("The quest's settings require a PDF of the paper, but the programs that make one are not installed "
                 "here.", "Install what the setup check (`python launch.py --doctor`) names for PDFs, then continue the "
                          "quest.")
-    if "venv creation failed" in text and "python_version" in text:
-        version = re.search(r"python_version=([^)\s]+)", text)
+    if head.startswith("venv creation failed via"):
+        version = re.search(r"python_version=([^)\s]+)", head)
         named = f" ({version.group(1)})" if version else ""
         return (f"The Python version the quest's settings ask for{named} could not be set up on this machine.",
                 "Install that Python version or change `execution.python_version` in the settings, then continue the "
                 "quest.")
-    named = _SETTING_NAMED.search(text)
-    if named:
-        return (f"A setting of the quest cannot be used here ({named.group(0)}): {_one_line(exc, 160)}",
-                "Change that setting or set up what it needs, then continue the quest.")
-    return None
+    return (f"A setting of the quest cannot be used here: {_one_line(exc, 160)}",
+            "Change that setting in the quest's settings, then continue the quest.")
 
 
 def _quota_used_up(exc: BaseException) -> bool:
@@ -232,7 +242,7 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     if _inputs_problem(exc, text):
         return (f"A file named in the quest's settings cannot be used: {_one_line(exc, 160)}",
                 "Put the file in place or change the settings to name the right one, then continue the quest.")
-    refused = _settings_refusal(exc, text)
+    refused = _settings_refusal(exc)
     if refused:
         return refused
     if model_call and (_quota_used_up(exc) or (not has_http_answer and any(w in text for w in _QUOTA_WORDS))):

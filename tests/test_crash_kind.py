@@ -450,6 +450,25 @@ def test_a_refused_setting_is_the_person_s_one_action(message: str, words: str) 
     assert "Nothing for you to fix" not in f.do and "continue the quest" in f.do
 
 
+@pytest.mark.parametrize("exc, kind", [
+    (FileNotFoundError(errno.ENOENT, "No such file", "C:/q/.fi/engine.log"), "unknown"),
+    (RuntimeError("knowledge.asearch returned no list"), "unknown"),
+    (RuntimeError("the writer answered with something that is not a paper (output.md ...)"), "unknown"),
+    (ConnectionResetError("connection reset while writing output.bin"), "transient"),
+])
+def test_a_message_that_only_mentions_a_settings_like_name_is_not_a_settings_refusal(exc, kind) -> None:
+    """Only FI's own refusals of a setting, by their opening words, count (fourth check)."""
+    f = ck.classify(_raised(exc))
+    assert f.kind == kind and "Change that setting" not in f.do, f
+
+
+def test_a_file_held_or_a_full_disk_keeps_its_own_words_even_with_a_settings_like_file_name() -> None:
+    held = _winerror(PermissionError, 32, "being used by another process", "C:/q/execution.log")
+    assert "Close that file" in ck.classify(_raised(held)).do
+    full = OSError(errno.ENOSPC, "No space left on device", "C:/q/output.pdf")
+    assert "disk is full" in ck.classify(_raised(full)).say
+
+
 def test_a_bug_in_the_inputs_module_is_not_blamed_on_the_person() -> None:
     planted = compile("def f():\n    return None.size\n", str(ck._CORE / "example_inputs.py"), "exec")
     ns: dict = {}
