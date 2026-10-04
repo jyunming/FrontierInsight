@@ -438,7 +438,8 @@ async def test_an_fi_bug_is_not_run_again(tmp_path, monkeypatch, _no_waits) -> N
 
 @pytest.mark.parametrize("message, words", [
     ("Docker daemon not reachable. Install Docker Desktop (Windows/macOS) or run `dockerd` (Linux), then retry.",
-     "Docker"),
+     "Docker, which is not installed or not running"),
+    ("execution.sandbox=docker requires `pip install docker`", "the Python package FI uses to reach Docker"),
     ("[preflight] paper_pdf requested with output.require_pdf=True but pandoc not found on this host", "PDF"),
     ("venv creation failed via py (python_version=3.9): rc=1", "(3.9)"),
     ("engine.skills_required names skill(s) that cannot be used: foo (no skill by that name was found)",

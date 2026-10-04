@@ -187,7 +187,10 @@ def _settings_refusal(exc: BaseException) -> tuple[str, str] | None:
     head = " ".join(_one_line(exc, 400).split()).lower()
     if not head.startswith(_SETTING_REFUSALS):
         return None
-    if head.startswith(("execution.sandbox=docker requires", "docker daemon not reachable")):
+    if head.startswith("execution.sandbox=docker requires"):
+        return ("The quest's settings run the experiment in Docker, but the Python package FI uses to reach Docker is "
+                "not installed.", "Install it (`pip install docker`), then continue the quest.")
+    if head.startswith("docker daemon not reachable"):
         return ("The quest's settings run the experiment in Docker, which is not installed or not running here.",
                 "Start Docker (Docker Desktop on Windows or macOS), or install it, then continue the quest.")
     if head.startswith("[preflight] paper_pdf"):
