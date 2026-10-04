@@ -271,11 +271,12 @@ def test_after_the_freeze_a_measured_failure_is_offered_the_named_go_on_never_a_
         text = "\n".join(todo.card_lines(made, markdown=False))
         assert "--accept-checks q-1 --approve-as <you>" in text
     research = _rk4_card(tmp_path / "c2", frozen=True, research=True, go_on=_rk4_offer())
-    assert "mark it unconfirmed and go on" in json.dumps(research)
+    assert "marked unconfirmed" in json.dumps(research) and "fix the script" not in json.dumps(research)
     # Before the freeze a research quest may still change the check through the plan, and is never offered warn.
     open_research = _rk4_card(tmp_path / "d", research=True)
     assert [a["id"] for a in open_research["actions"]] == ["resume", "edit", "revise_check"]
-    assert "oracle_check: warn" not in json.dumps(open_research) and "--revise-plan" in open_research["notes"][0]
+    # The note asks the person for nothing (FI decides about its own checks): no plan edit, no debugging.
+    assert "oracle_check: warn" not in json.dumps(open_research) and "Nothing for you to fix" in open_research["notes"][0]
 
 
 def test_resume_says_what_it_really_does_for_a_check_with_no_numbers(tmp_path: Path) -> None:

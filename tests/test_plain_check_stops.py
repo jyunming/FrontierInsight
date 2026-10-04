@@ -453,12 +453,13 @@ def test_a_later_engine_change_never_drops_the_fitted_mark(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("same_model, how_slip, set_aside", [(True, False, False), (False, True, False),
-                                                              (False, False, True)])
-async def test_only_an_independent_recheck_keeps_a_check_from_the_repairs(tmp_path: Path, same_model: bool,
-                                                                        how_slip: bool, set_aside: bool) -> None:
-    """The plan's own model asked again, or a recheck whose own working does not add up, is recorded but never keeps
-    the script from being repaired: a simulation bug is not left unfixed on its word."""
+@pytest.mark.parametrize("same_model, how_slip, corrects", [(True, False, False), (False, True, False),
+                                                             (False, False, True)])
+async def test_a_disputing_recheck_keeps_the_script_as_it_is_and_only_an_independent_one_corrects(
+        tmp_path: Path, same_model: bool, how_slip: bool, corrects: bool) -> None:
+    """Any recheck that disputes a check keeps the script from being bent towards a value it disputes (bending a correct
+    script to a wrong check is the worse failure). Only an independent one may correct the check; the others leave it
+    to go on unconfirmed."""
     eng = _engine_with_plan(tmp_path, EXACT_90)
     plain = {**EXACT_90, "reference": "derivation: the exact period from the elliptic integral (E2)"}  # no arithmetic
     entry = oracle_triage.recompute_entry(plain, "disputed", 2.3678, MEASURED, "x", model="m", same_model=same_model)
@@ -471,8 +472,8 @@ async def test_only_an_independent_recheck_keeps_a_check_from_the_repairs(tmp_pa
     record: dict[str, Any] = {"judged": [_judged("exact_90_deg", MEASURED)]}
     await eng._look_at_failing_checks({}, None, seed, [plain], [plain], record, set(), protocol={},
                                       timeout=10, case_env={})
-    assert ("exact_90_deg" in eng._oracle_disputed) is set_aside
-    assert eng._oracle_proposals["exact_90_deg"]["source"] == "recompute", "the recheck is still on record"
+    assert "exact_90_deg" in eng._oracle_disputed, "the script is not bent towards a disputed value"
+    assert eng._independent_value(eng._oracle_proposals["exact_90_deg"]) is corrects
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -517,3 +518,52 @@ def test_the_fill_report_asks_the_person_for_nothing() -> None:
     source = Path(launch.__file__).read_text(encoding="utf-8")
     assert "ask again, or edit plan.md" not in source
     assert "fix the script and resume" not in json.dumps(todo._RESEARCH_INSTEAD)
+
+
+# --- after the second, targeted review --------------------------------------------------------------------------------
+
+
+def test_a_kept_recheck_is_judged_by_the_model_that_answered_not_by_todays_settings(tmp_path: Path) -> None:
+    """Run 1 had no `oracle_review`: the plan's own model answered and the answer was kept. A person then names
+    another reviewer and resumes: the kept answer is still the plan's own model's, never an independent one."""
+    import asyncio
+
+    from core import oracle_triage as ot
+    from core.config import ProviderConfig as PC
+
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    ot.write(eng.fi_dir, {"recompute": {ot.recompute_key(EXACT_90): {
+        "name": "exact_90_deg", "recomputed": 2.3678, "how": "x", "model": "A"}}})
+    eng.config = eng.config.model_copy(update={"provider": PC(name="openai", model="A",
+                                                              node_models={"oracle_review": "B"})})
+    eng._client = type("M", (), {"chat": AsyncMock(side_effect=AssertionError("a kept answer is not asked again"))})()
+    entry, called = asyncio.run(eng._recompute_expected({"topic": "t"}, EXACT_90, MEASURED))
+    assert not called and entry["same_model"] is True
+
+
+def test_a_kept_recheck_by_an_unknown_model_is_the_same_model(tmp_path: Path) -> None:
+    import asyncio
+
+    from core import oracle_triage as ot
+    from core.config import ProviderConfig as PC
+
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    ot.write(eng.fi_dir, {"recompute": {ot.recompute_key(EXACT_90): {
+        "name": "exact_90_deg", "recomputed": 2.3678, "how": "x", "model": "the provider's default model"}}})
+    eng.config = eng.config.model_copy(update={"provider": PC(name="openai", model="A",
+                                                              node_models={"oracle_review": "B"})})
+    entry, _ = asyncio.run(eng._recompute_expected({"topic": "t"}, EXACT_90, MEASURED))
+    assert entry["same_model"] is True
+
+
+@pytest.mark.parametrize("expression", ["cos(2*30)", "sin(90-60)", "atan2(1, 1)"])
+def test_a_trig_function_whose_argument_names_no_angle_unit_is_ambiguous(expression: str) -> None:
+    assert oracle_triage.ambiguous(expression)
+
+
+def test_the_card_never_changes_the_proposals_it_is_given(tmp_path: Path) -> None:
+    proposals: list[dict[str, Any]] = []
+    _card(tmp_path, [EXACT_90], [_judged("exact_90_deg", MEASURED)], [], proposals=proposals)
+    assert proposals == [], "the card works on its own copy"

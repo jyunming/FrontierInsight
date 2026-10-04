@@ -496,15 +496,34 @@ def _is_arithmetic(text: str) -> bool:
     return any(isinstance(n, (ast.BinOp, ast.Call)) for n in ast.walk(tree))
 
 
-# A bare ``log(`` can mean base 10 or base e, and a trig function of a bare number can mean degrees or radians: the
-# calculator would pick one and could call a correct derivation a slip (``log(1000) = 3``, ``sin(30) = 0.5``). Such a
-# step is never counted as a slip (``log10(``, ``ln(``, ``30 deg`` and ``pi/6`` are unambiguous and still are).
-_AMBIGUOUS = _re.compile(r"(?<![\w.])log\s*\(|(?<![\w.])(?:sin|cos|tan|asin|acos|atan)\s*\(\s*[-+]?(?:\d+\.?\d*|\.\d+)\s*\)")
+# A bare ``log(`` can mean base 10 or base e, and a trig function whose argument names no angle unit can mean degrees
+# or radians: the calculator would pick one and could call a correct derivation a slip (``log(1000) = 3``,
+# ``sin(30) = 0.5``, ``cos(2*30) = 0.5``). Such a step is never counted as a slip. ``log10(`` and an angle written with
+# ``pi``, ``deg`` or a degree sign are unambiguous and are still worked out. (``ln(`` is not on the calculator's list,
+# so a step that uses it is never worked out at all.)
+_AMBIGUOUS_LOG = _re.compile(r"(?<![\w.])log\s*\(")
+_TRIG = _re.compile(r"(?<![\w.])(?:sin|cos|tan|asin|acos|atan|atan2)\s*\(")
+
+
+def _call_argument(text: str, start: int) -> str:
+    """The text inside the brackets of the call whose ``(`` is at ``start - 1``."""
+    depth, i = 1, start
+    while i < len(text) and depth:
+        depth += {"(": 1, ")": -1}.get(text[i], 0)
+        i += 1
+    return text[start:i - 1]
 
 
 def ambiguous(expression: str) -> bool:
-    """Whether ``expression`` uses a bare ``log(`` or a trig function of a bare number (see ``_AMBIGUOUS``)."""
-    return _AMBIGUOUS.search(str(expression or "")) is not None
+    """Whether ``expression`` uses a bare ``log(`` or a trig function whose argument names no angle unit (no ``pi``,
+    ``deg``, a degree sign or ``rad``)."""
+    text = str(expression or "")
+    if _AMBIGUOUS_LOG.search(text):
+        return True
+    for m in _TRIG.finditer(text):
+        if not _re.search(r"pi|π|deg|°|rad", _call_argument(text, m.end()), _re.IGNORECASE):
+            return True
+    return False
 
 
 def arithmetic_slip(text: Any, expected: Any = None) -> dict[str, Any] | None:

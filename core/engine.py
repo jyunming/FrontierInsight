@@ -10570,8 +10570,7 @@ class Engine:
             if not name or name not in now or prints.get(name) != now[name]:
                 continue
             self._oracle_proposals[name] = dict(proposal)
-            # A recheck that is not independent never sets a check aside from the repairs (an earlier FI recorded it so).
-            if name in disputed and (proposal.get("source") != "recompute" or self._independent_value(proposal)):
+            if name in disputed:
                 self._oracle_disputed.add(name)
                 self._log.info("[oracle] kept from the last run: the expected value of %r is disputed (proposed %s); the "
                                "script is not rewritten for it", name, proposal.get("expected"))
@@ -10623,22 +10622,18 @@ class Engine:
                 proposal = {**_oracle_triage.recompute_proposal(oracle, entry),
                             **({"how_slip": True} if entry.get("how_slip") else {})}
                 self._oracle_proposals[name] = proposal
-                if self._independent_value(proposal):
-                    self._oracle_disputed.add(name)
-                    self._log.warning(
-                        "[oracle] the expected value of %r is disputed: worked out again without the measured value it "
-                        "is %s (the plan says %s, measured %s); the script is not rewritten for it", name,
-                        _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
-                        _oracle.fmt_digits(value))
-                else:
-                    # The plan's own model asked again, or a recheck whose own working does not add up, is recorded but
-                    # never decides: the check stays with the repairs (a script bug is not left unfixed on its word).
-                    self._log.info(
-                        "[oracle] a recheck of %r got %s (the plan says %s, measured %s), but it is not independent (%s): "
-                        "recorded only; the script is still repaired for this check", name,
-                        _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
-                        _oracle.fmt_digits(value),
-                        "its own working does not add up" if entry.get("how_slip") else "the plan's own model answered")
+                # Any disputing recheck keeps the script from being rewritten towards a value it disputes: a repair
+                # aimed at a check that may be wrong can fit correct code to it, and that is the worse failure. A
+                # recheck that is not independent (the plan's own model, or working that does not add up) never
+                # corrects the check and never counts as evidence: the check goes on unconfirmed, the result exploratory.
+                self._oracle_disputed.add(name)
+                self._log.warning(
+                    "[oracle] the expected value of %r is disputed: worked out again without the measured value it is %s "
+                    "(the plan says %s, measured %s); the script is not rewritten for it%s", name,
+                    _oracle.fmt_digits(entry["recomputed"]), _oracle.fmt_digits(entry["expected"]),
+                    _oracle.fmt_digits(value),
+                    "" if self._independent_value(proposal) else
+                    " (the recheck is not independent, so the check is not corrected either: it goes on unconfirmed)")
             own = _oracle.case_of(cases.get(name) or oracle)
             if not trial or own is None or j.get("measured_by") != "engine":
                 continue  # FI runs a case itself only under the trial contract, for a check it measured
@@ -10729,9 +10724,13 @@ class Engine:
                       **({"error": error} if error else {})}
             if not error:  # a call that got no answer is asked again on the next run (once per run, at most)
                 _oracle_triage.write(self.fi_dir, {**kept, "recompute": {**answers, fp: answer}})
-        # Whether the plan's own model answered, worked out now (never taken from a kept answer an earlier FI wrote).
-        # A writer whose model is unknown (the provider's default) counts as the same model: fail closed.
-        same = not named or "" in writers or any(_review.same_model(named, w) for w in writers)
+        # Whether the plan's own model answered: worked out from the model that ACTUALLY answered (a kept answer may come
+        # from an earlier run with other settings), never from today's settings alone. An unknown model -- the answer's
+        # or a writer's (the provider's default) -- counts as the same model: fail closed. A kept "same" stays same.
+        who = str(answer.get("model") or "").strip()
+        unknown = not who or who == "the provider's default model"
+        same = (bool(answer.get("same_model")) or unknown or "" in writers
+                or any(_review.same_model(who, w) for w in writers))
         answer = {**answer, "same_model": same}
         recomputed = _oracle_triage.num(answer.get("recomputed"))
         verdict = _oracle_triage.recompute_verdict(oracle, recomputed, value)
