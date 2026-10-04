@@ -943,8 +943,10 @@ def analysis_note(judged_list: list[dict[str, Any]]) -> str:
         verdict += "" if j.get("measured_by") == "engine" else " (the value is the script's own)"
         disputed = _num(j.get("disputed_expected"))
         if disputed is not None and j.get("passed_by_engine") is False:
-            who = ("FI's own recomputation of it (another model, not shown the measured value) says"
-                   if j.get("disputed_by") == "recompute" else "a repair says")
+            who = {"recompute": "FI's own recomputation of it (another model, not shown the measured value) says",
+                   "recompute_same_model": "a recomputation by the model that wrote the plan (not shown the measured "
+                                           "value; not an independent check) says"}.get(str(j.get("disputed_by") or ""),
+                                                                                         "a repair says")
             verdict += (
                 f"; {who} the expected value the protocol declares is itself wrong and proposes {_fmt(disputed)}, "
                 "but nobody has approved that change, so the check counts as failed (say so: the check failed and its "

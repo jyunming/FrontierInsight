@@ -567,3 +567,30 @@ def test_the_card_never_changes_the_proposals_it_is_given(tmp_path: Path) -> Non
     proposals: list[dict[str, Any]] = []
     _card(tmp_path, [EXACT_90], [_judged("exact_90_deg", MEASURED)], [], proposals=proposals)
     assert proposals == [], "the card works on its own copy"
+
+
+def test_a_kept_recheck_by_another_model_stays_independent(tmp_path: Path) -> None:
+    import asyncio
+
+    from core import oracle_triage as ot
+    from core.config import ProviderConfig as PC
+
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng.fi_dir.mkdir(parents=True, exist_ok=True)
+    ot.write(eng.fi_dir, {"recompute": {ot.recompute_key(EXACT_90): {
+        "name": "exact_90_deg", "recomputed": 2.3678, "how": "x", "model": "C", "same_model": False}}})
+    eng.config = eng.config.model_copy(update={"provider": PC(name="openai", model="A",
+                                                              node_models={"oracle_review": "C"})})
+    entry, _ = asyncio.run(eng._recompute_expected({"topic": "t"}, EXACT_90, MEASURED))
+    assert entry["same_model"] is False
+
+
+def test_the_analysis_never_calls_the_plans_own_model_another_model() -> None:
+    from core import oracle_check
+
+    base = {"name": "exact_90_deg", "value": MEASURED, "expected": 1.18034, "limit": 1e-5, "passed_by_engine": False,
+            "measured_by": "engine", "disputed_expected": 2.3678}
+    same = oracle_check.analysis_note([{**base, "disputed_by": "recompute_same_model"}])
+    other = oracle_check.analysis_note([{**base, "disputed_by": "recompute"}])
+    assert "another model" not in same and "not an independent check" in same
+    assert "another model" in other

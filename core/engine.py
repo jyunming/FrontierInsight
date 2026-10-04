@@ -9611,7 +9611,10 @@ class Engine:
                 if j.get("name") in disputed_failing:
                     j["disputed_expected"] = by_name[j["name"]]["expected"]
                     if by_name[j["name"]].get("source") == "recompute":
-                        j["disputed_by"] = "recompute"
+                        # Said differently when the recheck was not independent (the plan's own model, or working that
+                        # does not add up): the analysis and the paper never call it another model.
+                        j["disputed_by"] = ("recompute" if self._independent_value(by_name[j["name"]])
+                                            else "recompute_same_model")
         loose = [w for w in (_oracle.loose_tolerance(o) for o in oracles) if w]
         for warning in loose:
             self._log.warning("[oracle] %s", warning)
@@ -10723,7 +10726,10 @@ class Engine:
                       "model": named or planner or "the provider's default model",
                       **({"error": error} if error else {})}
             if not error:  # a call that got no answer is asked again on the next run (once per run, at most)
-                _oracle_triage.write(self.fi_dir, {**kept, "recompute": {**answers, fp: answer}})
+                # Kept with whether the plan's own model answered as it was when asked (today's settings can differ).
+                asked_same = (not named or "" in writers or any(_review.same_model(named, w) for w in writers))
+                _oracle_triage.write(self.fi_dir, {**kept, "recompute": {**answers, fp: {**answer,
+                                                                                         "same_model": asked_same}}})
         # Whether the plan's own model answered: worked out from the model that ACTUALLY answered (a kept answer may come
         # from an earlier run with other settings), never from today's settings alone. An unknown model -- the answer's
         # or a writer's (the provider's default) -- counts as the same model: fail closed. A kept "same" stays same.
