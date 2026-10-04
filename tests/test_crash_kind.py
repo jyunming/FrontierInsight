@@ -451,6 +451,23 @@ def test_a_refused_setting_is_the_person_s_one_action(message: str, words: str) 
     assert "Nothing for you to fix" not in f.do and "continue the quest" in f.do
 
 
+def test_a_missing_docker_package_is_named_as_such_with_its_real_cause_chain() -> None:
+    """The real error is ``raise RuntimeError(...) from ModuleNotFoundError(name="docker")``: the card names the
+    package FI uses to reach Docker, not the generic missing package and not Docker being down."""
+    def raise_it():
+        try:
+            raise ModuleNotFoundError("No module named 'docker'", name="docker")
+        except ModuleNotFoundError as inner:
+            raise RuntimeError("execution.sandbox=docker requires `pip install docker`") from inner
+
+    try:
+        raise_it()
+    except RuntimeError as exc:
+        f = ck.classify(exc)
+    assert f.kind == "setup" and "the Python package FI uses to reach Docker" in f.say, f
+    assert "not running" not in f.say and "A Python package FI needs" not in f.say
+
+
 @pytest.mark.parametrize("exc, kind", [
     (FileNotFoundError(errno.ENOENT, "No such file", "C:/q/.fi/engine.log"), "unknown"),
     (RuntimeError("knowledge.asearch returned no list"), "unknown"),
