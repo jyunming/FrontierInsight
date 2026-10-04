@@ -768,6 +768,10 @@ class Engine:
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        # This run's automatic retries per step (core/crash_kind.py), and when it began: a failure record written
+        # before then is an earlier run's (launch.py prints only this run's).
+        self._step_retries: dict[str, int] = {}
+        self._run_started_at = time.time()
         self._clarify_answerable = (
             clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
         import time as _time
@@ -1059,31 +1063,16 @@ class Engine:
                     #       again — at which point _node_wait_for_data
                     #       sees the files and proceeds without pausing.
                     data_paused = False
-                    self._transient_retries = 0
                     while True:
                         try:
                             final_state = await graph.ainvoke(payload, config=fork_config or run_config)
                         except (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError):
                             raise
                         except Exception as step_exc:  # noqa: BLE001 -- sorted below; anything else is re-raised
-                            # A passing problem (a timeout, a dropped connection, a 429 or 5xx the provider's own
-                            # retries did not outlast) is tried again here, from the step that stopped, after a
-                            # longer wait (core/crash_kind.py): the person is never asked to restart for it.
-                            if (self._transient_retries >= len(_crash_kind.RETRY_WAITS_S)
-                                    or _crash_kind.classify(step_exc).kind != "transient"):
+                            if not await self._try_step_again(graph, run_config, step_exc):
                                 raise
-                            wait_s = _crash_kind.RETRY_WAITS_S[self._transient_retries]
-                            self._transient_retries += 1
-                            self._log.warning(
-                                "[run] a passing problem stopped a step (%s); trying it again in %d s (%d of %d)",
-                                _crash_kind._one_line(step_exc, 160), int(wait_s), self._transient_retries,
-                                len(_crash_kind.RETRY_WAITS_S))
-                            await asyncio.sleep(wait_s)
-                            # Continue from the last finished step (the checkpoint), as ``--resume`` would; a failure
-                            # before the first checkpoint starts again from the beginning.
-                            snap = await graph.aget_state(run_config)
-                            if getattr(snap, "next", None) or getattr(snap, "values", None):
-                                payload = None
+                            # Continue from the last finished step (the checkpoint), as ``--resume`` would.
+                            payload = None
                             fork_config = None
                             continue
                         fork_config = None
@@ -17439,6 +17428,43 @@ class Engine:
             except asyncio.CancelledError:
                 pass
 
+    async def _try_step_again(self, graph: Any, run_config: dict[str, Any], exc: Exception) -> bool:
+        """Whether to run the step that just failed again by itself (core/crash_kind.py): only for a passing problem (a
+        timeout, a dropped connection, a 429 or 5xx the provider's own retries did not outlast), at most
+        ``len(RETRY_WAITS_S)`` times for the same step, and only when the step had not been running long (a long
+        experiment is never repeated for a problem that may not have passed). Waits first, and says so on the screen.
+        Never raises: a doubt means no retry, and the error goes on as it was."""
+        from datetime import datetime, timezone
+
+        try:
+            if _crash_kind.classify(exc).kind != "transient":
+                return False
+            snap = await graph.aget_state(run_config)
+            step = ", ".join(getattr(snap, "next", None) or ()) or "(start)"
+            done = self._step_retries.get(step, 0)
+            if done >= len(_crash_kind.RETRY_WAITS_S):
+                return False
+            created = getattr(snap, "created_at", None)
+            if created:
+                ran_s = (datetime.now(timezone.utc) - datetime.fromisoformat(str(created))).total_seconds()
+                if ran_s > _crash_kind.RETRY_ONLY_UNDER_S:
+                    self._log.warning("[run] a passing problem stopped the step %s after %d s of work; not running "
+                                      "it again by itself", step, int(ran_s))
+                    return False
+            wait_s = _crash_kind.RETRY_WAITS_S[done]
+            self._step_retries[step] = done + 1
+            self._log.warning("[run] a passing problem stopped the step %s (%s); trying it again in %d s (%d of %d)",
+                              step, _crash_kind._one_line(exc, 160), int(wait_s), done + 1,
+                              len(_crash_kind.RETRY_WAITS_S))
+            minutes = max(1, round(wait_s / 60))
+            self._progress(f"The model service or the network had a passing problem; FI tries the step again in "
+                           f"{minutes} minute{'s' if minutes != 1 else ''}.")
+            await asyncio.sleep(wait_s)
+            return True
+        except Exception as doubt:  # noqa: BLE001 -- never in the way of the real error
+            self._log.warning("[run] could not decide whether to run the step again: %r", doubt)
+            return False
+
     def _clear_stale_quest_failed_diagnostic(self) -> None:
         """Remove a stale ``quest_failed.md`` from a PRIOR failed run.
 
@@ -17635,8 +17661,8 @@ class Engine:
         # The failure as the person sees it first (core/crash_kind.py): what happened and the one thing to do. The
         # exception, the provider and the log tail are details for a bug report, below.
         failure = _crash_kind.classify(
-            exc, node=failing_node, provider=provider_name,
-            model=self.config.provider.model or "", retries=int(getattr(self, "_transient_retries", 0) or 0))
+            exc, node=failing_node, provider=provider_name, model=self.config.provider.model or "",
+            retries=int((getattr(self, "_step_retries", None) or {}).get(failing_node, 0)))
         try:
             _crash_kind.write(self.fi_dir, failure)
         except OSError as e:
@@ -17648,7 +17674,7 @@ class Engine:
             f"\n"
             f"**What happened:** {failure.say}\n"
             f"\n"
-            f"**What you can do:** {failure.do}\n"
+            f"**What to do:** {failure.do}\n"
             f"\n"
             f"To continue (it picks up at the step that stopped; the finished steps are not done again):\n"
             f"\n"

@@ -364,8 +364,8 @@ def waiting(quest_root: Path) -> list[Item]:
         plain = _crash_kind.read(root / ".fi")
         if plain:
             out.append(Item("failed", f"The last run stopped: {plain['say']}",
-                            recommended=f"{plain.get('do') or ''} (`--resume` continues from the step that stopped; the "
-                                        "details for a bug report are in quest_failed.md.)".strip()))
+                            recommended=f"{plain.get('do') or ''} (`--resume` continues from the step that "
+                                        "stopped.)".strip()))
         else:
             out.append(Item("failed", "The last run stopped with an error (quest_failed.md says where).",
                             recommended="Read quest_failed.md; once the cause is fixed, go on: the quest continues "

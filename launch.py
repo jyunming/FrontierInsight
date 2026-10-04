@@ -2596,12 +2596,15 @@ def _print_quest_failure(engine: Engine) -> bool:
     one thing to do, how to continue. False when the engine did not record one (the caller keeps the traceback)."""
     from core import crash_kind as _crash_kind
 
-    plain = _crash_kind.read(engine.fi_dir)
+    started = getattr(engine, "_run_started_at", None)
+    if started is None:  # the engine never started this run (a failure before it): keep the traceback
+        return False
+    plain = _crash_kind.read(engine.fi_dir, since=started - 1)
     if not plain:
         return False
     print(f"[FI] {plain.get('title') or 'The quest stopped'}: {plain.get('say')}", file=sys.stderr)
-    print(f"     What you can do: {plain.get('do')}", file=sys.stderr)
-    print(f"     To continue: fi --resume {engine.quest_id}   (the details for a bug report: "
+    print(f"     {plain.get('do')}", file=sys.stderr)
+    print(f"     To continue: python launch.py --resume {engine.quest_id}   (details: "
           f"{(Path(engine.quest_root) / 'quest_failed.md').as_posix()})", file=sys.stderr)
     return True
 
@@ -4651,7 +4654,8 @@ async def _run_new(
         )
         return 0
     except Exception as e:
-        print(f"[FI] quest failed: {e!r}", file=sys.stderr)
+        if not getattr(e, "_fi_failure_shown", False):  # already said in plain words by run_one
+            print(f"[FI] quest failed: {e!r}", file=sys.stderr)
         return 1
 
 

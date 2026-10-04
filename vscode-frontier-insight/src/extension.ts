@@ -1370,6 +1370,9 @@ async function runLaunchInChat(
     let stdoutBuf = "";
     let questIdSeen: string | undefined;
     const onLine = (line: string): void => {
+        // The quest this run started or resumed (printed before it runs, so a run that fails still names it).
+        const started = line.match(/^\[FI\] (?:start|resume) quest_id=(\S+)/);
+        if (started && !opts.fleet) questIdSeen = started[1];
         if (opts.showAllOutput) {
             showRaw(line);
             return;
@@ -1582,9 +1585,8 @@ async function reportQuestEnd(
         if (plain) {
             stream.markdown(
                 `\n\n---\n\n❌ **${plain.title || "The quest stopped"}.** ${plain.say}\n\n` +
-                `**What you can do:** ${plain.do}\n\n` +
-                `To continue: \`@fi /resume ${plain.questId}\` (it picks up at the step that stopped). ` +
-                "The details for a bug report are in `quest_failed.md` in the quest folder.\n",
+                `${plain.do}\n\n` +
+                `To continue: \`@fi /resume ${plain.questId}\` (it picks up at the step that stopped).\n`,
             );
             return;
         }
@@ -1592,7 +1594,7 @@ async function reportQuestEnd(
         stream.markdown(
             `\n❌ **Python exited with code ${ran.code}.**\n\n` +
             (tail.trim()
-                ? "Last lines of stderr (the actual error usually lives here, **not** in `run.log` — unhandled exceptions skip the logger):\n\n" +
+                ? "Last lines of stderr (a quest that started also keeps its full error in `.fi/run.log`):\n\n" +
                   "```\n" + tail + "\n```\n"
                 : "stderr was empty. Check `outputs/<quest_id>/.fi/run.log` for whatever made it to the logger before the crash.\n"),
         );
