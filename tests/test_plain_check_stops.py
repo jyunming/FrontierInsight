@@ -435,3 +435,85 @@ def test_a_recheck_by_any_model_that_writes_the_checks_is_not_independent(tmp_pa
     finally:
         ot.recompute_prompt = original
     assert entry["same_model"] is True, "plan_revise answers with B, the same model that rechecks"
+
+
+# --- after the combined review of the plain check stops and the plain failure card -----------------------------------
+
+
+def test_a_later_engine_change_never_drops_the_fitted_mark(tmp_path: Path) -> None:
+    """A check fitted to the test run stays marked when FI later changes another check (a correction, a rewrite):
+    losing the mark would let it count as independently validated."""
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng._oracles_added_write({"oracles": ["exact_90_deg"], "shown": False, "fitted": ["exact_90_deg"]})
+    eng._note_engine_change(["other_check"], reason="FI corrected an expected value")
+    assert eng._fitted_to_test_run([EXACT_90]) == ["exact_90_deg"]
+    eng._oracles_added_write({**eng._oracles_added_read(), "shown": True})
+    eng._note_engine_change(["third_check"])
+    assert eng._fitted_to_test_run([EXACT_90]) == ["exact_90_deg"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("same_model, how_slip, set_aside", [(True, False, False), (False, True, False),
+                                                              (False, False, True)])
+async def test_only_an_independent_recheck_keeps_a_check_from_the_repairs(tmp_path: Path, same_model: bool,
+                                                                        how_slip: bool, set_aside: bool) -> None:
+    """The plan's own model asked again, or a recheck whose own working does not add up, is recorded but never keeps
+    the script from being repaired: a simulation bug is not left unfixed on its word."""
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    plain = {**EXACT_90, "reference": "derivation: the exact period from the elliptic integral (E2)"}  # no arithmetic
+    entry = oracle_triage.recompute_entry(plain, "disputed", 2.3678, MEASURED, "x", model="m", same_model=same_model)
+    if how_slip:
+        entry["how_slip"] = True
+    eng._recompute_expected = AsyncMock(return_value=(entry, True))  # type: ignore[method-assign]
+    seed = eng.quest_root / "code" / "simulate.py"
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    seed.write_text("x = 1\n", encoding="utf-8")
+    record: dict[str, Any] = {"judged": [_judged("exact_90_deg", MEASURED)]}
+    await eng._look_at_failing_checks({}, None, seed, [plain], [plain], record, set(), protocol={},
+                                      timeout=10, case_env={})
+    assert ("exact_90_deg" in eng._oracle_disputed) is set_aside
+    assert eng._oracle_proposals["exact_90_deg"]["source"] == "recompute", "the recheck is still on record"
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("derivation: level = log(1000) = 3", 3.0),  # log base 10 meant; the calculator's log is natural
+    ("derivation: y = sin(30) = 0.5", 0.5),      # degrees meant; the calculator's sin is in radians
+    ("derivation: y = cos(60) = 0.50", 0.5),
+])
+def test_a_bare_log_or_a_trig_function_of_a_bare_number_is_never_called_a_slip(text: str, expected: float) -> None:
+    assert oracle_triage.arithmetic_slip(text, expected) is None
+    assert oracle_triage.ambiguous(text.split("=")[1])
+
+
+def test_unambiguous_forms_are_still_worked_out() -> None:
+    assert oracle_triage.arithmetic_slip("derivation: level = log10(1000) = 4.00", 4.0)["computes"] == 3.0
+    assert not oracle_triage.ambiguous("sin(30 deg)") and not oracle_triage.ambiguous("sin(pi/6)")
+
+
+def test_a_correction_that_matches_the_measurement_says_so(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng._oracle_proposals["exact_90_deg"] = oracle_triage.arithmetic_proposal(
+        EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE))
+    assert eng._correct_expected_values([_judged("exact_90_deg", 2.367836)], [EXACT_90]) == ["exact_90_deg"]
+    record = json.loads((eng.fi_dir / "oracle_corrections.json").read_text(encoding="utf-8"))
+    assert record["exact_90_deg"].get("agrees_with_measurement") is True
+
+
+def test_a_failing_check_under_warn_and_a_check_corrected_by_another_model_are_unconfirmed(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    (eng.quest_root / "needs").mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
+        "status": "warned", "attempts": [{"judged": [{"name": "warned_check", "passed_by_engine": False},
+                                                     {"name": "fine", "passed_by_engine": True}]}],
+        "corrected": {"by_model": {"source": "recompute"}, "by_arithmetic": {"source": "arithmetic"}}}),
+        encoding="utf-8")
+    out = eng._unconfirmed_checks()
+    assert {"warned_check", "by_model"} <= out and not ({"fine", "by_arithmetic"} & out)
+
+
+def test_the_fill_report_asks_the_person_for_nothing() -> None:
+    import launch
+
+    source = Path(launch.__file__).read_text(encoding="utf-8")
+    assert "ask again, or edit plan.md" not in source
+    assert "fix the script and resume" not in json.dumps(todo._RESEARCH_INSTEAD)

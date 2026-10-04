@@ -257,7 +257,8 @@ def _setup(exc: BaseException, provider: str, model: str) -> tuple[str, str] | N
     if model_call and (status in (401, 403) or (not has_http_answer and any(w in text for w in _AUTH_WORDS))):
         return (f"FI could not sign in to {service}.",
                 "Sign in to it again (the setup check, `python launch.py --doctor`, shows how), then continue the quest.")
-    names_model = bool(model) and model.lower() in text
+    # Read from the message itself, never from the provider's note (which always names the model).
+    names_model = bool(model) and model.lower() in str(exc).lower()
     if model_call and (status == 404 or any(w in text for w in _MODEL_MISSING_WORDS)
                        or ((has_http_answer or names_model) and any(w in text for w in _MODEL_MISSING_LOOSE))):
         named = f"`{model}`" if model else "named in the settings"

@@ -580,3 +580,54 @@ def test_the_fleet_summary_does_not_repeat_a_failure_already_said(tmp_path, caps
 
     source = Path(launch.__file__).read_text(encoding="utf-8")
     assert 'if not getattr(r, "_fi_failure_shown", False):' in source
+
+
+# ---- after the combined review ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_retry_is_sorted_with_the_same_provider_and_model_as_the_card(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    seen: list[dict] = []
+    real = ck.classify
+
+    def spy(exc, **kw):  # noqa: ANN001, ANN003
+        seen.append(kw)
+        return real(exc, **kw)
+
+    monkeypatch.setattr(ck, "classify", spy)
+    eng, _ = _bare_engine()
+    eng.config = SimpleNamespace(provider=SimpleNamespace(name="claude_code", model="sonnet"),
+                                 execution=SimpleNamespace(background_jobs=False))
+    eng._invoke_started_at = time.time()
+    await eng._try_step_again(_Graph(_Snap("design", "c1", None)), {}, httpx.ReadTimeout("t"))
+    assert seen and seen[0]["provider"] == "claude_code" and seen[0]["model"] == "sonnet"
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_hands_work_to_background_jobs_is_never_run_again_by_itself(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(ck, "RETRY_WAITS_S", (0.0, 0.0))
+    eng, _ = _bare_engine()
+    eng.config = SimpleNamespace(provider=SimpleNamespace(name="openai", model="m"),
+                                 execution=SimpleNamespace(background_jobs=True))
+    eng._invoke_started_at = time.time()
+    assert await eng._try_step_again(_Graph(_Snap("execute", "c1", None)), {}, httpx.ReadTimeout("t")) is False
+    assert await eng._try_step_again(_Graph(_Snap("design", "c2", None)), {}, httpx.ReadTimeout("t")) is True
+
+
+def test_words_alone_never_make_an_error_passing_or_a_missing_model() -> None:
+    # FI's own message with "timeout" in it, not from a model call: not a passing problem.
+    assert ck.classify(_raised(RuntimeError("the step's timeout setting is too small"))).kind != "transient"
+    # A model call whose text says a FILE does not exist, with no HTTP answer and no model named: not "unknown model".
+    err = RuntimeError("claude CLI failed: the file C:/x/prompt.txt does not exist")
+    err.add_note("[FI] provider=claude_cli, node=design, model=sonnet")
+    f = ck.classify(_raised(err), provider="claude_cli", model="sonnet")
+    assert "does not know the model" not in f.say
+    # The same words with the model named are still read as a missing model.
+    err2 = RuntimeError("model sonnet-9 does not exist")
+    err2.add_note("[FI] provider=claude_cli, node=design, model=sonnet-9")
+    assert "does not know the model" in ck.classify(_raised(err2), provider="claude_cli", model="sonnet-9").say
