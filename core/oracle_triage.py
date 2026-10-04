@@ -284,7 +284,8 @@ def step_verdict(oracle: dict[str, Any], values: list[float], *, order: float | 
       none declared (a first-order step where a higher one is meant is a classic bug, so this is said, not set aside);
       ``converges_unconfirmed``: they converge to the expected value with no order declared, on a check other than a
       rule's worst violation expecting 0 (which order the scheme should have is not known: said, not set aside);
-    - ``converges_elsewhere``: they settle on another value; ``not_converging``: they do not shrink like an error.
+    - ``converges_elsewhere``: they settle on another value; ``steady_elsewhere``: they hardly move at all (within the
+      check's tolerance) and stay far from the expected value; ``not_converging``: they do not shrink like an error.
 
     ``None`` when the check passes or nothing can be said (fewer than three values)."""
     expected, limit, _mode = _oracle.limit_of(oracle)
@@ -295,6 +296,11 @@ def step_verdict(oracle: dict[str, Any], values: list[float], *, order: float | 
     if gap <= limit:
         return None
     out: dict[str, Any] = {"values": list(values), "gap": gap}
+    spread = max(values) - min(values)
+    if spread <= max(limit, 1e-9 * abs(v0)) and gap > 10 * spread:
+        # The value hardly moves as the step shrinks and stays far from the expected one: whatever is wrong, it is not
+        # the step (said as "stays the same", never as "does not settle").
+        return {**out, "spread": spread, "verdict": "steady_elsewhere"}
     d1, d2 = v0 - values[1], values[1] - values[2]
     if d1 == 0 or d2 == 0 or (d1 > 0) != (d2 > 0):
         return {**out, "verdict": "not_converging"}
@@ -368,6 +374,11 @@ def step_entry(oracle: dict[str, Any], key: str, steps: list[float], result: dic
                          "FI can tell.",
                  "evidence": f"{runs}; {order_text}; extrapolated to step 0 it is {_fmt(result.get('extrapolated'))}, "
                              f"the expected value {_fmt(expected)}."}
+    elif verdict == "steady_elsewhere":
+        points = "script"
+        cause = {"text": f"At a smaller step `{name}` stays at the same value, so the gap is not the step's error: the "
+                         "simulation (or the expected value) is wrong.",
+                 "evidence": f"{runs}; the expected value {_fmt(expected)}."}
     elif verdict == "not_converging":
         points = "script"
         cause = {"text": f"At a smaller step `{name}` does not shrink like a method's error, so the gap is not the "
@@ -457,7 +468,7 @@ def calculate(text: str) -> float | None:
         return None
     text = _DEGREES.sub(lambda m: f"({m.group(1)}*pi/180)", text)
     text = text.replace("^", "**").replace("×", "*").replace("·", "*").replace("−", "-").replace("π", "pi")
-    return _forms.evaluate(text, {}).value
+    return _forms.evaluate(text, {}, special=True).value
 
 
 def _digits(number: str) -> int:
@@ -469,12 +480,18 @@ def _digits(number: str) -> int:
     return len(_re.sub(r"[^0-9]", "", mantissa).lstrip("0")) or 1
 
 
-def _close(a: float, b: float, written: str, *, approximate: bool = False) -> bool:
+def _close(a: float, b: float, written: str, *, approximate: bool = False, limit: float | None = None) -> bool:
     """Whether ``a`` (worked out) and ``b`` (the number written) agree to what the written number's digits can say
-    (five times looser after an "approximately" sign). Never tighter than 1%: only a clear slip counts, not a last
-    digit rounded differently."""
-    slack = max(1e-2, 5 * 10.0 ** (-_digits(written))) * (5 if approximate else 1)
-    return abs(a - b) <= slack * max(abs(a), abs(b)) or abs(a - b) < 1e-12
+    (five times looser after an "approximately" sign), so a last digit rounded differently is never a slip. Without
+    ``limit`` never tighter than 1%. With ``limit`` (the check's own tolerance, as an absolute amount) the 1% floor
+    gives way to it: a gap the check itself can tell apart, and the written digits cannot explain, is a slip (a real
+    quest's "(2/pi)*ellipk(sin(pi/8)**2) approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance)."""
+    digits = 5 * 10.0 ** (-_digits(written)) * (5 if approximate else 1)
+    if limit is None or limit <= 0:
+        slack_abs = max(1e-2 * (5 if approximate else 1), digits) * max(abs(a), abs(b))
+    else:
+        slack_abs = max(digits * max(abs(a), abs(b)), limit)
+    return abs(a - b) <= slack_abs or abs(a - b) < 1e-12
 
 
 _NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
@@ -523,21 +540,30 @@ def ambiguous(expression: str) -> bool:
     for m in _TRIG.finditer(text):
         if not _re.search(r"pi|π|deg|°|rad", _call_argument(text, m.end()), _re.IGNORECASE):
             return True
+    # ellipk takes the parameter m = k**2 (SciPy's convention); a step that passes the modulus k itself means the
+    # other convention, so only an argument written as a square is worked out.
+    for m in _ELLIPK.finditer(text):
+        if not _re.search(r"(\*\*|\^)\s*2\s*\)?\s*$", _call_argument(text, m.end()).strip()):
+            return True
     return False
 
 
-def arithmetic_slip(text: Any, expected: Any = None) -> dict[str, Any] | None:
+_ELLIPK = _re.compile(r"(?<![\w.])ellipk\s*\(")
+
+
+def arithmetic_slip(text: Any, expected: Any = None, limit: float | None = None) -> dict[str, Any] | None:
     """A written-out step of ``text`` whose arithmetic does not give the number written after it, as
     ``{"expression", "computes", "written"}``; ``None`` when there is none.
 
     Only a step that is a calculation (an operator or a function call, never a lone number: "g = 9.81 = 2.006" is a
     parameter and a result, not a slip) followed by a bare number (with at most a unit word) counts. With
     ``expected`` (the check's expected value), only a step that writes that number counts: the slip is in the working
-    that produces the expected value, never in an intermediate step."""
+    that produces the expected value, never in an intermediate step. ``limit``: the check's tolerance as an absolute
+    amount (:func:`_close`)."""
     want = num(expected)
-    pieces = _re.split(r"(=>|⇒|≈|~=|(?<![<>=!~])=(?!=))", str(text or ""))
+    pieces = _APPROX_SPLIT.split(str(text or ""))
     for i in range(0, len(pieces) - 2, 2):
-        left, sign, right = pieces[i].strip(), pieces[i + 1], pieces[i + 2].strip()
+        left, sign, right = pieces[i].strip(), pieces[i + 1].strip().lower(), pieces[i + 2].strip()
         found = _re.match(rf"^({_NUMBER})", right)
         if found is None:
             continue
@@ -551,16 +577,25 @@ def arithmetic_slip(text: Any, expected: Any = None) -> dict[str, Any] | None:
         if not _is_arithmetic(expression) or ambiguous(expression):
             continue
         computes = calculate(expression)
-        if computes is None or _close(computes, float(written), written, approximate=sign in ("≈", "~=")):
+        if computes is None or _close(computes, float(written), written, approximate=sign in _APPROXIMATE,
+                                      limit=limit):
             continue
         return {"expression": expression, "computes": computes, "written": float(written)}
     return None
 
 
+# The signs a derivation writes its result after: "=", "=>", and the approximate ones ("≈", "~=", "~", "approx",
+# "approximately", "about"), after which the written number is compared more loosely (its own digits, five times over).
+_APPROXIMATE = ("≈", "~=", "~", "approx", "approx.", "approximately", "about")
+_APPROX_SPLIT = _re.compile(r"(=>|⇒|≈|~=|(?<![<>=!~\w])~(?!=)|\bapprox(?:imately|\.)?(?=\s|$)|\babout\b|(?<![<>=!~])=(?!=))",
+                            _re.IGNORECASE)
+
+
 def plan_slip(oracle: dict[str, Any]) -> dict[str, Any] | None:
     """The slip in the arithmetic of ``oracle``'s own derivation that produces its expected value (:func:`arithmetic_slip`
     tied to the check's ``expected``), or ``None``."""
-    return arithmetic_slip(_oracle.reference_of(oracle), oracle.get("expected"))
+    _expected, limit, _mode = _oracle.limit_of(oracle)
+    return arithmetic_slip(_oracle.reference_of(oracle), oracle.get("expected"), limit)
 
 
 def correctable(oracle: dict[str, Any]) -> bool:
@@ -595,6 +630,72 @@ def arithmetic_proposal(oracle: dict[str, Any], slip: dict[str, Any]) -> dict[st
               f"{_fmt(slip['written'])} the plan writes.")
     return {"name": str(oracle.get("name") or "").strip(), "expected": slip["computes"], "tolerance": tolerance,
             "tolerance_mode": mode, "reason": reason[:600], "source": "arithmetic"}
+
+
+# --- a measured value that is a simple multiple of a value FI worked out itself -----------------------------------------
+#
+# A real quest measured 0.519923 for a period ratio whose value, worked out from the plan's own derivation, is 1.0400:
+# half of it, the classic sign of a simulation that measures half a period. Said to the repair (where to look) and on
+# the card; never a verdict, and only against a value FI worked out itself (never the plan's number alone).
+
+_MULTIPLES: tuple[tuple[float, str, str], ...] = (
+    (0.5, "half", "half of the quantity (half a period, say)"),
+    (2.0, "twice", "the quantity twice over (two periods, say, or a sum counted twice)"),
+    (0.25, "a quarter of", "a quarter of the quantity (a quarter period, say)"),
+    (4.0, "four times", "the quantity four times over"),
+)
+
+
+def multiple_of(value: Any, reference: Any, limit: float | None) -> tuple[float, str, str] | None:
+    """``(factor, word, what)`` when ``value`` is ``factor`` times ``reference`` (half, twice, a quarter, four times),
+    within ``limit`` (the check's tolerance, as an absolute amount, at the reference's scale); ``None`` otherwise, and
+    when the value already agrees with the reference."""
+    v, ref = num(value), num(reference)
+    if v is None or ref is None or v == 0 or ref == 0 or limit is None:
+        return None
+    if abs(v - ref) <= limit:
+        return None
+    for factor, word, what in _MULTIPLES:
+        if abs(v / factor - ref) <= limit:
+            return factor, word, what
+    return None
+
+
+def multiple_entry(oracle: dict[str, Any], value: float, reference: float, found: tuple[float, str, str],
+                   source: str) -> dict[str, Any]:
+    """A triage entry for a measured value that is a simple multiple of a value FI worked out itself: it points to the
+    script, and its ``hint`` goes into the repair request."""
+    name = str(oracle.get("name") or "").strip()
+    _factor, word, what = found
+    said = (f"the measured {_fmt(value)} is {word} the {_fmt(reference)} FI worked out itself ({source}): the simulation "
+            f"likely computes {what}, not the quantity the check means")
+    return {"check": name, "kind": "multiple", "verdict": "factor", "points_to": "script", "factor": found[0],
+            "measured": value, "reference": reference,
+            "tried": f"FI compared what `{name}` measured with the value it worked out itself: {said}.",
+            "hint": f"The check '{name}': {said}.",
+            "cause": {"text": f"The simulation likely computes {what} for `{name}`.",
+                      "evidence": said[0].upper() + said[1:] + "."}}
+
+
+def verified_value(oracle: dict[str, Any]) -> float | None:
+    """The check's expected value when FI can work the plan's own derivation of it out and gets the same number (the
+    expected value then rests on FI's own arithmetic, not on the plan's word); ``None`` otherwise."""
+    expected, limit, _mode = _oracle.limit_of(oracle)
+    if expected is None:
+        return None
+    pieces = _APPROX_SPLIT.split(str(_oracle.reference_of(oracle) or ""))
+    for i in range(0, len(pieces) - 2, 2):
+        right = pieces[i + 2].strip()
+        found = _re.match(rf"^({_NUMBER})", right)
+        if found is None or not _close(expected, float(found.group(1)), found.group(1)):
+            continue
+        expression = pieces[i].strip().split(":")[-1].strip()
+        if not _is_arithmetic(expression) or ambiguous(expression):
+            continue
+        computes = calculate(expression)
+        if computes is not None and _close(computes, expected, found.group(1), limit=limit):
+            return computes
+    return None
 
 
 # --- the gate's own: an exception that comes back, a run out of time ---------------------------------------------------

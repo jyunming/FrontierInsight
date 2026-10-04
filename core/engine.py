@@ -9363,6 +9363,10 @@ class Engine:
         # together, a quest that first needed its plan completed, then its FI_ORACLE branch added, had no repair left
         # for the numerical problem that only showed once the checks finally ran.
         plans_left, repairs_left, call_failures_left = budget, budget, 1
+        # A repair whose code cannot be used (it does not parse, or lacks the function FI calls) changed nothing: not
+        # counted as one of the repairs, once per gate run (a second one is, so the loop stays bounded).
+        unusable_left = 1
+        hinted: set[str] = set()
         attempts: list[dict[str, Any]] = []
         found: list[str] = []
         new_code: str | None = None
@@ -9551,11 +9555,14 @@ class Engine:
             )
             code_before, new_code_before = seed_path.read_text(encoding="utf-8"), new_code
             package_before = self._package_snapshot()
+            hints = self._multiple_hints(oracles, measured_to_fix, attempts[-1], hinted)
             text, call_failed, outcome = await self._repair_script_for_oracle(
                 state, seed_path, oracles, to_fix,
-                # The error that stopped the run, said first: the repair goes to it, not to a symptom.
-                (f"The run of the checks stopped with: {attempts[-1]['exception']}\n" if attempts[-1].get("exception")
-                 else "") + stderr_tail,
+                # What FI found about the numbers (a measured value that is half the value it worked out, say), then
+                # the error that stopped the run, said first: the repair goes to it, not to a symptom.
+                "".join(f"FI found: {h}\n" for h in hints)
+                + (f"The run of the checks stopped with: {attempts[-1]['exception']}\n" if attempts[-1].get("exception")
+                   else "") + stderr_tail,
                 disputed=disputed + aside,
                 passing=[str(j["name"]) for j in judged_now if j.get("passed_by_engine") is True],
             )
@@ -9571,6 +9578,10 @@ class Engine:
                     if package_before.get(rel) != body}
             if call_failed and call_failures_left > 0:
                 call_failures_left -= 1  # no answer came back: the script was not rewritten, so the repair is not spent
+            elif outcome == "not_usable" and unusable_left > 0:
+                unusable_left -= 1
+                self._log.warning("[oracle] the repair's code could not be used, so it does not count as one of the %d "
+                                  "repairs (once per run of the checks)", budget)
             elif outcome != "set_aside_disputed":
                 # A set-aside answer is not spent either: the next request, without that check, is the repair. It is
                 # bounded: a check can be newly disputed only once.
@@ -9687,9 +9698,14 @@ class Engine:
                                   "against known answers)", sentence, _accepted.UNCONFIRMED)
             names = ", ".join(repr(str(e.get("name"))) for e in went_on if e.get("name")) or "the known-answer checks"
             why = explained.get("why") or ""
-            print(f"[FI] FI could not confirm {names}" + (f" ({why})" if why else "") + ", so the result counts as "
-                  "exploratory, not as checked against a known answer; the paper says so. Nothing to do (details: "
-                  "needs/ORACLE_CHECK.json and run.log).")
+            line = (f"[FI] FI could not confirm {names}" + (f" ({why})" if why else "") + ", so the result counts as "
+                    "exploratory, not as checked against a known answer; the paper says so. Nothing to do (details: "
+                    "needs/ORACLE_CHECK.json and run.log).")
+            # The gate runs again after a later repair of the run: the same sentence is said once per quest run.
+            said = getattr(self, "_unconfirmed_said", set())
+            if line not in said:
+                print(line)
+                self._unconfirmed_said = said | {line}
             return new_code
         if self.config.engine.oracle_check == "warn":
             self._log.warning(
@@ -9700,6 +9716,63 @@ class Engine:
             return new_code
         # Not reached with the checks on: the gate goes on by itself above (``_goes_on_by_itself``).
         return new_code
+
+    def _multiple_hints(self, oracles: list[dict[str, Any]], measured: list[dict[str, Any]],
+                        attempt: dict[str, Any], hinted: set[str]) -> list[str]:
+        """For each failing check measured at a simple multiple (half, twice ...) of a value FI worked out itself (its
+        correction from the plan's own arithmetic or an independent recheck, or the plan's derivation as FI works it
+        out): a triage entry pointing to the script, and the sentence for the repair request. Once per check per gate
+        run; never a verdict."""
+        corrected = self._corrections_read()
+        declared = {str(o.get("name") or "").strip(): o for o in oracles}
+        hints: list[str] = []
+        for j in measured:
+            name = str(j.get("name") or "").strip()
+            oracle = declared.get(name)
+            if oracle is None:
+                continue
+            fix = corrected.get(name) if isinstance(corrected.get(name), dict) else None
+            if fix and (fix.get("source") == "arithmetic" or fix.get("source") == "recompute"):
+                reference = _oracle_triage.num(fix.get("to"))
+                source = ("its correction of the plan's arithmetic" if fix.get("source") == "arithmetic"
+                          else "its correction from an independent recheck")
+            else:
+                reference, source = _oracle_triage.verified_value(oracle), "the plan's derivation, worked out"
+            _expected, limit, _mode = _oracle.limit_of(oracle)
+            found = _oracle_triage.multiple_of(j.get("value"), reference, limit)
+            if found is None:
+                continue
+            entry = _oracle_triage.multiple_entry(oracle, float(j["value"]), float(reference), found, source)
+            if name not in hinted:
+                hinted.add(name)
+                attempt.setdefault("triage", []).append(entry)
+                self._log.warning("[oracle] %s", entry["hint"])
+            hints.append(entry["hint"])
+        return hints
+
+    @staticmethod
+    async def _installed_distributions(py: Any) -> list[str] | None:
+        """``name==version`` of every distribution the interpreter ``py`` has installed (importlib.metadata, no pip, no
+        version-control probe), sorted; ``None`` when it cannot be listed."""
+        code = ("import importlib.metadata as m\n"
+                "rows = {(d.metadata['Name'] or '').strip(): d.version for d in m.distributions()}\n"
+                "print('\\n'.join(sorted(f'{n}=={v}' for n, v in rows.items() if n)))\n")
+        try:
+            tree = await AsyncProcessTree.start(str(py), "-c", code, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE)
+            aborted = False
+            try:
+                out, _err = await asyncio.wait_for(tree.proc.communicate(), timeout=_PIP_FREEZE_TIMEOUT_S)
+            except BaseException:
+                aborted = True
+                raise
+            finally:
+                await tree.aclose(aborted=aborted)
+        except Exception:  # noqa: BLE001 -- a diagnostic must never stall a quest
+            return None
+        if tree.proc.returncode != 0:
+            return None
+        return sorted(line for line in out.decode("utf-8", "replace").splitlines() if line.strip())
 
     def _goes_on_by_itself(self) -> bool:
         """Whether a known-answer check that still fails after FI's repairs and corrections lets the quest go on by
@@ -18286,7 +18359,16 @@ class Engine:
                 # The returncode is not optional to check: pip can exit non-zero with EMPTY stdout (a real case,
                 # found on this codebase's own dev machine — a corrupted dist-info makes `pip freeze` crash there),
                 # which would otherwise look exactly like "confirmed zero packages" instead of "unknown."
-                record["packages_error"] = f"pip freeze exited {proc.returncode}: {err.decode('utf-8', 'replace')[-500:]}"
+                # Another real case: an editable install whose folder was deleted makes `pip freeze` crash in its
+                # version-control probe (NotADirectoryError). The installed distributions are then listed from the
+                # interpreter itself, which needs no probe; only when that fails too is the list unknown.
+                why = _last_error_line(err.decode("utf-8", "replace")) or f"exit code {proc.returncode}"
+                listed = await self._installed_distributions(py)
+                if listed is not None:
+                    record["packages"] = listed
+                    record["packages_source"] = f"the interpreter's installed distributions (pip freeze failed: {why})"
+                else:
+                    record["packages_error"] = f"pip freeze failed ({why}), and the installed distributions could not be listed"
             else:
                 record["packages"] = sorted(out.decode("utf-8", "replace").splitlines())
         except Exception as e:  # noqa: BLE001 -- a diagnostic must never stall a quest
@@ -25191,6 +25273,14 @@ def _literature_entry(
 # is well above 5000 chars even when truncated. 1500 splits the two
 # comfortably without over- or under-flagging.
 _ABSTRACT_ONLY_CHAR_THRESHOLD = 1500
+
+
+def _last_error_line(text: str) -> str:
+    """The last line of a traceback that names an error (``NotADirectoryError: [WinError 267] ...``), else the last
+    non-empty line, at most 200 characters: what a record says, never the whole traceback."""
+    lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip() and not set(ln.strip()) <= set("^~ ")]
+    named = [ln for ln in lines if re.match(r"^[A-Za-z_][\w.]*(Error|Exception)\b", ln)]
+    return ((named or lines or [""])[-1])[:200]
 
 
 def _read_json_or_none_path(path: Path) -> Any:

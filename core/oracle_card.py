@@ -459,6 +459,9 @@ _LOOK_SAID = {
     ("half_step", "converges_elsewhere"): "at a smaller step the result settles on a different value than expected",
     ("half_step", "wrong_order"): "at a smaller step the error shrinks at another rate than the method should",
     ("half_step", "not_converging"): "at a smaller step the result does not settle",
+    ("half_step", "steady_elsewhere"): "at a smaller step the result stays the same, so the gap is not a step-size error",
+    ("multiple", "factor"): "what was measured is {word} the value FI worked out itself, so the simulation likely "
+                            "computes a related quantity (half a period, say) instead of the one the check means",
     ("seeds", "noise"): "repeated runs of the same case differ by more than the check allows, so one run cannot meet it",
     ("seeds", "beyond_noise"): "repeated runs of the same case agree with each other, and all miss the expected value",
     ("seeds", "varies"): "a rule every run must keep exactly changes from run to run",
@@ -522,7 +525,10 @@ def _why(side: str, checks: list[dict[str, Any]], triage: list[dict[str, Any]],
     if side == "script" and any(c.get("status") == "not_measured" for c in failing.values()):
         return "the simulation stopped with an error before it could measure the check"
     wanted = {"check": ("check", "tolerance"), "script": ("script",)}.get(side, ("check", "tolerance", "script"))
-    for t in triage:
+    # The strongest evidence speaks first: the plan's own arithmetic, then a measured value that is a simple multiple
+    # of FI's own value, then the rest in the order FI looked.
+    rank = {"arithmetic": 0, "multiple": 1}
+    for t in sorted(triage, key=lambda t: rank.get(str(t.get("kind") or ""), 2)):
         key = str(t.get("check") or "").strip().lower()
         if (key and key not in failing) or str(t.get("points_to") or "") not in wanted:
             continue
@@ -531,9 +537,10 @@ def _why(side: str, checks: list[dict[str, Any]], triage: list[dict[str, Any]],
             def num(k: str, default: str) -> str:
                 return _oracle.fmt_digits(t.get(k)) if isinstance(t.get(k), (int, float)) else default
 
+            word = {0.5: "half", 2.0: "twice", 0.25: "a quarter of", 4.0: "four times"}.get(t.get("factor"), "a multiple of")
             return said.format(recomputed=num("recomputed", "another value"), expected=num("expected", "value"),
                                computes=num("computes", "?"), written=num("written", "?"),
-                               expression=str(t.get("expression") or "it"))
+                               expression=str(t.get("expression") or "it"), word=word)
     same = [t for t in triage if t.get("kind") == "recompute" and t.get("same_model")
             and str(t.get("check") or "").strip().lower() in failing]
     if side == "unclear" and same:
