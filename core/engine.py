@@ -75,6 +75,7 @@ from . import record_anchor as _record_anchor
 from . import evidence as _evidence
 from . import frozen_protocol as _frozen
 from . import todo as _todo
+from . import crash_kind as _crash_kind
 from . import oracle_card as _oracle_card
 from . import oracle_triage as _oracle_triage
 from . import code_layout as _code_layout
@@ -767,6 +768,10 @@ class Engine:
         # failure (preflight, endpoint resolution, executor.setup) doesn't
         # NameError its way into masking the original exception.
         run_config: dict[str, Any] | None = None
+        # This run's automatic retries per step (core/crash_kind.py), and when it began: a failure record written
+        # before then is an earlier run's (launch.py prints only this run's).
+        self._step_retries: dict[str, tuple[str, int]] = {}
+        self._run_started_at = time.time()
         self._clarify_answerable = (
             clarify_callback is not None or (self.fi_dir / "clarify_answer.json").is_file())
         import time as _time
@@ -1059,7 +1064,18 @@ class Engine:
                     #       sees the files and proceeds without pausing.
                     data_paused = False
                     while True:
-                        final_state = await graph.ainvoke(payload, config=fork_config or run_config)
+                        self._invoke_started_at = time.time()
+                        try:
+                            final_state = await graph.ainvoke(payload, config=fork_config or run_config)
+                        except (KeyboardInterrupt, SystemExit, GeneratorExit, asyncio.CancelledError):
+                            raise
+                        except Exception as step_exc:  # noqa: BLE001 -- sorted below; anything else is re-raised
+                            if not await self._try_step_again(graph, run_config, step_exc):
+                                raise
+                            # Continue from the last finished step (the checkpoint), as ``--resume`` would.
+                            payload = None
+                            fork_config = None
+                            continue
                         fork_config = None
                         interrupts = (final_state or {}).get("__interrupt__")
                         if not interrupts:
@@ -1599,6 +1615,10 @@ class Engine:
             # mask the original exception (the user wants to see the
             # real error, not "could not open file for diagnostic
             # writing").
+            try:
+                self._log.error("[run] the quest stopped on an error", exc_info=exc)
+            except Exception:  # noqa: BLE001 -- the log must never hide the error
+                pass
             try:
                 await self._write_quest_failed_diagnostic(exc, run_config)
             except Exception as diag_err:
@@ -17441,6 +17461,55 @@ class Engine:
             except asyncio.CancelledError:
                 pass
 
+    async def _try_step_again(self, graph: Any, run_config: dict[str, Any], exc: Exception) -> bool:
+        """Whether to run the step that just failed again by itself (core/crash_kind.py): only for a passing problem (a
+        timeout, a dropped connection, a 429 or 5xx the provider's own retries did not outlast), at most
+        ``len(RETRY_WAITS_S)`` times for the same step, and only when the step had not been running long (a long
+        experiment is never repeated for a problem that may not have passed). Waits first, and says so on the screen.
+        Never raises: a doubt means no retry, and the error goes on as it was."""
+        from datetime import datetime
+
+        try:
+            snap = await graph.aget_state(run_config)
+            step = ", ".join(getattr(snap, "next", None) or ()) or "(start)"
+            # Counted per entry into the step: the checkpoint it starts from. A later pass through the same step (after
+            # a review sent the quest back, say) starts from another checkpoint and has its own retries; the count kept
+            # is always this entry's, so the failure card never names an earlier pass's retries.
+            entry = str(((getattr(snap, "config", None) or {}).get("configurable") or {}).get("checkpoint_id") or "")
+            seen_entry, done = self._step_retries.get(step, ("", 0))
+            if seen_entry != entry:
+                done = 0
+                self._step_retries[step] = (entry, 0)
+            if _crash_kind.classify(exc).kind != "transient":
+                return False
+            if done >= len(_crash_kind.RETRY_WAITS_S):
+                return False
+            # How long the step had been working: since it last started in this process (never counting the time
+            # between an earlier run and a resume, nor a wait before a retry), or since the checkpoint it started from
+            # when that is later (a step after others in the same call).
+            began = float(getattr(self, "_invoke_started_at", 0.0) or 0.0)
+            created = getattr(snap, "created_at", None)
+            if created:
+                began = max(began, datetime.fromisoformat(str(created)).timestamp())
+            ran_s = time.time() - began if began else 0.0
+            if ran_s > _crash_kind.RETRY_ONLY_UNDER_S:
+                self._log.warning("[run] a passing problem stopped the step %s after %d s of work; not running it "
+                                  "again by itself", step, int(ran_s))
+                return False
+            wait_s = _crash_kind.RETRY_WAITS_S[done]
+            self._step_retries[step] = (entry, done + 1)
+            self._log.warning("[run] a passing problem stopped the step %s (%s); trying it again in %d s (%d of %d)",
+                              step, _crash_kind._one_line(exc, 160), int(wait_s), done + 1,
+                              len(_crash_kind.RETRY_WAITS_S))
+            minutes = max(1, round(wait_s / 60))
+            self._progress(f"The model service or the network had a passing problem; FI tries the step again in "
+                           f"{minutes} minute{'s' if minutes != 1 else ''}.")
+            await asyncio.sleep(wait_s)
+            return True
+        except Exception as doubt:  # noqa: BLE001 -- never in the way of the real error
+            self._log.warning("[run] could not decide whether to run the step again: %r", doubt)
+            return False
+
     def _clear_stale_quest_failed_diagnostic(self) -> None:
         """Remove a stale ``quest_failed.md`` from a PRIOR failed run.
 
@@ -17450,6 +17519,7 @@ class Engine:
         PDF compile. Failures to unlink are logged but never raise —
         a stale file is annoying but not fatal.
         """
+        _crash_kind.clear(self.fi_dir)
         stale = self.quest_root / "quest_failed.md"
         if stale.is_file():
             try:
@@ -17633,14 +17703,41 @@ class Engine:
         # ``HTTPStatusError``, with the note that would have named the likely key sitting one
         # frame away, unread).
         what_broke = "".join(traceback.format_exception_only(type(exc), exc)).rstrip("\n")
+        # The failure as the person sees it first (core/crash_kind.py): what happened and the one thing to do. The
+        # exception, the provider and the log tail are details for a bug report, below.
+        failure = _crash_kind.classify(
+            exc, node=failing_node, provider=provider_name, model=self.config.provider.model or "",
+            retries=int((getattr(self, "_step_retries", None) or {}).get(failing_node, ("", 0))[1]))
+        try:
+            _crash_kind.write(self.fi_dir, failure)
+        except OSError as e:
+            self._log.warning("[run] could not write %s: %r", self.fi_dir / _crash_kind.FAILURE_FILE, e)
+        resume_cmd = (f"python launch.py --config {(self.quest_root / 'config.yaml').as_posix()} "
+                      f"--resume {self.quest_id}")
         body = (
-            f"# Quest failed before producing a paper\n"
+            f"# {_crash_kind.TITLES.get(failure.kind, 'The quest stopped')}\n"
+            f"\n"
+            f"**What happened:** {failure.say}\n"
+            f"\n"
+            f"**What to do:** {failure.do}\n"
+            f"\n"
+            f"To continue (it picks up at the step that stopped; the finished steps are not done again):\n"
+            f"\n"
+            f"```bash\n"
+            f"{resume_cmd}\n"
+            f"```\n"
+            f"\n"
+            f"(or `fi --resume {self.quest_id}`, or Resume on the web quest page or in VS Code.)\n"
+            f"\n"
+            f"## Details (for FI's maintainers)\n"
             f"\n"
             f"**Quest ID:** `{self.quest_id}`\n"
             f"**Topic:** {topic_one_line}\n"
             f"**Failing node:** `{failing_node}`\n"
             f"**Provider:** `{provider_name}` / model `{provider_model}`"
             f" / extras: {provider_extra_str}\n"
+            f"**Kind of failure:** {failure.kind}"
+            + (f" (tried again {failure.retries} time(s) first)" if failure.retries else "") + "\n"
             f"\n"
             f"## What broke\n"
             f"\n"
@@ -17654,36 +17751,7 @@ class Engine:
             f"{log_tail}\n"
             f"```\n"
             f"\n"
-            f"## How to resume\n"
-            f"\n"
-            f"Most node failures are transient (rate-limit, CLI "
-            f"wall-clock timeout, network blip). The LangGraph "
-            f"checkpoint at `.fi/state.sqlite` lets the engine "
-            f"continue from the failing node on resume:\n"
-            f"\n"
-            f"```bash\n"
-            f"python launch.py --config "
-            f"{(self.quest_root / 'config.yaml').as_posix()} "
-            f"--resume {self.quest_id}\n"
-            f"```\n"
-            f"\n"
-            f"If the same node fails repeatedly, the cause is likely "
-            f"systematic. Common follow-ups:\n"
-            f"\n"
-            f"- **CLI wall-clock timeout** — switch to a smaller model "
-            f"via `provider.node_models.<failing_node>` (e.g. Haiku "
-            f"for `implement`), or shrink the prompt by disabling "
-            f"the ensemble preset.\n"
-            f"- **Bridge error** — the bridge dumps the available "
-            f"`id|family` model catalog on failed lookups; look for "
-            f"that line in the embedded log tail above to confirm "
-            f"the YAML's `provider.model` matches what Copilot "
-            f"actually exposes.\n"
-            f"- **Provider auth / quota** — re-authenticate "
-            f"(`claude auth login`, `gh auth refresh`, etc.) and retry.\n"
-            f"\n"
-            f"This file is auto-deleted on the next successful run "
-            f"of this quest.\n"
+            f"This file is deleted on the next successful run of this quest.\n"
         )
         diag_path = self.quest_root / "quest_failed.md"
         try:

@@ -599,13 +599,16 @@ backing off 1 / 2 / 4 minutes on a rate limit) and a 24-hour response
 cache, so running several quests at once no longer multiplies arXiv
 traffic.
 
-If a quest crashes mid-graph (a `_node_*` raises, or a pre-graph
-stage fails), the engine writes `quest_failed.md` to the quest
-root with the failing-node name, the exception text, a log tail,
-provider context, and a `--resume` command. The chat emits a
-single `❌ Quest failed: <reason>` line at the end of the run;
-open the quest folder to read `quest_failed.md` for the full
-context and the resume hint. This holds even when the failure does
+If a quest stops on an error, the chat says in plain words what
+happened. There is never anything to debug: after a passing
+problem with the model service or the network (which FI already
+tried again by itself) or a problem in FI itself, you only continue
+later; you are asked to act only when your machine or account needs
+it (sign in again, install something, change a setting, close a file). `@fi /resume
+<quest_id>` picks up at the step that stopped. The engine writes the same to
+`quest_failed.md` in the quest folder, with the failing-node name,
+the exception text, a log tail and the provider context under
+Details for FI's maintainers. This holds even when the failure does
 not arrive as an ordinary Python error — some failures reach the
 engine from outside Python's usual error hierarchy, and one of
 those used to leave an empty quest folder with nothing in it to

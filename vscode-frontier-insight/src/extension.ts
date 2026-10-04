@@ -1370,6 +1370,9 @@ async function runLaunchInChat(
     let stdoutBuf = "";
     let questIdSeen: string | undefined;
     const onLine = (line: string): void => {
+        // The quest this run started or resumed (printed before it runs, so a run that fails still names it).
+        const started = line.match(/^\[FI\] (?:start|resume) quest_id=(\S+)/);
+        if (started && !opts.fleet) questIdSeen = started[1];
         if (opts.showAllOutput) {
             showRaw(line);
             return;
@@ -1576,15 +1579,48 @@ async function reportQuestEnd(
         // This run's quest, never another one running beside it in the same folder.
         await surfaceWantedPapers(outputsDir, stream, questId ?? card?.questId, !!card, startedAt);
     } else {
+        // A quest that stopped on an error: what happened and the one thing to do, in plain words
+        // (`.fi/failure.json`, core/crash_kind.py), before any technical output.
+        const plain = await readFailure(outputsDir, questId, startedAt);
+        if (plain) {
+            stream.markdown(
+                `\n\n---\n\n❌ **${plain.title || "The quest stopped"}.** ${plain.say}\n\n` +
+                `${plain.do}\n\n` +
+                `To continue: \`@fi /resume ${plain.questId}\` (it picks up at the step that stopped).\n`,
+            );
+            return;
+        }
         const tail = ran.stderrTail.join("\n");
         stream.markdown(
             `\n❌ **Python exited with code ${ran.code}.**\n\n` +
             (tail.trim()
-                ? "Last lines of stderr (the actual error usually lives here, **not** in `run.log` — unhandled exceptions skip the logger):\n\n" +
+                ? "Last lines of stderr (a quest that started also keeps its full error in `.fi/run.log`):\n\n" +
                   "```\n" + tail + "\n```\n"
                 : "stderr was empty. Check `outputs/<quest_id>/.fi/run.log` for whatever made it to the logger before the crash.\n"),
         );
     }
+}
+
+
+/**
+ * A quest that stopped on an error this run: the engine's plain-words record of it (`.fi/failure.json`,
+ * core/crash_kind.py): `title`, `say` (what happened), `do` (the one thing to do). Null when there is none, or when
+ * it is older than this run (the record of an earlier failure is not this one).
+ */
+async function readFailure(
+    outputsDir: string,
+    questId: string | undefined,
+    since: number,
+): Promise<{ questId: string; title?: string; say: string; do: string } | null> {
+    if (!questId) { return null; }
+    try {
+        const file = path.join(outputsDir, questId, ".fi", "failure.json");
+        const st = await fsPromises.stat(file);
+        if (st.mtimeMs < since - CLOCK_SLACK_MS) { return null; }
+        const data = JSON.parse(await fsPromises.readFile(file, "utf-8"));
+        if (!data || typeof data.say !== "string" || !data.say) { return null; }
+        return { questId, title: data.title, say: data.say, do: String(data.do || "") };
+    } catch { return null; }
 }
 
 
