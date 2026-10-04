@@ -3,8 +3,10 @@
 A real quest (rigor_profile: research, a search for the best design, a Copilot model) wrote a plan whose model behind
 the numbers showed only "Where it holds", and whose three checks had no kind and no reference. It stopped at the plan;
 `@fi /resume <id> --revise-plan "..."` resumed it into the same stop (the words were dropped), and the only ways on were
-to edit plan.md by hand. These are that quest's failures, one test each, and the three ways on it now has: FI fills it
-in once itself, a change in words that is applied and then checked, and going on as it is, with a name.
+to edit plan.md by hand. These are that quest's failures, one test each. Where a check's expected value comes from is
+not a question a person is asked: FI fills it in once itself (a second model, when one is named for checking the
+checks), and when it finds none the quest goes on by itself with each such check marked "source not confirmed" in the
+evidence, the freeze and the paper. A person can still change the plan in words, or go on under their own name.
 """
 
 from __future__ import annotations
@@ -250,46 +252,47 @@ async def test_under_research_fi_fills_the_sources_in_once_before_it_would_stop(
 
 
 @pytest.mark.asyncio
-async def test_a_fill_that_changes_a_checks_number_is_put_back_and_the_quest_stops(tmp_path: Path) -> None:
+async def test_a_fill_that_changes_a_checks_number_is_put_back_and_the_quest_goes_on_marked(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, [])
     calls = _chat_by_step(eng, lambda text: _with(text, "derivation: sum S = 1 by definition").replace(
         "expected: 1.0", "expected: 2.0"))
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
+    await eng._node_plan(dict(STATE))
+    assert seen == [], "no stop: FI goes on by itself"
     assert plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design["protocol"]["oracles"][0][
         "expected"] == 1.0, "the check's number is as the plan had it"
     assert "put back" in plan.history(eng.quest_root)[-1]["note"]
-    # Asked once: a resume that fixed nothing stops again without asking the model again.
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
+    record = accepted_checks.accepted(eng.quest_root)
+    assert record and {c["by"] for c in record["chosen"].values()} == {accepted_checks.AUTOMATIC}
+    # Asked once: a resume asks the model no second time.
+    await eng._node_plan(dict(STATE))
     assert [node for node, _text in calls].count("plan_revise") == 1
 
 
 @pytest.mark.asyncio
-async def test_the_stop_offers_three_ways_on_in_plain_words(tmp_path: Path) -> None:
-    eng, seen = _engine(tmp_path, [])  # the fill call fails (no reply): the quest stops
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    pause = seen[-1]
-    assert pause["headline"] == "say where the plan's expected values come from"
-    assert pause["recommended"].startswith("Let FI fill it in")
-    assert pause["alternatives"][0].startswith("Change it yourself") and pause["alternatives"][1].startswith("Go on as it is")
-    steps = "\n".join(pause["steps"])
-    assert "(it expects 1.0)" in steps and "'horizontal_symmetry'" in steps
-    assert f"--accept-checks {eng.quest_id} --approve-as <your name>" in steps and "@fi /accept-checks" in steps
-    record = accepted_checks.pending(eng.quest_root)
-    assert [c["name"] for c in record["checks"]] == ["source_normalization", "horizontal_symmetry"]
+async def test_when_fi_finds_no_source_the_quest_goes_on_marked_and_asks_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from core import audit_log
+
+    eng, seen = _engine(tmp_path, [])  # the fill call fails (no reply)
+    await eng._node_plan(dict(STATE))
+    assert seen == [], "no question about where a value comes from"
+    out = capsys.readouterr().out
+    assert "do not say where their expected value comes from, and FI could not find it" in out
+    assert "Nothing to do" in out
+    assert accepted_checks.pending(eng.quest_root) is None, "no surface offers a choice"
+    chosen = accepted_checks.accepted(eng.quest_root)["chosen"]
+    assert sorted(chosen) == ["horizontal_symmetry", "source_normalization"]
+    assert all(c["by"] == accepted_checks.AUTOMATIC for c in chosen.values())
+    events = [e for e in audit_log.read(eng.audit.path) if e.get("check") == "oracle_sources"]
+    assert events and "FI went on by itself" in events[-1]["summary"]
 
 
 @pytest.mark.asyncio
-async def test_after_a_change_in_words_the_stop_says_it_was_applied_and_what_is_still_missing(tmp_path: Path) -> None:
+async def test_a_change_in_words_that_fills_one_source_leaves_only_the_other_marked(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, [])
-    # FI's own ask gets an answer it cannot use (twice): that is its one ask, and the quest stops.
     _chat_by_step(eng, lambda text: "I could not do that.")
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    first = seen[-1]["steps"][0]
-    assert "FI already asked the model once" in first
+    await eng._node_plan(dict(STATE))
     path = plan.plan_path(eng.quest_root)
     # The person asks for a change; the model fills in one check properly and the other in words with no equation.
     revised = path.read_text(encoding="utf-8").replace(
@@ -299,16 +302,9 @@ async def test_after_a_change_in_words_the_stop_says_it_was_applied_and_what_is_
     await eng.revise_plan("change the checks by looking at literature and formulas")
     prompt = _content(eng._client.chat.await_args_list[0])
     assert "never read" in prompt and "'source_normalization'" in prompt, "the rewrite was told what FI reads"
-    seen.clear()
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    second = seen[-1]["steps"][0]
-    assert second != first
-    assert "Your change to the plan (version" in second and "change the checks by looking at literature" in second
-    assert "'horizontal_symmetry'" in second and "at least one equation (with `=`" in second
-    fine = "These now say where their value comes from:"
-    assert "'source_normalization'" not in second.split(fine)[0]
-    assert f"{fine} 'source_normalization'" in second
+    await eng._node_plan(dict(STATE))
+    assert seen == []
+    assert eng._not_confirmed_names(dict(STATE), eng._draft_protocol(dict(STATE))) == ["horizontal_symmetry"]
 
 
 @pytest.mark.asyncio
@@ -316,42 +312,34 @@ async def test_a_revision_that_fills_the_references_lets_the_quest_go_on(tmp_pat
     from core.engine import _REFERENCE_FORMS
 
     eng, seen = _engine(tmp_path, [])
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
+    await eng._node_plan(dict(STATE))
     path = plan.plan_path(eng.quest_root)
     revised = _with(path.read_text(encoding="utf-8"), "derivation: sum of S over the pupil = 1 by definition")
     eng._client = type("Stub", (), {"chat": AsyncMock(return_value=revised)})()
     await eng.revise_plan("say where the checks' values come from")
     assert _REFERENCE_FORMS in _content(eng._client.chat.await_args_list[0]), "the rule the check reads, in the prompt"
-    seen.clear()
     assert eng._check_plan_sources(dict(STATE), stop=True) == []
     assert seen == [] and accepted_checks.pending(eng.quest_root) is None
+    assert eng._not_confirmed_names(dict(STATE), eng._draft_protocol(dict(STATE))) == []
 
 
 @pytest.mark.asyncio
-async def test_going_on_as_it_is_needs_a_name_and_is_recorded_everywhere(tmp_path: Path) -> None:
-    from core import audit_log, frozen_protocol
+async def test_going_on_by_itself_is_recorded_everywhere_and_relaxes_nothing(tmp_path: Path) -> None:
+    from core import frozen_protocol
 
     eng, seen = _engine(tmp_path, [])
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    assert accepted_checks.accept(eng.quest_root, "  ", via="cli")[0] is False
-    ok, message = accepted_checks.accept(eng.quest_root, "Jun", via="cli")
-    assert ok and "source not confirmed" in message
-    seen.clear()
     await eng._node_plan(dict(STATE))
-    assert seen == [], "the person chose to go on: no stop"
-    assert accepted_checks.pending(eng.quest_root) is None, "no surface offers the choice again"
-    events = audit_log.read(eng.audit.path)
-    chosen = [e for e in events if e.get("check") == "oracle_sources"]
-    assert chosen and chosen[-1]["status"] == "accepted_without_source" and "Jun" in chosen[-1]["summary"]
-    # The evidence keeps the gap, marked; the freeze and the paper say so.
+    assert seen == []
+    # The evidence keeps the gap, marked; the freeze and the paper say so, and that FI went on by itself.
     gaps = eng._oracle_source_gaps(dict(STATE), eng._draft_protocol(dict(STATE)))
-    assert len(gaps) == 2 and all("source not confirmed: Jun chose to go on without one" in g for g in gaps)
+    assert len(gaps) == 2 and all("source not confirmed: FI (no source could be found) went on without one" in g
+                                  for g in gaps)
     names = eng._not_confirmed_names(dict(STATE), eng._draft_protocol(dict(STATE)))
     assert names == ["source_normalization", "horizontal_symmetry"]
-    assert "'source_normalization'" in accepted_checks.disclosure(eng.quest_root, names)
-    # A check given a source after the choice is no longer said to have none (not in the freeze, not in the paper).
+    disclosure = accepted_checks.disclosure(eng.quest_root, names)
+    assert "'source_normalization'" in disclosure and "FI (no source could be found) went on without one" in disclosure
+    assert "Do not describe these checks as validated against an independent source" in disclosure
+    # A check given a source afterwards is no longer said to have none (not in the freeze, not in the paper).
     path = plan.plan_path(eng.quest_root)
     path.write_text(path.read_text(encoding="utf-8").replace("reference: ''", "reference: '[1], section 2'", 1),
                     encoding="utf-8")
@@ -363,17 +351,32 @@ async def test_going_on_as_it_is_needs_a_name_and_is_recorded_everywhere(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_a_check_whose_numbers_change_after_the_choice_stops_the_quest_again(tmp_path: Path) -> None:
+async def test_a_persons_own_choice_keeps_their_name(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, [])
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
+    by_name = {o["name"]: o for o in _oracles()}
+    accepted_checks.write_pending(eng.quest_root, [
+        {"name": n, "why": f"the check '{n}' ...", "expected": o["expected"], "fingerprint": accepted_checks.fingerprint(o)}
+        for n, o in by_name.items()], plan_version=1)
+    assert accepted_checks.accept(eng.quest_root, "  ", via="cli")[0] is False, "a person's choice needs a name"
     assert accepted_checks.accept(eng.quest_root, "Jun", via="cli")[0]
+    await eng._node_plan(dict(STATE))
+    assert seen == []
+    chosen = accepted_checks.accepted(eng.quest_root)["chosen"]
+    assert {c["by"] for c in chosen.values()} == {"Jun"}, "FI going on by itself never overwrites a person's choice"
+
+
+@pytest.mark.asyncio
+async def test_a_check_whose_numbers_change_after_going_on_is_marked_again(tmp_path: Path) -> None:
+    eng, seen = _engine(tmp_path, [])
+    await eng._node_plan(dict(STATE))
+    before = accepted_checks.accepted(eng.quest_root)["chosen"]["source_normalization"]["fingerprint"]
     path = plan.plan_path(eng.quest_root)
     path.write_text(path.read_text(encoding="utf-8").replace("expected: 1.0", "expected: 5.0"), encoding="utf-8")
-    seen.clear()
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    assert "its numbers have changed since" in seen[-1]["steps"][0]
+    eng._went_on_unsourced = False
+    await eng._node_plan(dict(STATE))
+    assert seen == []
+    after = accepted_checks.accepted(eng.quest_root)["chosen"]["source_normalization"]
+    assert after["fingerprint"] != before and after["expected"] == 5.0, "the record names the numbers as they are now"
 
 
 def test_a_pending_record_without_names_cannot_be_gone_on_with(tmp_path: Path) -> None:
@@ -402,11 +405,9 @@ async def test_an_incomplete_answer_to_the_fill_does_not_use_up_the_one_ask(tmp_
         return json.dumps({"objections_addressed": []})
 
     eng._client = type("Stub", (), {"chat": staticmethod(chat)})()
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    assert seen[-1]["headline"] == "say where the plan's expected values come from", "the sources stop, not another"
-    assert not (eng.fi_dir / "plan_sources_asked.json").exists()
-    assert "FI already asked" not in seen[-1]["steps"][0]
+    await eng._node_plan(dict(STATE))
+    assert seen == [], "no stop"
+    assert not (eng.fi_dir / "plan_sources_asked.json").exists(), "a cut-off answer does not use up the one ask"
 
 
 # A real plan (claude haiku, 2026-10-03) named scipy as a second implementation and wrote its call into the reference:
@@ -535,20 +536,18 @@ def test_a_fill_may_only_add_sources_kinds_and_missing_parts_of_the_model() -> N
 
 
 @pytest.mark.asyncio
-async def test_going_on_covers_only_the_checks_the_stop_named(tmp_path: Path) -> None:
+async def test_a_check_added_after_going_on_is_marked_too(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, [])
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    accepted_checks.accept(eng.quest_root, "Jun", via="web")
+    await eng._node_plan(dict(STATE))
     path = plan.plan_path(eng.quest_root)
     design = plan.parse(path.read_text(encoding="utf-8")).design
     extra = {"name": "baseline_design_check", "check": "baseline", "expected": 3.0, "tolerance": 0.1, "reference": ""}
     design["protocol"]["oracles"].append(extra)
     path.write_text(plan.render("t", {}, design, sources=SOURCES), encoding="utf-8")
-    seen.clear()
-    with pytest.raises(Paused):
-        await eng._node_plan(dict(STATE))
-    assert "'baseline_design_check'" in seen[-1]["steps"][0]
+    eng._went_on_unsourced = False
+    await eng._node_plan(dict(STATE))
+    assert seen == []
+    assert "baseline_design_check" in accepted_checks.accepted(eng.quest_root)["chosen"]
 
 
 # --- the three surfaces ------------------------------------------------------------------------------------------------
@@ -569,7 +568,6 @@ def test_the_cli_records_going_on_with_a_name(tmp_path: Path, capsys: pytest.Cap
     _stopped_quest(tmp_path)
     args = launch.parse_args(["--accept-checks", "q-1", "--approve-as", "Jun", "--output-root", str(tmp_path)])
     assert args.accept_checks == "q-1" and args.approve_as == "Jun"
-    assert launch._accept_checks("q-1", "", tmp_path) == 2
     assert launch._accept_checks("nope", "Jun", tmp_path) == 1
     assert launch._accept_checks("q-1", "Jun", tmp_path) == 0
     assert "--resume q-1" in capsys.readouterr().out

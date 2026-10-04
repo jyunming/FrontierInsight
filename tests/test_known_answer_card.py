@@ -453,11 +453,17 @@ def _paused(tmp_path: Path) -> Engine:
     engine._trial_mode = True
     reported = {"checks": [{"name": RK4["name"], "value": 3.33241e-07, "measured_by": "engine"}], "engine_measured": True}
     found = oc.problems([RK4], reported, 0)
-    # The pause ends in LangGraph's interrupt(), which outside a running graph raises RuntimeError: reaching it means
-    # everything before it (the card, NEXT_STEP.md, pause.json) was written without an error of its own.
+    # A stop at the known-answer checks as an earlier FI wrote it (the gate now goes on by itself): the card, through
+    # the one way the engine stops. The pause ends in LangGraph's interrupt(), which outside a running graph raises
+    # RuntimeError: reaching it means everything before it (the card, NEXT_STEP.md, pause.json) was written.
+    card = oracle_card.build(quest_id=engine.quest_id, quest_root=engine.quest_root, script=script, found=found,
+                             oracles=[RK4], judged=_judged(3.33241e-07), trial=True,
+                             attempts=[{"problems": found, "checks": reported["checks"], "judged": _judged(3.33241e-07)}])
     with pytest.raises(RuntimeError):
-        engine._pause_for_oracle(found, script, [], _judged(3.33241e-07), [RK4],
-                                 attempts=[{"problems": found, "checks": reported["checks"], "judged": _judged(3.33241e-07)}])
+        engine._pause_for_human(kind="oracle", interaction="supply",
+                                headline="the script has not passed its known-answer checks", steps=found,
+                                card=card, payload={"oracle_stage": True, "quest_id": engine.quest_id,
+                                                    "problems": found})
     return engine
 
 

@@ -94,9 +94,10 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
          "holding to its protocol."],
     ),
     "oracle": (
-        "A known-answer check did not pass. Is the simulation wrong, or the check?",
-        "Compare the measured value with the expected one and where it comes from, fix whichever is wrong, then go on.",
-        ["Change the check's expected value or tolerance in the plan: `--revise-plan \"...\"`."],
+        # Only for a stop an earlier FI wrote: the checks no longer stop a quest.
+        "This quest was stopped at its known-answer checks by an earlier version of FI.",
+        "Resume it: FI now works out itself whether the check or the simulation is wrong, and goes on.",
+        [],
     ),
     "improve": (
         "A change FI made to the simulation made a check of correctness worse. Go on with the version kept so far?",
@@ -382,22 +383,15 @@ def waiting(quest_root: Path) -> list[Item]:
 
         from .oracle_check import proposal_request
 
-        sentences = [_went_on_gap(e) for e in oracle.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
-        # A change to a check that FI or a repair proposed, kept for the person to accept or not.
-        proposed = [p for p in oracle.get("proposed_changes") or [] if isinstance(p, dict) and p.get("name")]
-        offers = []
-        for p in proposed:
-            try:
-                offers.append(f"proposed for '{p['name']}' (to accept it: `--revise-plan \"{proposal_request(p)}\"`)")
-            except Exception:  # noqa: BLE001 -- a proposal that cannot be shown is still in the record
-                continue
+        sentences = [_went_on_gap(e) for e in oracle.get("went_on") or []
+                     if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
+        # (A change a repair proposed is in the record; it is not offered here: whether a check is right is FI's to work
+        # out, and a repair's numbers saw the run.)
         out.append(Item("went_on", "A known-answer check failed and the quest went on: "
                                    + ("; ".join(sentences) or "see needs/ORACLE_CHECK.json") + ".",
-                        recommended="Compare the measured value with the expected one and where it comes from: if the "
-                                    "check is right, the simulation is wrong; if the check is wrong, change it. Until "
-                                    "then the result does not count as checked against known answers."
-                                    + (" A change to the check was " + "; ".join(offers) + " (once the protocol is "
-                                       "frozen, this becomes an amendment you approve)." if offers else "")))
+                        recommended="Nothing you have to fix. What it means: this check is unconfirmed, so the "
+                                    "result counts as exploratory, not as checked against a known answer, and the "
+                                    "paper says so."))
     wanted = needs / "WANTED_PAPERS.md"
     if wanted.is_file() and not _supplied_since(root / "inputs" / "papers", wanted):
         out.append(Item("papers", "Some papers could not be downloaded (needs/WANTED_PAPERS.md lists them, most "

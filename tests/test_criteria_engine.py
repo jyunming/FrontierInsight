@@ -136,9 +136,11 @@ async def test_a_draft_that_names_criteria_does_not_search(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
-async def test_still_none_with_the_plan_pause_on_stops_and_asks_the_person_to_write_one(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_still_none_with_the_plan_pause_on_says_so_in_one_line_and_asks_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # A person is never asked to write a criterion (an oracle name, a direction, a target, a tolerance): the plan stop
+    # they asked for says in one line what having none means, and nothing more.
     search = _Search()
     monkeypatch.setattr("core.knowledge.Knowledge.asearch", search.fn)
     model = _Model(PROTOCOL, [])
@@ -147,12 +149,25 @@ async def test_still_none_with_the_plan_pause_on_stops_and_asks_the_person_to_wr
     await engine.run()
     assert len(search.queries) == 1
     descriptor = json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "plan"
+    assert descriptor["kind"] == "plan" and descriptor["headline"] == "read and edit the plan"
     nxt = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "no way yet to judge whether the code got better" in nxt.splitlines()[0]
-    assert "read and edit the plan" in nxt.splitlines()[0]
-    assert "`criteria`" in nxt and "Or resume without one" in nxt
+    assert "no measure of whether the code got better" in nxt and "Nothing to do: the quest goes on." in nxt
+    assert "`criteria`" not in nxt and "tolerance" not in nxt, "no YAML to write, no tolerance to set"
+    assert "Nothing to do: the quest goes on." in capsys.readouterr().out
     assert not (engine.quest_root / "code" / "experiment.py").exists(), "nothing ran before the person read it"
+
+
+@pytest.mark.asyncio
+async def test_still_none_without_the_plan_pause_never_stops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("core.knowledge.Knowledge.asearch", _Search().fn)
+    engine = Engine(_config(tmp_path))
+    engine._client = _Model(PROTOCOL, [])
+    stops: list[dict[str, Any]] = []
+    engine._pause_for_human = lambda **kw: stops.append(kw)  # type: ignore[method-assign]
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert stops == []
 
 
 # --- after every run -------------------------------------------------------------------------------------------------

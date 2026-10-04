@@ -200,7 +200,7 @@ def test_the_evidence_names_who_went_on_and_is_never_publication_ready() -> None
     person = ac.gap({**check, "by": "Jun"})
     assert person.startswith("Jun chose to go on although the known-answer check 'final size closed form' failed")
     auto = ac.gap({**check, "by": ac.AUTOMATIC})
-    assert auto.startswith("FI went on by itself (this quest explores) although the known-answer check") and "unconfirmed" in auto
+    assert auto.startswith("FI went on by itself although the known-answer check") and "unconfirmed" in auto
     record = {"status": ac.WENT_ON, "went_on": [{**check, "by": "Jun"}]}
     assert "These known-answer checks FAILED and the run went on anyway: Jun chose" in ac.failing_disclosure(record)
     assert ac.failing_disclosure({"status": "ok"}) == ""
@@ -209,11 +209,11 @@ def test_the_evidence_names_who_went_on_and_is_never_publication_ready() -> None
 
 
 @pytest.mark.asyncio
-async def test_a_decision_quest_stops_and_a_named_go_on_continues_without_a_repair(
+async def test_a_decision_quest_goes_on_by_itself_and_never_asks_a_person(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    import launch
-
+    # Whether the check or the simulation is wrong is FI's to work out: after its repairs, the quest goes on with the
+    # check marked unconfirmed, recorded as FI's decision; the result counts as exploratory and the paper says so.
     calls: list[str] = []
     prompts: list[str] = []
     fake = _fake(calls, implement=_FAILING, repair=_FAILING, protocol={**_PROTOCOL, "oracles": [ORACLE]})
@@ -224,34 +224,22 @@ async def test_a_decision_quest_stops_and_a_named_go_on_continues_without_a_repa
 
     monkeypatch.setattr("core.engine.LLMClient.chat", recording)
     cfg = _cfg(tmp_path)  # result_use: decision
-    first = Engine(cfg)
-    await first.run()
-    record = json.loads((first.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
-    assert record["status"] == "stopped" and record["go_on"]["offered"] is True
-    assert record["go_on"]["script"] == "code/experiment.py" and len(record["go_on"]["script_version"]) == 64
-    card = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert f"python launch.py --accept-checks {first.quest_id} --approve-as <you>" in card
-    assert "expected 1 within ±0.05 (absolute); measured 0.5" in card and "code/experiment.py (version " in card
-    assert "oracle_check: warn" not in card
-
-    assert launch._accept_checks(first.quest_id, "Jun", cfg.output.output_dir) == 0
-    repairs_before = calls.count("OracleRepair")
-    capsys.readouterr()
-    second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
-    assert calls.count("OracleRepair") == repairs_before, "the choice is honoured before any repair could change the code"
-    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    record = json.loads((second.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
-    assert record["status"] == ac.WENT_ON and record["went_on"][0]["by"] == "Jun"
-    assert "going on although a known-answer check failed: Jun chose to go on" in capsys.readouterr().out
-    trace = second.fi_dir / "audit.jsonl"
-    lines = trace.read_text(encoding="utf-8").splitlines() if trace.is_file() else []
-    assert any('"oracle"' in line and ac.WENT_ON in line and "Jun chose to go on" in line for line in lines), \
-        "the audit trace says who went on"
-    gaps = json.dumps(evidence.read(second.quest_root) or {})
-    assert "Jun chose to go on although the known-answer check 'final size closed form' failed" in gaps
-    level = (evidence.read(second.quest_root) or {}).get("level")
-    assert level not in ("independently_validated", "publication_ready")
+    engine = Engine(cfg)
+    artifacts = await engine.run()
+    assert calls.count("OracleRepair") == 2, "FI still tries its repairs first"
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists(), "no stop to ask"
+    record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == ac.WENT_ON and record["went_on"][0]["by"] == ac.AUTOMATIC
+    assert record["went_on"][0]["script"] == "code/experiment.py" and len(record["went_on"][0]["script_version"]) == 64
+    assert record.get("explained", {}).get("why"), "why, in plain words, with the decision"
+    out = capsys.readouterr().out
+    assert "FI could not confirm 'final size closed form'" in out and "counts as exploratory" in out
+    assert not (engine.quest_root / "NEXT_STEP.md").exists() or "known-answer" not in (
+        engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    gaps = json.dumps(evidence.read(engine.quest_root) or {})
+    assert "FI went on by itself although the known-answer check 'final size closed form' failed" in gaps
+    level = (evidence.read(engine.quest_root) or {}).get("level")
+    assert level not in ("independently_validated", "publication_ready"), "nothing about the check is relaxed"
     assert any("These known-answer checks FAILED and the run went on anyway" in p for p in prompts), \
         "the paper is told to say so"
 
@@ -270,7 +258,7 @@ async def test_an_exploration_goes_on_by_itself_with_an_automatic_gap(
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
     record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
     assert record["status"] == ac.WENT_ON and record["went_on"][0]["by"] == ac.AUTOMATIC
-    assert "FI went on by itself (this quest explores)" in capsys.readouterr().out
+    assert "FI could not confirm" in capsys.readouterr().out
     items = todo.read(engine.fi_dir)
     assert any(i["kind"] == "went_on" and "FI went on by itself" in i["why"] for i in items), "listed on the to-do card"
     assert not (engine.quest_root / "NEXT_STEP.md").exists() or "Action needed" not in (
@@ -278,12 +266,13 @@ async def test_an_exploration_goes_on_by_itself_with_an_automatic_gap(
     assert engine._goes_on_by_itself()
 
 
-def test_only_an_exploration_outside_research_goes_on_by_itself(tmp_path: Path) -> None:
-    from core.config import Config, OutputConfig
+def test_every_quest_goes_on_by_itself_with_the_checks_on(tmp_path: Path) -> None:
+    from core.config import Config, EngineConfig, OutputConfig
 
     def goes_on(**kw: Any) -> bool:
         return Engine(Config(topic="t", output=OutputConfig(output_dir=tmp_path / "o"), **kw))._goes_on_by_itself()
 
     assert goes_on() and goes_on(result_use="explore")
-    assert not goes_on(result_use="decision") and not goes_on(result_use="research")
-    assert not goes_on(rigor_profile="research"), "a research quest still stops for a person"
+    assert goes_on(result_use="decision") and goes_on(result_use="research")
+    assert goes_on(rigor_profile="research"), "a research quest too: no person is asked whether a check is right"
+    assert not goes_on(engine=EngineConfig(oracle_check="warn")), "warn records the failure its own way"

@@ -181,6 +181,21 @@ def recompute_entry(oracle: dict[str, Any], verdict: str, recomputed: float | No
              f"{_fmt(expected)}; measured {_fmt(value)}).")
     cause: dict[str, str] | None = None
     points = ""
+    slip = arithmetic_slip(how, recomputed)
+    if slip is not None:
+        # Its own working does not give the number it reports: the recheck is no evidence either way.
+        said = (f"{slip['expression']} comes to {_fmt(slip['computes'])}, not the {_fmt(slip['written'])} it "
+                "writes")
+        return {"check": name, "kind": "recompute", "verdict": verdict, "points_to": "", "recomputed": recomputed,
+                "expected": expected, "measured": value, "how": how, "model": model, "same_model": same_model,
+                "how_slip": slip, "tried": tried + f" Its own arithmetic does not add up ({said}), so it is not used.",
+                "cause": None}
+    if same_model and verdict in ("agrees", "disputed"):
+        # The model that wrote the plan, asked again, is not an independent check of it: said, never counted.
+        return {"check": name, "kind": "recompute", "verdict": verdict, "points_to": "", "recomputed": recomputed,
+                "expected": expected, "measured": value, "how": how, "model": model, "same_model": same_model,
+                "tried": tried + " It is the same model that wrote the plan, so this is not an independent check.",
+                "cause": None}
     if verdict == "agrees":
         points = "script"
         cause = {"text": f"The expected value of `{name}` holds up, so the simulation is the likely cause: worked out "
@@ -209,7 +224,9 @@ def recompute_proposal(oracle: dict[str, Any], entry: dict[str, Any]) -> dict[st
               f"without showing it the measured value, and it got {_fmt(entry.get('recomputed'))}"
               + (f": {entry['how']}" if entry.get("how") else "") + ".")
     return {"name": str(oracle.get("name") or "").strip(), "expected": entry["recomputed"], "tolerance": tolerance,
-            "tolerance_mode": mode, "reason": reason[:600], "source": "recompute"}
+            "tolerance_mode": mode, "reason": reason[:600], "source": "recompute",
+            # Whether the model that wrote the plan answered: never counted as independent evidence when it did.
+            "same_model": bool(entry.get("same_model"))}
 
 
 # --- half the step -----------------------------------------------------------------------------------------------------
@@ -417,6 +434,137 @@ def seeds_entry(oracle: dict[str, Any], result: dict[str, Any]) -> dict[str, Any
                              f"is {_fmt(expected)}."}
     return {"check": name, "kind": "seeds", "verdict": str(result.get("verdict") or ""), "points_to": points,
             **{k: v for k, v in result.items() if k != "verdict"}, "tried": tried, "cause": cause}
+
+
+# --- the arithmetic a derivation writes out ------------------------------------------------------------------------------
+#
+# A derivation often ends in numbers: "T = T0 * (2/pi) * K(sin(45deg)) = 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 => 1.18034".
+# When the numbers it multiplies out do not give the answer it writes (2.368, not 1.180), the expected value is a slip of
+# the plan, whatever any model says about it (a real quest: the same model, asked again, repeated the same slip). FI works
+# each written-out step out itself, with the small calculator the checks' formulas already use
+# (core/oracle_forms.py::evaluate: numbers, + - * / ** and a short list of named functions, walked, never run as code).
+
+import re as _re
+
+_DEGREES = _re.compile(r"(\d+(?:\.\d+)?)\s*(?:°|deg\b|degrees?\b)")
+
+
+def calculate(text: str) -> float | None:
+    """The value of a written-out calculation (``2*pi*sqrt(1/9.81) * (2/pi) * 1.85407``), or ``None`` when ``text`` is
+    not plain arithmetic: a symbol (``T0``), a function not on the calculator's list, anything else."""
+    text = str(text or "").strip().rstrip(".,;").strip()
+    if not text or len(text) > 300 or not _re.search(r"\d", text):
+        return None
+    text = _DEGREES.sub(lambda m: f"({m.group(1)}*pi/180)", text)
+    text = text.replace("^", "**").replace("×", "*").replace("·", "*").replace("−", "-").replace("π", "pi")
+    return _forms.evaluate(text, {}).value
+
+
+def _digits(number: str) -> int:
+    """The significant digits a written number states: ``1.85407`` 6, ``0.0595`` 3, ``2.000`` 4, ``100`` 1 (the
+    trailing zeros of a whole number say nothing), ``3.3e-7`` 2."""
+    mantissa = _re.sub(r"[eE][-+]?\d+$", "", number.strip().lstrip("+-"))
+    if "." not in mantissa:
+        mantissa = mantissa.rstrip("0") or "0"
+    return len(_re.sub(r"[^0-9]", "", mantissa).lstrip("0")) or 1
+
+
+def _close(a: float, b: float, written: str, *, approximate: bool = False) -> bool:
+    """Whether ``a`` (worked out) and ``b`` (the number written) agree to what the written number's digits can say
+    (five times looser after an "approximately" sign). Never tighter than 1%: only a clear slip counts, not a last
+    digit rounded differently."""
+    slack = max(1e-2, 5 * 10.0 ** (-_digits(written))) * (5 if approximate else 1)
+    return abs(a - b) <= slack * max(abs(a), abs(b)) or abs(a - b) < 1e-12
+
+
+_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?"
+# What may follow the number a step writes: nothing, or one unit word (letters, a degree sign, letters per letters).
+# Never an operator, a bracket, another number or a percent sign (a percent rescales the number).
+_UNIT = _re.compile(r"^(?:[A-Za-zµ°]{1,8}(?:/[A-Za-zµ°]{1,8})*)?$")
+
+
+def _is_arithmetic(text: str) -> bool:
+    """Whether ``text`` is a calculation (an operator or a function call), not a lone number like ``g = 9.81``."""
+    import ast
+
+    text = _DEGREES.sub(lambda m: f"({m.group(1)}*pi/180)", str(text or "").strip().rstrip(".,;"))
+    text = text.replace("^", "**").replace("×", "*").replace("·", "*").replace("−", "-").replace("π", "pi")
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError:
+        return False
+    return any(isinstance(n, (ast.BinOp, ast.Call)) for n in ast.walk(tree))
+
+
+def arithmetic_slip(text: Any, expected: Any = None) -> dict[str, Any] | None:
+    """A written-out step of ``text`` whose arithmetic does not give the number written after it, as
+    ``{"expression", "computes", "written"}``; ``None`` when there is none.
+
+    Only a step that is a calculation (an operator or a function call, never a lone number: "g = 9.81 = 2.006" is a
+    parameter and a result, not a slip) followed by a bare number (with at most a unit word) counts. With
+    ``expected`` (the check's expected value), only a step that writes that number counts: the slip is in the working
+    that produces the expected value, never in an intermediate step."""
+    want = num(expected)
+    pieces = _re.split(r"(=>|⇒|≈|~=|(?<![<>=!~])=(?!=))", str(text or ""))
+    for i in range(0, len(pieces) - 2, 2):
+        left, sign, right = pieces[i].strip(), pieces[i + 1], pieces[i + 2].strip()
+        found = _re.match(rf"^({_NUMBER})", right)
+        if found is None:
+            continue
+        rest = right[found.end():].strip().strip(".,;").strip()
+        if not _UNIT.match(rest.split(";")[0].split(",")[0].strip() if rest else ""):
+            continue
+        written = found.group(1)
+        if want is not None and not _close(want, float(written), written):
+            continue
+        expression = left.split(":")[-1].strip()
+        if not _is_arithmetic(expression):
+            continue
+        computes = calculate(expression)
+        if computes is None or _close(computes, float(written), written, approximate=sign in ("≈", "~=")):
+            continue
+        return {"expression": expression, "computes": computes, "written": float(written)}
+    return None
+
+
+def plan_slip(oracle: dict[str, Any]) -> dict[str, Any] | None:
+    """The slip in the arithmetic of ``oracle``'s own derivation that produces its expected value (:func:`arithmetic_slip`
+    tied to the check's ``expected``), or ``None``."""
+    return arithmetic_slip(_oracle.reference_of(oracle), oracle.get("expected"))
+
+
+def correctable(oracle: dict[str, Any]) -> bool:
+    """Whether FI may correct ``oracle``'s expected value: only a check that compares a measured quantity with its
+    expected value (a special case, a published value ...). Not a check whose number is a worst violation of a rule or
+    a formula built from what the simulation returns: its expected value is 0 by its form, and what a slip changes
+    lives inside its ``measure``, which FI never edits."""
+    measure = str(oracle.get("measure") or "").strip()
+    simple = not measure or _re.fullmatch(r"[A-Za-z_]\w*", measure) is not None
+    return simple and _oracle.kind_of(oracle) not in _forms.VIOLATION_KINDS
+
+
+def arithmetic_entry(oracle: dict[str, Any], slip: dict[str, Any], *, where: str = "plan") -> dict[str, Any]:
+    """A triage entry for a slip in the plan's own working (``where`` ``plan``): it points to the check."""
+    name = str(oracle.get("name") or "").strip()
+    said = (f"the plan's own working for the expected value does not add up: {slip['expression']} comes to "
+            f"{_fmt(slip['computes'])}, not the {_fmt(slip['written'])} it writes")
+    return {"check": name, "kind": "arithmetic", "verdict": "slip", "points_to": "check", **slip, "where": where,
+            "tried": f"FI worked out the arithmetic in the plan's derivation of `{name}` itself: {said}.",
+            "cause": {"text": f"The expected value of `{name}` is a slip in the plan's arithmetic, not a fault of the "
+                              "simulation.",
+                      "evidence": said[0].upper() + said[1:] + "."}}
+
+
+def arithmetic_proposal(oracle: dict[str, Any], slip: dict[str, Any]) -> dict[str, Any]:
+    """The expected value the plan's own derivation gives, worked out by FI, as a proposal in the shape
+    :func:`core.oracle_check.proposals` gives (the card offers it; a person's yes applies it through the plan). It comes
+    from the plan's own working, never from the measured value; the check's tolerance is kept."""
+    tolerance = _num(oracle.get("tolerance")) or 0.0
+    mode = "relative" if str(oracle.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
+    reason = (f"FI worked out the plan's own derivation: {slip['expression']} comes to {_fmt(slip['computes'])}, not the "
+              f"{_fmt(slip['written'])} the plan writes.")
+    return {"name": str(oracle.get("name") or "").strip(), "expected": slip["computes"], "tolerance": tolerance,
+            "tolerance_mode": mode, "reason": reason[:600], "source": "arithmetic"}
 
 
 # --- the gate's own: an exception that comes back, a run out of time ---------------------------------------------------

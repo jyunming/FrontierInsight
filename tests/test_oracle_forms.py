@@ -397,12 +397,10 @@ async def test_the_test_run_flags_expected_1_against_measured_0_and_sends_it_bac
     # The change makes the test run's own number pass: said as exactly that, so the reason is checked, not the result.
     assert "pass on the test run's own numbers" in added["reason"]
     assert "passes on the test run's own numbers" in _plan_text(engine)
-    # The person reads the change before the freeze (pauses.plan: ask), in plain words.
-    with pytest.raises(Exception):
-        engine._hold_added_oracles()
-    card = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "FI changed checks against known answers" in card and "test run of the checks" in card
-    assert engine._oracles_added_read()["shown"] is True
+    # The change is said in one line, never stopped for (FI checks the values itself); nobody is said to approve it.
+    engine._hold_added_oracles()
+    assert not (engine.quest_root / "NEXT_STEP.md").exists()
+    assert engine._oracles_added_read()["shown"] is False and engine._oracles_added_read()["told"] is True
 
 
 @pytest.mark.asyncio
@@ -417,7 +415,8 @@ async def test_a_plain_failure_goes_to_the_usual_repair_and_the_test_run_asks_no
 
 
 @pytest.mark.asyncio
-async def test_a_check_the_plan_removes_after_the_test_run_is_named_to_the_person(tmp_path: Path) -> None:
+async def test_a_check_the_plan_removes_after_the_test_run_is_named_to_the_person(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     engine = Engine(_config(tmp_path, plan_pause="ask", oracle_check="warn"))
     keep = {"name": "kept", "kind": "invariant", "expected": 0.0, "tolerance": 1e-6, "case": {"n": 4},
             "measure": "violation"}
@@ -439,9 +438,8 @@ async def test_a_check_the_plan_removes_after_the_test_run_is_named_to_the_perso
     assert added["removed"] == ["power_conservation"] and added["shown"] is False
     record = json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
     assert record["attempts"][-1]["oracles"] == ["kept"], "measured again as the plan now states them"
-    with pytest.raises(Exception):
-        engine._hold_added_oracles()
-    assert "power_conservation (removed)" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    engine._hold_added_oracles()
+    assert "'power_conservation' (removed)" in capsys.readouterr().out, "named in one line, never a stop"
 
 
 @pytest.mark.asyncio

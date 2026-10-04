@@ -434,6 +434,12 @@ def assess(
     # independently validated
     valid_gaps = gaps["independently_validated"]
     oracle_record = _json(needs / "ORACLE_CHECK.json")
+    fitted = oracle_record.get("fitted_to_test_run") if isinstance(oracle_record, dict) else None
+    if protocol is not None and isinstance(fitted, list) and fitted:
+        # The plan changed these checks after FI's test run measured them, and the change makes that measurement pass:
+        # the value checked is the one the simulation produced, so it is no independent check of it.
+        valid_gaps.extend(f"the known-answer check '{n}' was changed after a test run measured it, so that the "
+                          "measured value passes: nothing independent confirms it" for n in fitted)
     if settings.get("oracle_check") == "off":
         valid_gaps.append("the oracle check was turned off")
     elif protocol is not None and isinstance(oracle_record, dict) and oracle_record.get("status") == "went_on_failing":
@@ -441,7 +447,8 @@ def assess(
         # in its own plain words (core/accepted_checks.py), so the result never reaches this level or the ones above.
         from .accepted_checks import gap as _went_on_gap
 
-        entries = [e for e in oracle_record.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
+        entries = [e for e in oracle_record.get("went_on") or []
+                   if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
         valid_gaps.extend([_went_on_gap(e) for e in entries]
                           or ["a known-answer check failed and the quest went on (oracle check: went_on_failing)"])
     elif protocol is not None and (not isinstance(oracle_record, dict) or oracle_record.get("status") != "ok"):

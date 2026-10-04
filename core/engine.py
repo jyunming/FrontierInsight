@@ -4875,163 +4875,33 @@ class Engine:
         self._log.info("[design] using the design block of plan.md (sha256 %s)", sha[:12])
         return parsed.design, sha
 
-    def _pause_for_plan(self, *, error: str = "", added: list[str] | None = None,
-                        unsourced: list[str] | None = None, no_criteria: bool = False, reason: str = "",
-                        unsourced_checks: list[dict[str, Any]] | None = None,
-                        model_missing: list[str] | None = None) -> None:
-        """Stop so the person can read and edit ``plan.md``. Once per quest (a marker on disk, as for the other
-        supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
+    def _pause_for_plan(self, *, error: str = "", no_criteria: bool = False) -> None:
+        """Stop so the person can read and edit ``plan.md`` (``pauses.plan: ask``). Once per quest (a marker on disk, as
+        for the other supply pauses), unless the file cannot be read: then every resume stops again, with the reason.
 
-        ``added`` names the oracles the engine wrote into the plan after the person read it (the caller keeps its own
-        once-per-addition record): the stop then says so first, since the protocol is frozen right after it.
-        ``unsourced`` (``rigor_profile: research``) says which checks' expected values have no source a reader can
-        check; like an unreadable file, it stops every resume until the plan says where each value comes from.
-        ``no_criteria``: the plan has no way to judge whether the code got better, and FI found none to propose; the stop
-        (once, like the plain one) asks the person to write one, and a resume without one goes on without."""
+        Nothing about a check's expected value, its source or its tolerance stops the quest here: FI works those out
+        itself (``_fill_plan_sources``, ``_hold_added_oracles``, the triage at the known-answer checks) and marks what
+        it cannot confirm. ``no_criteria``: the plan has no way to judge whether the code got better; one plain line
+        says so (never a stop of its own)."""
         marker = self.fi_dir / "paused_at_plan.flag"
-        # The stop for a missing criterion has its own marker: a quest that first stopped at the plan for another reason
-        # (its sources) still stops once to ask for one.
-        criteria_marker = self.fi_dir / "paused_for_criteria.flag"
-        if (not error and added is None and not unsourced and marker.is_file()
-                and (not no_criteria or criteria_marker.is_file())):
+        # A plan with no way to judge whether the code got better is never a stop of its own: one line says what that
+        # means, in the console, and at the stop the person asked for (``pauses.plan: ask``).
+        if no_criteria:
+            self._say_no_criteria()
+        if not error and marker.is_file():
             return
-        if no_criteria and not error and added is None:
-            try:
-                self.fi_dir.mkdir(parents=True, exist_ok=True)
-                criteria_marker.write_text("plan", encoding="utf-8")
-            except OSError as e:
-                self._log.warning("[plan] couldn't write pause marker %s: %r", criteria_marker, e)
-        if added is None:
-            try:
-                self.fi_dir.mkdir(parents=True, exist_ok=True)
-                marker.write_text("plan", encoding="utf-8")
-            except OSError as e:
-                self._log.warning("[plan] couldn't write pause marker %s: %r", marker, e)
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text("plan", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't write pause marker %s: %r", marker, e)
         path = _plan.plan_path(self.quest_root)
         # The person reads the plan at this stop, including any source FI wrote into a check after they last read it.
         try:
             (self.fi_dir / _FILLED_AFTER_READ).unlink(missing_ok=True)
         except OSError:
             pass
-        if added is not None:
-            names = ", ".join(f"“{n}”" for n in added) or "(none named)"
-            checks_on = self.config.engine.oracle_check != "off"
-            steps = [
-                (f"After you read the plan, FI changed checks against known answers (oracles) in it: {names}. {reason} "
-                 "You have not seen these changes yet, and the plan is fixed for the run once the quest goes on.")
-                if reason else
-                (f"After you read the plan, FI added checks against known answers (oracles) to it, or filled in their "
-                 f"numbers: {names}. The plan had no such check, or its checks had no numbers to compare against. You "
-                 "have not seen these yet, and the plan is fixed for the run once the quest goes on."),
-                f"Read them in `plan.md` ({path}), in the `oracles` list of the protocol under "
-                f"“{_plan.DESIGN_HEADING}”: what each one checks, the value it expects and how close is close "
-                "enough. Edit any you disagree with (a plan left with no check at all gets one added again).",
-                "Or ask for a change and let FI rewrite it: "
-                f"`python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan \"what to change\"` "
-                "(the quest page's Plan box on the web, `@fi /plan` in VSCode).",
-                ("Then resume: the checks run again on what the plan says, and the plan is fixed for the run."
-                 if checks_on else
-                 "Then resume: the plan is fixed for the run (the checks themselves are off: `engine.oracle_check: off`)."),
-            ]
-            self._pause_for_human(
-                kind="plan",
-                interaction="supply",
-                headline="read the checks FI changed in the plan" if reason else "read the checks FI added to the plan",
-                steps=steps,
-                payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
-                         "oracles_added": list(added)},
-            )
-            return
-        criteria_steps = [
-            "The plan names no check of correctness FI can compute itself, so there is no way yet to judge whether the "
-            "code got better (when the model's draft had none, FI searched the literature once for how studies like "
-            "this one are checked and asked the model again, and found none).",
-            f"If you know one, write it in `plan.md` ({path}), in the protocol under \u201c{_plan.DESIGN_HEADING}\u201d, as "
-            "`criteria`, for example: `- {name: rk4 error, oracle: <the name of one of the protocol's oracles, one that "
-            "names a case so FI runs it itself>, direction: lower, target: 1.0e-6, tolerance: 1.0e-8}`. A criterion "
-            "checks that the code is right (an error against a known answer, a convergence order, a conserved "
-            "quantity); it is never the study's own finding.",
-            "Or resume without one: the quest goes on, and no run of it can be shown to be better than another.",
-        ] if no_criteria else []
-        if unsourced:
-            checks = list(unsourced_checks or [{"name": "", "why": why} for why in unsourced])
-            history = _plan.history(self.quest_root)
-            version = int(history[-1].get("version") or 0) if history else None
-            record = _accepted.write_pending(self.quest_root, checks, plan_version=version,
-                                             model_missing=model_missing)
-            previous = record.get("previous") or {}
-            listed = "\n".join(
-                f"  - {c['why']}" + (f" (it expects {c['expected']})" if c.get("expected") is not None else "")
-                for c in checks)
-            since = [r for r in history if previous and int(r.get("version") or 0) > int(previous.get("plan_version") or 0)]
-            if previous and since:
-                change = since[-1]
-                said = f": “{str(change.get('note') or '')[:160]}”" if change.get("note") else ""
-                who = {"request": "Your change to the plan", "user": "Your edit of plan.md",
-                       "engine": "FI's change to the plan"}.get(str(change.get("by")), "The change to the plan")
-                intro = (f"{who} (version {change.get('version')}{said}) was applied, but these checks still do not say "
-                         "where their expected value comes from:")
-            elif previous:
-                intro = ("The plan has not changed since the quest last stopped here, so these checks still do not say "
-                         "where their expected value comes from:")
-            else:
-                intro = ("The quest stopped at the plan: the value a check against a known answer expects has to come "
-                         "from somewhere a reader can check, and for these it does not:")
-            fixed_since = [str(c.get("name")) for c in previous.get("checks") or []
-                           if str(c.get("name") or "") and str(c.get("name")).lower() not in
-                           {str(x.get("name") or "").lower() for x in checks}]
-            asked = (self.fi_dir / _FILL_MARKER).is_file()
-            first = (intro + "\n" + listed
-                     + (f"\n  These now say where their value comes from: {', '.join(repr(n) for n in fixed_since)}."
-                        if fixed_since else "")
-                     + ("\n  (FI already asked the model once to fill these in, before this stop.)" if asked else "")
-                     + (f"\n  The model behind the numbers also leaves out {', '.join(model_missing)} "
-                        "(`protocol.model`: `summary`, `assumptions`, `equations`)." if model_missing else ""))
-            fill = "fill in where each check's expected value comes from"
-            steps = [
-                first,
-                "Why it matters: a wrong expected value makes a correct simulation fail its check, or a wrong one pass it. "
-                f"Each check needs one of these: {_oracle.SOURCE_FORMS}. A source counts only if this quest found it "
-                "(it is listed under “The sources this quest found” in plan.md); one recalled from memory does not.",
-                (f"Let FI fill it in: `python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan "
-                 f"\"{fill}\"` (the quest page's Plan box on the web; `@fi /plan {self.quest_id} {fill}` in VS Code). FI "
-                 "writes, for each check, how its value follows (an equation) or which source it found says so. Then "
-                 "resume.") if not asked else
-                (f"Let FI fill it in, in your words: FI already asked once and these are still missing, so say how each "
-                 f"value follows: `python launch.py --config <quest.yaml> --resume {self.quest_id} --revise-plan "
-                 "\"<check>: <how its value follows, e.g. the weights sum to 1 by definition>\"` (the quest page's Plan "
-                 f"box on the web; `@fi /plan {self.quest_id} <the same words>` in VS Code). Then resume."),
-                f"Or change it yourself: in `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”, give each check in the "
-                "`oracles` list its `reference`; or say what to change in words with `--revise-plan \"...\"`. Then "
-                "resume.",
-                f"Or go on as it is: `python launch.py --accept-checks {self.quest_id} --approve-as <your name>`, then "
-                f"resume (the web: *Go on as it is* on this card; VS Code: `@fi /accept-checks {self.quest_id}`). The "
-                f"checks still run and are still judged; each is marked “{_accepted.NOT_CONFIRMED}”, and the result and "
-                "the paper say so. Your name is recorded with the choice.",
-                *criteria_steps,
-                "(This stop comes from `rigor_profile: research`. Without it FI notes the problem in the plan and in "
-                "run.log and goes on, and the result is not counted as checked against known answers.)",
-            ]
-            self._pause_for_human(
-                kind="plan",
-                interaction="supply",
-                headline="say where the plan's expected values come from",
-                steps=steps,
-                recommended=(f"Let FI fill it in: `--revise-plan \"{fill}\"`, then resume." if not asked else
-                             "Let FI fill it in, saying how each value follows in your own words (FI already asked "
-                             "once and these are still missing, so the same request may give the same result): "
-                             "`--revise-plan \"<check>: <how its value follows, e.g. the weights sum to 1 by "
-                             "definition>\"`, then resume."),
-                alternatives=[
-                    "Change it yourself: edit each check's `reference` in plan.md, or say what to change in words "
-                    "(`--revise-plan \"...\"`), then resume.",
-                    f"Go on as it is: `--accept-checks {self.quest_id} --approve-as <your name>`, then resume. The "
-                    f"checks are marked “{_accepted.NOT_CONFIRMED}”, and the result says so.",
-                ],
-                payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": "",
-                         "unsourced": list(unsourced)},
-            )
-            return
+        criteria_steps = [_NO_CRITERIA_LINE] if no_criteria else []
         steps = [
             *([f"`plan.md` could not be used: {error}. Fix it, then resume."] if error else []),
             *criteria_steps,
@@ -5046,13 +4916,20 @@ class Engine:
         self._pause_for_human(
             kind="plan",
             interaction="supply",
-            headline=("plan.md cannot be read" if error else
-                      "read and edit the plan: it has no way yet to judge whether the code got better" if no_criteria
-                      else "read and edit the plan"),
+            headline=("plan.md cannot be read" if error else "read and edit the plan"),
             steps=steps,
             payload={"plan_stage": True, "quest_id": self.quest_id, "plan_file": str(path), "error": error,
                      **({"no_criteria": True} if no_criteria else {})},
         )
+
+    def _say_no_criteria(self) -> None:
+        """Once per quest, in the console and run.log: the plan has no way to judge whether the code got better, so the
+        step that improves the simulation does not start. Nothing to do; never a stop."""
+        if self.__dict__.get("_said_no_criteria"):
+            return
+        self._said_no_criteria = True
+        self._log.info("[plan] %s", _NO_CRITERIA_LINE)
+        print(f"[FI] {_NO_CRITERIA_LINE}")
 
     async def _node_plan(self, state: QuestState) -> QuestState:
         """Review the literature and write the plan (``plan.md``) before the experiment is designed.
@@ -5464,25 +5341,24 @@ class Engine:
             if choice is not None:
                 self._go_on_unsourced(choice, [n for n, _why in named])
                 return gaps
-            checks = [{"name": n, "why": why + ("; you chose to go on with it before, and its numbers have changed since"
+            checks = [{"name": n, "why": why + ("; the quest went on with it before, and its numbers have changed since"
                                                 if _accepted.changed_since(self.quest_root, by_name.get(n) or {"name": n})
                                                 else ""),
                        "expected": (by_name.get(n) or {}).get("expected"),
                        "fingerprint": _accepted.fingerprint(by_name[n]) if n in by_name else ""} for n, why in named]
-            # A hand edit made while the quest was stopped is its own version, so the stop can say what changed since.
-            try:
-                _plan.note_edit(self.quest_root, _plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
-            except OSError:
-                pass
-            added = self._oracles_added_read()
-            if (added and not added.get("shown") and added.get("oracles") and not added.get("removed")
-                    and not added.get("reason")  # a change, not an addition: that stop does not say what changed
-                    and all(any(repr(str(n)) in why for why in gaps) for n in added["oracles"])):
-                # This stop names every check the engine added (each lacks a source), so the person reads them here:
-                # the stop for them is not made again. Otherwise that stop still comes, and says FI added them.
-                self._oracles_added_write({**added, "shown": True})
-            self._pause_for_plan(unsourced=gaps, no_criteria=no_criteria, unsourced_checks=checks or None,
-                                 model_missing=missing)
+            # Where a check's expected value comes from is not a question a person is asked: FI asked a model once
+            # (a second model, when one is named for checking the checks) and it found none. The quest goes on by
+            # itself, recorded as automatic: each check still runs and is still judged, and is marked "source not
+            # confirmed" in the evidence, the freeze and the paper, so the result never counts as checked against an
+            # independent source (nothing is relaxed). A check whose numbers change afterwards is marked again.
+            history = _plan.history(self.quest_root)
+            version = int(history[-1].get("version") or 0) if history else None
+            went_on = _accepted.go_on_by_itself(self.quest_root, checks, plan_version=version)
+            if went_on is not None:
+                self._go_on_unsourced(went_on, [n for n, _why in named])
+            if missing:
+                self._log.warning("[plan] the model behind the numbers still leaves out %s; going on, and the evidence "
+                                  "says so", ", ".join(missing))
         elif gaps and not self.__dict__.get("_said_unsourced"):
             self._said_unsourced = True
             print(f"[FI] {len(gaps)} check(s) in the plan do not say where their expected value comes from, or cite a "
@@ -5504,15 +5380,22 @@ class Engine:
             return
         self._went_on_unsourced = True
         listed = ", ".join(repr(n) for n in names)
-        self._log.warning("[plan] going on with %d check(s) whose expected value has no stated source (%s): %s chose to "
-                          "go on (%s); each is marked %r in the evidence", len(names), listed, choice.get("by"),
-                          choice.get("via"), _accepted.NOT_CONFIRMED)
-        print(f"[FI] going on with {len(names)} check(s) whose expected value has no stated source ({listed}), as "
-              f"{choice.get('by')} chose; the result says their source is not confirmed")
+        if choice.get("by") == _accepted.AUTOMATIC:
+            self._log.warning("[plan] %d check(s) still do not say where their expected value comes from after FI asked "
+                              "a model once (%s): going on by itself; each is marked %r in the evidence", len(names),
+                              listed, _accepted.NOT_CONFIRMED)
+            print(f"[FI] {len(names)} check(s) do not say where their expected value comes from, and FI could not find "
+                  f"it ({listed}). Nothing to do: FI goes on, and the result says these checks are not confirmed.")
+            summary = f"FI went on by itself with {listed}: no source could be found ({_accepted.NOT_CONFIRMED})"
+        else:
+            self._log.warning("[plan] going on with %d check(s) whose expected value has no stated source (%s): %s chose "
+                              "to go on (%s); each is marked %r in the evidence", len(names), listed, choice.get("by"),
+                              choice.get("via"), _accepted.NOT_CONFIRMED)
+            print(f"[FI] going on with {len(names)} check(s) whose expected value has no stated source ({listed}), as "
+                  f"{choice.get('by')} chose; the result says their source is not confirmed")
+            summary = f"{choice.get('by')} chose to go on with {listed} as they are ({_accepted.NOT_CONFIRMED})"
         self._audit_check("oracle_sources", self.quest_root / "needs" / _accepted.ACCEPTED_NAME,
-                          status="accepted_without_source",
-                          summary=f"{choice.get('by')} chose to go on with {listed} as they are ({_accepted.NOT_CONFIRMED})",
-                          problems=names)
+                          status="accepted_without_source", summary=summary, problems=names)
 
     def _fill_request(self, named: list[tuple[str, str]], missing: list[str]) -> str:
         """The one request FI makes of the plan step before it stops for the checks' sources: fill in exactly what is
@@ -5589,6 +5472,8 @@ class Engine:
             except OSError as e:
                 self._log.warning("[plan] couldn't record that FI asked for the checks' sources: %r", e)
 
+        # The plan step fills it in (never the model named for `oracle_review`: that one rechecks the expected values
+        # later, and must not be the one that wrote their sources).
         try:
             await self._rewrite_plan(self._fill_request(named, missing), path, by="engine")
         except _ModelAnswerProblem as e:
@@ -5870,7 +5755,8 @@ class Engine:
         self._log.info("[plan] the model corrected the plan's design block (asked once, for the block alone)")
         return candidate, "", True
 
-    async def _rewrite_plan(self, request: str, path: Path, *, by: str = "request") -> dict[str, Any]:
+    async def _rewrite_plan(self, request: str, path: Path, *, by: str = "request",
+                            node: str = "plan_revise") -> dict[str, Any]:
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
         prompt = self._prompts["plan_revise"].substitute(
@@ -5884,7 +5770,7 @@ class Engine:
                     f"\n\n## Your last reply could not be used\nThe design block: {why}. "
                     "Return the whole file again, with that fixed.\n" if why else ""
                 ),
-                node="plan_revise",
+                node=node,
             )
             revised = _plan.strip_outer_fence(reply)
             # The block alone is asked for at most once, after the first answer: at most two calls in all.
@@ -7992,10 +7878,10 @@ class Engine:
         gone_on = self._not_confirmed_names(state, protocol)
         if gone_on:
             chosen = _accepted.accepted(self.quest_root) or {}
-            who = sorted({str(((chosen.get("chosen") or {}).get(" ".join(n.split()).lower()) or {}).get("by")
-                              or chosen.get("by")) for n in gone_on})
+            who = sorted({_accepted.who_text(((chosen.get("chosen") or {}).get(" ".join(n.split()).lower()) or {})
+                                             .get("by") or chosen.get("by")) for n in gone_on})
             unsourced_note = (f"; the checks {', '.join(repr(n) for n in gone_on)} say nowhere where their expected "
-                              f"value comes from ({_accepted.NOT_CONFIRMED}): {' and '.join(who)} chose to go on "
+                              f"value comes from ({_accepted.NOT_CONFIRMED}): {' and '.join(who)} went on "
                               "without one")
         try:
             filled = json.loads((self.fi_dir / _FILLED_AFTER_READ).read_text(encoding="utf-8")).get("checks") or []
@@ -8719,7 +8605,8 @@ class Engine:
         out = []
         for oracle, why in pairs:
             who = _accepted.chose(self.quest_root, oracle)
-            out.append(f"{why} ({_accepted.NOT_CONFIRMED}: {who} chose to go on without one)" if who else why)
+            out.append(f"{why} ({_accepted.NOT_CONFIRMED}: {_accepted.who_text(who)} went on without one)" if who
+                       else why)
         return out + extra
 
     def _unsourced_oracles(self, state: QuestState, protocol: Any) -> tuple[list[tuple[dict[str, Any], str]], list[str]]:
@@ -9597,6 +9484,14 @@ class Engine:
                 state, py, seed_path, oracles, run_oracles, attempts[-1], looked, protocol=protocol, timeout=timeout,
                 case_env=dict(_replicate_env(exec_env, 0, stride)))
             self_check_calls, self_check_runs = self_check_calls + calls, self_check_runs + runs
+            # A check FI's own look found wrong, with a value worked out independently of the measurement (the plan's
+            # own arithmetic, or another model that never saw the measured value): FI corrects the plan's expected value
+            # itself (never to the measured value, never its tolerance) and measures the checks again.
+            corrected = self._correct_expected_values(attempts[-1]["judged"], oracles)
+            if corrected:
+                looked.difference_update(corrected)
+                attempts[-1]["corrected"] = corrected
+                continue
             disputed = [n for n in self._oracle_proposals if n in self._oracle_disputed]
             # Not the script's to fix either: a check whose tolerance FI found tighter than its method's error or noise.
             aside = [n for n in self._oracle_set_aside if n not in disputed]
@@ -9666,10 +9561,16 @@ class Engine:
         go_on_checks, go_on_why_not = (_accepted.offer(found, run_oracles, attempts[-1].get("judged") or [])
                                        if found else ([], ""))
         version = self._measuring_code_version(seed_path)
-        if found and not went_on and go_on_checks and self._goes_on_by_itself():
-            # An exploration quest goes on by itself: the same gap a person's choice leaves, recorded as automatic.
+        if found and not went_on and self._goes_on_by_itself():
+            # Whether a check is right is not a question a person is asked: when FI could neither fix the simulation
+            # nor correct the check from an independent value, it goes on by itself with each failed check marked
+            # unconfirmed (one that measured nothing too), recorded as automatic and bound, as a person's choice was, to
+            # the check and to this version of the code. The evidence keeps the result below "independently validated"
+            # and the paper says so: nothing about the check is relaxed.
             went_on = [{**c, "by": _accepted.AUTOMATIC, "via": _accepted.AUTOMATIC, "script": self._rel_to_quest(seed_path),
-                        "script_version": version} for c in go_on_checks]
+                        "script_version": version}
+                       for c in (go_on_checks or _accepted.went_on_entries(found, run_oracles,
+                                                                           attempts[-1].get("judged") or []))]
         status = ("ok" if not found else "warned" if self.config.engine.oracle_check == "warn"
                   else _accepted.WENT_ON if went_on else "stopped")
         proposed = list(self._oracle_proposals.values())
@@ -9689,6 +9590,23 @@ class Engine:
             self._log.warning("[oracle] %s", warning)
         aside_failing = [n for n in self._oracle_set_aside if found and n not in disputed_failing and any(
             j.get("name") == n and j.get("passed_by_engine") is False for j in attempts[-1].get("judged") or [])]
+        for duplicate in _oracle.duplicate_names(oracles, {"checks": attempts[-1].get("checks") or []}):
+            self._log.warning("[oracle] %s", duplicate)
+        # Which side FI's own look points to, and why, in a scientist's words (core/oracle_card.py): recorded with the
+        # automatic decision and said in the console; the numbers stay in the record and run.log.
+        explained: dict[str, str] = {}
+        if found:
+            try:
+                card = _oracle_card.build(
+                    quest_id=self.quest_id, quest_root=self.quest_root, script=seed_path, found=found, oracles=oracles,
+                    judged=attempts[-1].get("judged") or [], attempts=attempts, proposals=proposed,
+                    disputed=disputed_failing, trial=bool(getattr(self, "_trial_mode", False)),
+                    frozen=_frozen.load(self.quest_root) is not None,
+                    research=getattr(self.config, "rigor_profile", "default") == "research",
+                    repairs=budget, stderr_tail=stderr_tail)
+                explained = {"leaning": str(card.get("leaning") or ""), "why": str(card.get("why") or "")}
+            except Exception as e:  # noqa: BLE001 -- an explanation that cannot be made never stops a quest
+                self._log.warning("[oracle] could not say why the checks did not pass (%r); run.log has them", e)
         self._oracle_record({
             "status": status, "judged_by": "engine", "attempts": attempts, "problems": found,
             **({"contract": "trial"} if getattr(self, "_trial_mode", False) else {}),
@@ -9702,6 +9620,9 @@ class Engine:
                if self_check_calls or self_check_runs else {}),
             **({"went_on": went_on, "summary": "; ".join(_accepted.gap(e) for e in went_on)} if status == _accepted.WENT_ON
                else {}),
+            **({"explained": explained} if explained else {}),
+            **({"corrected": self._corrections_read()} if self._corrections_read() else {}),
+            **({"fitted_to_test_run": fitted} if (fitted := self._fitted_to_test_run(oracles)) else {}),
             **({"go_on": {"offered": bool(go_on_checks), "why_not": go_on_why_not, "checks": go_on_checks,
                           "script": self._rel_to_quest(seed_path), "script_version": version}}
                if status == "stopped" else {}),
@@ -9728,8 +9649,11 @@ class Engine:
                 sentence = _accepted.gap(entry)
                 self._log.warning("[oracle] going on: %s (the check stays marked %s; the result does not count as checked "
                                   "against known answers)", sentence, _accepted.UNCONFIRMED)
-                print(f"[FI] going on although a known-answer check failed: {sentence}. The result says so; "
-                      "needs/ORACLE_CHECK.json has the numbers.")
+            names = ", ".join(repr(str(e.get("name"))) for e in went_on if e.get("name")) or "the known-answer checks"
+            why = explained.get("why") or ""
+            print(f"[FI] FI could not confirm {names}" + (f" ({why})" if why else "") + ", so the result counts as "
+                  "exploratory, not as checked against a known answer; the paper says so. Nothing to do (details: "
+                  "needs/ORACLE_CHECK.json and run.log).")
             return new_code
         if self.config.engine.oracle_check == "warn":
             self._log.warning(
@@ -9738,27 +9662,130 @@ class Engine:
                 "the check counts as failed);" if disputed_failing else "",
             )
             return new_code
-        all_disputed = (bool(disputed_failing or aside_failing)
-                        and not _oracle.undisputed(found, disputed_failing + aside_failing))
-        for duplicate in _oracle.duplicate_names(oracles, {"checks": attempts[-1].get("checks") or []}):
-            self._log.warning("[oracle] %s", duplicate)
-        self._pause_for_oracle(
-            found, seed_path, list(self._oracle_proposals.values()), attempts[-1].get("judged") or [], oracles,
-            kept=("as_it_was" if not any(a.get("repair") == "applied" for a in attempts) else "for_disputed")
-            if all_disputed else None,
-            attempts=attempts, disputed=disputed_failing, stderr_tail=stderr_tail,
-            go_on={"offered": bool(go_on_checks), "why_not": go_on_why_not, "checks": go_on_checks,
-                   "script": self._rel_to_quest(seed_path), "script_version": version},
-        )
-        return new_code  # not reached: the pause exits the run
+        # Not reached with the checks on: the gate goes on by itself above (``_goes_on_by_itself``).
+        return new_code
 
     def _goes_on_by_itself(self) -> bool:
-        """Whether a known-answer check that was measured and failed (after FI's repairs) lets the quest go on by itself,
-        recorded as automatic: an exploration (``result_use`` explore, said or unsaid) that is not set up for research.
-        A research quest, and one whose result is for research or a decision, stops for a person."""
-        return (self.config.engine.oracle_check == "block"
-                and getattr(self.config, "rigor_profile", "default") != "research"
-                and getattr(self.config, "effective_result_use", "") == "explore")
+        """Whether a known-answer check that still fails after FI's repairs and corrections lets the quest go on by
+        itself, recorded as automatic: always, with the checks on (``engine.oracle_check: block``). Whether the simulation
+        or the check is wrong is FI's to work out, never a person's; what FI could not confirm is marked unconfirmed,
+        so the result counts as exploratory whatever the quest was set up for (a research quest included)."""
+        return self.config.engine.oracle_check == "block"
+
+    def _fitted_to_test_run(self, oracles: list[dict[str, Any]]) -> list[str]:
+        """The checks the plan changed after FI's test run so that they pass on its own numbers, still in the protocol."""
+        try:
+            fitted = json.loads(self._dry_run_path().read_text(encoding="utf-8")).get("fitted") or []
+        except (OSError, ValueError, AttributeError):
+            return []
+        names = {str(o.get("name") or "").strip() for o in oracles}
+        return sorted(str(n) for n in fitted if str(n) in names)
+
+    def _unconfirmed_checks(self) -> set[str]:
+        """The known-answer checks this quest could not confirm: gone on with failed, disputed, set aside as wrong, or
+        fitted to the test run. The improve step never optimises against one of them."""
+        record = self._oracle_record_read() or {}
+        out = {str(e.get("name")) for e in record.get("went_on") or [] if isinstance(e, dict) and e.get("name")}
+        out |= {str(n) for n in record.get("disputed") or []}
+        out |= {str(n) for n in (record.get("set_aside") or {})}
+        out |= {str(n) for n in record.get("fitted_to_test_run") or []}
+        return out
+
+    _CORRECTIONS = "oracle_corrections.json"
+
+    def _corrections_read(self) -> dict[str, Any]:
+        try:
+            data = json.loads((self.fi_dir / self._CORRECTIONS).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _independent_value(proposal: dict[str, Any]) -> bool:
+        """Whether a proposed expected value was worked out independently of the measurement and of the plan's own model:
+        the plan's own arithmetic worked out by FI, or another model that never saw the measured value and whose own
+        working adds up. A repair's proposal (it saw the run) and the plan's model asked again are never used."""
+        if proposal.get("source") == "arithmetic":
+            return True
+        # A record that does not say which model answered (one an earlier FI wrote) is not counted as independent.
+        return (proposal.get("source") == "recompute" and proposal.get("same_model") is False
+                and not proposal.get("how_slip"))
+
+    def _correct_expected_values(self, judged: list[dict[str, Any]], oracles: list[dict[str, Any]]) -> list[str]:
+        """Correct, in ``plan.md``, the expected value of each failing check FI's own look found wrong, to a value worked
+        out independently of the measurement (:meth:`_independent_value`). Only the ``expected`` number changes (never
+        the tolerance, the case or the measure), only before the protocol is frozen, and each check at most once per
+        quest. Every correction is a plan version by the engine, an audit event, a line in run.log and the console, and a
+        record (``.fi/oracle_corrections.json``) the to-do list and the freeze read. Returns the checks corrected."""
+        if _frozen.load(self.quest_root) is not None:
+            return []
+        path = _plan.plan_path(self.quest_root)
+        if not path.is_file():
+            return []
+        done = self._corrections_read()
+        failing = {str(j.get("name") or "").strip() for j in judged
+                   if j.get("passed_by_engine") is False and _oracle_triage.num(j.get("value")) is not None}
+        declared = {str(o.get("name") or "").strip(): o for o in oracles}
+        todo: dict[str, dict[str, Any]] = {}
+        for name, proposal in self._oracle_proposals.items():
+            value = _oracle_triage.num(proposal.get("expected"))
+            if (name in failing and name in declared and name not in done and value is not None
+                    and self._independent_value(proposal)):
+                todo[name] = {**proposal, "expected": value}
+        if not todo:
+            return []
+        before: dict[str, Any] = {}
+
+        def change(block: dict[str, Any]) -> dict[str, Any] | None:
+            protocol = block.get("protocol")
+            rows = protocol.get("oracles") if isinstance(protocol, dict) else None
+            if not isinstance(rows, list):
+                return None
+            for row in rows:
+                name = str(row.get("name") or "").strip() if isinstance(row, dict) else ""
+                if name in todo:
+                    before[name] = row.get("expected")
+                    row["expected"] = todo[name]["expected"]  # the expected value only (tolerance, case, measure kept)
+                    # The plan keeps saying why the number is what it is: what FI changed, after the derivation.
+                    note = (f"(FI corrected the expected value from {before[name]} to "
+                            f"{_oracle.fmt_digits(todo[name]['expected'])}: {str(todo[name].get('reason') or '')[:200]})")
+                    reference = row.get("reference")
+                    row["reference"] = f"{reference} {note}".strip() if isinstance(reference, str) else note
+            return block if before else None
+
+        text = path.read_text(encoding="utf-8")
+        new = _plan.edit_design_block(text, change)
+        if new is None or not before:
+            return []
+        names = sorted(before)
+        why = {n: str(todo[n].get("reason") or "")[:300] for n in names}
+        note = "; ".join(f"FI corrected the expected value of '{n}' from {before[n]} to "
+                         f"{_oracle.fmt_digits(todo[n]['expected'])}: {why[n]}" for n in names)
+        path.write_text(new, encoding="utf-8")
+        _plan.record_version(self.quest_root, new, by="engine", note=note[:300])
+        self._note_engine_change(names, reason="FI corrected an expected value it worked out independently of the "
+                                               "measurement")
+        record = {**done}
+        for n in names:
+            record[n] = {"from": before[n], "to": todo[n]["expected"], "source": todo[n].get("source"),
+                         "why": why[n], "at": _frozen.now()}
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / self._CORRECTIONS).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[oracle] couldn't record the corrected expected values: %r", e)
+        self._audit_check("oracle_correction", path, status="corrected", summary=note[:400], problems=names)
+        for n in names:
+            # The check changed: what FI's look found about its old value no longer applies to it.
+            self._oracle_proposals.pop(n, None)
+            self._oracle_disputed.discard(n)
+            self._oracle_set_aside.pop(n, None)
+            self._oracle_noisy.discard(n)
+            self._log.warning("[oracle] corrected the expected value of %r: %s -> %s (%s); measuring the checks again",
+                              n, before[n], _oracle.fmt_digits(todo[n]["expected"]), why[n])
+            print(f"[FI] FI corrected an expected value the plan had worked out wrongly: '{n}' {before[n]} -> "
+                  f"{_oracle.fmt_digits(todo[n]['expected'])}, because {why[n][:1].lower() + why[n][1:]}")
+        return names
 
     def _rel_to_quest(self, path: Path) -> str:
         try:
@@ -9941,9 +9968,23 @@ class Engine:
             done["improve_rounds_used"] = spent
         why = self._improve_skip(state)
         protocol = _frozen.protocol_of(self.quest_root) or self._draft_protocol(state)
+        # A known-answer check FI could not confirm (its expected value may be the wrong one) is never optimised against:
+        # a change that moved the simulation towards it would bend correct code to a wrong number.
+        unconfirmed = self._unconfirmed_checks()
+        dropped: set[str] = set()
+        if unconfirmed and isinstance(protocol, dict) and isinstance(protocol.get("criteria"), list):
+            dropped = {str(c.get("name") or "") for c in protocol["criteria"]
+                       if isinstance(c, dict) and str(c.get("oracle") or "") in unconfirmed}
+            if dropped:
+                self._log.info("[improve] not optimising against the unconfirmed check(s) %s",
+                               ", ".join(repr(n) for n in sorted(unconfirmed)))
+                protocol = {**protocol, "criteria": [c for c in protocol["criteria"]
+                                                     if not (isinstance(c, dict) and str(c.get("name") or "") in dropped)]}
         if why is None and not (isinstance(protocol, dict) and _criteria.countable(protocol)):
-            why = "the plan has no check of correctness FI measures itself (`criteria` in the protocol)"
-        baseline = [r for r in last.get("criteria") or [] if isinstance(r, dict)]
+            why = ("every check of correctness it has rests on a known-answer check FI could not confirm" if dropped
+                   else "the plan has no check of correctness FI measures itself (`criteria` in the protocol)")
+        # (A criterion's row in the last run's record carries its name, not its check's.)
+        baseline = [r for r in last.get("criteria") or [] if isinstance(r, dict) and str(r.get("name") or "") not in dropped]
         if why is None and not _improve.counted(baseline):
             why = "no check of correctness was measured by FI in this run"
         if why is None and _improve.all_met(baseline):
@@ -10507,11 +10548,25 @@ class Engine:
                 continue
             looked.add(name)
             oracle = by_name[name]
+            slip = _oracle_triage.plan_slip(oracle)
+            if slip is not None:
+                # The plan's own working does not give the expected value it writes: the check is what is wrong, so
+                # the script is not rewritten towards it (it still fails; the card says why in plain words).
+                found = _oracle_triage.arithmetic_entry(oracle, slip)
+                entries.append(found)
+                self._oracle_set_aside[name] = found["cause"]["evidence"]
+                # The value the plan's own working gives: FI corrects the check to it (``_correct_expected_values``),
+                # for a check whose number is the quantity itself (never a violation formula, see ``correctable``).
+                if _oracle_triage.correctable(oracle):
+                    self._oracle_proposals.setdefault(name, _oracle_triage.arithmetic_proposal(oracle, slip))
+                self._log.warning("[oracle] %s", found["tried"])
             entry, called = await self._recompute_expected(state, oracle, value)
             calls += int(called)
             entries.append(entry)
-            if entry["verdict"] == "disputed":
-                self._oracle_proposals[name] = _oracle_triage.recompute_proposal(oracle, entry)
+            if entry["verdict"] == "disputed" and (self._oracle_proposals.get(name) or {}).get("source") != "arithmetic":
+                # (A value FI worked out from the plan's own arithmetic stays: it is deterministic, a model's is not.)
+                self._oracle_proposals[name] = {**_oracle_triage.recompute_proposal(oracle, entry),
+                                                **({"how_slip": True} if entry.get("how_slip") else {})}
                 self._oracle_disputed.add(name)
                 self._log.warning(
                     "[oracle] the expected value of %r is disputed: worked out again without the measured value it is %s "
@@ -10697,24 +10752,31 @@ class Engine:
             self._log.warning("[oracle] couldn't record the oracles added to the plan: %r", e)
 
     def _hold_added_oracles(self) -> None:
-        """With ``pauses.plan: ask``, stop again for the person to read the oracles the engine added to the plan after
-        they read it: the protocol is frozen next, and the record says a person approved it. Once per addition (a
-        later addition stops again); a no-op once the protocol is frozen, or when the plan stop is off (the freeze
-        record then says nobody approved those oracles)."""
+        """With ``pauses.plan: ask``, say (once per addition, without stopping) which checks against known answers the
+        engine added to the plan, changed or removed after the person read it. Judging a check's expected value or
+        tolerance is not something a person is asked to do: FI's own look checks them when they run (another model
+        works each expected value out again without seeing the result, core/oracle_triage.py), and a check that then
+        fails is repaired, corrected or gone on with marked unconfirmed. The record stays ``shown: false``, so the freeze
+        record never says a person approved a check they were not shown. A no-op once the protocol is frozen, or when
+        the plan stop is off."""
         if self.config.pauses.plan != "ask" or _frozen.load(self.quest_root) is not None:
             return
         added = self._oracles_added_read()
-        if added is None or added.get("shown") or not (added.get("oracles") or added.get("removed")):
+        if added is None or added.get("shown") or added.get("told") or not (added.get("oracles") or added.get("removed")):
             return
         # Only the added checks still in the plan: one the person renamed or removed at an earlier stop they have seen.
         planned = self._planned_oracles()
         still = [str(n) for n in added.get("oracles") or [] if str(n) in planned]
-        # A check the engine's request removed is named too: removing a failing check is a change the person must see.
         removed = [str(n) for n in added.get("removed") or [] if str(n) not in planned]
-        # Written before the stop: the stop never returns, and the resume must go on to the freeze.
-        self._oracles_added_write({**added, "oracles": still, "removed": removed, "shown": True})
+        self._oracles_added_write({**added, "oracles": still, "removed": removed, "told": True})
         if still or removed:
-            self._pause_for_plan(added=still + [f"{n} (removed)" for n in removed], reason=str(added.get("reason") or ""))
+            named = ", ".join([*(f"'{n}'" for n in still), *(f"'{n}' (removed)" for n in removed)])
+            self._log.info("[plan] after the plan was read, FI added or changed these checks against known answers: "
+                           "%s%s; not stopping for them (FI checks their expected values itself when they run)",
+                           named, f" ({added['reason']})" if added.get("reason") else "")
+            print(f"[FI] FI added or changed {len(still) + len(removed)} check(s) against known answers after you read "
+                  f"the plan ({named}). Nothing to do: FI checks their expected values itself when they run; plan.md "
+                  "lists them.")
 
     # --- the checks against known answers, before anything runs (core/oracle_forms.py) ---------------------------------
 
@@ -11082,9 +11144,11 @@ class Engine:
         """The oracle gate's first measurement, before the protocol is frozen, is a test run of the checks: a number whose
         size says the plan and the simulation mean different things by a check (:func:`core.oracle_forms.mismatch`) sends
         ONE targeted request to the plan (never a change to an expected value made here), and the checks it changes or
-        removes are recorded as the engine's, so a person reads them before the freeze (``pauses.plan: ask``, which
-        research sets). ``True`` when the plan's checks changed and the gate should measure again. Asked at most once
-        per quest."""
+        removes are recorded as the engine's (the freeze says nobody approved them). A changed check that then passes
+        on the test run's own numbers was fitted to what it was meant to check: it is recorded
+        (``.fi/oracle_dry_run.json`` ``fitted``, ``needs/ORACLE_CHECK.json`` ``fitted_to_test_run``), the evidence keeps
+        a gap for it, and the improve step never optimises against it. ``True`` when the plan's checks changed and the
+        gate should measure again. Asked at most once per quest."""
         if self._dry_run_path().is_file():
             return False
         found = _forms.mismatches(oracles, record.get("checks"))
@@ -11113,6 +11177,15 @@ class Engine:
                     if isinstance(c, dict) and c.get("measured_by") == "engine"}
         fits = [n for n in changed
                 if _forms.passes_on(after[n], returned.get(n), (before.get(n) or {}).get("case")) is True]
+        if fits:
+            try:
+                kept = json.loads(self._dry_run_path().read_text(encoding="utf-8"))
+                self._dry_run_path().write_text(json.dumps({**kept, "fitted": sorted(fits)}, indent=2) + "\n",
+                                                encoding="utf-8")
+            except (OSError, ValueError) as e:
+                self._log.warning("[oracle] couldn't record the checks fitted to the test run: %r", e)
+            self._log.warning("[oracle] after the test run, %s pass on the test run's own numbers: they count as "
+                              "unconfirmed", ", ".join(repr(n) for n in fits))
         path = _plan.plan_path(self.quest_root)
         try:
             self._write_plan_section(path, [
@@ -11232,64 +11305,6 @@ class Engine:
             str(parsed.get("patch_summary") or "no summary")[:160],
         )
         return new_code, False, "applied"
-
-    def _pause_for_oracle(
-        self, found: list[str], seed_path: Path, proposed: list[dict[str, Any]] | None = None,
-        judged: list[dict[str, Any]] | None = None, oracles: list[dict[str, Any]] | None = None, kept: str | None = None,
-        *, attempts: list[dict[str, Any]] | None = None, disputed: list[str] | None = None, stderr_tail: str = "",
-        go_on: dict[str, Any] | None = None,
-    ) -> None:
-        """Stop before the main sweep: the known-answer checks (oracles) did not pass after the repairs. The stop shows
-        the "why it stopped" card (core/oracle_card.py): each check's expected value and where it comes from, the
-        measured value and who measured it, the tolerance and the gap, the case, where in the script the number is
-        computed, the most likely causes from what FI already has, what FI tried, and two or three ways on. When a repair
-        judged a check itself wrong, its proposal is shown beside the measured value, and whether accepting it would
-        simply let this run pass -- the person decides; nothing here applies it. ``kept``: every check still failing is
-        one a repair called wrong, so the script was not rewritten towards it (``as_it_was``: no repair changed it at
-        all; ``for_disputed``: a repair fixed something else)."""
-        frozen = _frozen.load(self.quest_root) is not None
-        research = getattr(self.config, "rigor_profile", "default") == "research"
-        oracles = list(oracles or [])
-        try:
-            card: dict[str, Any] | None = _oracle_card.build(
-                quest_id=self.quest_id, quest_root=self.quest_root, script=seed_path, found=found, oracles=oracles,
-                judged=judged, attempts=attempts, proposals=proposed, disputed=disputed,
-                trial=bool(getattr(self, "_trial_mode", False)), frozen=frozen, research=research,
-                # A quest the interview wrote holds its checks' settings to what was approved (core/plan_settings.py):
-                # changing `engine.oracle_check` there needs `--update`, or the resume stops again to ask.
-                interview_made=(self.fi_dir / _plan_settings.NAME).is_file(),
-                repairs=int(self.config.engine.oracle_repair_attempts), kept=kept, stderr_tail=stderr_tail,
-                go_on=go_on,
-            )
-        except Exception as e:  # noqa: BLE001 -- the card is what a person reads; the stop must happen without it too
-            self._log.warning("[oracle] could not build the card for this stop (%r); NEXT_STEP.md lists the problems", e)
-            card = None
-        statuses = {c["status"] for c in (card or {}).get("checks") or []}
-        headline = (
-            "the plan has no known-answer check to judge the script by" if not oracles else
-            "a known-answer check has no number to compare with" if "cannot_judge" in statuses else
-            "the known-answer checks could not be measured" if statuses and "failed" not in statuses else
-            "the script has not passed its known-answer checks"
-        )
-        self._pause_for_human(
-            kind="oracle",
-            interaction="supply",
-            headline=headline,
-            # What each check found, as the record says it; the card above is what a person reads.
-            steps=["The script has not been shown to be right, so its main run has not started: " + "; ".join(found) + "."],
-            alternatives=[f"{a['label']}: {a['detail']}" for a in card["actions"] if a.get("id") != "resume"] if card else (
-                # Without a card: the one-step way on when a check was measured and failed, then what holds after the
-                # freeze (the plan no longer changes a check from here).
-                ([f"Mark the failed check unconfirmed and go on, with your name: `python launch.py --accept-checks "
-                  f"{self.quest_id} --approve-as <you>`."] if (go_on or {}).get("offered") else [])
-                + ([_todo.research_instead("oracle", frozen=True)] if frozen and research else [])) or None,
-            card=card,
-            payload={
-                "oracle_stage": True, "quest_id": self.quest_id, "problems": found,
-                "plan_file": str(_plan.plan_path(self.quest_root)),
-                **({"proposed_changes": list(proposed)} if proposed else {}),
-            },
-        )
 
     def _pause_for_protocol(self, mismatches: list[Any], deps: list[str]) -> None:
         """Stop for the person: the script still contradicts the plan after the repairs. They edit ``plan.md`` (the
@@ -14174,10 +14189,19 @@ class Engine:
             self.quest_root, self._not_confirmed_names(state, self._protocol_block(state)))
         if not_confirmed:
             evidence_note = f"{evidence_note}\n\n{not_confirmed}".strip()
-        # A known-answer check failed and the quest went on (a person's choice, or automatic for an exploration).
+        # A known-answer check failed and the quest went on (FI's automatic decision, or a person's earlier choice).
         went_on_note = _accepted.failing_disclosure(self._oracle_record_read())
         if went_on_note:
             evidence_note = f"{evidence_note}\n\n{went_on_note}".strip()
+        # An expected value FI corrected in the plan (from the plan's own arithmetic or another model's, never from the
+        # measurement): the paper says so where the checks are described.
+        corrected = self._corrections_read()
+        if corrected:
+            listed = "; ".join(f"'{n}' from {c.get('from')} to {c.get('to')} ({c.get('why')})"
+                               for n, c in corrected.items() if isinstance(c, dict))
+            evidence_note = (f"{evidence_note}\n\nFI corrected the expected value of these known-answer checks in the "
+                             f"plan before the run, from a value worked out independently of the measurement: {listed}. "
+                             "Say so where the checks are described.").strip()
         # The model was changed during the quest: the paper says more than one model produced it.
         try:
             models_note = _plan_settings.model_disclosure(_audit_log.read(self.audit.path))
@@ -19885,6 +19909,9 @@ _REFERENCE_FORMS = (
 
 # Written once FI has asked the plan step to fill in where the checks' expected values come from (``_fill_plan_sources``).
 _FILL_MARKER = "plan_sources_asked.json"
+#: What a plan with no way to judge whether the code got better means, in one line (never a stop of its own).
+_NO_CRITERIA_LINE = ("The plan has no measure of whether the code got better (FI looked in the literature once and found "
+                     "none), so FI will not try to improve the simulation step by step. Nothing to do: the quest goes on.")
 # The checks whose source that rewrite wrote after the person had read the plan (the freeze record says so).
 _FILLED_AFTER_READ = "plan_sources_filled.json"
 # What a rewrite that fills in the checks' sources may change: where each value comes from and its kind (under any of
