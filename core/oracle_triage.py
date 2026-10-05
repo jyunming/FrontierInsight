@@ -658,6 +658,18 @@ _APPROX_SPLIT = _re.compile(r"(=>|⇒|≈|~=|(?<![<>=!~\w])~(?!=)|\bapprox(?:ima
                             _re.IGNORECASE)
 
 
+BLIND_REFERENCE = ("not shown on purpose: work the value out yourself from the check's statement, case and measure "
+                   "and the physics or mathematics they name, so that your answer is independent of the plan's own "
+                   "working")
+
+
+def blind(oracle: dict[str, Any]) -> dict[str, Any]:
+    """``oracle`` as a second source sees it when FI checks the plan's own arithmetic: its statement, case and measure,
+    never the plan's derivation (a model shown the working may repeat the very step the calculator misread, and would
+    then "confirm" it). The expected value is kept for the verdict; the prompt never shows it either way."""
+    return {**oracle, "reference": BLIND_REFERENCE}
+
+
 def plan_slip(oracle: dict[str, Any]) -> dict[str, Any] | None:
     """The slip in the arithmetic of ``oracle``'s own derivation that produces its expected value (:func:`arithmetic_slip`
     tied to the check's ``expected``), or ``None``."""
@@ -678,12 +690,13 @@ def correctable(oracle: dict[str, Any]) -> bool:
 def arithmetic_entry(oracle: dict[str, Any], slip: dict[str, Any], *, where: str = "plan") -> dict[str, Any]:
     """A triage entry for a slip in the plan's own working (``where`` ``plan``): it points to the check."""
     name = str(oracle.get("name") or "").strip()
-    said = (f"the plan's own working for the expected value does not add up: {slip['expression']} comes to "
-            f"{_fmt(slip['computes'])}, not the {_fmt(slip['written'])} it writes")
+    said = (f"the plan's own working, {slip['expression']}, gives {_fmt(slip['computes'])}, not the "
+            f"{_fmt(slip['written'])} it writes, so FI does not rely on this check")
     return {"check": name, "kind": "arithmetic", "verdict": "slip", "points_to": "check", **slip, "where": where,
             "tried": f"FI worked out the arithmetic in the plan's derivation of `{name}` itself: {said}.",
-            "cause": {"text": f"The expected value of `{name}` is a slip in the plan's arithmetic, not a fault of the "
-                              "simulation.",
+            "cause": {"text": f"The expected value of `{name}` looks like a slip in the plan's arithmetic, so FI does "
+                              "not rely on this check (FI's calculator can misread a correct derivation, so it is "
+                              "never rewritten on this alone).",
                       "evidence": said[0].upper() + said[1:] + "."}}
 
 

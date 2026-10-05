@@ -620,6 +620,12 @@ _SURVEY_WRITE_NOTE = (
 _OUTSIDE_WORK_STEPS = frozenset({"execute", "execute_reflect", "improve"})
 
 
+def _lower_first(text: str) -> str:
+    """``text`` with its first letter lowered for use mid-sentence, unless the first word is a name or an acronym
+    (``FI worked out ...`` stays ``FI``)."""
+    return text if text[1:2].isupper() else text[:1].lower() + text[1:]
+
+
 class Engine:
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
@@ -9529,7 +9535,7 @@ class Engine:
             judged_now = attempts[-1]["judged"]
             if not to_fix:
                 self._log.warning(
-                    "[oracle] the script is kept as it is: %s; FI corrects the check from an independent value, or "
+                    "[oracle] the script is kept as it is: %s; FI corrects the check only where two independent workings agree, or "
                     "goes on with it marked unconfirmed",
                     "; ".join(
                         [f"the check {n!r} is disputed ({'FI worked its expected value out again' if (self._oracle_proposals.get(n) or {}).get('source') == 'recompute' else 'the repair says it is wrong'})"
@@ -9824,7 +9830,8 @@ class Engine:
                     if isinstance(j, dict) and j.get("name") and j.get("passed_by_engine") is False}
         # A check corrected to another model's value: nothing independent confirms it (core/evidence.py says so too).
         out |= {str(n) for n, c in (record.get("corrected") or {}).items()
-                if isinstance(c, dict) and c.get("source") == "recompute"}
+                if isinstance(c, dict) and (c.get("source") == "recompute"
+                                            or (c.get("source") == "arithmetic" and not c.get("confirmed_by")))}
         return out
 
     _CORRECTIONS = "oracle_corrections.json"
@@ -9849,7 +9856,7 @@ class Engine:
 
     @staticmethod
     def _may_correct(proposal: dict[str, Any]) -> bool:
-        """Whether FI may rewrite a check's expected value: only when TWO workings that share nothing agree on it -- the
+        """Whether FI may rewrite a check's expected value: only when TWO workings independent of each other agree on it -- the
         plan's own arithmetic worked out by FI AND another model that never saw the measured value (``confirmed_by``,
         :meth:`_second_source`). The arithmetic alone can misread a correct derivation (a truncated series written with
         ``=``, a function with a peak inside the range of its rounded constants), and one model alone can be wrong: on
@@ -9859,6 +9866,19 @@ class Engine:
                 and confirm.get("source") == "recompute" and _oracle_triage.num(confirm.get("value")) is not None)
 
     @staticmethod
+    def _still_holds(oracle: dict[str, Any], proposal: dict[str, Any]) -> bool:
+        """The correction worked out again against the check as it is NOW (never trusting stored fields alone): the
+        plan's current derivation still has the slip and gives the proposed value, and the second source's value lies
+        within the check's own tolerance of it."""
+        slip = _oracle_triage.plan_slip(oracle)
+        value = _oracle_triage.num(proposal.get("expected"))
+        second = _oracle_triage.num((proposal.get("confirmed_by") or {}).get("value"))
+        if slip is None or value is None or second is None:
+            return False
+        _expected, limit, _mode = _oracle.limit_of({**oracle, "expected": value})
+        return limit is not None and abs(slip["computes"] - value) <= limit and abs(second - value) <= limit
+
+    @staticmethod
     def _second_source(oracle: dict[str, Any], proposal: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any] | None:
         """The independent recheck (``entry``) as the second source for the plan's own arithmetic (``proposal``): another
         model (never the plan's own; :meth:`_recompute_expected` fails closed), whose own working adds up, that got the
@@ -9866,8 +9886,9 @@ class Engine:
         recomputed = _oracle_triage.num(entry.get("recomputed"))
         value = _oracle_triage.num(proposal.get("expected"))
         if (recomputed is None or value is None or entry.get("same_model") is not False or entry.get("how_slip")
-                or proposal.get("source") != "arithmetic"):
-            return None
+                or proposal.get("source") != "arithmetic" or entry.get("verdict") == "agrees"
+                or not entry.get("blind")):
+            return None  # agreeing with what the plan wrote, or shown the plan's working, confirms nothing
         _expected, limit, _mode = _oracle.limit_of({**oracle, "expected": value})
         if limit is None or abs(recomputed - value) > limit:
             return None
@@ -9892,7 +9913,7 @@ class Engine:
         for name, proposal in self._oracle_proposals.items():
             value = _oracle_triage.num(proposal.get("expected"))
             if (name in failing and name in declared and name not in done and value is not None
-                    and self._may_correct(proposal)):
+                    and self._may_correct(proposal) and self._still_holds(declared[name], proposal)):
                 todo[name] = {**proposal, "expected": value}
         if not todo:
             return []
@@ -9962,7 +9983,7 @@ class Engine:
                               n, before[n], _oracle.fmt_digits(todo[n]["expected"]), why[n])
             second = todo[n].get("confirmed_by") or {}
             print(f"[FI] FI corrected an expected value the plan had worked out wrongly: '{n}' {before[n]} -> "
-                  f"{_oracle.fmt_digits(todo[n]['expected'])}, because {why[n][:1].lower() + why[n][1:]} Another model "
+                  f"{_oracle.fmt_digits(todo[n]['expected'])}, because {_lower_first(why[n])} Another model "
                   f"({second.get('model') or 'not the one that wrote the plan'}), never shown the measured value, got "
                   f"{_oracle.fmt_digits(second.get('value'))} too.")
             if record[n].get("agrees_with_measurement"):
@@ -10698,7 +10719,8 @@ class Engine:
             name = str((proposal or {}).get("name") or "").strip() if isinstance(proposal, dict) else ""
             if not name or name not in now or prints.get(name) != now[name]:
                 continue
-            self._oracle_proposals[name] = dict(proposal)
+            # Only the dispute comes back; a confirmation is never taken from a file (the next look confirms afresh).
+            self._oracle_proposals[name] = {k: v for k, v in proposal.items() if k != "confirmed_by"}
             if name in disputed:
                 self._oracle_disputed.add(name)
                 self._log.info("[oracle] kept from the last run: the expected value of %r is disputed (proposed %s); the "
@@ -10745,10 +10767,16 @@ class Engine:
                 if _oracle_triage.correctable(oracle):
                     self._oracle_proposals.setdefault(name, _oracle_triage.arithmetic_proposal(oracle, slip))
                 self._log.warning("[oracle] %s", found["tried"])
-            entry, called = await self._recompute_expected(state, oracle, value)
+            arith = self._oracle_proposals.get(name)
+            if (arith or {}).get("source") == "arithmetic":
+                arith.pop("confirmed_by", None)  # confirmed afresh by this look, or not at all
+            # With a slip in the plan's working, the recheck never sees that working (it could repeat the misread step).
+            entry, called = await self._recompute_expected(
+                state, _oracle_triage.blind(oracle) if slip is not None else oracle, value)
+            if slip is not None:
+                entry = {**entry, "blind": True}
             calls += int(called)
             entries.append(entry)
-            arith = self._oracle_proposals.get(name)
             if (arith or {}).get("source") == "arithmetic" and (second := self._second_source(oracle, arith, entry)):
                 # Two workings that share nothing give the same value: only then may FI correct the check.
                 arith["confirmed_by"] = second
@@ -14418,7 +14446,8 @@ class Engine:
             listed = "; ".join(f"'{n}' from {c.get('from')} to {c.get('to')} ({c.get('why')})"
                                for n, c in corrected.items() if isinstance(c, dict))
             evidence_note = (f"{evidence_note}\n\nFI corrected the expected value of these known-answer checks in the "
-                             f"plan before the run, from a value worked out independently of the measurement: {listed}. "
+                             f"plan before the run, to a value two independent workings agreed on (the plan's own arithmetic and "
+                             f"another model never shown the measurement): {listed}. "
                              "Say so where the checks are described.").strip()
         # The model was changed during the quest: the paper says more than one model produced it.
         try:

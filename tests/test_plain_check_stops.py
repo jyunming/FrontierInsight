@@ -224,7 +224,8 @@ def _planned(eng: Engine) -> dict[str, Any]:
 
 def _confirmed(proposal: dict[str, Any], value: float = 2.367842, *, same_model: bool = False) -> dict[str, Any]:
     """``proposal`` (the plan's own arithmetic) with another model's blind recheck attached when it agrees."""
-    entry = oracle_triage.recompute_entry(EXACT_90, "disputed", value, MEASURED, "x", model="m2", same_model=same_model)
+    entry = {**oracle_triage.recompute_entry(EXACT_90, "disputed", value, MEASURED, "x", model="m2",
+                                             same_model=same_model), "blind": True}
     second = Engine._second_source(EXACT_90, proposal, entry)  # noqa: SLF001
     return {**proposal, **({"confirmed_by": second} if second else {})}
 
@@ -534,10 +535,11 @@ def test_a_failing_check_under_warn_and_a_check_corrected_by_another_model_are_u
     (eng.quest_root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
         "status": "warned", "attempts": [{"judged": [{"name": "warned_check", "passed_by_engine": False},
                                                      {"name": "fine", "passed_by_engine": True}]}],
-        "corrected": {"by_model": {"source": "recompute"}, "by_arithmetic": {"source": "arithmetic"}}}),
+        "corrected": {"by_model": {"source": "recompute"}, "by_arithmetic": {"source": "arithmetic"},
+                      "by_both": {"source": "arithmetic", "confirmed_by": {"source": "recompute", "value": 1.0}}}}),
         encoding="utf-8")
     out = eng._unconfirmed_checks()
-    assert {"warned_check", "by_model"} <= out and not ({"fine", "by_arithmetic"} & out)
+    assert {"warned_check", "by_model", "by_arithmetic"} <= out and not ({"fine", "by_both"} & out)
 
 
 def test_the_fill_report_asks_the_person_for_nothing() -> None:
@@ -685,3 +687,76 @@ def test_the_approx_45_degree_check_is_never_rewritten_its_measure_is_a_formula(
              "reference": "derivation: For A=45 deg, T/T0 = (2/pi)*ellipk(sin(pi/8)**2) approx 1.031"}
     assert oracle_triage.plan_slip(check) is not None, "the slip is seen (it sets the check aside)"
     assert not oracle_triage.correctable(check), "a formula measure is never corrected"
+
+
+
+# --- the second external review of the two-source rule --------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_second_source_never_sees_the_plans_working(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    other = oracle_triage.recompute_entry(EXACT_90, "disputed", 2.367842, MEASURED, "x", model="m2", same_model=False)
+    await _look(eng, EXACT_90, other)
+    asked = eng._recompute_expected.call_args.args[1]  # type: ignore[attr-defined]
+    assert asked["reference"] == oracle_triage.BLIND_REFERENCE and "1.85407" not in json.dumps(asked)
+
+
+def test_a_recheck_shown_the_working_or_agreeing_with_the_plan_confirms_nothing() -> None:
+    proposal = oracle_triage.arithmetic_proposal(EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE))
+    shown = oracle_triage.recompute_entry(EXACT_90, "disputed", 2.367842, MEASURED, "x", model="m2", same_model=False)
+    assert Engine._second_source(EXACT_90, proposal, shown) is None, "not blind to the plan's working"  # noqa: SLF001
+    agrees = {**shown, "verdict": "agrees", "blind": True}
+    assert Engine._second_source(EXACT_90, proposal, agrees) is None  # noqa: SLF001
+
+
+def test_a_confirmation_is_never_taken_from_a_file_or_kept_for_a_changed_check(tmp_path: Path) -> None:
+    # A forged record: "corrected to the measured value, confirmed".
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    forged = {"name": "exact_90_deg", "expected": MEASURED, "tolerance": 1e-5, "source": "arithmetic",
+              "confirmed_by": {"source": "recompute", "value": MEASURED}}
+    (eng.quest_root / "needs").mkdir(parents=True, exist_ok=True)
+    (eng.quest_root / "needs" / "ORACLE_CHECK.json").write_text(json.dumps({
+        "proposed_changes": [forged], "disputed": ["exact_90_deg"],
+        "fingerprints": {"exact_90_deg": oracle_triage.fingerprint(EXACT_90)}}), encoding="utf-8")
+    eng._restore_oracle_disputes([EXACT_90])
+    assert "confirmed_by" not in eng._oracle_proposals["exact_90_deg"]
+    # Even placed in memory, a "confirmation" the check's current derivation does not give is refused.
+    plain = {**EXACT_90, "reference": "derivation: the exact period from the elliptic integral (E2)"}
+    eng2 = _engine_with_plan(tmp_path / "b", plain)
+    eng2._oracle_proposals["exact_90_deg"] = dict(forged)
+    assert eng2._correct_expected_values([_judged("exact_90_deg", MEASURED)], [plain]) == []
+    assert _planned(eng2)["expected"] == 1.18034
+
+
+def test_a_name_at_the_start_of_a_reason_is_not_lowered() -> None:
+    from core import engine as engine_module
+
+    assert engine_module._lower_first("FI worked it out") == "FI worked it out"
+    assert engine_module._lower_first("The plan says") == "the plan says"
+
+
+def test_the_card_drops_an_arithmetic_finding_about_a_value_the_check_no_longer_has() -> None:
+    entry = oracle_triage.arithmetic_entry(EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE))
+    now = [{"id": "exact_90_deg", "status": "failed", "expected": 2.36784}]
+    assert oracle_card._current([entry], now) == []  # noqa: SLF001
+    assert oracle_card._current([entry], [{**now[0], "expected": 1.18034}]) == [entry]  # noqa: SLF001
+
+
+
+def test_evidence_counts_an_arithmetic_only_correction_as_a_gap(tmp_path: Path) -> None:
+    from core import evidence, frozen_protocol
+
+    quest = tmp_path / "q"
+    (quest / "needs").mkdir(parents=True)
+    frozen_protocol.freeze(quest, {"oracles": [EXACT_90]}, approved_by="t", source="plan.md")
+
+    def said(fix: dict[str, Any]) -> str:
+        (quest / "needs" / "ORACLE_CHECK.json").write_text(json.dumps(
+            {"status": "ok", "judged_by": "engine",
+             "corrected": {"exact_90_deg": {"from": 1.18034, "to": 2.36784, **fix}}}), encoding="utf-8")
+        return json.dumps(evidence.assess(quest, {}, settings={}))
+
+    assert "from the plan's own arithmetic alone" in said({"source": "arithmetic"})
+    assert "from the plan's own arithmetic alone" not in said(
+        {"source": "arithmetic", "confirmed_by": {"source": "recompute", "value": 2.36784}})

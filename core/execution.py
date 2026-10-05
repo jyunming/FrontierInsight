@@ -464,14 +464,25 @@ _PIN_SCRIPT = (
 # What ``pip freeze --local`` lists, without pip: the distributions installed inside
 # the venv itself (not the ones it sees from FI's own interpreter). One line, as
 # ``_PIN_SCRIPT``.
-_LOCAL_SCRIPT = (
-    "import os,sys,importlib.metadata as m;"
-    "c=lambda x:os.path.normcase(os.path.abspath(str(x)));p=c(sys.prefix);r={};"
-    "[r.setdefault(d.metadata['Name'],d.metadata['Name']+'=='+d.version) "
-    "for d in m.distributions() "
-    "if d.metadata['Name'] and c(d.locate_file('')).startswith(p)];"
-    "print(''.join(x+chr(10) for x in sorted(r.values())),end='')"
+_LOCAL_PROGRAM = (
+    "import os, re, sys, json, importlib.metadata as m\n"
+    "c = lambda x: os.path.normcase(os.path.abspath(str(x)))\n"
+    "k = lambda s: re.sub('[-_.]+', '-', s).lower()\n"
+    "p, r = c(sys.prefix), {}\n"
+    "for d in m.distributions():\n"
+    "    try:\n"
+    "        n = ((d.metadata or {}).get('Name') or '').strip()\n"
+    "        x = c(d.locate_file(''))\n"
+    "        if not n or os.path.commonpath([p, x]) != p or k(n) in r:\n"
+    "            continue\n"
+    "        u = json.loads(d.read_text('direct_url.json') or 'null')\n"
+    "        r[k(n)] = n + ' @ ' + u['url'] if isinstance(u, dict) and u.get('url') else n + '==' + d.version\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "print(''.join(v + chr(10) for v in sorted(r.values())), end='')\n"
 )
+# Passed as one line (a multi-line ``-c`` argument is fragile across Windows argv quoting).
+_LOCAL_SCRIPT = "exec(bytes.fromhex('" + _LOCAL_PROGRAM.encode().hex() + "').decode())"
 
 
 def _last_line(text: str) -> str:

@@ -277,11 +277,6 @@ def build(
         slip = plan_slip(oracle)
         if slip is not None and not by_judged.get(key, {}).get("passed_by_engine"):
             triage.insert(0, arithmetic_entry(oracle, slip))
-            if key not in by_proposal and correctable(oracle):
-                from .oracle_triage import arithmetic_proposal
-
-                by_proposal[key] = arithmetic_proposal(oracle, slip)
-                proposals.append(by_proposal[key])
     by_fi = any(p.get("source") == "recompute" for p in proposals) or any(
         t.get("points_to") in ("tolerance", "check") for t in triage)
     by_repair = any(p.get("source") not in ("recompute", "arithmetic") for p in proposals)
@@ -471,6 +466,20 @@ _LOOK_SAID = {
 }
 
 
+def _current(looks: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``looks`` without an arithmetic finding about a value the check no longer has (FI corrected it since): the
+    card never says the plan writes a number it does not write any more."""
+    expected = {str(c.get("id") or "").strip().lower(): c.get("expected") for c in checks}
+
+    def stale(t: dict[str, Any]) -> bool:
+        key = str(t.get("check") or "").strip().lower()
+        now, written = expected.get(key), t.get("written")
+        return (t.get("kind") == "arithmetic" and isinstance(now, (int, float)) and isinstance(written, (int, float))
+                and abs(float(now) - float(written)) > 1e-12 * max(1.0, abs(float(written))))
+
+    return [t for t in looks if not stale(t)]
+
+
 def _side_of(check: dict[str, Any], looks: list[dict[str, Any]], proposals: dict[str, dict[str, Any]]) -> str:
     """Which side FI's own look points to for ONE failing check: ``check``, ``script`` or ``unclear``."""
     key = str(check.get("id") or "").strip().lower()
@@ -509,6 +518,7 @@ def leaning(checks: list[dict[str, Any]], triage: list[dict[str, Any]], proposal
     by_name = {str(p.get("name") or "").strip().lower(): p for p in proposals if isinstance(p, dict)}
     # A check that measured nothing points to the simulation (it did not get as far as the number); each other failing
     # check by what FI's own look found about it.
+    triage = _current(triage, checks)
     sides = {"script" if c.get("status") == "not_measured" else _side_of(c, triage, by_name) for c in failing}
     if kept in ("as_it_was", "for_disputed") and sides <= {"check", "unclear"}:
         # Every check still failing is one FI's look or a repair called wrong: the script was not rewritten for it.
@@ -520,6 +530,7 @@ def _why(side: str, checks: list[dict[str, Any]], triage: list[dict[str, Any]],
          proposals: list[dict[str, Any]]) -> str:
     """One sentence of why FI leans the way it does, in words a scientist reads without the script open."""
     failing = {str(c.get("id") or "").strip().lower(): c for c in checks if c.get("status") in ("failed", "not_measured")}
+    triage = _current(triage, checks)
     if side == "plan":
         return "a check in the plan has no number to compare the result with yet"
     if side == "script" and any(c.get("status") == "not_measured" for c in failing.values()):
@@ -792,12 +803,12 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
             actions.append({
                 "id": "accept_proposal" if proposal else "revise_check",
                 "label": ("Correct the expected value to what the plan's own working gives"
-                          if (proposal or {}).get("source") == "arithmetic" else
+                          if (proposal or {}).get("source") == "arithmetic" and (proposal or {}).get("confirmed_by") else
                           f"Accept the {_whose(proposal)} proposed change" if proposal else
                           "Have the check worked out again"),
-                "detail": ("Ask the plan to write the value its own derivation gives (FI worked the arithmetic out; "
-                           "the measured value is not used), then resume."
-                           if (proposal or {}).get("source") == "arithmetic" else
+                "detail": ("Ask the plan to write the value its own derivation gives (FI worked the arithmetic out and "
+                           "another model agreed; the measured value is not used), then resume."
+                           if (proposal or {}).get("source") == "arithmetic" and (proposal or {}).get("confirmed_by") else
                            f"Ask the plan for the change the {_whose(proposal)[:-2]} proposes (check its reason, not "
                            "only that the measured value would pass), then resume." if proposal else
                            "Ask the plan to work the check out again from its own source, then resume. FI does not "

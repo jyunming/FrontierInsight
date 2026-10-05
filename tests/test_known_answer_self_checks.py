@@ -483,3 +483,31 @@ else:
     # The main experiment's own count is still read.
     wrong = pc.check({"runs_per_setting": 300}, {"experiment.py": ONE_SCRIPT})
     assert [m.kind for m in wrong] == ["runs"] and wrong[0].found == [900.0]
+
+
+
+@pytest.mark.asyncio
+async def test_rk4_slip_in_the_plans_working_confirmed_by_another_model_is_corrected_and_then_passes(
+        tmp_path: Path) -> None:
+    """The plan's own working gives the right RK4 error but writes another number; another model, shown neither that
+    working nor the result, gets the same value: FI corrects the check (never the tolerance, never the measured value),
+    measures again, and the corrected check passes on the correct script."""
+    slipped = {**RK4, "reference": "derivation: the RK4 global error at t = 1 with h = 0.1, "
+                                   "error = 0.9048375**10 - exp(-1) => 1.637e-08"}
+    from core import oracle_triage
+
+    computes = oracle_triage.plan_slip(slipped)["computes"]
+    engine = Engine(_config(tmp_path).model_copy(update={"provider": ProviderConfig(
+        name="openai", model="planner", node_models={"oracle_review": "another-model"})}))
+    model = _Model(recompute={"expected": computes, "how": "the RK4 amplification factor at h = 0.1"},
+                   repair_code=BENT)
+    engine._client = model
+    await _gate(engine, [slipped], RK4_SOURCE)
+    assert model.repairs == [] and (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RK4_SOURCE
+    assert "0.9048375**10" not in model.recompute_prompts[0], "the second source never sees the plan's working"
+    record = _record(engine)
+    assert record["status"] == "ok", record.get("status")
+    after = plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]
+    assert after["expected"] == pytest.approx(computes) and after["tolerance"] == 1e-09
+    corrected = json.loads((engine.fi_dir / "oracle_corrections.json").read_text(encoding="utf-8"))
+    assert corrected["rk4_closed_form_h01"]["confirmed_by"]["source"] == "recompute"

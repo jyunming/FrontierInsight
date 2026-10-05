@@ -198,7 +198,7 @@ _SETTING_RE = re.compile(r"`(?:(?P<section>engine|execution|pauses)\.)?(?P<key>\
 #: a stop before the review, so after the freeze nothing here points at the plan.
 _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
     "oracle": {
-        # FI decides about its own checks (it repairs the script, corrects a check only from an independent value, or
+        # FI decides about its own checks (it repairs the script, corrects a check only where two independent workings agree, or
         # goes on with it marked unconfirmed): a person is never asked to debug or to judge a check.
         False: "This quest is set up for research, so the known-answer checks are never relaxed. Nothing for you to "
                "fix: resume, and FI repairs the script or goes on with a check it cannot confirm marked unconfirmed "

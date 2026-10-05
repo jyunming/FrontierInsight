@@ -505,4 +505,4 @@ def test_the_local_listing_script_runs_on_this_interpreter():
     from core.execution import _LOCAL_SCRIPT
     out = subprocess.run([sys.executable, "-c", _LOCAL_SCRIPT], capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr
-    assert all("==" in line for line in out.stdout.splitlines())
+    assert out.stdout.strip() and all("==" in line or " @ " in line for line in out.stdout.splitlines())

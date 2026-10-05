@@ -449,6 +449,12 @@ def assess(
         valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to another model's value "
                           "that agrees with the measurement: nothing independent confirms it"
                           for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "recompute")
+        # A correction from the plan's arithmetic alone (an earlier FI made those): the calculator may have misread
+        # a correct derivation, and nothing else confirms it.
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected from the plan's own "
+                          "arithmetic alone: nothing independent confirms it"
+                          for n, c in corrected.items()
+                          if isinstance(c, dict) and c.get("source") == "arithmetic" and not c.get("confirmed_by"))
     fitted = oracle_record.get("fitted_to_test_run") if isinstance(oracle_record, dict) else None
     if protocol is not None and isinstance(fitted, list) and fitted:
         # The plan changed these checks after FI's test run measured them, and the change makes that measurement pass:
