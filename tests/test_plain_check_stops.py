@@ -769,7 +769,7 @@ def test_evidence_counts_an_arithmetic_only_correction_as_a_gap(tmp_path: Path) 
 def test_a_derivation_written_inside_the_checks_statement_is_not_shown_either() -> None:
     oracle = {**EXACT_90, "reference": "", "check": "T_exact at 90 degrees (" + PENDULUM_REFERENCE + ")"}
     shown = oracle_triage.blind(oracle)
-    assert "1.85407" not in json.dumps(shown) and shown["check"].startswith("T_exact at 90 degrees")
+    assert "1.85407" not in json.dumps(shown) and shown["check"].startswith("the value of `T_exact`")
     assert not oracle_triage.shows_working(shown)
 
 
@@ -853,3 +853,16 @@ def test_working_written_in_any_form_counts_as_shown(statement: str) -> None:
 ])
 def test_a_plain_statement_with_settings_is_not_working(statement: str) -> None:
     assert not oracle_triage.shows_working({"check": statement, "reference": oracle_triage.BLIND_REFERENCE})
+
+
+@pytest.mark.parametrize("statement", [
+    "10 \u2013 3 = 7", "9.81 \u00f7 1 = 9.81", "2 \\cdot 9.81 = 19.62", "4pi^2 = 39.48", "\u221a9.81 = 3.13",
+    "\u0393(0.5) = 1.7725", "sqrt(g/L) => 3.13", "1.25\u00b2 = 1.5625", "T at 90 degrees, T0 * K(m) is 2.368",
+])
+def test_nothing_the_plan_wrote_reaches_the_second_source(statement: str) -> None:
+    shown = oracle_triage.blind({**EXACT_90, "check": statement, "derivation": statement})
+    flat = json.dumps(shown, ensure_ascii=False)
+    assert statement not in flat and "1.85407" not in flat
+    assert set(shown) <= {"name", "kind", "case", "measure", "expected", "tolerance", "tolerance_mode", "order",
+                          "check", "reference"}
+    assert not oracle_triage.shows_working(shown), "a statement FI built itself carries no working"

@@ -672,13 +672,19 @@ _WORKING_IN_TEXT = _re.compile(r"\(?\s*\b(?:derivation|derived|reference)\s*:.*"
 
 
 def blind(oracle: dict[str, Any]) -> dict[str, Any]:
-    """``oracle`` as a second source sees it when FI checks the plan's own arithmetic: its statement, case and measure,
-    never the plan's derivation, wherever the plan wrote it (``reference``, ``derivation`` or inside ``check``): a model
-    shown the working may repeat the very step the calculator misread, and would then "confirm" it. The expected value
-    is kept for the verdict; the prompt never shows it either way. :func:`shows_working` says whether any is left."""
-    check = _WORKING_IN_TEXT.sub("", str(oracle.get("check") or "")).strip()
-    return {**{k: v for k, v in oracle.items() if k != "derivation"}, "reference": BLIND_REFERENCE, "check": check}
-
+    """``oracle`` as a second source sees it when FI checks the plan's own arithmetic: NO free text from the plan at all
+    -- only the check's name, kind, the quantity measured and its case (structured fields the prompt also shows), with a
+    neutral statement built from them. A model shown any of the plan's working (written in any notation, under any
+    label or none) could repeat the very step the calculator misread and then "confirm" it; a blocklist of notations
+    can never be complete, so nothing written by the plan is passed. The expected value is kept for the verdict; the
+    prompt never shows it either way. Less to go on can only leave the check unconfirmed (the safe side)."""
+    name = str(oracle.get("name") or "").strip()
+    measure = str(oracle.get("measure") or "").strip()
+    statement = f"the value of `{measure}` the simulation returns on the check's case" if measure else \
+        f"the quantity the check `{name}` names, on its case"
+    keep = {k: oracle[k] for k in ("name", "kind", "case", "measure", "expected", "tolerance", "tolerance_mode",
+                                    "order") if k in oracle}
+    return {**keep, "check": statement, "reference": BLIND_REFERENCE}
 
 def shows_working(oracle: dict[str, Any]) -> bool:
     """Whether ``oracle`` (as it would be shown) may still carry arithmetic a model could copy. Read wide on purpose:
