@@ -255,39 +255,25 @@ async def test_a_script_that_ignores_the_oracle_request_is_sent_back_and_the_rep
 
 
 @pytest.mark.asyncio
-async def test_a_failing_oracle_stops_the_quest_before_the_main_run_and_a_fixed_script_goes_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_a_failing_oracle_is_repaired_then_gone_on_with_marked_unconfirmed_never_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     calls: list[str] = []
     protocol = {**_PROTOCOL, "oracles": [ORACLE]}
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_FAILING, repair=_FAILING, protocol=protocol))
-    cfg = _cfg(tmp_path)
-    first = Engine(cfg)
-    await first.run()
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
 
-    log = (first.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert calls.count("OracleRepair") == 2
-    assert "[oracle] paused" in log and "paused for clarify" not in log
-    # The console line names what stopped it and points at the card, never "edit plan.md" (the script may have crashed).
-    assert "[FI] paused: the script has not passed its known-answer checks" in log
-    assert "paused for the oracle checks: read and edit" not in log
-    assert not (first.fi_dir / "clarify_questions.json").exists()
-    descriptor = json.loads((first.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "oracle" and descriptor["interaction"] == "supply"
-    assert "the script measured 0.5, the protocol expects 1 within 0.05" in descriptor["problems"][0]
-    text = (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    for needle in ("Expected: 1 — from:", "Measured: 0.5 — by the script itself, run with FI_ORACLE=1",
-                   "Tolerance: ±0.05 (absolute)", "Gap: off by 0.5 (10 times the tolerance)"):
-        assert needle in text, needle
-    assert _record(first)["status"] == "stopped"
-    assert not list((first.quest_root / "figures").glob("*.png")), "the main run must not have started"
-    assert not (first.quest_root / "paper" / "paper.md").exists()
-
-    (first.quest_root / "code" / "experiment.py").write_text(_PASSING, encoding="utf-8")
-    second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert calls.count("OracleRepair") == 2, "FI repairs first"
+    assert "[oracle] paused" not in log, "whether the check or the script is wrong is never asked"
+    record = _record(engine)
+    assert record["status"] == "went_on_failing" and record["went_on"][0]["by"] == "automatic"
+    last = record["attempts"][-1]
+    assert "the script measured 0.5, the protocol expects 1 within 0.05" in last["problems"][0]
+    assert last["judged"][0]["passed_by_engine"] is False, "the check stays failed"
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    assert _record(second)["status"] == "ok"
+    assert "FI could not confirm 'final size closed form'" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
@@ -306,18 +292,22 @@ async def test_a_protocol_with_no_oracle_asks_the_plan_for_one_and_then_checks_i
 
 
 @pytest.mark.asyncio
-async def test_when_the_plan_cannot_be_given_an_oracle_the_quest_stops_and_says_so(
+async def test_when_the_plan_cannot_be_given_an_oracle_the_quest_goes_on_and_the_result_says_so(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from core import evidence
+
     calls: list[str] = []
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_PASSING, revise=False))
     engine = Engine(_cfg(tmp_path))
-    await engine.run()
-    assert "[oracle] paused" in (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "the plan has no known-answer check" in text and "--revise-plan \"Add a known-answer check" in text
-    assert "declares no oracle" in json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["problems"][0]
-    assert not (engine.quest_root / "paper" / "paper.md").exists()
+    artifacts = await engine.run()
+    assert "[oracle] paused" not in (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    record = _record(engine)
+    assert record["status"] == "went_on_failing" and "declares no oracle" in record["went_on"][0]["unmeasured"]
+    assert artifacts.paper_md is not None
+    gaps = json.dumps(evidence.read(engine.quest_root) or {})
+    assert "no known-answer check could be judged" in gaps
+    assert (evidence.read(engine.quest_root) or {}).get("level") not in ("independently_validated", "publication_ready")
 
 
 @pytest.mark.asyncio
@@ -411,11 +401,10 @@ async def test_a_script_that_declares_its_own_pass_expected_value_and_tolerance_
     engine = Engine(_cfg(tmp_path))
     await engine.run()
     record = _record(engine)
-    assert record["status"] == "stopped" and record["judged_by"] == "engine"
+    assert record["status"] == "went_on_failing" and record["judged_by"] == "engine", "never passed on its own word"
     last = record["attempts"][-1]
     assert last["judged"][0]["passed_by_engine"] is False and last["judged"][0]["script_said"] is True
     assert "the script measured 0.5, the protocol expects 1 within 0.05" in last["problems"][0]
-    assert not (engine.quest_root / "paper" / "paper.md").exists()
 
 
 @pytest.mark.asyncio
@@ -607,12 +596,12 @@ def test_a_proposed_oracle_change_is_kept_only_when_it_is_usable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_check_the_repair_calls_wrong_is_shown_to_the_person_and_never_applied(
+async def test_a_check_the_repair_calls_wrong_is_recorded_and_never_applied(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A live quest's repair said, four rounds running, that the declared tolerance was below the method's own error --
-    and could do nothing about it. Now it can propose a change; the stop shows it beside the measured value, says that
-    accepting it would make that value pass, and gives the one command that applies it. The plan is not touched."""
+    """A live quest's repair said, four rounds running, that the declared tolerance was below the method's own error.
+    Its proposal is recorded; it is never applied (the repair saw the run, so its numbers are not independent of the
+    measurement), and the quest goes on with the check marked unconfirmed. The plan is not touched."""
     calls: list[str] = []
     protocol = {**_PROTOCOL, "oracles": [ORACLE]}
 
@@ -630,14 +619,11 @@ async def test_a_check_the_repair_calls_wrong_is_shown_to_the_person_and_never_a
     engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
     await engine.run()
     record = _record(engine)
-    assert record["status"] == "stopped"
+    assert record["status"] == "went_on_failing"
     assert record["proposed_changes"] == [{"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute", "reason": "the small case's own error is 0.5"}]
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "judged the check `final size closed form` itself wrong" in text
-    assert "The script measured 0.5: accepting this makes that measurement pass" in text
-    assert "--revise-plan" in text and "Change the oracle 'final size closed form' to expected 1, tolerance 0.6 (absolute)" in text
     plan_after = plan.parse(plan.plan_path(engine.quest_root).read_text(encoding="utf-8")).design["protocol"]["oracles"]
-    assert plan_after == [ORACLE], "a proposal is never applied by the engine"
+    assert plan_after == [ORACLE], "a repair's proposal is never applied by the engine"
+    assert not (engine.fi_dir / "oracle_corrections.json").exists()
 
 
 # --- a repair that blames the check never rewrites the script for it (a real kimi-k3 quest) --------------------------
@@ -653,6 +639,8 @@ if os.environ.get("FI_ORACLE") == "1":
 """ + _TAIL
 _DISPUTE = [{"name": ORACLE["name"], "expected": 0.5, "tolerance": 0.01,
              "reason": "the closed form gives 0.5 on this case; 1.0 is an arithmetic slip in the protocol"}]
+
+
 
 
 def _disputing_fake(calls: list[str], protocol: dict[str, Any], prompts: list[str] | None = None):
@@ -672,7 +660,7 @@ def _disputing_fake(calls: list[str], protocol: dict[str, Any], prompts: list[st
 
 
 @pytest.mark.asyncio
-async def test_a_repair_that_blames_the_check_does_not_rewrite_the_script_and_the_quest_stops_for_a_person(
+async def test_a_repair_that_blames_the_check_does_not_rewrite_the_script_and_the_quest_goes_on_marked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -684,12 +672,10 @@ async def test_a_repair_that_blames_the_check_does_not_rewrite_the_script_and_th
         "the script the repair called right must be kept as it was"
     assert calls.count("OracleRepair") == 1, "once every failing check is disputed, no more repairs are spent"
     record = _record(engine)
-    assert record["status"] == "stopped" and record["disputed"] == [ORACLE["name"]]
+    assert record["status"] == "went_on_failing" and record["disputed"] == [ORACLE["name"]]
     assert record["attempts"][0]["repair"] == "set_aside_disputed"
     assert record["proposed_changes"][0]["expected"] == 0.5
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "The script was kept as it was" in text and "judged the check `final size closed form` itself wrong" in text
-    assert "--revise-plan" in text
+    assert record["explained"]["leaning"] == "check", "the record says FI's look points to the check"
     log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
     assert "[oracle] rewrote experiment.py" not in log
 
@@ -767,9 +753,8 @@ async def test_with_one_check_disputed_and_one_not_only_the_undisputed_one_is_re
     assert "Do not change the script for these checks" in prompts[1] and "final size closed form" in prompts[1]
     record = _record(engine)
     assert [a.get("repair") for a in record["attempts"]] == ["set_aside_disputed", "applied", None]
-    assert record["status"] == "stopped" and record["disputed"] == [ORACLE["name"]]
+    assert record["status"] == "went_on_failing" and record["disputed"] == [ORACLE["name"]]
     assert len(record["problems"]) == 1 and "'final size closed form' failed" in record["problems"][0]
-    assert "the script was not changed for them" in (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -789,7 +774,7 @@ async def test_a_later_repair_that_makes_a_disputed_check_pass_is_undone(
     await engine.run()
     assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed_b
     record = _record(engine)
-    assert record["status"] == "stopped" and record["disputed"] == [ORACLE["name"]]
+    assert record["status"] == "went_on_failing" and record["disputed"] == [ORACLE["name"]]
     assert [a.get("repair") for a in record["attempts"]] == [
         "set_aside_disputed", "reverted_disputed_changed", None, "applied", None]
     assert "[oracle] put experiment.py back as it was" in (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
@@ -818,7 +803,7 @@ async def test_a_disputed_check_whose_measurement_was_dropped_is_not_restored_be
     engine = Engine(_cfg(tmp_path, oracle_repair_attempts=3))
     await engine.run()
     record = _record(engine)
-    assert record["status"] == "stopped", "a disputed check must never end up passing through a repair"
+    assert record["status"] == "went_on_failing", "a disputed check must never end up passing through a repair"
     assert "reverted_disputed_changed" in [a.get("repair") for a in record["attempts"]]
     assert (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == fixed_b
     assert "was not checked" in prompts[2] and "restore its honest measurement" in prompts[2]
@@ -927,30 +912,6 @@ async def test_the_analyze_prompt_carries_the_engines_verdicts(tmp_path: Path, m
     assert carrying and "- final size closed form: measured 0.99, expected 1 within 0.05: passed" in carrying[0]
 
 
-def test_a_stop_after_the_freeze_says_how_an_oracle_can_still_change(tmp_path: Path) -> None:
-    """Once frozen, a plan edit changes nothing: the stop offers the one named step that goes on (mark the failed check
-    unconfirmed), never a setting to change (which, on a quest the interview wrote, stopped it a second time), and says
-    how the proposed change could still be made."""
-    from core import accepted_checks, frozen_protocol
-
-    engine = Engine(_cfg(tmp_path))
-    engine.quest_root.mkdir(parents=True, exist_ok=True)
-    frozen_protocol.freeze(engine.quest_root, {**_PROTOCOL, "oracles": [ORACLE]}, approved_by="test", source="plan.md")
-    proposal = {"name": ORACLE["name"], "expected": 1.0, "tolerance": 0.6, "tolerance_mode": "absolute", "reason": "own error 0.5"}
-    judged = oc.judged([ORACLE], {"checks": [{"name": ORACLE["name"], "value": 0.5}]})
-    found = oc.problems([ORACLE], {"checks": [{"name": ORACLE["name"], "value": 0.5}]}, 0)
-    checks, _ = accepted_checks.offer(found, [ORACLE], judged)
-    with pytest.raises(BaseException):  # the pause interrupts; outside a graph that raises
-        engine._pause_for_oracle(found, engine.quest_root / "code" / "experiment.py", [proposal], judged, [ORACLE],
-                                 go_on={"offered": True, "checks": checks, "script": "code/experiment.py",
-                                        "script_version": "ab" * 32})
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "The protocol is frozen, so editing plan.md does not change it" in text
-    assert "oracle_check: warn" not in text
-    assert f"python launch.py --accept-checks {engine.quest_id} --approve-as <you>" in text
-    assert "--revise-plan" not in text and "Change the oracle 'final size closed form' to expected 1, tolerance 0.6" in text
-
-
 # --- an oracle the engine added after the plan was read is never recorded as a person's approval ---------------------------
 
 
@@ -960,15 +921,17 @@ def _frozen_record(engine: Engine) -> dict[str, Any] | None:
 
 
 @pytest.mark.asyncio
-async def test_an_oracle_the_engine_adds_after_the_plan_was_read_stops_the_quest_again_before_the_freeze(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+async def test_an_oracle_the_engine_adds_after_the_plan_was_read_is_said_never_stopped_for_and_never_called_approved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """With ``pauses.plan: ask`` the person read a plan with no oracle; the gate then had the model add one. The protocol
-    is frozen as approved by a person, so the person must see that oracle before the freeze, not after it."""
+    """With ``pauses.plan: ask`` the person read a plan with no oracle; the gate then had the model add one. Judging a
+    check's expected value is not something a person is asked to do (FI checks it itself when it runs), so the quest
+    does not stop again for it: one line says so, and the freeze record says nobody approved that oracle, never that
+    the person did."""
     from core.config import PausesConfig
 
     calls: list[str] = []
-    # The script has no oracle branch yet: the gate adds the oracle and repairs the script before it stops.
+    # The script has no oracle branch yet: the gate adds the oracle and repairs the script.
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_UNAWARE, repair=_PASSING))
     cfg = _cfg(tmp_path)
     cfg.pauses = PausesConfig(plan="ask")
@@ -977,26 +940,16 @@ async def test_an_oracle_the_engine_adds_after_the_plan_was_read_stops_the_quest
     assert "read and edit the plan" in (first.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
 
     second = Engine(cfg, resume_quest_id=first.quest_id)
-    await second.run()
+    artifacts = await second.run()
     assert calls.count("PlanRevise") == 1 and calls.count("OracleRepair") == 1
-    assert _frozen_record(second) is None, "the protocol was frozen before the person saw the oracle the engine added"
-    descriptor = json.loads((second.fi_dir / "pause.json").read_text(encoding="utf-8"))
-    assert descriptor["kind"] == "plan" and descriptor["interaction"] == "supply"
-    assert descriptor["headline"] == "read the checks FI added to the plan"
-    text = (second.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
-    assert "“final size closed form”" in text and "You have not seen these yet" in text
-    assert "[FI] paused for the checks FI added to the plan" in (second.fi_dir / "run.log").read_text(encoding="utf-8")
-    # (The first script ignores FI_ORACLE, so its oracle run drew a figure; the main run is what must not have started.)
-    assert not (second.quest_root / "paper" / "paper.md").exists()
-
-    third = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await third.run()
-    assert artifacts.paper_md is not None and calls.count("PlanRevise") == 1
-    record = _frozen_record(third)
-    assert record is not None and record["approved_by"].startswith("human:")
-    assert "'final size closed form' were added by the engine" in record["approved_by"] and "held for the person" in record["approved_by"]
+    assert artifacts.paper_md is not None, "no second stop for the check FI added"
+    assert "Nothing to do: FI checks their expected values itself" in capsys.readouterr().out
+    record = _frozen_record(second)
+    assert record is not None and record["approved_by"].startswith("auto:")
+    assert "'final size closed form' were added by the engine" in record["approved_by"]
+    assert "nobody approved them" in record["approved_by"] and "held for the person to read" in record["approved_by"]
     assert record["protocol"]["oracles"] == [ORACLE]
-    # The repair made before the stop is the script the quest carries on with, not the one before it.
+    # The repair is the script the quest carries on with, not the one before it.
     assert "FI_ORACLE" in artifacts.raw_state["code"]
 
 
@@ -1054,3 +1007,55 @@ def test_the_freeze_never_says_a_person_approved_what_they_were_not_shown(tmp_pa
     # A name the person removed at the stop is not named as part of the frozen protocol.
     gone = _freeze_with(tmp_path / "g", plan_mode="off", held=False, added={"oracles": ["removed at the stop"], "shown": False})
     assert "removed at the stop" not in gone and gone.startswith("auto: nobody approved this protocol")
+
+
+# --- a repair whose code cannot be used does not use one up (a live gemma4 quest, 2026-10-05) ----------------------------
+
+
+def _repairs_in_turn(calls: list[str], replies: list[str], protocol: dict[str, Any]):
+    inner = _fake(calls, implement=_FAILING, repair=_PASSING, protocol=protocol)
+    sent: list[int] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "ExecuteReflect" and "FI_ORACLE=1 to check its oracles" in prompt:
+            calls.append("OracleRepair")
+            reply = replies[min(len(sent), len(replies) - 1)]
+            sent.append(1)
+            return json.dumps({"code": reply, "deps": [], "patch_summary": "a repair"})
+        return await inner(self, messages, **kw)
+
+    return fake_chat
+
+
+@pytest.mark.asyncio
+async def test_a_repair_whose_code_cannot_be_used_does_not_use_one_up_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With one repair allowed: the first repair's code does not even parse (FI keeps the script as it is), so it is not
+    counted, and the next one, which passes, is still made."""
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat",
+                        _repairs_in_turn(calls, ["def broken(:\n    pass\n", _PASSING], protocol))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert calls.count("OracleRepair") == 2
+    assert _record(engine)["status"] == "ok"
+    log = (engine.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "does not count as one of the 1 repairs" in log
+
+
+@pytest.mark.asyncio
+async def test_unusable_repairs_are_exempt_only_once_so_the_loop_stays_bounded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    protocol = {**_PROTOCOL, "oracles": [ORACLE]}
+    monkeypatch.setattr("core.engine.LLMClient.chat", _repairs_in_turn(calls, ["def broken(:\n"], protocol))
+    engine = Engine(_cfg(tmp_path, oracle_repair_attempts=1))
+    await engine.run()
+    # One free, then the one allowed: two calls, never more.
+    assert calls.count("OracleRepair") == 2
+    assert _record(engine)["status"] != "ok"

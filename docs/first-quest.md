@@ -62,7 +62,7 @@ Want to see what happened, in order? `python launch.py --trace <quest id>` ([tra
 ## 6. If it stops
 
 - **`paused`**: FI is asking for you, not failing. Read `outputs/<quest id>/NEXT_STEP.md`: it says what to do (for example, download a few paywalled papers, or accept the paper). Then continue with `python launch.py --resume <quest id>` (it finds that quest's own saved config; no `--config` needed). The bundled example is set not to stop; your own quests stop for paywalled papers and for your review of the result unless you turn that off (`pauses:` in the YAML).
-- **`failed`**: `outputs/<quest id>/quest_failed.md` names the step and what went wrong; the full log is `.fi/run.log` in the same folder.
+- **`failed`**: the terminal (and `outputs/<quest id>/quest_failed.md`) says in one line what happened. There is never anything to debug: a passing problem with the model service or the network (FI already tried the step again by itself) or a problem in FI itself only needs you to continue later; you are asked to act only when something on your machine or account needs it (sign in again, add credits, put a file named in the settings in place, install what `python launch.py --doctor` names, start the model service on this machine, close a file another program holds). Continue with `python launch.py --resume <quest id>`: it picks up at the step that stopped. The details are further down in the same file, and the full log is `.fi/run.log`.
 - **A `401`**: the key is wrong for the provider in the YAML.
 
 ## 7. Your own question

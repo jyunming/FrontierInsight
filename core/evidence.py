@@ -424,6 +424,13 @@ def assess(
             "the packages the run had could not be listed, so its environment cannot be reproduced "
             f"({str(environment['packages_error'])[:160]}; see needs/ENVIRONMENT.json)"
         )
+    elif isinstance(environment, dict) and environment.get("packages_source"):
+        # Listed without pip (pip freeze failed): versions are known, but an editable or direct install among them may
+        # not be installable again as it was.
+        matched_gaps.append(
+            "the packages the run had were listed without pip (pip freeze failed), so an editable or local install among "
+            "them may not be installable again as it was (see needs/ENVIRONMENT.json)"
+        )
     if isinstance(environment, dict) and environment.get("isolated") is False:
         matched_gaps.append(
             "the run shared its Python environment with other quests (execution.shared_interpreter / "
@@ -434,6 +441,26 @@ def assess(
     # independently validated
     valid_gaps = gaps["independently_validated"]
     oracle_record = _json(needs / "ORACLE_CHECK.json")
+    corrected = oracle_record.get("corrected") if isinstance(oracle_record, dict) else None
+    if protocol is not None and isinstance(corrected, dict):
+        # A correction to another model's value: that value was taken because it lies near what was measured, so the
+        # check it makes pass confirms nothing independent. (A correction from the plan's own arithmetic was not chosen
+        # by the measurement, and is no gap.)
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected to another model's value "
+                          "that agrees with the measurement: nothing independent confirms it"
+                          for n, c in corrected.items() if isinstance(c, dict) and c.get("source") == "recompute")
+        # A correction from the plan's arithmetic alone (an earlier FI made those): the calculator may have misread
+        # a correct derivation, and nothing else confirms it.
+        valid_gaps.extend(f"the expected value of the known-answer check '{n}' was corrected from the plan's own "
+                          "arithmetic alone: nothing independent confirms it"
+                          for n, c in corrected.items()
+                          if isinstance(c, dict) and c.get("source") == "arithmetic" and not c.get("confirmed_by"))
+    fitted = oracle_record.get("fitted_to_test_run") if isinstance(oracle_record, dict) else None
+    if protocol is not None and isinstance(fitted, list) and fitted:
+        # The plan changed these checks after FI's test run measured them, and the change makes that measurement pass:
+        # the value checked is the one the simulation produced, so it is no independent check of it.
+        valid_gaps.extend(f"the known-answer check '{n}' was changed after a test run measured it, so that the "
+                          "measured value passes: nothing independent confirms it" for n in fitted)
     if settings.get("oracle_check") == "off":
         valid_gaps.append("the oracle check was turned off")
     elif protocol is not None and isinstance(oracle_record, dict) and oracle_record.get("status") == "went_on_failing":
@@ -441,7 +468,8 @@ def assess(
         # in its own plain words (core/accepted_checks.py), so the result never reaches this level or the ones above.
         from .accepted_checks import gap as _went_on_gap
 
-        entries = [e for e in oracle_record.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
+        entries = [e for e in oracle_record.get("went_on") or []
+                   if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
         valid_gaps.extend([_went_on_gap(e) for e in entries]
                           or ["a known-answer check failed and the quest went on (oracle check: went_on_failing)"])
     elif protocol is not None and (not isinstance(oracle_record, dict) or oracle_record.get("status") != "ok"):

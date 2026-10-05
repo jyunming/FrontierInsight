@@ -469,3 +469,40 @@ async def test_execute_no_hint_on_ordinary_failure(tmp_path: Path, caplog):
         )
     assert res.returncode == 1
     assert not any("MAX_PATH" in r.message for r in caplog.records)
+
+
+
+@pytest.mark.asyncio
+async def test_a_crashing_pip_freeze_falls_back_to_the_venvs_own_distributions(tmp_path: Path, monkeypatch):
+    """pip freeze crashes on a machine with an editable install whose folder was deleted: the lock file is still
+    written, from importlib.metadata, says so in one line, and carries no traceback."""
+    from core.execution import _LOCAL_SCRIPT, ExecutionResult
+    exe = VenvExecutor()
+    _fake_cfg_and_interp(exe, tmp_path, interp=True)
+    calls: list[list[str]] = []
+
+    async def fake_exec(cmd, **kw):  # noqa: ANN001
+        calls.append(list(cmd))
+        if "freeze" in cmd:
+            return ExecutionResult(returncode=2, stdout="", duration_s=0.0, stderr=(
+                "Traceback (most recent call last):\n  File x\nFileNotFoundError: [WinError 3] C:\\dev\\agora"))
+        if _LOCAL_SCRIPT in cmd:
+            return ExecutionResult(returncode=0, stdout="numpy==2.1.0\n", stderr="", duration_s=0.0)
+        return ExecutionResult(returncode=0, stdout="", stderr="", duration_s=0.0)
+
+    monkeypatch.setattr(exe, "execute", fake_exec)
+    lock = await exe.cleanup_after_success(tmp_path)
+    assert lock is not None
+    text = lock.read_text(encoding="utf-8")
+    assert "numpy==2.1.0" in text and "listed from importlib.metadata" in text
+    assert "Traceback" not in text and "FileNotFoundError: [WinError 3]" in text
+    assert any(_LOCAL_SCRIPT in c for c in calls)
+
+
+def test_the_local_listing_script_runs_on_this_interpreter():
+    import subprocess
+    import sys
+    from core.execution import _LOCAL_SCRIPT
+    out = subprocess.run([sys.executable, "-c", _LOCAL_SCRIPT], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() and all("==" in line or " @ " in line for line in out.stdout.splitlines())

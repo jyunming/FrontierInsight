@@ -11,8 +11,13 @@ and it covers only the checks the stop named. Nothing about the check itself is 
 judged; the evidence record keeps the gap below *independently validated* (marked "source not confirmed", with who chose
 to go on), the audit trace records the choice, and the paper is told to say so plainly.
 
-Two records under ``needs/``: ``UNSOURCED_CHECKS.json`` (written by the stop: which checks, why, the plan version) and
-``UNSOURCED_CHECKS_ACCEPTED.json`` (written by the choice).
+Two records under ``needs/``: ``UNSOURCED_CHECKS.json`` (which checks, why, the plan version) and
+``UNSOURCED_CHECKS_ACCEPTED.json`` (who went on with them).
+
+Where a check's expected value comes from is not something a person is asked to work out: when FI's own ask of a model
+(core/engine.py ``_fill_plan_sources``) finds no source, the quest goes on by itself (:func:`go_on_by_itself`),
+recorded as :data:`AUTOMATIC`, with each check marked "source not confirmed" exactly as a person's choice marks it. A
+person can still make the choice under their own name (``--accept-checks``) for a stop an older FI wrote.
 
 The same choice, with the same command, exists for a check that WAS measured and failed (the stop at the known-answer
 checks, ``Engine._oracle_gate``): *mark it unconfirmed and go on*. It is offered only when every problem the stop found is
@@ -38,6 +43,9 @@ PENDING_NAME = "UNSOURCED_CHECKS.json"
 ACCEPTED_NAME = "UNSOURCED_CHECKS_ACCEPTED.json"
 #: The words a person reads for a check they went on with.
 NOT_CONFIRMED = "source not confirmed"
+#: Who went on, when nobody chose it: FI went on by itself (an exploration quest with a failed check, or checks whose
+#: source FI could not find).
+AUTOMATIC = "automatic"
 
 
 def _needs(quest_root: Path) -> Path:
@@ -162,6 +170,42 @@ def accept(quest_root: Path, who: str, *, via: str) -> tuple[bool, str]:
                   "quest to go on.")
 
 
+def go_on_by_itself(quest_root: Path, checks: list[dict[str, Any]], *,
+                    plan_version: int | None) -> dict[str, Any] | None:
+    """Record that FI goes on by itself with ``checks`` (``[{name, why, expected, fingerprint}]``: the checks whose
+    expected value still has no source after FI asked a model for one), each marked "source not confirmed". Returns
+    the record (as :func:`accepted` reads it), or ``None`` when there is nothing to record. A check a person already
+    chose to go on with, as it is now, keeps the person's name; nothing else about any check changes."""
+    named = [c for c in checks if str(c.get("name") or "").strip() and c.get("fingerprint")]
+    if not named:
+        return None
+    write_pending(quest_root, named, plan_version=plan_version)
+    earlier = accepted(quest_root)
+    chosen = dict((earlier or {}).get("chosen") or {})
+    for c in named:
+        entry = chosen.get(_key(c["name"]))
+        if isinstance(entry, dict) and entry.get("fingerprint") == c["fingerprint"]:
+            continue  # a person's choice about this check, as it is now, stays theirs
+        chosen[_key(c["name"])] = {"name": c["name"], "fingerprint": c["fingerprint"], "by": AUTOMATIC,
+                                   "via": AUTOMATIC, "at": _now(), "why": c.get("why"), "expected": c.get("expected")}
+    names = [str(c["name"]) for c in named]
+    entry = {
+        "by": (earlier or {}).get("by") or AUTOMATIC, "via": (earlier or {}).get("via") or AUTOMATIC, "at": _now(),
+        "checks": [v["name"] for v in chosen.values()], "chosen": chosen, "plan_version": plan_version,
+        "history": [*((earlier or {}).get("history") or []),
+                    {"by": AUTOMATIC, "via": AUTOMATIC, "at": _now(), "checks": names}],
+    }
+    if not _write(_needs(quest_root) / ACCEPTED_NAME, entry):
+        return None
+    clear_pending(quest_root)
+    return {**entry, "by": AUTOMATIC}
+
+
+def who_text(by: Any) -> str:
+    """Who went on with a check, as a sentence's subject: a person's name, or FI when it went on by itself."""
+    return "FI (no source could be found)" if str(by or "") == AUTOMATIC else str(by or "")
+
+
 def chose(quest_root: Path, oracle: dict[str, Any]) -> str | None:
     """Who chose to go on with ``oracle`` exactly as it is now (its name and numbers), or ``None``."""
     record = accepted(quest_root)
@@ -190,11 +234,11 @@ def disclosure(quest_root: Path, names: list[str]) -> str:
     if record is None or not names:
         return ""
     chosen = record.get("chosen") or {}
-    who = sorted({str((chosen.get(_key(n)) or {}).get("by") or record["by"]) for n in names})
+    who = sorted({who_text((chosen.get(_key(n)) or {}).get("by") or record["by"]) for n in names})
     listed = ", ".join(repr(str(n)) for n in names)
     return (
         f"The expected values of these checks against known answers have no stated source: {listed}. "
-        f"{' and '.join(who)} chose to go on without one. Say so plainly where the checks are described (and in the "
+        f"{' and '.join(who)} went on without one. Say so plainly where the checks are described (and in the "
         "limitations): each check shows the code agrees with the value the plan expected, not that the value itself is "
         "right. Do not describe these checks as validated against an independent source."
     )
@@ -206,8 +250,6 @@ ORACLE_RECORD = "ORACLE_CHECK.json"
 FAILED_ACCEPTED_NAME = "FAILED_CHECKS_ACCEPTED.json"
 #: The status of ``needs/ORACLE_CHECK.json`` when the quest went on although a check failed.
 WENT_ON = "went_on_failing"
-#: Who went on, when nobody chose it: an exploration quest goes on by itself.
-AUTOMATIC = "automatic"
 #: The word a person reads for a failed check the quest went on with.
 UNCONFIRMED = "unconfirmed"
 
@@ -276,6 +318,37 @@ def offer(found: list[str], oracles: list[dict[str, Any]],
     if not failing:
         return [], "no check failed with a measured number"
     return failing, ""
+
+
+def went_on_entries(found: list[str], oracles: list[dict[str, Any]],
+                    judged: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Every check the gate could not confirm, for going on by itself when :func:`offer` offers nothing (a check that
+    measured nothing, a check with no number, no check at all): the measured failures as :func:`offer` gives them, and
+    each other one with ``measured`` ``None`` and ``unmeasured``: why, in the gate's words. Never empty when ``found``
+    is not: a run with no check to name gets one entry with no name."""
+    from . import oracle_check as _oracle
+
+    by_name = {str(j.get("name") or "").strip().lower(): j for j in judged or [] if isinstance(j, dict)}
+    out: list[dict[str, Any]] = []
+    for oracle in oracles or []:
+        name = str(oracle.get("name") or "").strip()
+        j = by_name.get(name.lower()) or {}
+        if j.get("passed_by_engine") is True:
+            continue
+        expected, limit, mode = _oracle.limit_of(oracle)
+        value = _oracle._num(j.get("value"))  # noqa: SLF001
+        said = next((f for f in found or [] if repr(name) in f or f"'{name}'" in f), "")
+        if value is None and not said and j:
+            said = "it reported no number"
+        if value is None and not said:
+            continue
+        out.append({"name": name, "fingerprint": fingerprint(oracle), "expected": expected, "limit": limit,
+                    "tolerance": oracle.get("tolerance"), "tolerance_mode": mode, "case": oracle.get("case"),
+                    "measure": oracle.get("measure"), "measured": value, "measured_by": j.get("measured_by") or "",
+                    **({"unmeasured": said[:300]} if value is None else {})})
+    if not out and found:
+        out.append({"name": "", "measured": None, "unmeasured": str(found[0])[:300]})
+    return out
 
 
 def conditions_text(check: dict[str, Any]) -> str:
@@ -379,9 +452,14 @@ def no_longer_applies(quest_root: Path, check: dict[str, Any], version: str) -> 
 def gap(entry: dict[str, Any]) -> str:
     """The evidence's sentence for one failed check the quest went on with."""
     name = str(entry.get("name") or "")
+    if entry.get("measured") is None and "unmeasured" in entry:
+        if not name:
+            return f"FI went on by itself although no known-answer check could be judged ({entry.get('unmeasured')})"
+        return (f"FI went on by itself although the known-answer check '{name}' could not be judged "
+                f"({entry.get('unmeasured')}); it is marked {UNCONFIRMED}")
     how = conditions_text(entry)
     if entry.get("by") == AUTOMATIC:
-        return (f"FI went on by itself (this quest explores) although the known-answer check '{name}' failed ({how}); "
+        return (f"FI went on by itself although the known-answer check '{name}' failed ({how}); "
                 f"it is marked {UNCONFIRMED}")
     return f"{entry.get('by')} chose to go on although the known-answer check '{name}' failed ({how})"
 
@@ -390,7 +468,7 @@ def failing_disclosure(record: Any) -> str:
     """What the paper must say about the failed checks the quest went on with (``needs/ORACLE_CHECK.json``), or ``""``."""
     if not isinstance(record, dict) or record.get("status") != WENT_ON:
         return ""
-    entries = [e for e in record.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
+    entries = [e for e in record.get("went_on") or [] if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
     if not entries:
         return ""
     lines = "; ".join(gap(e) for e in entries)

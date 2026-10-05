@@ -94,9 +94,10 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
          "holding to its protocol."],
     ),
     "oracle": (
-        "A known-answer check did not pass. Is the simulation wrong, or the check?",
-        "Compare the measured value with the expected one and where it comes from, fix whichever is wrong, then go on.",
-        ["Change the check's expected value or tolerance in the plan: `--revise-plan \"...\"`."],
+        # Only for a stop an earlier FI wrote: the checks no longer stop a quest.
+        "This quest was stopped at its known-answer checks by an earlier version of FI.",
+        "Resume it: FI now works out itself whether the check or the simulation is wrong, and goes on.",
+        [],
     ),
     "improve": (
         "A change FI made to the simulation made a check of correctness worse. Go on with the version kept so far?",
@@ -197,14 +198,14 @@ _SETTING_RE = re.compile(r"`(?:(?P<section>engine|execution|pauses)\.)?(?P<key>\
 #: a stop before the review, so after the freeze nothing here points at the plan.
 _RESEARCH_INSTEAD: dict[str, dict[bool, str]] = {
     "oracle": {
-        False: "This quest is set up for research, so the known-answer checks cannot be relaxed: fix the script and "
-               "resume, or, if a check itself is wrong, change it in the plan (`--revise-plan`) and resume; or, if it "
-               "was measured and you judge the check wrong, mark it unconfirmed and go on (with your name: the result "
-               "then says the check failed and is never publication-ready).",
-        True: "This quest is set up for research and its protocol is frozen, so the known-answer checks cannot be "
-              "relaxed or changed inside this quest: fix the script and resume; or, if a check was measured and you "
-              "judge the check itself wrong, mark it unconfirmed and go on (with your name: the result then says the "
-              "check failed and is never publication-ready); or start a new quest whose plan states the right check.",
+        # FI decides about its own checks (it repairs the script, corrects a check only where two independent workings agree, or
+        # goes on with it marked unconfirmed): a person is never asked to debug or to judge a check.
+        False: "This quest is set up for research, so the known-answer checks are never relaxed. Nothing for you to "
+               "fix: resume, and FI repairs the script or goes on with a check it cannot confirm marked unconfirmed "
+               "(the result then counts as exploratory).",
+        True: "This quest is set up for research and its protocol is frozen, so the known-answer checks are never "
+              "relaxed or changed inside it. Nothing for you to fix: resume, and FI repairs the script or goes on with "
+              "a check it cannot confirm marked unconfirmed (the result then counts as exploratory).",
     },
     "split": {
         False: "This quest is set up for research, so it always keeps the simulation and the analysis apart: resume, "
@@ -359,9 +360,16 @@ def waiting(quest_root: Path) -> list[Item]:
     out: list[Item] = []
     failed = root / "quest_failed.md"
     if failed.is_file():
-        out.append(Item("failed", "The last run stopped with an error (quest_failed.md says where).",
-                        recommended="Read quest_failed.md; once the cause is fixed, go on: the quest continues from "
-                                    "the step that failed."))
+        from . import crash_kind as _crash_kind
+
+        plain = _crash_kind.read(root / ".fi")
+        if plain:
+            out.append(Item("failed", f"The last run stopped: {plain['say']}",
+                            recommended=f"{plain.get('do') or ''} (`--resume` continues from the step that "
+                                        "stopped.)".strip()))
+        else:
+            out.append(Item("failed", "The last run stopped with an error (quest_failed.md says where).",
+                            recommended="Continue with `--resume`: the quest picks up at the step that stopped."))
     pending = _read_json(needs / "PROTOCOL_AMENDMENT_PENDING.json")
     if isinstance(pending, dict):
         changes = pending.get("changes") or []
@@ -380,24 +388,15 @@ def waiting(quest_root: Path) -> list[Item]:
     if isinstance(oracle, dict) and oracle.get("status") == "went_on_failing":
         from .accepted_checks import gap as _went_on_gap
 
-        from .oracle_check import proposal_request
-
-        sentences = [_went_on_gap(e) for e in oracle.get("went_on") or [] if isinstance(e, dict) and e.get("name")]
-        # A change to a check that FI or a repair proposed, kept for the person to accept or not.
-        proposed = [p for p in oracle.get("proposed_changes") or [] if isinstance(p, dict) and p.get("name")]
-        offers = []
-        for p in proposed:
-            try:
-                offers.append(f"proposed for '{p['name']}' (to accept it: `--revise-plan \"{proposal_request(p)}\"`)")
-            except Exception:  # noqa: BLE001 -- a proposal that cannot be shown is still in the record
-                continue
+        sentences = [_went_on_gap(e) for e in oracle.get("went_on") or []
+                     if isinstance(e, dict) and (e.get("name") or e.get("unmeasured"))]
+        # (A change a repair proposed is in the record; it is not offered here: whether a check is right is FI's to work
+        # out, and a repair's numbers saw the run.)
         out.append(Item("went_on", "A known-answer check failed and the quest went on: "
                                    + ("; ".join(sentences) or "see needs/ORACLE_CHECK.json") + ".",
-                        recommended="Compare the measured value with the expected one and where it comes from: if the "
-                                    "check is right, the simulation is wrong; if the check is wrong, change it. Until "
-                                    "then the result does not count as checked against known answers."
-                                    + (" A change to the check was " + "; ".join(offers) + " (once the protocol is "
-                                       "frozen, this becomes an amendment you approve)." if offers else "")))
+                        recommended="Nothing you have to fix. What it means: this check is unconfirmed, so the "
+                                    "result counts as exploratory, not as checked against a known answer, and the "
+                                    "paper says so."))
     wanted = needs / "WANTED_PAPERS.md"
     if wanted.is_file() and not _supplied_since(root / "inputs" / "papers", wanted):
         out.append(Item("papers", "Some papers could not be downloaded (needs/WANTED_PAPERS.md lists them, most "

@@ -70,7 +70,8 @@ def _write_plan(engine: Engine, oracles: list[dict[str, Any]], grid: dict[str, A
     return design
 
 
-async def _gate(engine: Engine, oracles: list[dict[str, Any]], source: str, *, stops: bool = True) -> None:
+async def _gate(engine: Engine, oracles: list[dict[str, Any]], source: str) -> None:
+    """One run of the oracle gate. It never stops to ask: it repairs, corrects or goes on (the record says which)."""
     design = _write_plan(engine, oracles)
     seed = engine.quest_root / "code" / "simulate.py"
     seed.parent.mkdir(parents=True, exist_ok=True)
@@ -78,21 +79,17 @@ async def _gate(engine: Engine, oracles: list[dict[str, Any]], source: str, *, s
         seed.write_text(source, encoding="utf-8")
     engine.executor = SharedInterpreterExecutor(python_version="3.11")
     engine._trial_mode = True
-    run = engine._oracle_gate({"topic": engine.config.topic, "iteration": 0, "design": design}, sys.executable, None, seed)
-    if stops:
-        # The stop ends in LangGraph's interrupt(), which outside a running graph raises RuntimeError.
-        with pytest.raises(RuntimeError):
-            await run
-    else:
-        await run
+    await engine._oracle_gate({"topic": engine.config.topic, "iteration": 0, "design": design}, sys.executable, None,
+                              seed)
 
 
 def _record(engine: Engine) -> dict[str, Any]:
     return json.loads((engine.quest_root / "needs" / "ORACLE_CHECK.json").read_text(encoding="utf-8"))
 
 
-def _card(engine: Engine) -> dict[str, Any]:
-    return json.loads((engine.fi_dir / "pause.json").read_text(encoding="utf-8"))["card"]
+def _explained(engine: Engine) -> dict[str, Any]:
+    """Why FI went on, in plain words, as the record keeps it (``leaning``, ``why``)."""
+    return _record(engine).get("explained") or {}
 
 
 def _triage(record: dict[str, Any], kind: str) -> list[dict[str, Any]]:
@@ -133,19 +130,44 @@ async def test_rk4_expected_value_off_20x_is_disputed_by_a_blind_recompute_and_t
     asked = model.recompute_prompts[0]
     assert "3.33241" not in asked and "3.3324e-07" not in asked, "the measured value is never shown"
     record = _record(engine)
-    assert record["status"] == "stopped" and record["disputed"] == ["rk4_closed_form_h01"]
+    assert record["status"] == "went_on_failing" and record["disputed"] == ["rk4_closed_form_h01"]
     (entry,) = _triage(record, "recompute")
-    assert entry["verdict"] == "disputed" and entry["points_to"] == "check" and entry["same_model"] is True
+    # The model that wrote the plan, asked again: said, never counted as independent evidence.
+    assert entry["verdict"] == "disputed" and entry["points_to"] == "" and entry["same_model"] is True
+    judged = record["attempts"][-1]["judged"][0]
+    assert judged["disputed_by"] == "recompute_same_model", "the paper never calls the plan's own model another one"
+    kept = json.loads((engine.fi_dir / "oracle_triage.json").read_text(encoding="utf-8"))["recompute"]
+    assert all(a.get("same_model") is True for a in kept.values()), "a kept answer says who answered it"
+    assert "same model that wrote the plan" in entry["tried"]
     proposal = record["proposed_changes"][0]
     assert proposal["source"] == "recompute" and proposal["expected"] == pytest.approx(3.3324e-07)
     assert proposal["tolerance"] == 1e-09, "the check's own tolerance: nothing is loosened"
     assert record["self_checks"]["model_calls"] == 1
-    card = _card(engine)
-    assert "FI's own look at it points to the check" in card["summary"]
-    assert "worked out again without the measured value" in card["causes"][0]["text"]
-    assert any("without showing it the measured value: it got 3.3324e-07" in t for t in card["tried"])
-    assert any(a["id"] == "accept_proposal" or "3.3324e-07" in json.dumps(a) for a in card["actions"])
+    assert not (engine.fi_dir / "oracle_corrections.json").exists(), "the same model's value never corrects a check"
+    assert plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]["expected"] == 1.637e-08
+    assert _explained(engine)["why"], "why FI went on, in plain words"
     assert "this run spent 1 model call(s)" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_rk4_expected_value_off_20x_another_models_value_alone_never_corrects_the_check(
+        tmp_path: Path) -> None:
+    """With another model named for checking the checks, its value (worked out without seeing the result) disputes the
+    plan's: the correct script is kept, but one model's value alone never rewrites the check (only the plan's own
+    arithmetic confirmed by it does): the check goes on unconfirmed and the result counts as exploratory."""
+    engine = Engine(_config(tmp_path).model_copy(update={"provider": ProviderConfig(
+        name="openai", model="planner", node_models={"oracle_review": "another-model"})}))
+    model = _Model(recompute={"expected": 3.3324e-07, "how": "the RK4 amplification factor at h=0.1 is "
+                                                            "0.9048375; 0.9048375^10 - exp(-1) = 3.3324e-07"},
+                   repair_code=BENT)
+    engine._client = model
+    await _gate(engine, [RK4], RK4_SOURCE)
+    assert model.repairs == [] and (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RK4_SOURCE
+    record = _record(engine)
+    assert record["status"] == "went_on_failing" and record["disputed"] == ["rk4_closed_form_h01"]
+    after = plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]
+    assert after["expected"] == 1.637e-08 and after["tolerance"] == 1e-09, "the check is neither rewritten nor loosened"
+    assert not (engine.fi_dir / "oracle_corrections.json").exists()
 
 
 @pytest.mark.asyncio
@@ -153,8 +175,8 @@ async def test_a_dispute_survives_resume_until_the_check_is_changed(tmp_path: Pa
     engine = Engine(_config(tmp_path))
     engine._client = _Model(recompute={"expected": 3.3324e-07, "how": "h^4 term"}, repair_code=BENT)
     await _gate(engine, [RK4], RK4_SOURCE)
-    # The resume: the gate runs again. The dispute is read back from needs/ORACLE_CHECK.json, so the model is not asked
-    # again and the correct script is not rewritten towards the disputed number.
+    # The gate runs again (a redo from the run): the dispute is read back from needs/ORACLE_CHECK.json, so the model is
+    # not asked again and the correct script is not rewritten towards the disputed number.
     again = _Model(recompute={"expected": 1.637e-08, "how": "would agree with the plan"}, repair_code=BENT)
     engine._client = again
     await _gate(engine, [RK4], RK4_SOURCE)
@@ -162,10 +184,10 @@ async def test_a_dispute_survives_resume_until_the_check_is_changed(tmp_path: Pa
     assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RK4_SOURCE
     record = _record(engine)
     assert record["disputed"] == ["rk4_closed_form_h01"] and record["proposed_changes"][0]["source"] == "recompute"
-    # The person accepts the proposal: the check is not the one the dispute was about, and it now passes.
-    accepted = {**RK4, "expected": 3.3324e-07}
+    # A changed check is not the one the dispute was about, and it now passes.
+    changed = {**RK4, "expected": 3.3324e-07}
     engine._client = _Model(recompute={"expected": 3.3324e-07}, repair_code=BENT)
-    await _gate(engine, [accepted], RK4_SOURCE, stops=False)
+    await _gate(engine, [changed], RK4_SOURCE)
     record = _record(engine)
     assert record["status"] == "ok" and "disputed" not in record and "proposed_changes" not in record
 
@@ -209,11 +231,9 @@ async def test_verlet_energy_at_1e_12_is_the_methods_own_error_at_its_step_and_t
     assert record["self_checks"] == {"model_calls": 1, "extra_runs": 2}
     (recomputed,) = _triage(record, "recompute")
     assert recomputed["verdict"] == "agrees"
-    card = _card(engine)
-    texts = " ".join(c["text"] + " " + c["evidence"] for c in card["causes"])
-    assert "tighter than the method's own error at this step" in texts and "dt=0.005" in texts
-    assert card["checks"][0]["set_aside"] is True and card["checks"][0]["status"] == "failed", "the verdict stands"
-    assert any("at a smaller step" in t for t in card["tried"])
+    assert "tighter than the method's own error at this step" in (step.get("cause") or {}).get("text", "")
+    assert record["status"] == "went_on_failing", "the verdict stands: the check stays failed, marked unconfirmed"
+    assert _explained(engine)["leaning"] == "check" and "step error" in _explained(engine)["why"]
     assert "2 extra run(s)" in plan.plan_path(engine.quest_root).read_text(encoding="utf-8")
 
 
@@ -224,9 +244,12 @@ def test_a_check_whose_number_is_an_error_at_a_finite_step_is_not_called_method_
     assert got is not None and got["verdict"] == "converges_elsewhere"
     with_order = ot.step_verdict({**RK4, "order": 4}, [3.33241e-07, 1.99761e-08, 1.22274e-09], order=4)
     assert with_order is not None and with_order["verdict"] == "converges_elsewhere"
-    # A wrong constant does not move with the step at all.
+    # A wrong constant does not move with the step at all: said as staying the same, never as "does not settle".
     flat = ot.step_verdict({**VERLET, "tolerance": 1e-6}, [0.25, 0.25, 0.25], order=None)
-    assert flat is not None and flat["verdict"] == "not_converging"
+    assert flat is not None and flat["verdict"] == "steady_elsewhere"
+    # Values that jump about without shrinking still do not converge.
+    jumpy = ot.step_verdict({**VERLET, "tolerance": 1e-6}, [0.25, 0.30, 0.22], order=None)
+    assert jumpy is not None and jumpy["verdict"] == "not_converging"
 
 
 def _euler(dt: float) -> float:
@@ -311,8 +334,8 @@ async def test_a_single_random_trial_judged_tighter_than_its_noise_is_said_and_n
     assert seeds["verdict"] == "noise" and len(seeds["values"]) == 4 and seeds["sd"] > 0.01
     assert len(set(seeds["values"])) == 4, "each extra trial has its own seed"
     assert model.repairs == [] and record["self_checks"]["extra_runs"] == 3
-    card = _card(engine)
-    assert any("smaller than one trial's noise" in c["text"] for c in card["causes"])
+    assert "smaller than one trial's noise" in (seeds.get("cause") or {}).get("text", "")
+    assert record["status"] == "went_on_failing" and _explained(engine)["leaning"] == "check"
 
 
 SAME_ERROR = '''
@@ -336,9 +359,9 @@ async def test_the_same_exception_after_a_repair_stops_the_repairs_early(tmp_pat
     assert [a.get("exception") for a in record["attempts"]] == ["KeyError: 'MY_SETTING'"] * 2
     (stopped,) = _triage(record, "same_exception")
     assert stopped["repairs_left"] == 1
-    card = _card(engine)
-    assert any("The same error came back after FI's repair (KeyError: 'MY_SETTING')" in t for t in card["tried"])
-    assert card["checks"][0]["error"] == "KeyError: 'MY_SETTING'"
+    assert record["status"] == "went_on_failing" and record["went_on"][0]["measured"] is None
+    assert "KeyError: 'MY_SETTING'" in record["went_on"][0]["unmeasured"]
+    assert _explained(engine)["leaning"] == "script" and "stopped with an error" in _explained(engine)["why"]
 
 
 @pytest.mark.asyncio
@@ -357,7 +380,7 @@ async def test_a_run_that_runs_out_of_time_gets_one_retry_at_twice_the_time(tmp_
         return [{"name": RK4["name"], "value": 1.6e-08, "measured_by": "engine"}], [], False
 
     monkeypatch.setattr(trial_runner, "measure_oracles", measure)
-    await _gate(engine, [RK4], RK4_SOURCE, stops=False)
+    await _gate(engine, [RK4], RK4_SOURCE)
     assert limits == [limits[0], limits[0] * 2]
     record = _record(engine)
     assert record["status"] == "ok"
@@ -460,3 +483,31 @@ else:
     # The main experiment's own count is still read.
     wrong = pc.check({"runs_per_setting": 300}, {"experiment.py": ONE_SCRIPT})
     assert [m.kind for m in wrong] == ["runs"] and wrong[0].found == [900.0]
+
+
+
+@pytest.mark.asyncio
+async def test_rk4_slip_in_the_plans_working_confirmed_by_another_model_is_corrected_and_then_passes(
+        tmp_path: Path) -> None:
+    """The plan's own working gives the right RK4 error but writes another number; another model, shown neither that
+    working nor the result, gets the same value: FI corrects the check (never the tolerance, never the measured value),
+    measures again, and the corrected check passes on the correct script."""
+    slipped = {**RK4, "reference": "derivation: the RK4 global error at t = 1 with h = 0.1, "
+                                   "error = 0.9048375**10 - exp(-1) => 1.637e-08"}
+    from core import oracle_triage
+
+    computes = oracle_triage.plan_slip(slipped)["computes"]
+    engine = Engine(_config(tmp_path).model_copy(update={"provider": ProviderConfig(
+        name="openai", model="planner", node_models={"oracle_review": "another-model"})}))
+    model = _Model(recompute={"expected": computes, "how": "the RK4 amplification factor at h = 0.1"},
+                   repair_code=BENT)
+    engine._client = model
+    await _gate(engine, [slipped], RK4_SOURCE)
+    assert model.repairs == [] and (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RK4_SOURCE
+    assert "0.9048375**10" not in model.recompute_prompts[0], "the second source never sees the plan's working"
+    record = _record(engine)
+    assert record["status"] == "ok", record.get("status")
+    after = plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]
+    assert after["expected"] == pytest.approx(computes) and after["tolerance"] == 1e-09
+    corrected = json.loads((engine.fi_dir / "oracle_corrections.json").read_text(encoding="utf-8"))
+    assert corrected["rk4_closed_form_h01"]["confirmed_by"]["source"] == "recompute"

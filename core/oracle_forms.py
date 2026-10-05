@@ -66,6 +66,24 @@ FUNCTIONS: dict[str, Callable[..., float]] = {
 #: The names a formula may use that are not returned by the simulation.
 CONSTANTS: dict[str, float] = {"pi": math.pi}
 
+
+def _ellipk(m: float) -> float:
+    """The complete elliptic integral of the first kind in SciPy's convention, ``scipy.special.ellipk(m)`` with the
+    parameter ``m = k**2``: ``pi / (2 * AGM(1, sqrt(1 - m)))`` (no SciPy needed)."""
+    if not m < 1:
+        raise ValueError("ellipk(m) needs m < 1")
+    a, b = 1.0, math.sqrt(1.0 - m)
+    for _ in range(64):
+        if abs(a - b) <= 1e-16 * a:
+            break
+        a, b = (a + b) / 2, math.sqrt(a * b)
+    return math.pi / (2 * a)
+
+
+#: Functions only FI's own working-out of a derivation may use (core/oracle_triage.py::calculate), never a check's
+#: formula: a plan writes its expected value with them, a simulation's returned names are never passed through them.
+SPECIAL_FUNCTIONS: dict[str, Callable[..., float]] = {"ellipk": _ellipk}
+
 _BINARY: dict[type, Callable[[float, float], float]] = {
     ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
     # math.pow, not **: a negative base to a fractional power is an error here, never a complex number.
@@ -88,8 +106,10 @@ LANGUAGE = (
 )
 
 
-def _tree(text: Any) -> tuple[ast.Expression | None, str]:
-    """The parsed formula, or ``(None, why it cannot be read)``."""
+def _tree(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> tuple[ast.Expression | None, str]:
+    """The parsed formula, or ``(None, why it cannot be read)``. ``functions``: the functions it may call (default
+    :data:`FUNCTIONS`)."""
+    functions = FUNCTIONS if functions is None else functions
     text = str(text if text is not None else "").strip()
     if not text:
         return None, "it is empty"
@@ -116,9 +136,9 @@ def _tree(text: Any) -> tuple[ast.Expression | None, str]:
                 return None, f"it uses the operator {type(op).__name__}, which a formula here may not"
             continue
         if isinstance(node, ast.Name):
-            if id(node) in calls and node.id not in FUNCTIONS:
+            if id(node) in calls and node.id not in functions:
                 return None, f"it calls {node.id}(), which is not one of {FUNCTION_LIST}"
-            if id(node) not in calls and node.id in FUNCTIONS:
+            if id(node) not in calls and node.id in functions:
                 return None, f"it uses the function {node.id} without calling it"
             continue
         if isinstance(node, ast.Constant):
@@ -141,10 +161,10 @@ def problem(text: Any) -> str | None:
     return None if tree is not None else why
 
 
-def names(text: Any) -> list[str]:
+def names(text: Any, functions: dict[str, Callable[..., float]] | None = None) -> list[str]:
     """The names a formula takes from what the simulation returns (not its functions or constants), in order; empty
-    when it cannot be read."""
-    tree, _ = _tree(text)
+    when it cannot be read (with ``functions``, the functions it may call, as :func:`evaluate` reads it)."""
+    tree, _ = _tree(text, functions)
     if tree is None:
         return []
     calls = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
@@ -168,13 +188,16 @@ class Evaluated:
     problem: str = ""
 
 
-def evaluate(text: Any, values: dict[str, Any]) -> Evaluated:
+def evaluate(text: Any, values: dict[str, Any], *, special: bool = False) -> Evaluated:
     """``text`` computed from ``values`` (what the simulation returned). Never runs code: the parsed tree is walked
-    here, and each constant is a float, so no exponent can grow an integer without bound."""
-    tree, why = _tree(text)
+    here, and each constant is a float, so no exponent can grow an integer without bound. ``special``: FI's own
+    working-out of a derivation, which may also call :data:`SPECIAL_FUNCTIONS`."""
+    functions = {**FUNCTIONS, **SPECIAL_FUNCTIONS} if special else FUNCTIONS
+    tree, why = _tree(text, functions)
     if tree is None:
         return Evaluated(unreadable=why)
-    missing = [n for n in names(text) if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
+    missing = [n for n in names(text, functions)
+               if not isinstance(values.get(n), (int, float)) or isinstance(values.get(n), bool)]
     if missing:
         return Evaluated(missing=missing)
 
@@ -195,7 +218,7 @@ def evaluate(text: Any, values: dict[str, Any]) -> Evaluated:
         if isinstance(node, ast.BinOp):
             return real(_BINARY[type(node.op)](walk(node.left), walk(node.right)))
         if isinstance(node, ast.Call):
-            return real(FUNCTIONS[node.func.id](*[walk(a) for a in node.args]))  # type: ignore[union-attr]
+            return real(functions[node.func.id](*[walk(a) for a in node.args]))  # type: ignore[union-attr]
         raise ValueError(f"cannot compute {type(node).__name__}")
 
     try:
@@ -205,8 +228,8 @@ def evaluate(text: Any, values: dict[str, Any]) -> Evaluated:
         return Evaluated(problem="it divides by zero")
     except OverflowError:
         return Evaluated(problem="the number is too large")
-    except (ValueError, TypeError, RecursionError) as e:
-        return Evaluated(problem=f"it cannot be computed ({e})")
+    except (ValueError, TypeError, RecursionError, KeyError) as e:
+        return Evaluated(problem=f"it cannot be computed ({e!r})")
     if not finite:
         return Evaluated(problem=f"it gives {value}")
     return Evaluated(value=value)

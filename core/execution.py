@@ -322,14 +322,25 @@ class VenvExecutor:
                 cwd=quest_root,
                 timeout_s=60,
             )
+            listed_by = ""
             if freeze.returncode != 0:
-                _log.warning(
-                    "cleanup_after_success: pip freeze rc=%d stderr=%s; "
-                    "keeping .venv/ for debugging",
-                    freeze.returncode,
-                    freeze.stderr[-300:],
-                )
-                return None
+                # pip freeze crashes on a machine with an editable install whose
+                # folder was deleted (it probes each one); the venv's own
+                # distributions, read with importlib.metadata, are what
+                # ``--local`` would have listed.
+                local = await self.execute([str(py), "-c", _LOCAL_SCRIPT], cwd=quest_root, timeout_s=60)
+                if local.returncode != 0:
+                    _log.warning(
+                        "cleanup_after_success: pip freeze rc=%d (%s) and the importlib.metadata "
+                        "listing rc=%d; keeping .venv/ for debugging",
+                        freeze.returncode,
+                        _last_line(freeze.stderr),
+                        local.returncode,
+                    )
+                    return None
+                listed_by = (f"# pip freeze failed ({_last_line(freeze.stderr)}); listed from "
+                             "importlib.metadata instead.\n")
+                freeze = local
             # Stamp the lock file with a short header so a future reader
             # knows what produced it and how to reuse it. POSIX and
             # Windows reproduction lines are both spelled out — the
@@ -352,7 +363,7 @@ class VenvExecutor:
                     "# Pinned to the versions this quest ran against; their "
                     "dependencies resolve fresh on reinstall.\n" + inherited
                 )
-            lock_path.write_text(header + freeze.stdout + inherited, encoding="utf-8")
+            lock_path.write_text(header + listed_by + freeze.stdout + inherited, encoding="utf-8")
             # Delete the venv. ``ignore_errors`` rather than ``onerror=``
             # so a stuck file handle on Windows doesn't propagate — the
             # lock file is the durable artifact; a stray .venv/ is
@@ -448,6 +459,38 @@ _PIN_SCRIPT = (
     "for d in m.distributions() "
     "if d.metadata['Name'] and n(d.metadata['Name']) in w})]"
 )
+
+
+# What ``pip freeze --local`` lists, without pip: the distributions installed inside
+# the venv itself (not the ones it sees from FI's own interpreter). One line, as
+# ``_PIN_SCRIPT``.
+_LOCAL_PROGRAM = (
+    "import os, re, sys, json, importlib.metadata as m\n"
+    "c = lambda x: os.path.normcase(os.path.abspath(str(x)))\n"
+    "k = lambda s: re.sub('[-_.]+', '-', s).lower()\n"
+    "p, r = c(sys.prefix), {}\n"
+    "for d in m.distributions():\n"
+    "    try:\n"
+    "        n = ((d.metadata or {}).get('Name') or '').strip()\n"
+    "        x = c(d.locate_file(''))\n"
+    "        if not n or os.path.commonpath([p, x]) != p or k(n) in r:\n"
+    "            continue\n"
+    "        u = json.loads(d.read_text('direct_url.json') or 'null')\n"
+    "        v = (u or {}).get('vcs_info') if isinstance(u, dict) else None\n"
+    "        url = (v['vcs'] + '+' + u['url'] + '@' + v.get('commit_id', '')) if v and v.get('vcs') else (u or {}).get('url')\n"
+    "        r[k(n)] = n + ' @ ' + url if isinstance(u, dict) and url else n + '==' + d.version\n"
+    "    except Exception:\n"
+    "        pass\n"
+    "print(''.join(v + chr(10) for v in sorted(r.values())), end='')\n"
+)
+# Passed as one line (a multi-line ``-c`` argument is fragile across Windows argv quoting).
+_LOCAL_SCRIPT = "exec(bytes.fromhex('" + _LOCAL_PROGRAM.encode().hex() + "').decode())"
+
+
+def _last_line(text: str) -> str:
+    """The last non-empty line of ``text`` (an error's message, not its traceback), shortened."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return (lines[-1] if lines else "no message")[:200]
 
 
 def _norm_dist(name: str) -> str:

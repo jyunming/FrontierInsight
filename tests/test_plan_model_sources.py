@@ -293,29 +293,27 @@ async def test_by_default_an_unsourced_expected_value_is_warned_about_and_the_qu
 
 
 @pytest.mark.asyncio
-async def test_under_research_an_unsourced_expected_value_stops_the_quest_at_the_plan_until_it_is_fixed(
+async def test_under_research_an_unsourced_expected_value_is_marked_not_confirmed_and_never_stops(
         tmp_path: Path) -> None:
+    from core import accepted_checks
+
     eng, seen = _engine(tmp_path, _protocol(oracles=[{**GOOD_ORACLE, "reference": ""}]), research=True)
     state = {"topic": "RK4", "iteration": 0, "literature": _literature()}
-    with pytest.raises(Paused):
-        await eng._node_plan(state)
-    assert seen[-1]["kind"] == "plan"
-    assert "rk4 error" in " ".join(seen[-1]["steps"])
-    # A resume that fixed nothing stops again (the plan-pause marker does not let it through).
-    with pytest.raises(Paused):
-        await eng._node_plan(state)
-    # Fixed in plan.md: the resume goes on without another stop.
+    await eng._node_plan(state)
+    assert seen == [], "where a value comes from is not a question a person is asked"
+    assert eng._not_confirmed_names(state, eng._draft_protocol(state)) == ["rk4 error"]
+    assert accepted_checks.accepted(eng.quest_root)["chosen"]["rk4 error"]["by"] == accepted_checks.AUTOMATIC
+    # Given a source later, the check is no longer marked.
     path = plan.plan_path(eng.quest_root)
     fixed = path.read_text(encoding="utf-8").replace("reference: ''", "reference: '[1], the error constant of RK4'")
     assert fixed != path.read_text(encoding="utf-8")
     path.write_text(fixed, encoding="utf-8")
-    seen.clear()
     await eng._node_plan(state)
-    assert seen == []
+    assert seen == [] and eng._not_confirmed_names(state, eng._draft_protocol(state)) == []
 
 
 @pytest.mark.asyncio
-async def test_under_research_an_oracle_the_engine_added_without_a_source_stops_before_the_freeze(
+async def test_under_research_an_oracle_the_engine_added_without_a_source_is_frozen_marked_not_confirmed(
         tmp_path: Path) -> None:
     from core import frozen_protocol
 
@@ -325,9 +323,11 @@ async def test_under_research_an_oracle_the_engine_added_without_a_source_stops_
     path = plan.plan_path(eng.quest_root)
     text = path.read_text(encoding="utf-8")
     path.write_text(text.replace(GOOD_ORACLE["reference"][:40], "from memory, roughly "), encoding="utf-8")
-    with pytest.raises(Paused):
-        eng._check_plan_sources(state, stop=True)
-    assert frozen_protocol.load(eng.quest_root) is None
+    eng._check_plan_sources(state, stop=True)
+    assert seen == []
+    eng._freeze_protocol_if_due(state)
+    approved = frozen_protocol.load(eng.quest_root)["approved_by"]
+    assert "source not confirmed" in approved and "'rk4 error'" in approved, "the freeze says the value is unconfirmed"
 
 
 # --- the edge cases a review found -------------------------------------------------------------------------------
@@ -431,14 +431,14 @@ async def test_a_quest_that_runs_no_experiment_is_not_checked(tmp_path: Path, pa
 
 
 @pytest.mark.asyncio
-async def test_under_research_with_the_plan_held_the_unsourced_stop_is_the_only_plan_stop(tmp_path: Path) -> None:
+async def test_under_research_with_the_plan_held_the_plain_plan_stop_is_the_only_one(tmp_path: Path) -> None:
     from core import frozen_protocol
 
     eng, seen = _engine(tmp_path, _protocol(oracles=[{**GOOD_ORACLE, "reference": ""}]), research=True, ask=True)
     state = {"topic": "RK4", "iteration": 0, "literature": _literature()}
     with pytest.raises(Paused):
         await eng._node_plan(state)
-    assert seen[-1]["headline"] == "say where the plan's expected values come from"
+    assert seen[-1]["headline"] == "read and edit the plan", "the stop the person asked for, nothing about sources"
     path = plan.plan_path(eng.quest_root)
     path.write_text(path.read_text(encoding="utf-8").replace("reference: ''", "reference: '[1], the error of RK4'"),
                     encoding="utf-8")
@@ -516,19 +516,15 @@ def test_a_second_label_right_after_the_first_is_read_too() -> None:
     assert "[7]" in gap
 
 
-def test_a_research_stop_about_another_check_does_not_count_as_showing_the_checks_fi_added(tmp_path: Path) -> None:
+def test_going_on_without_a_source_never_counts_as_showing_the_checks_fi_added(tmp_path: Path) -> None:
     eng, seen = _engine(tmp_path, _protocol(), research=True)
     eng.quest_root.mkdir(parents=True, exist_ok=True)
     plan.plan_path(eng.quest_root).write_text("x", encoding="utf-8")
     eng._oracles_added_write({"oracles": ["added one"], "shown": False})
-    protocol = {"oracles": [{**GOOD_ORACLE, "reference": ""}, {**GOOD_ORACLE, "name": "added one"}]}
-    with pytest.raises(Paused):
-        eng._check_plan_sources({"literature": _literature()}, stop=True, protocol=protocol)
-    assert eng._oracles_added_read()["shown"] is False
     protocol = {"oracles": [{**GOOD_ORACLE, "name": "added one", "reference": ""}]}
-    with pytest.raises(Paused):
-        eng._check_plan_sources({"literature": _literature()}, stop=True, protocol=protocol)
-    assert eng._oracles_added_read()["shown"] is True
+    eng._check_plan_sources({"literature": _literature()}, stop=True, protocol=protocol)
+    assert seen == []
+    assert eng._oracles_added_read()["shown"] is False, "nobody was shown it, so the freeze never says they approved it"
 
 
 @pytest.mark.asyncio

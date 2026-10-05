@@ -459,7 +459,7 @@ function helpText(): string {
         "- `@fi /scan-skill <name> [--config <quest.yaml>]` — statically review a skill before approving it: injection phrasing, hidden characters, network access, `eval`. Nothing is imported or run.",
         "- `@fi /approve-skill <name> [--config <quest.yaml>]` — approve a skill for use. Shows the review first, then asks who is approving; a high-severity finding needs an extra confirmation. Approval binds to that exact content.",
         "- `@fi /approve-amendment <quest_id>` — approve the change to a quest's frozen protocol that it stopped to ask about. Shows what changes and why, asks who is approving, and records it; resuming the quest without approving keeps the frozen protocol. If the results had already been seen, the run is archived and the paper says the change was post-hoc.",
-        "- `@fi /accept-checks <quest_id>` — go on as it is when a quest stopped at a known-answer check that was measured and failed (the check is marked *unconfirmed*: it shows the check's expected value, tolerance, case, measure, the measured value and the code that measured it, asks your name, records the choice and resumes; if the check or that code changes, it is judged again; not offered when nothing was measured), or because some of its checks do not say where their expected value comes from. Shows the checks, asks your name, records the choice and resumes. The checks still run; each is marked *source not confirmed*, and the result and the paper say so. To fill them in instead: `@fi /plan <quest_id> fill in where each check's expected value comes from`.",
+        "- `@fi /accept-checks <quest_id>` — for a quest an earlier FI stopped at its known-answer checks (today's FI decides this itself and never stops there): go on as it is when it stopped at a known-answer check that was measured and failed (the check is marked *unconfirmed*: it shows the check's expected value, tolerance, case, measure, the measured value and the code that measured it, asks your name, records the choice and resumes; if the check or that code changes, it is judged again; not offered when nothing was measured), or because some of its checks do not say where their expected value comes from. Shows the checks, asks your name, records the choice and resumes. The checks still run; each is marked *source not confirmed*, and the result and the paper say so. To fill them in instead: `@fi /plan <quest_id> fill in where each check's expected value comes from`.",
         "- `@fi /approve-all-skills` — approve every skill that passes its gates at once, optionally pip-installing what quarantined skills are missing first. Still asks who is approving; a failing self-test is still refused.",
         "- `@fi /revoke-skill <name> [--config <quest.yaml>]` — withdraw approval, returning the skill to proposed.",
         "- `@fi /remove-skill <name> [--config <quest.yaml>]` — remove a skill from FI: deleted if it is in FI's own folder, hidden if another tool installed it.",
@@ -528,8 +528,8 @@ async function runResume(
         stream.markdown(
             `❌ \`/resume\` does not understand ${unknown.map((f) => `\`${f}\``).join(", ")}, so nothing was run. ` +
             "It takes a quest id, `--from <step>` (redo from a step) and `--revise-plan \"<what to change>\"` " +
-            "(rewrite the plan). To go on with a known-answer check that failed (marked unconfirmed), or with checks " +
-            "that do not say where their expected value comes from: " +
+            "(rewrite the plan). For a quest an earlier FI stopped at its known-answer checks, to go on with them marked " +
+            "unconfirmed: " +
             "`@fi /accept-checks <quest_id>`.\n",
         );
         return;
@@ -1370,6 +1370,9 @@ async function runLaunchInChat(
     let stdoutBuf = "";
     let questIdSeen: string | undefined;
     const onLine = (line: string): void => {
+        // The quest this run started or resumed (printed before it runs, so a run that fails still names it).
+        const started = line.match(/^\[FI\] (?:start|resume) quest_id=(\S+)/);
+        if (started && !opts.fleet) questIdSeen = started[1];
         if (opts.showAllOutput) {
             showRaw(line);
             return;
@@ -1576,15 +1579,48 @@ async function reportQuestEnd(
         // This run's quest, never another one running beside it in the same folder.
         await surfaceWantedPapers(outputsDir, stream, questId ?? card?.questId, !!card, startedAt);
     } else {
+        // A quest that stopped on an error: what happened and the one thing to do, in plain words
+        // (`.fi/failure.json`, core/crash_kind.py), before any technical output.
+        const plain = await readFailure(outputsDir, questId, startedAt);
+        if (plain) {
+            stream.markdown(
+                `\n\n---\n\n❌ **${plain.title || "The quest stopped"}.** ${plain.say}\n\n` +
+                `${plain.do}\n\n` +
+                `To continue: \`@fi /resume ${plain.questId}\` (it picks up at the step that stopped).\n`,
+            );
+            return;
+        }
         const tail = ran.stderrTail.join("\n");
         stream.markdown(
             `\n❌ **Python exited with code ${ran.code}.**\n\n` +
             (tail.trim()
-                ? "Last lines of stderr (the actual error usually lives here, **not** in `run.log` — unhandled exceptions skip the logger):\n\n" +
+                ? "Last lines of stderr (a quest that started also keeps its full error in `.fi/run.log`):\n\n" +
                   "```\n" + tail + "\n```\n"
                 : "stderr was empty. Check `outputs/<quest_id>/.fi/run.log` for whatever made it to the logger before the crash.\n"),
         );
     }
+}
+
+
+/**
+ * A quest that stopped on an error this run: the engine's plain-words record of it (`.fi/failure.json`,
+ * core/crash_kind.py): `title`, `say` (what happened), `do` (the one thing to do). Null when there is none, or when
+ * it is older than this run (the record of an earlier failure is not this one).
+ */
+async function readFailure(
+    outputsDir: string,
+    questId: string | undefined,
+    since: number,
+): Promise<{ questId: string; title?: string; say: string; do: string } | null> {
+    if (!questId) { return null; }
+    try {
+        const file = path.join(outputsDir, questId, ".fi", "failure.json");
+        const st = await fsPromises.stat(file);
+        if (st.mtimeMs < since - CLOCK_SLACK_MS) { return null; }
+        const data = JSON.parse(await fsPromises.readFile(file, "utf-8"));
+        if (!data || typeof data.say !== "string" || !data.say) { return null; }
+        return { questId, title: data.title, say: data.say, do: String(data.do || "") };
+    } catch { return null; }
 }
 
 

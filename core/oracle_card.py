@@ -24,6 +24,13 @@ The payload (``type: "known_answer_check"``):
 - ``actions``: two or three one-step ways on, each with the exact command per interface. A consumer must ignore an
   action ``id`` it does not know: more kinds of action can be added without changing the others.
 - ``notes``: what holds for this quest (a frozen protocol, a research quest).
+- ``leaning``: which side FI's own look points to (:func:`leaning`): ``check`` (the check's expected value or tolerance
+  is most likely wrong), ``script`` (the simulation is most likely wrong), ``unclear``, or ``plan`` (a check has no
+  number to compare with yet). Worked out from what FI already has, never from a new model call.
+- ``why``: one sentence, in a scientist's words, of why FI leans that way (the plan's own arithmetic does not add
+  up; another model got another value without seeing the result; the value settles elsewhere at a smaller step ...).
+  The gate writes it with its automatic decision (``needs/ORACLE_CHECK.json``) and says it in the console: whether a
+  check or the simulation is wrong is never a question for a person.
 """
 
 from __future__ import annotations
@@ -249,7 +256,8 @@ def build(
     attempts = [a for a in attempts or [] if isinstance(a, dict)]
     judged = [j for j in judged or [] if isinstance(j, dict)]
     by_judged = {str(j.get("name") or "").strip().lower(): j for j in judged}
-    proposals = [p for p in proposals or [] if isinstance(p, dict) and p.get("name")]
+    # A copy (of the list and of each proposal): the card never changes what the gate passed in.
+    proposals = [dict(p) for p in proposals or [] if isinstance(p, dict) and p.get("name")]
     by_proposal = {str(p["name"]).strip().lower(): p for p in proposals}
     disputed_set = {str(n).strip().lower() for n in disputed or []}
     last_checks = attempts[-1].get("checks") if attempts else None
@@ -258,9 +266,23 @@ def build(
     run_text = "; ".join(found) + "\n" + (stderr_tail or "")
     # What FI's own look at the failing checks found (core/oracle_triage.py), in the order it looked.
     triage = [t for a in attempts for t in a.get("triage") or [] if isinstance(t, dict)]
+    # The plan's own arithmetic, worked out here too (pure, no model): a card never blames the simulation for a slip in
+    # the plan's derivation, whichever run of the gate recorded what.
+    from .oracle_triage import arithmetic_entry, plan_slip
+
+    for oracle in oracles:
+        key = str(oracle.get("name") or "").strip().lower()
+        if any(t.get("kind") == "arithmetic" and str(t.get("check") or "").strip().lower() == key for t in triage):
+            continue
+        slip = plan_slip(oracle)
+        if slip is not None and not by_judged.get(key, {}).get("passed_by_engine"):
+            triage.insert(0, arithmetic_entry(oracle, slip))
+    # An arithmetic finding about a value a check no longer has (FI corrected it since) is said nowhere on the card.
+    triage = _current(triage, [{"id": str(o.get("name") or "").strip(), "expected": o.get("expected")}
+                               for o in oracles])
     by_fi = any(p.get("source") == "recompute" for p in proposals) or any(
-        t.get("points_to") == "tolerance" for t in triage)
-    by_repair = any(p.get("source") != "recompute" for p in proposals)
+        t.get("points_to") in ("tolerance", "check") for t in triage)
+    by_repair = any(p.get("source") not in ("recompute", "arithmetic") for p in proposals)
 
     checks: list[dict[str, Any]] = []
     causes: list[dict[str, str]] = []
@@ -397,6 +419,9 @@ def build(
         # A check whose error is on the card already does not repeat it.
         c["found"] = ([_plain(p) for p in c.get("problems") or []]
                       if c["status"] not in ("failed", "not_run") and not c.get("error") else [])
+    side = leaning(checks, triage, proposals, kept=kept, has_oracles=bool(oracles))
+    actions = _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
+                       repairs=repairs, kept=kept, quest_root=quest_root, script=script, go_on=go_on)
     return {
         "type": TYPE,
         "summary": summary,
@@ -406,8 +431,9 @@ def build(
         "also_found": [_plain(f) for f in found if not any(repr(c["id"]) in f for c in checks)] if oracles else [],
         "causes": causes,
         "tried": _tried(attempts, kept=kept, script=script, by_fi=by_fi and not by_repair),
-        "actions": _actions(quest_id, checks, oracles, frozen=frozen, research=research, interview_made=interview_made,
-                            repairs=repairs, kept=kept, quest_root=quest_root, script=script, go_on=go_on),
+        "leaning": side,
+        "why": _why(side, checks, triage, proposals),
+        "actions": actions,
         "notes": _notes(frozen=frozen, research=research, plan_incomplete=not oracles or any_unjudgeable) + (
             # Why "mark it unconfirmed and go on" is not among the ways on: said, so nobody looks for it.
             [f"Going on with a check marked unconfirmed is not offered here: {go_on['why_not']}."]
@@ -420,9 +446,136 @@ def build(
     }
 
 
+#: What FI's own looks (core/oracle_triage.py) found, in a scientist's words: ``(kind, verdict) -> sentence``.
+_LOOK_SAID = {
+    ("recompute", "disputed"): "another model worked out the expected value again, without seeing the result, and got "
+                               "{recomputed}: close to what was measured, not the plan's {expected}",
+    ("recompute", "agrees"): "another model worked out the expected value again, without seeing the result, and got the "
+                             "plan's value",
+    ("half_step", "method_error"): "at a smaller step the result moves onto the expected value, so the gap is only the "
+                                   "method's own step error, which the check does not allow for",
+    ("half_step", "converges_elsewhere"): "at a smaller step the result settles on a different value than expected",
+    ("half_step", "wrong_order"): "at a smaller step the error shrinks at another rate than the method should",
+    ("half_step", "not_converging"): "at a smaller step the result does not settle",
+    ("half_step", "steady_elsewhere"): "at a smaller step the result stays the same, so the gap is not a step-size error",
+    ("multiple", "factor"): "what was measured is {word} the value FI worked out itself, so the simulation likely "
+                            "computes a related quantity instead of the one the check means",
+    ("seeds", "noise"): "repeated runs of the same case differ by more than the check allows, so one run cannot meet it",
+    ("seeds", "beyond_noise"): "repeated runs of the same case agree with each other, and all miss the expected value",
+    ("seeds", "varies"): "a rule every run must keep exactly changes from run to run",
+    ("same_exception", "stopped"): "the same error came back after FI's repair",
+    ("arithmetic", "slip"): "the plan's own working, {expression}, gives {computes}, not the {written} it writes, so "
+                            "FI does not rely on this check",
+}
+
+
+def _current(looks: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``looks`` without an arithmetic finding about a value the check no longer has (FI corrected it since): the
+    card never says the plan writes a number it does not write any more."""
+    expected = {str(c.get("id") or "").strip().lower(): c.get("expected") for c in checks}
+
+    def stale(t: dict[str, Any]) -> bool:
+        key = str(t.get("check") or "").strip().lower()
+        now, written = expected.get(key), t.get("expected_then", t.get("written"))
+        now_n, written_n = _num(now), _num(written)
+        return (t.get("kind") == "arithmetic" and now_n is not None and written_n is not None
+                and abs(now_n - written_n) > 1e-12 * max(1.0, abs(written_n)))
+
+    return [t for t in looks if not stale(t)]
+
+
+def _side_of(check: dict[str, Any], looks: list[dict[str, Any]], proposals: dict[str, dict[str, Any]]) -> str:
+    """Which side FI's own look points to for ONE failing check: ``check``, ``script`` or ``unclear``."""
+    key = str(check.get("id") or "").strip().lower()
+    points = {str(t.get("points_to") or "") for t in looks if str(t.get("check") or "").strip().lower() == key}
+    if "check" in points and any(t.get("kind") == "arithmetic" for t in looks
+                                 if str(t.get("check") or "").strip().lower() == key):
+        return "check"  # the plan's own arithmetic does not add up: nothing outweighs that
+    # Which side a look points to (``Engine._independent_value``, a label; a correction needs more,
+    # ``Engine._may_correct``): the plan's own arithmetic, or another model that
+    # never saw the result. A repair's proposal (it saw the run) and the plan's model asked again do not count.
+    proposal = proposals.get(key)
+    independent = proposal is not None and (
+        proposal.get("source") == "arithmetic"
+        or (proposal.get("source") == "recompute" and proposal.get("same_model") is False and not proposal.get("how_slip")))
+    to_check = bool(points & {"check", "tolerance"}) or independent or bool(check.get("set_aside")) or bool(
+        check.get("disputed") and (proposal is None or independent))
+    to_script = "script" in points
+    if to_check and not to_script:
+        return "check"
+    if to_script and not to_check:
+        return "script"
+    return "unclear"
+
+
+def leaning(checks: list[dict[str, Any]], triage: list[dict[str, Any]], proposals: list[dict[str, Any]], *,
+            kept: str | None = None, has_oracles: bool = True) -> str:
+    """Which side FI's own look at the failing checks points to, from what it already has (no model call): ``check``
+    (each failing check's expected value or tolerance is most likely what is wrong), ``script`` (the simulation is),
+    ``unclear`` (the looks disagree, or found nothing), ``plan`` (a check has no number to compare with yet: the plan
+    is incomplete), or ``""`` (nothing failed). A check that measured nothing points to the script: the simulation did
+    not get as far as the number."""
+    if not has_oracles or any(c.get("status") == "cannot_judge" for c in checks):
+        return "plan"
+    failing = [c for c in checks if c.get("status") in ("failed", "not_measured")]
+    if not failing:
+        return "script" if has_oracles and not checks else ""
+    by_name = {str(p.get("name") or "").strip().lower(): p for p in proposals if isinstance(p, dict)}
+    # A check that measured nothing points to the simulation (it did not get as far as the number); each other failing
+    # check by what FI's own look found about it.
+    triage = _current(triage, checks)
+    sides = {"script" if c.get("status") == "not_measured" else _side_of(c, triage, by_name) for c in failing}
+    if kept in ("as_it_was", "for_disputed") and sides <= {"check", "unclear"}:
+        # Every check still failing is one FI's look or a repair called wrong: the script was not rewritten for it.
+        return "check"
+    return sides.pop() if len(sides) == 1 else "unclear"
+
+
+def _why(side: str, checks: list[dict[str, Any]], triage: list[dict[str, Any]],
+         proposals: list[dict[str, Any]]) -> str:
+    """One sentence of why FI leans the way it does, in words a scientist reads without the script open."""
+    failing = {str(c.get("id") or "").strip().lower(): c for c in checks if c.get("status") in ("failed", "not_measured")}
+    triage = _current(triage, checks)
+    if side == "plan":
+        return "a check in the plan has no number to compare the result with yet"
+    if side == "script" and any(c.get("status") == "not_measured" for c in failing.values()):
+        return "the simulation stopped with an error before it could measure the check"
+    wanted = {"check": ("check", "tolerance"), "script": ("script",)}.get(side, ("check", "tolerance", "script"))
+    # The strongest evidence speaks first: the plan's own arithmetic, then a measured value that is a simple multiple
+    # of FI's own value, then the rest in the order FI looked.
+    rank = {"arithmetic": 0, "multiple": 1}
+    for t in sorted(triage, key=lambda t: rank.get(str(t.get("kind") or ""), 2)):
+        key = str(t.get("check") or "").strip().lower()
+        if (key and key not in failing) or str(t.get("points_to") or "") not in wanted:
+            continue
+        said = _LOOK_SAID.get((str(t.get("kind") or ""), str(t.get("verdict") or "")))
+        if said:
+            def num(k: str, default: str) -> str:
+                return _oracle.fmt_digits(t.get(k)) if isinstance(t.get(k), (int, float)) else default
+
+            word = {0.5: "half", 2.0: "twice", 0.25: "a quarter of", 4.0: "four times"}.get(t.get("factor"), "a multiple of")
+            return said.format(recomputed=num("recomputed", "another value"), expected=num("expected", "value"),
+                               computes=num("computes", "?"), written=num("written", "?"),
+                               expression=str(t.get("expression") or "it"), word=word)
+    same = [t for t in triage if t.get("kind") == "recompute" and t.get("same_model")
+            and str(t.get("check") or "").strip().lower() in failing]
+    if side == "unclear" and same:
+        return ("the only recheck of the expected value was made by the same model that wrote the plan, so it is not "
+                "an independent check")
+    if side == "check" and any(p.get("source") != "recompute" for p in proposals if isinstance(p, dict)):
+        return "FI's repair of the simulation found the check itself to be the problem, not the simulation"
+    if side == "check":
+        return "FI's own look points to the check's expected value or tolerance, not to the simulation"
+    if side == "script":
+        return "FI's own look at the check points to the simulation, not to the check"
+    return "FI's own looks at the check do not agree on whether the simulation or the check is wrong"
+
+
 def _whose(proposal: dict[str, Any] | None) -> str:
-    """Who proposed a change to a check, as a possessive: FI's recomputation of its expected value, or a repair."""
-    return "recomputation's" if (proposal or {}).get("source") == "recompute" else "repair's"
+    """Who proposed a change to a check, as a possessive: FI's recomputation of its expected value, FI's working out of
+    the plan's own arithmetic, or a repair."""
+    source = (proposal or {}).get("source")
+    return "recomputation's" if source == "recompute" else "arithmetic's" if source == "arithmetic" else "repair's"
 
 
 def _entries(script: Path) -> set[str]:
@@ -447,6 +600,8 @@ def _causes_for(check: dict[str, Any], oracle: dict[str, Any], proposal: dict[st
                 reported: dict[str, Any] | None, attempts: list[dict[str, Any]]) -> list[dict[str, str]]:
     name = check["id"]
     out: list[dict[str, str]] = []
+    if proposal is not None and proposal.get("source") == "arithmetic":
+        proposal = None  # its cause (the plan's arithmetic does not add up) is FI's own look's, said once above
     if proposal is not None:
         value = check.get("measured")
         expected, limit, _mode = _oracle.limit_of(proposal)
@@ -652,9 +807,14 @@ def _actions(quest_id: str, checks: list[dict[str, Any]], oracles: list[dict[str
             proposal = next((c["proposal"] for c in checks if c.get("proposal")), None)
             actions.append({
                 "id": "accept_proposal" if proposal else "revise_check",
-                "label": f"Accept the {_whose(proposal)} proposed change" if proposal else
-                         "Have the check worked out again",
-                "detail": (f"Ask the plan for the change the {_whose(proposal)[:-2]} proposes (check its reason, not "
+                "label": ("Correct the expected value to what the plan's own working gives"
+                          if (proposal or {}).get("source") == "arithmetic" and (proposal or {}).get("confirmed_by") else
+                          f"Accept the {_whose(proposal)} proposed change" if proposal else
+                          "Have the check worked out again"),
+                "detail": ("Ask the plan to write the value its own derivation gives (FI worked the arithmetic out and "
+                           "another model agreed; the measured value is not used), then resume."
+                           if (proposal or {}).get("source") == "arithmetic" and (proposal or {}).get("confirmed_by") else
+                           f"Ask the plan for the change the {_whose(proposal)[:-2]} proposes (check its reason, not "
                            "only that the measured value would pass), then resume." if proposal else
                            "Ask the plan to work the check out again from its own source, then resume. FI does not "
                            "put the measured value in as the expected one."),
