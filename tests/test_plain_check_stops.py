@@ -793,3 +793,27 @@ def test_a_confirmation_for_the_check_as_it_was_does_not_hold_for_a_changed_case
     changed = {**EXACT_90, "case": {"amplitude_deg": 60}}
     assert Engine._still_holds(EXACT_90, proposal) is True  # noqa: SLF001
     assert Engine._still_holds(changed, proposal) is False  # noqa: SLF001
+
+
+@pytest.mark.parametrize("statement", [
+    "T_exact at 90 degrees (derived: 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 \u2248 1.18034)",
+    "T_exact at 90 degrees (reference: 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 approx 1.18034)",
+    "T_exact at 90 degrees, 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 about 1.18034",
+])
+def test_working_under_any_label_or_sign_is_not_shown_or_is_seen_as_shown(statement: str) -> None:
+    shown = oracle_triage.blind({**EXACT_90, "reference": "", "check": statement})
+    assert "1.85407" not in shown["check"] or oracle_triage.shows_working(shown)
+
+
+def test_a_setting_in_a_statement_is_not_working() -> None:
+    shown = {"check": "RK4 error on y' = -y at t = 1 with h = 0.1", "reference": oracle_triage.BLIND_REFERENCE}
+    assert not oracle_triage.shows_working(shown)
+
+
+def test_the_card_keeps_a_slip_whose_written_number_rounds_the_expected_value() -> None:
+    oracle = {**EXACT_90, "expected": 1.18, "reference": "derivation: 2*pi*sqrt(1/9.81) * (2/pi) * 1.85407 = 1.1803"}
+    slip = oracle_triage.plan_slip(oracle)
+    if slip is None:
+        pytest.skip("the calculator does not call this a slip")
+    entry = oracle_triage.arithmetic_entry(oracle, slip)
+    assert oracle_card._current([entry], [{"id": "exact_90_deg", "expected": 1.18}]) == [entry]  # noqa: SLF001

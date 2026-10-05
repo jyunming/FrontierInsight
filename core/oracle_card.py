@@ -476,7 +476,7 @@ def _current(looks: list[dict[str, Any]], checks: list[dict[str, Any]]) -> list[
 
     def stale(t: dict[str, Any]) -> bool:
         key = str(t.get("check") or "").strip().lower()
-        now, written = expected.get(key), t.get("written")
+        now, written = expected.get(key), t.get("expected_then", t.get("written"))
         return (t.get("kind") == "arithmetic" and isinstance(now, (int, float)) and isinstance(written, (int, float))
                 and abs(float(now) - float(written)) > 1e-12 * max(1.0, abs(float(written))))
 

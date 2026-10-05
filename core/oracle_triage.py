@@ -667,7 +667,9 @@ BLIND_REFERENCE = ("not shown on purpose: work the value out yourself from the c
                    "working")
 
 
-_WORKING_IN_TEXT = _re.compile(r"\(?\s*derivation\s*:.*", _re.IGNORECASE | _re.DOTALL)
+# Every label a check's statement may carry its working under (core/oracle_check.py::_IN_CHECK_RE), to the end.
+_WORKING_IN_TEXT = _re.compile(r"\(?\s*\b(?:derivation|derived|reference)\s*:.*", _re.IGNORECASE | _re.DOTALL)
+_ARITHMETIC_STEP = _re.compile(r"(\d|\))\s*(\*\*|[*/^+-])\s*(\d|\(|[A-Za-z]+\()")
 
 
 def blind(oracle: dict[str, Any]) -> dict[str, Any]:
@@ -683,10 +685,17 @@ def shows_working(oracle: dict[str, Any]) -> bool:
     """Whether ``oracle`` (as it would be shown) still carries arithmetic a model could copy: a written-out step with a
     number after ``=`` in its statement or its reference."""
     text = f"{oracle.get('check') or ''} {oracle.get('reference') or ''}"
+    if plan_slip(oracle) is not None:
+        return True
     # A step of arithmetic (a number or a bracket, an operator, then a number, a bracket or a function) whose result
-    # is written after "=" -- not a setting such as "at t = 1 with h = 0.1".
-    step = _re.search(r"(\d|\))\s*(\*\*|[*/^+-])\s*(\d|\(|[A-Za-z]+\()[^=;]*=\s*>?\s*[-+]?\d", text)
-    return plan_slip(oracle) is not None or step is not None
+    # is written after any of the signs the slip finder reads ("=", "=>", "≈", "~", "approx", "about") -- not a
+    # setting such as "at t = 1 with h = 0.1".
+    parts = _APPROX_SPLIT.split(text)
+    for i in range(1, len(parts) - 1, 2):
+        left, right = parts[i - 1], parts[i + 1]
+        if _re.match(r"\s*[-+]?\.?\d", right) and _ARITHMETIC_STEP.search(left.split(";")[-1]):
+            return True
+    return False
 
 
 def plan_slip(oracle: dict[str, Any]) -> dict[str, Any] | None:
@@ -712,6 +721,8 @@ def arithmetic_entry(oracle: dict[str, Any], slip: dict[str, Any], *, where: str
     said = (f"the plan's own working, {slip['expression']}, gives {_fmt(slip['computes'])}, not the "
             f"{_fmt(slip['written'])} it writes, so FI does not rely on this check")
     return {"check": name, "kind": "arithmetic", "verdict": "slip", "points_to": "check", **slip, "where": where,
+            # The check's expected value when this was found: the card drops the finding once the check has another.
+            "expected_then": oracle.get("expected"),
             "tried": f"FI worked out the arithmetic in the plan's derivation of `{name}` itself: {said}.",
             "cause": {"text": f"The expected value of `{name}` looks like a slip in the plan's arithmetic, so FI does "
                               "not rely on this check (FI's calculator can misread a correct derivation, so it is "
