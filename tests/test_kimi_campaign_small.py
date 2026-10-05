@@ -188,7 +188,10 @@ def test_the_frozen_oracle_card_says_the_oracle_cannot_change_inside_the_quest()
     card = todo.pause_item("oracle", "stopped", ["Set `engine.oracle_check: warn` and go on."], profile="research",
                            frozen=True)
     text = " ".join([card.recommended, *card.alternatives])
-    assert "start a new quest" in text and "--revise-plan" not in text
+    # The checks still cannot change inside a frozen research quest; the person is no longer sent to start a new
+    # quest or to edit anything: FI repairs the script or goes on with the check marked unconfirmed.
+    assert "never relaxed or changed inside it" in text and "--revise-plan" not in text
+    assert "Nothing for you to fix" in text and "start a new quest" not in text
 
 
 def test_a_quoted_value_the_profile_keeps_is_not_refused() -> None:
