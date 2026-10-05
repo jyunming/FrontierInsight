@@ -184,3 +184,8 @@ exclude = [
 # uses in the source tree.
 [tool.setuptools.package-data]
 "*" = ["*.md", "*.tex", "*.css", "*.html", "*.js", "*.otf"]
+
+[tool.coverage.run]
+# tests/test_crash_kind.py compiles a small function under this name inside core/ so its frames count as FI's own
+# code; the file never exists, so the coverage report must not look for it.
+omit = ["*/core/_planted_bug.py"]
