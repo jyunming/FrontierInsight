@@ -817,3 +817,14 @@ def test_the_card_keeps_a_slip_whose_written_number_rounds_the_expected_value() 
         pytest.skip("the calculator does not call this a slip")
     entry = oracle_triage.arithmetic_entry(oracle, slip)
     assert oracle_card._current([entry], [{"id": "exact_90_deg", "expected": 1.18}]) == [entry]  # noqa: SLF001
+
+
+@pytest.mark.parametrize("statement", [
+    "Exact-to-small-angle period ratio at 90\u00b0, (2/\u03c0) \u00d7 1.85407 \u2248 1.25",
+    "the ratio, i.e. 2/pi*1.85407 \u2248 1.25",
+    "pi*1.85407 = 5.82",
+    "ellipk(0.5) = 1.85407",
+    "the ratio (2/pi) * 1.85407 \u2248 \u22121.25",
+])
+def test_working_without_a_label_counts_as_shown(statement: str) -> None:
+    assert oracle_triage.shows_working({"check": statement, "reference": oracle_triage.BLIND_REFERENCE})

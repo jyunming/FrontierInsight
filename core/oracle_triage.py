@@ -669,7 +669,6 @@ BLIND_REFERENCE = ("not shown on purpose: work the value out yourself from the c
 
 # Every label a check's statement may carry its working under (core/oracle_check.py::_IN_CHECK_RE), to the end.
 _WORKING_IN_TEXT = _re.compile(r"\(?\s*\b(?:derivation|derived|reference)\s*:.*", _re.IGNORECASE | _re.DOTALL)
-_ARITHMETIC_STEP = _re.compile(r"(\d|\))\s*(\*\*|[*/^+-])\s*(\d|\(|[A-Za-z]+\()")
 
 
 def blind(oracle: dict[str, Any]) -> dict[str, Any]:
@@ -685,15 +684,21 @@ def shows_working(oracle: dict[str, Any]) -> bool:
     """Whether ``oracle`` (as it would be shown) still carries arithmetic a model could copy: a written-out step with a
     number after ``=`` in its statement or its reference."""
     text = f"{oracle.get('check') or ''} {oracle.get('reference') or ''}"
-    if plan_slip(oracle) is not None:
-        return True
     # A step of arithmetic (a number or a bracket, an operator, then a number, a bracket or a function) whose result
     # is written after any of the signs the slip finder reads ("=", "=>", "≈", "~", "approx", "about") -- not a
     # setting such as "at t = 1 with h = 0.1".
+    # Read wide on purpose (a wrong "shown" only keeps a check from being corrected): the calculator's own signs
+    # (×, ·, −, π) count, and any operator or function call next to a number before a sign followed by a number.
+    for a, b in (("−", "-"), ("×", "*"), ("·", "*"), ("π", " pi ")):
+        text = text.replace(a, b)
     parts = _APPROX_SPLIT.split(text)
     for i in range(1, len(parts) - 1, 2):
-        left, right = parts[i - 1], parts[i + 1]
-        if _re.match(r"\s*[-+]?\.?\d", right) and _ARITHMETIC_STEP.search(left.split(";")[-1]):
+        left, right = parts[i - 1].split(";")[-1].split(":")[-1], parts[i + 1]
+        if not _re.match(r"\s*[-+]?\.?\d", right):
+            continue
+        numbers = _re.search(r"\d|\bpi\b", left, _re.IGNORECASE)
+        operation = _re.search(r"[+\-*/^]", left) or _re.search(r"[A-Za-z_]\w*\s*\(", left)
+        if numbers and operation:
             return True
     return False
 
