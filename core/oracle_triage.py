@@ -696,13 +696,27 @@ def shows_working(oracle: dict[str, Any]) -> bool:
     case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
     # A case is read as settings: a number under a plain name is an input. A result written into it (a key such as
     # "T_expected", or a string value) counts as working, like the name and the kind as the plan wrote them.
-    if any(_re.search(r"expect|result|answer|exact|target|reference|true_?value", str(k), _re.IGNORECASE)
-           for k in case):
+    # A key names a result only as a whole word at its end ("T_expected", "exact_value"); "target_angle" and
+    # "reference_frame" are settings.
+    if any(_re.search(r"(?:^|_)(?:expected|expect|results?|answer|exact(?:_?value)?|true_?value|reference_?value|"
+                      r"target_?value)$", str(k), _re.IGNORECASE) for k in case):
         return True
-    strings = " ".join(str(v) for v in case.values() if not isinstance(v, (int, float, bool)) and v is not None)
+
+    def _numbers_only(v: Any) -> bool:  # a number, or a list / dict of numbers (an initial state, a parameter set)
+        if v is None or isinstance(v, (int, float, bool)):
+            return True
+        if isinstance(v, (list, tuple)):
+            return all(_numbers_only(x) for x in v)
+        if isinstance(v, dict):
+            return all(_numbers_only(x) for x in v.values()) and not any(
+                _re.search(r"(?:^|_)(?:expected|exact|answer|result)$", str(k), _re.IGNORECASE) for k in v)
+        return False
+
+    strings = " ".join(str(v) for v in case.values() if not _numbers_only(v))
     text = (f"{oracle.get('check') or ''} {oracle.get('reference') or ''} {oracle.get('name') or ''} "
             f"{oracle.get('kind') or ''} {strings}")
-    if _re.search(r"\d", strings):
+    # A written value in a string setting ("T = 2.368", "2.368") counts; a name with a digit ("RK4") does not.
+    if _re.search(r"\d+\.\d+|\d\s*=|=\s*[-+]?\d", strings):
         return True
     for a, b in (("\u2212", "-"), ("\u00d7", "*"), ("\u00b7", "*"), ("\u03c0", " pi "), ("\uff1d", "=")):
         text = text.replace(a, b)

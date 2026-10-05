@@ -883,3 +883,23 @@ def test_a_field_the_plan_wrote_that_carries_working_or_a_result_counts_as_shown
 
 def test_a_plain_numeric_case_is_an_input_not_working() -> None:
     assert not oracle_triage.shows_working(oracle_triage.blind(EXACT_90))
+
+
+@pytest.mark.parametrize("case, shown", [
+    ({"initial_state": [1.0, 0.0]}, False),
+    ({"params": {"L": 1.0, "g": 9.81}}, False),
+    ({"integrator": "RK4"}, False),
+    ({"target_angle": 30}, False),
+    ({"reference_frame": "lab"}, False),
+    ({"amplitude_deg": 45}, False),
+    ({"T_expected": 2.368}, True),
+    ({"T_exact": 2.368}, True),
+    ({"note": "T = 2.368"}, True),
+    ({"params": {"expected": 2.368}}, True),
+])
+def test_a_case_of_ordinary_settings_is_not_read_as_shown_working(case, shown):
+    """Final targeted review of a0810722: numeric lists, nested parameter sets, a name with a digit and keys such as
+    target_angle are settings; only a key that names a result, or a written value in a string, counts as working."""
+    from core.oracle_triage import shows_working
+
+    assert shows_working({"name": "x", "kind": "special_case", "case": case}) is shown
