@@ -268,7 +268,7 @@ def build(
     triage = [t for a in attempts for t in a.get("triage") or [] if isinstance(t, dict)]
     # The plan's own arithmetic, worked out here too (pure, no model): a card never blames the simulation for a slip in
     # the plan's derivation, whichever run of the gate recorded what.
-    from .oracle_triage import arithmetic_entry, correctable, plan_slip
+    from .oracle_triage import arithmetic_entry, plan_slip
 
     for oracle in oracles:
         key = str(oracle.get("name") or "").strip().lower()
