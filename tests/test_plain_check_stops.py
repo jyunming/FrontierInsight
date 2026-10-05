@@ -103,7 +103,7 @@ def test_the_real_pendulum_stop_is_explained_as_the_plans_arithmetic_not_the_sim
                                                model="gemma4:31b-cloud", same_model=True)
     card = _card(tmp_path, [EXACT_90], [_judged("exact_90_deg", MEASURED)], [same_model])
     assert card["leaning"] == "check", "the slip in the plan's arithmetic, not the simulation"
-    assert "comes to 2.36784" in card["why"] and "1.18034" in card["why"]
+    assert "gives 2.36784" in card["why"] and "1.18034" in card["why"]
     assert card["checks"][0]["status"] == "failed", "explaining changes no verdict"
     assert not any("simulation is the likely cause" in c["text"] for c in card["causes"])
 
@@ -114,7 +114,7 @@ def test_with_a_second_check_not_measured_the_explanation_still_names_the_slip(t
                  "measure": "T_num"}
     card = _card(tmp_path, [EXACT_90, numerical], [_judged("exact_90_deg", MEASURED),
                                                     _judged("numerical_period_90_deg", None)], [])
-    assert card["leaning"] == "unclear" and "comes to 2.36784" in card["why"]
+    assert card["leaning"] == "unclear" and "gives 2.36784" in card["why"]
 
 
 ORACLE = {"name": "final size", "kind": "closed_form", "check": "final size", "expected": 1.0, "tolerance": 0.05,
@@ -222,14 +222,39 @@ def _planned(eng: Engine) -> dict[str, Any]:
     return plan.load_design(eng.quest_root)[0]["protocol"]["oracles"][0]
 
 
-def test_fi_corrects_a_slip_to_the_value_the_plans_own_working_gives_never_to_the_measured_one(tmp_path: Path) -> None:
-    from core import audit_log, plan
+def _confirmed(proposal: dict[str, Any], value: float = 2.367842, *, same_model: bool = False) -> dict[str, Any]:
+    """``proposal`` (the plan's own arithmetic) with another model's blind recheck attached when it agrees."""
+    entry = oracle_triage.recompute_entry(EXACT_90, "disputed", value, MEASURED, "x", model="m2", same_model=same_model)
+    second = Engine._second_source(EXACT_90, proposal, entry)  # noqa: SLF001
+    return {**proposal, **({"confirmed_by": second} if second else {})}
 
-    # A slip whose working gives 2.36784 while the simulation measured something else (3.0): the correction must be
-    # the derived value, not the measurement.
+
+def test_the_plans_arithmetic_alone_never_rewrites_a_check(tmp_path: Path) -> None:
+    """A slip in the plan's own working only sets the check aside: the arithmetic can misread a correct derivation, so
+    on its own it may lower a result (unconfirmed, exploratory) and never rewrite the check."""
     eng = _engine_with_plan(tmp_path, EXACT_90)
     eng._oracle_proposals["exact_90_deg"] = oracle_triage.arithmetic_proposal(
         EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE))
+    assert eng._correct_expected_values([_judged("exact_90_deg", MEASURED)], [EXACT_90]) == []
+    assert _planned(eng)["expected"] == 1.18034
+    assert not (eng.fi_dir / "oracle_corrections.json").exists()
+
+
+def test_a_second_model_that_disagrees_with_the_arithmetic_or_is_the_same_model_confirms_nothing() -> None:
+    proposal = oracle_triage.arithmetic_proposal(EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE))
+    assert "confirmed_by" not in _confirmed(proposal, 2.3678), "off by more than the check's own tolerance (1e-5)"
+    assert "confirmed_by" not in _confirmed(proposal, same_model=True)
+    assert Engine._may_correct(_confirmed(proposal)) is True  # noqa: SLF001
+
+
+def test_fi_corrects_a_slip_to_the_value_the_plans_own_working_gives_never_to_the_measured_one(tmp_path: Path) -> None:
+    from core import audit_log, plan
+
+    # A slip whose working gives 2.36784, confirmed by another model, while the simulation measured something else
+    # (3.0): the correction must be the derived value, not the measurement.
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    eng._oracle_proposals["exact_90_deg"] = _confirmed(oracle_triage.arithmetic_proposal(
+        EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE)))
     fixed = eng._correct_expected_values([_judged("exact_90_deg", 3.0)], [EXACT_90])
     assert fixed == ["exact_90_deg"]
     after = _planned(eng)
@@ -239,6 +264,7 @@ def test_fi_corrects_a_slip_to_the_value_the_plans_own_working_gives_never_to_th
     assert plan.history(eng.quest_root)[-1]["by"] == "engine"
     record = json.loads((eng.fi_dir / "oracle_corrections.json").read_text(encoding="utf-8"))
     assert record["exact_90_deg"]["from"] == 1.18034 and record["exact_90_deg"]["source"] == "arithmetic"
+    assert record["exact_90_deg"]["confirmed_by"]["source"] == "recompute"
     assert any(e.get("check") == "oracle_correction" for e in audit_log.read(eng.audit.path))
     # Never twice: the same check is not corrected again in this quest.
     eng._oracle_proposals["exact_90_deg"] = {**eng._oracle_proposals.get("exact_90_deg", {}), "name": "exact_90_deg",
@@ -259,12 +285,12 @@ def test_a_value_that_is_not_independent_is_never_used_to_correct_a_check(tmp_pa
     assert _planned(eng)["expected"] == 1.18034
 
 
-def test_another_model_that_never_saw_the_result_may_correct_it(tmp_path: Path) -> None:
+def test_one_other_model_alone_never_corrects_a_check(tmp_path: Path) -> None:
     eng = _engine_with_plan(tmp_path, EXACT_90)
     entry = oracle_triage.recompute_entry(EXACT_90, "disputed", 2.3678, MEASURED, "", model="m2", same_model=False)
     eng._oracle_proposals["exact_90_deg"] = oracle_triage.recompute_proposal(EXACT_90, entry)
-    assert eng._correct_expected_values([_judged("exact_90_deg", MEASURED)], [EXACT_90]) == ["exact_90_deg"]
-    assert _planned(eng)["expected"] == 2.3678
+    assert eng._correct_expected_values([_judged("exact_90_deg", MEASURED)], [EXACT_90]) == []
+    assert _planned(eng)["expected"] == 1.18034
 
 
 def test_after_the_freeze_fi_corrects_nothing(tmp_path: Path) -> None:
@@ -328,7 +354,8 @@ def test_an_old_recheck_record_that_does_not_say_which_model_answered_is_not_ind
 
 def test_the_corrected_plan_says_what_fi_changed_next_to_the_derivation(tmp_path: Path) -> None:
     eng = _engine_with_plan(tmp_path, EXACT_90)
-    eng._oracle_proposals["exact_90_deg"] = oracle_triage.arithmetic_proposal(EXACT_90, oracle_triage.plan_slip(EXACT_90))
+    eng._oracle_proposals["exact_90_deg"] = _confirmed(oracle_triage.arithmetic_proposal(
+        EXACT_90, oracle_triage.plan_slip(EXACT_90)))
     assert eng._correct_expected_values([_judged("exact_90_deg", MEASURED)], [EXACT_90]) == ["exact_90_deg"]
     after = _planned(eng)
     assert "FI corrected the expected value from 1.18034 to 2.36784" in after["reference"]
@@ -474,6 +501,7 @@ async def test_a_disputing_recheck_keeps_the_script_as_it_is_and_only_an_indepen
                                       timeout=10, case_env={})
     assert "exact_90_deg" in eng._oracle_disputed, "the script is not bent towards a disputed value"
     assert eng._independent_value(eng._oracle_proposals["exact_90_deg"]) is corrects
+    assert eng._may_correct(eng._oracle_proposals["exact_90_deg"]) is False, "one recheck alone never corrects"
 
 
 @pytest.mark.parametrize("text, expected", [
@@ -493,8 +521,8 @@ def test_unambiguous_forms_are_still_worked_out() -> None:
 
 def test_a_correction_that_matches_the_measurement_says_so(tmp_path: Path) -> None:
     eng = _engine_with_plan(tmp_path, EXACT_90)
-    eng._oracle_proposals["exact_90_deg"] = oracle_triage.arithmetic_proposal(
-        EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE))
+    eng._oracle_proposals["exact_90_deg"] = _confirmed(oracle_triage.arithmetic_proposal(
+        EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE)))
     assert eng._correct_expected_values([_judged("exact_90_deg", 2.367836)], [EXACT_90]) == ["exact_90_deg"]
     record = json.loads((eng.fi_dir / "oracle_corrections.json").read_text(encoding="utf-8"))
     assert record["exact_90_deg"].get("agrees_with_measurement") is True
@@ -594,3 +622,66 @@ def test_the_analysis_never_calls_the_plans_own_model_another_model() -> None:
     other = oracle_check.analysis_note([{**base, "disputed_by": "recompute"}])
     assert "another model" not in same and "not an independent check" in same
     assert "another model" in other
+
+
+# --- the plan's arithmetic alone only lowers a result; a correction needs a second, independent working ------------------
+
+
+@pytest.mark.parametrize("reference, written", [
+    ("derivation: y = sin(0.5*pi - 0.01) = 1.000000", 1.0),   # a peak inside the range of the rounded constants
+    ("derivation: T/T0 = 1 + (pi/4)**2/16 = 1.0400", 1.04),   # a truncated series written with "="
+])
+def test_a_derivation_the_calculator_may_misread_can_only_set_a_check_aside(tmp_path: Path, reference: str,
+                                                                            written: float) -> None:
+    oracle = {**EXACT_90, "expected": written, "reference": reference}
+    eng = _engine_with_plan(tmp_path, oracle)
+    slip = oracle_triage.plan_slip(oracle)
+    if slip is not None:
+        eng._oracle_proposals["exact_90_deg"] = oracle_triage.arithmetic_proposal(oracle, slip)
+    assert eng._correct_expected_values([_judged("exact_90_deg", 0.5)], [oracle]) == []
+    assert _planned(eng)["expected"] == written, "never rewritten on the arithmetic alone"
+
+
+async def _look(eng: Engine, oracle: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any]:
+    eng._recompute_expected = AsyncMock(return_value=(entry, True))  # type: ignore[method-assign]
+    seed = eng.quest_root / "code" / "simulate.py"
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    seed.write_text("x = 1\n", encoding="utf-8")
+    record: dict[str, Any] = {"judged": [_judged(str(oracle["name"]), MEASURED)]}
+    await eng._look_at_failing_checks({}, None, seed, [oracle], [oracle], record, set(), protocol={},
+                                      timeout=10, case_env={})
+    return record
+
+
+@pytest.mark.asyncio
+async def test_the_real_pendulum_slip_with_only_the_plans_own_model_goes_on_unconfirmed(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    same = oracle_triage.recompute_entry(EXACT_90, "agrees", 1.1803415, MEASURED, PENDULUM_RECHECK,
+                                         model="gemma4:31b-cloud", same_model=True)
+    record = await _look(eng, EXACT_90, same)
+    assert "exact_90_deg" in eng._oracle_set_aside, "not sent to the repair"
+    assert not eng._may_correct(eng._oracle_proposals["exact_90_deg"])
+    assert eng._correct_expected_values(record["judged"], [EXACT_90]) == []
+    assert _planned(eng)["expected"] == 1.18034
+    card = _card(tmp_path, [EXACT_90], record["judged"], record["triage"])
+    assert "gives 2.36784, not the 1.18034" in card["why"] and "does not rely on this check" in card["why"]
+
+
+@pytest.mark.asyncio
+async def test_the_real_pendulum_slip_confirmed_by_another_model_is_corrected(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    other = oracle_triage.recompute_entry(EXACT_90, "disputed", 2.367842, MEASURED, "T0 * (2/pi) * K(0.5)",
+                                          model="another-model", same_model=False)
+    record = await _look(eng, EXACT_90, other)
+    assert eng._may_correct(eng._oracle_proposals["exact_90_deg"])
+    assert eng._correct_expected_values(record["judged"], [EXACT_90]) == ["exact_90_deg"]
+    after = _planned(eng)
+    assert abs(after["expected"] - 2.36784) < 1e-5 and after["tolerance"] == EXACT_90["tolerance"]
+
+
+def test_the_approx_45_degree_check_is_never_rewritten_its_measure_is_a_formula(tmp_path: Path) -> None:
+    check = {"name": "large_amplitude_period", "kind": "published_value", "expected": 1.031, "tolerance": 0.001,
+             "tolerance_mode": "relative", "case": {"amplitude_deg": 45, "dt": 0.001}, "measure": "T / T0",
+             "reference": "derivation: For A=45 deg, T/T0 = (2/pi)*ellipk(sin(pi/8)**2) approx 1.031"}
+    assert oracle_triage.plan_slip(check) is not None, "the slip is seen (it sets the check aside)"
+    assert not oracle_triage.correctable(check), "a formula measure is never corrected"

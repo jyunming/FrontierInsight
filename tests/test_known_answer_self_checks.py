@@ -150,11 +150,11 @@ async def test_rk4_expected_value_off_20x_is_disputed_by_a_blind_recompute_and_t
 
 
 @pytest.mark.asyncio
-async def test_rk4_expected_value_off_20x_is_corrected_from_another_models_value_and_then_passes(
+async def test_rk4_expected_value_off_20x_another_models_value_alone_never_corrects_the_check(
         tmp_path: Path) -> None:
-    """With another model named for checking the checks, its value (worked out without seeing the result) is
-    independent: FI corrects the plan's expected value to it, never to the measured value, keeps the tolerance, and
-    measures again; the corrected check passes on the correct script."""
+    """With another model named for checking the checks, its value (worked out without seeing the result) disputes the
+    plan's: the correct script is kept, but one model's value alone never rewrites the check (only the plan's own
+    arithmetic confirmed by it does): the check goes on unconfirmed and the result counts as exploratory."""
     engine = Engine(_config(tmp_path).model_copy(update={"provider": ProviderConfig(
         name="openai", model="planner", node_models={"oracle_review": "another-model"})}))
     model = _Model(recompute={"expected": 3.3324e-07, "how": "the RK4 amplification factor at h=0.1 is "
@@ -164,13 +164,10 @@ async def test_rk4_expected_value_off_20x_is_corrected_from_another_models_value
     await _gate(engine, [RK4], RK4_SOURCE)
     assert model.repairs == [] and (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RK4_SOURCE
     record = _record(engine)
-    assert record["status"] == "ok", "the corrected check passes on the correct script"
+    assert record["status"] == "went_on_failing" and record["disputed"] == ["rk4_closed_form_h01"]
     after = plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]
-    assert after["expected"] == pytest.approx(3.3324e-07) and after["expected"] != 3.33241e-07
-    assert after["tolerance"] == 1e-09, "never loosened"
-    corrected = json.loads((engine.fi_dir / "oracle_corrections.json").read_text(encoding="utf-8"))
-    assert corrected["rk4_closed_form_h01"]["from"] == 1.637e-08 and corrected["rk4_closed_form_h01"]["source"] == "recompute"
-    assert plan.history(engine.quest_root)[-1]["by"] == "engine"
+    assert after["expected"] == 1.637e-08 and after["tolerance"] == 1e-09, "the check is neither rewritten nor loosened"
+    assert not (engine.fi_dir / "oracle_corrections.json").exists()
 
 
 @pytest.mark.asyncio

@@ -466,7 +466,7 @@ _LOOK_SAID = {
     ("seeds", "beyond_noise"): "repeated runs of the same case agree with each other, and all miss the expected value",
     ("seeds", "varies"): "a rule every run must keep exactly changes from run to run",
     ("same_exception", "stopped"): "the same error came back after FI's repair",
-    ("arithmetic", "slip"): "the plan's own working gives {computes}, not the {written} it writes ({expression}), so "
+    ("arithmetic", "slip"): "the plan's own working, {expression}, gives {computes}, not the {written} it writes, so "
                             "FI does not rely on this check",
 }
 

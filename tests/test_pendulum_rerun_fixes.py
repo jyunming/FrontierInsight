@@ -160,7 +160,8 @@ def test_a_slip_in_the_plans_arithmetic_is_the_reason_given_first() -> None:
                                     oracle_triage.step_verdict(CHECK_45, HALF_STEPS, order=None))
     triage = [step, oracle_triage.arithmetic_entry(CHECK_45, slip)]
     why = oracle_card._why("unclear", [{"id": "large_amplitude_period", "status": "failed"}], triage, [])  # noqa: SLF001
-    assert why.startswith("the plan's own working for the expected value does not add up"), why
+    assert why.startswith("the plan's own working") and "gives 1.03997, not the 1.031" in why, why
+    assert "so FI does not rely on this check" in why
 
 
 def test_the_same_sentence_is_said_once_per_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
