@@ -682,9 +682,10 @@ def blind(oracle: dict[str, Any]) -> dict[str, Any]:
     measure = str(oracle.get("measure") or "").strip()
     statement = f"the value of `{measure}` the simulation returns on the check's case" if measure else \
         f"the quantity the check `{name}` names, on its case"
-    keep = {k: oracle[k] for k in ("name", "kind", "case", "measure", "expected", "tolerance", "tolerance_mode",
+    keep = {k: oracle[k] for k in ("name", "case", "measure", "expected", "tolerance", "tolerance_mode",
                                     "order") if k in oracle}
-    return {**keep, "check": statement, "reference": BLIND_REFERENCE}
+    kind = _oracle.kind_of(oracle)  # the standard name only, never what the plan wrote under `kind`
+    return {**keep, **({"kind": kind} if kind else {}), "check": statement, "reference": BLIND_REFERENCE}
 
 def shows_working(oracle: dict[str, Any]) -> bool:
     """Whether ``oracle`` (as it would be shown) may still carry arithmetic a model could copy. Read wide on purpose:
@@ -692,7 +693,17 @@ def shows_working(oracle: dict[str, Any]) -> bool:
     written result ("sqrt(g/L) = 3.13") counts, whatever sign the result is written after and wherever it stands. A
     wrong "shown" only keeps a check from being corrected (it never makes a correction): a setting such as
     "at t = 1 with h = 0.1" is not an operation and does not count."""
-    text = f"{oracle.get('check') or ''} {oracle.get('reference') or ''}"
+    case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
+    # A case is read as settings: a number under a plain name is an input. A result written into it (a key such as
+    # "T_expected", or a string value) counts as working, like the name and the kind as the plan wrote them.
+    if any(_re.search(r"expect|result|answer|exact|target|reference|true_?value", str(k), _re.IGNORECASE)
+           for k in case):
+        return True
+    strings = " ".join(str(v) for v in case.values() if not isinstance(v, (int, float, bool)) and v is not None)
+    text = (f"{oracle.get('check') or ''} {oracle.get('reference') or ''} {oracle.get('name') or ''} "
+            f"{oracle.get('kind') or ''} {strings}")
+    if _re.search(r"\d", strings):
+        return True
     for a, b in (("\u2212", "-"), ("\u00d7", "*"), ("\u00b7", "*"), ("\u03c0", " pi "), ("\uff1d", "=")):
         text = text.replace(a, b)
     operand = r"(?:\d|\bpi\b|\))"

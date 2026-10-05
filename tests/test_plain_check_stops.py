@@ -866,3 +866,20 @@ def test_nothing_the_plan_wrote_reaches_the_second_source(statement: str) -> Non
     assert set(shown) <= {"name", "kind", "case", "measure", "expected", "tolerance", "tolerance_mode", "order",
                           "check", "reference"}
     assert not oracle_triage.shows_working(shown), "a statement FI built itself carries no working"
+
+
+@pytest.mark.parametrize("extra", [
+    {"kind": "analytic: T = 2*pi*sqrt(1/9.81)*(2/pi)*1.85407 = 2.368"},
+    {"name": "T_exact_2*pi*sqrt(1/9.81)*1.180=2.368"},
+    {"case": {"amplitude_deg": 90, "note": "T0*K(m) = 2.368"}},
+    {"case": {"amplitude_deg": 90, "T_expected": 2.368}},
+])
+def test_a_field_the_plan_wrote_that_carries_working_or_a_result_counts_as_shown(extra: dict[str, Any]) -> None:
+    shown = oracle_triage.blind({**EXACT_90, **extra})
+    assert "analytic" not in json.dumps(shown), "the plan's own kind text is never passed"
+    if "kind" not in extra:
+        assert oracle_triage.shows_working(shown)
+
+
+def test_a_plain_numeric_case_is_an_input_not_working() -> None:
+    assert not oracle_triage.shows_working(oracle_triage.blind(EXACT_90))
