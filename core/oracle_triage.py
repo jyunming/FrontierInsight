@@ -176,8 +176,10 @@ def recompute_entry(oracle: dict[str, Any], verdict: str, recomputed: float | No
                  "reference, without the measured value; it gave no usable number.")
         return {"check": name, "kind": "recompute", "verdict": "", "points_to": "", "model": model,
                 "same_model": same_model, "tried": tried, "cause": None}
-    tried = (f"FI asked {who} to work out the expected value of `{name}` again from the check's statement, case and "
-             f"reference, without showing it the measured value: it got {_fmt(recomputed)} (the plan says "
+    what = ("statement, case and measure (not the plan's working)" if oracle.get("reference") == BLIND_REFERENCE
+            else "statement, case and reference")
+    tried = (f"FI asked {who} to work out the expected value of `{name}` again from the check's {what}, "
+             f"without showing it the measured value: it got {_fmt(recomputed)} (the plan says "
              f"{_fmt(expected)}; measured {_fmt(value)}).")
     cause: dict[str, str] | None = None
     points = ""
@@ -220,7 +222,9 @@ def recompute_proposal(oracle: dict[str, Any], entry: dict[str, Any]) -> dict[st
     tolerance = _num(oracle.get("tolerance")) or 0.0
     mode = "relative" if str(oracle.get("tolerance_mode") or "").strip().lower() == "relative" else "absolute"
     who = ("the model that wrote the plan" if entry.get("same_model") else "another model") + f" ({entry.get('model')})"
-    reason = (f"FI asked {who} to work the expected value out again from the check's statement, case and reference, "
+    what = ("statement, case and measure (not the plan's working)" if oracle.get("reference") == BLIND_REFERENCE
+            else "statement, case and reference")
+    reason = (f"FI asked {who} to work the expected value out again from the check's {what}, "
               f"without showing it the measured value, and it got {_fmt(entry.get('recomputed'))}"
               + (f": {entry['how']}" if entry.get("how") else "") + ".")
     return {"name": str(oracle.get("name") or "").strip(), "expected": entry["recomputed"], "tolerance": tolerance,
@@ -663,11 +667,26 @@ BLIND_REFERENCE = ("not shown on purpose: work the value out yourself from the c
                    "working")
 
 
+_WORKING_IN_TEXT = _re.compile(r"\(?\s*derivation\s*:.*", _re.IGNORECASE | _re.DOTALL)
+
+
 def blind(oracle: dict[str, Any]) -> dict[str, Any]:
     """``oracle`` as a second source sees it when FI checks the plan's own arithmetic: its statement, case and measure,
-    never the plan's derivation (a model shown the working may repeat the very step the calculator misread, and would
-    then "confirm" it). The expected value is kept for the verdict; the prompt never shows it either way."""
-    return {**oracle, "reference": BLIND_REFERENCE}
+    never the plan's derivation, wherever the plan wrote it (``reference``, ``derivation`` or inside ``check``): a model
+    shown the working may repeat the very step the calculator misread, and would then "confirm" it. The expected value
+    is kept for the verdict; the prompt never shows it either way. :func:`shows_working` says whether any is left."""
+    check = _WORKING_IN_TEXT.sub("", str(oracle.get("check") or "")).strip()
+    return {**{k: v for k, v in oracle.items() if k != "derivation"}, "reference": BLIND_REFERENCE, "check": check}
+
+
+def shows_working(oracle: dict[str, Any]) -> bool:
+    """Whether ``oracle`` (as it would be shown) still carries arithmetic a model could copy: a written-out step with a
+    number after ``=`` in its statement or its reference."""
+    text = f"{oracle.get('check') or ''} {oracle.get('reference') or ''}"
+    # A step of arithmetic (a number or a bracket, an operator, then a number, a bracket or a function) whose result
+    # is written after "=" -- not a setting such as "at t = 1 with h = 0.1".
+    step = _re.search(r"(\d|\))\s*(\*\*|[*/^+-])\s*(\d|\(|[A-Za-z]+\()[^=;]*=\s*>?\s*[-+]?\d", text)
+    return plan_slip(oracle) is not None or step is not None
 
 
 def plan_slip(oracle: dict[str, Any]) -> dict[str, Any] | None:

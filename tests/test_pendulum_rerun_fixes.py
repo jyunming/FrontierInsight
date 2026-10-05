@@ -115,7 +115,8 @@ def test_the_hint_reaches_the_repair_and_points_to_the_script(tmp_path: Path) ->
     corrected = {**CHECK_45, "expected": EXACT_45}
     (eng.fi_dir).mkdir(parents=True, exist_ok=True)
     (eng.fi_dir / "oracle_corrections.json").write_text(json.dumps(
-        {"large_amplitude_period": {"from": 1.031, "to": EXACT_45, "source": "arithmetic"}}), encoding="utf-8")
+        {"large_amplitude_period": {"from": 1.031, "to": EXACT_45, "source": "arithmetic",
+                                    "confirmed_by": {"source": "recompute", "value": EXACT_45}}}), encoding="utf-8")
     attempt: dict[str, Any] = {}
     judged = [{"name": "large_amplitude_period", "value": HALF_STEPS[0], "passed_by_engine": False}]
     hints = eng._multiple_hints([corrected], judged, attempt, set())
@@ -268,7 +269,8 @@ def test_a_correction_no_longer_in_force_gives_no_hint(tmp_path: Path) -> None:
     eng = _engine(tmp_path)
     eng.fi_dir.mkdir(parents=True, exist_ok=True)
     (eng.fi_dir / "oracle_corrections.json").write_text(json.dumps(
-        {"large_amplitude_period": {"from": 1.031, "to": EXACT_45, "source": "arithmetic"}}), encoding="utf-8")
+        {"large_amplitude_period": {"from": 1.031, "to": EXACT_45, "source": "arithmetic",
+                                    "confirmed_by": {"source": "recompute", "value": EXACT_45}}}), encoding="utf-8")
     rewritten = {**CHECK_45, "expected": 2.0}  # the check was written again since the correction
     judged = [{"name": "large_amplitude_period", "value": 1.0, "passed_by_engine": False}]
     assert eng._multiple_hints([rewritten], judged, {}, set()) == []

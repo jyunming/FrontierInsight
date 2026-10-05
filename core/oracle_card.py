@@ -277,6 +277,9 @@ def build(
         slip = plan_slip(oracle)
         if slip is not None and not by_judged.get(key, {}).get("passed_by_engine"):
             triage.insert(0, arithmetic_entry(oracle, slip))
+    # An arithmetic finding about a value a check no longer has (FI corrected it since) is said nowhere on the card.
+    triage = _current(triage, [{"id": str(o.get("name") or "").strip(), "expected": o.get("expected")}
+                               for o in oracles])
     by_fi = any(p.get("source") == "recompute" for p in proposals) or any(
         t.get("points_to") in ("tolerance", "check") for t in triage)
     by_repair = any(p.get("source") not in ("recompute", "arithmetic") for p in proposals)
@@ -487,7 +490,8 @@ def _side_of(check: dict[str, Any], looks: list[dict[str, Any]], proposals: dict
     if "check" in points and any(t.get("kind") == "arithmetic" for t in looks
                                  if str(t.get("check") or "").strip().lower() == key):
         return "check"  # the plan's own arithmetic does not add up: nothing outweighs that
-    # The same rule as the correction (``Engine._independent_value``): the plan's own arithmetic, or another model that
+    # Which side a look points to (``Engine._independent_value``, a label; a correction needs more,
+    # ``Engine._may_correct``): the plan's own arithmetic, or another model that
     # never saw the result. A repair's proposal (it saw the run) and the plan's model asked again do not count.
     proposal = proposals.get(key)
     independent = proposal is not None and (

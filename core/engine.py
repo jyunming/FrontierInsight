@@ -9735,11 +9735,10 @@ class Engine:
             if oracle is None:
                 continue
             fix = corrected.get(name) if isinstance(corrected.get(name), dict) else None
-            if not fix or fix.get("source") not in ("arithmetic", "recompute"):
+            if not fix or fix.get("source") != "arithmetic" or not fix.get("confirmed_by"):
                 continue
             reference = _oracle_triage.num(fix.get("to"))
-            source = ("its correction of the plan's arithmetic" if fix.get("source") == "arithmetic"
-                      else "its correction from an independent recheck")
+            source = "its correction of the plan's arithmetic, confirmed by another model"
             expected_now, limit, _mode = _oracle.limit_of(oracle)
             if reference is None or expected_now is None or limit is None or abs(expected_now - reference) > limit:
                 continue  # a correction no longer in force (the check was written again since): not FI's value now
@@ -9872,9 +9871,12 @@ class Engine:
         within the check's own tolerance of it."""
         slip = _oracle_triage.plan_slip(oracle)
         value = _oracle_triage.num(proposal.get("expected"))
-        second = _oracle_triage.num((proposal.get("confirmed_by") or {}).get("value"))
+        confirm = proposal.get("confirmed_by") or {}
+        second = _oracle_triage.num(confirm.get("value"))
         if slip is None or value is None or second is None:
             return False
+        if confirm.get("fingerprint") != _oracle_triage.fingerprint(oracle):
+            return False  # confirmed for the check as it was (another case, measure or statement): not this one
         _expected, limit, _mode = _oracle.limit_of({**oracle, "expected": value})
         return limit is not None and abs(slip["computes"] - value) <= limit and abs(second - value) <= limit
 
@@ -9892,7 +9894,8 @@ class Engine:
         _expected, limit, _mode = _oracle.limit_of({**oracle, "expected": value})
         if limit is None or abs(recomputed - value) > limit:
             return None
-        return {"source": "recompute", "model": str(entry.get("model") or ""), "value": recomputed}
+        return {"source": "recompute", "model": str(entry.get("model") or ""), "value": recomputed,
+                "fingerprint": entry.get("fingerprint") or _oracle_triage.fingerprint(oracle)}
 
     def _correct_expected_values(self, judged: list[dict[str, Any]], oracles: list[dict[str, Any]]) -> list[str]:
         """Correct, in ``plan.md``, the expected value of each failing check FI's own look found wrong, to the value two
@@ -10771,14 +10774,16 @@ class Engine:
             if (arith or {}).get("source") == "arithmetic":
                 arith.pop("confirmed_by", None)  # confirmed afresh by this look, or not at all
             # With a slip in the plan's working, the recheck never sees that working (it could repeat the misread step).
-            entry, called = await self._recompute_expected(
-                state, _oracle_triage.blind(oracle) if slip is not None else oracle, value)
-            if slip is not None:
-                entry = {**entry, "blind": True}
+            shown = _oracle_triage.blind(oracle) if slip is not None else oracle
+            entry, called = await self._recompute_expected(state, shown, value)
+            if slip is not None and called and not _oracle_triage.shows_working(shown):
+                # Blind to the plan's working AND answered now (a kept answer is a file anyone could write): only
+                # such a recheck can confirm the plan's arithmetic.
+                entry = {**entry, "blind": True, "fingerprint": _oracle_triage.fingerprint(oracle)}
             calls += int(called)
             entries.append(entry)
             if (arith or {}).get("source") == "arithmetic" and (second := self._second_source(oracle, arith, entry)):
-                # Two workings that share nothing give the same value: only then may FI correct the check.
+                # Two workings independent of each other give the same value: only then may FI correct the check.
                 arith["confirmed_by"] = second
                 self._log.warning("[oracle] another model (%s), never shown the measured value, gets %s for %r too: "
                                   "the plan's own arithmetic is confirmed", second["model"],
@@ -14443,11 +14448,18 @@ class Engine:
         # measurement): the paper says so where the checks are described.
         corrected = self._corrections_read()
         if corrected:
-            listed = "; ".join(f"'{n}' from {c.get('from')} to {c.get('to')} ({c.get('why')})"
+            def rests_on(c: dict[str, Any]) -> str:
+                if c.get("source") == "arithmetic" and c.get("confirmed_by"):
+                    return ("the plan's own arithmetic, confirmed by another model never shown the measurement or the "
+                            "plan's working")
+                if c.get("source") == "arithmetic":
+                    return "the plan's own arithmetic alone (not confirmed independently)"
+                return "another model's value alone (not confirmed independently)"
+
+            listed = "; ".join(f"'{n}' from {c.get('from')} to {c.get('to')}, resting on {rests_on(c)} ({c.get('why')})"
                                for n, c in corrected.items() if isinstance(c, dict))
             evidence_note = (f"{evidence_note}\n\nFI corrected the expected value of these known-answer checks in the "
-                             f"plan before the run, to a value two independent workings agreed on (the plan's own arithmetic and "
-                             f"another model never shown the measurement): {listed}. "
+                             f"plan before the run, never from the measurement: {listed}. "
                              "Say so where the checks are described.").strip()
         # The model was changed during the quest: the paper says more than one model produced it.
         try:

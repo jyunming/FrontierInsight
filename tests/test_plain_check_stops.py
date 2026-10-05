@@ -760,3 +760,36 @@ def test_evidence_counts_an_arithmetic_only_correction_as_a_gap(tmp_path: Path) 
     assert "from the plan's own arithmetic alone" in said({"source": "arithmetic"})
     assert "from the plan's own arithmetic alone" not in said(
         {"source": "arithmetic", "confirmed_by": {"source": "recompute", "value": 2.36784}})
+
+
+
+# --- the second pass of that review ---------------------------------------------------------------------------------------
+
+
+def test_a_derivation_written_inside_the_checks_statement_is_not_shown_either() -> None:
+    oracle = {**EXACT_90, "reference": "", "check": "T_exact at 90 degrees (" + PENDULUM_REFERENCE + ")"}
+    shown = oracle_triage.blind(oracle)
+    assert "1.85407" not in json.dumps(shown) and shown["check"].startswith("T_exact at 90 degrees")
+    assert not oracle_triage.shows_working(shown)
+
+
+@pytest.mark.asyncio
+async def test_a_kept_recheck_answer_never_confirms_the_plans_arithmetic(tmp_path: Path) -> None:
+    eng = _engine_with_plan(tmp_path, EXACT_90)
+    other = oracle_triage.recompute_entry(EXACT_90, "disputed", 2.367842, MEASURED, "x", model="m2", same_model=False)
+    eng._recompute_expected = AsyncMock(return_value=(other, False))  # type: ignore[method-assign]  # read from a file
+    seed = eng.quest_root / "code" / "simulate.py"
+    seed.parent.mkdir(parents=True, exist_ok=True)
+    seed.write_text("x = 1\n", encoding="utf-8")
+    record: dict[str, Any] = {"judged": [_judged("exact_90_deg", MEASURED)]}
+    await eng._look_at_failing_checks({}, None, seed, [EXACT_90], [EXACT_90], record, set(), protocol={},
+                                      timeout=10, case_env={})
+    assert not eng._may_correct(eng._oracle_proposals["exact_90_deg"])
+    assert eng._correct_expected_values(record["judged"], [EXACT_90]) == []
+
+
+def test_a_confirmation_for_the_check_as_it_was_does_not_hold_for_a_changed_case(tmp_path: Path) -> None:
+    proposal = _confirmed(oracle_triage.arithmetic_proposal(EXACT_90, oracle_triage.arithmetic_slip(PENDULUM_REFERENCE)))
+    changed = {**EXACT_90, "case": {"amplitude_deg": 60}}
+    assert Engine._still_holds(EXACT_90, proposal) is True  # noqa: SLF001
+    assert Engine._still_holds(changed, proposal) is False  # noqa: SLF001
