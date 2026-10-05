@@ -828,3 +828,28 @@ def test_the_card_keeps_a_slip_whose_written_number_rounds_the_expected_value() 
 ])
 def test_working_without_a_label_counts_as_shown(statement: str) -> None:
     assert oracle_triage.shows_working({"check": statement, "reference": oracle_triage.BLIND_REFERENCE})
+
+
+@pytest.mark.parametrize("statement", [
+    "(2/\u03c0) \u00d7 1.85407 = approx. 1.25",
+    "(2/pi) * 1.85407 = about 1.25",
+    "(2/pi) * 1.85407 = ~1.25",
+    "(2/pi) * 1.85407 =~ 1.25",
+    "(2/pi) * 1.85407 \u2243 1.25",
+    "(2/pi) * 1.85407 \u2192 1.25",
+    "(2/pi) * 1.85407 gives 1.25",
+    "the ratio is 1.25 = (2/\u03c0) \u00d7 1.85407",
+    "(2/pi) * 1.85407 = (1.25)",
+    "omega = sqrt(g/L) = 3.13",
+])
+def test_working_written_in_any_form_counts_as_shown(statement: str) -> None:
+    assert oracle_triage.shows_working({"check": statement, "reference": oracle_triage.BLIND_REFERENCE})
+
+
+@pytest.mark.parametrize("statement", [
+    "RK4 error on y' = -y at t = 1 with h = 0.1",
+    "T_exact at 90 degrees",
+    "final size of the epidemic with R0 = 2",
+])
+def test_a_plain_statement_with_settings_is_not_working(statement: str) -> None:
+    assert not oracle_triage.shows_working({"check": statement, "reference": oracle_triage.BLIND_REFERENCE})

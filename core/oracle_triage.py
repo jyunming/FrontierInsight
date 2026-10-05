@@ -681,27 +681,22 @@ def blind(oracle: dict[str, Any]) -> dict[str, Any]:
 
 
 def shows_working(oracle: dict[str, Any]) -> bool:
-    """Whether ``oracle`` (as it would be shown) still carries arithmetic a model could copy: a written-out step with a
-    number after ``=`` in its statement or its reference."""
+    """Whether ``oracle`` (as it would be shown) may still carry arithmetic a model could copy. Read wide on purpose:
+    any arithmetic operation next to a number, any function call with a number in it, or any function call next to a
+    written result ("sqrt(g/L) = 3.13") counts, whatever sign the result is written after and wherever it stands. A
+    wrong "shown" only keeps a check from being corrected (it never makes a correction): a setting such as
+    "at t = 1 with h = 0.1" is not an operation and does not count."""
     text = f"{oracle.get('check') or ''} {oracle.get('reference') or ''}"
-    # A step of arithmetic (a number or a bracket, an operator, then a number, a bracket or a function) whose result
-    # is written after any of the signs the slip finder reads ("=", "=>", "≈", "~", "approx", "about") -- not a
-    # setting such as "at t = 1 with h = 0.1".
-    # Read wide on purpose (a wrong "shown" only keeps a check from being corrected): the calculator's own signs
-    # (×, ·, −, π) count, and any operator or function call next to a number before a sign followed by a number.
-    for a, b in (("−", "-"), ("×", "*"), ("·", "*"), ("π", " pi ")):
+    for a, b in (("\u2212", "-"), ("\u00d7", "*"), ("\u00b7", "*"), ("\u03c0", " pi "), ("\uff1d", "=")):
         text = text.replace(a, b)
-    parts = _APPROX_SPLIT.split(text)
-    for i in range(1, len(parts) - 1, 2):
-        left, right = parts[i - 1].split(";")[-1].split(":")[-1], parts[i + 1]
-        if not _re.match(r"\s*[-+]?\.?\d", right):
-            continue
-        numbers = _re.search(r"\d|\bpi\b", left, _re.IGNORECASE)
-        operation = _re.search(r"[+\-*/^]", left) or _re.search(r"[A-Za-z_]\w*\s*\(", left)
-        if numbers and operation:
-            return True
-    return False
-
+    operand = r"(?:\d|\bpi\b|\))"
+    operation = _re.search(operand + r"\s*(?:\*\*|[+\-*/^])\s*(?:\d|\(|\bpi\b|[A-Za-z_]\w*\s*\()", text,
+                           _re.IGNORECASE)
+    call_with_number = _re.search(r"\b[A-Za-z_]\w*\s*\(\s*[-+]?[\d.(]", text)
+    call = _re.search(r"\b[A-Za-z_]\w*\s*\(", text)
+    result = _re.search(r"(?:=|\u2248|~|\u2243|\u2245|\u2192|\bgives\b|\bapprox|\babout\b)\s*\(?\s*[-+]?\.?\d", text,
+                        _re.IGNORECASE)
+    return bool(operation or call_with_number or (call and result))
 
 def plan_slip(oracle: dict[str, Any]) -> dict[str, Any] | None:
     """The slip in the arithmetic of ``oracle``'s own derivation that produces its expected value (:func:`arithmetic_slip`
