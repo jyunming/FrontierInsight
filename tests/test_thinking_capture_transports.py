@@ -402,3 +402,18 @@ def test_the_whole_call_budget_still_bounds_a_stream_that_never_goes_silent() ->
     chunks = [{"message": {"thinking": "t"}}] * 50 + [_done()]
     with pytest.raises(httpx.ReadTimeout):
         _stream_call(chunks, timeout=0.5, inactivity=0.4, gaps=0.1)
+
+
+def test_a_refusal_of_thinking_sent_inside_the_stream_falls_back_and_is_remembered() -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/api/chat":
+            return httpx.Response(200, content=_ndjson([
+                {"error": {"type": "invalid_request_error", "message": '"gemma4:31b-cloud" does not support thinking'}}]))
+        return httpx.Response(200, json={"model": "m", "choices": [{"message": {"content": "No."}, "finish_reason": "stop"}]})
+
+    answers, thinking = _ollama_call(handler, calls=2)
+    assert answers == ["No.", "No."] and thinking == ""
+    assert [r.url.path for r in seen] == ["/api/chat", "/v1/chat/completions", "/v1/chat/completions"]

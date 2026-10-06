@@ -1057,11 +1057,11 @@ def _stream_error(error: Any, request: Any) -> BaseException:
     # A permanent type or code wins over a hopeful message ("invalid request ... try again with a shorter prompt"),
     # unless the type or code itself says it will clear.
     if _STREAM_PERMANENT.search(norm(kind)) and not _STREAM_TRANSIENT.search(norm(kind)):
-        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text))
     if _STREAM_TRANSIENT.search(norm(f"{kind} {message}")):
         return httpx.RemoteProtocolError(text)
     if status is not None and 400 <= int(status) < 500:
-        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text))
     return httpx.RemoteProtocolError(text)
 
 
