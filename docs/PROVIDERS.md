@@ -238,6 +238,32 @@ needs longer than FI's limit for one answer and names the setting to raise.
 `output.save_thinking: false` stops asking. The chat's per-step line
 (`... N thinking ...`) shows how many characters of thinking arrived.
 
+**A reasoning that goes round in circles is cut and asked again without
+reasoning.** A model that thinks at length can fall into a loop and repeat the
+same lines until its context is full (one real call ran 32 minutes and used the
+model's whole context). FI watches the reasoning as it streams in: when the end
+of it is one block of up to 60 lines repeated ten times in a row (at least 400
+characters), or one stretch of up to 800 characters repeated ten times, FI stops
+reading at once, discards that reasoning, and asks the same request one more
+time without reasoning; that answer is used. A reasoning that uses up all the
+room there was and ends without an answer gets the same single retry. The
+thresholds are far above anything an ordinary derivation does: of 85 reasoning
+texts kept by earlier quests, only the one real loop is flagged (after about
+15,000 characters). The retry is made once per call and never repeats. `run.log`
+says it once per step, in plain words ("The model's reasoning at the step `plan`
+went round in circles (the same N lines repeated R times), so FI asked again
+without reasoning; this step's reasoning is not kept."), and nothing for that
+call is written to `.fi/thinking.jsonl`.
+
+**Sampling while the model thinks.** When FI asks Ollama to think it does not
+send its own per-step temperature (0 for deciding steps, 0.2 for others): long
+reasoning at temperature 0 is prone to loops, so the model's own recommended
+sampling (its Modelfile defaults) is used. If you set `provider.fixed_temperature`
+(or a `temperature` in `provider.extra_body`), that value is sent as before.
+`run.log` says which one was used, once per model; a call that does not ask for
+reasoning is unchanged. Each streamed call also leaves one `run.log` line on when
+its first output, its thinking and its answer began and how long it took.
+
 **Which connections return a model's reasoning.** `output.save_thinking` (on by
 default) keeps whatever reasoning a connection hands back in
 `.fi/thinking.jsonl`. Most connections return none unless they are asked, so
