@@ -324,3 +324,94 @@ class TestPercentileRank:
 def test_a_genuine_near_miss_is_still_reported(paper, results, expected) -> None:
     declared = no.declared_numbers(_DESIGN, "Compare models for R0 in {0.9, 1.5, 3.0}.")
     assert expected in _flagged(paper, results, declared=declared)
+
+
+# --- a percentage, and the value of a formula written right before it ---------
+#
+# A real pendulum quest (results by amplitude: rel_error_t0 stored as a FRACTION)
+# was blocked from "internally reconciled" by two findings on correct numbers:
+# "0.77%" (the 20 degree value 0.00767, printed as a percent) read as the bare
+# 0.77 against 150 degrees' 0.762, and "2.006" (2 pi sqrt(1/9.81), the paper's own
+# computation) read as a last-digit slip of T_num = 2.00702.
+
+_PENDULUM = {
+    "by_amplitude_deg": {
+        "5": {"T_num": 2.007021773701787},
+        "20": {"rel_error_t0": 0.007669025791545065},
+        "30": {"rel_error_t0": 0.017408797595956017},
+        "150": {"rel_error_t0": 0.7622037295037565},
+    }
+}
+
+
+class TestPercentIsReadAsTheFractionItMeans:
+    def test_the_real_context_is_not_a_finding(self) -> None:
+        paper = "the 1% relative error threshold was crossed between 20° (0.77%) and 30° (1.74%)."
+        assert _flagged(paper, _PENDULUM) == []
+
+    @pytest.mark.parametrize("percent", [r"0.77\%", r"$0.77\%$", "0.77 percent", "0.77 %"])
+    def test_every_way_of_writing_the_percent_sign(self, percent: str) -> None:
+        assert _flagged(f"the error at 20° was {percent} here.", _PENDULUM) == []
+
+    def test_a_true_slip_in_a_percent_is_still_reported(self) -> None:
+        # 0.007669 rounds to 0.0077 at percent precision; the paper's 0.78% is one off.
+        results = {"rel_error_t0": 0.007669025791545065}
+        got = no.check("the error at 20° was 0.78% here.", results).findings
+        assert [(f.kind, f.result_path) for f in got] == [("near_miss", "rel_error_t0")]
+
+    def test_the_bare_printed_value_is_not_read_against_a_fraction(self) -> None:
+        # 0.77% against only the 150 degree fraction 0.762: not its slip.
+        results = {"rel_error_150": 0.7622037295037565}
+        assert _flagged("the error at 20° was 0.77% here.", results) == []
+
+    def test_a_percent_stored_as_a_percent_is_still_checked(self) -> None:
+        # a result above 1 cannot be a fraction: 76.54 stored, 76.55% printed
+        assert _flagged("coverage was 76.55% of runs.", {"coverage_pct": 76.54}) == [
+            ("near_miss", 76.55)
+        ]
+
+    def test_a_whole_percent_is_not_a_last_digit_slip(self) -> None:
+        # "65%" is as coarse as 65: against a stored 0.6379 it is not reported
+        assert _flagged("about 65% of runs went extinct.", {"p_ext": 0.6379}) == []
+
+    def test_a_whole_percent_does_not_state_a_result_right(self) -> None:
+        # "33%" must not mark 0.3267 as stated correctly and so hide 0.328 beside it
+        paper = "extinction removed 33% of runs; the probability was 0.328 here."
+        assert _flagged(paper, {"p": 0.32666666}) == [("near_miss", 0.328)]
+
+    def test_a_confidence_level_is_still_not_a_result(self) -> None:
+        assert _flagged("the 95% CI was wide.", {"n_runs": 93.4}) == []
+
+
+class TestTheValueOfAFormulaIsNotACopy:
+    def test_the_real_context_is_not_a_finding(self) -> None:
+        paper = (
+            "the small-angle period $T_0$ was calculated as "
+            r"$2\pi\sqrt{L/g} \approx 2.006$ s."
+        )
+        assert _flagged(paper, _PENDULUM) == []
+
+    @pytest.mark.parametrize(
+        "paper",
+        [
+            r"$T_0 = 2\pi\sqrt{L/g} = 2.006$ s",
+            r"$2\pi\sqrt{L/g}$ \approx 2.006 s",
+            "T0 = 2*pi*sqrt(L/g) ≈ 2.006 s",
+            "Computing 2 * 3.1416 * 0.3193 = 2.006 gives the period",
+        ],
+    )
+    def test_other_ways_of_writing_a_formula(self, paper: str) -> None:
+        assert _flagged(paper, {"T_num": 2.00702}) == []
+
+    def test_a_symbol_alone_is_a_result_and_is_still_checked(self) -> None:
+        assert _flagged("T_num = 2.006 s.", {"T_num": 2.00702}) == [("near_miss", 2.006)]
+        assert _flagged(r"$T_{num} = 2.006$ s.", {"T_num": 2.00702}) == [("near_miss", 2.006)]
+
+    def test_a_formula_does_not_hide_a_transposition(self) -> None:
+        paper = r"$2\pi\sqrt{L/g} \approx 2.41$ s."
+        assert _flagged(paper, {"nils": 2.14}) == [("transposed", 2.41)]
+
+    def test_a_number_that_is_not_right_after_the_relation_is_still_checked(self) -> None:
+        paper = r"$2\pi\sqrt{L/g} \approx 2.006$ s, and the run gave 2.006 s."
+        # the second 2.006 is stated as a result and is a slip of 2.00702
+        assert _flagged(paper, {"T_num": 2.00702}) == [("near_miss", 2.006)]
