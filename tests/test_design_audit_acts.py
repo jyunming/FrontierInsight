@@ -87,7 +87,7 @@ async def test_an_engine_rewrite_before_the_freeze_is_changed_to_meet_the_audit(
     assert receipt["status"] == "pass"
     assert receipt["output_hash"] == receipts.sha256(receipts.design_core(runs))
     log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
-    assert "FI changed the design to meet it: timing error is O(dt)" in log
+    assert "before the experiment ran, a second look at the design found a problem and FI changed the design to fix it: timing error is O(dt)" in log
     # The design that runs now matches its receipt, so asking again takes no call.
     again = await eng._audit_the_design_that_runs({"topic": "t", "iteration": 0}, runs)
     assert again == runs and _calls(eng) == 2
@@ -174,3 +174,34 @@ async def test_an_audit_with_nothing_to_change_still_leaves_an_honest_receipt(tm
     runs = await eng._audit_the_design_that_runs({"topic": "t", "iteration": 0}, design)
     assert runs == design and _calls(eng) == 2
     assert _receipt(eng)["status"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_the_audit_may_change_the_method_but_never_the_checks_the_results_are_judged_by(tmp_path: Path) -> None:
+    check = {"name": "period_check", "kind": "published_value", "check": "T", "expected": 2.0, "tolerance": 0.001,
+             "case": {"dt": 0.01}, "measure": "T", "reference": "derivation: T = 2*pi*sqrt(1/9.81) = 2.006"}
+    protocol = {"runs_per_setting": 5, "thresholds": {"max_error": 0.01}, "acceptance": ["error below 0.01"],
+                "oracles": [check]}
+    eng = _engine(tmp_path, [])
+    design, why = plan.normalize_design({**DRAFT, "protocol": protocol})
+    assert design is not None, why
+    path = plan.plan_path(eng.quest_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan.render("pendulum period", {}, design, []), encoding="utf-8")
+    plan.record_version(eng.quest_root, path.read_text(encoding="utf-8"), by="engine", note="test")
+    design = plan.parse(path.read_text(encoding="utf-8")).design
+    loosened = {**design, "method": METHOD, "protocol": {
+        **design["protocol"], "thresholds": {"max_error": 0.5}, "acceptance": ["anything"],
+        "oracles": [{**check, "tolerance": 0.5}]}}
+    eng._client.chat.side_effect = [
+        json.dumps({"objections_addressed": [OBJECTION], "amended_design": loosened}),
+        json.dumps({"objections_addressed": [], "amended_design": loosened})]
+    runs = await eng._audit_the_design_that_runs({"topic": "t", "iteration": 0}, design)
+    assert "interpolated" in runs["method"]
+    assert runs["protocol"]["oracles"] == design["protocol"]["oracles"]
+    assert runs["protocol"]["oracles"][0]["tolerance"] == 0.001
+    assert runs["protocol"]["thresholds"] == {"max_error": 0.01} and runs["protocol"]["acceptance"] == design["protocol"]["acceptance"]
+    assert plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design["protocol"]["oracles"][0]["tolerance"] == 0.001
+    log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "the audit also suggested changing the checks the results are judged by; FI kept them as they were" in log
+    assert "FI kept them as they were" in _receipt(eng)["detail"]

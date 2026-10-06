@@ -8643,6 +8643,9 @@ class Engine:
                        "itself and nothing has run, so the audit may change it once")
         self._mark_design_audit_acted(key)
         amended, objections = await self._audit_design(state, design, adopt=True)
+        kept_checks = False
+        if isinstance(amended, dict):
+            amended, kept_checks = self._keep_what_the_results_are_judged_by(design, amended)
         if isinstance(amended, dict) and _receipts.design_core(amended) != _receipts.design_core(design):
             first = next((o.get("objection") if isinstance(o, dict) else o for o in objections or [] if o), "")
             written = self._write_audited_design_to_plan(
@@ -8650,11 +8653,37 @@ class Engine:
                          + str(first)[:200])
             if written is not None:
                 self._log.info(
-                    "[design] the methodology audit objected to the design FI rewrote itself, before anything ran; "
-                    "FI changed the design to meet it: %s", str(first)[:160] or "see needs/DESIGN_CRITIQUE.json")
+                    "[design] before the experiment ran, a second look at the design found a problem and FI changed "
+                    "the design to fix it: %s", str(first)[:160] or "see needs/DESIGN_CRITIQUE.json")
                 design = written
+        if kept_checks:
+            self._log.info("[design] the audit also suggested changing the checks the results are judged by; FI kept "
+                           "them as they were")
         await self._audit_design(state, design, adopt=False)
+        if kept_checks:
+            _receipts.add_detail(self.quest_root, "design_audit",
+                                 "The audit also suggested changing the checks the results are judged by (the protocol's "
+                                 "checks, thresholds, acceptance rules, metrics, precision target and model); FI kept "
+                                 "them as they were.")
         return design
+
+    #: The protocol keys an audit may change: how the study is run, never what its results are judged by.
+    _AUDIT_MAY_CHANGE = frozenset({"grid", "seed_policy", "failure_policy", "ci_method"})
+
+    def _keep_what_the_results_are_judged_by(self, before: dict[str, Any], amended: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """``(design, changed)``: ``amended`` with every protocol key but those in ``_AUDIT_MAY_CHANGE`` put back as it was
+        in ``before`` (the checks and their tolerances, thresholds, acceptance rules, metrics, precision target, criteria,
+        model and the rest), and whether the audit tried to change one. The method, the variables and the grid may change."""
+        old = before.get("protocol") if isinstance(before.get("protocol"), dict) else None
+        new = amended.get("protocol") if isinstance(amended.get("protocol"), dict) else None
+        if old is None and new is None:
+            return amended, False
+        old, new = old or {}, new or {}
+        merged = {k: v for k, v in old.items() if k not in self._AUDIT_MAY_CHANGE}
+        merged.update({k: new[k] for k in new if k in self._AUDIT_MAY_CHANGE})
+        merged.update({k: old[k] for k in old if k in self._AUDIT_MAY_CHANGE and k not in new})
+        changed = any(new.get(k) != old.get(k) for k in {*old, *new} if k not in self._AUDIT_MAY_CHANGE)
+        return {**amended, "protocol": merged}, changed
 
     def _write_receipt(self, check: str, status: str, **kwargs: Any) -> None:
         """Leave the receipt of a required check (core/receipts.py). A receipt that cannot be written is logged: the
@@ -11455,7 +11484,8 @@ class Engine:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
             for f in formula_asks:
                 reason = {"missing": "it gave none", "unusable": f"its formula could not be computed: {f.get('why')}",
-                          "differs": "its formula and its expected value disagree"}[f["state"]]
+                          "differs": "its formula and its expected value disagree",
+                          "ambiguous": "its formula can be read two ways"}[f["state"]]
                 self._log.info("[oracle] asking the plan for the expected value of %r as a formula FI can compute (%s)",
                                f["name"], reason)
             # Recorded before the request: it is made at most once, even if this run stops while it is out.
@@ -11530,9 +11560,10 @@ class Engine:
         protocol = design.get("protocol") if isinstance(design, dict) else None
         left = []
         for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None):
-            if f["state"] in ("missing", "unusable"):
+            if f["state"] in ("missing", "unusable", "ambiguous"):
                 why = ("the plan gave no formula for it" if f["state"] == "missing"
-                       else f"its formula cannot be computed: {f.get('why')}")
+                       else f"its formula can be read two ways, so FI did not use it: {f.get('formula')}"
+                       if f["state"] == "ambiguous" else f"its formula cannot be computed: {f.get('why')}")
                 self._log.info("[oracle] FI could not compute the expected value of %r itself (%s); the check is "
                                "used as the plan wrote it", f["name"], why)
                 left.append(f"FI could not compute the expected value of {f['name']!r} itself ({why}); the check is "

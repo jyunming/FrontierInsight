@@ -516,10 +516,16 @@ def formula_value(oracle: dict[str, Any]) -> tuple[float | None, str]:
     return None, result.unreadable or result.problem or "it cannot be computed"
 
 
+#: Said to the plan, and in plan.md, about a formula that can be read two ways.
+AMBIGUOUS_WHY = ("it can be read two ways: write it so it can only be read one way (angles in radians with pi, log10 or "
+                 "ln named, ellipk(k**2))")
+
+
 def formula_findings(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     """What FI's own computation of each check's expected value found, for the checks FI may correct that can be judged
     (a number ``expected`` and a ``tolerance``): ``{"name", "state", ...}`` with ``state`` ``agrees``, ``missing``,
-    ``unusable`` (``why``) or ``differs`` (``value``, ``expected``). A check whose number is a violation, expecting 0
+    ``unusable`` (``why``), ``ambiguous`` (a disagreeing formula that can be read two ways: never applied) or ``differs``
+    (``value``, ``expected``). A check whose number is a violation, expecting 0
     by its form, has no formula to compute."""
     from . import oracle_triage as _triage
 
@@ -534,8 +540,15 @@ def formula_findings(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
             found.append({"name": name, "state": "missing" if why == "missing" else "unusable", "why": why,
                           "formula": str(oracle.get("expected_formula") or "")})
         elif abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
-            found.append({"name": name, "state": "differs", "value": value, "expected": expected,
-                          "formula": str(oracle.get("expected_formula"))})
+            formula = str(oracle.get("expected_formula"))
+            if _triage.ambiguous(formula):
+                # A formula that can be read two ways (sin(30) for 30 degrees, a bare log, ellipk of a modulus) is never
+                # used to change `expected`: FI's reading may not be the plan's.
+                found.append({"name": name, "state": "ambiguous", "value": value, "expected": expected,
+                              "formula": formula, "why": AMBIGUOUS_WHY})
+            else:
+                found.append({"name": name, "state": "differs", "value": value, "expected": expected,
+                              "formula": formula})
         else:
             found.append({"name": name, "state": "agrees", "value": value, "expected": expected})
     return found
@@ -556,6 +569,10 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True) -> str
         elif f["state"] == "unusable":
             lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` cannot be computed ({f['why']}); give "
                          "one that can.")
+        elif f["state"] == "ambiguous":
+            lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` {f['why']}; FI reads it as "
+                         f"{_digits(f['value'])} while `expected` says {_digits(f['expected'])}. Give it in a form that "
+                         "can only be read one way, and the corrected `expected` if the formula is right.")
         elif f["state"] == "differs":
             lines.append(f"- {f['name']!r}: FI computed your `expected_formula` `{f['formula']}`: it gives "
                          f"{_digits(f['value'])}, but `expected` says {_digits(f['expected'])}. Give the corrected "

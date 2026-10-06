@@ -130,6 +130,19 @@ def carry_output(quest_root: Path, check: str, before: Any, after: Any, why: str
     return True
 
 
+def add_detail(quest_root: Path, check: str, text: str) -> bool:
+    """Add a sentence to the ``detail`` of ``check``'s receipt, changing nothing else; whether it was added."""
+    status, record, problem = read(quest_root, check)
+    if problem or record is None:
+        return False
+    record["detail"] = (str(record.get("detail") or "") + " " + text).strip()
+    target = path(quest_root, check)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, target)
+    return True
+
+
 def carry_over(quest_root: Path, check: str, key: str, before: Any, after: Any, why: str) -> bool:
     """Move a receipt from ``before`` to ``after`` of one input, when ``after`` was made from ``before`` by a step that
     cannot add what the check judged (the page-limit trim only takes sentences out of the checked draft). Only a receipt

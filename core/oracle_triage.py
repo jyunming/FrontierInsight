@@ -549,19 +549,19 @@ def _close(a: float, b: float, written: str, *, approximate: bool = False, limit
     (five times looser after an "approximately" sign), so a last digit rounded differently is never a slip. Without
     ``limit`` never tighter than 1%. With ``limit`` (the check's own tolerance, as an absolute amount) the 1% floor
     gives way to it: a gap the check itself can tell apart is a slip (a real quest's "(2/pi)*ellipk(sin(pi/8)**2)
-    approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance) -- never tighter than :data:`APPROX_FLOOR`
-    after an "approximately" sign. Rounded constants inside the step are allowed for by :func:`calculated_range`.
+    approx 1.031" comes to 1.0400, 0.9% off, nine times its tolerance); :data:`APPROX_FLOOR` applies only when
+    no ``limit`` is given. Rounded constants inside the step are allowed for by :func:`calculated_range`.
 
     The slack the written number's own digits allow is half a unit in its last written place, absolute (``2.366``
     0.0005, ``1.85407`` 0.000005; five times that after an "approximately" sign), and with ``limit`` it is the larger
     of that and ``limit``, never more: a gap the check itself can tell apart is a slip."""
     scale = max(abs(a), abs(b))
     slack = _written_slack(written) * (5 if approximate else 1)
-    if approximate:
-        slack = max(slack, APPROX_FLOOR * scale)
     if limit is None or limit <= 0:
-        slack_abs = max(slack, 1e-2 * (5 if approximate else 1) * scale)
+        # Nothing the check can tell apart: never tighter than the floors.
+        slack_abs = max(slack, (APPROX_FLOOR * scale) if approximate else 0.0, 1e-2 * (5 if approximate else 1) * scale)
     else:
+        # A gap the check itself can tell apart is a slip, "approximately" or not: the floors give way to the limit.
         slack_abs = max(slack, limit)
     return abs(a - b) <= slack_abs or abs(a - b) < 1e-12
 

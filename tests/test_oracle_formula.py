@@ -233,7 +233,8 @@ def test_the_slack_of_a_written_number_is_half_a_unit_in_its_last_place() -> Non
     assert tri._close(1.85408, 1.85407, "1.85407", limit=1e-9) is False, "0.00001 apart, half a unit is 0.000005"
     assert tri._close(0.0021, 0.0020, "2.0e-3", limit=1e-9) is False
     assert tri._close(0.00204, 0.0020, "2.0e-3", limit=1e-9) is True
-    assert tri._close(2.3678, 2.366, "2.366", approximate=True, limit=0.001) is True, "approximate: five times looser"
+    assert tri._close(2.3678, 2.3676, "2.3676", approximate=True, limit=1e-9) is True, "approximate: five times looser"
+    assert tri._close(2.3678, 2.360, "2.360", approximate=True, limit=0.001) is False, "far apart: a slip"
 
 
 @pytest.mark.asyncio
@@ -254,3 +255,22 @@ async def test_a_formula_that_stays_missing_is_said_in_plan_md(tmp_path: Path) -
     await _plan_step(engine)
     assert "FI could not compute the expected value of 'exact_period_check' itself" in plan.plan_path(
         engine.quest_root).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_formula_that_can_be_read_two_ways_is_asked_about_and_never_applied(tmp_path: Path) -> None:
+    case_30 = {"name": "s30", "kind": "special_case", "check": "sin of the angle", "expected": 0.5, "tolerance": 1e-6,
+               "case": {"angle_deg": 30}, "measure": "s", "reference": "derivation: sin(30 deg) = 0.5"}
+    engine = Engine(_config(tmp_path))
+    model = _Model(_protocol({**case_30, "expected_formula": "sin(30)"}), NO_REVIEW)
+    engine._client = model
+    await _plan_step(engine)
+    assert len(model.revisions) == 1 and "can only be read one way" in model.revisions[0]
+    assert _planned(engine)["s30"]["expected"] == 0.5, "sin(30) read in radians must not replace the expected value"
+    assert "can be read two ways" in _log(engine)
+
+    engine = Engine(_config(tmp_path / "ok"))
+    model = _Model(_protocol({**case_30, "expected": 0.51, "expected_formula": "sin(30*pi/180)"}), NO_REVIEW)
+    engine._client = model
+    await _plan_step(engine)
+    assert _planned(engine)["s30"]["expected"] == pytest.approx(0.5, abs=1e-12)
