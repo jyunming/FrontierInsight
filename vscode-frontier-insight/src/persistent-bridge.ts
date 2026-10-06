@@ -25,7 +25,7 @@ import * as fs from "fs";
 import * as net from "net";
 import { persistentBridgePath } from "./bridge-path";
 import {
-    BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, partKind, servedModel,
+    BRIDGE_PROTOCOL, BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, partKind, servedModel, stallMessage,
     thinkingText, toChatMessages,
 } from "./lm-messages";
 
@@ -167,7 +167,7 @@ export class PersistentBridge {
             server.listen(this.path, () => {
                 this.ownsSocket = true;
                 this.outputChannel.appendLine(
-                    `[fi] persistent bridge listening at ${this.path}`,
+                    `[fi] persistent bridge listening at ${this.path} (bridge protocol ${BRIDGE_PROTOCOL})`,
                 );
                 resolve(this.path);
             });
@@ -311,7 +311,7 @@ export class PersistentBridge {
                 version: m.version,
             }));
             this.send(socket, {
-                type: "models", id: req.id, models: payload,
+                type: "models", id: req.id, models: payload, protocol: BRIDGE_PROTOCOL,
             });
         } catch (e) {
             const msg = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
@@ -464,10 +464,10 @@ export class PersistentBridge {
                         // Phrasing matches bridge.ts so Python's
                         // ``_is_bridge_error_transient`` classifier hits
                         // on "bridge stalled" in either transport.
-                        throw new Error(
-                            `bridge stalled: no chunk for ${INACTIVITY_MS / 1000} s ` +
-                            `(received ${chunkCount} chunks / ${content.length} chars before stall)`,
-                        );
+                        throw new Error(stallMessage(
+                            model, INACTIVITY_MS / 1000,
+                            `received ${chunkCount} chunks / ${content.length} chars before stall`,
+                        ));
                     }
                     if (result.done) break;
                     if (partsSeen++ === 0) this.thinkingRequests.firstPart(modelKey, askedForThinking);
@@ -532,6 +532,10 @@ export class PersistentBridge {
                 // The model selected and sent this request, so FI can record it; the model's own reasoning rides
                 // along when there is room (cut to fit). An older FI ignores both.
                 served_model: servedModel(model),
+                // What this extension is (FI says once when it is older than it expects) and how many reasoning parts
+                // came with no text (a GPT model through Copilot: encrypted only).
+                protocol: BRIDGE_PROTOCOL,
+                ...(thinkingAll.emptyParts ? { thinking_parts_empty: thinkingAll.emptyParts } : {}),
                 // This model refused the request for its reasoning, so it was asked without it (FI says so in run.log).
                 ...(declined ? { thinking_declined: declined } : {}),
             }, thinkingAll.text, undefined, thinkingAll.total));

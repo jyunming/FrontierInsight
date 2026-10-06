@@ -65,6 +65,24 @@ LAST_BRIDGE_THINKING: contextvars.ContextVar[str | None] = contextvars.ContextVa
 LAST_BRIDGE_THINKING_DECLINED: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "fi_vscode_thinking_declined", default=None)
 
+#: The version of the bridge messages this FI expects the extension to speak (``BRIDGE_PROTOCOL`` in
+#: vscode-frontier-insight/src/lm-messages.ts; a test keeps the two equal). An extension that sends none, or a lower one,
+#: is older than this FI (it does not ask a model for its reasoning, for one).
+REQUIRED_BRIDGE_PROTOCOL = 1
+#: The one plain line said when it is: what the person has to do about it.
+EXTENSION_OLDER_NOTE = ("The FI extension in VS Code is older than this FI; update it (the .vsix in "
+                        "vscode-frontier-insight/) and reload the window.")
+#: The bridge protocol the extension sent with the current task's last bridge call (0 when it sent none).
+LAST_BRIDGE_PROTOCOL: contextvars.ContextVar[int | None] = contextvars.ContextVar("fi_vscode_protocol", default=None)
+#: How many reasoning parts came with no text on the current task's last bridge call.
+LAST_BRIDGE_EMPTY_PARTS: contextvars.ContextVar[int] = contextvars.ContextVar("fi_vscode_empty_parts", default=0)
+
+
+def extension_is_older(protocol: int | None) -> bool:
+    """The extension's bridge protocol (``None``: no call answered yet) is below what this FI expects."""
+    return protocol is not None and protocol < REQUIRED_BRIDGE_PROTOCOL
+
+
 #: Names a chat picker uses for "let the service choose": they name no model, so they prove nothing about which
 #: model answered.
 _ROUTER_ALIASES = frozenset({"auto", "default", "copilot-auto", "auto-mode"})
@@ -128,6 +146,10 @@ class VSCodeBridgeClient:
         self._usage: dict[int, dict] = {}
         self._thinking: dict[int, str] = {}
         self._declined: dict[int, str] = {}
+        self._protocol: dict[int, int] = {}
+        self._empty_parts: dict[int, int] = {}
+        #: The bridge protocol the extension last reported (0: none sent); ``None`` before its first answer.
+        self.extension_protocol: int | None = None
         self._next_id = 1
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()  # serialize writes
@@ -190,6 +212,8 @@ class VSCodeBridgeClient:
         self._usage.clear()
         self._thinking.clear()
         self._declined.clear()
+        self._protocol.clear()
+        self._empty_parts.clear()
 
     async def chat(
         self,
@@ -227,6 +251,8 @@ class VSCodeBridgeClient:
         LAST_BRIDGE_USAGE.set(None)
         LAST_BRIDGE_THINKING.set(None)
         LAST_BRIDGE_THINKING_DECLINED.set(None)
+        LAST_BRIDGE_PROTOCOL.set(None)
+        LAST_BRIDGE_EMPTY_PARTS.set(0)
         req_id = self._next_id
         self._next_id += 1
         fut: asyncio.Future[str] = asyncio.get_event_loop().create_future()
@@ -260,6 +286,8 @@ class VSCodeBridgeClient:
                 LAST_BRIDGE_USAGE.set(self._usage.pop(req_id, None))
                 LAST_BRIDGE_THINKING.set(self._thinking.pop(req_id, None))
                 LAST_BRIDGE_THINKING_DECLINED.set(self._declined.pop(req_id, None))
+                LAST_BRIDGE_PROTOCOL.set(self._protocol.pop(req_id, None))
+                LAST_BRIDGE_EMPTY_PARTS.set(self._empty_parts.pop(req_id, 0))
                 return content
             except asyncio.TimeoutError as e:
                 raise BridgeError(
@@ -273,6 +301,8 @@ class VSCodeBridgeClient:
             self._usage.pop(req_id, None)
             self._thinking.pop(req_id, None)
             self._declined.pop(req_id, None)
+            self._protocol.pop(req_id, None)
+            self._empty_parts.pop(req_id, None)
 
     async def clarify(self, questions: dict[str, Any]) -> dict[str, Any]:
         """Pause for human-in-the-loop clarify answers. The extension
@@ -382,6 +412,8 @@ class VSCodeBridgeClient:
             self._usage.clear()
             self._thinking.clear()
             self._declined.clear()
+            self._protocol.clear()
+            self._empty_parts.clear()
             w = self._writer
             self._reader = None
             self._writer = None
@@ -442,6 +474,14 @@ class VSCodeBridgeClient:
                 thinking = "".join(thinking)
             if isinstance(thinking, str) and thinking:
                 self._thinking[req_id] = thinking
+            # An extension older than the protocol sends none: 0.
+            proto = msg.get("protocol")
+            proto = proto if isinstance(proto, int) and not isinstance(proto, bool) else 0
+            self._protocol[req_id] = proto
+            self.extension_protocol = proto
+            empty = msg.get("thinking_parts_empty")
+            if isinstance(empty, int) and not isinstance(empty, bool) and empty > 0:
+                self._empty_parts[req_id] = empty
             declined = msg.get("thinking_declined")
             if isinstance(declined, str) and declined.strip():
                 self._declined[req_id] = declined.strip()[:500]

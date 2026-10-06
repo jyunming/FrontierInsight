@@ -73,7 +73,10 @@ from tenacity import (
 from .config import ProviderConfig
 from .proc_tree import _DESCENDANT_WAIT_S as _TREE_KILL_WAIT_S
 from .proc_tree import AsyncProcessTree, ProcessTree
-from .thinking_capture import add_thinking, as_text, note_declined, note_thinking, wanted as thinking_wanted
+from .thinking_capture import (
+    add_thinking, as_text, has_holder, note_declined, note_empty_parts, note_extension_older, note_thinking,
+    wanted as thinking_wanted,
+)
 
 _log = logging.getLogger("frontier_insight.provider")
 
@@ -954,6 +957,10 @@ _REASONING_EFFORT_WARNED: set[tuple[str, str]] = set()
 _HTTP_EFFORT_LEVELS: dict[str, frozenset[str]] = {
     "ollama": frozenset({"low", "medium", "high"}),
 }
+
+
+#: Whether the 'extension is older' line was said by a call outside an engine step (one list cell, not a global flag).
+_EXTENSION_OLDER_SAID: list[bool] = []
 
 
 def _warn_reasoning_effort_once(provider: str, level: str, reason: str) -> None:
@@ -4078,11 +4085,19 @@ class LLMClient:
                 node=node,
             )
             from .vscode_bridge import (
-                LAST_BRIDGE_THINKING, LAST_BRIDGE_THINKING_DECLINED, LAST_BRIDGE_USAGE, LAST_SERVED, is_router_alias,
+                EXTENSION_OLDER_NOTE, LAST_BRIDGE_EMPTY_PARTS, LAST_BRIDGE_PROTOCOL, LAST_BRIDGE_THINKING,
+                LAST_BRIDGE_THINKING_DECLINED, LAST_BRIDGE_USAGE, LAST_SERVED, extension_is_older, is_router_alias,
             )
 
             note_thinking(LAST_BRIDGE_THINKING.get() or "")
             note_declined(LAST_BRIDGE_THINKING_DECLINED.get() or "")
+            note_empty_parts(LAST_BRIDGE_EMPTY_PARTS.get())
+            if extension_is_older(LAST_BRIDGE_PROTOCOL.get()):
+                # The engine says it once in run.log and on the console; a call made outside an engine step says it here.
+                note_extension_older()
+                if not has_holder() and not _EXTENSION_OLDER_SAID:
+                    _EXTENSION_OLDER_SAID.append(True)
+                    _log.warning("%s", EXTENSION_OLDER_NOTE)
             served = LAST_SERVED.get()
             if served and served.get("id") and not is_router_alias(served):
                 # The extension named the chat model it selected and sent this very call to (as VS Code reports it):

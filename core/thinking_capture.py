@@ -39,7 +39,7 @@ def open_holder(*, want: bool = True) -> tuple[dict[str, Any], contextvars.Token
     """Start collecting for one model call in this task; returns the holder to read afterwards and the token that
     :func:`close_holder` gives back (so a call made inside another one leaves the outer holder as it was). ``want``
     says whether the reasoning will be kept (``output.save_thinking``): a connection asks for it only then."""
-    holder: dict[str, Any] = {"text": "", "want": bool(want), "declined": ""}
+    holder: dict[str, Any] = {"text": "", "want": bool(want), "declined": "", "empty_parts": 0, "extension_older": False}
     return holder, _HOLDER.set(holder)
 
 
@@ -89,3 +89,25 @@ def note_declined(reason: object) -> None:
     if holder is None or not isinstance(reason, str) or not reason.strip():
         return
     holder["declined"] = reason.strip()
+
+
+def note_empty_parts(count: object) -> None:
+    """The connection passed on ``count`` reasoning parts that carried no text (a GPT model's reasoning reaches VS Code
+    encrypted only): kept on the holder for the engine to say once in run.log."""
+    holder = _HOLDER.get()
+    if holder is None or not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return
+    holder["empty_parts"] = count
+
+
+def note_extension_older() -> None:
+    """The FI extension in VS Code is older than this FI expects (it sent no or a lower bridge protocol): kept on the
+    holder for the engine to say once."""
+    holder = _HOLDER.get()
+    if holder is not None:
+        holder["extension_older"] = True
+
+
+def has_holder() -> bool:
+    """A model call of an engine step is open in this task (its holder will be read afterwards)."""
+    return _HOLDER.get() is not None

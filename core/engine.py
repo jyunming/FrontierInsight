@@ -17290,6 +17290,15 @@ class Engine:
         except AttributeError:  # a stand-in config
             return False
 
+    def _say_extension_older(self, holder: dict[str, Any]) -> None:
+        """The FI extension in VS Code answered with an older bridge protocol than this FI expects: one plain line, in
+        run.log and on the console, said once per engine. Never stops the quest."""
+        said = self.__dict__.setdefault("_thinking_said", set())
+        if holder.get("extension_older") and "extension_older" not in said:
+            said.add("extension_older")
+            from .vscode_bridge import EXTENSION_OLDER_NOTE
+            self._progress(EXTENSION_OLDER_NOTE)
+
     def _say_once_about_thinking(self, node: str, holder: dict[str, Any], served: dict[str, Any], outcome: str,
                                  text: str) -> None:
         """Plain run.log lines about a call's reasoning, each said once: the model refused the request for its
@@ -17297,18 +17306,25 @@ class Engine:
         said = self.__dict__.setdefault("_thinking_said", set())
         declined = str(holder.get("declined") or "")
         model = str(served.get("model") or served.get("provider") or "the model")
-        if declined and ("declined", model) not in said:
-            said.add(("declined", model))
-            self._log.info("[thinking] %s did not accept FI's request for its reasoning, so FI asked again without it "
-                           "(%s); its answers are used as usual", model, declined[:200])
+        empty = holder.get("empty_parts") or 0
         provider = str(served.get("provider") or "")
+        via_vscode = provider == "vscode_extension"
+        if (via_vscode and outcome == "ok" and not str(holder.get("text") or "").strip()
+                and ("vscode_none", model) not in said):
+            said.add(("vscode_none", model))
+            why = ("VS Code passed it on with no text in it (for an OpenAI model Copilot does not ask for the reasoning "
+                   "summary, so it arrives encrypted only)" if empty else
+                   "VS Code did not pass any on (not every model in it returns its reasoning)")
+            self._log.info("[thinking] %s returned no reasoning through VS Code: %s. To keep an OpenAI model's reasoning "
+                           "use the codex_cli connection (it saves the reasoning summary); only its answers are kept.",
+                           model, why)
         if (outcome == "ok" and not text.strip() and provider in _thinking.CANNOT_RETURN
                 and ("cannot", provider) not in said):
             said.add(("cannot", provider))
             self._log.info("[thinking] %s cannot return a model's reasoning: %s; only its answers are kept (set "
                            "output.save_thinking: false to stop this note)", provider, _thinking.CANNOT_RETURN[provider])
         if (outcome == "ok" and not text.strip() and provider not in _thinking.CANNOT_RETURN
-                and ("none", node) not in said):
+                and not via_vscode and ("none", node) not in said):
             said.add(("none", node))
             self._log.info("[thinking] %s: this model/connection returned no reasoning for this step (only its answer "
                            "and any reasons it wrote in it are kept)", node)
@@ -17322,6 +17338,10 @@ class Engine:
         not evidence, and never in the way of the quest."""
         text = holder.get("text") or ""
         fi_dir = getattr(self, "fi_dir", None)
+        try:
+            self._say_extension_older(holder)
+        except Exception:  # noqa: BLE001 -- a log line never touches the quest (nor a stand-in engine's call)
+            pass
         if fi_dir is None or not self._keeps_thinking():
             return
         try:
