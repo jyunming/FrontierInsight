@@ -37,7 +37,7 @@ import yaml
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, TypedDict
+from typing import Any, Awaitable, Callable, TypedDict, get_args
 
 # User-supplied async function that collects answers to clarify-node
 # questions. Receives the ``clarify_questions`` dict and must return
@@ -625,6 +625,12 @@ def _lower_first(text: str) -> str:
     (``FI worked out ...`` stays ``FI``)."""
     return text if text[1:2].isupper() else text[:1].lower() + text[1:]
 
+
+from core.config import ProviderName as _ProviderName  # noqa: E402
+
+#: Every provider name FI itself uses; an answer whose provider is not one of them came through the VS Code bridge,
+#: which reports the vendor that answered (copilot, customendpoint, ollama-models).
+_FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
 class Engine:
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
@@ -17308,7 +17314,16 @@ class Engine:
         model = str(served.get("model") or served.get("provider") or "the model")
         empty = holder.get("empty_parts") or 0
         provider = str(served.get("provider") or "")
-        via_vscode = provider == "vscode_extension"
+        # The connection, not the vendor that answered: through VS Code the answer names Copilot's vendor (copilot,
+        # customendpoint, ollama-models), never "vscode_extension".
+        # A fallback provider that answered instead (it names itself, e.g. "ollama") is not the VS Code route.
+        configured = getattr(getattr(getattr(self, "config", None), "provider", None), "name", "")
+        via_vscode = provider == "vscode_extension" or (
+            configured == "vscode_extension" and provider not in _FI_PROVIDER_NAMES)
+        if declined and ("declined", model) not in said:
+            said.add(("declined", model))
+            self._log.info("[thinking] %s did not accept FI's request for its reasoning, so FI asked again without it "
+                           "(%s); its answers are used as usual", model, declined[:200])
         if (via_vscode and outcome == "ok" and not str(holder.get("text") or "").strip()
                 and ("vscode_none", model) not in said):
             said.add(("vscode_none", model))

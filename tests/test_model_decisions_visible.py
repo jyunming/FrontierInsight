@@ -337,8 +337,9 @@ async def test_a_refusal_and_no_reasoning_are_each_said_once_in_run_log(tmp_path
         await server.stop()
     log = _run_log(eng)
     assert log.count("did not accept FI's request for its reasoning") == 1
-    assert log.count("design: this model/connection returned no reasoning for this step") == 1
-    assert log.count("analyze: this model/connection returned no reasoning for this step") == 1
+    # Through VS Code the missing reasoning is said once per model (with the route that keeps it), not per step.
+    assert log.count("returned no reasoning through VS Code") == 1
+    assert "this model/connection returned no reasoning for this step" not in log
     assert not (eng.fi_dir / tc.THINKING_FILE).exists()
 
 
@@ -681,3 +682,13 @@ def test_both_bridges_send_through_the_thinking_request_and_the_chat_passes_its_
     # /start, /fleet and /resume pass the chat panel's model; /update and /generate keep the config's.
     assert ext.count("...chatModelArgs(userPickedModel)") == 1
     assert "const args: string[] = [...chatModelArgs(userPickedModel)];" in ext
+
+
+def test_a_fallback_provider_that_answered_is_not_called_the_vs_code_route(tmp_path: Path) -> None:
+    """With provider vscode_extension, an answer from a fallback provider (it names itself, e.g. ollama) is not said
+    to have come through VS Code; one through the bridge (it names Copilot's vendor) is."""
+    eng = _engine(tmp_path, provider="vscode_extension")
+    eng._say_once_about_thinking("design", {"text": ""}, {"provider": "ollama", "model": "g"}, "ok", "")
+    assert "through VS Code" not in _run_log(eng)
+    eng._say_once_about_thinking("design", {"text": ""}, {"provider": "copilot", "model": "m"}, "ok", "")
+    assert _run_log(eng).count("returned no reasoning through VS Code") == 1
