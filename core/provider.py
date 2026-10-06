@@ -1103,7 +1103,7 @@ def _ollama_native_body(body: dict[str, Any]) -> dict[str, Any] | None:
         options["temperature"] = body["temperature"]
     if isinstance(body.get("max_tokens"), int) and not isinstance(body.get("max_tokens"), bool):
         options["num_predict"] = body["max_tokens"]
-    return {"model": body["model"], "messages": messages, "stream": False, "think": body.get("reasoning_effort") or True,
+    return {"model": body["model"], "messages": messages, "stream": True, "think": body.get("reasoning_effort") or True,
             **({"options": options} if options else {})}
 
 
@@ -1121,6 +1121,71 @@ def _ollama_as_openai(data: dict[str, Any]) -> dict[str, Any]:
                                  **({"reasoning_content": thought} if isinstance(thought, str) and thought else {})}}],
         "usage": {"prompt_tokens": prompt, "completion_tokens": out, "total_tokens": prompt + out},
     }
+
+
+async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
+                                timeout: float, inactivity: float | None = None) -> dict[str, Any]:
+    """Ollama's native chat call as a stream (newline-delimited JSON), put back together into the shape
+    :func:`_ollama_as_openai` returns (a model that thinks can be silent to a plain request for longer than its read
+    timeout; a stream sends its thinking as it goes).
+
+    Time, as for :func:`_post_streamed`: ``timeout`` (the step's HTTP budget) bounds the whole call. ``inactivity``
+    (default ``timeout``) bounds the silence between two lines: a model whose thinking keeps arriving is not cut off by
+    it, a stalled stream is. Both end as ``httpx.ReadTimeout`` and are tried again under the usual rules. An error
+    status raises as ``raise_for_status`` would (the caller reads a refusal of ``think`` from it); an ``error`` sent
+    inside the stream is classified by :func:`_stream_error`; a stream that ends without ``done: true`` was cut off
+    and is tried again."""
+    wait = timeout if inactivity is None else inactivity
+    content: list[str] = []
+    thinking: list[str] = []
+    last: dict[str, Any] = {}
+    done = False
+    request = httpx.Request("POST", url)
+    try:
+        async with asyncio.timeout(timeout):
+            async with http.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
+                request = r.request
+                if r.status_code >= 400:
+                    await r.aread()
+                    r.raise_for_status()
+                lines = r.aiter_lines().__aiter__()
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(lines.__anext__(), wait)
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        raise httpx.ReadTimeout(
+                            f"the model's stream sent nothing for {wait:g} s (its read timeout)") from None
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except ValueError:
+                        raise httpx.RemoteProtocolError(
+                            f"the model's stream sent a line that is not JSON: {line[:200]!r}") from None
+                    if not isinstance(chunk, dict):
+                        raise httpx.RemoteProtocolError(
+                            f"the model's stream sent a line that is not an object: {line[:200]!r}")
+                    if chunk.get("error"):
+                        raise _stream_error(chunk["error"], request)
+                    message = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
+                    if isinstance(message.get("content"), str) and message["content"]:
+                        content.append(message["content"])
+                    if isinstance(message.get("thinking"), str) and message["thinking"]:
+                        thinking.append(message["thinking"])
+                    if chunk.get("done"):
+                        last, done = chunk, True
+                        break
+    except TimeoutError:
+        raise httpx.ReadTimeout(
+            f"the model's stream did not finish its answer within the step's {timeout:g} s budget") from None
+    if not done:
+        raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no done message)")
+    return {"model": last.get("model"), "done_reason": last.get("done_reason"),
+            "prompt_eval_count": last.get("prompt_eval_count"), "eval_count": last.get("eval_count"),
+            "message": {"content": "".join(content), **({"thinking": "".join(thinking)} if thinking else {})}}
 
 
 async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
@@ -4191,7 +4256,7 @@ class LLMClient:
             if native is None or native_url is None:
                 return await send_to(url, request_body)
             try:
-                return _ollama_as_openai(await send_to(native_url, native))
+                return _ollama_as_openai(await send_to(native_url, native, native=True))
             except httpx.HTTPStatusError as e:
                 sc = getattr(getattr(e, "response", None), "status_code", None)
                 if sc not in (400, 404, 405, 501):
@@ -4207,7 +4272,7 @@ class LLMClient:
                           node or "chat", request_body.get("model"), sc)
                 return await send_to(url, request_body)
 
-        async def send_to(call_url: str, request_body: dict[str, Any]) -> dict[str, Any]:
+        async def send_to(call_url: str, request_body: dict[str, Any], *, native: bool = False) -> dict[str, Any]:
             data: dict[str, Any] = {}
             async for attempt in AsyncRetrying(
                 # Six attempts over about 3-4.5 minutes once the provider's
@@ -4237,7 +4302,9 @@ class LLMClient:
                     http_timeout = node_budget(
                         self._node_http_timeout_s, node, self._http_timeout_s,
                     )
-                    if streams:
+                    if native:
+                        data = await _post_ollama_streamed(self._http, call_url, request_body, headers, http_timeout)
+                    elif streams:
                         data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
                     else:
                         r = await self._http.post(

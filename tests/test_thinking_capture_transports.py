@@ -26,6 +26,10 @@ from tests.test_vscode_bridge import _MockBridgeServer
 MESSAGES = [{"role": "user", "content": "hi"}]
 
 
+def _ndjson(chunks: list[dict]) -> bytes:
+    return "".join(json.dumps(c) + "\n" for c in chunks).encode()
+
+
 def _ollama_handler(seen: list[httpx.Request], *, thinking: str = "weighing 91 = 7 x 13", status: int = 200,
                     error: str = ""):
     def handler(request: httpx.Request) -> httpx.Response:
@@ -33,10 +37,11 @@ def _ollama_handler(seen: list[httpx.Request], *, thinking: str = "weighing 91 =
         if request.url.path == "/api/chat":
             if status != 200:
                 return httpx.Response(status, json={"error": error})
-            return httpx.Response(200, json={
-                "model": "gemma4:31b-cloud", "done": True, "done_reason": "stop",
-                "message": {"role": "assistant", "content": "No.", "thinking": thinking},
-                "prompt_eval_count": 7, "eval_count": 11})
+            return httpx.Response(200, content=_ndjson([
+                {"model": "gemma4:31b-cloud", "message": {"role": "assistant", "content": "", "thinking": thinking}},
+                {"model": "gemma4:31b-cloud", "message": {"role": "assistant", "content": "No."}},
+                {"model": "gemma4:31b-cloud", "message": {"role": "assistant", "content": ""}, "done": True,
+                 "done_reason": "stop", "prompt_eval_count": 7, "eval_count": 11}]))
         return httpx.Response(200, json={
             "model": "gemma4:31b-cloud",
             "choices": [{"message": {"role": "assistant", "content": "No."}, "finish_reason": "stop"}],
@@ -70,7 +75,7 @@ def test_ollama_is_asked_for_its_reasoning_on_its_own_api_and_it_comes_back() ->
     (req,) = seen
     assert req.url.path == "/api/chat"
     body = json.loads(req.content)
-    assert body["think"] is True and body["stream"] is False and body["options"]["num_predict"] == 300
+    assert body["think"] is True and body["stream"] is True and body["options"]["num_predict"] == 300
     assert body["model"] == "gemma4:31b-cloud" and body["messages"] == MESSAGES
 
 
@@ -304,3 +309,96 @@ async def test_a_connection_that_cannot_return_reasoning_says_so_once(smoke_conf
     assert text.count("gemini_cli cannot return a model's reasoning") == 1
     assert "returned no reasoning for this step" not in text
     assert not (engine.fi_dir / tc.THINKING_FILE).exists()
+
+
+# ---- the native call is streamed: assembled, classified and timed as a stream ----
+
+def _stream_call(chunks, *, timeout: float = 30.0, inactivity: float | None = None, gaps: float = 0.0,
+                 raw: bytes | None = None, final_hang: float = 0.0):
+    """``_post_ollama_streamed`` against an in-memory stream that sends ``chunks`` one line at a time, ``gaps`` seconds
+    apart (and, with ``final_hang``, stays silent that long before ending)."""
+    from core.provider import _post_ollama_streamed
+
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            if raw is not None:
+                yield raw
+            for c in chunks:
+                await asyncio.sleep(gaps)
+                yield (json.dumps(c) + "\n").encode()
+            if final_hang:
+                await asyncio.sleep(final_hang)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=Body())
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await _post_ollama_streamed(http, "http://x/api/chat", {"stream": True}, {}, timeout, inactivity)
+
+    return asyncio.run(go())
+
+
+def _done(reason: str = "stop") -> dict:
+    return {"model": "m", "message": {"content": ""}, "done": True, "done_reason": reason,
+            "prompt_eval_count": 5, "eval_count": 9}
+
+
+def test_a_streamed_native_reply_is_assembled_from_its_chunks() -> None:
+    from core.provider import _ollama_as_openai
+
+    out = _ollama_as_openai(_stream_call([
+        {"message": {"thinking": "step one, "}}, {"message": {"thinking": "step two"}},
+        {"message": {"content": "He"}}, {"message": {"content": "llo"}}, _done()]))
+    choice = out["choices"][0]
+    assert choice["message"]["content"] == "Hello" and choice["message"]["reasoning_content"] == "step one, step two"
+    assert choice["finish_reason"] == "stop" and out["model"] == "m"
+    assert out["usage"] == {"prompt_tokens": 5, "completion_tokens": 9, "total_tokens": 14}
+
+
+def test_a_streamed_reply_cut_at_the_limit_reads_as_cut_off() -> None:
+    from core.provider import _ollama_as_openai
+
+    out = _ollama_as_openai(_stream_call([{"message": {"content": "abc"}}, _done("length")]))
+    assert out["choices"][0]["finish_reason"] == "length" and out["choices"][0]["message"]["content"] == "abc"
+
+
+def test_an_error_inside_the_stream_is_classified_like_any_stream_error() -> None:
+    with pytest.raises(httpx.RemoteProtocolError):
+        _stream_call([{"message": {"content": "a"}}, {"error": "server is overloaded, try again"}])
+    with pytest.raises(httpx.HTTPStatusError):
+        _stream_call([{"error": {"type": "invalid_request_error", "message": "bad"}}])
+
+
+def test_a_stream_that_ends_without_done_is_an_error_that_is_tried_again() -> None:
+    from core.provider import _retry_http_error
+
+    with pytest.raises(httpx.RemoteProtocolError) as e:
+        _stream_call([{"message": {"content": "a"}}])
+    assert _retry_http_error(e.value)
+
+
+def test_a_line_that_is_not_json_is_a_protocol_error() -> None:
+    with pytest.raises(httpx.RemoteProtocolError):
+        _stream_call([], raw=b"not json\n")
+
+
+def test_thinking_that_keeps_arriving_is_not_cut_off_by_the_inactivity_timeout() -> None:
+    # 8 chunks 0.15 s apart = 1.2 s in all, each gap well under the 0.5 s limit.
+    chunks = [{"message": {"thinking": "t"}}] * 7 + [_done()]
+    out = _stream_call(chunks, timeout=10.0, inactivity=0.5, gaps=0.15)
+    assert out["message"]["thinking"] == "t" * 7
+
+
+def test_a_silent_stream_is_cut_off_by_the_inactivity_timeout_and_retried() -> None:
+    from core.provider import _retry_http_error
+
+    with pytest.raises(httpx.ReadTimeout) as e:
+        _stream_call([{"message": {"thinking": "t"}}], timeout=10.0, inactivity=0.3, final_hang=3.0)
+    assert _retry_http_error(e.value)
+
+
+def test_the_whole_call_budget_still_bounds_a_stream_that_never_goes_silent() -> None:
+    chunks = [{"message": {"thinking": "t"}}] * 50 + [_done()]
+    with pytest.raises(httpx.ReadTimeout):
+        _stream_call(chunks, timeout=0.5, inactivity=0.4, gaps=0.1)
