@@ -671,6 +671,11 @@ def test_is_bridge_error_transient_classification() -> None:
         "bridge stalled: no chunk for 180 s (received 0 chunks / 0 chars before stall)"
     )
 
+    # The stall error now names who went silent; it is still the phrase FI retries on.
+    assert _is_bridge_error_transient(
+        "bridge stalled: no part from ollama-models/gemma4:31b-cloud for 180 s (received 0 chunks / 0 chars before stall)"
+    )
+
     # Non-transient — should propagate immediately, no retry.
     assert not _is_bridge_error_transient(
         "no Copilot model available for hint 'gpt-5.4-mini'"
