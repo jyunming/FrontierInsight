@@ -195,6 +195,33 @@ only the readable summary.
 `output.save_thinking: false` stops asking. The chat's per-step line
 (`... N thinking ...`) shows how many characters of thinking arrived.
 
+**Which connections return a model's reasoning.** `output.save_thinking` (on by
+default) keeps whatever reasoning a connection hands back in
+`.fi/thinking.jsonl`. Most connections return none unless they are asked, so
+with the setting on FI asks wherever the connection has a way to; with
+`output.save_thinking: false` it asks for nothing and keeps nothing. The model
+and `provider.reasoning_effort` are never changed by this. What comes back is
+what the provider chooses to show: often a summary, never a guarantee, and a
+model that did not reason on a step (a very short question, a low effort level)
+returns nothing for it.
+
+| Connection | How FI asks | Where it comes back | Notes |
+|---|---|---|---|
+| `ollama` | Calls Ollama's own `/api/chat` with `think` (the `reasoning_effort` level if you set one, else on). Its OpenAI-compatible `/v1` endpoint never returns reasoning, whatever is sent | `message.thinking` | A model that cannot think, or a request with an image or an `extra_body`, uses the `/v1` call as before. Checked with `gemma4:31b-cloud`: no reasoning on `/v1`, a few hundred characters on `/api/chat`; a named level (`high`) made that model return none, so leave `reasoning_effort` unset to see its thinking |
+| `openai`, `vllm`, other OpenAI-compatible servers | Nothing to ask: the server decides | `reasoning_content`, `reasoning` or `reasoning_text` on the message (streamed or not) | OpenAI's own chat endpoint does not return reasoning text; a vLLM server needs its `--reasoning-parser`. Not probed here except Kimi |
+| Kimi / Moonshot (`openai`) | Thinking is on unless `extra_body` turns it off | `reasoning_content` | `examples/kimi_moonshot/config.yaml` turns thinking off to save tokens (so it saves none); remove `extra_body` to keep it. Checked on `kimi-k2.6` |
+| `gemini` (HTTP) | Not asked | The OpenAI-compatible endpoint puts thoughts inside the answer text | Not read: separating them from the answer is not done. Not probed |
+| `claude_cli` | `--settings '{"showThinkingSummaries":true}'` for the call only | `thinking_delta` events of the stream | Without it a non-interactive Claude call sends each thinking block with an empty text (checked on Claude Code 2.1.287, Haiku) |
+| `codex_cli` | `-c model_reasoning_summary="detailed"` | `item.completed` events of type `reasoning` | A short summary, not the full chain; Codex sends none for a step the model did not reason about (checked with `gpt-6-luna`: with the setting a reasoning item at effort `high`, none at `low`) |
+| `vscode_extension` | Copilot's `_enableThinking` (and `includeEncryptedThinking` for GPT), see above | Thinking parts of the reply | Not probed in this check (VS Code was not running) |
+| `gemini_cli` | Cannot | Its output has no reasoning in it (the `stream-json` events are init, message, tool use and result) | `run.log` says so once |
+| `antigravity_cli` (agy) | Cannot | Its stream reports only how many tokens the model spent thinking (329 in one check), not the text | `run.log` says so once |
+| `copilot_cli` | Not read | Its `--output-format json` events were not mapped for reasoning, and the CLI is agentic and not recommended | `run.log` says so once |
+| `claude_code`, `github_copilot_cli`, `github_copilot_vscode` (proxies) | Not asked | The proxy returns only the answer, as far as FI reads it | Not probed here (none installed). `reasoning_content` from a proxy would be kept |
+
+Where a connection cannot return reasoning, `run.log` says so once in plain
+words instead of repeating "returned no reasoning" at every step.
+
 **Which nodes.** Five nodes have been measured on a cheaper model:
 `cross_check`, `select_skills`, `literature_screen`, `slides` and
 `poster`. On one simulation topic, three runs each (codex, `terra` on
