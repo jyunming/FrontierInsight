@@ -370,6 +370,18 @@ class TestPercentIsReadAsTheFractionItMeans:
             ("near_miss", 76.55)
         ]
 
+    def test_a_result_named_as_a_percent_is_read_as_printed(self) -> None:
+        # stored in percent and below 1: the old code reported this copy error
+        assert _flagged("coverage was 0.78% of units.", {"coverage_pct": 0.77}) == [("near_miss", 0.78)]
+        assert _flagged("coverage was 0.78% of units.", {"error_percent": 0.77}) == [("near_miss", 0.78)]
+        assert _flagged("coverage was 0.78% of units.", {"pct_error": 0.77}) == [("near_miss", 0.78)]
+
+    def test_a_percent_stored_as_a_percent_and_printed_right_is_cleared(self) -> None:
+        assert _flagged("coverage was 0.77% of units.", {"coverage_pct": 0.77}) == []
+
+    def test_the_pendulum_fraction_stays_silent(self) -> None:
+        assert _flagged("the error was 0.77% here.", {"by_amplitude_deg": {"150": {"rel_error_t0": 0.762204}}}) == []
+
     def test_a_whole_percent_is_not_a_last_digit_slip(self) -> None:
         # "65%" is as coarse as 65: against a stored 0.6379 it is not reported
         assert _flagged("about 65% of runs went extinct.", {"p_ext": 0.6379}) == []

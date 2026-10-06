@@ -831,6 +831,16 @@ def _is_rounding_of(paper: float, actual: float, token: str) -> bool:
     return round(paper, shorter) == round(actual, shorter)
 
 
+# A result whose own name says it is stored in percent: ``coverage_pct``,
+# ``error_percent``, ``pct_error``, ``loss_pc``.
+_PERCENT_NAME = re.compile(r"(?:^|_)(?:pct|percent|perc)(?:_|$)|_pc$", re.IGNORECASE)
+
+
+def _is_percent_named(path: str) -> bool:
+    """Does the last segment of ``path`` say the result is in percent?"""
+    return bool(_PERCENT_NAME.search(_ARRAY_INDEX.sub("", path.rsplit(".", 1)[-1])))
+
+
 def _is_eligible_near_result(path: str) -> bool:
     """May a paper number be read as a slip of the result at ``path``? Not an
     identifier, an index, a seed, a year or a count of files. An element of an
@@ -966,7 +976,8 @@ def check(
                     # A percentage as printed (0.77%) is read only against a result
                     # that cannot be a fraction (above 1): a fraction like 0.762 is
                     # compared as value / 100, never as the bare 0.77.
-                    if as_printed_percent and abs(actual) <= 1:
+                    # ...unless the result's own name says it is stored in percent.
+                    if as_printed_percent and abs(actual) <= 1 and not _is_percent_named(path):
                         continue
                     if _is_eligible_near_result(path) and (eligible is None or rel < eligible[4]):
                         eligible = (value, token, actual, path, rel)
