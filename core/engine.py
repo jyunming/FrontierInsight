@@ -11019,7 +11019,9 @@ class Engine:
                 "`expected` (worked out from the closed form, the limit or the invariant; 0 for an invariant's worst violation or for the difference between two implementations) and "
                 "a numeric `tolerance` (plus `tolerance_mode: relative` only when the expected value is not 0), a `kind` "
                 "(one of special_case, invariant, symmetry, second_implementation, convergence_rate, published_value) "
-                f"and a `reference` saying where the expected value comes from: {_REFERENCE_FORMS} Change nothing else."
+                f"and a `reference` saying where the expected value comes from: {_REFERENCE_FORMS} Also give "
+                f"`expected_formula`, {_forms.EXPECTED_FORMULA_LANGUAGE} (not for an invariant, a symmetry or a second "
+                "implementation). Change nothing else."
             )
         else:
             request = (
@@ -11032,7 +11034,8 @@ class Engine:
             "measurement must agree with, worked out here from the closed form, the limit or the invariant; 0 for an "
             "invariant's worst violation), a NUMERIC `tolerance` (how far from `expected` still agrees), optionally a "
             "`tolerance_mode` (`absolute`, the default, or `relative`) and a `reference` saying where the expected value comes "
-            f"from: {_REFERENCE_FORMS}" " Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
+            f"from: {_REFERENCE_FORMS}" " For every check that is not an invariant, a symmetry or a second implementation "
+            f"give `expected_formula` too, {_forms.EXPECTED_FORMULA_LANGUAGE}." " Also give each a `case` (the settings of one small, fast run of the simulation, e.g. {\"dt\": 0.1}) and a "
             "`measure` (how the number is computed from what that run returns: one returned name, or a formula of them "
             "such as abs(P_out - P_in) / P_in; for an invariant, a symmetry or a second implementation it is the worst "
             "violation, expecting 0), so the engine can run the simulation on it itself (for a "
@@ -11417,7 +11420,15 @@ class Engine:
         review = await self._review_oracles(state or {})
         findings = [str(f) for f in review.get("findings") or []]
         progress = self._oracle_review_read()
-        if (rewrites or requests or review.get("lines")) and not progress.get("written"):
+        # FI's own computation of each expected value, from the formula the plan gives (core/oracle_forms.py): what the
+        # plan must still say goes into the SAME request as the rest; nothing is asked on a resume that already asked.
+        formula_asks: list[dict[str, Any]] = []
+        if not progress.get("asked") and not self._simulation_ran():
+            design_now, _why = _plan.load_design(self.quest_root)
+            protocol_now = design_now.get("protocol") if isinstance(design_now, dict) else None
+            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None)
+                            if f["state"] != "agrees"]
+        if (rewrites or requests or review.get("lines") or formula_asks) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
             # never leaves them unexplained.
             self._write_plan_section(path, [
@@ -11439,17 +11450,24 @@ class Engine:
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "
                               "stopped; it is not made again")
-        elif (requests or findings) and not progress.get("asked"):
+        elif (requests or findings or formula_asks) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
+            for f in formula_asks:
+                reason = {"missing": "it gave none", "unusable": f"its formula could not be computed: {f.get('why')}",
+                          "differs": "its formula and its expected value disagree"}[f["state"]]
+                self._log.info("[oracle] asking the plan for the expected value of %r as a formula FI can compute (%s)",
+                               f["name"], reason)
             # Recorded before the request: it is made at most once, even if this run stops while it is out.
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
-            parts = [_forms.request(requests, last=not findings) if requests else "",
-                     _review.request(findings) if findings else ""]
-            if requests and findings:
-                parts.insert(0, "Two things about the checks against known answers, below. The first must be done; "
-                                "the second is a reader's findings, to follow where they are right.")
+            must = [p for p in (_forms.request(requests, last=not (findings or formula_asks)) if requests else "",
+                                _forms.formula_request(formula_asks, last=not findings)) if p]
+            parts = [*must, _review.request(findings) if findings else ""]
+            if len(must) + bool(findings) > 1:
+                parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
+                                "give or change must be done" + ("; the last is a reader's findings, to follow where "
+                                                                 "they are right." if findings else "."))
             failed = await self._revise_checks_only("\n\n".join(p for p in parts if p))
             if failed:
                 self._log.warning("[oracle] %s", failed)
@@ -11473,6 +11491,7 @@ class Engine:
                 *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
             ], note="the checks against known answers looked at")
             self._oracle_review_write({**self._oracle_review_read(), "answered": True})
+        formulas = self._apply_expected_formulas(path)
         end = self._oracle_review_read()
         if end.get("verdicts") and "after_look" not in end and (not end.get("asked") or end.get("answered")):
             # The checks as this one look left them, after what the reader found was applied: a later change to one is
@@ -11481,7 +11500,66 @@ class Engine:
             now = design_now.get("protocol") if isinstance(design_now, dict) else None
             self._oracle_review_write({**end, "after_look": _review.fingerprints(now if isinstance(now, dict) else None)})
         return {"rewritten": rewrites, "asked": requests, "left": left,
+                **({"expected_formula": {"asked": [f["name"] for f in formula_asks], "corrected": formulas}}
+                   if formula_asks or formulas else {}),
                 **({"review": {k: v for k, v in review.items() if k != "lines"}} if review else {})}
+
+    def _simulation_ran(self) -> bool:
+        """Whether the audit trace shows the experiment step ever started (the trace outlives a ``--from plan`` rerun,
+        which moves the frozen protocol and the run's records aside): after that, a measured value may have been seen,
+        so FI's own computation of expected values is not made (the rules for a check that failed apply)."""
+        try:
+            return any(e.get("kind") == "node_started" and e.get("node") == "execute"
+                       for e in _audit_log.read(self.audit.path))
+        except Exception:  # noqa: BLE001 -- a trace that cannot be read says nothing ran; the freeze guard still holds
+            return False
+
+    def _apply_expected_formulas(self, path: Path) -> list[dict[str, Any]]:
+        """Before the protocol is frozen and before anything ran (the callers' guard), once per quest (``formulas`` in
+        ``.fi/oracle_review.json``): a check whose ``expected_formula`` still gives another number than its ``expected``,
+        by more than the check's own tolerance, takes the formula's value (the plan's own working, computed exactly;
+        a number written from memory is the weaker of the two). The tolerance, mode, case and measure are never
+        touched and no measured value is used. Recorded as the engine's change, never a person's. A check whose
+        formula is still missing or unusable is left exactly as it was."""
+        progress = self._oracle_review_read()
+        if "formulas" in progress or _frozen.load(self.quest_root) is not None or self._simulation_ran():
+            return [dict(c) for c in progress.get("formulas") or []]
+        text = path.read_text(encoding="utf-8")
+        new_text, corrections = _forms.apply_formulas(text)
+        design, _why = _plan.load_design(self.quest_root)
+        protocol = design.get("protocol") if isinstance(design, dict) else None
+        left = []
+        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None):
+            if f["state"] in ("missing", "unusable"):
+                why = ("the plan gave no formula for it" if f["state"] == "missing"
+                       else f"its formula cannot be computed: {f.get('why')}")
+                self._log.info("[oracle] FI could not compute the expected value of %r itself (%s); the check is "
+                               "used as the plan wrote it", f["name"], why)
+                left.append(f"FI could not compute the expected value of {f['name']!r} itself ({why}); the check is "
+                            "used as the plan wrote it.")
+        if left and not corrections:
+            self._write_plan_section(path, ["", *[f"- {line}" for line in left]],
+                                     note="expected values FI could not compute itself")
+        if corrections:
+            names = [c["name"] for c in corrections]
+            lines = [f"before anything ran, FI computed the expected value of {c['name']!r} from the plan's own formula: "
+                     f"{c['now']:.10g} (the plan had written {c['was']:.10g}); the check uses {c['now']:.10g}"
+                     for c in corrections]
+            for line in lines:
+                self._log.warning("[oracle] %s", line)
+            self._note_engine_change(names, reason=(
+                "Before anything ran, FI computed each of these expected values itself from the plan's own formula and "
+                "it differed from the number the plan wrote by more than the check's tolerance, so the check uses the "
+                "formula's value (worked out before any run): "
+                + "; ".join(f"{c['name']!r} {c['was']:.10g} -> {c['now']:.10g}" for c in corrections) + "."))
+            path.write_text(new_text, encoding="utf-8")
+            _plan.record_version(self.quest_root, new_text, by="engine",
+                                 note="expected values computed by FI from the plan's own formulas")
+            self._write_plan_section(path, ["", *[f"- {line[0].upper()}{line[1:]}." for line in lines],
+                                            *[f"- {line}" for line in left]],
+                                     note="expected values computed by FI from the plan's own formulas")
+        self._oracle_review_write({**self._oracle_review_read(), "formulas": corrections})
+        return corrections
 
     def _dry_run_path(self) -> Path:
         return self.fi_dir / "oracle_dry_run.json"
@@ -20398,7 +20476,7 @@ _FI_PLAN_AUTHORS = frozenset({"model", "engine"})
 # What a rewrite that fills in the checks' sources may change: where each value comes from and its kind (under any of
 # the keys the engine reads them from). The words of a check only by adding to them (a "(derivation: ...)" at its end),
 # and the model behind the numbers only in the parts it left out.
-_FILL_FREE_KEYS = frozenset({*_oracle._KIND_KEYS, *_oracle._REFERENCE_KEYS, "derivation", "check"})
+_FILL_FREE_KEYS = frozenset({*_oracle._KIND_KEYS, *_oracle._REFERENCE_KEYS, "derivation", "check", "expected_formula"})
 
 
 def _plan_checks_note(plan_md: str) -> str:
@@ -20422,6 +20500,9 @@ def _plan_checks_note(plan_md: str) -> str:
         "- `model` has `summary` (one sentence: what produces the numbers), `assumptions` (a list), `holds_for`, and "
         "`equations` (a list, each with `id` E1, E2 ..., `formula`, `role` generates or analyses, and `source`: a [n] from "
         "the plan's list of the sources this quest found, or `derivation` with the steps in `derivation`).",
+        "- A check may carry `expected_formula`: its `expected` as one formula FI computes itself before anything runs "
+        "(see the plan's instructions for what a formula may use); where it and `expected` differ by more than `tolerance`, "
+        "FI uses the formula's value.",
         "- Keep each check's `name`, `expected`, `tolerance`, `case` and `measure` unless the request is about them.",
     ]
     try:
@@ -20530,7 +20611,7 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
   "acceptance": ["<a rule fixed now that decides whether the hypothesis is supported, such as how close counts as converged>"],
   "precision": {"target_half_width": <the 95% half-width the headline probability needs, for example 0.03>, "metric": "<which number>", "reason": "<why that width is what the claim needs>"},
   "metrics": [{"id": "<the name the code uses for the number in RESULT_JSON>", "estimand": "<what it estimates, for example P(outbreak | R0)>", "kind": "<proportion | mean>", "unit": "<what one observation is: a trajectory, a run, a household>", "cluster": <null, or true when observations come in clusters that are not independent (trials of one household, steps of one trajectory), or the name of the RESULT_JSON list that holds each observation's cluster>, "paired": <true when trial i of every setting uses the same random numbers, so settings are compared trial by trial; false otherwise>, "family": "<the set of comparisons a multiplicity correction covers, for example R0 contrasts>", "given": "<only for a mean over a subset of the trials (the final size of the runs that became major outbreaks, say): the id of the proportion metric whose successes are that subset; leave it out otherwise. Reported per stratum, each stratum is a mapping of its own keyed like R0=1.5, holding <given>_count and <id>_values under their own names>"}],
-  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
+  "oracles": [{"name": "<short name>", "kind": "<special_case | invariant | symmetry | second_implementation | convergence_rate | published_value>", "check": "<what the script measures, on which small case>", "expected": <the number the measurement must agree with, computed by you from the closed form, the limit or the invariant, not by the script; 0 for an invariant's worst violation or for the difference between two implementations>, "expected_formula": "<for a check that is not an invariant, a symmetry or a second implementation: @@FORMULA@@>", "tolerance": <a number: how far from `expected` still counts as agreeing>, "tolerance_mode": "<absolute (default) | relative>", "reference": "<where the expected value comes from, in one of the four forms below>", "case": {"<grid parameter>": <its value in one small, fast run, e.g. "dt": 0.1>}, "measure": "<how the number is computed from what that run returns: one name the simulation function returns, or a formula of them, e.g. abs(P_out - P_in) / P_in>"}],
   "model": {
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
     "assumptions": ["<what the model assumes>"],
@@ -20558,9 +20639,12 @@ Mistakes that stop a run, each seen in real quests:
 - An oracle that compares two methods compares the same quantity: two iterative solvers started differently can converge to different solutions of one problem, so compare a residual, or solutions found from the same start or in the same bracket.
 - Each oracle check runs on a small, fast case: all of them together must finish in seconds (the pre-check has a time limit of a fraction of the run's timeout).
 - An `expected` of 0 takes an absolute `tolerance`; a relative one around 0 cannot be judged.
+- `expected_formula` is the working of `expected` as one formula FI computes itself (before anything runs, so that a value written from memory, such as the complete elliptic integral K(m), cannot be wrong): @@FORMULA@@. For example `2*pi*sqrt(1/9.81)*(2/pi)*ellipk(sin(15*pi/180)**2)`. `expected` is that formula's value to full precision; where the two differ by more than `tolerance`, FI uses the formula.
 
 Every number the topic sets (a set in braces, a count of runs, a threshold) must appear in `protocol` exactly as the topic gives it, and the design's method must use those values. Add values the topic does not name only when the method needs them, and say why in `method`. Leave out the keys that do not apply (an analytical study has no grid).
 """
+
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@FORMULA@@", _forms.EXPECTED_FORMULA_LANGUAGE)
 
 # The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan
 # directive, so the rules above stay as they are for a measurement.

@@ -110,6 +110,14 @@ same PR that adds, splits or renames one.
   freeze, merged by `Engine._note_engine_change`, which `_declare_oracles` uses too); both ask the plan through
   `Engine._revise_checks_only`, which keeps only the changes to `protocol.oracles` and the criteria reading them.
   `core/rerun_from.py` moves both markers aside with the plan (and the test-run one with the design).
+  `expected_formula` (a check's expected value as one formula FI computes itself, with `evaluate(..., special=True)`
+  on the check's numeric `case` settings): `formula_value` / `formula_findings` (only checks `oracle_triage.correctable`
+  allows and that can be judged), `formula_request` (the part of the SAME one request about the checks),
+  `apply_formulas` (a formula that still disagrees by more than the check's own tolerance sets `expected`; the
+  tolerance, mode, case and measure are never touched), `EXPECTED_FORMULA_LANGUAGE` (generated from the
+  calculator's tables, spliced into `_PLAN_DIRECTIVE`). Applied by `Engine._apply_expected_formulas` from
+  `_hold_oracle_forms`: before the freeze and any run, once (`formulas` in `.fi/oracle_review.json`), as the
+  engine's change (`_note_engine_change`, plan version `by="engine"`). `oracle_triage.blind` withholds it.
   The plan.md section is `HEADING`; `plan.raw_design_block` / `plan.edit_design_block` read and edit the block as
   written, `plan.add_to_section` / `plan.refresh_model_section` keep the prose in step.
 - `core/oracle_review.py` — a second opinion on the plan's checks (`agents/oracle_review.md`, node `oracle_review`):
