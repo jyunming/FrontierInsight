@@ -1123,26 +1123,33 @@ def _ollama_as_openai(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: A streamed call's whole-call budget as a multiple of the step's HTTP timeout (which stays the limit on silence between
+#: two chunks): a model that keeps streaming its thinking can finish a long step, a call that goes on for ever is still
+#: ended.
+_STREAM_TOTAL_FACTOR = 4
+
+
 async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
                                 timeout: float, inactivity: float | None = None) -> dict[str, Any]:
     """Ollama's native chat call as a stream (newline-delimited JSON), put back together into the shape
     :func:`_ollama_as_openai` returns (a model that thinks can be silent to a plain request for longer than its read
     timeout; a stream sends its thinking as it goes).
 
-    Time, as for :func:`_post_streamed`: ``timeout`` (the step's HTTP budget) bounds the whole call. ``inactivity``
-    (default ``timeout``) bounds the silence between two lines: a model whose thinking keeps arriving is not cut off by
-    it, a stalled stream is. Both end as ``httpx.ReadTimeout`` and are tried again under the usual rules. An error
+    Time: ``inactivity`` (default ``timeout``, the step's HTTP timeout) bounds the silence between two lines, so a model
+    whose thinking keeps arriving is not cut off by it and a stalled stream is; ``timeout`` x
+    :data:`_STREAM_TOTAL_FACTOR` bounds the whole call. Both end as ``httpx.ReadTimeout`` and are tried again under the usual rules. An error
     status raises as ``raise_for_status`` would (the caller reads a refusal of ``think`` from it); an ``error`` sent
     inside the stream is classified by :func:`_stream_error`; a stream that ends without ``done: true`` was cut off
     and is tried again."""
     wait = timeout if inactivity is None else inactivity
+    total = timeout * _STREAM_TOTAL_FACTOR
     content: list[str] = []
     thinking: list[str] = []
     last: dict[str, Any] = {}
     done = False
     request = httpx.Request("POST", url)
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(total):
             async with http.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
                 request = r.request
                 if r.status_code >= 400:
@@ -1180,7 +1187,7 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
                         break
     except TimeoutError:
         raise httpx.ReadTimeout(
-            f"the model's stream did not finish its answer within the step's {timeout:g} s budget") from None
+            f"the model's stream did not finish its answer within {total:g} s ({_STREAM_TOTAL_FACTOR} times the step's {timeout:g} s limit)") from None
     if not done:
         raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no done message)")
     return {"model": last.get("model"), "done_reason": last.get("done_reason"),
@@ -1193,9 +1200,9 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
     """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
     ``finish_reason``, ``usage``, ``model``).
 
-    Time: ``timeout`` (the step's own HTTP budget) bounds the whole call, as it bounded a plain request, which sends
-    nothing until its answer is complete; a stream kept open by keep-alive comments, or one that trickles for longer
-    than that, fails with ``httpx.ReadTimeout`` and is tried again under the usual rules. Events follow the SSE format
+    Time: ``timeout`` (the step's own HTTP timeout) is the limit on silence between two reads (httpx's read timeout);
+    ``timeout`` x :data:`_STREAM_TOTAL_FACTOR` bounds the whole call. A stream kept open by keep-alive comments, or one
+    that trickles for longer than that, fails with ``httpx.ReadTimeout`` and is tried again under the usual rules. Events follow the SSE format
     (several ``data:`` lines of one event are joined; an event that does not parse is a protocol error, never skipped).
     An error status raises as ``raise_for_status`` would; an error sent inside the stream is a 4xx-equivalent when
     retrying cannot fix it (:func:`_stream_error`) and transient otherwise. A stream that ends without a
@@ -1252,7 +1259,7 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
         return False
 
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(timeout * _STREAM_TOTAL_FACTOR):
             async with http.stream("POST", url, json=stream_body, headers=headers, timeout=timeout) as r:
                 request = r.request
                 if r.status_code >= 400:
@@ -1279,7 +1286,8 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
                     done = take(event_name, data_lines)
     except TimeoutError:
         raise httpx.ReadTimeout(
-            f"the model's stream did not finish its answer within the step's {timeout:g} s budget"
+            f"the model's stream did not finish its answer within {timeout * _STREAM_TOTAL_FACTOR:g} s "
+            f"({_STREAM_TOTAL_FACTOR} times the step's {timeout:g} s limit)"
         ) from None
     if finish is None:
         raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no finish reason)")
@@ -4274,6 +4282,7 @@ class LLMClient:
 
         async def send_to(call_url: str, request_body: dict[str, Any], *, native: bool = False) -> dict[str, Any]:
             data: dict[str, Any] = {}
+            tries = timeouts = 0  # attempts made, and how many of them ended in a timeout
             async for attempt in AsyncRetrying(
                 # Six attempts over about 3-4.5 minutes once the provider's
                 # server is down or busy (5xx, 429 rate limit; a sane
@@ -4302,20 +4311,28 @@ class LLMClient:
                     http_timeout = node_budget(
                         self._node_http_timeout_s, node, self._http_timeout_s,
                     )
-                    if native:
-                        data = await _post_ollama_streamed(self._http, call_url, request_body, headers, http_timeout)
-                    elif streams:
-                        data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
-                    else:
-                        r = await self._http.post(
-                            call_url, json=request_body, headers=headers, timeout=http_timeout,
-                        )
-                        # Raise for any error status; the retry predicate
-                        # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                        # (bad key, quota, content policy, oversized body) surface
-                        # immediately instead of burning the backoff budget.
-                        r.raise_for_status()
-                        data = r.json()
+                    tries += 1
+                    try:
+                        if native:
+                            data = await _post_ollama_streamed(self._http, call_url, request_body, headers, http_timeout)
+                        elif streams:
+                            data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
+                        else:
+                            r = await self._http.post(
+                                call_url, json=request_body, headers=headers, timeout=http_timeout,
+                            )
+                            # Raise for any error status; the retry predicate
+                            # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                            # (bad key, quota, content policy, oversized body) surface
+                            # immediately instead of burning the backoff budget.
+                            r.raise_for_status()
+                            data = r.json()
+                    except httpx.TimeoutException as e:
+                        # Said on the error for whoever sorts the failure (core/crash_kind.py): when every try ended
+                        # like this, retrying later will not help; the step needs more time (or a faster model).
+                        timeouts += 1
+                        e.fi_timeouts = {"tries": tries, "all": timeouts == tries, "limit_s": http_timeout}  # type: ignore[attr-defined]
+                        raise
             return data
 
         def usage_of(reply: dict[str, Any]) -> dict[str, int] | None:

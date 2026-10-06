@@ -631,3 +631,18 @@ def test_words_alone_never_make_an_error_passing_or_a_missing_model() -> None:
     err2 = RuntimeError("model sonnet-9 does not exist")
     err2.add_note("[FI] provider=claude_cli, node=design, model=sonnet-9")
     assert "does not know the model" in ck.classify(_raised(err2), provider="claude_cli", model="sonnet-9").say
+
+
+def test_a_single_timeout_is_a_passing_problem_but_every_try_timing_out_is_not() -> None:
+    once = _raised(httpx.ReadTimeout("slow"))
+    assert ck.classify(once, node="implement", provider="ollama", model="m").kind == "transient"
+    every = _raised(httpx.ReadTimeout("slow"))
+    every.fi_timeouts = {"tries": 6, "all": True, "limit_s": 900.0}  # type: ignore[attr-defined]
+    f = ck.classify(every, node="implement", provider="ollama", model="gemma4:31b-cloud")
+    assert f.kind == "setup"
+    assert f.say == ("The model (gemma4:31b-cloud) takes longer to answer the step `implement` than FI's time limit "
+                     "for one answer (900 s), on every try.")
+    assert "provider.http_timeout_s" in f.do and "node_http_timeout_s" in f.do and "faster model" in f.do
+    one_try = _raised(httpx.ReadTimeout("slow"))
+    one_try.fi_timeouts = {"tries": 1, "all": True, "limit_s": 900.0}  # type: ignore[attr-defined]
+    assert ck.classify(one_try, node="implement").kind == "transient"

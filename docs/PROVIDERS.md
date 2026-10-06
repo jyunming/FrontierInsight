@@ -225,6 +225,16 @@ extension profiled was `RobBos.copilot-token-tracker`, whose time went to
 synchronous file reads (`readSessionEvents`, `readFileSync`); no FI code ran at
 those moments. The three endings were not profiled, so that extension is the
 suspect, not a proven cause.
+**FI's own `ollama` connection streams the thinking call.** When the reasoning is
+kept, FI calls Ollama's native chat API with `think` and reads the answer as it
+arrives, so a model that thinks for a long time is not mistaken for a stalled
+one. Two limits apply: the silence between two pieces of the stream may not
+exceed the step's HTTP timeout (`provider.http_timeout_s`, or
+`provider.node_http_timeout_s` for that step), and the whole call may not run
+longer than four times that timeout. A model whose thinking keeps arriving is
+cut off only by the second. A call that hits either limit is tried again; when
+every try of a step ends in a timeout, the quest's failure card says the model
+needs longer than FI's limit for one answer and names the setting to raise.
 `output.save_thinking: false` stops asking. The chat's per-step line
 (`... N thinking ...`) shows how many characters of thinking arrived.
 

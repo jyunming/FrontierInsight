@@ -398,10 +398,20 @@ def test_a_silent_stream_is_cut_off_by_the_inactivity_timeout_and_retried() -> N
     assert _retry_http_error(e.value)
 
 
-def test_the_whole_call_budget_still_bounds_a_stream_that_never_goes_silent() -> None:
-    chunks = [{"message": {"thinking": "t"}}] * 50 + [_done()]
-    with pytest.raises(httpx.ReadTimeout):
-        _stream_call(chunks, timeout=0.5, inactivity=0.4, gaps=0.1)
+def test_a_stream_that_keeps_going_past_the_step_limit_but_under_four_times_it_completes() -> None:
+    # 1.5 s of steady chunks against a 0.5 s step limit (whole-call budget 2 s).
+    chunks = [{"message": {"thinking": "t"}}] * 14 + [_done()]
+    out = _stream_call(chunks, timeout=0.5, gaps=0.1)
+    assert out["message"]["thinking"] == "t" * 14
+
+
+def test_a_stream_that_goes_on_past_four_times_the_step_limit_is_cut_and_retried() -> None:
+    from core.provider import _retry_http_error
+
+    chunks = [{"message": {"thinking": "t"}}] * 50 + [_done()]  # 5 s against a 2 s whole-call budget
+    with pytest.raises(httpx.ReadTimeout) as e:
+        _stream_call(chunks, timeout=0.5, gaps=0.1)
+    assert _retry_http_error(e.value)
 
 
 def test_a_refusal_of_thinking_sent_inside_the_stream_falls_back_and_is_remembered() -> None:

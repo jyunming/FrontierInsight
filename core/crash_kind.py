@@ -388,6 +388,25 @@ _NOTHING_TO_FIX = ("Nothing for you to fix: continue the quest later and it pick
                    "details are kept for FI's maintainers in quest_failed.md.")
 
 
+def _always_too_slow(exc: BaseException, node: str, provider: str, model: str) -> tuple[str, str] | None:
+    """(say, do) when the provider's own retries of one call all ended in the same timeout (``fi_timeouts`` on the
+    error, set by ``LLMClient``): the model needs longer than FI's limit for one answer, so trying again later ends the
+    same way. A single timeout, or a mix of failures, is a passing problem and stays ``transient``."""
+    info = getattr(exc, "fi_timeouts", None)
+    if not isinstance(info, dict) or not info.get("all") or int(info.get("tries") or 0) < 2:
+        return None
+    try:
+        limit = float(info.get("limit_s") or 0)
+    except (TypeError, ValueError):
+        limit = 0.0
+    step = f" the step `{node}`" if node and not node.startswith("(") else " a step"
+    who = f"The model ({model})" if model else "The model"
+    over = f" ({limit:g} s)" if limit else ""
+    return (f"{who} takes longer to answer{step} than FI's time limit for one answer{over}, on every try.",
+            "Raise `provider.http_timeout_s` (or `provider.node_http_timeout_s` for that step), or use a faster model, "
+            "then continue the quest.")
+
+
 def _classify(exc: BaseException, *, node: str, provider: str, model: str, retries: int) -> Failure:
     chain = _chain(exc)
     detail = _detail(exc)
@@ -396,6 +415,10 @@ def _classify(exc: BaseException, *, node: str, provider: str, model: str, retri
         found = _setup(e, provider, model)
         if found:
             return Failure("setup", found[0], found[1], detail, node, retries)
+    for e in chain:
+        slow = _always_too_slow(e, node, provider, model)
+        if slow:
+            return Failure("setup", slow[0], slow[1], detail, node, retries)
     if any(_transient(e) for e in chain):
         tried = f"FI already tried the step again {retries} time(s) by itself. " if retries else ""
         return Failure("transient",
