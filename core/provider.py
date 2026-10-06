@@ -74,7 +74,8 @@ from .config import ProviderConfig
 from .proc_tree import _DESCENDANT_WAIT_S as _TREE_KILL_WAIT_S
 from .proc_tree import AsyncProcessTree, ProcessTree
 from .thinking_capture import (
-    add_thinking, as_text, has_holder, note_declined, note_empty_parts, note_extension_older, note_thinking,
+    LOOP_CHECK_EVERY, LOOP_TAIL_KEPT, ThinkingLoop, add_thinking, as_text, has_holder, note_declined, note_empty_parts,
+    note_extension_older, note_loop, note_sampling, note_thinking, note_timing, repeating_cycle,
     wanted as thinking_wanted,
 )
 
@@ -1087,11 +1088,13 @@ def _ollama_native(base_url: str) -> str | None:
     return base[: -len("/v1")] + "/api/chat" if base.endswith("/v1") else None
 
 
-def _ollama_native_body(body: dict[str, Any]) -> dict[str, Any] | None:
+def _ollama_native_body(body: dict[str, Any], *, keep_temperature: bool = True) -> dict[str, Any] | None:
     """The same request in Ollama's native ``/api/chat`` form, asking the model to think (``think``): Ollama's
     OpenAI-compatible endpoint never returns a model's reasoning, its own API does (``message.thinking``). The user's
     ``reasoning_effort`` (``body["reasoning_effort"]``) is passed on as ``think``'s named level; ``None`` when the
-    request has something the native form would change (a message with an image, or a field of ``extra_body``)."""
+    request has something the native form would change (a message with an image, or a field of ``extra_body``).
+    ``keep_temperature`` False leaves the temperature out, so Ollama uses the model's own recommended sampling (a model
+    that thinks at length can loop at FI's temperature 0)."""
     known = {"model", "messages", "temperature", "max_tokens", "reasoning_effort"}
     messages = body.get("messages")
     if set(body) - known or not isinstance(messages, list):
@@ -1099,7 +1102,7 @@ def _ollama_native_body(body: dict[str, Any]) -> dict[str, Any] | None:
     if any(not isinstance(m, dict) or not isinstance(m.get("content"), str) for m in messages):
         return None
     options: dict[str, Any] = {}
-    if body.get("temperature") is not None:
+    if keep_temperature and body.get("temperature") is not None:
         options["temperature"] = body["temperature"]
     if isinstance(body.get("max_tokens"), int) and not isinstance(body.get("max_tokens"), bool):
         options["num_predict"] = body["max_tokens"]
@@ -1154,6 +1157,7 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
     first_any: float | None = None
     first_thinking: float | None = None
     first_content: float | None = None
+    tail, unchecked = "", 0  # the end of the reasoning so far, and how much of it has arrived since the last look
     try:
         async with asyncio.timeout(total):
             async with http.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
@@ -1192,6 +1196,16 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
                     if isinstance(message.get("thinking"), str) and message["thinking"]:
                         thinking.append(message["thinking"])
                         first_thinking = now if first_thinking is None else first_thinking
+                        tail = (tail + message["thinking"])[-LOOP_TAIL_KEPT:]
+                        unchecked += len(message["thinking"])
+                        if unchecked >= LOOP_CHECK_EVERY and not content:
+                            unchecked = 0
+                            cycle = repeating_cycle(tail)
+                            if cycle is not None:
+                                # Stop reading at once (leaving the `async with` closes the stream): a loop only ends
+                                # when the model's context is full.
+                                raise ThinkingLoop(kind=cycle[0], block=cycle[1], repeats=cycle[2],
+                                                   chars=sum(map(len, thinking)))
                     if chunk.get("done"):
                         last, done = chunk, True
                         break
@@ -1205,9 +1219,11 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
     def _s(v: float | None) -> str:
         return "none" if v is None else f"{v:.0f} s"
 
-    _log.info("[ollama] %s: first output after %s, thinking from %s, answer from %s, done after %s (%d thinking chars, "
-              "%d answer chars)", last.get("model") or body.get("model") or "the model", _s(first_any),
-              _s(first_thinking), _s(first_content), _s(end), sum(map(len, thinking)), sum(map(len, content)))
+    summary = (f"{last.get('model') or body.get('model') or 'the model'}: first output after {_s(first_any)}, thinking "
+               f"from {_s(first_thinking)}, answer from {_s(first_content)}, done after {_s(end)} "
+               f"({sum(map(len, thinking))} thinking chars, {sum(map(len, content))} answer chars)")
+    _log.info("[ollama] %s", summary)
+    note_timing(summary)  # the engine writes it in run.log (this module's log does not reach it)
     return {"model": last.get("model"), "done_reason": last.get("done_reason"),
             "prompt_eval_count": last.get("prompt_eval_count"), "eval_count": last.get("eval_count"),
             "message": {"content": "".join(content), **({"thinking": "".join(thinking)} if thinking else {})}}
@@ -4271,18 +4287,38 @@ class LLMClient:
         # POST instead of letting it propagate. Re-run the two
         # cancellation tests in tests/test_provider.py if you touch
         # this retry config.
+        think_off = {"on": False}  # a loop (or a thinking that used up the answer) once: this call asks no more for reasoning
+
         async def send(request_body: dict[str, Any]) -> dict[str, Any]:
             # Ollama only hands a model's reasoning back through its own API, so when the reasoning will be kept
             # (``output.save_thinking``) the call goes there; a model that cannot think (or a server that does not
             # know the call) is remembered and sent to the OpenAI-compatible endpoint as before.
             native_url = _ollama_native(self.endpoint.base_url) if self.endpoint.provider_name == "ollama" else None
             refused = self.__dict__.setdefault("_ollama_not_thinking", set())
-            native = (_ollama_native_body(request_body) if native_url and thinking_wanted()
+            # FI's own temperature is not sent with a request to think (the model's recommended sampling is used
+            # then), unless the person set one: ``provider.fixed_temperature`` or a ``temperature`` of their own.
+            explicit = (self.endpoint.fixed_temperature is not None or "temperature" in (self.endpoint.extra_body or {})
+                        or "temperature" in (extra or {}))
+            native = (_ollama_native_body(request_body, keep_temperature=explicit)
+                      if native_url and thinking_wanted() and not think_off["on"]
                       and request_body.get("model") not in refused else None)
             if native is None or native_url is None:
                 return await send_to(url, request_body)
             try:
-                return _ollama_as_openai(await send_to(native_url, native, native=True))
+                note_sampling(await self._ollama_sampling_note(native_url, request_body, explicit))
+            except Exception:  # noqa: BLE001 -- a note about sampling never stops the call
+                pass
+
+            async def without_reasoning() -> dict[str, Any]:
+                think_off["on"] = True
+                return await send_to(url, request_body)
+
+            try:
+                reply = _ollama_as_openai(await send_to(native_url, native, native=True))
+            except ThinkingLoop as loop:
+                note_loop(loop.kind, loop.block, loop.repeats, loop.chars)
+                _log.info("[%s] %s; asking again without reasoning", node or "chat", loop)
+                return await without_reasoning()
             except httpx.HTTPStatusError as e:
                 sc = getattr(getattr(e, "response", None), "status_code", None)
                 if sc not in (400, 404, 405, 501):
@@ -4297,6 +4333,19 @@ class LLMClient:
                           "%s (HTTP %s); using the OpenAI-compatible call, whose answers carry no reasoning",
                           node or "chat", request_body.get("model"), sc)
                 return await send_to(url, request_body)
+            message = reply["choices"][0]["message"]
+            if _finish_reason(reply) == "length" and message.get("reasoning_content") and not str(
+                    message.get("content") or "").strip():
+                # The reasoning used up all the room there was and no answer came: paid for, noted, asked once more
+                # without reasoning (asking again with it would spend the same).
+                spent = len(message["reasoning_content"])
+                _note_failed_attempt(self.last_provider, reply.get("model") or request_body.get("model"),
+                                     cut_off(reply, request_body.get("max_tokens")))
+                note_loop("length", 0, 0, spent)
+                _log.info("[%s] the model's reasoning used up the whole answer space (%d characters) without an answer; "
+                          "asking again without reasoning", node or "chat", spent)
+                return await without_reasoning()
+            return reply
 
         async def send_to(call_url: str, request_body: dict[str, Any], *, native: bool = False) -> dict[str, Any]:
             data: dict[str, Any] = {}
@@ -4453,6 +4502,29 @@ class LLMClient:
         # carries real numbers instead of nulls.
         self._fill_usage_estimate_if_missing(messages, text)
         return text
+
+    async def _ollama_sampling_note(self, native_url: str, request_body: dict[str, Any], explicit: bool) -> str:
+        """One plain phrase for which sampling a request to think uses: the person's own temperature, or the model's
+        recommended one (its ``parameters`` as Ollama's ``/api/show`` lists them, asked once per model; "the model's own
+        defaults" when they cannot be read)."""
+        model = str(request_body.get("model") or "")
+        if explicit:
+            return f"{model}: FI sends temperature {request_body.get('temperature')} (set in the provider settings)"
+        cache = self.__dict__.setdefault("_ollama_defaults", {})
+        if model not in cache:
+            cache[model] = ""
+            try:
+                r = await self._http.post(native_url[: -len("/chat")] + "/show", json={"model": model},
+                                          headers={"Content-Type": "application/json"}, timeout=10)
+                r.raise_for_status()
+                params = r.json().get("parameters")
+                if isinstance(params, str):
+                    cache[model] = ", ".join(" ".join(x.split()) for x in params.splitlines() if x.strip())[:200]
+            except Exception:  # noqa: BLE001 -- the model's defaults not being readable only changes the wording
+                pass
+        got = cache[model]
+        return (f"{model}: reasoning is on, so FI sent no temperature of its own and the model's own defaults are used"
+                + (f" ({got})" if got else ""))
 
     # ~4 chars per token holds reasonably well across English-text
     # tokenizers (BPE / tiktoken / SentencePiece). It's not exact —

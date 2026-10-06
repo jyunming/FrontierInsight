@@ -17305,6 +17305,29 @@ class Engine:
             from .vscode_bridge import EXTENSION_OLDER_NOTE
             self._progress(EXTENSION_OLDER_NOTE)
 
+    def _say_call_notes(self, node: str, holder: dict[str, Any], served: dict[str, Any]) -> None:
+        """What the streamed Ollama call noted on the call's holder, in plain run.log lines: when its output began (each
+        call), which sampling a request to think used (once per model), and that the model's reasoning went nowhere so
+        FI asked again without it (once per step)."""
+        said = self.__dict__.setdefault("_thinking_said", set())
+        for line in holder.get("timings") or []:
+            self._log.info("[%s] %s", node, line)
+        sampling = str(holder.get("sampling") or "")
+        if sampling and ("sampling", sampling) not in said:
+            said.add(("sampling", sampling))
+            self._log.info("[thinking] %s", sampling)
+        loop = holder.get("loop")
+        if isinstance(loop, dict) and ("loop", node) not in said:
+            said.add(("loop", node))
+            if loop.get("kind") == "length":
+                what = (f"used up all the room there was ({loop.get('chars')} characters of reasoning) without giving an "
+                        "answer")
+            else:
+                unit = "lines" if loop.get("kind") == "lines" else "characters"
+                what = f"went round in circles (the same {loop.get('block')} {unit} repeated {loop.get('repeats')} times)"
+            self._log.info("[thinking] The model's reasoning at the step `%s` %s, so FI asked again without reasoning; "
+                           "this step's reasoning is not kept.", node, what)
+
     def _say_once_about_thinking(self, node: str, holder: dict[str, Any], served: dict[str, Any], outcome: str,
                                  text: str) -> None:
         """Plain run.log lines about a call's reasoning, each said once: the model refused the request for its
@@ -17339,7 +17362,7 @@ class Engine:
             self._log.info("[thinking] %s cannot return a model's reasoning: %s; only its answers are kept (set "
                            "output.save_thinking: false to stop this note)", provider, _thinking.CANNOT_RETURN[provider])
         if (outcome == "ok" and not text.strip() and provider not in _thinking.CANNOT_RETURN
-                and not via_vscode and ("none", node) not in said):
+                and not holder.get("loop") and not via_vscode and ("none", node) not in said):
             said.add(("none", node))
             self._log.info("[thinking] %s: this model/connection returned no reasoning for this step (only its answer "
                            "and any reasons it wrote in it are kept)", node)
@@ -17355,6 +17378,10 @@ class Engine:
         fi_dir = getattr(self, "fi_dir", None)
         try:
             self._say_extension_older(holder)
+        except Exception:  # noqa: BLE001 -- a log line never touches the quest (nor a stand-in engine's call)
+            pass
+        try:
+            self._say_call_notes(node, holder, served)
         except Exception:  # noqa: BLE001 -- a log line never touches the quest (nor a stand-in engine's call)
             pass
         if fi_dir is None or not self._keeps_thinking():

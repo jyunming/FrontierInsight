@@ -29,10 +29,14 @@ MESSAGES = [{"role": "user", "content": "hi"}]
 def _ndjson(chunks: list[dict]) -> bytes:
     return "".join(json.dumps(c) + "\n" for c in chunks).encode()
 
+SHOWN = "temperature 1\ntop_k 64\ntop_p 0.95"  # what the fake Ollama lists as the model's own parameters
+
 
 def _ollama_handler(seen: list[httpx.Request], *, thinking: str = "weighing 91 = 7 x 13", status: int = 200,
                     error: str = ""):
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":  # FI reading the model's own sampling: not one of the calls under test
+            return httpx.Response(200, json={"parameters": SHOWN})
         seen.append(request)
         if request.url.path == "/api/chat":
             if status != 200:
@@ -418,6 +422,8 @@ def test_a_refusal_of_thinking_sent_inside_the_stream_falls_back_and_is_remember
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={})
         seen.append(request)
         if request.url.path == "/api/chat":
             return httpx.Response(200, content=_ndjson([
@@ -427,3 +433,176 @@ def test_a_refusal_of_thinking_sent_inside_the_stream_falls_back_and_is_remember
     answers, thinking = _ollama_call(handler, calls=2)
     assert answers == ["No.", "No."] and thinking == ""
     assert [r.url.path for r in seen] == ["/api/chat", "/v1/chat/completions", "/v1/chat/completions"]
+
+
+# ---- a model whose reasoning goes round in circles; sampling; the run.log lines -------------------------------------
+
+NL = chr(10)
+_CYCLE = [f"    *   the value for case {k} is read from the table and compared with the formula once more" for k in range(2)]
+
+
+def _looping_chunks(n: int = 600) -> list[dict]:
+    return [{"model": "gemma4:31b-cloud", "message": {"thinking": NL.join(_CYCLE) + NL}} for _ in range(n)]
+
+
+def _loop_then_plain_handler(seen: list[httpx.Request], yielded: list[int], *, native_chunks: list[dict],
+                             plain: str = "No."):
+    class Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for c in native_chunks:
+                yielded.append(1)
+                yield (json.dumps(c) + NL).encode()
+                await asyncio.sleep(0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":
+            return httpx.Response(200, json={"parameters": SHOWN})
+        seen.append(request)
+        if request.url.path == "/api/chat":
+            return httpx.Response(200, stream=Body())
+        return httpx.Response(200, json={"model": "gemma4:31b-cloud", "choices": [
+            {"message": {"role": "assistant", "content": plain}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
+
+    return handler
+
+
+def _run_chat(handler, *, want: bool = True, provider: dict | None = None, node: str = "plan"):
+    async def go():
+        holder, token = tc.open_holder(want=want)
+        http = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=30.0)
+        try:
+            client = LLMClient(resolve_endpoint(ProviderConfig(name="ollama", model="gemma4:31b-cloud",
+                                                               **(provider or {}))), http=http)
+            return await client.chat(MESSAGES, max_tokens=300, node=node), holder
+        finally:
+            await http.aclose()
+            tc.close_holder(token)
+
+    return asyncio.run(go())
+
+
+def test_a_repeating_block_is_found_and_a_long_derivation_is_not() -> None:
+    assert tc.repeating_cycle(NL.join(_CYCLE * 12) + NL + "x")[:2] == ("lines", 2)
+    assert tc.repeating_cycle(NL.join(_CYCLE * 9) + NL + "x") is None  # nine times is not ten
+    derivation = NL.join(f"Step {i}: so x_{i} = {3 * i + 1} and y_{i} = {i * i}, which is consistent with step {i - 1}."
+                         for i in range(1, 600))
+    assert tc.repeating_cycle(derivation + NL + "tail") is None
+    # short interjections said again and again (a run of "Wait.") are not a block worth 400 characters
+    assert tc.repeating_cycle(NL.join(["Wait."] * 30) + NL + "x") is None
+    # a loop inside a few very long lines is found by the character check
+    assert tc.repeating_cycle("alpha beta gamma delta " * 600)[0] == "chars"
+
+
+def test_a_stream_whose_reasoning_repeats_is_cut_early_and_raises_the_loop_error() -> None:
+    from core.provider import _post_ollama_streamed
+
+    yielded: list[int] = []
+    handler = _loop_then_plain_handler([], yielded, native_chunks=_looping_chunks())
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            return await _post_ollama_streamed(http, "http://x/api/chat", {"stream": True}, {}, 30.0)
+
+    with pytest.raises(tc.ThinkingLoop) as e:
+        asyncio.run(go())
+    assert len(yielded) < 100 and len(yielded) < 600 // 4  # it stopped reading long before the end
+    assert e.value.kind == "lines" and e.value.block == 2 and e.value.repeats >= 10 and e.value.chars > 0
+
+
+def test_a_long_reasoning_that_does_not_repeat_is_not_cut() -> None:
+    chunks = [{"message": {"thinking": f"Step {i}: x_{i} = {3 * i + 1} follows from step {i - 1} and the table." + NL}}
+              for i in range(1, 400)] + [_done()]
+    assert _stream_call(chunks)["message"]["thinking"].count(NL) == 399
+
+
+def test_after_a_loop_the_same_request_is_sent_once_more_without_reasoning() -> None:
+    seen: list[httpx.Request] = []
+    answer, holder = _run_chat(_loop_then_plain_handler(seen, [], native_chunks=_looping_chunks()))
+    assert answer == "No."
+    assert [r.url.path for r in seen] == ["/api/chat", "/v1/chat/completions"]  # once more, not again and again
+    plain = json.loads(seen[1].content)
+    assert "think" not in plain and plain["messages"] == MESSAGES
+    assert holder["text"] == "" and holder["loop"]["kind"] == "lines" and holder["loop"]["block"] == 2
+
+
+def test_a_reasoning_that_filled_the_answer_space_is_also_asked_again_once_without_reasoning() -> None:
+    seen: list[httpx.Request] = []
+    cut = [{"message": {"thinking": "thinking and thinking"}},
+           {"model": "gemma4:31b-cloud", "message": {"content": ""}, "done": True, "done_reason": "length",
+            "prompt_eval_count": 20, "eval_count": 280}]
+    answer, holder = _run_chat(_loop_then_plain_handler(seen, [], native_chunks=cut))
+    assert answer == "No." and [r.url.path for r in seen] == ["/api/chat", "/v1/chat/completions"]
+    assert holder["loop"]["kind"] == "length" and holder["text"] == ""
+
+
+def test_with_reasoning_on_no_temperature_is_sent_unless_the_person_set_one() -> None:
+    def native_body(provider: dict | None) -> dict:
+        seen: list[httpx.Request] = []
+        _run_chat(_ollama_handler(seen), provider=provider)
+        return json.loads(seen[0].content)
+
+    assert "temperature" not in native_body(None).get("options", {})
+    assert native_body({"fixed_temperature": 0.3})["options"]["temperature"] == 0.3
+    assert native_body({"extra_body": {"temperature": 0.7}})["options"]["temperature"] == 0.7
+
+
+def test_the_sampling_note_names_the_models_own_settings_or_the_persons() -> None:
+    _, holder = _run_chat(_ollama_handler([]))
+    assert "no temperature of its own" in holder["sampling"] and "temperature 1, top_k 64, top_p 0.95" in holder["sampling"]
+    _, holder = _run_chat(_ollama_handler([]), provider={"fixed_temperature": 0.3})
+    assert "sends temperature 0.3" in holder["sampling"]
+
+    def unreadable(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":
+            return httpx.Response(500, json={})
+        return _ollama_handler([])(request)
+
+    _, holder = _run_chat(unreadable)
+    assert holder["sampling"].endswith("the model's own defaults are used")
+
+
+def test_without_reasoning_the_request_is_exactly_as_before() -> None:
+    seen: list[httpx.Request] = []
+    _, holder = _run_chat(_ollama_handler(seen), want=False)
+    (req,) = seen
+    assert req.url.path == "/v1/chat/completions" and "temperature" in json.loads(req.content)
+    assert holder["sampling"] == "" and holder["loop"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_log_says_a_loop_once_per_step_and_keeps_no_reasoning_for_it(smoke_config) -> None:  # noqa: ANN001, F811
+    seen: list[httpx.Request] = []
+    http = httpx.AsyncClient(transport=httpx.MockTransport(
+        _loop_then_plain_handler(seen, [], native_chunks=_looping_chunks())), timeout=30.0)
+    client = LLMClient(resolve_endpoint(ProviderConfig(name="ollama", model="gemma4:31b-cloud")), http=http)
+    engine = _engine_with(smoke_config, client)
+    try:
+        assert await engine._chat("prompt", node="plan") == "No."
+        assert await engine._chat("prompt", node="plan") == "No."
+    finally:
+        await http.aclose()
+    for h in engine._log.handlers:
+        h.flush()
+    text = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert text.count("The model's reasoning at the step `plan` went round in circles (the same 2 lines repeated") == 1
+    assert "so FI asked again without reasoning; this step's reasoning is not kept." in text
+    assert "returned no reasoning for this step" not in text
+    assert not (engine.fi_dir / tc.THINKING_FILE).exists()  # nothing kept for the calls that looped
+
+
+@pytest.mark.asyncio
+async def test_run_log_carries_the_timing_and_sampling_lines_of_a_streamed_call(smoke_config) -> None:  # noqa: ANN001, F811
+    http = httpx.AsyncClient(transport=httpx.MockTransport(_ollama_handler([])), timeout=30.0)
+    client = LLMClient(resolve_endpoint(ProviderConfig(name="ollama", model="gemma4:31b-cloud")), http=http)
+    engine = _engine_with(smoke_config, client)
+    try:
+        await engine._chat("prompt", node="design")
+        await engine._chat("prompt", node="analyze")
+    finally:
+        await http.aclose()
+    for h in engine._log.handlers:
+        h.flush()
+    text = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert text.count("first output after") == 2  # one line per streamed call
+    assert text.count("reasoning is on, so FI sent no temperature of its own") == 1  # sampling: once per model
