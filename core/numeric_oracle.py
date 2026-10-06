@@ -28,11 +28,17 @@ its last digit one off the correct rounding. A number far from every result
 is assumed to come from somewhere else and is ignored. A number that rounds
 correctly is correct.
 
-Two signals, strongest first:
+Three signals, strongest first:
 
 ``transposed``
     Same digits, different order (2.41 vs 2.14; 0.045 vs 0.054). Almost
     never a coincidence, and the classic way a number gets copied wrong.
+
+``formula_slip``
+    A number printed as the value of a calculation the paper writes out
+    (``37 \\cdot 1.35 / 193 \\approx 0.258``) that is not that calculation's value
+    correctly rounded (0.2588 prints as 0.259). It reads no result: the paper
+    contradicts its own arithmetic.
 
 ``near_miss``
     A last-digit slip: a result whose correct rounding to the
@@ -80,8 +86,14 @@ the theoretical values 0.333 and 0.667 read against the nearest result. A
   extra decimals of the fraction are a unit, not precision the paper printed;
 * the value of a formula the paper writes out just before it (``$2\\pi\\sqrt{L/g}
   \\approx 2.006$``: an expression with a root, a function, a constant with a coefficient
-  or a binary operation, then ``=`` / ``\\approx`` / ``≈`` / ``~``, in the same math span
-  or clause). It is the paper's own computation, not a copy of a result. A symbol alone
+  or a binary operation, then ``=`` / ``\\approx`` /``≈`` / ``~``, in the same math span
+  or clause). It is the paper's own computation, not a copy of a result, so it is never
+  a ``near_miss``. FI checks what it can: when the formula is only numbers it is
+  worked out with ``oracle_triage.calculate`` and the printed number must be the value
+  correctly rounded to its own printed decimals (half a unit of the last digit, after
+  ``\\approx`` too: a truncated 0.258 for 0.2588 is a slip); if not, that is a
+  ``formula_slip``. A formula with a symbol (``L``, ``g``, ``T_0``) or a function the
+  calculator lacks cannot be worked out and is skipped. A symbol alone
   (``T_num = 2.006``) is not a formula and is still checked, and a digit transposition
   is still reported after one.
 
@@ -369,17 +381,18 @@ class _PaperNumber(NamedTuple):
     token: str
     ctx: str
     percent: bool = False  # printed with a percent sign
-    formula: bool = False  # given as the value of a formula written just before it
+    formula: str = ""  # the formula written just before it, when the number is its value
 
 
-def _is_formula_value(before: str) -> bool:
-    """Is the number that follows ``before`` the value of a formula written right
-    ahead of it: an expression with an operation, then ``=`` / ``\\approx`` / ``≈`` /
-    ``~``, in the same math span or the same clause? ``$2\\pi\\sqrt{L/g} \\approx 2.006$``
-    is; ``T_num = 2.006`` (a symbol alone) is a result being stated, not computed."""
+def _formula_before(before: str) -> str:
+    """The formula written right ahead of the number that follows ``before``, or
+    ``""``: an expression with an operation, then ``=`` / ``\\approx`` / ``≈`` /
+    ``~``, in the same math span or the same clause. ``$2\\pi\\sqrt{L/g} \\approx
+    2.006$`` has one; ``T_num = 2.006`` (a symbol alone) is a result being stated,
+    not computed."""
     rel = _RELATION_BEFORE.search(before)
     if rel is None:
-        return False
+        return ""
     head = before[: rel.start()].rstrip()
     if head.endswith("$"):
         # ``$formula$ \approx 2.006``: the formula is the span just closed.
@@ -391,7 +404,124 @@ def _is_formula_value(before: str) -> bool:
         cuts = list(_CLAUSE_CUT.finditer(expr))
         if cuts:
             expr = expr[cuts[-1].end():]
-    return bool(_OPERATION.search(expr))
+    return expr.strip() if _OPERATION.search(expr) else ""
+
+
+# A number that an operator follows is a term of a longer sum, not the value of the
+# formula before it (``a*b + c*d = 0.1907 + 0.0050``): nothing to work out for it.
+_CONTINUES_AFTER = re.compile(r"^\s*(?:[+*/^×·÷±]|\\(?:times|cdot|div|pm)(?![A-Za-z])|-\s)")
+
+_LATEX_NOISE = re.compile(r"\\(?:left|right|displaystyle|[,!;: ])|\$")
+_FRAC = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+_SQRT = re.compile(r"\\sqrt\s*\{([^{}]*)\}")
+_ARITH_TOKEN = re.compile(
+    r"\d+(?:\.\d*)?(?:[eE][-+]?\d+)?|\.\d+|[A-Za-z_][A-Za-z_0-9]*|\*\*|[-+*/()]|\S"
+)
+_RELATION_ANY = re.compile(r"=|[\u2248\u2243\u223c~]|\\(?:approx|simeq|sim)\b")
+
+
+def _arithmetic_of(expr: str) -> str | None:
+    """The formula as plain arithmetic the calculator reads (``\\frac{a}{b}`` ->
+    ``((a)/(b))``, ``\\cdot`` / ``×`` -> ``*``, ``\\sqrt{x}`` -> ``sqrt(x)``,
+    ``\\pi`` -> ``pi``, ``^`` -> ``**``, braces -> parentheses), or ``None`` when it
+    still holds a symbol or anything else the calculator does not know: ``L``, ``g``,
+    ``T_0``, a function it does not have, ``log`` (natural or base 10?)."""
+    from core import oracle_forms as forms
+
+    s = _RELATION_ANY.split(expr.replace(_MINUS_SIGN, "-"))[-1]
+    s = _LATEX_NOISE.sub(" ", s)
+    s = re.sub(r"\\(?:cdot|times)(?![A-Za-z])|[\u00d7\u00b7]", "*", s)
+    s = re.sub(r"\\div(?![A-Za-z])|\u00f7", "/", s)
+    s = re.sub(r"\\pi(?![A-Za-z])|\u03c0", " pi ", s)
+    s = re.sub(r"\\ln(?![A-Za-z])", " ln ", s)
+    s = re.sub(r"\\(exp|sinh|cosh|tanh|sin|cos|tan)(?![A-Za-z])", r" \1 ", s)
+    s = re.sub(r"\^\s*\{([^{}]*)\}", r"**(\1)", s).replace("^", "**")
+    for _ in range(10):
+        t = _SQRT.sub(r"sqrt(\1)", _FRAC.sub(r"((\1)/(\2))", s))
+        if t == s:
+            break
+        s = t
+    s = re.sub(r"\u221a\s*(\d+(?:\.\d+)?)", r"sqrt(\1)", s).replace("\u221a", "sqrt")
+    s = s.replace("{", "(").replace("}", ")")
+    s = re.sub(r"(?<=\d),(?=\d{3}\b)", "", s)
+
+    known = (set(forms.FUNCTIONS) - {"log"}) | {"pi", "ln"}
+    tokens = _ARITH_TOKEN.findall(s)
+    is_name = lambda t: bool(re.match(r"[A-Za-z_]", t))  # noqa: E731
+    cut = 0
+    for i in range(len(tokens) - 1, -1, -1):
+        t = tokens[i]
+        if is_name(t) and t not in known:
+            if tokens[i + 1: i + 2] == ["("]:
+                return None  # a function the calculator does not have
+            # Only a prose word (``Computing``, ``value``) may be left behind; a
+            # symbol (``L``, ``T_0``) means the expression is not just numbers.
+            if not re.fullmatch(r"[A-Za-z]{3,}", t):
+                return None
+            cut = i + 1
+            break
+        if not is_name(t) and not re.match(r"[\d.*/()+-]", t):
+            return None
+    tokens = tokens[cut:]
+    if not tokens or not (re.match(r"[\d.]", tokens[0]) or tokens[0] in known or tokens[0] == "("):
+        return None
+    out: list[str] = []
+    for t in tokens:
+        t = "log" if t == "ln" else t
+        if out:
+            prev = out[-1]
+            ends = re.match(r"[\d.]", prev) or prev in ("pi", ")")
+            starts = re.match(r"[\d.]", t) or is_name(t) or t == "("
+            if ends and starts:
+                out.append("*")
+        out.append(t)
+    return " ".join(out)
+
+
+def _computed_value(expr: str) -> float | None:
+    """What the paper's own formula comes to, worked out with FI's calculator, or
+    ``None`` when it is not just numbers."""
+    arithmetic = _arithmetic_of(expr)
+    if not arithmetic:
+        return None
+    from core.oracle_triage import calculate
+
+    try:
+        return calculate(arithmetic)
+    except Exception:  # noqa: BLE001 - an expression nobody can read is not a finding
+        return None
+
+
+def _formula_slip(num: "_PaperNumber") -> float | None:
+    """The value of the paper's own formula when the number it prints is not that
+    value correctly rounded to the number's own printed decimals (half a unit of its
+    last digit), else ``None``: nothing to report, or the formula cannot be worked out.
+
+    One allowance: a number printed with no more decimals than the decimal numbers it
+    was worked from (``0.34 * 0.58 = 0.19``) may have been worked from the unrounded
+    ones, so it is read against the range those numbers allow. A number with more
+    decimals than its inputs (``37 * 1.35 / 193 = 0.258``) claims their values exactly."""
+    if not num.formula:
+        return None
+    value = _computed_value(num.formula)
+    if value is None:
+        return None
+    from core.oracle_triage import _DECIMAL, calculated_range
+
+    arithmetic = _arithmetic_of(num.formula) or ""
+    input_decimals = [_decimals_of_token(m.group()) for m in _DECIMAL.finditer(arithmetic)]
+    spread = None
+    for printed, token, _pct in _views(num):
+        decimals = _decimals_of_token(token)
+        half = 0.5 * 10 ** -decimals * (1 + 1e-9)
+        low = high = value
+        if input_decimals and decimals <= min(input_decimals):
+            if spread is None:
+                spread = calculated_range(arithmetic) or (value, value)
+            low, high = spread
+        if low - half <= printed <= high + half:
+            return None
+    return value
 
 
 # Markdown constructs whose numbers are structural rather than claimed.
@@ -415,13 +545,14 @@ _STRIP_BLOCKS = [
 class Finding:
     """One number in the paper that contradicts a computed result."""
 
-    kind: str          # "transposed" | "near_miss"
+    kind: str          # "transposed" | "formula_slip" | "near_miss" | "trivial_reference"
     paper_value: float
     result_value: float
     result_path: str
     context: str       # surrounding prose, trimmed
     rel_error: float
     printed: str = ""  # the number as the paper wrote it ("2.12"), for a near_miss
+    expression: str = ""  # the paper's own formula, for a formula_slip
 
     def describe(self) -> str:
         if self.kind == "trivial_reference":
@@ -432,6 +563,12 @@ class Finding:
                 f"finder returning the trivial root on its bracket endpoint "
                 f"looks like — check the bracket before the paper describes "
                 f"this as a limit"
+            )
+        if self.kind == "formula_slip":
+            return (
+                f"the paper's own calculation {self.expression} gives "
+                f"{_fmt(self.result_value)}, not the {self.printed} it prints "
+                f"— “{self.context}”"
             )
         if self.kind == "transposed":
             lead = "digits transposed"
@@ -594,7 +731,11 @@ def _scan_paper_numbers(text: str) -> list[_PaperNumber]:
             _PaperNumber(
                 value, token, ctx,
                 percent=bool(_PERCENT_AFTER.match(cleaned[m.end(): m.end() + 12])),
-                formula=_is_formula_value(cleaned[max(0, m.start() - 120): m.start()]),
+                formula=(
+                    ""
+                    if _CONTINUES_AFTER.match(cleaned[m.end(): m.end() + 12])
+                    else _formula_before(cleaned[max(0, m.start() - 120): m.start()])
+                ),
             )
         )
     return out
@@ -748,7 +889,7 @@ def _is_last_digit_slip(value: float, token: str, actual: float) -> bool:
 
 # Report order: the self-contradiction first, then the classic copy error,
 # then the weaker distance signal.
-_KIND_RANK = {"trivial_reference": 0, "transposed": 1, "near_miss": 2}
+_KIND_RANK = {"trivial_reference": 0, "transposed": 1, "formula_slip": 2, "near_miss": 3}
 
 
 def check(
@@ -786,9 +927,27 @@ def check(
     settings = list(declared) if declared else []
 
     seen: set[tuple[float, str]] = set()
+    seen_formulas: set[tuple[float, str]] = set()
     for num in numbers:
         ctx = num.ctx
         views = _views(num)
+        # The paper's own calculation, worked out: a number that is not that value
+        # correctly rounded is a slip FI can check without any result.
+        computed = _formula_slip(num)
+        if computed is not None and (num.value, num.formula) not in seen_formulas:
+            seen_formulas.add((num.value, num.formula))
+            report.findings.append(
+                Finding(
+                    kind="formula_slip",
+                    paper_value=num.value,
+                    result_value=computed,
+                    result_path="",
+                    context=ctx,
+                    rel_error=abs(computed - num.value) / max(abs(computed), abs(num.value)),
+                    printed=num.token,
+                    expression=num.formula,
+                )
+            )
         # (view value, view token, result, path, rel) -- the nearest result of any
         # view, and the nearest one a near_miss may be read against.
         nearest: tuple[float, str, float, str, float] | None = None
@@ -827,7 +986,7 @@ def check(
                 continue
             value, token, actual, path, rel = eligible
             # The value of a formula the paper writes out is its own computation, not
-            # a copy of a result.
+            # a copy of a result (a wrong one is a formula_slip, above).
             if num.formula:
                 continue
             # The two extra decimals of value / 100 are a change of unit, not precision

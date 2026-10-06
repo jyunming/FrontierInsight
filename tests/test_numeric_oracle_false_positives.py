@@ -415,3 +415,78 @@ class TestTheValueOfAFormulaIsNotACopy:
         paper = r"$2\pi\sqrt{L/g} \approx 2.006$ s, and the run gave 2.006 s."
         # the second 2.006 is stated as a result and is a slip of 2.00702
         assert _flagged(paper, {"T_num": 2.00702}) == [("near_miss", 2.006)]
+
+
+class TestAFormulaFiMCanWorkOutIsChecked:
+    """A formula that is only numbers is worked out with FI's calculator, and the
+    number printed after it must be its value correctly rounded."""
+
+    def _slips(self, paper: str, results: dict | None = None):
+        report = no.check(paper, results or {"unrelated": 123456.0})
+        return [(f.kind, f.paper_value, f.result_value) for f in report.findings]
+
+    def test_a_truncated_value_is_a_formula_slip(self) -> None:
+        paper = r"$$ k_1 = \frac{37 \cdot 1.35}{193} \approx 0.258. $$"
+        (finding,) = no.check(paper, {"unrelated": 123456.0}).findings
+        assert finding.kind == "formula_slip"
+        assert finding.result_path == ""
+        assert finding.result_value == pytest.approx(37 * 1.35 / 193)
+        text = finding.describe()
+        assert "gives 0.258808" in text and "not the 0.258 it prints" in text
+
+    def test_the_correctly_rounded_value_is_nothing(self) -> None:
+        assert self._slips(r"$$ k_1 = \frac{37 \cdot 1.35}{193} \approx 0.259. $$") == []
+
+    def test_the_real_pendulum_formula_is_nothing(self) -> None:
+        # L and g are symbols: it cannot be worked out, so it is skipped
+        assert self._slips(r"$2\pi\sqrt{L/g} \approx 2.006$ s.") == []
+
+    def test_numbers_only_pendulum_formula(self) -> None:
+        assert self._slips(r"$2\pi\sqrt{1/9.81} \approx 2.006$ s.") == []
+        assert [k for k, *_ in self._slips(r"$2\pi\sqrt{1/9.81} \approx 2.060$ s.")] == ["formula_slip"]
+
+    def test_plain_arithmetic_and_implicit_products(self) -> None:
+        assert self._slips("Computing 2 * 3.1416 * 0.3193 = 2.006 gives the period") == []
+        assert [k for k, *_ in self._slips("so 12 / 5 = 2.5 and 3 * 4 = 13.0")] == ["formula_slip"]
+
+    def test_a_percent_may_be_read_either_way(self) -> None:
+        assert self._slips("coverage was (37 / 193) * 100 = 19.2% here") == []
+        assert self._slips("coverage was (37 / 193) = 19.2% here") == []
+
+    @pytest.mark.parametrize(
+        "paper",
+        [
+            r"$2\pi\sqrt{1/9.81} + wibble(3) \approx 2.9$",  # an unknown function
+            r"$\log(7) * 2 \approx 9.0$",  # log: natural or base 10?
+            r"$x * 3 \approx 9.0$",  # a symbol
+            r"$T_0 = 2\pi\sqrt{L/g} = 9.5$",
+        ],
+    )
+    def test_what_cannot_be_worked_out_is_skipped(self, paper: str) -> None:
+        assert self._slips(paper) == []
+
+    def test_it_is_ranked_after_transposed_and_before_near_miss(self) -> None:
+        paper = (
+            "The MEEF is 2.00 at best focus, NILS reached 2.41, "
+            r"and $\frac{37 \cdot 1.35}{193} \approx 0.258$."
+        )
+        report = no.check(paper, {"meef": 2.0053, "nils": 2.14})
+        assert [f.kind for f in report.findings] == ["transposed", "formula_slip", "near_miss"]
+        assert report.to_dict()["findings"][1]["message"].startswith("the paper's own calculation")
+
+    def test_the_calculator_really_reads_the_written_formulas(self) -> None:
+        """Guards the tests above against passing only because nothing was worked out."""
+        assert no._computed_value(r"2\pi\sqrt{1/9.81}") == pytest.approx(2.00607, abs=1e-5)
+        assert no._computed_value(r"\frac{37 \cdot 1.35}{193}") == pytest.approx(0.258808, abs=1e-6)
+        assert no._computed_value("Computing 2 * 3.1416 * 0.3193") == pytest.approx(2.006226, abs=1e-6)
+        assert no._computed_value(r"2\pi\sqrt{L/g}") is None
+
+    def test_a_term_of_a_longer_sum_is_not_the_value_of_the_formula(self) -> None:
+        paper = r"yields $0.3396 \times 0.5617 + (1 - 0.3396) \times 0.0076 = 0.1907 + 0.0050 = 0.1957$."
+        assert self._slips(paper) == []
+
+    def test_rounded_inputs_allow_a_result_with_no_more_decimals(self) -> None:
+        # 0.34 * 0.58 = 0.1972 but each factor may be a rounding: 0.19 is possible
+        assert self._slips("so 0.34 × 0.58 ≈ 0.19 here") == []
+        # 1.35 cannot excuse a third decimal: 0.258 claims the inputs exactly
+        assert [k for k, *_ in self._slips(r"$\frac{37 \cdot 1.35}{193} \approx 0.258$")] == ["formula_slip"]
