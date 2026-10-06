@@ -4325,7 +4325,8 @@ class LLMClient:
                 _note_failed_attempt(self.last_provider, request_body.get("model"), cut_off(
                     {"model": request_body.get("model"), "usage": {"prompt_tokens": asked_tokens,
                                                                     "completion_tokens": spent,
-                                                                    "total_tokens": asked_tokens + spent}},
+                                                                    "total_tokens": asked_tokens + spent,
+                                                                    "estimated": True}},
                     request_body.get("max_tokens")))
                 _log.info("[%s] %s; asking again without reasoning", node or "chat", loop)
                 return await without_reasoning()
@@ -4412,7 +4413,7 @@ class LLMClient:
                         raise
             return data
 
-        def usage_of(reply: dict[str, Any]) -> dict[str, int] | None:
+        def usage_of(reply: dict[str, Any]) -> dict[str, Any] | None:
             u = reply.get("usage") or {}
             if not (u and isinstance(u, dict)):
                 return None
@@ -4421,6 +4422,8 @@ class LLMClient:
                 "completion_tokens": int(u.get("completion_tokens", 0) or 0),
                 "total_tokens": int(u.get("total_tokens", 0) or (u.get("prompt_tokens", 0) or 0)
                                     + (u.get("completion_tokens", 0) or 0)),
+                # a count FI estimated from characters stays marked as one in the record of calls
+                **({"estimated": True} if u.get("estimated") else {}),
             }
 
         def problem(kind: type, reply: dict[str, Any], why: str, limit: int | None,

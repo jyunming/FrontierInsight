@@ -592,7 +592,11 @@ async def test_run_log_says_a_loop_once_per_step_and_keeps_no_reasoning_for_it(s
     # the reasoning the cut stream spent is on record as a failed attempt, so the retry does not make the call look cheap
     rows = [json.loads(x) for x in (engine.fi_dir / "model_calls.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
     spent = [r for r in rows if r.get("outcome") != "ok"]
-    assert len(spent) == 2 and all((r.get("usage") or {}).get("completion_tokens", 0) > 0 for r in spent), rows
+    assert len(spent) == 2, rows
+    for r in spent:
+        usage = r.get("usage") or {}
+        assert usage.get("completion_tokens", 0) > 0 and usage.get("prompt_tokens", 0) > 0, rows
+        assert usage.get("estimated") is True, rows
 
 
 @pytest.mark.asyncio
