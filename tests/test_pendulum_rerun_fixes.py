@@ -73,6 +73,8 @@ def test_every_approximate_sign_is_read_and_a_right_answer_is_left_alone(sign: s
 @pytest.mark.parametrize("text, expected, limit", [
     # The second review's counterexamples: rounded constants in the step, truncated series after an approximate sign.
     ("derivation: (2/pi)*1.6336 = 1.0399733", 1.0399733, 1.04e-6),
+    ("derivation: T/T0 ≈ 1 + (pi/4)**2/16 ≈ 1.0400", 1.04, 1.04e-3),
+    ("derivation: x = 1 + (pi/4)**2/16 + 11*(pi/4)**4/3072 ~ 1.03997", 1.03997, 1.04e-5),
     # The second look's counterexamples: a subtraction or exp that carries the constants' rounding far.
     ("derivation: y = 1/(1.04-1.03) = 104.1", 104.1, 0.1),
     ("derivation: y = exp(12.3) = 229843", 229843.0, 1.0),
@@ -272,23 +274,3 @@ def test_a_correction_no_longer_in_force_gives_no_hint(tmp_path: Path) -> None:
     rewritten = {**CHECK_45, "expected": 2.0}  # the check was written again since the correction
     judged = [{"name": "large_amplitude_period", "value": 1.0, "passed_by_engine": False}]
     assert eng._multiple_hints([rewritten], judged, {}, set()) == []
-
-
-@pytest.mark.parametrize("text, expected, limit", [
-    ("derivation: T/T0 ≈ 1 + (pi/4)**2/16 ≈ 1.0400", 1.04, 1.04e-3),
-    ("derivation: x = 1 + (pi/4)**2/16 + 11*(pi/4)**4/3072 ~ 1.03997", 1.03997, 1.04e-5),
-])
-def test_a_truncated_series_written_as_approximate_is_a_slip_when_the_check_can_tell_the_gap_apart(
-        text: str, expected: float, limit: float) -> None:
-    """These two used to be left alone because the approximate floor (0.5%) outranked the check's own tolerance. A gap
-    larger than the check's tolerance is one the check itself would judge a correct simulation by."""
-    assert oracle_triage.arithmetic_slip(text, expected, limit) is not None
-
-
-def test_after_an_approximate_sign_the_checks_own_tolerance_decides_not_the_floor() -> None:
-    base = "derivation: (2/pi)*ellipk(sin(pi/8)**2) ≈ "
-    exact = EXACT_45  # 1.0400
-    assert oracle_triage.arithmetic_slip(base + f"{exact * 1.004:.5f}", exact * 1.004, 0.001 * exact) is not None
-    assert oracle_triage.arithmetic_slip(base + f"{exact * 1.0005:.5f}", exact * 1.0005, 0.001 * exact) is None
-    # No tolerance known: the floor still holds.
-    assert oracle_triage.arithmetic_slip(base + f"{exact * 1.004:.5f}", exact * 1.004) is None

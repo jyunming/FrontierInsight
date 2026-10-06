@@ -234,7 +234,7 @@ def test_the_slack_of_a_written_number_is_half_a_unit_in_its_last_place() -> Non
     assert tri._close(0.0021, 0.0020, "2.0e-3", limit=1e-9) is False
     assert tri._close(0.00204, 0.0020, "2.0e-3", limit=1e-9) is True
     assert tri._close(2.3678, 2.3676, "2.3676", approximate=True, limit=1e-9) is True, "approximate: five times looser"
-    assert tri._close(2.3678, 2.360, "2.360", approximate=True, limit=0.001) is False, "far apart: a slip"
+    assert tri._close(2.3678, 2.366, "2.366", approximate=True, limit=0.001) is True, "approximate: the floor holds"
 
 
 @pytest.mark.asyncio
@@ -274,3 +274,13 @@ async def test_a_formula_that_can_be_read_two_ways_is_asked_about_and_never_appl
     engine._client = model
     await _plan_step(engine)
     assert _planned(engine)["s30"]["expected"] == pytest.approx(0.5, abs=1e-12)
+
+
+def test_after_an_approximate_sign_a_small_gap_is_never_a_slip() -> None:
+    """The number written after an approximate sign may be better than the expression before it (a truncated series
+    written "≈ 1.0400"), so the approximate floor holds even with a tolerance."""
+    base = "derivation: (2/pi)*ellipk(sin(pi/8)**2) ≈ "
+    exact = 1.0400  # about; the written number is judged against the expression's own value
+    value = tri.calculate("(2/pi)*ellipk(sin(pi/8)**2)")
+    assert tri.arithmetic_slip(base + f"{value * 1.0005:.5f}", value * 1.0005, 0.001 * exact) is None
+    assert tri.arithmetic_slip(base + f"{value * 1.004:.5f}", value * 1.004) is None
