@@ -614,3 +614,5 @@ same PR that adds, splits or renames one.
 One `string.Template` file per node/persona; loaded once at engine init (`core/engine.py`). Grep `agents/` for a
 topic before writing a new prompt — most nodes already have one, and a persona variant (`write_persona_*.md`,
 `review_persona_*.md`) is usually the right way to add a new voice rather than a new node.
+
+- **The methodology audit acts on FI's own rewrite** - `Engine._audit_the_design_that_runs` (called at the end of `_node_design`): when plan.md's latest version was written by FI (`_FI_PLAN_AUTHORS`: `model` / `engine` in `needs/PLAN_HISTORY.json`, file unchanged since) and no protocol is frozen (`_frozen.load`), the audit may amend the design once per design hash (`.fi/design_audit_acted.json`, so a resume does not act twice); the amendment is written with `_write_audited_design_to_plan` (`plan.edit_design_block`, a new `engine` version) and the audit then looks again taking nothing, so the receipt is for the design that runs. A person's edit or request, a frozen protocol, or any design that is not plan.md's keeps record-only behaviour.

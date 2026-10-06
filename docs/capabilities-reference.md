@@ -469,3 +469,5 @@ PATH (Docker daemon, Marp CLI, pdflatex).
 See [`architecture.md`](architecture.md) for the layered diagram and
 contracts (`Config`, `QuestState`, `QuestArtifacts`, `Executor`,
 generator protocol).
+
+- **The methodology audit meets its own objections before anything runs** - when FI itself rewrote the plan (for its checks against known answers) and nothing has run yet, an objection the methodology audit makes to the rewritten design is acted on once: FI changes the design to meet it, writes the change into `plan.md` (kept as a version) and audits the design that will run; if it still objects, that is recorded in the evidence and the quest goes on. A design a person edited or asked for, or one in a frozen protocol, is only checked and recorded, never changed. `run.log` says: "the methodology audit objected to the design FI rewrote itself, before anything ran; FI changed the design to meet it".

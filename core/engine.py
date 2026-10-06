@@ -5859,7 +5859,12 @@ class Engine:
         # this point before anything is implemented or run, and one the engine cannot search stops here
         # (core/optimisation_plan.py; the search itself: core/optimise.py).
         self._stop_if_the_search_cannot_start(state, design)
-        await self._audit_the_design_that_runs(state, design)
+        audited = await self._audit_the_design_that_runs(state, design)
+        if audited is not design:
+            # FI changed its own design to meet the audit (written into plan.md): the rest of the node uses that one.
+            design = audited
+            plan_sha = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
+            self._stop_if_the_search_cannot_start(state, design)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -8554,17 +8559,102 @@ class Engine:
                 out = {**out, "spec_statistics": spec}
         return out
 
-    async def _audit_the_design_that_runs(self, state: QuestState, design: Any) -> None:
+    def _fi_wrote_the_plan_unfrozen(self, design: dict[str, Any]) -> bool:
+        """Whether the design about to run is plan.md's design block, that block was last written by FI itself (the model's
+        draft or an engine rewrite, never a person's edit or request), and the protocol is not frozen yet. Anything
+        else, or anything that cannot be told, is ``False``: the audit then only records, as it always did."""
+        if _frozen.load(self.quest_root) is not None:
+            return False
+        path = _plan.plan_path(self.quest_root)
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        rows = _plan.history(self.quest_root)
+        if not rows or rows[-1].get("by") not in _FI_PLAN_AUTHORS or rows[-1].get("sha256") != _plan.sha256(text):
+            return False  # a hand edit not yet recorded, a person's request, or no history: a person's plan
+        planned = _plan.parse(text).design
+        return isinstance(planned, dict) and _receipts.design_core(planned) == _receipts.design_core(design)
+
+    def _design_audit_acted_on(self, key: str) -> bool:
+        """Whether the audit already acted on the design with this hash (a resume must not act twice)."""
+        try:
+            done = json.loads((self.fi_dir / "design_audit_acted.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return isinstance(done, list) and key in done
+
+    def _mark_design_audit_acted(self, key: str) -> None:
+        marker = self.fi_dir / "design_audit_acted.json"
+        try:
+            done = json.loads(marker.read_text(encoding="utf-8")) if marker.is_file() else []
+            done = done if isinstance(done, list) else []
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(json.dumps([*done, key], indent=2) + "\n", encoding="utf-8")
+        except (OSError, ValueError) as e:
+            self._log.warning("[design] could not record that the audit was acted on (%r)", e)
+
+    def _write_audited_design_to_plan(self, amended: dict[str, Any], note: str) -> dict[str, Any] | None:
+        """Write the design the audit amended into plan.md's design block (the way the engine's other plan edits are
+        made) and keep that version as FI's own; the design that runs is read back from the file. ``None`` when it could
+        not be written, and plan.md is then unchanged."""
+        path = _plan.plan_path(self.quest_root)
+        try:
+            text = path.read_text(encoding="utf-8")
+            normalized, why = _plan.normalize_design({k: v for k, v in amended.items() if k != "rationale"})
+            if normalized is None:
+                self._log.warning("[design] the audit's amended design cannot be used (%s); the design is kept as it was", why)
+                return None
+            new = _plan.edit_design_block(text, lambda _block: normalized)
+            if new is None:
+                return None
+            new = _plan.refresh_model_section(new)
+            parsed = _plan.parse(new)
+            if parsed.design is None:
+                self._log.warning("[design] plan.md with the audit's change cannot be read (%s); it is unchanged", parsed.error)
+                return None
+            path.write_text(new, encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] plan.md could not be updated with the audit's change (%r); it is unchanged", e)
+            return None
+        _plan.record_version(self.quest_root, new, by="engine", note=note[:300])
+        return parsed.design
+
+    async def _audit_the_design_that_runs(self, state: QuestState, design: Any) -> Any:
         """The methodology audit's receipt must be for the design that runs. A design a person edited in plan.md, an
         amended one, or one the frozen protocol held changed after the audit saw it: the audit checks it again, taking
-        none of its proposals (one more call, only when the design changed)."""
+        none of its proposals (one more call, only when the design changed).
+
+        The exception: the change was FI's own (it rewrote plan.md itself) and the protocol is not frozen, so nothing has
+        run yet. Then the audit's objections are met before anything is implemented: it may amend the design once (per
+        design), the amendment is written into plan.md, and the audit looks once more, taking nothing, so the receipt is
+        for the design that runs. Returns the design to run."""
         if self.config.engine.analyze_local_first or not isinstance(design, dict):
-            return
+            return design
         _status, record, problem = _receipts.read(self.quest_root, "design_audit")
-        if not problem and record is not None and record.get("output_hash") == _receipts.sha256(_receipts.design_core(design)):
-            return
-        self._log.info("[design] the design that will run is not the one the methodology audit saw; auditing it (no change taken)")
+        key = _receipts.sha256(_receipts.design_core(design))
+        if not problem and record is not None and record.get("output_hash") == key:
+            return design
+        if self._design_audit_acted_on(key) or not self._fi_wrote_the_plan_unfrozen(design):
+            self._log.info("[design] the design that will run is not the one the methodology audit saw; auditing it (no change taken)")
+            await self._audit_design(state, design, adopt=False)
+            return design
+        self._log.info("[design] the design that will run is not the one the methodology audit saw; FI rewrote it "
+                       "itself and nothing has run, so the audit may change it once")
+        self._mark_design_audit_acted(key)
+        amended, objections = await self._audit_design(state, design, adopt=True)
+        if isinstance(amended, dict) and _receipts.design_core(amended) != _receipts.design_core(design):
+            first = next((o.get("objection") if isinstance(o, dict) else o for o in objections or [] if o), "")
+            written = self._write_audited_design_to_plan(
+                amended, "the methodology audit objected to the design before anything ran; FI changed the design: "
+                         + str(first)[:200])
+            if written is not None:
+                self._log.info(
+                    "[design] the methodology audit objected to the design FI rewrote itself, before anything ran; "
+                    "FI changed the design to meet it: %s", str(first)[:160] or "see needs/DESIGN_CRITIQUE.json")
+                design = written
         await self._audit_design(state, design, adopt=False)
+        return design
 
     def _write_receipt(self, check: str, status: str, **kwargs: Any) -> None:
         """Leave the receipt of a required check (core/receipts.py). A receipt that cannot be written is logged: the
@@ -20302,6 +20392,9 @@ _NO_CRITERIA_LINE = ("The plan has no measure of whether the code got better (FI
                      "none), so FI will not try to improve the simulation step by step. Nothing to do: the quest goes on.")
 # The checks whose source that rewrite wrote after the person had read the plan (the freeze record says so).
 _FILLED_AFTER_READ = "plan_sources_filled.json"
+# Plan versions FI wrote itself (core/plan.py::record_version): the model's draft and the engine's own rewrites. A
+# person's edit is "user" and a person's rewrite request is "request"; those, and any other value, are a person's plan.
+_FI_PLAN_AUTHORS = frozenset({"model", "engine"})
 # What a rewrite that fills in the checks' sources may change: where each value comes from and its kind (under any of
 # the keys the engine reads them from). The words of a check only by adding to them (a "(derivation: ...)" at its end),
 # and the model behind the numbers only in the parts it left out.
