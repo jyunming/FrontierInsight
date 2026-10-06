@@ -1148,6 +1148,12 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
     last: dict[str, Any] = {}
     done = False
     request = httpx.Request("POST", url)
+    # When the first line, the first thinking and the first answer text arrived (seconds after the call started), for
+    # one run.log line: it tells a model that was thinking from one that was waiting (queued) before saying anything.
+    started = time.monotonic()
+    first_any: float | None = None
+    first_thinking: float | None = None
+    first_content: float | None = None
     try:
         async with asyncio.timeout(total):
             async with http.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
@@ -1178,10 +1184,14 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
                     if chunk.get("error"):
                         raise _stream_error(chunk["error"], request)
                     message = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
+                    now = time.monotonic() - started
+                    first_any = now if first_any is None else first_any
                     if isinstance(message.get("content"), str) and message["content"]:
                         content.append(message["content"])
+                        first_content = now if first_content is None else first_content
                     if isinstance(message.get("thinking"), str) and message["thinking"]:
                         thinking.append(message["thinking"])
+                        first_thinking = now if first_thinking is None else first_thinking
                     if chunk.get("done"):
                         last, done = chunk, True
                         break
@@ -1190,6 +1200,14 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
             f"the model's stream did not finish its answer within {total:g} s ({_STREAM_TOTAL_FACTOR} times the step's {timeout:g} s limit)") from None
     if not done:
         raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no done message)")
+    end = time.monotonic() - started
+
+    def _s(v: float | None) -> str:
+        return "none" if v is None else f"{v:.0f} s"
+
+    _log.info("[ollama] %s: first output after %s, thinking from %s, answer from %s, done after %s (%d thinking chars, "
+              "%d answer chars)", last.get("model") or body.get("model") or "the model", _s(first_any),
+              _s(first_thinking), _s(first_content), _s(end), sum(map(len, thinking)), sum(map(len, content)))
     return {"model": last.get("model"), "done_reason": last.get("done_reason"),
             "prompt_eval_count": last.get("prompt_eval_count"), "eval_count": last.get("eval_count"),
             "message": {"content": "".join(content), **({"thinking": "".join(thinking)} if thinking else {})}}
