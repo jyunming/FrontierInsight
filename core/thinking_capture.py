@@ -22,6 +22,16 @@ THINKING_NOTE = "the model's own account of its reasoning, not evidence"
 THINKING_LINE_CHARS = 64_000
 THINKING_FILE_BYTES = 32 * 1024 * 1024
 
+# Connections that cannot hand a model's reasoning text back at all, by provider name, with what to tell the user.
+CANNOT_RETURN: dict[str, str] = {
+    "gemini_cli": "the Gemini CLI's output has no reasoning in it",
+    "antigravity_cli": "the Antigravity CLI (agy) reports only how many tokens the model spent thinking, not the text",
+    "copilot_cli": "the Copilot CLI is not read for reasoning (use the VS Code connection for that)",
+    "claude_code": "the Claude proxy returns only the answer",
+    "github_copilot_cli": "the Copilot proxy returns only the answer",
+    "github_copilot_vscode": "the Copilot proxy returns only the answer",
+}
+
 _HOLDER: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar("fi_thinking_holder", default=None)
 
 

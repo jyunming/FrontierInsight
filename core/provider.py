@@ -234,6 +234,10 @@ class _CliSpec:
     # (core/thinking_capture.py). ``None``: this CLI's reasoning is not read. Read beside ``usage_extractor``, from
     # the same stdout, on the path that collects it (``last_message_file``); never the answer.
     reasoning_extractor: Callable[[str], str] | None = None
+    # What this CLI must be told for its output to carry the reasoning at all (``output.save_thinking``): added to a
+    # call only when the engine will keep the reasoning (``thinking_capture.wanted()``), never otherwise. claude and
+    # codex leave the reasoning text out of a non-interactive call unless asked; ``()``: nothing to ask.
+    thinking_args: tuple[str, ...] = ()
     # Environment variables to clear for this CLI's subprocess, and the one
     # variable whose presence means the user chose the env path deliberately
     # and we must not touch anything.
@@ -731,6 +735,10 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         pass_prompt_via="stdin",
         output_via="stream_json",
         usage_extractor=lambda raw: _extract_claude_usage(raw),
+        # A non-interactive claude call omits the thinking text (each thinking block arrives with an empty text and a
+        # signature; checked on Claude Code 2.1.287 with Haiku). The user setting `showThinkingSummaries`, given
+        # for this call only, brings the text back (an older CLI ignores an unknown settings key).
+        thinking_args=("--settings", '{"showThinkingSummaries":true}'),
         model_flag="--model",   # provider.model = "opus" / "sonnet" / "claude-opus-4-7"
         image_input="stream_json",
         # `claude --effort <level>` (Claude Code 2.1.x). Checked against the
@@ -806,6 +814,9 @@ _CLI_SPECS: dict[str, _CliSpec] = {
         # ...; not seen in a real call). Whether a model returns one depends on the model and Codex's own summary
         # setting.
         reasoning_extractor=lambda raw: _extract_codex_reasoning(raw),
+        # Without a summary setting codex returns no reasoning item (checked with gpt-6-luna on codex-cli 0.159: the same
+        # question gave none, and with the setting a `reasoning` item). It is a short summary, not the full chain.
+        thinking_args=("-c", 'model_reasoning_summary="detailed"'),
         # provider.model = "gpt-5.5". Left blank, codex uses its own default
         # model: config.toml's `model` is not read (--ignore-user-config).
         model_flag="-m",
@@ -1056,11 +1067,53 @@ def _reasoning_of(data: dict[str, Any]) -> str:
         return ""
     if not isinstance(message, dict):
         return ""
-    for key in ("reasoning_content", "reasoning"):
+    for key in ("reasoning_content", "reasoning", "reasoning_text"):
         value = as_text(message.get(key))  # a list of summary strings too
         if value:
             return value
     return ""
+
+
+def _ollama_native(base_url: str) -> str | None:
+    """Ollama's own chat URL for an OpenAI-compatible ``base_url`` that ends in ``/v1`` (the default), else ``None``."""
+    base = base_url.rstrip("/")
+    return base[: -len("/v1")] + "/api/chat" if base.endswith("/v1") else None
+
+
+def _ollama_native_body(body: dict[str, Any]) -> dict[str, Any] | None:
+    """The same request in Ollama's native ``/api/chat`` form, asking the model to think (``think``): Ollama's
+    OpenAI-compatible endpoint never returns a model's reasoning, its own API does (``message.thinking``). The user's
+    ``reasoning_effort`` (``body["reasoning_effort"]``) is passed on as ``think``'s named level; ``None`` when the
+    request has something the native form would change (a message with an image, or a field of ``extra_body``)."""
+    known = {"model", "messages", "temperature", "max_tokens", "reasoning_effort"}
+    messages = body.get("messages")
+    if set(body) - known or not isinstance(messages, list):
+        return None
+    if any(not isinstance(m, dict) or not isinstance(m.get("content"), str) for m in messages):
+        return None
+    options: dict[str, Any] = {}
+    if body.get("temperature") is not None:
+        options["temperature"] = body["temperature"]
+    if isinstance(body.get("max_tokens"), int) and not isinstance(body.get("max_tokens"), bool):
+        options["num_predict"] = body["max_tokens"]
+    return {"model": body["model"], "messages": messages, "stream": False, "think": body.get("reasoning_effort") or True,
+            **({"options": options} if options else {})}
+
+
+def _ollama_as_openai(data: dict[str, Any]) -> dict[str, Any]:
+    """Ollama's native reply in the shape of an OpenAI-compatible one (answer, ``reasoning_content``, finish reason,
+    usage), so everything after the call reads it as it reads any other."""
+    message = data.get("message") if isinstance(data.get("message"), dict) else {}
+    thought = message.get("thinking")
+    done = data.get("done_reason")
+    prompt, out = int(data.get("prompt_eval_count") or 0), int(data.get("eval_count") or 0)
+    return {
+        "model": data.get("model") if isinstance(data.get("model"), str) else None,
+        "choices": [{"index": 0, "finish_reason": "length" if done == "length" else "stop",
+                     "message": {"role": "assistant", "content": message.get("content") or "",
+                                 **({"reasoning_content": thought} if isinstance(thought, str) and thought else {})}}],
+        "usage": {"prompt_tokens": prompt, "completion_tokens": out, "total_tokens": prompt + out},
+    }
 
 
 async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
@@ -2306,6 +2359,8 @@ async def _run_cli(
     # ``provider.reasoning_effort``: empty unless the level is set AND this
     # CLI can express it. Kept ahead of a trailing prompt flag, like images.
     effort_args = _cli_effort_args(spec, reasoning_effort)
+    # Ask for the reasoning only when the engine will keep it (``output.save_thinking``).
+    effort_args = [*effort_args, *(spec.thinking_args if thinking_wanted() else ())]
     if spec.pass_prompt_via == "arg":
         argv[-1:-1] = effort_args
     else:
@@ -4111,6 +4166,33 @@ class LLMClient:
         # cancellation tests in tests/test_provider.py if you touch
         # this retry config.
         async def send(request_body: dict[str, Any]) -> dict[str, Any]:
+            # Ollama only hands a model's reasoning back through its own API, so when the reasoning will be kept
+            # (``output.save_thinking``) the call goes there; a model that cannot think (or a server that does not
+            # know the call) is remembered and sent to the OpenAI-compatible endpoint as before.
+            native_url = _ollama_native(self.endpoint.base_url) if self.endpoint.provider_name == "ollama" else None
+            refused = self.__dict__.setdefault("_ollama_not_thinking", set())
+            native = (_ollama_native_body(request_body) if native_url and thinking_wanted()
+                      and request_body.get("model") not in refused else None)
+            if native is None or native_url is None:
+                return await send_to(url, request_body)
+            try:
+                return _ollama_as_openai(await send_to(native_url, native))
+            except httpx.HTTPStatusError as e:
+                sc = getattr(getattr(e, "response", None), "status_code", None)
+                if sc not in (400, 404, 405, 501):
+                    raise
+                try:
+                    said = str(getattr(getattr(e, "response", None), "text", "") or "")
+                except Exception:  # noqa: BLE001 -- a body that cannot be read only loses the detail
+                    said = ""
+                if "think" in said.lower() or sc in (404, 405, 501):
+                    refused.add(request_body.get("model"))  # not asked again; any other 400 is asked afresh next time
+                _log.info("[%s] Ollama's own chat call (which returns the model's reasoning) was not accepted for "
+                          "%s (HTTP %s); using the OpenAI-compatible call, whose answers carry no reasoning",
+                          node or "chat", request_body.get("model"), sc)
+                return await send_to(url, request_body)
+
+        async def send_to(call_url: str, request_body: dict[str, Any]) -> dict[str, Any]:
             data: dict[str, Any] = {}
             async for attempt in AsyncRetrying(
                 # Six attempts over about 3-4.5 minutes once the provider's
@@ -4141,10 +4223,10 @@ class LLMClient:
                         self._node_http_timeout_s, node, self._http_timeout_s,
                     )
                     if streams:
-                        data = await _post_streamed(self._http, url, request_body, headers, http_timeout)
+                        data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
                     else:
                         r = await self._http.post(
-                            url, json=request_body, headers=headers, timeout=http_timeout,
+                            call_url, json=request_body, headers=headers, timeout=http_timeout,
                         )
                         # Raise for any error status; the retry predicate
                         # (_retry_http_error) retries only 5xx / 429, letting a 4xx

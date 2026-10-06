@@ -17301,7 +17301,14 @@ class Engine:
             said.add(("declined", model))
             self._log.info("[thinking] %s did not accept FI's request for its reasoning, so FI asked again without it "
                            "(%s); its answers are used as usual", model, declined[:200])
-        if outcome == "ok" and not text.strip() and ("none", node) not in said:
+        provider = str(served.get("provider") or "")
+        if (outcome == "ok" and not text.strip() and provider in _thinking.CANNOT_RETURN
+                and ("cannot", provider) not in said):
+            said.add(("cannot", provider))
+            self._log.info("[thinking] %s cannot return a model's reasoning: %s; only its answers are kept (set "
+                           "output.save_thinking: false to stop this note)", provider, _thinking.CANNOT_RETURN[provider])
+        if (outcome == "ok" and not text.strip() and provider not in _thinking.CANNOT_RETURN
+                and ("none", node) not in said):
             said.add(("none", node))
             self._log.info("[thinking] %s: this model/connection returned no reasoning for this step (only its answer "
                            "and any reasons it wrote in it are kept)", node)
