@@ -4,10 +4,10 @@
 # the folder you run FI from (FI reads it at start, the file is git-ignored) or set it in the environment; never write the
 # key into this file. The global endpoint is api.moonshot.ai; a key made on the Chinese platform uses api.moonshot.cn.
 #
-# Kimi K2.6 and K3 answer only one temperature (0.6 with thinking off, 1 with it on) and reject any other with HTTP 400, so
-# `fixed_temperature` replaces the per-node temperatures, and `extra_body` turns thinking off: a reasoning model spends most
-# of its output tokens on reasoning, which is what made a one-word reply cost 32 tokens instead of 4. Remove `extra_body`
-# (and set `fixed_temperature: 1`) to run it with thinking on.
+# Kimi K2.6 and K3 answer only one temperature (1 with thinking on, 0.6 with it off) and reject any other with HTTP 400, so
+# `fixed_temperature` replaces the per-node temperatures. Thinking is on: FI keeps the model's reasoning in
+# .fi/thinking.jsonl, at the cost of more output tokens (a one-word reply took 32 tokens instead of 4). To turn it off,
+# add `extra_body: {thinking: {type: disabled}}` and set `fixed_temperature: 0.6`.
 #
 # Run it:  python launch.py --config examples/kimi_moonshot/config.yaml
 # In VSCode:  @fi /start examples/kimi_moonshot/config.yaml   (a YAML that names its own provider keeps it: the quest does
@@ -25,10 +25,7 @@ provider:
   base_url: https://api.moonshot.ai/v1
   api_key_env: MOONSHOT_API_KEY
   model: kimi-k2.6
-  fixed_temperature: 0.6
-  extra_body:
-    thinking:
-      type: disabled
+  fixed_temperature: 1
 engine:
   max_iterations: 1
   review_loop: false
