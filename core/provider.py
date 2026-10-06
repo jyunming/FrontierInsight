@@ -4317,6 +4317,13 @@ class LLMClient:
                 reply = _ollama_as_openai(await send_to(native_url, native, native=True))
             except ThinkingLoop as loop:
                 note_loop(loop.kind, loop.block, loop.repeats, loop.chars)
+                # The cut stream never reported its usage; the reasoning it spent is paid for, so it is counted as
+                # a failed attempt with an estimate (about four characters a token), like any attempt that did answer.
+                spent = max(1, loop.chars // self._CHARS_PER_TOKEN)
+                _note_failed_attempt(self.last_provider, request_body.get("model"), cut_off(
+                    {"model": request_body.get("model"), "usage": {"prompt_tokens": 0, "completion_tokens": spent,
+                                                                    "total_tokens": spent}},
+                    request_body.get("max_tokens")))
                 _log.info("[%s] %s; asking again without reasoning", node or "chat", loop)
                 return await without_reasoning()
             except httpx.HTTPStatusError as e:
