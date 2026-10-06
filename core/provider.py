@@ -5082,6 +5082,13 @@ class FallbackLLMClient:
         # Every provider failed on this call, or all circuits are already open.
         if errors:
             _, last_err = errors[-1]
+            if len(errors) > 1 and not all(getattr(e, "fi_timeouts", {}).get("all") for _, e in errors):
+                # The last provider timing out on every try is not "the model is too slow" when another failed another
+                # way: crash_kind reads it as a passing problem.
+                try:
+                    last_err.fi_timeouts["all"] = False  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001 -- no mark on the error
+                    pass
             try:
                 chain = ", ".join(lbl for lbl, _ in errors)
                 last_err.add_note(f"[FI] all providers exhausted: {chain}")

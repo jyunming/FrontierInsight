@@ -646,3 +646,13 @@ def test_a_single_timeout_is_a_passing_problem_but_every_try_timing_out_is_not()
     one_try = _raised(httpx.ReadTimeout("slow"))
     one_try.fi_timeouts = {"tries": 1, "all": True, "limit_s": 900.0}  # type: ignore[attr-defined]
     assert ck.classify(one_try, node="implement").kind == "transient"
+
+
+def test_the_timeout_mark_is_read_through_a_wrapped_error() -> None:
+    inner = _raised(httpx.ReadTimeout("slow"))
+    inner.fi_timeouts = {"tries": 4, "all": True, "limit_s": 600.0}  # type: ignore[attr-defined]
+    try:
+        raise RuntimeError("the step failed") from inner
+    except RuntimeError as outer:
+        f = ck.classify(outer, node="write", provider="ollama", model="m")
+    assert f.kind == "setup" and "(600 s)" in f.say
