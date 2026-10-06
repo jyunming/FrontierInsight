@@ -151,13 +151,34 @@ export function thinkingText(value: unknown): string | undefined {
  * default (Python sends `ask_thinking: false` when the quest keeps no reasoning, `output.save_thinking: false`); a model
  * that refuses the option is asked again once without it, and not asked again for as long as the bridge runs.
  *
- * GPT models (OpenAI's Responses API) send their reasoning summary inside an encrypted reasoning item; Copilot passes it
- * to another extension only when the request carries `includeEncryptedThinking: true` (a request option VS Code hands to
- * the model provider as it is: extHostLanguageModels.ts, vscode.proposed.chatProvider.d.ts). The part then carries the
- * readable summary as its value and the encrypted state in its metadata; FI keeps the summary only, never the encrypted
- * state. Without it, a GPT model in Copilot returns no reasoning to FI although the chat panel shows it.
+ * GPT models (OpenAI's Responses API) keep their reasoning in an encrypted reasoning item; Copilot passes it to another
+ * extension only when the request carries `includeEncryptedThinking: true` (a request option VS Code hands to the model
+ * provider as it is: extHostLanguageModels.ts, vscode.proposed.chatProvider.d.ts), and then as a thinking part whose
+ * metadata holds the encrypted state and whose text is the readable summary when there is one. Measured on Copilot
+ * Chat 0.68 (VS Code 1.140): Copilot's own request to OpenAI never asks for `reasoning.summary`, so that text is empty
+ * and FI gets no GPT reasoning text, whatever FI sends. The option stays: it is what delivers the text if Copilot starts
+ * asking for the summary. FI keeps the readable text only, never the encrypted state, and counts the parts that came
+ * with no text (`ThinkingCollector.emptyParts`) so it can say so (`thinking_parts_empty` on `lm_done`).
  */
 export const THINKING_REQUEST_OPTIONS = { modelOptions: { _enableThinking: true }, includeEncryptedThinking: true };
+/** The version of what this extension tells FI over the bridge. Raise it by one when FI starts to rely on something an
+ * older extension does not do (asking for the model's reasoning was the first). It rides on every `lm_done`, on the
+ * `models` reply and in the Output line "persistent bridge listening"; an older extension sends none, which FI reads as
+ * 0 and says once that the extension is older than this FI (core/vscode_bridge.py REQUIRED_BRIDGE_PROTOCOL, which a
+ * test keeps equal to this). It is a number kept by hand, not a build stamp: a stamp that changes on every package would
+ * make the committed .vsix manifest differ on every rebuild. */
+export const BRIDGE_PROTOCOL = 1;
+
+/** The error for a model that sent no part for `seconds`. It names who went silent, and a model whose VS Code
+ * extension forwards only the answer (the Ollama extension reports no part while a model is still thinking) is said to
+ * look the same whether it is slow or stuck. "bridge stalled" is the phrase FI retries on. */
+export function stallMessage(
+    model: { vendor?: string; id?: string } | undefined, seconds: number, detail: string,
+): string {
+    const who = model?.id ? ` from ${model.vendor ? model.vendor + "/" : ""}${model.id}` : "";
+    return `bridge stalled: no part${who} for ${seconds} s (${detail})`;
+}
+
 /** Words FI's Python side retries on (core/provider.py `_TRANSIENT_BRIDGE_MARKERS`): the stream failed after the model
  * was asked for its reasoning, so the call is made again without asking. */
 export const THINKING_DECLINED_MARKER = "the model did not accept the request for its reasoning";
@@ -282,7 +303,10 @@ export const LM_DONE_HARD_BYTES = 60 * 1024;
 export class ThinkingCollector {
     text = "";
     total = 0;
+    /** Reasoning parts that arrived with no text in them (a GPT model's reasoning comes encrypted only). */
+    emptyParts = 0;
     add(fragment: string, keepChars: number = LM_DONE_MAX_BYTES): void {
+        if (!fragment) this.emptyParts++;
         this.total += fragment.length;
         if (this.text.length < keepChars) this.text += fragment.slice(0, keepChars - this.text.length);
     }

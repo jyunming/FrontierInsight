@@ -188,12 +188,72 @@ step's call and keeps what comes back in `.fi/thinking.jsonl`; Opus returns a
 summary of its thinking, not the full text. The option is internal to
 Copilot and may stop working in any Copilot release. A model that refuses it
 is asked again once without it (the quest goes on; `run.log` says so once).
-A GPT model (gpt-5.6-luna, for one) sends its reasoning summary in an
-encrypted reasoning item that Copilot passes to another extension only when
-the request carries `includeEncryptedThinking: true`; FI sends it and keeps
-only the readable summary.
+An OpenAI (GPT) model returns no reasoning text through VS Code in the Copilot
+version checked (Copilot Chat 0.68, VS Code 1.140): FI sends
+`includeEncryptedThinking: true`, which makes Copilot pass the model's
+reasoning on, but Copilot's own request to OpenAI never asks for the reasoning
+summary (it asks only for the encrypted state), so the part arrives with no text
+in it. Checked live: `gpt-5.4`, `gpt-5.4-mini` and `gpt-5-mini` returned 0
+characters on a question that needs several steps, while `claude-haiku-4.5`
+returned 387 and `kimi-k3` 90. This is a limit of Copilot and VS Code (the
+thinking-part API is still a proposal, microsoft/vscode#246993), not of FI.
+`run.log` says so once, with the route that works: the `codex_cli` connection
+saves OpenAI's reasoning summary. The option stays on, so the text arrives if a
+later Copilot starts asking for the summary.
+**A model from another VS Code extension** (for example the Ollama extension,
+vendor `ollama-models`) returns no reasoning either: that extension passes on
+only the answer and tool calls, never a thinking part (read in its source,
+`ollama.ollama` 0.0.12, `out/provider.js`), whatever model runs behind it. It
+also reports nothing while a model is still thinking, so a slow model and a stuck
+one look the same to FI, which gives up after 180 s with an error that names the
+model (`bridge stalled: no part from ollama-models/<model> for 180 s`). To keep a
+local model's reasoning, use FI's own `ollama` connection (it calls Ollama's
+native API with `think`). Checked with `gemma4:31b-cloud` through the Ollama
+extension: five answers in 2 to 25 s with no reasoning; one earlier request had
+stalled for 180 s without a part while the extension host was freezing (see
+below), a stall that did not come back and has no proven cause.
+**An older FI extension.** The extension tells FI which bridge protocol it
+speaks (`protocol` on every answer; the "persistent bridge listening" line in
+the Output panel shows it). An extension that is older than the FI using it
+(one built before FI asked for reasoning sends none) is said once in `run.log` and on
+the console: "The FI extension in VS Code is older than this FI; update it (the
+.vsix in vscode-frontier-insight/) and reload the window." The quest goes on.
+**VS Code's extension host freezing.** In the logs of one session the host was
+reported unresponsive about every five minutes and was ended three times in a
+minute and a half (exit code 0, about 30 s after each start). The only
+extension profiled was `RobBos.copilot-token-tracker`, whose time went to
+synchronous file reads (`readSessionEvents`, `readFileSync`); no FI code ran at
+those moments. The three endings were not profiled, so that extension is the
+suspect, not a proven cause.
 `output.save_thinking: false` stops asking. The chat's per-step line
 (`... N thinking ...`) shows how many characters of thinking arrived.
+
+**Which connections return a model's reasoning.** `output.save_thinking` (on by
+default) keeps whatever reasoning a connection hands back in
+`.fi/thinking.jsonl`. Most connections return none unless they are asked, so
+with the setting on FI asks wherever the connection has a way to; with
+`output.save_thinking: false` it asks for nothing and keeps nothing. The model
+and `provider.reasoning_effort` are never changed by this. What comes back is
+what the provider chooses to show: often a summary, never a guarantee, and a
+model that did not reason on a step (a very short question, a low effort level)
+returns nothing for it.
+
+| Connection | How FI asks | Where it comes back | Notes |
+|---|---|---|---|
+| `ollama` | Calls Ollama's own `/api/chat` with `think` (the `reasoning_effort` level if you set one, else on). Its OpenAI-compatible `/v1` endpoint never returns reasoning, whatever is sent | `message.thinking` | A model that cannot think, or a request with an image or an `extra_body`, uses the `/v1` call as before. Checked with `gemma4:31b-cloud`: no reasoning on `/v1`, a few hundred characters on `/api/chat`; a named level (`low`) made that model return none, so leave `reasoning_effort` unset to see its thinking |
+| `openai`, `vllm`, other OpenAI-compatible servers | Nothing to ask: the server decides | `reasoning_content`, `reasoning` or `reasoning_text` on the message (streamed or not) | OpenAI's own chat endpoint does not return reasoning text; a vLLM server needs its `--reasoning-parser`. Not probed here except Kimi |
+| Kimi / Moonshot (`openai`) | Thinking is on unless `extra_body` turns it off | `reasoning_content` | `examples/kimi_moonshot/config.yaml` keeps thinking on (`fixed_temperature: 1`), so its reasoning is saved; `extra_body: {thinking: {type: disabled}}` with `fixed_temperature: 0.6` turns it off. Checked on `kimi-k2.6` |
+| `gemini` (HTTP) | Not asked | The OpenAI-compatible endpoint puts thoughts inside the answer text | Not read: separating them from the answer is not done. Not probed |
+| `claude_cli` | `--settings '{"showThinkingSummaries":true}'` for the call only | `thinking_delta` events of the stream | Without it a non-interactive Claude call sends each thinking block with an empty text (checked on Claude Code 2.1.287, Haiku) |
+| `codex_cli` | `-c model_reasoning_summary="detailed"` | `item.completed` events of type `reasoning` | A short summary, not the full chain; Codex sends none for a step the model did not reason about (checked with `gpt-6-luna`: with the setting a reasoning item at effort `high`, none at `low`) |
+| `vscode_extension` | Copilot's `_enableThinking` (and `includeEncryptedThinking` for GPT), see above | Thinking parts of the reply | Checked live: Claude (`claude-haiku-4.5`, Opus, Sonnet) and `kimi-k3` return a summary; every OpenAI model returns none; a model from another extension (Ollama) returns none |
+| `gemini_cli` | Cannot | Its output has no reasoning in it (the `stream-json` events are init, message, tool use and result) | `run.log` says so once |
+| `antigravity_cli` (agy) | Cannot | Its stream reports only how many tokens the model spent thinking (329 in one check), not the text | `run.log` says so once |
+| `copilot_cli` | Not read | Its `--output-format json` events were not mapped for reasoning, and the CLI is agentic and not recommended | `run.log` says so once |
+| `claude_code`, `github_copilot_cli`, `github_copilot_vscode` (proxies) | Not asked | The proxy returns only the answer, as far as FI reads it | Not probed here (none installed). `reasoning_content` from a proxy would be kept |
+
+Where a connection cannot return reasoning, `run.log` says so once in plain
+words instead of repeating "returned no reasoning" at every step.
 
 **Which nodes.** Five nodes have been measured on a cheaper model:
 `cross_check`, `select_skills`, `literature_screen`, `slides` and

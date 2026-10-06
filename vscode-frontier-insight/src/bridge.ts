@@ -24,8 +24,8 @@ import * as net from "net";
 import * as os from "os";
 import { ChildProcess } from "child_process";
 import {
-    BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, looksTransient,
-    partKind as partKindOf, servedModel, thinkingText, toChatMessages,
+    BRIDGE_PROTOCOL, BridgeMessage, ChatMessageApi, ThinkingCollector, ThinkingRequests, lmDoneMessage, looksTransient,
+    partKind as partKindOf, servedModel, stallMessage, thinkingText, toChatMessages,
 } from "./lm-messages";
 
 // Sanitize a free-text fragment so it renders as plain prose
@@ -747,11 +747,11 @@ export class Bridge {
                         // Include thinking-char count too so the user can
                         // tell if the model was reasoning (thinking >0,
                         // no output chunks) vs truly silent.
-                        throw new Error(
-                            `bridge stalled: no part for ${INACTIVITY_MS / 1000} s ` +
-                            `(received ${chunkCount} chunks / ${chars} chars / ` +
-                            `${thinkingChars} thinking chars before stall)`,
-                        );
+                        throw new Error(stallMessage(
+                            model, INACTIVITY_MS / 1000,
+                            `received ${chunkCount} chunks / ${chars} chars / ` +
+                            `${thinkingChars} thinking chars before stall`,
+                        ));
                     }
                     if (result.done) break;
                     if (partsSeen++ === 0) this.thinkingRequests.firstPart(modelKey, askedForThinking);
@@ -805,6 +805,8 @@ export class Bridge {
                 id: req.id,
                 content: accumulated,
                 served_model: servedModel(model),
+                protocol: BRIDGE_PROTOCOL,
+                ...(thinkingAll.emptyParts ? { thinking_parts_empty: thinkingAll.emptyParts } : {}),
                 ...(declined ? { thinking_declined: declined } : {}),
             }, thinkingAll.text, undefined, thinkingAll.total));
         } catch (e) {
