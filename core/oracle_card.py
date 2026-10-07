@@ -324,6 +324,7 @@ def build(
             "expected": expected,
             "expected_text": shown_expected,
             "reference": _oracle.reference_of(oracle),
+            "expected_formula": str(oracle.get("expected_formula") or ""),
             "measured": value,
             "measured_text": shown_value,
             "measured_by": ("fi" if engine else "script") if value is not None else "",

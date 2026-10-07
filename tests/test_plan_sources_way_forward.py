@@ -38,9 +38,9 @@ GOOD_MODEL = {
 
 def _oracles(reference: str = "") -> list[dict[str, Any]]:
     return [
-        {"name": "source_normalization", "check": "sum of the source weights", "expected": 1.0, "tolerance": 1e-9,
+        {"name": "source_normalization", "check": "sum of the source weights", "expected": 1.0, "expected_formula": "1.0", "tolerance": 1e-9,
          "reference": reference},
-        {"name": "horizontal_symmetry", "check": "x-centroid of the source", "expected": 0.0, "tolerance": 1e-9,
+        {"name": "horizontal_symmetry", "check": "x-centroid of the source", "expected": 0.0, "expected_formula": "0.0", "tolerance": 1e-9,
          "reference": reference},
     ]
 

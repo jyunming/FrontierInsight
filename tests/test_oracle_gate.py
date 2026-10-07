@@ -15,7 +15,7 @@ from core.config import (
 from core.engine import Engine
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 
-ORACLE = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size against the root of the final-size relation", "expected": 1.0, "tolerance": 0.05}
+ORACLE = {"name": "final size closed form", "kind": "closed_form", "check": "small-N final size against the root of the final-size relation", "expected": 1.0, "expected_formula": "1.0", "tolerance": 0.05}
 
 
 # --- reading an oracle run ---------------------------------------------------------------------------------------------

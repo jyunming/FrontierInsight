@@ -439,7 +439,7 @@ def apply_to_plan(text: str, *, fi_runs: bool = True) -> tuple[str, list[str], l
     return (edited if edited is not None else text), (enforced.rewrites if edited is not None else []), enforced.requests
 
 
-_SHOWN = ("kind", "measure", "case", "expected", "tolerance", "tolerance_mode")
+_SHOWN = ("kind", "measure", "case", "expected", "expected_formula", "tolerance", "tolerance_mode")
 _TOLD = {"check": "what it checks is worded differently", "reference": "where its expected value comes from changed"}
 
 
@@ -472,6 +472,149 @@ def request(requests: list[str], *, last: bool = True) -> str:
         + ("\nChange only these checks (and a criterion that reads one of them, when its number changes meaning), and "
            "nothing else in the plan." if last else "")
     )
+
+
+# --- the expected value, computed by FI itself, before anything runs -----------------------------------------------------
+#
+# A plan that writes an expected value from memory can be wrong in a way no check of its written steps can see (a real
+# plan wrote K(0.0670) = 1.654 where the elliptic integral is 1.5981, and every multiplication around it was right). So
+# each check may carry ``expected_formula``: the expected value as ONE formula, which FI computes itself, at full
+# precision, with the calculator the checks' own formulas use. Before the protocol is frozen and before any run, when no
+# measured value exists, a formula that disagrees with ``expected`` by more than the check's own tolerance is put to the
+# plan once; if they still disagree FI uses the formula's value (the plan's own working, computed exactly), never a
+# measured one.
+
+#: How an ``expected_formula`` is written, generated from the calculator's own function tables so the two cannot drift.
+EXPECTED_FORMULA_LANGUAGE = (
+    "the expected value as one formula FI can compute itself: numbers, + - * / ** %, parentheses, pi, the functions "
+    f"{FUNCTION_LIST}, and {', '.join(f'{n}(m)' for n in sorted(SPECIAL_FUNCTIONS))} with m = k**2 (SciPy's "
+    "convention, so ellipk(sin(a/2)**2) for amplitude a), and the settings of the check's `case` by name; angles in "
+    "radians (30 degrees is 30*pi/180)"
+)
+
+
+def case_numbers(oracle: dict[str, Any]) -> dict[str, float]:
+    """The settings of ``oracle``'s ``case`` that are plain numbers, by name (what a formula may use)."""
+    case = oracle.get("case") if isinstance(oracle.get("case"), dict) else {}
+    return {str(k): float(v) for k, v in case.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
+
+
+def formula_value(oracle: dict[str, Any]) -> tuple[float | None, str]:
+    """``(value, "")`` the check's ``expected_formula`` computes, or ``(None, why not)``; why is ``"missing"`` when the
+    check has none."""
+    text = oracle.get("expected_formula")
+    if text is None or (isinstance(text, str) and not text.strip()):
+        return None, "missing"
+    if isinstance(text, bool) or not isinstance(text, (str, int, float)):
+        return None, "it is not a formula"
+    result = evaluate(str(text), case_numbers(oracle), special=True)
+    if result.value is not None:
+        return result.value, ""
+    if result.missing:
+        return None, f"it uses {', '.join(result.missing)}, which the check's case does not set as a number"
+    return None, result.unreadable or result.problem or "it cannot be computed"
+
+
+#: Said to the plan, and in plan.md, about a formula that can be read two ways.
+AMBIGUOUS_WHY = ("it can be read two ways: write it so it can only be read one way (angles in radians with pi, log10 or "
+                 "ln named, ellipk(k**2))")
+
+
+def formula_findings(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """What FI's own computation of each check's expected value found, for the checks FI may correct that can be judged
+    (a number ``expected`` and a ``tolerance``): ``{"name", "state", ...}`` with ``state`` ``agrees``, ``missing``,
+    ``unusable`` (``why``), ``ambiguous`` (a disagreeing formula that can be read two ways: never applied) or ``differs``
+    (``value``, ``expected``). A check whose number is a violation, expecting 0
+    by its form, has no formula to compute."""
+    from . import oracle_triage as _triage
+
+    found: list[dict[str, Any]] = []
+    for oracle in _oracle.declared(protocol):
+        expected, limit, _mode = _oracle.limit_of(oracle)
+        if expected is None or limit is None or not _triage.correctable(oracle):
+            continue
+        name = str(oracle["name"]).strip()
+        value, why = formula_value(oracle)
+        if value is None:
+            found.append({"name": name, "state": "missing" if why == "missing" else "unusable", "why": why,
+                          "formula": str(oracle.get("expected_formula") or "")})
+        elif abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
+            formula = str(oracle.get("expected_formula"))
+            if _triage.ambiguous(formula):
+                # A formula that can be read two ways (sin(30) for 30 degrees, a bare log, ellipk of a modulus) is never
+                # used to change `expected`: FI's reading may not be the plan's.
+                found.append({"name": name, "state": "ambiguous", "value": value, "expected": expected,
+                              "formula": formula, "why": AMBIGUOUS_WHY})
+            else:
+                found.append({"name": name, "state": "differs", "value": value, "expected": expected,
+                              "formula": formula})
+        else:
+            found.append({"name": name, "state": "agrees", "value": value, "expected": expected})
+    return found
+
+
+def _digits(value: float) -> str:
+    return f"{value:.12g}"
+
+
+def formula_request(findings: list[dict[str, Any]], *, last: bool = True) -> str:
+    """The part of the one request to the plan about the expected values FI computed itself: a check with no usable
+    formula, and one whose formula gives another number than its ``expected`` (both numbers shown: no measured value
+    exists yet). ``""`` when every check agrees."""
+    lines = []
+    for f in findings:
+        if f["state"] == "missing":
+            lines.append(f"- {f['name']!r}: give `expected_formula`.")
+        elif f["state"] == "unusable":
+            lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` cannot be computed ({f['why']}); give "
+                         "one that can.")
+        elif f["state"] == "ambiguous":
+            lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` {f['why']}; FI reads it as "
+                         f"{_digits(f['value'])} while `expected` says {_digits(f['expected'])}. Give it in a form that "
+                         "can only be read one way, and the corrected `expected` if the formula is right.")
+        elif f["state"] == "differs":
+            lines.append(f"- {f['name']!r}: FI computed your `expected_formula` `{f['formula']}`: it gives "
+                         f"{_digits(f['value'])}, but `expected` says {_digits(f['expected'])}. Give the corrected "
+                         "`expected` and `expected_formula`.")
+    if not lines:
+        return ""
+    return (
+        "FI works out each expected value itself before anything runs, from a formula the plan gives: "
+        f"{EXPECTED_FORMULA_LANGUAGE}. `expected` must be the number that formula gives, to full precision (a special "
+        "function's value written from memory is the usual mistake: let the formula compute it).\n" + "\n".join(lines)
+        + ("\nChange only these checks, and nothing else in the plan." if last else ""))
+
+
+def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
+    """``(text, corrections)``: ``text`` (a plan.md) with each check's ``expected`` set to what its ``expected_formula``
+    computes where the two still disagree by more than the check's own tolerance; ``tolerance``, ``tolerance_mode``,
+    ``case`` and ``measure`` are never touched. Each correction is ``{"name", "was", "now", "formula"}``."""
+    from . import plan as _plan
+
+    done: list[dict[str, Any]] = []
+
+    def change(block: dict[str, Any]) -> dict[str, Any] | None:
+        protocol = block.get("protocol")
+        if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
+            return None
+        wrong = {f["name"]: f for f in formula_findings(protocol) if f["state"] == "differs"}
+        if not wrong:
+            return None
+        items = []
+        for item in protocol["oracles"]:
+            name = str(item.get("name") or "").strip() if isinstance(item, dict) else ""
+            if name in wrong:
+                f = wrong[name]
+                done.append({"name": name, "was": f["expected"], "now": f["value"], "formula": f["formula"]})
+                item = {**item, "expected": f["value"]}
+            items.append(item)
+        return {**block, "protocol": {**protocol, "oracles": items}}
+
+    edited = _plan.edit_design_block(text, change)
+    if edited is None or not done:
+        return text, []
+    return _plan.refresh_model_section(edited), done
 
 
 # --- a test run of the checks before the study -------------------------------------------------------------------------

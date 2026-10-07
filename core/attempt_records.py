@@ -547,7 +547,9 @@ def model_call_row(*, node: str, attempt: int, served: dict[str, Any] | None, re
         "outcome": outcome,
         # Why the answer ended, when the connection said (``stop``, ``length`` for one cut off at its limit, ...).
         **({"finish_reason": served["finish_reason"]} if served.get("finish_reason") else {}),
+        # ``estimated`` marks a count FI worked out from characters, not one the connection reported.
         "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens") if k in usage}
+        | ({"estimated": True} if usage.get("estimated") else {})
         if isinstance(usage, dict) else None,
     }
 

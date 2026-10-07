@@ -26,8 +26,8 @@ from core.engine import Engine
 
 # Every label the oracle can put on a finding. Each finding carries its own
 # kind rather than one blanket prefix, so "did the oracle block?" is asked
-# against all three.
-_ORACLE_KINDS = ("transposed:", "near_miss:", "trivial_reference:")
+# against all four.
+_ORACLE_KINDS = ("transposed:", "formula_slip:", "near_miss:", "trivial_reference:")
 
 
 class _Recorder:
@@ -373,3 +373,28 @@ def test_panel_review_runs_the_check_too(tmp_path: Path) -> None:
     assert any(
         str(h).startswith("unsourced_number") for h in review["must_flag_hits"]
     ), "a number the run never produced is blocking"
+
+
+def test_a_formula_slip_is_advisory_too(tmp_path: Path) -> None:
+    """The new kind goes through the real review node and never blocks."""
+    import asyncio
+
+    eng = _review_engine(tmp_path)
+
+    async def fake_chat(prompt, *, node=None):  # noqa: ANN001
+        return json.dumps({"verdict": "accept", "score": 4,
+                           "suggestions": [], "must_flag_hits": []})
+
+    eng._chat = fake_chat  # type: ignore[assignment]
+    paper = tmp_path / "paper.md"
+    paper.write_text("The share of runs is 37 / 193 = 0.191 in this setting.", encoding="utf-8")
+    patch = asyncio.run(eng._node_review({  # type: ignore[arg-type]
+        "topic": "t", "iteration": 0, "review": {},
+        "paper_md": str(paper), "result_json": {"unrelated_count": 4321.0},
+    }))
+    review = patch["review"]
+    warnings = review.get("numeric_oracle_warnings") or []
+    assert len(warnings) == 1 and warnings[0].startswith("formula_slip:"), warnings
+    assert not any(
+        str(h).startswith(_ORACLE_KINDS) for h in review["must_flag_hits"]
+    ), "a formula_slip must not block"
