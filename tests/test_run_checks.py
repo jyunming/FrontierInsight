@@ -145,7 +145,65 @@ def test_the_node_reads_the_simulation_again_after_each_gate() -> None:
     src = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
     node = src[src.index("async def _node_execute("):]
     node = node[:node.index("pilot_run and not self.config.execution.background_jobs")]
-    assert node.count("self._results_from_computation(state)") == 3, "before the gates, after the equation gate, after the oracle gate"
+    assert node.count("self._results_from_computation(state)") == 2, "before the gates, and after the equation gate"
+    assert "self._typed_results_stable(" in node, "and until the text the oracle gate leaves has been read"
+
+
+def _fake_gate(eng: Engine, texts: list[str | None]) -> list[int]:
+    """An oracle gate whose repairs write the next text of the simulation (``None``: it leaves the text as it is)."""
+    calls: list[int] = []
+
+    async def gate(state: Any, py: Any, env: Any, seed_path: Path) -> str | None:
+        calls.append(1)
+        text = texts[min(len(calls), len(texts)) - 1]
+        if text is None:
+            return None
+        seed_path.write_text(text, encoding="utf-8")
+        return text
+
+    eng._oracle_gate = gate  # type: ignore[method-assign]
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_a_second_oracle_repair_that_types_a_result_in_again_is_read_again_until_the_text_is_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng, asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": COMPUTED_SIM, "patch_summary": "computed"})])
+    sim = eng.quest_root / "code" / "simulate.py"
+    # The first gate left a typed-in result; its repair (the check's) was followed by a second gate repair that typed one in again.
+    calls = _fake_gate(eng, [TYPED_SIM + "\n# the gate wrote this\n", None])
+    code, stop = await eng._typed_results_stable({}, sys.executable, None, sim, None)
+    assert stop is None and len(calls) == 2 and len(asked) == 2, "read, repaired, gated, read, repaired, gated, read"
+    assert sim.read_text(encoding="utf-8") == COMPUTED_SIM and code == COMPUTED_SIM
+    assert eng._left_out_quantities() == set() and not eng._typed_text_unread(sim)
+
+
+@pytest.mark.asyncio
+async def test_a_simulation_that_never_settles_is_not_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng, asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": COMPUTED_SIM, "patch_summary": "computed"})])
+    sim = eng.quest_root / "code" / "simulate.py"
+    n = {"i": 0}
+
+    async def gate(state: Any, py: Any, env: Any, seed_path: Path) -> str | None:
+        n["i"] += 1
+        text = TYPED_SIM + f"\n# rewritten {n['i']}\n"
+        seed_path.write_text(text, encoding="utf-8")
+        return text
+
+    eng._oracle_gate = gate  # type: ignore[method-assign]
+    code, stop = await eng._typed_results_stable({}, sys.executable, None, sim, None)
+    assert n["i"] == Engine.TYPED_GATE_ROUNDS and stop is not None
+    text = stop["exec_result"]["not_run"]
+    assert "the text FI would run was not checked for typed-in results" in text and stop["exec_give_up_reason"] == text
+    assert eng._typed_text_unread(sim)
+    # The repair step leaves it alone and the gate ends the quest without a second design or a paper.
+    assert await eng._node_execute_reflect({"exec_result": stop["exec_result"], "exec_give_up_reason": text}) == {}
+    verdict = eng._no_results_verdict({"exec_result": stop["exec_result"], "result_json": {}, "iteration": 0})
+    assert verdict is not None and verdict["stuck"] is True and verdict["stuck_reason"] == "not_run"
+    stuck = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "not_run"},
+                                               "exec_result": stop["exec_result"]})
+    assert "No paper was written" in stuck["stuck"]["say"] and "not checked for typed-in results" in stuck["stuck"]["say"]
 
 
 ANALYSIS = '''\
@@ -419,6 +477,49 @@ async def test_nothing_is_timed_for_a_later_pass_or_a_cluster_job(tmp_path: Path
     assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None and ex.calls == 0
     eng.config.execution.background_jobs = True
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and ex.calls == 0
+
+
+FAILS_AT_END = '''\
+import time
+
+def run_trial(cell, trial, seed):
+    if cell["n"] == 4:
+        raise ValueError("the grid cannot take this size")
+    return {"y": float(cell["n"])}
+'''
+FAILS_TOGETHER = '''\
+import time
+
+def run_cell(cell):
+    time.sleep(0.05 * max(cell["a"], cell["b"]))
+    if cell["a"] == 8 and cell["b"] == 8:
+        raise ValueError("both too large")
+    return {"y": float(cell["a"])}
+'''
+
+
+@pytest.mark.asyncio
+async def test_a_setting_that_fails_when_timed_goes_to_the_repair_of_the_simulation_naming_it(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    (eng.quest_root / "code" / "simulate.py").write_text(FAILS_AT_END, encoding="utf-8")
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and patch["exec_result"]["returncode"] == 1
+    assert patch["exec_result"]["failed_script"] == "simulate.py" and "exec_give_up_reason" not in patch
+    said = patch["exec_result"]["stderr_tail"]
+    assert "at n=4: a trial failed: ValueError: the grid cannot take this size" in said and "expected" not in said.lower()
+    assert model.asked == [], "the plan is not asked; the simulation is repaired"
+    assert eng._route_after_execute_reflect({"exec_result": patch["exec_result"], "exec_reflect_iter": 0}) == "retry"
+
+
+@pytest.mark.asyncio
+async def test_a_corner_that_fails_is_a_failing_setting_too(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[], grid={"a": [1, 2, 8], "b": [1, 2, 8]}, runs=1)
+    (eng.quest_root / "code" / "simulate.py").write_text(FAILS_TOGETHER, encoding="utf-8")
+    runner.deterministic = True
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None
+    assert "at a=8,b=8: a trial failed: ValueError: both too large" in patch["exec_result"]["stderr_tail"]
+    assert patch["exec_result"]["failed_script"] == "simulate.py"
 
 
 # ---- "N of M settings done, about T left" -------------------------------------------------------------------------------

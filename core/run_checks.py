@@ -176,6 +176,35 @@ class RunChecksMixin:
             str(parsed.get("patch_summary") or "no summary")[:120])
         return True
 
+    #: The most times the oracle gate and the typed-results check hand the simulation to each other in one pass.
+    TYPED_GATE_ROUNDS = 3
+
+    async def _typed_results_stable(self, state: Any, py: Any, env: Any, seed_path: Path,
+                                    oracle_code: str | None) -> tuple[str | None, dict[str, Any] | None]:
+        """After an oracle repair rewrote the simulation: read the text it left for typed-in results, and when that repair
+        rewrote it again run the oracle gate on the result, and read what that left, until the text is one the check has
+        read (each step is bounded by its own budget per text). ``(the repaired code for the state, None)``; a text still
+        unread when the rounds are spent is not run: ``(code, the quest's stop)``."""
+        for _ in range(self.TYPED_GATE_ROUNDS):
+            if not await self._results_from_computation(state):
+                return oracle_code, None  # the text is read: nothing to rewrite, or nothing it could rewrite
+            again = await self._oracle_gate(state, py, env, seed_path)  # type: ignore[attr-defined]
+            oracle_code = again if again is not None else seed_path.read_text(encoding="utf-8")
+            self._check_equation_labels(state)  # type: ignore[attr-defined]
+            self._check_code_layout(state)  # type: ignore[attr-defined]
+        if self._typed_text_unread(seed_path):
+            text = ("the simulation kept being rewritten by the known-answer checks' repair and by the repair of its typed-in "
+                    "results, and the text FI would run was not checked for typed-in results")
+            return oracle_code, self._stop_before_run(text, "not_run")
+        return oracle_code, None
+
+    def _typed_text_unread(self, seed_path: Path) -> bool:
+        try:
+            sha = hashlib.sha256(seed_path.read_bytes()).hexdigest() if seed_path.is_file() else ""
+        except OSError:
+            return True
+        return bool(sha) and getattr(self, "_typed_checked_sha", None) != sha
+
     def _left_out_quantities(self) -> set[str]:
         """The quantities this pass's analysis and results must not use (still typed into the code after the repairs)."""
         return set(getattr(self, "_typed_result_keys", None) or ())
@@ -250,8 +279,10 @@ class RunChecksMixin:
                 runs=runs, deterministic=runner.deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
                 thresholds=thresholds, cached=cached)
             if probes is None:
-                self._log.info("[execute] FI could not time the experiment before running it (%s); going on", why)  # type: ignore[attr-defined]
-                return None
+                # A setting that fails when timed is a setting the simulation fails at: the same repair as a failed run, naming
+                # it (the error only; the repair is never given an expected value).
+                self._log.warning("[execute] the simulation failed while FI timed the experiment %s", why)  # type: ignore[attr-defined]
+                return self._sizing_failed(why)
             for p in probes:
                 cached[_estimate.probe_key(p.cell, runs)] = p
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
@@ -324,7 +355,7 @@ class RunChecksMixin:
         def request(_now: Any, _text: str) -> str:
             asked["n"] += 1
             return _estimate.request(est, limit_s, runs, deterministic,
-                                     _estimate.rules(before_protocol, before_runs, deterministic))
+                                     _estimate.rules(before_protocol, before_runs, deterministic, est.spreads))
 
         def keep(before: str, revised: str) -> str:
             kept = self._keep_only_the_parts(before, revised, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
@@ -334,7 +365,8 @@ class RunChecksMixin:
             protocol = block.get("protocol") if isinstance(block, dict) and isinstance(block.get("protocol"), dict) else {}
             grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
             new_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
-            problems = _estimate.smaller_run_problems(before_protocol, before_grid, before_runs, grid, new_runs, deterministic)
+            problems = _estimate.smaller_run_problems(
+                before_protocol, before_grid, before_runs, grid, new_runs, deterministic, est.spreads)
             if problems:
                 raise ValueError("the revised plan is not used: " + "; ".join(problems) + "; plan.md is unchanged")
             return kept
@@ -366,14 +398,34 @@ class RunChecksMixin:
             return f"{said}; FI asked the plan {asks} time{'s' if asks != 1 else ''} to make it smaller"
         return said if can_ask else f"{said}; FI had no way to ask the plan to make it smaller"
 
+    def _sizing_failed(self, why: str) -> dict[str, Any]:
+        """A failed run for the existing repair of the simulation: it failed while the experiment was timed, at the setting
+        named in ``why``."""
+        text = f"FI ran a trial of the simulation to time the experiment before the study, and it failed {why}"
+        return {
+            "exec_result": {
+                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],
+                "packages_note": getattr(self, "_packages_note", ""), "failed_script": _split_run.SIMULATE_NAME,
+                "flat_output": "", "numeric_warnings": [],
+            },
+            "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
+            "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
+            "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
+        }
+
     def _stop_too_long(self, text: str) -> dict[str, Any]:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
+        return self._stop_before_run(text, "too_long")
+
+    def _stop_before_run(self, text: str, kind: str) -> dict[str, Any]:
+        """The quest's plain stop before the study (``too_long``: it would not fit the time allowed; ``not_run``: a text of
+        the simulation could not be checked), with no paper."""
         self._log.warning("[execute] %s; stopping, the study was not run", text)  # type: ignore[attr-defined]
         return {
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],
                 "packages_note": getattr(self, "_packages_note", ""), "failed_script": "", "flat_output": "",
-                "numeric_warnings": [], "too_long": text,
+                "numeric_warnings": [], kind: text,
             },
             "exec_give_up_reason": text,
             "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,

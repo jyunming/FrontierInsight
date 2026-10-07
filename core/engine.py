@@ -13342,11 +13342,9 @@ class Engine(RunChecksMixin):
             self._check_code_layout(state)
             # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
             # the gate tests the text that will run.
-            if await self._results_from_computation(state):
-                again = await self._oracle_gate(state, py, exec_env, seed_path)
-                oracle_code = again if again is not None else seed_path.read_text(encoding="utf-8")
-                self._check_equation_labels(state)
-                self._check_code_layout(state)
+            oracle_code, unchecked = await self._typed_results_stable(state, py, exec_env, seed_path, oracle_code)
+            if unchecked is not None:
+                return unchecked
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -14354,7 +14352,7 @@ class Engine(RunChecksMixin):
         if resumed is not None:
             return resumed
         exec_result = state.get("exec_result") or {}
-        if exec_result.get("too_long"):
+        if exec_result.get("too_long") or exec_result.get("not_run"):
             return {}  # the study would not fit the time allowed: there is no script to repair (core/run_estimate.py)
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
@@ -15772,6 +15770,12 @@ class Engine(RunChecksMixin):
                      f"asked for the paper to be written again with the contradiction named ({_RECORD_REWRITES} times); "
                      "the claim was still there"]
             ended = "the paper still claimed what FI's records contradict"
+        if reason == "not_run":
+            said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
+            problem = f"{said}, so nothing was run for the study"
+            tried = ["rewrote the simulation to compute the results it had typed in, and ran the known-answer checks on it",
+                     said]
+            ended = "the simulation's text still could not be checked for typed-in results"
         if reason == "too_long":
             # The study would not finish in the time allowed, even made smaller (core/run_estimate.py): nothing was run.
             said = str((state.get("exec_result") or {}).get("too_long") or "").strip().rstrip(".")
@@ -15818,6 +15822,7 @@ class Engine(RunChecksMixin):
               + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                  or reason == "flat" else
                  "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
+                 "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
                  "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                  "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
@@ -15845,11 +15850,11 @@ class Engine(RunChecksMixin):
             or self.config.engine.analyze_local_first
         ):
             return None
-        too_long = str(exec_result.get("too_long") or "")
-        if too_long:  # stopped before the study, because it would not fit the time allowed: no second try from the design
+        too_long = str(exec_result.get("too_long") or exec_result.get("not_run") or "")
+        if too_long:  # stopped before the study (it would not fit the time allowed, or a text of it was not checked): no second try
             self._log.warning("[evidence_gate] %s; there is nothing measured to write up", too_long)
             return {"verdict": "insufficient", "rationale": too_long, "gaps": [too_long], "stuck": True,
-                    "stuck_reason": "too_long"}
+                    "stuck_reason": "too_long" if exec_result.get("too_long") else "not_run"}
         flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")

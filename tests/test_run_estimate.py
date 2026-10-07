@@ -142,10 +142,10 @@ def test_a_simulation_run_once_per_setting_is_timed_as_one_call(tmp_path: Path) 
     assert 0.55 < by[3] < 1.5 and by[3] > 1.8 * by[1]
 
 
-def test_a_simulation_that_cannot_be_timed_is_left_to_the_real_runs_repair(tmp_path: Path) -> None:
+def test_a_simulation_that_fails_when_timed_says_where_and_why(tmp_path: Path) -> None:
     root = _quest(tmp_path, "def run_trial(cell, trial, seed):\n    raise RuntimeError('broken')\n")
     probes, why = _measure(root, {"n": [1, 2]}, 3, False)
-    assert probes is None and why == "a trial failed"
+    assert probes is None and why == "at n=2: a trial failed: RuntimeError: broken (at code/simulate.py line 2)"
     root2 = _quest(tmp_path / "b", "def not_the_entry():\n    return 1\n")
     probes, why = _measure(root2, {"n": [1]}, 3, False)
     assert probes is None and "could not be loaded" in why
@@ -246,3 +246,61 @@ def test_what_a_smaller_run_must_keep_is_said_in_plain_words() -> None:
     assert est.smaller_run_problems({}, before, 40, before, 40, False) == ["it is not a smaller run"]
     assert est.smaller_run_problems({}, before, 1, {"n": [1, 8]}, 1, True) == [], "a run once per setting has no runs to cut"
     assert "changes which settings" in est.smaller_run_problems({}, before, 40, {"m": [1, 8]}, 10, False)[0]
+
+
+MEAN_PLAN = {"metrics": [{"id": "y", "kind": "mean", "estimand": "mean y", "unit": "one run"}],
+             "precision": {"target_half_width": 0.5, "metric": "y"}}
+PROP_PLAN = {"metrics": [{"id": "hit", "kind": "proportion", "estimand": "hit rate", "unit": "one run"}],
+             "precision": {"target_half_width": 0.1, "metric": "hit"}}
+
+
+def test_the_precision_floor_follows_the_kind_of_the_metric() -> None:
+    assert est.precision_metric(MEAN_PLAN) == ("y", "mean") and est.precision_metric(PROP_PLAN) == ("hit", "proportion")
+    only = {"metrics": MEAN_PLAN["metrics"], "precision": {"target_half_width": 0.5}}
+    assert est.precision_metric(only) == ("y", "mean"), "the plan's only metric"
+    # A proportion: the worst case near 0.5, 97 trials for +-0.1; a plan with more runs may cut down to it.
+    assert est.runs_floor(PROP_PLAN, 400) == 97 and est.runs_floor(PROP_PLAN, 40) == 40
+    # A mean: n >= (1.96 * s / h) ** 2 with s the spread of the timed trials. s = 1.0, h = 0.5 -> 16 runs.
+    assert est.runs_floor(MEAN_PLAN, 400, {"y": 1.0}) == 16
+    assert est.runs_floor(MEAN_PLAN, 400, {"y": 3.0}) == 139
+    assert est.runs_floor(MEAN_PLAN, 10, {"y": 3.0}) == 10, "never more than the run already had"
+    # Not estimable (no trials to take a spread from, or no spread at all): no cut below the plan's own runs.
+    assert est.runs_floor(MEAN_PLAN, 400, None) == 400 and est.runs_floor(MEAN_PLAN, 400, {}) == 400
+    assert est.runs_floor(MEAN_PLAN, 400, {"y": 0.0}) == 400 and est.runs_floor(MEAN_PLAN, 400, {"other": 1.0}) == 400
+    # A stated minimum still applies on top.
+    assert est.runs_floor({**MEAN_PLAN, "min_runs_per_setting": 50}, 400, {"y": 1.0}) == 50
+
+
+def test_a_smaller_run_is_judged_by_the_same_floor() -> None:
+    before = {"n": [1, 2, 4]}
+    assert est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 20, False, {"y": 1.0}) == []
+    assert "below the 16" in est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 15, False, {"y": 1.0})[0]
+    assert "below the 400" in est.smaller_run_problems(MEAN_PLAN, before, 400, {"n": [1, 4]}, 100, False, None)[0]
+    assert "below the 97" in est.smaller_run_problems(PROP_PLAN, before, 400, {"n": [1, 4]}, 96, False, None)[0]
+    assert "keep at least 400 runs per setting" in est.rules(MEAN_PLAN, 400, False, None)
+    assert "keep at least 16 runs per setting" in est.rules(MEAN_PLAN, 400, False, {"y": 1.0})
+
+
+NOISY = '''\
+import time
+
+def run_trial(cell, trial, seed):
+    return {"y": float(seed % 7) * 0.5}
+'''
+
+
+def test_the_two_timed_trials_give_the_spread_of_each_metric(tmp_path: Path) -> None:
+    root = _quest(tmp_path, NOISY)
+    probes, why = _measure(root, {"n": [1, 2, 4]}, 10, False)
+    assert why == "" and probes is not None
+    assert all(set(p.spread) == {"y"} for p in probes)
+    from core import trial_runner
+    values = [(trial_runner.trial_seed(0, trial_runner.cell_key(probes[0].cell), t) % 7) * 0.5 for t in (0, 1)]
+    assert abs(probes[0].spread["y"] - abs(values[0] - values[1]) / 2 ** 0.5) < 1e-9
+    assert est.spreads_of(probes)["y"] == max(p.spread["y"] for p in probes)
+    e = est.estimate({"n": [1, 2, 4]}, 10, False, probes)
+    assert e is not None and e.spreads == est.spreads_of(probes)
+    # A simulation run once per setting has no second trial to take a spread from.
+    root2 = _quest(tmp_path / "b", TOY_CELL)
+    probes2, _ = _measure(root2, {"n": [1, 3]}, 1, True)
+    assert probes2 is not None and all(p.spread == {} for p in probes2)
