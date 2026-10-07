@@ -151,6 +151,66 @@ def test_a_simulation_that_cannot_be_timed_is_left_to_the_real_runs_repair(tmp_p
     assert probes is None and "could not be loaded" in why
 
 
+def _two_axis(corner: float) -> list[est.Probe]:
+    return [est.Probe(None, None, {"a": 2, "b": 2}, 10.0),
+            est.Probe("a", 0, {"a": 1, "b": 2}, 10.0), est.Probe("a", 2, {"a": 4, "b": 2}, 100.0),
+            est.Probe("b", 0, {"a": 2, "b": 1}, 10.0), est.Probe("b", 2, {"a": 2, "b": 4}, 100.0),
+            est.Probe(est.CORNER, None, {"a": 4, "b": 4}, corner)]
+
+
+def test_two_costly_settings_are_not_assumed_to_multiply() -> None:
+    grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
+    assert est.costly_ends(grid, _two_axis(100.0)) == {"a": 2, "b": 2}
+    assert est.corner_cell(grid, {"a": 2, "b": 2}) == {"a": 4, "b": 4}
+    # The cost is the larger of the two (the corner costs no more than one of them): 5 settings at 100, 4 at 10.
+    cheap = est.estimate(grid, 1, True, _two_axis(100.0))
+    assert cheap is not None and abs(cheap.seconds - (5 * 100.0 + 4 * 10.0)) < 1e-6
+    assert cheap.together == {"cell": {"a": 4, "b": 4}, "ratio": 10.0}
+    # Taken as multiplying, the same measurements would say 4 * mean ratio... far more.
+    without = est.estimate(grid, 1, True, _two_axis(100.0)[:-1])
+    assert without is not None and without.seconds > 2.5 * cheap.seconds
+    # A corner dearer than the product raises the cost in the same proportion; one equal to it changes nothing.
+    product = est.estimate(grid, 1, True, _two_axis(1000.0))
+    assert product is not None and abs(product.seconds - without.seconds) < 1e-6
+    dearer = est.estimate(grid, 1, True, _two_axis(2000.0))
+    assert dearer is not None and dearer.seconds > 1.9 * product.seconds
+
+
+def test_the_request_names_the_corner() -> None:
+    grid = {"a": [1, 2, 4], "b": [1, 2, 4]}
+    e = est.estimate(grid, 1, True, _two_axis(100.0))
+    assert e is not None
+    assert "all the costly ends together (`a` = 4, `b` = 4) cost 10 times" in est.request(e, 100.0, 1, True)
+
+
+TWO_AXES = '''
+import time
+
+def run_cell(cell):
+    time.sleep(0.05 * max(cell["a"], cell["b"]))
+    return {"y": float(cell["a"] + cell["b"])}
+'''
+
+
+def test_the_most_expensive_corner_is_timed_when_two_settings_are_each_costly(tmp_path: Path) -> None:
+    root = _quest(tmp_path, TWO_AXES)
+    grid = {"a": [1, 2, 8], "b": [1, 2, 8]}
+    probes, why = _measure(root, grid, 1, True)
+    assert why == "" and probes is not None
+    corner = [p for p in probes if p.axis == est.CORNER]
+    assert len(probes) == 6 and len(corner) == 1 and corner[0].cell == {"a": 8, "b": 8}
+    e = est.estimate(grid, 1, True, probes)
+    assert e is not None and e.complete and e.together is not None
+    # True cost: 0.05 s x the larger value, summed over the 9 settings (47) = 2.35 s plus a process start each; not the product.
+    assert 2.0 < e.seconds < 7.0
+
+
+def test_one_costly_setting_times_no_corner(tmp_path: Path) -> None:
+    root = _quest(tmp_path, TWO_AXES)
+    probes, _why = _measure(root, {"a": [1, 2, 8], "b": [2]}, 1, True)
+    assert probes is not None and all(p.axis != est.CORNER for p in probes)
+
+
 class _NeverFinishes:
     """An executor whose process runs out of its allowance without reporting a trial."""
 
@@ -172,3 +232,17 @@ def test_a_trial_that_runs_out_of_its_allowance_is_a_lower_bound_and_the_rest_is
     assert e is not None and e.at_least and not e.complete
     assert est.known_too_long(e, 3600.0)
     assert est.says(e, 3600.0).startswith("FI estimates the experiment takes at least ")
+
+
+def test_what_a_smaller_run_must_keep_is_said_in_plain_words() -> None:
+    before = {"n": [1, 2, 4, 8]}
+    proto = {"precision": {"target_half_width": 0.1}}
+    assert est.smaller_run_problems({}, before, 40, {"n": [1, 8]}, 10, False) == []
+    assert est.smaller_run_problems({}, before, 40, {"n": [2, 4, 8]}, 40, False)[0].startswith("it drops the first or last value")
+    assert "not marked as a numerical resolution" in est.smaller_run_problems({}, before, 40, {"n": [1, 3, 8]}, 10, False)[0]
+    assert est.smaller_run_problems({"numerical_axes": ["n"]}, before, 40, {"n": [1, 3, 8]}, 10, False) == []
+    assert "below the 40" in est.smaller_run_problems(proto, before, 40, {"n": [1, 8]}, 20, False)[0]
+    assert est.smaller_run_problems(proto, before, 400, {"n": [1, 8]}, 100, False) == [], "97 trials are enough for ±0.1"
+    assert est.smaller_run_problems({}, before, 40, before, 40, False) == ["it is not a smaller run"]
+    assert est.smaller_run_problems({}, before, 1, {"n": [1, 8]}, 1, True) == [], "a run once per setting has no runs to cut"
+    assert "changes which settings" in est.smaller_run_problems({}, before, 40, {"m": [1, 8]}, 10, False)[0]

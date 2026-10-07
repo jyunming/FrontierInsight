@@ -158,17 +158,76 @@ def run_cell(cell):
     assert _keys(src, exempt={"mass"}) == ["cap"]
 
 
-def test_a_module_constant_and_other_functions_are_not_read() -> None:
+def test_a_module_constant_under_its_own_name_is_an_echoed_setting_under_another_name_it_is_a_result() -> None:
     src = '''
 LIMIT = 5.0
+SPRING_K = 2.0
 
 def helper():
     return {"k": 1.0}
 
 def run_trial(cell, trial, seed):
-    return {"limit": LIMIT, "n": cell["n"]}
+    return {"limit": LIMIT, "spring_k": SPRING_K, "ok_rate": LIMIT, "n": cell["n"]}
 '''
-    assert _keys(src) == [], "only the entry functions are read; a module constant is a setting given by name"
+    assert _keys(src) == ["ok_rate"], "only the entry functions are read; LIMIT as `limit` is a setting echoed back"
+    assert _keys(src, exempt={"ok_rate"}) == []
+    shadowed = ("LIMIT = 5.0\n\ndef run_trial(cell, trial, seed):\n    LIMIT = cell['x'] * 2\n"
+                "    return {'ok_rate': LIMIT}\n")
+    assert _keys(shadowed) == [], "a name the function binds itself is its own"
+
+
+def test_a_counter_the_code_computes_passes_and_a_literal_zero_is_caught() -> None:
+    computed = '''
+def run_trial(cell, trial, seed):
+    n = 0
+    for i in range(cell["steps"]):
+        if (seed + i) % 5 == 0:
+            n += 1
+    return {"count": n}
+'''
+    assert _keys(computed) == []
+    assigned_in_loop = '''
+def run_trial(cell, trial, seed):
+    n = 0
+    for i in range(cell["steps"]):
+        n = n + 1
+    return {"count": n}
+'''
+    assert _keys(assigned_in_loop) == []
+    assert _keys("def run_trial(cell, trial, seed):\n    return {'count': 0}\n") == ["count"]
+    never_counted = ("def run_trial(cell, trial, seed):\n    n = 0\n    for i in range(3):\n        pass\n"
+                     "    return {'count': n}\n")
+    assert _keys(never_counted) == ["count"], "a counter nothing ever increments is a typed-in zero"
+
+
+def test_a_number_made_by_a_scalar_constructor_is_typed_in_too() -> None:
+    src = '''
+import numpy as np
+from numpy import float32
+
+def run_trial(cell, trial, seed):
+    a = np.float64(0.0)
+    return {"a": a, "b": float(0), "c": int(3), "d": numpy_like(1), "e": float32(2.5), "f": np.int32(4) * 2,
+            "g": np.float64(cell["x"]), "h": float(seed)}
+'''
+    assert _keys(src) == ["a", "b", "c", "e", "f"]
+
+
+def test_a_helper_whose_only_statement_returns_a_number_is_typed_in() -> None:
+    src = '''
+def _zero():
+    return 0.0
+
+def _two_steps():
+    return _zero()
+
+def _measured(x):
+    return x * 2.0
+
+def run_trial(cell, trial, seed):
+    return {"a": _zero(), "b": _two_steps(), "c": _measured(cell["x"]), "d": _measured(1.0)}
+'''
+    assert _keys(src) == ["a", "b"], "a helper that takes an argument, or computes from one, is not followed"
 
 
 def test_oracle_is_read_like_the_others() -> None:
@@ -184,6 +243,7 @@ def test_the_directive_names_each_key_and_line_and_holds_no_expected_value() -> 
     found = tr.typed_results(CUP, "simulate.py")
     text = tr.directive(found)
     assert "simulate.py line 9" in text and "`lid_on`" in text and "compute it from the simulation" in text
+    assert "if it is a setting, return it under the setting's own name" in text
     assert "tolerance" not in text.lower() and "expected" not in text.lower()
 
 

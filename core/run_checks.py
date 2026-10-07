@@ -85,10 +85,20 @@ class RunChecksMixin:
         typed in. ``True`` when the simulation was rewritten. The left-out quantities are this pass's alone: the record of
         an earlier pass goes first."""
         record_path = self.quest_root / "needs" / TYPED_RECORD  # type: ignore[attr-defined]
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME  # type: ignore[attr-defined]
+        try:
+            sha = hashlib.sha256(simulate.read_bytes()).hexdigest() if simulate.is_file() else ""
+        except OSError:
+            sha = ""
+        # Asked again for every later text of the script (a gate's repair, a repair of the run, a new round), never for
+        # one that was read already: its answer (the left-out quantities and their record) stands.
+        if sha and getattr(self, "_typed_checked_sha", None) == sha:
+            return False
         record_path.unlink(missing_ok=True)
         self._typed_result_keys: set[str] = set()
         path, found = self._typed_results_in_simulation(state)
         if not found:
+            self._typed_checked_sha = sha
             return False
         rewrote = False
         text = path.read_text(encoding="utf-8")
@@ -102,6 +112,7 @@ class RunChecksMixin:
             text = path.read_text(encoding="utf-8")
             self._save_typed_counter(text, used)
             path, found = self._typed_results_in_simulation(state)
+        self._typed_checked_sha = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else ""
         if not found:
             return rewrote
         keys = sorted({f.key for f in found})
@@ -293,17 +304,18 @@ class RunChecksMixin:
         if design is None or not sha or self._client is None:  # type: ignore[attr-defined]
             return {}, None, 0
         before_grid, before_runs, _t = self._grid_and_runs(state)
+        before_protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         words = "at least " if est.at_least else "about "
         asked = {"n": 0}
 
         def lacks(now: Any) -> list[str]:
-            # The run is still too big while it has not become smaller; never more requests than are left.
+            # The run is still too big until it has become smaller; the number of requests is bounded by the helper.
             protocol = now.get("protocol") if isinstance(now, dict) and isinstance(now.get("protocol"), dict) else {}
             grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
             now_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
             smaller = (_estimate.trial_count(grid, now_runs, deterministic)
                        < _estimate.trial_count(before_grid, before_runs, deterministic))
-            if smaller or (remaining < 2 and asked["n"] >= remaining):  # two is also what the helper itself allows
+            if smaller:
                 return []
             return [f"a smaller run (the experiment would take {words}"
                     f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
@@ -311,7 +323,8 @@ class RunChecksMixin:
 
         def request(_now: Any, _text: str) -> str:
             asked["n"] += 1
-            return _estimate.request(est, limit_s, runs, deterministic)
+            return _estimate.request(est, limit_s, runs, deterministic,
+                                     _estimate.rules(before_protocol, before_runs, deterministic))
 
         def keep(before: str, revised: str) -> str:
             kept = self._keep_only_the_parts(before, revised, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
@@ -321,16 +334,15 @@ class RunChecksMixin:
             protocol = block.get("protocol") if isinstance(block, dict) and isinstance(block.get("protocol"), dict) else {}
             grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
             new_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
-            if before_grid and set(grid) != set(before_grid):
-                raise ValueError("the revised plan changes which settings the experiment varies; plan.md is unchanged")
-            if (_estimate.trial_count(grid, new_runs, deterministic)
-                    >= _estimate.trial_count(before_grid, before_runs, deterministic)):
-                raise ValueError("the revised plan is not a smaller run; plan.md is unchanged")
+            problems = _estimate.smaller_run_problems(before_protocol, before_grid, before_runs, grid, new_runs, deterministic)
+            if problems:
+                raise ValueError("the revised plan is not used: " + "; ".join(problems) + "; plan.md is unchanged")
             return kept
 
         await self._ask_plan_to_complete(  # type: ignore[attr-defined]
             design, sha, lacks=lacks, request=request, keep=keep, file="run_size_asked.json", what="run size",
-            short="a smaller run", note="a smaller run, so the experiment fits the time allowed, written by the plan's model")
+            short="a smaller run", note="a smaller run, so the experiment fits the time allowed, written by the plan's model",
+            ask_limit=remaining + self._search_record(sha, "run_size_asked.json")[0])  # type: ignore[attr-defined]
         grid, new_runs, _t = self._grid_and_runs(state)
         if (grid, new_runs) == (before_grid, before_runs):
             return {}, None, asked["n"]

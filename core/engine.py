@@ -5388,7 +5388,7 @@ class Engine(RunChecksMixin):
 
     async def _ask_plan_to_complete(
         self, design: Any, plan_sha: str, *, lacks: Any, request: Any, keep: Any, file: str, what: str, short: str,
-        note: str, extra: dict[str, Any] | None = None,
+        note: str, extra: dict[str, Any] | None = None, ask_limit: int | None = None,
     ) -> tuple[Any, str]:
         """The bounded request to the plan's model to write a part of the plan that is missing or cannot be read, shared by
         every such part (the search block, the settings to sweep, the metrics ...): at most ``_SEARCH_ASKS`` requests and
@@ -5401,7 +5401,8 @@ class Engine(RunChecksMixin):
         if not gaps or not path.is_file():
             return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
-        while count < _SEARCH_ASKS and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS:
+        while (count < (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
+               and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS):
             text = path.read_text(encoding="utf-8")
             sha_before = _plan.sha256(text)
             self._log.warning("[plan] the plan's %s was missing %s; FI asked the plan to complete it (%d of %d)", what,
@@ -13324,6 +13325,9 @@ class Engine(RunChecksMixin):
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations
+        # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
+        # text is never read twice), before the oracle gate tests it.
+        await self._results_from_computation(state)
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
@@ -13336,6 +13340,13 @@ class Engine(RunChecksMixin):
             # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
             self._check_equation_labels(state)
             self._check_code_layout(state)
+            # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
+            # the gate tests the text that will run.
+            if await self._results_from_computation(state):
+                again = await self._oracle_gate(state, py, exec_env, seed_path)
+                oracle_code = again if again is not None else seed_path.read_text(encoding="utf-8")
+                self._check_equation_labels(state)
+                self._check_code_layout(state)
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,

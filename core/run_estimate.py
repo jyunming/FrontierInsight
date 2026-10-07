@@ -22,6 +22,7 @@ kept. Everything here is arithmetic on the measurements; nothing is a judgement 
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import time
@@ -100,6 +101,9 @@ class Estimate:
     base: dict[str, Any] = field(default_factory=dict)
     base_seconds: float = 0.0
     timed: int = 0
+    #: When two or more settings are each costly, the settings at their costly ends together and how many times the base's
+    #: cost that was measured: ``{"cell": {...}, "ratio": 3.2}``.
+    together: dict[str, Any] | None = None
 
 
 def probe_key(cell: dict[str, Any], runs: int) -> str:
@@ -119,6 +123,37 @@ def probe_cells(grid: dict[str, list[Any]]) -> list[tuple[str | None, int | None
         for index in sorted({0, len(values) - 1} - {mids[name]}):
             out.append((name, index, {**base, name: values[index]}))
     return out
+
+
+#: A setting whose end costs at least this many times the base is "costly".
+COSTLY = 2.0
+#: Up to this many settings are added one by one when the settings interact; beyond it the mean ratios are used, capped.
+ENUM_LIMIT = 50000
+CORNER = "together"
+
+
+def costly_ends(grid: dict[str, list[Any]], probes: list[Probe]) -> dict[str, int]:
+    """For each setting whose timed end costs at least :data:`COSTLY` times the base, the index of its costlier end."""
+    base = next((p for p in probes if p.axis is None), None)
+    if base is None or base.seconds <= 0:
+        return {}
+    out: dict[str, int] = {}
+    for name, _values in axes_of(grid):
+        ends = [(p.seconds / base.seconds, p.index) for p in probes if p.axis == name and p.index is not None]
+        if ends:
+            ratio, index = max(ends)
+            if ratio >= COSTLY and index is not None:
+                out[name] = index
+    return out
+
+
+def corner_cell(grid: dict[str, list[Any]], costly: dict[str, int]) -> dict[str, Any]:
+    """The base with every costly setting at its costly end: the most expensive setting the study has."""
+    cell = dict(probe_cells(grid)[0][2])
+    for name, values in axes_of(grid):
+        if name in costly:
+            cell[name] = values[costly[name]]
+    return cell
 
 
 def _interpolated(known: dict[int, float], n: int) -> list[float]:
@@ -141,14 +176,20 @@ def _interpolated(known: dict[int, float], n: int) -> list[float]:
 
 
 def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes: list[Probe]) -> Estimate | None:
-    """The total time of the study from the timed settings, or ``None`` when the base was not timed."""
+    """The total time of the study from the timed settings, or ``None`` when the base was not timed.
+
+    Each setting alone changes the cost by the ratio measured for its values (read in proportion between timed ones). Settings
+    are not assumed to multiply: when two or more are each costly, the base with all of them at their costly ends was timed
+    too (``together``), and no setting costs more than that one (the study's most expensive setting), nor is any cost taken
+    beyond what the product of the ratios measured one by one says; a setting measured dearer than that product raises every
+    setting's cost in the same proportion."""
     base = next((p for p in probes if p.axis is None), None)
     if base is None or base.seconds <= 0:
         return None
     axes = axes_of(grid)
-    factor = 1.0
     ratios: dict[str, dict[str, float]] = {}
-    complete = len(probes) == len(probe_cells(grid))
+    per_axis: list[list[float]] = []
+    complete = sum(1 for p in probes if p.axis != CORNER) == len(probe_cells(grid))
     for name, values in axes:
         mid = len(values) // 2
         known = {mid: 1.0}
@@ -156,12 +197,32 @@ def estimate(grid: dict[str, list[Any]], runs: int, deterministic: bool, probes:
             if p.axis == name and p.index is not None:
                 known[p.index] = p.seconds / base.seconds
                 ratios.setdefault(name, {})[str(values[p.index])] = round(p.seconds / base.seconds, 3)
-        per_value = _interpolated(known, len(values))
-        factor *= sum(per_value) / len(per_value)
+        per_axis.append(_interpolated(known, len(values)))
     cells = cell_count(grid)
-    return Estimate(seconds=cells * base.seconds * factor, at_least=any(p.at_least for p in probes), complete=complete,
+    mean_ratio = 1.0
+    for per_value in per_axis:
+        mean_ratio *= sum(per_value) / len(per_value)
+    total_ratio = cells * mean_ratio
+    costly = costly_ends(grid, probes)
+    corner = next((p for p in probes if p.axis == CORNER), None)
+    together = None
+    if corner is not None and len(costly) >= 2:
+        c = corner.seconds / base.seconds
+        product = 1.0
+        for (name, _values), per_value in zip(axes, per_axis):
+            if name in costly:
+                product *= per_value[costly[name]]
+        scale = max(1.0, c / product) if product > 0 else 1.0
+        together = {"cell": dict(corner.cell), "ratio": round(c, 3)}
+        if cells <= ENUM_LIMIT:
+            total_ratio = 0.0
+            for combo in itertools.product(*per_axis):
+                total_ratio += min(math.prod(combo) * scale, max(c, 1.0))
+        else:
+            total_ratio = min(total_ratio * scale, cells * max(c, 1.0))
+    return Estimate(seconds=base.seconds * total_ratio, at_least=any(p.at_least for p in probes), complete=complete,
                     cells=cells, trials=trial_count(grid, runs, deterministic), ratios=ratios, base=dict(base.cell),
-                    base_seconds=base.seconds, timed=len(probes))
+                    base_seconds=base.seconds, timed=len(probes), together=together)
 
 
 def fits(est: Estimate, limit_s: float) -> bool:
@@ -188,23 +249,39 @@ async def measure(
     allowance = max(60.0, 3.0 * limit_s / max(1, total_trials))
     started = time.monotonic()
     probes: list[Probe] = []
-    for axis, index, cell in probe_cells(grid):
+
+    async def time_cell(axis: str | None, index: int | None, cell: dict[str, Any]) -> tuple[bool, str]:
+        """Time one setting into ``probes``; ``(False, why)`` when the simulation could not be timed."""
         key = probe_key(cell, runs)
         if cached and key in cached:
             probes.append(Probe(axis, index, cell, cached[key].seconds, cached[key].at_least))
-            continue
+            return True, ""
         left = budget_s - (time.monotonic() - started)
         if probes and left < 5:
-            break
+            return True, "budget"
         timeout = int(max(5, min(allowance, max(left, 60.0) if not probes else left)))
         probe, why = await _time_one(executor, python, quest_root, module, cell, runs=runs, deterministic=deterministic,
                                      timeout_s=timeout, env=env, thresholds=thresholds)
         if probe is None:
-            return None, why
+            return False, why
         probe.axis, probe.index = axis, index
         probes.append(probe)
-        if probe.at_least and axis is None:
-            break  # the base alone is already past what the study allows: nothing more to learn by timing the rest
+        return True, ""
+
+    for axis, index, cell in probe_cells(grid):
+        ok, why = await time_cell(axis, index, cell)
+        if not ok:
+            return None, why
+        if why == "budget":
+            return probes, ""
+        if probes[-1].at_least and axis is None:
+            return probes, ""  # the base alone is already past what the study allows: nothing more to learn by timing the rest
+    # Settings that are each costly may not multiply: the most expensive setting (all costly ends together) is timed itself.
+    costly = costly_ends(grid, probes)
+    if len(costly) >= 2:
+        ok, why = await time_cell(CORNER, None, corner_cell(grid, costly))
+        if not ok:
+            return None, why
     return probes, ""
 
 
@@ -298,13 +375,83 @@ def progress_line(done_cells: int, cells: int, done_trials: int, trials: int, el
     return f"{head}, about {plain_duration(elapsed_s / done_trials * (trials - done_trials))} left"
 
 
-def request(est: Estimate, limit_s: float, runs: int, deterministic: bool) -> str:
+def runs_floor(protocol: dict[str, Any] | None, before_runs: int) -> int:
+    """The fewest runs per setting a smaller run may have: the plan's own minimum (`protocol.min_runs_per_setting`) and what its
+    stated precision needs (`protocol.precision.target_half_width`, for a probability near 0.5), never more than the run
+    already had. 1 when the plan states neither."""
+    from .stats import trials_for_half_width
+
+    floor = 1
+    if isinstance(protocol, dict):
+        least = protocol.get("min_runs_per_setting")
+        if isinstance(least, (int, float)) and not isinstance(least, bool) and least >= 1:
+            floor = max(floor, int(least))
+        precision = protocol.get("precision")
+        target = precision.get("target_half_width") if isinstance(precision, dict) else None
+        if isinstance(target, (int, float)) and not isinstance(target, bool):
+            need = trials_for_half_width(float(target))
+            if need:
+                floor = max(floor, need)
+    return min(int(before_runs), floor)
+
+
+def numerical_axes(protocol: dict[str, Any] | None) -> set[str]:
+    """The settings the plan marks as numerical resolution (`protocol.numerical_axes`): the only ones that may be made coarser."""
+    marked = protocol.get("numerical_axes") if isinstance(protocol, dict) else None
+    return {str(n) for n in marked} if isinstance(marked, list) else set()
+
+
+def smaller_run_problems(protocol: dict[str, Any] | None, before_grid: dict[str, list[Any]], before_runs: int,
+                         new_grid: dict[str, list[Any]], new_runs: int, deterministic: bool) -> list[str]:
+    """Why a smaller run is not one the study can use, in plain words; empty when it is. The range every setting covers stays
+    (its first and last value), no setting is added or removed, a setting gets no value it did not have unless the plan marks
+    it as numerical resolution, the runs per setting stay at the plan's own minimum, and the run is strictly smaller."""
+    problems: list[str] = []
+    before, new = dict(axes_of(before_grid)), dict(axes_of(new_grid))
+    if before and set(before) != set(new):
+        problems.append("it changes which settings the experiment varies")
+    marked = numerical_axes(protocol)
+    for name, values in before.items():
+        got = new.get(name)
+        if got is None or name in marked:
+            continue
+        if values[0] not in got or values[-1] not in got:
+            problems.append(f"it drops the first or last value of `{name}` ({values[0]} and {values[-1]}), the range the "
+                            "study covers")
+        elif any(v not in values for v in got):
+            problems.append(f"it gives `{name}` values it did not have, and `{name}` is not marked as a numerical resolution "
+                            "(`protocol.numerical_axes`)")
+    floor = runs_floor(protocol, before_runs)
+    if not deterministic and new_runs < floor:
+        problems.append(f"it cuts the runs per setting to {new_runs}, below the {floor} the plan's precision or stated "
+                        "minimum needs")
+    if trial_count(new_grid, new_runs, deterministic) >= trial_count(before_grid, before_runs, deterministic):
+        problems.append("it is not a smaller run")
+    return problems
+
+
+def rules(protocol: dict[str, Any] | None, before_runs: int, deterministic: bool) -> str:
+    """The rules a smaller run must keep, as the request to the plan's model states them."""
+    marked = sorted(numerical_axes(protocol))
+    text = ("Keep the first and last value of every setting (the range the study covers) and the same settings: take out "
+            "values in between instead")
+    text += (f"; only {', '.join('`' + m + '`' for m in marked)} (numerical resolution) may be made coarser, with other values"
+             if marked else "; do not coarsen a numerical resolution or give a setting values it did not have")
+    if not deterministic:
+        text += f"; keep at least {runs_floor(protocol, before_runs)} runs per setting"
+    return text + "."
+
+
+def request(est: Estimate, limit_s: float, runs: int, deterministic: bool, rules_text: str = "") -> str:
     """What the plan's model is asked, with the measured numbers: shrink the run, change nothing that decides whether a
     result is right."""
     lines = []
     for name, per in est.ratios.items():
         shown = "; ".join(f"`{name}` = {v} costs {r:g} times the time of `{name}` = {est.base.get(name)}" for v, r in per.items())
         lines.append(f"- {shown}")
+    if est.together:
+        cell = ", ".join(f"`{k}` = {v}" for k, v in est.together["cell"].items() if k in est.ratios)
+        lines.append(f"- all the costly ends together ({cell}) cost {est.together['ratio']:g} times the time of the base setting")
     per_trial = "" if deterministic else f", each setting {int(runs)} runs"
     return (
         "The experiment this plan describes would take longer than the time it is allowed on this machine, so it cannot "
@@ -313,9 +460,8 @@ def request(est: Estimate, limit_s: float, runs: int, deterministic: bool) -> st
         f"{plain_duration(limit_s)}.\n"
         + ("How the time changes with each setting, as measured:\n" + "\n".join(lines) + "\n" if lines else "")
         + f"Make the experiment smaller so that it takes about {plain_duration(limit_s / 2)} or less: use fewer runs per "
-        "setting (`protocol.runs_per_setting`) and/or fewer or coarser settings in `protocol.grid` (keep the same setting "
-        "names; a numerical resolution may be made coarser, a domain smaller, a list of values shorter). Write only "
-        "`protocol.grid` and `protocol.runs_per_setting` again.\n"
+        "setting (`protocol.runs_per_setting`) and/or fewer values of the settings in `protocol.grid`. "
+        + (rules_text + " " if rules_text else "") + "Write only `protocol.grid` and `protocol.runs_per_setting` again.\n"
         "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not any other part of "
         "the protocol."
     )

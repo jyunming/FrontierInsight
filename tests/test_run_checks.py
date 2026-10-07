@@ -118,6 +118,36 @@ async def test_a_simulation_with_nothing_typed_in_is_not_asked_about(tmp_path: P
     assert await eng._results_from_computation({}) is False and asked == []
 
 
+@pytest.mark.asyncio
+async def test_a_later_text_of_the_simulation_is_read_again_and_an_unchanged_one_is_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The text a gate's repair leaves: a literal the first reading never saw.
+    eng, asked = _typed_engine(tmp_path, monkeypatch, [json.dumps({"code": TYPED_SIM, "patch_summary": "no change"})])
+    sim = eng.quest_root / "code" / "simulate.py"
+    sim.write_text(COMPUTED_SIM, encoding="utf-8")
+    assert await eng._results_from_computation({}) is False and asked == [] and eng._left_out_quantities() == set()
+    sim.write_text(TYPED_SIM, encoding="utf-8")  # an oracle repair (or an equation's) typed a result in
+    await eng._results_from_computation({})
+    assert len(asked) == 2 and eng._left_out_quantities() == {"lid_on"}, "caught, asked twice, then left out"
+    # The same text again (the next entry of the node, a retry of the run): nothing is asked, the answer stands.
+    await eng._results_from_computation({})
+    await eng._results_from_computation({})
+    assert len(asked) == 2 and eng._left_out_quantities() == {"lid_on"}
+    assert (eng.quest_root / "needs" / "TYPED_RESULTS_CHECK.json").is_file()
+    # Another text has its own budget.
+    sim.write_text(TYPED_SIM + "\n# repaired elsewhere\n", encoding="utf-8")
+    await eng._results_from_computation({})
+    assert len(asked) == 4
+
+
+def test_the_node_reads_the_simulation_again_after_each_gate() -> None:
+    src = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    node = src[src.index("async def _node_execute("):]
+    node = node[:node.index("pilot_run and not self.config.execution.background_jobs")]
+    assert node.count("self._results_from_computation(state)") == 3, "before the gates, after the equation gate, after the oracle gate"
+
+
 ANALYSIS = '''\
 import json, os
 data = json.load(open(os.environ["FI_TRIALS"]))
@@ -161,11 +191,11 @@ def run_trial(cell, trial, seed):
 TOPIC = "Measure how a damped spring settles"
 
 
-def _draft(grid: dict[str, list[int]], runs: int) -> dict[str, Any]:
+def _draft(grid: dict[str, list[int]], runs: int, **protocol: Any) -> dict[str, Any]:
     draft = copy.deepcopy(HEAT_SINK)
     draft["study_type"] = "measure"
     draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": grid,
-                         "runs_per_setting": runs}
+                         "runs_per_setting": runs, **protocol}
     return draft
 
 
@@ -215,10 +245,10 @@ class _Counting(SharedInterpreterExecutor):
 
 
 async def _sizing(tmp_path: Path, *, timeout_s: int, answers: list[Any], grid: dict[str, list[int]] | None = None,
-                  runs: int = 40) -> tuple[Engine, Model, Any, _Counting]:
+                  runs: int = 40, **protocol: Any) -> tuple[Engine, Model, Any, _Counting]:
     eng = _plan_engine(tmp_path, [])
     eng.config.execution.timeout_s = timeout_s
-    model = Model(eng, _draft(grid or {"n": [1, 2, 4]}, runs), answers)
+    model = Model(eng, _draft(grid or {"n": [1, 2, 4]}, runs, **protocol), answers)
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     code = eng.quest_root / "code"
     code.mkdir(parents=True, exist_ok=True)
@@ -262,7 +292,7 @@ async def test_a_run_that_is_too_long_is_made_smaller_by_the_plans_model_and_the
     tolerance_tamper = {"oracles": [{"name": "baseline_energy_balance", "kind": "invariant", "check": "x", "expected": 0,
                                      "tolerance": 5.0, "reference": "derivation: steady state"}]}
     eng, model, runner, ex = await _sizing(
-        tmp_path, timeout_s=8, answers=[_smaller({"n": [1, 2]}, 4, **tolerance_tamper)])
+        tmp_path, timeout_s=8, answers=[_smaller({"n": [1, 4]}, 4, **tolerance_tamper)])
     before = copy.deepcopy(plan.load_design(eng.quest_root)[0]["protocol"]["oracles"])
     assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
     assert len(model.asked) == 1
@@ -272,9 +302,9 @@ async def test_a_run_that_is_too_long_is_made_smaller_by_the_plans_model_and_the
     asked_part = ask[ask.index(MARK) - 80:]
     assert "not a check, a threshold, a tolerance" in asked_part
     design = plan.load_design(eng.quest_root)[0]
-    assert design["protocol"]["grid"] == {"n": [1, 2]} and design["protocol"]["runs_per_setting"] == 4
+    assert design["protocol"]["grid"] == {"n": [1, 4]} and design["protocol"]["runs_per_setting"] == 4
     assert design["protocol"]["oracles"] == before, "a check the model also changed is put back"
-    assert eng._draft_protocol({"iteration": 0})["grid"] == {"n": [1, 2]}
+    assert eng._draft_protocol({"iteration": 0})["grid"] == {"n": [1, 4]}
     assert eng._design_after_sizing({"design": {"hypothesis": "h"}})["protocol"]["runs_per_setting"] == 4
     log = _log(eng)
     assert "FI made the experiment smaller" in log and "the checks, thresholds and tolerances are unchanged" in log
@@ -336,6 +366,51 @@ async def test_an_answer_that_is_not_a_smaller_run_of_the_same_settings_is_not_u
     design = plan.load_design(eng.quest_root)[0]
     assert design["protocol"]["grid"] == {"n": [1, 2, 4]} and design["protocol"]["runs_per_setting"] == 40
     assert "complete now" not in capsys.readouterr().out
+    assert "plan.md is unchanged" in _log(eng)
+
+
+def _rejected(log: str) -> str:
+    return " ".join(re.findall(r"could not be used: (.+)", log))
+
+
+@pytest.mark.asyncio
+async def test_a_smaller_run_may_not_drop_the_range_a_setting_covers_or_invent_values(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(
+        tmp_path, timeout_s=6, answers=[_smaller({"n": [1, 2]}, 4), _smaller({"n": [1, 3, 4]}, 4)])
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is not None
+    said = _rejected(_log(eng))
+    assert "drops the first or last value of `n` (1 and 4)" in said and "the range the study covers" in said
+    assert "gives `n` values it did not have" in said and "`protocol.numerical_axes`" in said
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["grid"] == {"n": [1, 2, 4]}
+    asked = model.asked[0]
+    assert "Keep the first and last value of every setting" in asked and "do not coarsen a numerical resolution" in asked
+
+
+@pytest.mark.asyncio
+async def test_a_setting_the_plan_marks_as_numerical_resolution_may_be_made_coarser(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(
+        tmp_path, timeout_s=8, answers=[_smaller({"n": [1, 3, 4]}, 4)], numerical_axes=["n"])
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert plan.load_design(eng.quest_root)[0]["protocol"]["grid"] == {"n": [1, 3, 4]}
+    assert "only `n` (numerical resolution) may be made coarser" in model.asked[0]
+
+
+@pytest.mark.asyncio
+async def test_a_smaller_run_may_not_cut_the_runs_below_what_the_plans_precision_or_minimum_needs(tmp_path: Path) -> None:
+    # A target half-width of 0.1 needs 97 trials; the plan has 40 runs, so none may be cut away.
+    eng, model, runner, ex = await _sizing(
+        tmp_path, timeout_s=6, answers=[_smaller({"n": [1, 4]}, 10), _smaller({"n": [1, 4]}, 39)],
+        precision={"target_half_width": 0.1})
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is not None
+    assert "cuts the runs per setting to 10, below the 40 the plan's precision or stated minimum needs" in _rejected(_log(eng))
+    assert "keep at least 40 runs per setting" in model.asked[0]
+    # A stated minimum is a floor for a run that has more; thinning the settings is still allowed.
+    eng2, model2, runner2, _ = await _sizing(
+        tmp_path / "b", timeout_s=8, answers=[_smaller({"n": [1, 4]}, 12), _smaller({"n": [1, 4]}, 6)],
+        min_runs_per_setting=8)
+    assert await eng2._size_the_run({"iteration": 0}, runner2, sys.executable, None) is None
+    assert plan.load_design(eng2.quest_root)[0]["protocol"]["runs_per_setting"] == 12
+    assert "keep at least 8 runs per setting" in model2.asked[0]
 
 
 @pytest.mark.asyncio
