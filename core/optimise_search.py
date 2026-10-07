@@ -993,7 +993,19 @@ def best_design(outcome, block, *, seed, check=None, extra=None):
         record["evaluations"]["added_budget"] = sum(int(r.get("added") or 0) for r in rounds)
     if extra:
         record.update(extra)
-    return json.loads(json.dumps(record, allow_nan=False, default=str))
+    return plain_zero(json.loads(json.dumps(record, allow_nan=False, default=str)))
+
+
+def plain_zero(value):
+    """``value`` with every negative zero written as 0.0, at any depth: -0.0 (what ``0 - 0.0`` or a product with a
+    negative number leaves) reads as a number with a sign when it is printed, and is no different from zero."""
+    if isinstance(value, float):
+        return 0.0 if value == 0.0 else value
+    if isinstance(value, dict):
+        return {k: plain_zero(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [plain_zero(v) for v in value]
+    return value
 
 
 def ledger_lines(outcome, block):
@@ -1002,7 +1014,7 @@ def ledger_lines(outcome, block):
             "method": outcome["method_used"], "method_requested": outcome["method_requested"],
             "budget": outcome["budget"], "starts": outcome["starts"], "per_start": outcome["per_start"],
             "seed": outcome["seed"], "search_settings": search_settings(block)}
-    return [json.dumps(head, default=str)] + [json.dumps(row, default=str) for row in outcome["rows"]]
+    return [json.dumps(plain_zero(head), default=str)] + [json.dumps(plain_zero(row), default=str) for row in outcome["rows"]]
 
 
 # --- a library's method, where the library is installed ------------------------------------------------------------

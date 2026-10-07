@@ -247,6 +247,26 @@ Do not write tests, a README or a command-line entry: FI writes the unit tests f
 """
 
 
+def prefilled_block(package: str, model_source: str) -> str:
+    """The layout the code-writing prompts ask for when FI has already written and checked the package, function by
+    function (:mod:`core.function_steps`): only the two scripts are asked for."""
+    return f"""
+THE CODE AS A SMALL RESEARCH TOOL. The model's package `{package}/` is ALREADY WRITTEN AND TESTED: FI wrote it one function
+at a time, one function per equation, and checked each function against the plan's equation. Do NOT write any file of the
+package and do not write its equations again: import them. Write only simulate.py and experiment.py.
+- simulate.py keeps run_trial / run_cell (and oracle) exactly as the contract above says: it reads the setting from `cell`
+  and computes it by calling the package (`from {package} import model`, then `model.<function>(...)`, with the signatures
+  below). The scenario (grid values, sizes, seeds, loops over settings) is in simulate.py, the mathematics in the package.
+- experiment.py never imports the package: it reads only the records FI hands it, as the contract above says.
+Do not write tests, a README or a command-line entry: FI writes the unit tests, the equation list (`{METHODS_NAME}`) and `run.py`
+itself. The package's `{package}/{MODEL_NAME}` as it is:
+
+```python
+{model_source.rstrip()}
+```
+"""
+
+
 def reminder(package: str) -> str:
     return (f"\n\nREMINDER: the reply did not hold the package. Give every file again, each in its own fenced block: "
             f"`# file: simulate.py`, `# file: experiment.py`, `# file: {package}/__init__.py` and "
@@ -640,6 +660,15 @@ def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str)
     tests = oracle_tests(protocol)
     if tests:
         files[TEST_PATH] = tests
+    # One small test per equation, from the plan's own worked example (core/equation_tests.py).
+    from . import equation_tests as _eqt
+
+    sources = dict(package_sources(code_dir))
+    if (Path(code_dir) / "simulate.py").is_file():
+        sources["simulate.py"] = (Path(code_dir) / "simulate.py").read_text(encoding="utf-8")
+    cases = _eqt.cases(_eqt.example_rows(protocol), _eqt.locate(protocol, sources))
+    if cases:
+        files[_eqt.TEST_PATH] = _eqt.test_source(cases)
     return files
 
 

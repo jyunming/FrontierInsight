@@ -40,7 +40,7 @@ import matplotlib.pyplot as plt
 
 os.makedirs('figures', exist_ok=True)
 plt.figure()
-plt.plot([0, 1, 2, 3], [0, 1, 4, 9])
+plt.plot(list(range(4)), [i * i for i in range(4)])
 plt.xlabel('x'); plt.ylabel('y')
 plt.savefig('figures/scaling.png', dpi=72)
 print('RESULT_JSON: {"score": 0.91, "slope": 3.0}')

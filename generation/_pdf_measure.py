@@ -888,6 +888,180 @@ def slides_report(doc: Document, figures: Sequence[FigureSource] = ()) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Layout of running text: lines over each other, blank gaps inside a column
+
+# Two lines of words whose boxes overlap by more than this share of the lower
+# one's height, over at least this many points of width, are drawn over each
+# other (a table's cells running into the next column). Lines set one under the
+# other touch by a point or two at most.
+_TEXT_OVERLAP_SHARE = 0.3
+_TEXT_OVERLAP_MIN_PT = 10.0
+# A vertical gap inside a column, between two things set in it, larger than this
+# share of the page's height. A paragraph break is 1-2 lines (about 2% of a page)
+# and a heading with its space about 4%; a figure and its caption sit closer than
+# that. Seven percent (55 pt of a letter page, five lines) is a gap that was
+# stretched or left by something that did not fit.
+_COLUMN_GAP_SHARE = 0.07
+# Blank between two paragraphs of body text, in lines of its size: LaTeX leaves
+# up to about one with a paragraph skip; more is a column pulled apart.
+_PARAGRAPH_GAP_LINES = 1.5
+_CAPTION_START = re.compile(r"^(Figure|Fig\.?|Table)\s*\d+", re.IGNORECASE)
+
+
+def _is_prose(line: Line, words: int = 2) -> bool:
+    """A line of words: at least ``words`` of them, and mostly letters."""
+    letters = sum(1 for c in line.text if c.isalpha())
+    return len(line.text.split()) >= words and letters >= 0.6 * max(1, line.visible)
+
+
+def _text_overlap_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """Lines of text drawn over other lines, one finding per page: a table wider
+    than its column prints its cells over the text of the column beside it, and
+    the screenshot shows a smear that a column-wise count of margins cannot."""
+    # Words only: the two halves of a fraction, a sub- and a superscript touch
+    # their neighbours the same way without being a wrong layout.
+    lines = [line for line in page.lines if line.visible and _is_prose(line)]
+    hit = []
+    for i, a in enumerate(lines):
+        for b in lines[i + 1:]:
+            across = min(a.box[2], b.box[2]) - max(a.box[0], b.box[0])
+            down = min(a.box[3], b.box[3]) - max(a.box[1], b.box[1])
+            if across < _TEXT_OVERLAP_MIN_PT or down <= 1.0:
+                continue
+            high = min(a.box[3] - a.box[1], b.box[3] - b.box[1])
+            if across >= _TEXT_OVERLAP_MIN_PT and down >= _TEXT_OVERLAP_SHARE * high:
+                hit.append((a, b))
+    if not hit:
+        return []
+    count = f"{len(hit)} pairs of lines" if len(hit) > 1 else "Two lines"
+    return [_finding(
+        "text_overlap", page.number, region,
+        f"{count} of text are drawn over each other, starting with \"{hit[0][0].text[:40]}\" and "
+        f"\"{hit[0][1].text[:40]}\" (a table or a line wider than its column).",
+        "high",
+        pairs_overlapping=len(hit),
+    )]
+
+
+def _gutter(page: Page) -> tuple[float, float] | None:
+    """The empty strip between two text columns, or None for one column. Lines
+    wider than 60% of the page (a title, the abstract, a full-width table) and lines of
+    a size other than the body's (a title, a heading, a caption) do not count; the
+    strip is the widest gap, at least 8 pt, in what the others cover near the
+    middle of the page, with at least six lines on each side."""
+    body = _size_mode([line for line in page.lines if line.visible])
+    narrow = [
+        line.box for line in page.lines
+        if line.visible and body is not None and abs(line.size - body) <= 0.05 * body
+        and line.box[2] - line.box[0] < 0.6 * page.width and len(line.text) >= 30
+    ]
+    if len(narrow) < 12:
+        return None
+    covered: list[list[float]] = []
+    for left, _bottom, right, _top in sorted(narrow):
+        if covered and left <= covered[-1][1]:
+            covered[-1][1] = max(covered[-1][1], right)
+        else:
+            covered.append([left, right])
+    best = None
+    for (_l1, r1), (l2, _r2) in zip(covered, covered[1:]):
+        if l2 - r1 >= 8.0 and 0.3 * page.width <= (r1 + l2) / 2 <= 0.7 * page.width:
+            if best is None or l2 - r1 > best[1] - best[0]:
+                best = (r1, l2)
+    if best is None:
+        return None
+    on_left = sum(1 for box in narrow if box[2] <= best[0] + 1.0)
+    on_right = sum(1 for box in narrow if box[0] >= best[1] - 1.0)
+    return best if on_left >= 6 and on_right >= 6 else None
+
+
+def _column_gap_findings(page: Page, *, region: str = "page") -> list[dict]:
+    """Blank stretches inside a column, between two things set in it: one larger
+    than ``_COLUMN_GAP_SHARE`` of the page, or at least two between paragraphs of
+    body text (one body line over another) wider than a line and a half of
+    blank (a gap counts only between two lines of body text: not around the title block, nor beside a figure, a table or its caption): the paragraphs of a column stretched apart because a figure did not
+    fit under them. The stretch under the last thing of a column is not one (the
+    column ended there), a heading's own space is not one, and a text area that
+    is empty from the top is the half-empty-page check's."""
+    top_limit, bottom_limit = 0.08 * page.height, 0.92 * page.height
+    gutter = _gutter(page)
+    body = _size_mode([line for line in page.lines if line.visible])
+    middle = None if gutter is None else sum(gutter) / 2
+    columns: dict[int, list[tuple[Box, int]]] = {0: [], 1: []}
+
+    def place(box: Box, kind: int) -> None:
+        if not (box[3] > top_limit and box[1] < bottom_limit):
+            return
+        if gutter is not None and box[0] < gutter[0] - 3.0 and box[2] > gutter[1] + 3.0:
+            return  # set across both columns
+        columns[0 if middle is None or (box[0] + box[2]) / 2 < middle else 1].append((box, kind))
+
+    visible = [line for line in page.lines if line.visible]
+
+    def in_a_row(line: Line) -> bool:
+        """A table cell: another line close beside it on the same row."""
+        for other in visible:
+            if other is line:
+                continue
+            if gutter is not None and ((line.box[0] + line.box[2]) / 2 < middle) != ((other.box[0] + other.box[2]) / 2 < middle):
+                continue  # the other column's line is not a cell
+            high = min(line.box[3] - line.box[1], other.box[3] - other.box[1])
+            same_row = min(line.box[3], other.box[3]) - max(line.box[1], other.box[1]) > 0.5 * high
+            beside = max(line.box[0], other.box[0]) - min(line.box[2], other.box[2])
+            if same_row and 0 <= beside < 40.0:
+                return True
+        return False
+
+    for line in visible:
+        # 2: a line of body text that is part of a paragraph, 1: one that is
+        # long enough to be a paragraph's own (not an author line), 0: other,
+        # -1: part of a float (a table's cell, a caption), whose own space
+        # above and below is the template's.
+        same = body is not None and abs(line.size - body) <= 0.05 * body
+        if _CAPTION_START.match(line.text) or in_a_row(line):
+            kind = -1
+        else:
+            kind = (1 + _is_prose(line, 5)) if same and _is_prose(line) else 0
+        place(line.box, kind)
+    for image in page.images:
+        if image[2] - image[0] < 0.9 * page.width and image[3] - image[1] >= 24.0:  # not a decoration or a logo
+            place(image, -1)
+    found = []
+    big = _COLUMN_GAP_SHARE * page.height
+    stretched = _PARAGRAPH_GAP_LINES * 1.2 * (body or 10.0)
+    for index, items in columns.items():
+        if len(items) < 3:
+            continue
+        # PDF y runs up: walk from the top of the column to its foot.
+        ordered = sorted(items, key=lambda item: -item[0][3])
+        reach, reach_kind = ordered[0][0][1], ordered[0][1]
+        widest, paragraph_gaps, para_widest = 0.0, 0, 0.0
+        for box, kind in ordered[1:]:
+            gap = reach - box[3]
+            # The space around a title block is the template's, and so is the
+            # space above and below a figure or a table with its caption.
+            if kind >= 1 and reach_kind >= 1 and 2 in (kind, reach_kind):
+                widest = max(widest, gap)
+            if gap > stretched and kind >= 1 and reach_kind >= 1:
+                paragraph_gaps += 1
+                para_widest = max(para_widest, gap)
+            if box[1] < reach:
+                reach, reach_kind = box[1], kind
+        if widest > big or paragraph_gaps >= 2:
+            side = "" if gutter is None else (" of the left column" if index == 0 else " of the right column")
+            what = (f"A blank gap of {widest:.0f} pt ({widest / page.height:.0%} of the page)" if widest > big
+                    else f"{paragraph_gaps} gaps of up to {para_widest:.0f} pt between paragraphs")
+            found.append(_finding(
+                "column_gap", page.number, region,
+                f"{what} sits inside the text{side}.",
+                "medium",
+                gap_pt=round(max(widest, para_widest), 1),
+                gaps=paragraph_gaps,
+            ))
+    return found
+
+
+# ---------------------------------------------------------------------------
 # Paper
 
 
@@ -911,6 +1085,8 @@ def paper_report(doc: Document) -> dict:
     findings: list[dict] = []
     for page in doc.pages:
         findings += _overflow_findings(page)
+        findings += _text_overlap_findings(page)
+        findings += _column_gap_findings(page)
         page_lines = [line for line in page.lines if line.visible]
         smallest = _smallest_readable_size(page_lines)
         if smallest is not None and smallest < PAPER_MIN_PT - 0.5:

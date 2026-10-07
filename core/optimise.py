@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import flat_output as _flat
 from . import optimisation_plan as _plan
 from . import optimise_search as _search
 from . import trial_runner as _trials
@@ -743,7 +744,7 @@ def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any], text: 
         if old in says:
             says = says[:says.index(old)]
     best["says"] = f"{says} Checked at finer numerical settings: {summary['says']}".strip()
-    best_text = json.dumps(best, indent=1) + "\n"
+    best_text = json.dumps(_search.plain_zero(best), indent=1) + "\n"
     saved["best"] = {"sha256": _sha(best_text.encode("utf-8")), "text": best_text}
     record_text = json.dumps(saved)
     for rel, body in ((BEST_PATH, best_text), (RECORD, record_text)):
@@ -775,6 +776,8 @@ class OptimisationRunner:
         self.analysis = Path(analysis)
         self.log = log
         self.failed_script: str | None = None
+        #: Why the last run was sent back as a simulation that does not use its inputs (core/flat_output.py), or ``None``.
+        self.flat: str | None = None
         self.last: SearchRun | None = None
         #: FI's check at finer settings, from memory: ``(its text, the key it is kept under)``.
         self.last_check: tuple[str | None, str | None] = (None, None)
@@ -827,6 +830,7 @@ class OptimisationRunner:
                                  "put back", Path(cmd[-1]).name if cmd else "a script")
             return result
         started = time.monotonic()
+        self.flat = None
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         if block_of(protocol) is None:
             self.failed_script = None
@@ -874,10 +878,23 @@ class OptimisationRunner:
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr}\nFI's search for the best design got no result from the "
                                           f"simulation: {reason}".strip())
+        # A search in which every design gave the very same numbers is not a result: the simulation does not use the
+        # design it is given. It is sent back to be repaired like one that does not run (core/flat_output.py).
+        norm_block = _plan.normalize(block_of(protocol))[0] or block_of(protocol) or {}
+        flat = _flat.flat_search(run.rows, str((norm_block.get("objective") or {}).get("quantity") or "the objective"))
+        if flat is not None:
+            return self._flat_result(flat, run, started)
         # FI checks the best design at finer settings (core/optimum_check.py), with a time limit of its own. A check that
         # fails is the study's result, reported and carried on with; one that cannot run is recorded as not finished.
         check_text, check_key = await self._check(cmd[0], run, protocol, base, timeout_s, env)
         self.last_check = (check_text, check_key)
+        try:
+            checked = json.loads(check_text) if check_text else None
+        except ValueError:
+            checked = None
+        flat = _flat.flat_search_check(checked, norm_block)
+        if flat is not None:
+            return self._flat_result(flat, run, started)
         analysis_env = {**(env or {}), LEDGER_ENV: LEDGER_PATH.as_posix(), BEST_ENV: BEST_PATH.as_posix(),
                         "FI_RAW_DIR": _trials.RAW_DIRNAME}
         if check_text is not None:
@@ -910,6 +927,18 @@ class OptimisationRunner:
             returncode=result.returncode, stdout=stdout, duration_s=time.monotonic() - started,
             stderr=(run.stderr + "\n" + (result.stderr or "")).strip(), timed_out=result.timed_out,
         )
+
+    def _flat_result(self, why: str, run: SearchRun, started: float) -> Any:
+        """The run, sent back: the simulation gives the same numbers whatever design it is given."""
+        from core.execution import ExecutionResult
+
+        self.flat = why
+        self.failed_script = self.simulate.name
+        if self.log is not None:
+            self.log.warning("[optimise] the simulation does not use the design it is given: %s", why)
+        return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                               stderr=f"{run.stderr}\nFI's search for the best design got a result that is not usable: "
+                                      f"{why}".strip())
 
     async def _check(self, python: Any, run: SearchRun, protocol: dict[str, Any], base: int, timeout_s: int,
                      env: dict[str, str] | None) -> tuple[str | None, str | None]:
@@ -1030,5 +1059,6 @@ def with_fi_record(stdout: str, record: dict[str, Any]) -> tuple[str, list[str]]
                                                                   "baseline_objective", "improvement",
                                                                   "improvement_numerical_error",
                                                                   "best_numerical_error")}
+    result = _search.plain_zero(result)
     lines[index] = "RESULT_JSON: " + json.dumps(result, allow_nan=True, default=str)
     return "\n".join(lines) + ("\n" if (stdout or "").endswith("\n") else ""), differs

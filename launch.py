@@ -3026,6 +3026,12 @@ async def _run_generators(
     web server) can record the failure for the quest."""
     written: dict[str, Path] = {}
     carried: set[str] = set()
+    if (Path(art.quest_root) / "needs" / "STUCK.json").is_file():
+        # The quest ended in an honest stop (needs/STUCK.json): there is no paper from this run, so none is made
+        # from one an earlier round left, and no slides, poster or talk from it.
+        print(f"[FI] quest {art.quest_id}: no paper, slides or poster were made, because the quest stopped without "
+              "findings to write up (needs/STUCK.json says why).")
+        return written
     _apply_paper_venue_override(cfg, art)
     _apply_quest_byline(cfg, Path(art.quest_root))
     if ask_byline:
@@ -3111,13 +3117,18 @@ async def _run_generators(
         paper_lines = 0
 
         async def redo_paper(feedback: str) -> None:
-            # Each attempt makes the text area one more line taller, so a last
-            # page holding a line or two moves back onto the page before.
+            # A last page holding a line or two moves back onto the page before
+            # when the text area is one line taller; text over an edge or over
+            # other text is set again with every table a size smaller.
             nonlocal paper_lines
-            paper_lines += 1
+            from generation._visual_check import paper_repairs
+
+            taller, smaller_tables = paper_repairs(feedback)
+            paper_lines += 1 if taller else 0
             source = written.get("paper_md") or art.paper_md
             pdf, skip = await asyncio.to_thread(
-                PaperGenerator(cfg)._compile_pdf, Path(source), art.quest_root, extra_lines=paper_lines,
+                PaperGenerator(cfg)._compile_pdf, Path(source), art.quest_root,
+                extra_lines=paper_lines, smaller_tables=smaller_tables,
             )
             if pdf is None:
                 raise RuntimeError(skip.summary if skip else "the paper did not recompile")
@@ -3769,6 +3780,21 @@ async def main_async(args: argparse.Namespace) -> int:
                 if (missing := missing_api_key(cfg.provider)) is not None:
                     print(f"[FI] {missing}", file=sys.stderr)
                     return 2
+                from core.provider import missing_step_api_keys
+
+                if (step_missing := missing_step_api_keys(cfg.provider)):
+                    print(f"[FI] {step_missing[0]} Nothing was started.", file=sys.stderr)
+                    return 2
+                # The key is there: the free model list of each step's own provider says whether its server answers
+                # and has the model (never a paid call), so a wrong address stops here and not at the first code step.
+                if cfg.provider.node_providers:
+                    from core.provider_readiness import check_steps, one_line
+
+                    for step, state in await check_steps(cfg.provider, deep=True):
+                        if state.blocked:
+                            print(f"[FI] the step `{step}` runs on its own provider: {one_line(state)} "
+                                  "Nothing was started.", file=sys.stderr)
+                            return 2
             if args.revise_plan is not None:
                 if not args.resume:
                     print("[FI] --revise-plan requires --resume <quest_id>",

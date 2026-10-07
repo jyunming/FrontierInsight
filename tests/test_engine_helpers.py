@@ -902,7 +902,7 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     assert patch["research_protocol"]["topic_type"]
 
 
-async def test_a_simulation_with_no_results_goes_back_once_then_writes_an_honest_failure(
+async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_paper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two live quests' final scripts crashed; the count rule still said "sufficient" (the analysis had summarised the
@@ -924,12 +924,12 @@ async def test_a_simulation_with_no_results_goes_back_once_then_writes_an_honest
     assert (ev["verdict"], ev["route"], ev["decided_by"]) == ("insufficient", "redesign", "rule") and calls == []
     assert first["iteration"] == 1 and first["evidence_no_result_retries"] == 1
     assert engine._route_after_evidence_gate(first) == "redesign"
-    # The second time (or with no iteration left) it writes, and the writer is told why.
+    # The second time (or with no iteration left) there is nothing to write up: the quest stops with no paper.
     again = await engine._node_evidence_gate({**state, **first})
     ev = again["evidence_assessment"]
-    assert (ev["verdict"], ev["route"]) == ("insufficient", "write") and "no results (exit code 1)" in ev["gaps"][0]
+    assert (ev["verdict"], ev["route"]) == ("insufficient", "stuck") and "no results (exit code 1)" in ev["gaps"][0]
     last = await engine._node_evidence_gate({**state, "iteration": 2})
-    assert last["evidence_assessment"]["route"] == "write"
+    assert last["evidence_assessment"]["route"] == "stuck"
     # A quest on user data, or with results, is not this case.
     assert engine._no_results_verdict({**state, "no_simulation_resolved": True}) is None
     assert engine._no_results_verdict({**state, "result_json": {"x": 1}}) is None
@@ -1117,6 +1117,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
         # picks ``human_feedback`` instead of revise/done so the user
         # can accept / reject / refine.
         "human_feedback": "human_feedback",
+        # The paper still claims what FI's own records contradict after its rewrites: no paper.
+        "stuck": "stuck_no_findings",
     }
     # human_feedback node itself routes back to design (refine) or END
     # (accept/reject). Same ``revise``/``done`` labels the auto path uses.
@@ -1145,7 +1147,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert "evidence_gate" in g.nodes
     assert "evidence_gate" in g.branches
     ev_branch = next(iter(g.branches["evidence_gate"].values()))
-    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design"}
+    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
     # ``implement`` (for resume contract compatibility — the 609990

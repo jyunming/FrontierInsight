@@ -301,7 +301,7 @@ import matplotlib.pyplot as plt
 raw = pathlib.Path(os.environ["FI_RAW_DIR"])
 done = json.loads((raw / "outcomes.json").read_text())
 os.makedirs('figures', exist_ok=True)
-plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
+plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('figures/result.png', dpi=72)
 print('RESULT_JSON: ' + json.dumps({'score': 0.987, 'cells': len(done)}))
 """
 
@@ -854,7 +854,7 @@ for c in data["cells"]:
     m = c["metrics"]["final_size"]
     out[c["key"]] = {"final_size_values": m["values"], "final_size_count": m["count"]}
 os.makedirs('figures', exist_ok=True)
-plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
+plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('figures/result.png', dpi=72)
 print('RESULT_JSON: ' + json.dumps({'score': 0.987, 'by_cell': out}))
 """
 

@@ -37,7 +37,7 @@ from typing import Callable
 
 __all__ = [
     "Readiness", "STATE_LABELS", "check_local", "check", "check_all", "preflight", "label", "one_line",
-    "ollama_models", "CLI_BINARIES", "KEY_ENVS",
+    "ollama_models", "CLI_BINARIES", "KEY_ENVS", "check_steps",
 ]
 
 #: The command each CLI provider runs (``core.provider._CLI_SPECS[...].argv[0]``; a test keeps them equal).
@@ -447,3 +447,31 @@ async def preflight(provider: str, *, model: str | None = None, base_url: str = 
     # A launch with no model named calls the provider's default, so that is the model looked for (Ollama).
     return await check(provider, model=model, base_url=base_url, api_key_env=api_key_env, sign_in=True,
                        call_service=True, timeout_s=timeout_s, default_model=True)
+
+
+def _step_local(entry_provider: str, model: str, base_url: str, api_key_env: str) -> Readiness:
+    """A step's own provider with no network: :func:`check_local`, and a key the entry names but the environment does not
+    hold is "no key" for every provider (``check_local`` leaves that to the providers that read a key by default)."""
+    key = (api_key_env or "").strip()
+    if key and not os.environ.get(key, "").strip() and entry_provider not in CLI_BINARIES:
+        return Readiness(entry_provider, "no_key", f"{key} is not set.",
+                         f"Set {key} in your terminal or in a .env file in the folder you run FI from.", model)
+    return check_local(entry_provider, model=model, base_url=base_url, api_key_env=api_key_env)
+
+
+async def check_steps(provider: object, *, deep: bool = False, timeout_s: float = 5.0) -> list[tuple[str, Readiness]]:
+    """The readiness of each step's own provider (``provider.node_providers`` of a quest's config), as ``(step,
+    Readiness)``, in the config's order. Quick: this computer only (the key in the environment, the command on PATH);
+    ``deep``: also the provider's model list, never a paid call. Never raises."""
+    out: list[tuple[str, Readiness]] = []
+    for step, entry in dict(getattr(provider, "node_providers", None) or {}).items():
+        args = dict(model=entry.model, base_url=entry.base_url or "", api_key_env=entry.api_key_env or "")
+        local = _step_local(entry.name, **args)
+        if deep and not local.blocked:
+            try:
+                out.append((step, await preflight(entry.name, timeout_s=timeout_s, **args)))
+                continue
+            except Exception:  # noqa: BLE001 -- a check that breaks never takes the caller down
+                pass
+        out.append((step, local))
+    return out

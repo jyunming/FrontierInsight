@@ -102,6 +102,53 @@ def _models_dir_env_default() -> Path | None:
     return Path(v).expanduser() if v else None
 
 
+class StepProviderConfig(BaseModel):
+    """One step's own provider and model (``provider.node_providers``): the step's calls go to this provider, with this
+    provider's own address, key, sampling and request fields, never the main provider's. Everything not named here is
+    the provider's own default; the timeouts, retries and the quest's records are the main provider's, unchanged."""
+
+    model_config = {"extra": "forbid"}
+
+    name: ProviderName
+    model: str
+    base_url: str | None = None
+    api_key_env: str | None = None
+    fixed_temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    extra_body: dict[str, Any] = Field(default_factory=dict)
+    reasoning_effort: ReasoningEffort | None = None
+    # Providers to fall back to when this one fails a call, as ``provider.fallback`` does for the main provider.
+    # Empty (the default): the step has no fallback.
+    fallback: list[ProviderName] = Field(default_factory=list)
+
+    @field_validator("model")
+    @classmethod
+    def _model_named(cls, v: str) -> str:
+        if not str(v).strip():
+            raise ValueError("a step's provider needs a model: `model: <the model it should use>`")
+        return str(v).strip()
+
+    @field_validator("extra_body")
+    @classmethod
+    def _no_stream_in_step_extra_body(cls, v: dict[str, Any]) -> dict[str, Any]:
+        if "stream" in (v or {}):
+            raise ValueError("extra_body cannot set `stream`: FI decides that itself. Remove `stream` from extra_body.")
+        return v
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _step_reasoning_effort(cls, v: object) -> object:
+        if v is None:
+            return None
+        if isinstance(v, str):
+            level = v.strip().lower()
+            if not level:
+                return None
+            if level in REASONING_EFFORT_LEVELS:
+                return level
+        raise ValueError("reasoning_effort must be one of " + ", ".join(REASONING_EFFORT_LEVELS)
+                         + f", or left unset; got {v!r}")
+
+
 class ProviderConfig(BaseModel):
     name: ProviderName = "codex"
     model: str | None = None
@@ -190,6 +237,7 @@ class ProviderConfig(BaseModel):
             # retry starts the answer over, so four tries ended the call after 8 minutes with nothing.
             "implement_oracle": 600.0,
             "implement_protocol": 600.0,
+            "implement_figures": 600.0,
             "plan": 600.0,
             "plan_revise": 600.0,
             "design_self_critique": 600.0,
@@ -241,6 +289,7 @@ class ProviderConfig(BaseModel):
             # table above for what timed out without them).
             "implement_oracle": 900.0,
             "implement_protocol": 900.0,
+            "implement_figures": 900.0,
             "plan": 900.0,
             "plan_revise": 900.0,
             "design_self_critique": 900.0,
@@ -304,6 +353,27 @@ class ProviderConfig(BaseModel):
     # just as good there. Unset, they use the primary model like any
     # other node — no behavior change until you opt in.
     node_models: dict[str, str] | None = None
+
+    # A step on ANOTHER PROVIDER, not just another model: maps a step (the same keys as ``node_models``: an exact key
+    # first, then the part before the first dot) to the provider, model, address and key its calls use, e.g. the code-
+    # writing steps on one provider and everything else on the main one. Each entry takes ``name`` and ``model`` (both
+    # required) and, as ``provider`` itself does, ``base_url``, ``api_key_env``, ``fixed_temperature``, ``extra_body``,
+    # ``reasoning_effort`` and ``fallback``. Only the entry's own values are sent to its provider (never the main
+    # provider's sampling or request fields); timeouts, retries and the quest's records stay the main provider's. A
+    # step in both ``node_providers`` and ``node_models`` uses ``node_providers`` (run.log says so once). Unset: none.
+    node_providers: dict[str, StepProviderConfig] | None = None
+
+    @field_validator("node_providers", mode="before")
+    @classmethod
+    def _step_providers_named(cls, v: Any) -> Any:
+        if v is None:
+            return v
+        if not isinstance(v, dict):
+            raise ValueError("provider.node_providers must map step names to {name, model, ...}")
+        for step in v:
+            if not str(step).strip():
+                raise ValueError("provider.node_providers: a step name cannot be empty")
+        return v
 
     # The most a step's answer may be, in tokens (the output limit sent as ``max_tokens``), per step: the same keys as
     # ``node_models`` (``write``, ``implement``, ``review_panel`` for every reviewer, ...), an exact key first, then the
@@ -1155,6 +1225,12 @@ class ExecutionConfig(BaseModel):
     code_package: bool = True
     code_package_max_extra_lines: int = Field(default=400, ge=0)
     code_package_max_extra_calls: int = Field(default=3, ge=0)
+    # The model's package written one function at a time (core/function_steps.py): after the outline names one function
+    # per equation, each body is filled, import-checked and tested against the plan's worked example for its equation
+    # before the next is written; a failing function is repaired alone. The limits are fixed (2 repairs per function, at
+    # most 10 model functions, at most 40 requests in a whole quest); ``false`` writes the code whole. Only for a quest
+    # laid out as a package (``code_package``).
+    code_function_steps: bool = True
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy

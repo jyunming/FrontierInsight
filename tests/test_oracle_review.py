@@ -17,8 +17,10 @@ from core.engine import Engine
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 
 MODEL = {"summary": "a lossless two-port network", "equations": [
-    {"id": "E1", "formula": "P_out = P_in", "role": "generates", "source": "derivation", "derivation": "energy balance: P_out = P_in"},
-    {"id": "E2", "formula": "V = I R", "role": "generates", "source": "derivation", "derivation": "Ohm's law: V = I R"},
+    {"id": "E1", "formula": "P_out = P_in", "role": "generates", "source": "derivation", "derivation": "energy balance: P_out = P_in",
+     "example": {"inputs": {"P_in": 2.0}, "expected_formula": "P_in"}},
+    {"id": "E2", "formula": "V = I R", "role": "generates", "source": "derivation", "derivation": "Ohm's law: V = I R",
+     "example": {"inputs": {"I": 2.0, "R": 3.0}, "expected_formula": "I * R"}},
 ]}
 CHECK = {"name": "power_conservation", "kind": "invariant", "check": "output power equals input power", "expected": 0,
          "tolerance": 1e-6, "case": {"n": 4}, "measure": "abs(P_out - P_in) / P_in",
@@ -362,3 +364,187 @@ def test_a_rewrite_is_fi_s_own_version_even_if_the_run_stops_during_the_reading(
     with pytest.raises(KeyboardInterrupt):
         asyncio.run(engine._hold_oracle_forms(plan.plan_path(engine.quest_root)))
     assert plan.note_edit(engine.quest_root, plan.plan_path(engine.quest_root).read_text(encoding="utf-8")) is None
+
+
+# --- the equations of the model, read by the same second reader -------------------------------------------------------
+
+CUP_MODEL = {"summary": "a cup of liquid cooling towards the room's temperature", "equations": [
+    {"id": "E1", "formula": "T(t) = T_env + (T0 - T_env) * exp(-k * t)", "role": "generates", "source": "derivation",
+     "derivation": "Newton cooling, solved",
+     "example": {"inputs": {"T_env": 20.0, "T0": 80.0, "k": 0.5, "t": 0.0}, "expected_formula": "T0"}},
+    {"id": "E2", "formula": "tau = 2 / k", "role": "analyses", "source": "derivation",
+     "derivation": "the time constant of E1", "example": {"inputs": {"k": 4.0}, "expected_formula": "2 / k"}},
+]}
+CUP_CHECK = {"name": "half_way", "kind": "special_case", "check": "temperature after one time constant", "expected": 0.3679,
+             "tolerance": 1e-3, "tolerance_mode": "absolute", "case": {"k": 1.0}, "measure": "frac",
+             "expected_formula": "exp(-k)", "reference": "derivation: exp(-1)"}
+CUP_PROTOCOL = {"grid": {"k": [1.0, 2.0]}, "model": CUP_MODEL, "oracles": [CUP_CHECK]}
+
+
+def _cup_review(*, e2_standard: str = "no") -> dict[str, Any]:
+    return {"checks": [{"name": "half_way", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes"}],
+            "equations_tested": ["E1"], "equations_not_tested": [], "add": [],
+            "equations": [{"id": "E1", "standard": "yes"},
+                          {"id": "E2", "standard": e2_standard, "correct": "tau = 1 / k",
+                           "why": "the time constant is the time for a drop by 1/e, which is 1/k"}],
+            "summary": "E2 has the wrong factor."}
+
+
+def _asked_about_checks(model: "_Model") -> list[str]:
+    """The requests to the plan that came from the second reading of the checks (the plan is asked other things too)."""
+    return [r for r in model.revisions if "A second model read the plan's checks" in r]
+
+
+def _correct_e2(block: dict[str, Any]) -> dict[str, Any]:
+    model = block["protocol"]["model"]
+    equations = [{**e, "formula": "tau = 1 / k"} if e["id"] == "E2" else e for e in model["equations"]]
+    oracles = [{**o, "tolerance": 0.5} for o in block["protocol"]["oracles"]]  # a rewrite that loosens: must not stick
+    return {**block, "protocol": {**block["protocol"], "model": {**model, "equations": equations}, "oracles": oracles}}
+
+
+def test_the_reader_is_asked_about_the_equations_and_its_objection_is_read_strictly() -> None:
+    review = orv.parse(_cup_review(), CUP_PROTOCOL)
+    assert [(e["id"], e["standard"]) for e in review.equations] == [("E1", True), ("E2", False)]
+    found = orv.equation_findings(review)
+    assert len(found) == 1 and "E2" in found[0] and "tau = 1 / k" in found[0] and "tau = 2 / k" in found[0]
+    assert "equation" in orv.request(found, equations=True) and "Never change a tolerance" in orv.request(
+        found, equations=True)
+    assert "Never change a tolerance" not in orv.request(["x"]), "no equation talk when no equation was objected to"
+    unknown = {**_cup_review(), "equations": [{"id": "E9", "standard": "no", "correct": "x"}]}
+    assert orv.parse(unknown, CUP_PROTOCOL).equations == []
+
+
+@pytest.mark.asyncio
+async def test_another_model_objects_to_an_equation_and_the_plan_corrects_it_before_any_code(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path, research=True, node_models={"oracle_review": "reviewer-model"}))
+    model = _Model(CUP_PROTOCOL, _cup_review(), revise=_correct_e2)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    asked = _asked_about_checks(model)
+    assert len(model.reviews) == 1 and len(asked) == 1, "the objection rides in the one request to the plan"
+    assert "E2" in model.reviews[0]["prompt"] and "standard definition" in model.reviews[0]["prompt"]
+    assert "The equation E2 (tau = 2 / k) is not the standard definition" in asked[0]
+    design = plan.load_design(engine.quest_root)[0]
+    formulas = {e["id"]: e["formula"] for e in design["protocol"]["model"]["equations"]}
+    assert formulas == {"E1": "T(t) = T_env + (T0 - T_env) * exp(-k * t)", "E2": "tau = 1 / k"}
+    assert design["protocol"]["oracles"][0]["tolerance"] == 1e-3, "a rewrite never loosens a check"
+    section = _section(engine)
+    assert "Equation E2 was changed: it was `tau = 2 / k`, it is now `tau = 1 / k`" in section
+    assert "**E2** is not the standard definition: tau = 1 / k" in section
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert record["equations"]["read_by_other_model"] is True and record["equations"]["judged"] == ["E1", "E2"]
+
+
+@pytest.mark.asyncio
+async def test_the_model_that_wrote_the_plan_does_not_count_as_a_reader_of_its_equations(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path, research=True))  # no other model named: the planner's own model reads
+    model = _Model(CUP_PROTOCOL, _cup_review(), revise=_correct_e2)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert _asked_about_checks(model) == [], "a same-model objection is not sent to the plan as a second opinion"
+    design = plan.load_design(engine.quest_root)[0]
+    assert {e["id"]: e["formula"] for e in design["protocol"]["model"]["equations"]}["E2"] == "tau = 2 / k"
+    section = _section(engine)
+    assert "not read by another model" in section and "the model that wrote the plan (planner-model)" in section
+    assert "below *independently validated*" in section
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert record["equations"]["read_by_other_model"] is False
+    gaps = orv.independence_gaps(record, [], configured=False, protocol=CUP_PROTOCOL)
+    assert any("equations" in g and "not read by another model" in g for g in gaps)
+
+
+@pytest.mark.asyncio
+async def test_a_reader_with_no_objection_to_any_equation_makes_no_request(tmp_path: Path) -> None:
+    engine = Engine(_config(tmp_path, research=True, node_models={"oracle_review": "reviewer-model"}))
+    model = _Model(CUP_PROTOCOL, _cup_review(e2_standard="yes"), revise=_correct_e2)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert len(model.reviews) == 1 and _asked_about_checks(model) == []
+    assert "**E2** is the standard definition or a correct derivation" in _section(engine)
+    # An answer with no verdict on the equations is a reading of the checks only; the equations are said not to be read.
+    engine = Engine(_config(tmp_path / "b", research=True, node_models={"oracle_review": "reviewer-model"}))
+    old_style = {k: v for k, v in _cup_review().items() if k != "equations"}
+    engine._client = _Model(CUP_PROTOCOL, old_style)
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert "no verdict on 'E1', 'E2'" in _section(engine)
+
+
+def test_a_rewrite_that_drops_an_equation_gets_it_back_and_a_looser_bar_is_refused() -> None:
+    old = [{"id": "E1", "formula": "a"}, {"id": "E2", "formula": "b"}]
+    got = orv.keep_every_equation(old, [{"id": "E1", "formula": "a2"}])
+    assert [(e["id"], e["formula"]) for e in got] == [("E1", "a2"), ("E2", "b")]
+    kept = orv.never_looser([{"name": "c", "tolerance": 1e-3, "tolerance_mode": "relative"}],
+                            [{"name": "c", "tolerance": 1e-2, "tolerance_mode": "relative", "expected": 5}])
+    assert kept[0]["tolerance"] == 1e-3 and kept[0]["expected"] == 5
+    tighter = orv.never_looser([{"name": "c", "tolerance": 1e-3}], [{"name": "c", "tolerance": 1e-4}])
+    assert tighter[0]["tolerance"] == 1e-4
+
+
+def test_an_equation_the_reader_cannot_tell_is_not_recorded_as_standard() -> None:
+    reply = {**_cup_review(), "equations": [{"id": "E1", "standard": "yes"}, {"id": "E2", "standard": ""}]}
+    review = orv.parse(reply, CUP_PROTOCOL)
+    assert [(e["id"], e["standard"]) for e in review.equations] == [("E1", True), ("E2", None)]
+    record = orv.equation_record(review, CUP_PROTOCOL, same_model=False, reviewer="reviewer-model", planner="planner-model")
+    assert record["judged"] == ["E1"] and record["read_by_other_model"] is False and "no verdict on 'E2'" in record["why"]
+    assert orv.equation_findings(review) == [], "no verdict is not an objection"
+
+
+# --- does a check's case isolate what its measure claims? ---------------------------------------------------------------
+
+ISO_CHECK = {**CUP_CHECK, "name": "mean_drop", "check": "the mean temperature drop over the whole run",
+             "case": {"k": 1.0, "t_end": 10.0}, "measure": "frac"}
+
+
+def _iso_review(isolates: str = "no") -> dict[str, Any]:
+    return {**_cup_review(e2_standard="yes"), "checks": [
+        {"name": "mean_drop", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes", "isolates": isolates,
+         "isolation_note": "the mean runs over a stretch where the cup is already at room temperature"}]}
+
+
+def _fix_case(block: dict[str, Any]) -> dict[str, Any]:
+    fixed = [{**o, "case": {"k": 1.0, "t_end": 1.0}, "expected_formula": "exp(-1)", "tolerance": 0.5, "expected": 99.0}
+             for o in block["protocol"]["oracles"]]  # a rewrite that also loosens and hand-writes: neither may stick
+    return {**block, "protocol": {**block["protocol"], "oracles": fixed}}
+
+
+def test_the_reader_s_verdict_on_a_case_is_read_and_only_a_no_is_an_objection() -> None:
+    protocol = {**CUP_PROTOCOL, "oracles": [ISO_CHECK]}
+    review = orv.parse(_iso_review(), protocol)
+    assert review.checks[0]["isolates"] is False
+    found = orv.isolation_findings(review)
+    assert len(found) == 1 and "mean_drop" in found[0] and "already at room temperature" in found[0]
+    assert orv.isolation_findings(orv.parse(_iso_review(""), protocol)) == []
+    text = orv.request(found, isolation=True)
+    assert "does not isolate" in text and "Never loosen a tolerance" in text
+    rec = orv.isolation_record(review, same_model=True, reviewer="m", planner="m")
+    assert rec["read_by_other_model"] is False and "wrote the plan" in rec["why"] and rec["objections"] == 0
+    assert orv.isolation_record(review, same_model=False, reviewer="r", planner="p")["objections"] == 1
+
+
+@pytest.mark.asyncio
+async def test_another_model_s_objection_to_a_case_goes_in_the_one_request_and_nothing_is_loosened(tmp_path: Path) -> None:
+    protocol = {**CUP_PROTOCOL, "oracles": [ISO_CHECK]}
+    engine = Engine(_config(tmp_path, research=True, node_models={"oracle_review": "reviewer-model"}))
+    model = _Model(protocol, _iso_review(), revise=_fix_case)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    asked = _asked_about_checks(model)
+    assert len(asked) == 1 and "The case of the check 'mean_drop' does not isolate" in asked[0]
+    check = plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]
+    assert check["case"] == {"k": 1.0, "t_end": 1.0} and check["expected_formula"] == "exp(-1)"
+    assert check["tolerance"] == 1e-3, "the bar is not loosened"
+    assert check["expected"] != 99.0, "an expected value written by hand is not kept (FI computes it from the formula)"
+    assert "its case may not isolate what it measures" in _section(engine)
+
+
+@pytest.mark.asyncio
+async def test_the_same_model_judging_a_case_is_recorded_plainly_and_asks_nothing(tmp_path: Path) -> None:
+    protocol = {**CUP_PROTOCOL, "oracles": [ISO_CHECK]}
+    engine = Engine(_config(tmp_path, research=True))
+    model = _Model(protocol, _iso_review(), revise=_fix_case)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert _asked_about_checks(model) == []
+    assert "cases were not judged by another model" in _section(engine)
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert record["isolation"]["read_by_other_model"] is False

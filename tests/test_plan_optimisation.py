@@ -382,7 +382,7 @@ async def test_the_persons_answer_reaches_the_plan_and_is_kept(tmp_path: Path) -
     seen = _stop_at_pause(eng)
     with pytest.raises(Paused):
         await eng._node_design(state)
-    assert "no `optimisation` block" in " ".join(seen[0]["steps"])
+    assert "what the search should make as low or as high as possible" in " ".join(seen[0]["steps"])
 
 
 @pytest.mark.asyncio
@@ -531,4 +531,4 @@ async def test_an_answer_does_not_hide_what_a_plan_with_a_block_is_missing(tmp_p
     with pytest.raises(Paused):
         await eng._node_design({"topic": "fins", "iteration": 0, "clarify_answers": {"study_type": "2"}})
     steps = " ".join(seen[0]["steps"])
-    assert "no evaluation budget" in steps and "the design is a measurement over chosen settings" not in steps
+    assert "how many designs the search may try" in steps and "the design is a measurement over chosen settings" not in steps

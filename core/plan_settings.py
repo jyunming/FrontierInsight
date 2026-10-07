@@ -38,6 +38,7 @@ SETTINGS: tuple[tuple[str, str], ...] = (
     ("provider.name", "the model provider"),
     ("provider.model", "the model"),
     ("provider.node_models", "models chosen for single steps"),
+    ("provider.node_providers", "providers chosen for single steps"),
     ("provider.node_ensemble", "the multi-model ensemble"),
     ("engine.review_panel", "the reviewers"),
     ("engine.protocol_check", "what a protocol problem does"),
@@ -69,7 +70,7 @@ SETTINGS: tuple[tuple[str, str], ...] = (
 #: said, never a stop (see the module docstring). The ensemble (``provider.node_ensemble``) is not one of them: it
 #: decides how many models vote on a check, so a change to it still needs approving.
 MODEL_SETTINGS: frozenset[str] = frozenset({
-    "provider.name", "provider.model", "provider.node_models",
+    "provider.name", "provider.model", "provider.node_models", "provider.node_providers",
 })
 
 

@@ -11,6 +11,7 @@ coexist in one process for the fleet runner.
 from __future__ import annotations
 
 import ast
+import copy
 import asyncio
 import fnmatch
 import concurrent.futures
@@ -66,6 +67,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
 
+from .latex_text import escape_latex_backslashes
 from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
@@ -101,10 +103,16 @@ from . import plan_settings as _plan_settings
 from . import receipts as _receipts
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
+from . import figure_data_check as _figdata
+from .run_checks import RunChecksMixin
+from . import record_claims as _record_claims
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
+from . import equation_tests as _equation_tests
+from . import code_review as _code_review
+from . import function_steps as _function_steps
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
@@ -146,8 +154,12 @@ from .provider import (
     PROXY_PROVIDERS,
     ProxySupervisor,
     append_cost_row,
+    missing_step_api_keys,
     model_for_node,
+    node_provider_for,
     outcome_of as _outcome_of,
+    step_provider_config,
+    step_provider_lines,
     _ModelAnswerProblem,
     ModelAnswerTruncated,
     resolve_endpoint_async,
@@ -316,6 +328,8 @@ class QuestState(TypedDict, total=False):
     design_history: list[dict[str, Any]]
     # How many times the simulation was sent back because its run manifest differed from the frozen protocol.
     run_manifest_failures: int
+    figure_data_repairs: int
+    record_rewrites: int
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -373,6 +387,8 @@ class QuestState(TypedDict, total=False):
     exec_reflect_iter: int
     exec_reflect_history: list[dict[str, Any]]
     exec_give_up_reason: str
+    # The quest stopped with no paper (``needs/STUCK.json``): what it could not do and what it tried.
+    stuck: dict[str, Any]
     # True from the moment the reflect node writes a patch until ``execute``
     # runs it. The router runs a pending patch even when it used the last
     # repair attempt; otherwise the paper is written from the run before it,
@@ -632,7 +648,7 @@ from core.config import ProviderName as _ProviderName  # noqa: E402
 #: which reports the vendor that answered (copilot, customendpoint, ollama-models).
 _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
-class Engine:
+class Engine(RunChecksMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -1022,6 +1038,7 @@ class Engine:
                         # iteration==0).
                         if reopen and not prior_snapshot.next:
                             forget_papers_asked(self.fi_dir, declined=False)
+                            self._set_aside_stuck_record()
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             # The notes of earlier refines were answered by earlier passes: this pass redoes the
                             # design, and neither the writer nor the review treats them as new.
@@ -1037,6 +1054,8 @@ class Engine:
                                     "feedback_rounds_from": len((prior_snapshot.values or {}).get("feedback_history") or []),
                                     # A request to search further (core/optimise_refine.py) belongs to its own pass.
                                     "optimise_refine": {},
+                                    # An honest stop belongs to the pass that ended in it.
+                                    "stuck": {},
                                 },
                                 as_node="human_feedback",
                             )
@@ -1449,6 +1468,7 @@ class Engine:
                 # ``aclose()`` on None would raise AttributeError and mask
                 # the real error. Same logic for the proxy release —
                 # only release a handle we actually acquired.
+                await self._close_step_clients()
                 if self._client is not None:
                     await self._client.aclose()
                 if (
@@ -2380,6 +2400,8 @@ class Engine:
         # sends the quest back for ONE bounded literature broaden. A
         # logged passthrough when engine.evidence_gate is off.
         g.add_node("evidence_gate", self._audited("evidence_gate", self._node_evidence_gate))
+        g.add_node("stuck_no_findings", self._audited("stuck_no_findings", self._node_stuck_no_findings))
+        g.add_edge("stuck_no_findings", END)
         g.add_node("write", self._audited("write", self._node_write))
         g.add_node("claim_check", self._audited("claim_check", self._node_claim_check))
         g.add_node("replot_layout", self._audited("replot_layout", self._node_replot_layout))
@@ -2480,7 +2502,7 @@ class Engine:
         )
         # evidence_gate → write (sufficient / insufficient-but-write) OR
         # back to literature for ONE bounded broaden pass.
-        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design"}
+        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings"}
         if _phased.enabled(self.config):
             # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
             # that analyses data reads the held-back rows once more with it.
@@ -2521,6 +2543,8 @@ class Engine:
                 "re_execute": "implement",
                 "done": END,
                 "human_feedback": "human_feedback",
+                # The paper still claims what FI's own records contradict after its rewrites: no paper (needs/STUCK.json).
+                "stuck": "stuck_no_findings",
             },
         )
         # human_feedback resolves to one of three outcomes after the callback returns: accept / reject → END,
@@ -2731,6 +2755,8 @@ class Engine:
         Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
         exploration goes to the confirm run first (``_phased_route``)."""
         route = (state.get("evidence_assessment") or {}).get("route", "write")
+        if route == "stuck":
+            return route  # no findings to write up: the quest stops here, in every mode
         if _phased.enabled(self.config):
             return self._phased_route(state, route)
         return route
@@ -3233,6 +3259,20 @@ class Engine:
         # write it again, shorter. These rewrites have their own cap (the
         # review stops forcing them after ``_PAGE_LIMIT_REWRITES``), so the
         # iteration budget neither pays for them nor stops them.
+        # The paper claims what FI's own records contradict: it is written again, with the contradiction named, up to
+        # ``_RECORD_REWRITES`` times (outside engine.max_iterations, so even a one-round quest gets them). A paper
+        # that still claims it is not delivered as a finished paper: the quest ends in the honest stop.
+        if any(_hit_name(h) == _record_claims.HIT for h in must_flag):
+            if int(state.get("record_rewrites") or 0) <= _RECORD_REWRITES:
+                self._log.info(
+                    "[route] the paper claims what FI's own records contradict — writing it again "
+                    "(rewrite %d of %d, outside engine.max_iterations)",
+                    int(state.get("record_rewrites") or 0), _RECORD_REWRITES)
+                return "rewrite"
+            self._log.warning(
+                "[route] the paper still claims what FI's own records contradict after %d rewrites — "
+                "stopping without a paper", _RECORD_REWRITES)
+            return "stuck"
         page_rewrites = int(state.get("page_limit_rewrites") or 0)
         if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
             self._log.info(
@@ -5014,6 +5054,7 @@ class Engine:
                            and self._split_on({**state, "design": parsed.design}) and not _criteria.countable(protocol))
             await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
                                             no_criteria=no_criteria)
+            await self._complete_the_search_in_the_plan(state)
             if ask:
                 self._pause_for_plan(no_criteria=no_criteria)
             return {}
@@ -5024,10 +5065,9 @@ class Engine:
                 or self._study_type_asked(state) == "find_best_design")
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
                   + self._study_type_note(state))
-        text = await self._chat(prompt, node="plan")
-        obj = _parse_json_lenient(text) or {}
-        extra = obj.pop("plan", None) if isinstance(obj, dict) else None
-        design = obj if isinstance(obj, dict) and obj else {"hypothesis": "(parse failed)", "dependencies": []}
+        obj = await self._design_reply(prompt, node="plan")
+        extra = obj.pop("plan", None)
+        design = obj
         design, objections = await self._audit_design(state, design)
         if isinstance(design, dict):
             # ``plan`` asks the same design prompt as ``design`` (``_design_prompt`` + ``_PLAN_DIRECTIVE``) and can get
@@ -5138,6 +5178,7 @@ class Engine:
         protocol = normalized.get("protocol")
         await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
                                         no_criteria=no_criteria and ask)
+        await self._complete_the_search_in_the_plan(state)
         if ask:
             self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
@@ -5252,34 +5293,377 @@ class Engine:
                          "if a measurement is what you want.")
         return notes
 
+    def _search_problems(self, state: QuestState, design: Any) -> tuple[bool, list[str], str | None]:
+        """``(wanted, what the search lacks, why its block cannot be read)`` for ``design``: ``wanted`` is whether the
+        design is a search for the best design (its own ``study_type`` or block, the person's answer, or, for a design
+        that says nothing of its own, a topic that plainly asks for it); the list is the technical sentences for
+        run.log and the request to the plan's model; the last is ``normalize``'s reason for a block that cannot be used."""
+        explicit = isinstance(design, dict) and design.get("study_type") is not None
+        # The person's answer, or a topic that plainly asks for the best design, counts for a design that says nothing
+        # of its own (one drafted at this step, say); a design that says `measure` is a choice someone made and runs.
+        asked = bool(self._asks_for_best_design(state, topic=False)) and not explicit and not _optim.has_block(design)
+        if _optim.study_type_of(design) != "find_best_design" and not asked:
+            return False, [], None
+        # Read back through the check, since a design drafted at this step has not been through it.
+        _block, block_why = (_optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design)
+                             else (None, None))
+        missing = _optim.missing_parts(design) if not asked else [
+            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+        if block_why:
+            missing.append(f"its optimisation block cannot be used ({block_why})")
+        return True, missing, block_why
+
+    def _plan_model_name(self) -> str:
+        """The model the plan step's requests go to (for the record of what FI asked it, so another model is asked afresh)."""
+        return str(self._model_for_node("plan_revise") or self.config.provider.model or "")
+
+    def _search_record(self, sha: str, file: str | None = None) -> tuple[int, int]:
+        """``(requests, chat calls)`` FI has made of the plan's model to write the search part of the plan that ``plan.md``
+        (``sha``) still lacks, on the model asked now. Zero for a plan someone changed since (a person, another request) or a
+        model changed since: each is a new plan, or a new asker, and is asked afresh."""
+        try:
+            record = json.loads((self.fi_dir / (file or _SEARCH_ASKED)).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0, 0
+        if (isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name()):
+            try:
+                count = max(0, int(record.get("count") or 0))
+                return count, max(0, int(record.get("calls") if record.get("calls") is not None else count * _SEARCH_CALLS_PER_ASK))
+            except (TypeError, ValueError):
+                return 0, 0
+        return 0, 0
+
+    def _search_asked(self, sha: str) -> int:
+        """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
+        return self._search_record(sha)[0]
+
+    def _parts_asked(self, sha: str) -> list[str]:
+        """The protocol parts FI has already asked the plan's model about, for the plan (``sha``) and model asked now (the
+        record is kept by part name too, because FI's own note in plan.md changes the plan's hash between two steps)."""
+        try:
+            record = json.loads((self.fi_dir / _PART_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name():
+            return [str(p) for p in record.get("parts") or []]
+        return []
+
+    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str, file: str | None = None,
+                             extra: dict[str, Any] | None = None) -> bool:
+        """Write the record; ``False`` when it could not be written."""
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / (file or _SEARCH_ASKED)).write_text(json.dumps({
+                "count": count, "calls": calls, "sha": sha, "model": self._plan_model_name(), "outcome": outcome,
+                "at": _frozen.now(), **(extra or {}),
+            }) + "\n", encoding="utf-8")
+            return True
+        except OSError as e:
+            self._log.warning("[plan] couldn't record that FI asked the plan's model for the search: %r", e)
+            return False
+
+    async def _ask_plan_for_the_search(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """Before a search for the best design stops because the plan's ``optimisation`` block is missing or cannot be
+        used, ask the plan's model itself to write it (at most twice per plan; the count is kept in
+        ``.fi/search_block_asked.json``, so a resume does not ask again): a scientist does not write FI's block, and the
+        topic already says what is to be made as low or as high as possible. Only a rewrite of the block (and
+        ``study_type``) is kept; a change to anything else is put back. Returns the design to use and the hash of its
+        plan: the plan as rewritten once the block is usable, else as it was (the stop that follows says what was tried)."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha):
+            return design, plan_sha
+
+        def lacks(now: Any) -> list[str]:
+            wanted, missing, why = self._search_problems(state, now)
+            return _optim.plain_gaps(now, why) if wanted and missing else []
+
+        def request(now: Any, text: str) -> str:
+            _wanted, missing, _why = self._search_problems(state, now)
+            left_out = [m.group(0).lstrip("- ").strip() for m in re.finditer(
+                r"^.*the optimisation block was left out.*$", text, re.MULTILINE)][:3]
+            return _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
+
+        return await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request, keep=self._keep_only_the_search, file=_SEARCH_ASKED,
+            what="search for the best design", short="the search",
+            note="the search for the best design, written by the plan's model")
+
+    async def _ask_plan_to_complete(
+        self, design: Any, plan_sha: str, *, lacks: Any, request: Any, keep: Any, file: str, what: str, short: str,
+        note: str, extra: dict[str, Any] | None = None, ask_limit: int | None = None,
+    ) -> tuple[Any, str]:
+        """The bounded request to the plan's model to write a part of the plan that is missing or cannot be read, shared by
+        every such part (the search block, the settings to sweep, the metrics ...): at most ``_SEARCH_ASKS`` requests and
+        ``_SEARCH_CALLS`` chat calls per plan and model, counted in ``.fi/<file>`` BEFORE each call so a resume never asks
+        again. ``lacks(design)``: what the plan still lacks, in plain sentences (empty when complete);
+        ``request(design, text)``: what to ask; ``keep(before_text, revised_text)``: the text to write, which keeps only the
+        asked part (``None`` or ``ValueError``: the answer is not used). Returns the design to use and its plan's hash."""
+        path = _plan.plan_path(self.quest_root)
+        gaps = lacks(design)
+        if not gaps or not path.is_file():
+            return design, plan_sha
+        count, calls = self._search_record(plan_sha, file)
+        while (count < (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
+               and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS):
+            text = path.read_text(encoding="utf-8")
+            sha_before = _plan.sha256(text)
+            self._log.warning("[plan] the plan's %s was missing %s; FI asked the plan to complete it (%d of %d)", what,
+                              "; ".join(gaps), count + 1, _SEARCH_ASKS)
+            self._progress(f"Asking the model to complete the {what} in the plan")
+            ask = request(design, text)
+            # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
+            # killed during it, still counts, so a broken model is never asked again and again across resumes.
+            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra):
+                # No durable count, no request: a request that could not be counted could be asked again on every resume.
+                self._log.warning("[plan] FI could not write down that it was asking the plan's model, so it did not ask")
+                return design, plan_sha
+            used_before = getattr(self, "_plan_chat_calls", 0)
+            outcome = "kept"
+            try:
+                await self._rewrite_plan(
+                    ask, path, by="engine", expect=text,
+                    finish=lambda revised, text=text: keep(text, revised), note=note)
+            except _PlanEditedMeanwhile:
+                outcome = "plan changed meanwhile"
+                self._log.warning("[plan] plan.md was changed while FI waited for the plan's model; FI kept the version "
+                                  "you saved and did not write the model's answer over it")
+                print("[FI] plan.md was changed while FI waited for the plan's model: your version is kept.")
+            except _ModelAnswerProblem as e:
+                outcome = "no complete answer"
+                self._log.warning("[plan] the plan step's answer to complete %s was not complete: %s", short, e)
+            except ValueError as e:
+                outcome = "not usable"
+                self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
+            except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
+                outcome = "no answer"
+                self._log.warning("[plan] the plan step could not be asked to complete %s: %s", short, e)
+            count += 1
+            calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
+            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file, extra)
+            if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
+                again, sha = self._design_from_plan()
+                return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
+            again, sha = self._design_from_plan()
+            if again is None:
+                return design, plan_sha
+            design, plan_sha = again, sha
+            gaps = lacks(design)
+            if not gaps:
+                self._log.info("[plan] the plan's %s is complete now (asked %d time(s))", what, count)
+                print(f"[FI] the plan's {what} is complete now; going on")
+                return design, plan_sha
+        return design, plan_sha
+
+    async def _complete_the_search_in_the_plan(self, state: QuestState) -> None:
+        """At the plan step, before a person reads the plan: a search for the best design whose block is missing is
+        asked of the plan's model (:meth:`_ask_plan_for_the_search`), and so is a protocol part that could not be read
+        (:meth:`_ask_plan_for_the_parts`), so the plan a person reads is complete."""
+        design, sha = self._design_from_plan()
+        if design is not None and sha:
+            design, sha = await self._ask_plan_for_the_search(state, design, sha)
+            await self._ask_plan_for_the_parts(state, design, sha)
+
+    def _unread_parts(self, design: Any) -> dict[str, str]:
+        """``{part: the sentence of plan.md that says it could not be read}`` for each protocol part that changes what is
+        measured (:data:`core.plan.ASKED_PARTS`: the settings to sweep, the metrics, the runs per setting, the precision)
+        that the plan's own notes say could not be read and that the design block still lacks. Only structured parts and
+        the notes FI wrote about them: no prose of the plan is read. A search for the best design has no separate sweep."""
+        path = _plan.plan_path(self.quest_root)
+        if not isinstance(design, dict) or not path.is_file():
+            return {}
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+        found: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if _plan.ASK_MARK not in line:
+                continue
+            for part in _plan.ASKED_PARTS:
+                if f"`protocol.{part}`" in line and part not in protocol and part not in found:
+                    if part == "grid" and _optim.study_type_of(design) == "find_best_design":
+                        continue
+                    found[part] = line.strip().lstrip("-").strip()
+        return found
+
+    def _keep_only_the_parts(self, before_text: str, after_text: str, parts: list[str]) -> str | None:
+        """``before_text`` with only the asked ``parts`` of the protocol taken from ``after_text`` (each only when it can be
+        read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
+        ``None`` when none of the asked parts came back usable."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return None
+        old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
+        new_protocol = new.get("protocol") if isinstance(new.get("protocol"), dict) else {}
+        merged = dict(old_protocol)
+        taken: list[str] = []
+        for part in parts:
+            if new_protocol.get(part) is None:
+                continue
+            fixed, why = _plan.normalize_protocol({**merged, part: new_protocol[part]})
+            if fixed is None or part not in fixed:
+                self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
+                continue
+            merged[part] = fixed[part]
+            taken.append(part)
+        if not taken:
+            return None
+        edited = _plan.edit_design_block(before_text, lambda design: {**design, "protocol": merged})
+        if edited is None or _plan.parse(edited).design is None:
+            return None
+        return _plan.refresh_model_section(edited)
+
+    async def _ask_plan_for_the_parts(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """A protocol part that could not be read (the settings to sweep, the metrics, ...) is asked of the plan's model, in
+        place of asking a person to write it: the same bounded request as the search block
+        (:meth:`_ask_plan_to_complete`, counted in ``.fi/protocol_part_asked.json``), quoting what could not be read and
+        the rule. Only the asked parts are kept from the rewrite. plan.md says what was done."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha):
+            return design, plan_sha
+        before = self._parts_asked(plan_sha)
+        # A part asked about at the plan step is not asked about again at the design step of the same run.
+        asked = [p for p in self._unread_parts(design) if p not in before]
+        if not asked:
+            return design, plan_sha
+        record_parts = {"parts": [*before, *asked]}
+
+        def lacks(now: Any) -> list[str]:
+            return [f"`protocol.{part}` (could not be read)" for part in self._unread_parts(now) if part in asked]
+
+        def request(now: Any, _text: str) -> str:
+            return _plan.part_request(state.get("topic") or self.config.topic,
+                                      {k: v for k, v in self._unread_parts(now).items() if k in asked})
+
+        def keep(before: str, revised: str) -> str:
+            kept = self._keep_only_the_parts(before, revised, asked)
+            if kept is None:
+                raise ValueError("the revised plan has none of the asked parts in a form that can be read; plan.md is unchanged")
+            return kept
+
+        design, plan_sha = await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
+            what="settings the experiment needs", short="the protocol",
+            note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts)
+        path = _plan.plan_path(self.quest_root)
+        if path.is_file():
+            left = self._unread_parts(design)
+            lines = [f"FI asked the plan's model to write `protocol.{part}` again, and it is "
+                     + (f"still not readable ({'; the quest stops' if part == 'grid' else 'the experiment goes on without it'})"
+                        if part in left else "now in the plan") + "." for part in asked]
+            text = path.read_text(encoding="utf-8")
+            if not any(line in text for line in lines):
+                count, calls = self._search_record(_plan.sha256(text), _PART_ASKED)
+                updated = _plan.add_to_section(text, _PART_HEADING, ["", *[f"- {line}" for line in lines]])
+                path.write_text(updated, encoding="utf-8")
+                if count:  # the record names the plan it was made on: the plan as FI wrote its note on it
+                    self._record_search_asked(count, calls, _plan.sha256(updated), "told in the plan", _PART_ASKED,
+                                              record_parts)
+                plan_sha = _plan.sha256(updated)
+                _plan.record_version(self.quest_root, updated, by="engine", note="what FI did about protocol parts that could not be read")
+        return design, plan_sha
+
+    def _stop_if_no_settings_to_vary(self, state: QuestState, design: Any) -> None:
+        """A study whose plan tried to list settings to vary (``protocol.grid`` was drafted and could not be read, even when
+        the plan's model was asked to write it again) must not run one setting and call it a sweep: stop plainly, with no
+        paper, saying what was tried. A plan that never listed a sweep is a study with one setting and goes on. The other
+        unreadable parts (the metrics ...) go on, said in plan.md."""
+        if not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
+            return
+        if "grid" not in self._unread_parts(design):
+            return
+        path = _plan.plan_path(self.quest_root)
+        tried = self._search_record(_plan.sha256(path.read_text(encoding="utf-8")), _PART_ASKED)[0] if path.is_file() else 0
+        steps = [
+            "Nothing was run. The plan lists settings to vary, but FI could not read them, so the experiment would have run "
+            "one setting only and called it a study of several.",
+            (f"FI asked the plan's model {tried} time(s) to write them again, and it still could not."
+             if tried else "FI did not ask the plan's model to write them again (no model was available to ask, or the plan "
+             "was already settled)."),
+            "You do not need to write them yourself. What to do:",
+            "1. Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) another "
+            f"model in the quest's config.yaml, then `python launch.py --update {self.quest_id}`.",
+            f"2. Or ask for a change in words: `--resume {self.quest_id} --revise-plan \"<the settings to vary and their values>\"`.",
+        ]
+        self._log.warning("[design] the settings to sweep could not be read, even when the plan's model was asked (%d time(s)); "
+                          "stopping, nothing was run", tried)
+        print(f"[FI] quest {self.quest_id}: the settings to vary could not be read, even when the plan's model was asked; "
+              "nothing was run (see NEXT_STEP.md)")
+        self._pause_for_human(
+            kind="plan",
+            interaction="supply",
+            headline="the settings to vary could not be read",
+            steps=steps,
+            recommended="Try another model for the plan step.",
+            alternatives=[steps[-1][3:]],
+            payload={"quest_id": self.quest_id, "plan_file": str(path), "settings_stage": True},
+        )
+
+    def _keep_only_the_search(self, before_text: str, after_text: str) -> str | None:
+        """``before_text`` with only the search part of ``after_text`` (``study_type`` and ``protocol.optimisation``)
+        taken in, its sections shown again from the block; a plain ``protocol.grid`` beside the block is dropped. Every part
+        of the plan's own block that could already be read is kept as the plan had it (a tolerance, a target, a margin, a
+        range, a baseline): the model supplies only what was missing or could not be read, and a value it changed for a part
+        the plan already had is put back. ``None`` when the rewrite has no search block or the result cannot be used."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        protocol = new.get("protocol") if isinstance(new, dict) else None
+        block = protocol.get("optimisation") if isinstance(protocol, dict) else None
+        if not isinstance(old, dict) or not isinstance(block, dict):
+            return None
+        old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
+        old_block = old_protocol.get("optimisation")
+        if isinstance(old_block, dict):
+            _fixed, why = _optim.normalize(old_block)
+            named = re.match(r"`protocol\.optimisation\.?(\w*)", why or "")
+            unreadable = {named.group(1)} if named else set()
+            if not isinstance(old_block.get("evaluation_budget"), dict):
+                unreadable.add("evaluation_budget")
+            if "" in unreadable:
+                unreadable = set(old_block)  # the block as a whole could not be read: nothing of it is kept
+            merged = dict(block)
+            put_back: list[str] = []
+            for key, value in old_block.items():
+                if key in unreadable or value is None or value == "" or value == [] or value == {}:
+                    continue
+                if merged.get(key) != value:
+                    if key in merged:
+                        put_back.append(str(key).replace("_", " "))
+                    merged[key] = value
+            if put_back:
+                self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
+                                  "plan's own", ", ".join(put_back))
+            block = merged
+            if _optim.normalize(block)[0] is None:
+                return None
+
+        def change(design: dict[str, Any]) -> dict[str, Any]:
+            kept = {k: v for k, v in (design.get("protocol") or {}).items() if k != "grid"}
+            out = {**design, "protocol": {**kept, "optimisation": block}}
+            out["study_type"] = "find_best_design"
+            return out
+
+        merged_text = _plan.edit_design_block(before_text, change)
+        if merged_text is None or _plan.parse(merged_text).design is None:
+            return None
+        return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
+
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Stop before anything runs when the design is a search for the best design that FI cannot start: the plan lacks
         what a search needs (the ``optimisation`` block, its budget), the simulation is not a script of its own
         (``execution.split_analysis: false``), or the trials go to a cluster (``execution.background_jobs``: the search
         runs here, one design after another). Such a plan is never run as a plain sweep instead. Every resume checks
         again (no once-only marker). A no-op for a measurement, for a search that can start (the engine runs it:
-        :mod:`core.optimise`), and for a quest that runs no experiment of its own."""
+        :mod:`core.optimise`), and for a quest that runs no experiment of its own. What the plan lacks has first been
+        asked of the plan's model (:meth:`_ask_plan_for_the_search`), so the stop never asks a person to write it."""
         if not self._runs_code(state):
             return
-        explicit = isinstance(design, dict) and design.get("study_type") is not None
-        # The person's answer, or a topic that plainly asks for the best design, counts for a design that says nothing
-        # of its own (one drafted at this step, say); a design that says `measure` is a choice someone made and runs.
-        asked = bool(self._asks_for_best_design(state, topic=False)) and not explicit and not _optim.has_block(design)
-        if _optim.study_type_of(design) != "find_best_design" and not asked:
+        wanted, missing, block_why = self._search_problems(state, design)
+        if not wanted:
             return
         path = _plan.plan_path(self.quest_root)
-        # Read back through the check, since a design drafted at this step has not been through it.
-        block, block_why = (_optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design)
-                            else (None, None))
+        block = _optim.normalize(design["protocol"]["optimisation"])[0] if _optim.has_block(design) else None
         goal = ""
         if block is not None:
             objective = block["objective"]
             goal = (f" (make {objective['quantity']} as {'low' if objective['direction'] == 'minimise' else 'high'} as "
                     f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
-        missing = _optim.missing_parts(design) if not asked else [
-            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
-        if block_why:
-            missing.append(f"its optimisation block cannot be used ({block_why})")
         setup: list[str] = []
         if not self._split_on(state):
             setup.append("the search calls the simulation as a function of its own, but this quest keeps one script "
@@ -5289,35 +5673,47 @@ class Engine:
                          "(`execution.background_jobs` is on): turn it off in the quest's config and resume")
         if not missing and not setup:
             return
-        where = (f"In `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”," if path.is_file()
-                 else "This quest has no plan.md (its plan could not be written); in the quest's topic,")
+        gaps = _optim.plain_gaps(design, block_why) if missing else []
         steps = [
             f"Nothing was run. This quest is a search for the best design{goal}, and the search cannot start yet. "
             "Running the plan as a plain sweep over fixed settings would answer a different question, so the quest "
             "stops here.",
-            *[f"Missing from the plan: {m}." for m in missing],
-            *[f"In the quest's setup: {s}." for s in setup],
         ]
+        recommended = "Complete the quest's setup as the steps below say, then resume."
+        alternatives = ["Ask for a change in words: `--revise-plan \"<what to change>\"`."]
         if missing:
+            tried = self._search_asked(_plan.sha256(path.read_text(encoding="utf-8"))) if path.is_file() else 0
+            steps.append(f"Still missing from the plan: {'; '.join(gaps)}.")
             steps.append(
-                f"{where} complete the `optimisation` block (what to make as low or as high as possible, what may change "
-                "and over what range, the design to beat, and `evaluation_budget`), then resume: "
-                f"`python launch.py --config <quest.yaml> --resume {self.quest_id}`. Or ask FI to make the change: "
-                f"`--resume {self.quest_id} --revise-plan \"<what to change>\"` (the quest page's Plan box on the web, "
-                "`@fi /plan` in VS Code). To measure over settings you choose instead, set `study_type: measure` and "
-                "give a `grid`.")
-        reason = missing[0] if missing else setup[0].split(" (`")[0]
-        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping", reason)
+                (f"FI asked the plan's model {tried} time(s) to write it from your topic, and it still could not."
+                 if tried else "FI did not ask the plan's model to write it (no model was available to ask, the plan was "
+                 "already settled, or this design did not come from the plan).")
+                if path.is_file() else
+                "This quest has no plan file (its plan could not be written), so FI had nothing to ask the model to complete.")
+            can_measure = path.is_file() and self._measure_instead_possible(path.read_text(encoding="utf-8"))
+            steps.append("You do not need to write any of it yourself. " + ("Choose one:" if can_measure else "What to do:"))
+            model = ("Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) "
+                     f"another model in the quest's config.yaml, then `python launch.py --update {self.quest_id}`. FI "
+                     "asks that model to write the search.")
+            measure = ("Measure over the settings the plan already lists instead of searching (this answers a different "
+                       f"question than the best design): `--resume {self.quest_id} --revise-plan "
+                       f"\"{_optim.MEASURE_INSTEAD}\"` (the quest page's Plan box on the web, `@fi /plan` in VS Code).")
+            steps += [f"1. {model}"] + ([f"2. {measure}"] if can_measure else [])
+            recommended = "Try another model for the plan step."
+            alternatives = [measure] if can_measure else []
+        steps += [f"In the quest's setup: {s}." for s in setup]
+        reason = gaps[0] if missing else setup[0].split(" (`")[0]
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping",
+                          "; ".join(missing) if missing else setup[0].split(" (`")[0])
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but the search cannot start "
-              f"({reason}); nothing was run (see NEXT_STEP.md)")
+              f"({'the plan does not say ' + reason if missing else reason}); nothing was run (see NEXT_STEP.md)")
         self._pause_for_human(
             kind="plan",
             interaction="supply",
             headline="the search for the best design cannot start",
             steps=steps,
-            recommended="Complete the plan (or the quest's setup) as the steps below say, then resume.",
-            alternatives=["Set `study_type: measure` and give a `grid` in plan.md, then resume.",
-                          "Ask for a change in words: `--revise-plan \"<what to change>\"`."],
+            recommended=recommended,
+            alternatives=alternatives,
             payload={"quest_id": self.quest_id, "plan_file": str(path), "best_design_stage": True},
         )
 
@@ -5686,26 +6082,12 @@ class Engine:
             self.config.provider.name, where, endpoint.model,
         )
         self._say_model_change()
+        self._say_step_providers()
         # A connection that names the model that answered each call (an HTTP API, the claude CLI): a call on it whose
         # model went unnamed is a gap in the quest's record of its calls (core/attempt_records.py::model_call_gaps).
         self._reports_model = (getattr(endpoint, "transport", "") == "http"
                                or self.config.provider.name == "claude_cli")
-        self._client = LLMClient(
-            endpoint,
-            timeout_s=self.config.provider.http_timeout_s,
-            cli_timeout_s=self.config.provider.cli_timeout_s,
-            cli_inactivity_timeout_s=(
-                self.config.provider.cli_inactivity_timeout_s
-            ),
-            node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
-            node_http_timeout_s=self.config.provider.node_http_timeout_s,
-            node_model_fallbacks=(
-                self.config.provider.node_model_fallbacks
-            ),
-            max_prompt_chars=self.config.provider.max_prompt_chars,
-            heartbeat_cb=self._llm_heartbeat,
-            run_log=self._log,
-        )
+        self._client = self._new_llm_client(endpoint, node_model_fallbacks=self.config.provider.node_model_fallbacks)
         # Wrap in a fallback chain so a single provider's outage doesn't
         # forfeit the quest. No-op (unwrapped) when no fallback configured.
         if self.config.provider.fallback:
@@ -5721,6 +6103,89 @@ class Engine:
                 self.config.provider.name,
                 " -> ".join(self.config.provider.fallback),
             )
+
+    def _say_step_providers(self) -> None:
+        """``provider.node_providers``: before anything is spent, a step whose provider's key is not set stops the quest
+        with the plain sentence; then one run.log line per step on its own provider, and one for a step that is in
+        ``provider.node_models`` or ``provider.node_ensemble`` too (the provider wins; the ensemble stays on the main
+        one). Once per engine."""
+        provider = self.config.provider
+        steps = getattr(provider, "node_providers", None) or {}
+        if not steps or self.__dict__.get("_step_providers_said"):
+            return
+        self.__dict__["_step_providers_said"] = True
+        missing = missing_step_api_keys(provider)
+        if missing:
+            raise RuntimeError(missing[0] + " Nothing was started.")
+        for line in step_provider_lines(provider):
+            self._log.info("[provider] %s", line)
+        for step in steps:
+            if provider.node_models and node_provider_for(provider.node_models, step) is not None:
+                self._log.warning("[provider] `%s` is in provider.node_models and provider.node_providers: the step "
+                                  "uses its own provider's model (node_providers wins)", step)
+            if provider.node_ensemble and node_provider_for(provider.node_ensemble, step) is not None:
+                self._log.warning("[provider] `%s` is a multi-model ensemble step: its models are asked on the main "
+                                  "provider, not on the one set in provider.node_providers", step)
+
+    async def _client_for(self, node: str | None) -> tuple[Any, bool]:
+        """The model client for ``node`` and whether its connection names the model that answered: the quest's own,
+        or, for a step in ``provider.node_providers``, that step's provider's, built on its first call and kept for
+        the quest (one per entry, not per step, so ``implement`` and ``implement_oracle`` named by one key share one;
+        concurrent first calls build it once)."""
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        if step is None:
+            return self._client, bool(getattr(self, "_reports_model", False))
+        key, entry = step
+        built = self.__dict__.setdefault("_step_clients", {})
+        if key not in built:
+            lock = self.__dict__.setdefault("_step_client_lock", asyncio.Lock())
+            async with lock:
+                if key not in built:
+                    built[key] = await self._build_step_client(key, entry)
+        return built[key]
+
+    async def _build_step_client(self, key: str, entry: Any) -> tuple[Any, bool]:
+        derived = step_provider_config(self.config.provider, entry)
+        endpoint = await resolve_endpoint_async(derived, self.supervisor)
+        if derived.name in PROXY_PROVIDERS:
+            self.__dict__.setdefault("_step_proxies", []).append(derived.name)
+        self._log.info("[provider] step `%s`: %s -> %s (model asked for: %s)", key, derived.name,
+                       endpoint.base_url or getattr(endpoint, "transport", ""), endpoint.model)
+        client: Any = self._new_llm_client(endpoint)
+        if derived.fallback:
+            client = FallbackLLMClient(
+                client, [(n, self._make_fallback_factory(n, base=derived)) for n in derived.fallback], log=self._log)
+        reports = getattr(endpoint, "transport", "") == "http" or derived.name == "claude_cli"
+        return client, reports
+
+    def _new_llm_client(self, endpoint: Any, *, node_model_fallbacks: dict[str, str] | None = None) -> LLMClient:
+        provider = self.config.provider
+        return LLMClient(
+            endpoint,
+            timeout_s=provider.http_timeout_s,
+            cli_timeout_s=provider.cli_timeout_s,
+            cli_inactivity_timeout_s=provider.cli_inactivity_timeout_s,
+            node_cli_timeout_s=provider.node_cli_timeout_s,
+            node_http_timeout_s=provider.node_http_timeout_s,
+            node_model_fallbacks=node_model_fallbacks or {},
+            max_prompt_chars=provider.max_prompt_chars,
+            heartbeat_cb=self._llm_heartbeat,
+            run_log=self._log,
+        )
+
+    async def _close_step_clients(self) -> None:
+        """Close the step providers' clients and release the proxies they started (the fallbacks they built too)."""
+        built = self.__dict__.pop("_step_clients", {})
+        for client, _reports in built.values():
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001 -- best-effort cleanup
+                pass
+            for fb_name in getattr(client, "built_fallback_providers", ()):
+                if fb_name in PROXY_PROVIDERS:
+                    await self.supervisor.release(fb_name)
+        for name in self.__dict__.pop("_step_proxies", []):
+            await self.supervisor.release(name)
 
     async def revise_plan(self, request: str, *, by: str = "request") -> dict[str, Any]:
         """Rewrite ``plan.md`` as the person asked (``--revise-plan``): the whole file goes to the model with the
@@ -5741,13 +6206,92 @@ class Engine:
         if connected_here:
             await self._connect_llm()
         try:
+            if request.strip().rstrip(".").lower() == _optim.MEASURE_INSTEAD:
+                before = path.read_text(encoding="utf-8")
+                return await self._rewrite_plan(
+                    request, path, by=by, expect=before,
+                    finish=lambda revised: self._check_measure_instead(before, revised))
             return await self._rewrite_plan(request, path, by=by)
         finally:
             if connected_here and self._client is not None:
+                await self._close_step_clients()
                 await self._client.aclose()
                 if self.config.provider.name in PROXY_PROVIDERS:
                     await self.supervisor.release(self.config.provider.name)
                 self._client = None
+
+    def _measure_instead_possible(self, text: str) -> bool:
+        """Whether "measure over the planned settings" can be done from this plan: it lists settings, each with a range or a
+        list of values (so :meth:`_check_measure_instead` can hold the measured values to them). Only then is it offered."""
+        design = _plan.raw_design_block(text)
+        if not isinstance(design, dict):
+            return False
+        block = (design.get("protocol") or {}).get("optimisation") if isinstance(design.get("protocol"), dict) else None
+        items = block.get("design_variables") if isinstance(block, dict) else None
+        if not isinstance(items, list) or not items:
+            return False
+        named: set[str] = set()
+        for index, item in enumerate(items, start=1):
+            variable = _optim._variable(item, index)[0]
+            if variable is None:
+                return False
+            named.add(str(variable["name"]))
+        independent = (design.get("variables") or {}).get("independent") if isinstance(design.get("variables"), dict) else None
+        return all(str(n) in named for n in independent) if isinstance(independent, list) else True
+
+    def _check_measure_instead(self, before_text: str, after_text: str) -> str:
+        """``after_text`` when a rewrite to "measure over the planned settings instead of searching" kept the plan's question
+        and settings: its hypothesis, expected outcome and measured quantity are unchanged, and every setting it measures
+        over is one the plan already listed (a design variable) with values inside the range or list the plan gave. Otherwise
+        ``ValueError`` (plan.md stays as it was), in plain words."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            raise ValueError("the plan could not be changed to a measurement: the rewrite could not be read; plan.md is unchanged")
+
+        def flat(value: Any) -> str:
+            return " ".join(str(value or "").split())
+
+        for key in ("hypothesis", "expected_outcome"):
+            if flat(old.get(key)) != flat(new.get(key)):
+                raise ValueError(f"the plan was not changed to a measurement: the rewrite also changed the plan's {key.replace('_', ' ')}, "
+                                 "and a measurement over the same settings must keep the question; plan.md is unchanged")
+        old_dep = (old.get("variables") or {}).get("dependent") if isinstance(old.get("variables"), dict) else None
+        new_dep = (new.get("variables") or {}).get("dependent") if isinstance(new.get("variables"), dict) else None
+        if old_dep != new_dep:
+            raise ValueError("the plan was not changed to a measurement: the rewrite changed what is measured; plan.md is unchanged")
+        old_block = (old.get("protocol") or {}).get("optimisation") if isinstance(old.get("protocol"), dict) else None
+        listed: dict[str, Any] = {}
+        if isinstance(old_block, dict):
+            for item in old_block.get("design_variables") or []:
+                if isinstance(item, dict) and item.get("name"):
+                    listed[str(item["name"])] = item
+        # A plan whose search block could not be read lists its settings only as the independent variables: no range to hold
+        # the values to, but still the only settings that may be measured over.
+        independent = (old.get("variables") or {}).get("independent") if isinstance(old.get("variables"), dict) else None
+        for name in independent if isinstance(independent, list) else []:
+            listed.setdefault(str(name), None)
+        grid = (new.get("protocol") or {}).get("grid") if isinstance(new.get("protocol"), dict) else None
+        if not listed or not isinstance(grid, dict) or not grid:
+            raise ValueError("the plan was not changed to a measurement: the rewrite does not say which of the plan's own "
+                             "settings to measure over, at which values; plan.md is unchanged")
+        for name, values in grid.items():
+            variable = listed.get(str(name))
+            known = str(name) in listed
+            values = values if isinstance(values, list) else [values]
+            if not values:
+                raise ValueError(f"the plan was not changed to a measurement: the rewrite lists no values for {name}; plan.md is unchanged")
+            if known and variable is None:
+                raise ValueError(f"the plan was not changed to a measurement: the plan lists {name} as a setting but not the "
+                                 "values it may take, so FI cannot tell whether the values to measure are the plan's own; "
+                                 "FI did not change the plan")
+            if not known:
+                raise ValueError(f"the plan was not changed to a measurement: the rewrite measures over {name}, which the plan "
+                                 "did not list as a setting; plan.md is unchanged")
+            for value in values:
+                if variable is not None and not _optim._inside(variable, value):
+                    raise ValueError(f"the plan was not changed to a measurement: the rewrite measures {name} at {value}, "
+                                     "outside what the plan listed for it; plan.md is unchanged")
+        return after_text
 
     async def _usable_design_block(self, revised: str, *, ask: bool) -> tuple[str, str, bool]:
         """``(the rewritten plan, "", asked)`` when its design block can be used, else ``(it, why not, asked)``; ``asked``
@@ -5792,7 +6336,13 @@ class Engine:
         self._log.info("[plan] the model corrected the plan's design block (asked once, for the block alone)")
         return candidate, "", True
 
-    async def _rewrite_plan(self, request: str, path: Path, *, by: str = "request") -> dict[str, Any]:
+    async def _rewrite_plan(
+        self, request: str, path: Path, *, by: str = "request", expect: str | None = None,
+        finish: Any = None, note: str | None = None,
+    ) -> dict[str, Any]:
+        """``expect``: the plan as it was when the request was made; when plan.md differs just before the write (a person
+        saved a change meanwhile) nothing is written (:class:`_PlanEditedMeanwhile`). ``finish(revised)`` may return the text
+        to write instead, or ``None``/raise ``ValueError`` for an answer that must not be used."""
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
         prompt = self._prompts["plan_revise"].substitute(
@@ -5809,6 +6359,7 @@ class Engine:
                 node="plan_revise",
             )
             revised = _plan.strip_outer_fence(reply)
+            revised = _plan.keep_latex_in_block(revised)  # `"$\text{SNR}$"` is LaTeX, not a tab and `ext`
             # The block alone is asked for at most once, after the first answer: at most two calls in all.
             revised, why, asked = await self._usable_design_block(revised, ask=_attempt == 1)
             if not why or asked:
@@ -5818,8 +6369,16 @@ class Engine:
         # The model section is shown from the block and never read back: shown again from the block as rewritten, so the
         # plan never shows a model or a check's source the block does not hold (or leaves out one it does).
         revised = _plan.refresh_model_section(revised)
+        revised = _plan.refresh_optimisation_section(revised)
+        if finish is not None:
+            kept = finish(revised)
+            if kept is None:
+                raise ValueError("the revised plan has no search block that can be used; plan.md is unchanged")
+            revised = kept
+        if expect is not None and path.read_text(encoding="utf-8") != expect:
+            raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(revised, encoding="utf-8")
-        entry = _plan.record_version(self.quest_root, revised, by=by, note=request[:300])
+        entry = _plan.record_version(self.quest_root, revised, by=by, note=(note or request)[:300])
         self._log.info("[plan] revised %s: version %d",
                        "by the engine for its oracle check" if by == "engine" else "on request", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
@@ -5849,8 +6408,7 @@ class Engine:
             objections = state.get("design_objections")
         if design is None:
             prompt = self._design_prompt(state)
-            text = await self._chat(prompt, node="design")
-            design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
+            design = await self._design_reply(prompt, node="design")
             design, objections = await self._audit_design(state, design)
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
@@ -5858,6 +6416,12 @@ class Engine:
         # A search for the best design never runs as a plain sweep: every design, from the plan or drafted here, passes
         # this point before anything is implemented or run, and one the engine cannot search stops here
         # (core/optimisation_plan.py; the search itself: core/optimise.py).
+        if plan_sha:
+            # A plan that lacks the search part is completed by the plan's model before this stops (a person is not
+            # asked to write it); the design to run is then the plan as rewritten.
+            design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
+            design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
+        self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
         audited = await self._audit_the_design_that_runs(state, design)
         if audited is not design:
@@ -6195,6 +6759,40 @@ class Engine:
             recommended=recommended, alternatives=alternatives,
             payload={"quest_id": self.quest_id, "step": call, "setting": key,
                      "reason": "truncated" if truncated else "content_filtered"},
+        )
+
+    async def _design_reply(self, prompt: str, *, node: str) -> dict[str, Any]:
+        """The design object a model answers ``prompt`` with (the ``plan`` and ``design`` steps). An answer that cannot be
+        read is asked for once more (:meth:`_chat_json`); one that cannot be read the second time stops the quest
+        (:meth:`_stop_for_unreadable_design`): an empty design is never run."""
+        text, obj = await self._chat_json(
+            prompt, node=node, want=("hypothesis",), usable=lambda p: any(k != "plan" for k in p))
+        if not any(k != "plan" for k in obj):
+            self._stop_for_unreadable_design(node, text)
+        return obj
+
+    def _stop_for_unreadable_design(self, step: str, text: str) -> None:
+        """Stop because the model's design at ``step`` could not be read, twice. A SUPPLY pause: resume asks again."""
+        headline = f"the model's design at the {step} step could not be read, even when asked twice"
+        steps = [
+            f"Nothing was run. The model's answer at the `{step}` step could not be read as a design, and asking it once "
+            "more for one short answer gave a reply that could not be read either. FI has no design to run, and it does "
+            "not run an empty one.",
+            "What FI tried: it read the reply as written, read it again with the backslashes of formulas kept as "
+            "written, and asked the model a second time.",
+            f"Give that step another model: `provider: {{node_models: {{{step}: <model>}}}}` in the quest's "
+            f"`config.yaml`, then approve the change with `python launch.py --update {self.quest_id}` (it resumes the "
+            "quest too). Or resume as it is to ask the same model again.",
+        ]
+        self._log.warning("[%s] the design could not be read, even when asked twice (%d characters); stopping, nothing "
+                          "was run", step, len(text or ""))
+        print(f"[FI] quest {self.quest_id}: the model's design at the {step} step could not be read, even when asked "
+              "twice; nothing was run (see NEXT_STEP.md)")
+        self._pause_for_human(
+            kind="model_unreadable", interaction="supply", headline=headline, steps=steps,
+            recommended=f"Use another model for `{step}`: `provider.node_models.{step}`, then go on.",
+            alternatives=["Resume as it is: the same model is asked again."],
+            payload={"quest_id": self.quest_id, "step": step, "setting": step, "reason": "unreadable"},
         )
 
     def _pause_stage_enabled(self, stage: str) -> bool:
@@ -7464,6 +8062,17 @@ class Engine:
             "figures": [],
         }
 
+    @staticmethod
+    def _code_design_block(state: QuestState, *, names_only: bool = False) -> str:
+        """The design as a request that writes or repairs code may see it: without the plan's own numbers for what the
+        code must reproduce. Each equation's worked ``example`` is dropped (``names_only``: kept as the names of its
+        inputs, which the outline needs to name a function's parameters), and each check's ``expected`` and
+        ``expected_formula`` are dropped; the code is judged against them by FI, never written toward them."""
+        design = copy.deepcopy(state.get("design") or {})
+        if isinstance(design, dict) and isinstance(design.get("protocol"), dict):
+            _strip_plan_numbers(design["protocol"], names_only=names_only)
+        return json.dumps(design, indent=2)
+
     async def _node_implement_outline(self, state: QuestState) -> QuestState:
         """First half of the two-stage implement flow: produce a
         structural outline (scaffold + function signatures + constants
@@ -7489,7 +8098,7 @@ class Engine:
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
             prompt = self._prompts["implement_outline"].substitute(
-                design_block=json.dumps(state.get("design") or {}, indent=2),
+                design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=(self._outline_skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
@@ -7546,8 +8155,11 @@ class Engine:
                 "[implement] filling scaffold (%d functions to body)",
                 len(outline.get("functions") or []),
             )
+            # The model's package, one function at a time (core/function_steps.py): when it is written and checked, the
+            # request below asks for the two scripts only.
+            await self._fill_model_functions(state, outline)
             prompt = body_prompt.substitute(
-                design_block=json.dumps(state.get("design") or {}, indent=2),
+                design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
@@ -7574,7 +8186,7 @@ class Engine:
             else:
                 self._log.info("[implement] generating experiment code (legacy one-shot)")
             prompt = self._prompts["implement"].substitute(
-                design_block=json.dumps(state.get("design") or {}, indent=2),
+                design_block=self._code_design_block(state),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
@@ -7991,6 +8603,153 @@ class Engine:
         ok_trials = sum(1 for r in ledger or [] if isinstance(r, dict) and r.get("status") == "ok")
         return _trial_runner.given_rows_problems(
             protocol, _trial_runner.recorded_rows_by_cell(self.quest_root), result_json, ok_trials=ok_trials)
+
+    #: How many times, in all, a script that draws typed-in numbers is sent back.
+    _FIGURE_DATA_REPAIRS = 2
+
+    def _figure_scripts_with_typed_numbers(self) -> dict[Path, list[_figdata.TypedSeries]]:
+        """Each script in ``code/`` that saves a figure and has a plotting call drawing numbers typed into the code."""
+        found: dict[Path, list[_figdata.TypedSeries]] = {}
+        code_dir = self.quest_root / "code"
+        for path in sorted(code_dir.glob("*.py")) if code_dir.is_dir() else []:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if ".savefig(" not in text:
+                continue
+            typed = _figdata.typed_series(text, path.name)
+            if typed:
+                found[path] = typed
+        return found
+
+    async def _figures_from_results(self, state: QuestState) -> tuple[int, bool]:
+        """Send a script that draws typed-in numbers back to draw its figures from the run's saved results: ``(the
+        repairs used so far for this script, whether a script was rewritten)``. Bounded by ``_FIGURE_DATA_REPAIRS``; what
+        is still typed in after that is left out of the paper (:meth:`_drop_typed_figures`)."""
+        used = int(state.get("figure_data_repairs") or 0)
+        rewrote = False
+        self._typed_figures = self._figure_scripts_with_typed_numbers()
+        while self._typed_figures and used < self._FIGURE_DATA_REPAIRS:
+            used += 1
+            for path, found in self._typed_figures.items():
+                self._log.warning(
+                    "[execute] %s draws figures from numbers typed into the code (%s); asking for them to be drawn from the "
+                    "run's saved results (%d of %d)", path.name, "; ".join(f.says() for f in found[:4]), used,
+                    self._FIGURE_DATA_REPAIRS)
+                rewrote = await self._repair_typed_figures(state, path, found) or rewrote
+            self._typed_figures = self._figure_scripts_with_typed_numbers()
+        return used, rewrote
+
+    async def _repair_typed_figures(self, state: QuestState, path: Path, found: list[_figdata.TypedSeries]) -> bool:
+        """ONE repair of one script's plotting code: kept only if it parses and has fewer typed-in series than before."""
+        code = path.read_text(encoding="utf-8")
+        prompt = self._prompts["execute_reflect"].substitute(
+            previous_code=code, returncode="(not run yet)", stdout_tail=_figdata.directive(found), stderr_tail="",
+            duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
+            reflect_history_block=_format_reflect_history([]),
+            design_block=self._code_design_block(state), clarify_block=_format_clarify(state),
+        )
+        try:
+            text = await self._chat(prompt, node="implement_figures")
+        except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
+            self._log.warning("[execute] the call to redraw the figures from the results failed (%r); keeping %s as written",
+                              exc, path.name)
+            return False
+        parsed: dict[str, Any] = {}
+        if _strip_outer_fence(text).lstrip().startswith("{"):
+            parsed = _parse_json_lenient(text, node="implement_figures") or {}
+        new_code = parsed.get("code")
+        if not (isinstance(new_code, str) and new_code.strip()):
+            new_code, _deps = _parse_implement_response(text)
+        try:
+            ast.parse(new_code)
+            # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
+            # seed, the simulation's entry points) is another script and is not used.
+            usable = bool(new_code.strip()) and all(
+                mark in new_code for mark in _figdata.KEEP_MARKS if mark in code)
+        except (SyntaxError, ValueError):
+            usable = False
+        if not usable:
+            self._log.warning("[execute] the redraw of %s is not the same script with its figures drawn from the results; "
+                              "keeping it as written", path.name)
+            return False
+        left = _figdata.typed_series(new_code, path.name)
+        if len(left) >= len(found):
+            self._log.warning("[execute] the rewritten %s still draws %d figure series from typed-in numbers; keeping it "
+                              "as written", path.name, len(left))
+            return False
+        path.write_text(new_code, encoding="utf-8")
+        self._log.info("[execute] rewrote %s so its figures come from the run's results (%d typed-in series left): %s",
+                       path.name, len(left), str(parsed.get("patch_summary") or "no summary")[:120])
+        return True
+
+    def _drop_typed_figures(self, figures: list[str], records_dir: Path) -> list[str]:
+        """The run's figures without those still drawn from typed-in numbers after the repairs: removed from ``figures/``
+        (and their records), said in run.log and in ``needs/FIGURE_DATA_CHECK.json``, which the writer's note reads. An
+        earlier pass's record goes first: it is this run's alone."""
+        record_path = self.quest_root / "needs" / "FIGURE_DATA_CHECK.json"
+        record_path.unlink(missing_ok=True)
+        typed = getattr(self, "_typed_figures", None) or {}
+        self._typed_figures = {}
+        if not typed:
+            return figures
+        wherever = [f for found in typed.values() for f in found]
+        drop: set[str] = set()
+        for found in typed.values():
+            drop |= set(_figdata.figures_to_drop(found, figures))
+        removed = [n for n in figures if Path(n).name in drop]
+        for name in removed:
+            targets = [self.quest_root / "figures" / name]
+            # The figure's record is shared by its other formats: it goes with the last of them.
+            if not any(Path(n).stem == Path(name).stem and n not in removed for n in figures):
+                targets += [records_dir / f"{Path(name).stem}.json", self.quest_root / "figures" / f"{Path(name).stem}.json"]
+            for target in targets:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError as exc:
+                    self._log.warning("[execute] could not remove %s (%r)", target.name, exc)
+        note = _figdata.plain_note(sorted(removed), wherever)
+        try:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps(_figdata.record(sorted(removed), wherever), indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/FIGURE_DATA_CHECK.json (%r)", exc)
+        self._log.warning("[execute] %s The paper does not use %s and says so in its limitations.", note,
+                          "it" if len(removed) == 1 else "them")
+        return [n for n in figures if n not in removed]
+
+    def _typed_figures_note(self) -> str:
+        """For the writer: figures left out because they showed typed-in numbers, so the limitations say so."""
+        record = _read_json_or_none_path(self.quest_root / "needs" / "FIGURE_DATA_CHECK.json")
+        note = record.get("note") if isinstance(record, dict) else None
+        if not isinstance(note, str) or not note.strip():
+            return ""
+        return (f"{note} Do not show, describe or quote anything from "
+                f"{'that figure' if len(record.get('removed_figures') or []) == 1 else 'those figures'}: say plainly, in "
+                "the limitations, that a figure was left out because it was not drawn from the run's results.")
+
+    def _record_contradiction_hits(self, paper_md: str, state: QuestState) -> list[str]:
+        """Must-fix hits for what the paper claims against FI's own records (core/record_claims.py). FI's own "Best design
+        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing."""
+        try:
+            recs = _best_report.records(self.quest_root)
+            text = _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md))
+            figures: set[str] | None = None
+            if (self.quest_root / "figures").is_dir():  # no figures folder at all: which figures the run drew is not known
+                figures = {p.name for sub in ("figures", "paper") if (self.quest_root / sub).is_dir()
+                           for p in (self.quest_root / sub).rglob("*") if p.is_file()}
+                if not any(Path(n).suffix.lower() in _FIGURE_SUFFIXES for n in figures):
+                    figures = None  # the run drew none: a paper citing one is not judged here
+            hits = _record_claims.contradictions(
+                text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
+                oracle=self._oracle_record_read(), figures_on_disk=figures)
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
+            return []
+        for hit in hits:
+            self._log.warning("[record_check] %s", hit)
+        return hits
 
     def _ran_once_note(self) -> str:
         """For the analysis and the paper: the frozen protocol still says N runs per setting, but FI ran each setting
@@ -8511,7 +9270,7 @@ class Engine:
             figures_count="0",
             result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         try:
@@ -8966,6 +9725,12 @@ class Engine:
         if extend and not on_disk:
             # An extension changes as little as it can: code kept as two scripts is not restructured for it.
             return scripts, text, {}
+        if not extend and _function_steps.is_ready(self.quest_root, package):
+            if _code_layout.reply_files(text, _PY_FENCE_RE, package):
+                self._log.info("[implement] the reply also wrote the model's package; FI keeps the package it wrote and "
+                               "checked function by function")
+            _code_layout.save(self.quest_root, {**layout, "fell_back": "", "function_steps": True})
+            return scripts, text, {}
         files = _code_layout.reply_files(text, _PY_FENCE_RE, package)
         if not _code_layout.complete(files, package) and not extend:
             adopted = self._adopt_reply_package(text, scripts, package)
@@ -9029,6 +9794,392 @@ class Engine:
                               " and ".join(f"code/{n}/" for n in absent) + (" was" if len(absent) == 1 else " were"))
         _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
         return scripts, text, files if _code_layout.complete(files, package) else {}
+
+    # --- the model's functions, one at a time, and a small test per equation (core/function_steps.py, core/equation_tests.py)
+
+    # --- a different model reads the code against the plan's required outputs (core/code_review.py)
+
+    def _reader_vs_planner(self, node: str, *, after_call: bool) -> tuple[bool | None, str, str, bool]:
+        """``(same model?, reader, planner, the connection named the reader)`` for the step ``node`` against the plan
+        step, as :meth:`_review_oracles` decides it: from the models the connections named after a call, else the ones
+        asked for. ``None`` when it cannot be told."""
+        answered = self._chat_provenance(node) if after_call else {}
+        planned = self._chat_provenance("plan")
+        reader_asked = self._model_for_node(node) or self.config.provider.model or ""
+        planner_asked = self._model_for_node("plan") or self.config.provider.model or ""
+        reader = str(answered.get("model") if answered.get("reported") else reader_asked or "")
+        planner = str(planned.get("model") if planned.get("reported") else planner_asked or "")
+        if answered.get("reported") and planned.get("reported"):
+            same: bool | None = _review.same_model(answered.get("model"), planned.get("model"))
+        elif reader_asked and planner_asked:
+            same = _review.same_model(reader_asked, planner_asked)
+        elif not self._model_for_node(node) and not self._model_for_node("plan"):
+            same = True
+        else:
+            same = None
+        return same, reader or "the provider's default model", planner or "the provider's default model", bool(answered.get("reported"))
+
+    async def _code_review_gate(self, state: QuestState) -> QuestState | None:
+        """After the code is written and before the equation tests and the oracle gate: the model named for
+        ``oracle_review`` (another model than the one that wrote the code, or nothing is asked) reads the plan's
+        required outputs against the scripts. What is missing or different goes to the existing repair path as a failed
+        run with a plain directive naming each requirement (at most ``code_review.MAX_SEND_BACKS`` times and one review
+        per code version, ``code_review.MAX_REVIEWS`` in the quest; ``.fi/code_review.json`` keeps it, so a resume does
+        not repeat a review). What is still missing at the end is not reported (the paper's limitations say it was not
+        computed); a missing headline quantity ends in the honest stop. ``None`` when the code goes on to the run."""
+        code = self.quest_root / "code"
+        if (self.config.engine.oracle_check == "off" or not self._runs_code(state)
+                or not (code / "experiment.py").is_file() or self.config.execution.background_jobs):
+            return None
+        protocol = self._protocol_block(state)
+        design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None)
+        if not reqs:
+            return None
+        version = _code_review.version(code)
+        record = _code_review.load(self.quest_root)
+        if record.get("version") == version:
+            if record.get("final") or not record.get("problems"):
+                return None  # this code was read already
+            # Sent back, and the repair never changed it (a stop, or a repair that gave up): this is what stands.
+            record["final"] = True
+            _code_review.save(self.quest_root, record)
+            return self._code_review_outcome(record)
+        counters = {k: record.get(k, 0) for k in ("reviews_total", "send_backs")}
+        if record.get("read_version"):
+            counters["read_version"] = record["read_version"]  # the last version a second model really read
+        record = {"version": version, **counters, "requirements": len(reqs)}
+        same, reader, planner, _named = self._reader_vs_planner(_review.NODE, after_call=False)
+        if same is True:
+            record["skipped"] = f"the reader is the model that wrote the code ({planner})"
+            _code_review.save(self.quest_root, record)
+            self._log.info("[code_review] %s", _code_review.plain_lines(record))
+            return None
+        if int(record["reviews_total"]) >= _code_review.MAX_REVIEWS:
+            record["skipped"] = f"the {_code_review.MAX_REVIEWS} readings of the code allowed in a quest are spent"
+            _code_review.save(self.quest_root, record)
+            self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
+                              "; the final version of the code was not read again by another model"
+                              if record.get("read_version") else "")
+            return None
+        record["reviews_total"] = int(record["reviews_total"]) + 1
+        _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
+        sources, _partial = _code_review.sources_text(code)
+        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
+        verdicts: list[dict[str, Any]] | None = None
+        try:
+            # One request, and one more for the requirements a reply left unanswered (never a third).
+            for _ask in range(2):
+                left = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts or []}]
+                if not left:
+                    break
+                prompt = self._prompts["code_review"].substitute(
+                    topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
+                    code=sources)
+                reply = await self._chat(prompt, node=_review.NODE)
+                got = _code_review.parse(_parse_json_lenient(reply, node=_review.NODE), left)
+                verdicts = [*(verdicts or []), *(got or [])] or None
+            if verdicts is None:
+                record["error"] = "its answer named none of the plan's requirements"
+        except _ModelAnswerProblem as e:
+            record["error"] = f"the provider withheld or cut off its answer ({str(e)[:120] or type(e).__name__})"
+        except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
+            record["error"] = f"the call failed ({str(e)[:120] or type(e).__name__})"
+        same, reader, planner, named = self._reader_vs_planner(_review.NODE, after_call=True)
+        record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
+        if verdicts is not None and same is False:
+            unanswered = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts}]
+            if unanswered:
+                record["not_reviewed"] = [r["text"] for r in unanswered]
+                record["not_reviewed_headline"] = any(r["headline"] for r in unanswered)
+                self._log.warning("[code_review] the reader did not answer, even when asked again, for: %s",
+                                  "; ".join(r["text"] for r in unanswered))
+        if verdicts is None:
+            _code_review.save(self.quest_root, record)
+            self._log.warning("[code_review] %s", _code_review.plain_lines(record))
+            return None
+        if same is not False:
+            record["skipped"] = ("the reader is the model that wrote the code" if same
+                                 else "FI cannot tell whether the reader is another model than the one that wrote the code")
+            _code_review.save(self.quest_root, record)
+            self._log.info("[code_review] %s", _code_review.plain_lines(record))
+            return None
+        record["verdicts"] = verdicts
+        record["read_version"] = version
+        record["problems"] = _code_review.problems(verdicts)
+        self._log.info("[code_review] %s", _code_review.plain_lines(record))
+        if not record["problems"]:
+            record["final"] = True
+            _code_review.save(self.quest_root, record)
+            return None
+        # Sent back to the existing repair while it has attempts left; otherwise this is what stands.
+        iters = int(state.get("exec_reflect_iter") or 0)
+        if int(record["send_backs"]) < _code_review.MAX_SEND_BACKS and iters < self.config.engine.exec_reflect_max_iterations:
+            record["send_backs"] = int(record["send_backs"]) + 1
+            _code_review.save(self.quest_root, record)
+            self._log.warning("[code_review] sending the code back to be repaired: %s",
+                              "; ".join(v["text"] for v in record["problems"][:6]))
+            return self._code_review_failed_run(_code_review.directive(record["problems"]),
+                                                script=_code_review.script_for(record["problems"], code))
+        record["final"] = True
+        _code_review.save(self.quest_root, record)
+        return self._code_review_outcome(record)
+
+    def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
+        """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""
+        patch: QuestState = {
+            "exec_result": {
+                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": message[-2500:],
+                "packages_note": getattr(self, "_packages_note", ""), "failed_script": script, "flat_output": "",
+                "numeric_warnings": [],
+            },
+            "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
+            "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
+            "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
+        }
+        if give_up:
+            patch["exec_give_up_reason"] = give_up
+        return patch
+
+    def _code_review_outcome(self, record: dict[str, Any]) -> QuestState | None:
+        """The code, read and repaired as far as the budget goes, still misses something in the reader's view. The reader
+        can be wrong, so nothing stops here: the run goes on, and a headline quantity the reader still calls missing
+        stops the quest only if the run's own results lack it too (:meth:`_no_results_verdict`); what the results do
+        hold is recorded as a disagreement. Anything else is not reported, and the limitations say it was not computed."""
+        problems = [v for v in record.get("problems") or [] if isinstance(v, dict)]
+        for v in problems:
+            self._log.warning("[code_review] still %s after the repairs: %s%s",
+                              "missing" if v.get("status") == _code_review.MISSING else "implemented differently", v["text"],
+                              " (the run's results decide whether the study stops)" if v.get("headline") else "")
+        return None
+
+    async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
+                          env: dict[str, str] | None = None) -> tuple[int, str, str]:
+        """Run ``python <argv>`` from the quest folder, in the quest's environment (a venv, the shared interpreter, or the
+        Docker container): ``(returncode, stdout, stderr)``."""
+        py = self.executor.python_path(self.quest_root)
+        # A function rewritten within the same second to the same size would be read from its stale compiled copy.
+        for cache in (self.quest_root / "code").glob("**/__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
+        try:
+            # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
+            ran = await self.executor.execute([str(py), "-B", *argv], cwd=self.quest_root, timeout_s=timeout_s, env=env)
+        except Exception as e:  # noqa: BLE001 -- a check that could not start is a failed check, said as such
+            return -1, "", repr(e)
+        return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
+
+    def _function_steps_note(self, package: str) -> str:
+        """For the code-writing prompt when the function-by-function attempt ended: which function it could not get right
+        (its name and equation, nothing else)."""
+        record = _function_steps.load(self.quest_root)
+        if record.get("package") != package or record.get("status") != "fell_back":
+            return ""
+        failed = [f"`{n}` (equation {e.get('equation')})" for n, e in (record.get("functions") or {}).items()
+                  if isinstance(e, dict) and e.get("status") == _function_steps.FAILED]
+        return ("\nFI first tried to write the package one function at a time and " + ", ".join(failed or ["one function"])
+                + " still failed its checks: take extra care that each function computes exactly its equation.\n")
+
+    def _equation_sources(self) -> dict[str, str]:
+        """The files of ``code/`` that can hold a function an equation test imports: the packages and ``simulate.py``
+        (``experiment.py`` runs when it is imported, so it is never one)."""
+        code = self.quest_root / "code"
+        out = dict(_code_layout.package_sources(code))
+        simulate = code / _split_run.SIMULATE_NAME
+        if simulate.is_file():
+            out[_split_run.SIMULATE_NAME] = simulate.read_text(encoding="utf-8")
+        return out
+
+    async def _fill_model_functions(self, state: QuestState, outline: dict[str, Any]) -> bool:
+        """After the outline, before the code is written whole: fill the model's package one function at a time, each
+        import-checked and tested against the plan's worked example for its equation, a failing function repaired alone
+        (bounded). ``True`` when the package is written and checked, so the code-writing request asks for the two scripts
+        only; ``False`` (the code is written whole, as before) when the step does not apply or a function still fails
+        after its repairs. Never stops a quest."""
+        ex = self.config.execution
+        try:
+            layout = self._code_layout(state)
+            if (not ex.code_function_steps or not layout
+                    or layout["shape"] != _code_layout.PACKAGE):
+                return False
+            protocol = self._protocol_block(state)
+            specs, notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
+            if not specs:
+                self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
+                               "; ".join(notes) or "the outline names no function per equation")
+                return False
+            if len(specs) > _function_steps.MAX_FUNCTIONS:
+                self._log.info("[implement] the model has %d functions, over the %d that are written one at a time: "
+                               "written with the rest of the code", len(specs), _function_steps.MAX_FUNCTIONS)
+                return False
+            if ex.sandbox == "venv" and not self.executor.python_path(self.quest_root).is_file():
+                self._log.info("[implement] the model's functions are written with the rest of the code: the quest's "
+                               "environment is not there to check them in")
+                return False
+            package = layout["package"]
+            record = _function_steps.load(self.quest_root)
+            if (self.quest_root / "code" / package / _code_layout.MODEL_NAME).is_file() and record.get("package") != package:
+                return False  # a package written whole earlier is not replaced by this step
+            deps = _coerce_dep_list(outline.get("deps")) + _coerce_dep_list((state.get("design") or {}).get("dependencies"))
+            install_list, _dropped = _experiment_deps.split_deps(
+                deps, local_modules=[p.stem for p in (self.quest_root / "code").glob("*.py")])
+            if install_list:
+                failed = await self._install_packages(install_list)
+                for dep, why in failed:
+                    self._log.info("[implement] %r could not be installed for the function checks: %s", dep, why)
+            view = _oracle.model_view((protocol or {}).get("model") if isinstance(protocol, dict) else None) or {}
+            constants = "\n".join(f"- {c.get('name')} = {c.get('value')} ({c.get('source')})"
+                                  for c in outline.get("constants") or [] if isinstance(c, dict) and c.get("name"))
+
+            async def chat(prompt: str) -> str:
+                return await self._chat(prompt, node="implement")
+
+            filler = _function_steps.FunctionFiller(
+                quest_root=self.quest_root, package=package, protocol=protocol if isinstance(protocol, dict) else None,
+                summary=str(view.get("summary") or ""),
+                prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"]},
+                chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
+                max_calls=_function_steps.MAX_CALLS, constants=constants)
+            outcome = await filler.run_all(specs)
+            if outcome.status == "done":
+                self._log.info("[implement] the model's package is written: %d function(s), each checked "
+                               "(%d request(s) to the model in this quest)", len(specs), outcome.calls)
+                return True
+            return False
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- writing the code function by function must never stop a quest
+            self._log.warning("[implement] writing the model's functions one at a time failed (%r); the code is written "
+                              "whole", e)
+            return False
+
+    async def _equation_gate(self, state: QuestState, py: Any, exec_env: Any) -> QuestState | None:
+        """Before the oracle gate and the study: one small test per equation of the plan's model, written by FI from the
+        plan's own worked example (core/equation_tests.py), run in the quest's environment. A failing function is
+        repaired alone (the function and its equation, never the expected value), at most
+        ``function_steps.REPAIRS`` times and within ``function_steps.MAX_CALLS`` in the quest;
+        what still fails is returned as a failed run, so the existing whole-script repair and the honest stop apply.
+        An equation that cannot be tested this way is said plainly and the quest goes on. ``None`` when nothing fails."""
+        if self.config.engine.oracle_check == "off" or not self._runs_code(state):
+            return None
+        protocol = self._protocol_block(state)
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        if not isinstance(protocol, dict) or not simulate.is_file() or not _equation_tests.eligible(protocol):
+            return None
+        ex = self.config.execution
+        rows = _equation_tests.example_rows(protocol)
+        record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows}}
+        env = {**(exec_env or os.environ)}
+        raw_dir = self._raw_root() / "equation_tests"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
+        spent: dict[str, int] = {}
+        failures: list[dict[str, Any]] = []
+        for attempt in range(_function_steps.REPAIRS + 1):
+            sources = self._equation_sources()
+            located = _equation_tests.locate(protocol, sources)
+            case_list = _equation_tests.cases(rows, located)
+            notes = _equation_tests.untested_notes(rows, located)
+            record["not_tested"] = notes
+            if attempt == 0:
+                for n in notes:
+                    self._log.info("[equations] %s", n)
+            if not case_list:
+                _equation_tests.write(self.quest_root / "code", [])
+                failures = []
+                break
+            _equation_tests.write(self.quest_root / "code", case_list)
+            rc, out, err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
+            results = _equation_tests.parse_results(out)
+            if results is None:
+                self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
+                                  (err or out).strip().splitlines()[-1][:160] if (err or out).strip() else f"exit code {rc}")
+                record["error"] = (err or out)[-400:]
+                failures = []
+                break
+            by_id = {c["id"]: c for c in case_list}
+            failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
+                         "module": by_id.get(str(r.get("id")), {}).get("module", "")}
+                        for r in results if r.get("status") != _equation_tests.OK]
+            record["tested"] = [str(r.get("id")) for r in results]
+            if not failures:
+                self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
+                               len(results))
+                break
+            if attempt == _function_steps.REPAIRS:
+                break
+            for f in failures:
+                eid = str(f.get("id"))
+                if spent.get(eid, 0) >= _function_steps.REPAIRS:
+                    continue
+                if not _function_steps.spend(self.quest_root, _function_steps.MAX_CALLS):
+                    self._log.warning("[equations] the most requests the function steps may make in this quest are spent; "
+                                      "equation %s is not repaired alone", eid)
+                    spent[eid] = _function_steps.REPAIRS
+                    continue
+                spent[eid] = spent.get(eid, 0) + 1
+                await self._repair_equation_function(f, sources, located)
+        record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status")} for f in failures]
+        record["repairs"] = spent
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "equation_tests.json").write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        if not failures:
+            return None
+        message = " ".join(_equation_tests.failure_message(f, str(f.get("formula") or "")) for f in failures)
+        self._log.warning("[equations] %s still fail their worked example after %d repair(s) each: %s",
+                          ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures), _function_steps.REPAIRS,
+                          "; the whole script is repaired next")
+        return {
+            "exec_result": {
+                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "",
+                "stderr_tail": ("FI tested the model's equations before the study ran and "
+                                + ("one does" if len(failures) == 1 else "some do") + " not compute what the plan says. "
+                                + message)[-2000:],
+                "packages_note": getattr(self, "_packages_note", ""), "failed_script": _split_run.SIMULATE_NAME,
+                "flat_output": "", "numeric_warnings": [],
+            },
+            "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
+            # Last-value channels the full run writes on every pass: a failed pass must not leave an earlier script's.
+            "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
+            "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
+        }
+
+    async def _repair_equation_function(self, failure: dict[str, Any], sources: dict[str, str],
+                                        located: dict[str, dict[str, str] | None]) -> bool:
+        """ONE repair of the function a failed equation test names, alone: it is shown that function, its equation and the
+        problem (never the expected value or the study's script). Kept only when the file still parses and the function
+        keeps the parameters it had."""
+        where = located.get(str(failure.get("id")))
+        if not where:
+            return False
+        path = self.quest_root / "code" / where["file"]
+        try:
+            source = path.read_text(encoding="utf-8")
+            node = _function_steps._find(source, where["function"])
+            if node is None:
+                return False
+            # The parameters exactly as the function has them now (the contract the test calls it by).
+            header = f"def {where['function']}({ast.unparse(node.args)}):"
+            problem = _equation_tests.failure_message(failure, str(failure.get("formula") or ""))
+            equation = str(failure.get("id"))
+            block = f"{equation}: {failure.get('formula') or ''}"
+            new, why = await _function_steps.repair_one(
+                source=source, name=where["function"], signature=header, equation=equation, equation_block=block,
+                problem=problem, prompt=self._prompts["implement_function_repair"],
+                chat=lambda prompt: self._chat(prompt, node="implement"), package=where["file"].split("/")[0])
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the code as it was
+            self._log.warning("[equations] the repair of %s could not be asked for: %r", failure.get("function"), e)
+            return False
+        if new is None:
+            self._log.warning("[equations] the repair of %s was not used: %s", failure.get("function"), why)
+            return False
+        path.write_text(new, encoding="utf-8")
+        self._log.info("[equations] rewrote the function %s alone (equation %s)", failure.get("function"), failure.get("id"))
+        return True
 
     def _package_in_use(self, state: QuestState) -> str | None:
         """The model's package when this quest's code is laid out as a research tool and the package is there."""
@@ -9453,6 +10604,10 @@ class Engine:
             self._oracle_record_clear()
             return None
         protocol = self._protocol_block(state)
+        if protocol is None and self._runs_code(state) and _frozen.load(self.quest_root) is None:
+            # A plan with no protocol at all declares no known-answer check either: the plan is asked for one below
+            # (as for a protocol that has none), never skipped, so a simulation never runs with nothing checking it.
+            protocol = {}
         if protocol is None:
             self._oracle_record_clear()
             return None
@@ -11111,6 +12266,13 @@ class Engine:
         protocol = planned.get("protocol") if isinstance(planned, dict) else None
         return {str(o["name"]): o for o in _oracle.declared(protocol if isinstance(protocol, dict) else None)}
 
+    def _planned_equations(self) -> dict[str, str]:
+        """The formulas of the model's equations in ``plan.md``, by id."""
+        planned, _why = _plan.load_design(self.quest_root)
+        protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        return {str(e["id"]).strip(): " ".join(str(e.get("formula") or "").split())
+                for e in _review.equations_of(protocol if isinstance(protocol, dict) else None)}
+
     def _oracles_added_path(self) -> Path:
         return self.fi_dir / "oracles_added.json"
 
@@ -11192,11 +12354,13 @@ class Engine:
         path.write_text(text, encoding="utf-8")
         _plan.record_version(self.quest_root, text, by="engine", note=note)
 
-    async def _revise_checks_only(self, request: str) -> str:
+    async def _revise_checks_only(self, request: str, *, equations: bool | str = False, isolation: bool = False) -> str:
         """Ask the plan (``plan_revise``) for ``request`` and keep only what it changed in the checks
         (``protocol.oracles``): anything else it changed in the design block is put back, so a request about the checks
         can never move the grid, the thresholds or the criteria. ``""`` when the plan was rewritten, else why not (a
-        failed call is reported, never a crash)."""
+        failed call is reported, never a crash). With ``equations`` (a reader of another model objected to an equation
+        of the model), the equations of ``protocol.model`` are also taken from the rewrite, none removed; and then no
+        check keeps a looser tolerance than it had (the equation changes, the bar never does)."""
         path = _plan.plan_path(self.quest_root)
         before_text = path.read_text(encoding="utf-8")
         try:
@@ -11245,6 +12409,18 @@ class Engine:
         def keep(block: dict[str, Any]) -> dict[str, Any]:
             protocol = dict(block.get("protocol") or {})
             protocol["oracles"] = part(after, "oracles")
+            if isolation and not equations:
+                # A case or a measure was objected to: no tolerance loosens and no `expected` is written by hand.
+                protocol["oracles"] = _review.never_looser(part(before, "oracles"), protocol["oracles"], keep_expected=True)
+            if equations:
+                protocol["oracles"] = _review.never_looser(part(before, "oracles"), protocol["oracles"],
+                                                           keep_expected=isolation)
+                model_before = protocol.get("model")
+                model_after = (after.get("protocol") or {}).get("model") if isinstance(after.get("protocol"), dict) else None
+                if isinstance(model_before, dict) and isinstance(model_after, dict):
+                    # ``"example"``: only the worked examples may change; an equation itself only when a reader objected.
+                    protocol["model"] = {**model_before, "equations": _review.keep_every_equation(
+                        model_before.get("equations"), model_after.get("equations"), only_example=equations == "example")}
             if criteria or "criteria" in protocol:
                 protocol["criteria"] = criteria
             return {**block, "protocol": protocol}
@@ -11402,6 +12578,29 @@ class Engine:
                 f"{below}; for a second opinion from another model set provider.node_models.oracle_review"
                 if research else "")
         found = _review.findings(review) if review is not None else []
+        # The model's equations, read in the same call: a reader that is shown to be another model than the planner may
+        # object to one (its objection goes into the one request to the plan); the planner's own reading is never
+        # counted as a second reading of them, and the record says so.
+        eq_record = _review.equation_record(review, protocol, same_model=same, reviewer=reviewer or "the reviewer",
+                                            planner=planner or "the planner")
+        eq_found = _review.equation_findings(review) if review is not None and same is False else []
+        if eq_record is not None and not error:
+            if eq_record["read_by_other_model"]:
+                self._log.info("[oracle] the model's %d equation(s) were read by another model than the one that wrote "
+                               "the plan; %s", eq_record["total"],
+                               f"it objects to {len(eq_found)}" if eq_found else "it has no objection")
+            else:
+                self._log.info("[oracle] the model's %d equation(s) were not read by another model (%s)",
+                               eq_record["total"], eq_record["why"])
+        # The checks' cases, judged in the same call: objections count only from another model than the planner.
+        iso_record = _review.isolation_record(review, same_model=same, reviewer=reviewer or "the reviewer",
+                                              planner=planner or "the planner") if review is not None else None
+        iso_found = _review.isolation_findings(review) if review is not None and same is False else []
+        if iso_record is not None and not error:
+            self._log.info("[oracle] the checks' cases %s", (
+                f"were judged by another model than the one that wrote the plan; it objects to {len(iso_found)}"
+                if iso_record["read_by_other_model"] else f"were not judged by another model ({iso_record['why']})"))
+        found = [*found, *eq_found, *iso_found]
         for f in found:
             self._log.info("[oracle] the second reader of the checks: %s", f)
         if error:
@@ -11421,7 +12620,12 @@ class Engine:
             "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
                                         same_model=same, research=research,
                                         reported=bool(answered.get("reported")), error=error,
-                                        sent=not oracles_text.lstrip().startswith("[]")),
+                                        sent=not oracles_text.lstrip().startswith("[]"), equations=eq_record,
+                                        isolation=iso_record),
+            **({"isolation": iso_record} if iso_record is not None else {}),
+            **({"isolation_objections": iso_found} if iso_found else {}),
+            **({"equations": eq_record} if eq_record is not None else {}),
+            **({"equation_objections": eq_found} if eq_found else {}),
             **({"verdicts": review.checks, "add": review.add, "summary": review.summary} if review is not None else {}),
             **({"error": error} if error else {}),
         }
@@ -11452,12 +12656,21 @@ class Engine:
         # FI's own computation of each expected value, from the formula the plan gives (core/oracle_forms.py): what the
         # plan must still say goes into the SAME request as the rest; nothing is asked on a resume that already asked.
         formula_asks: list[dict[str, Any]] = []
+        example_asks: list[dict[str, Any]] = []
+        fixed_now: dict[str, float] = {}
         if not progress.get("asked") and not self._simulation_ran():
             design_now, _why = _plan.load_design(self.quest_root)
             protocol_now = design_now.get("protocol") if isinstance(design_now, dict) else None
-            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None)
+            fixed_now = _forms.fixed_settings_of_design(design_now)
+            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None,
+                                                               fixed_now)
                             if f["state"] != "agrees"]
-        if (rewrites or requests or review.get("lines") or formula_asks) and not progress.get("written"):
+            # A worked example for each equation the code computes as a function (core/equation_tests.py): one that is
+            # missing or cannot be used goes into the SAME request, never guessed.
+            if fi_runs:
+                example_asks = [r for r in _equation_tests.example_rows(
+                    protocol_now if isinstance(protocol_now, dict) else None) if r["state"] in ("missing", "unusable")]
+        if (rewrites or requests or review.get("lines") or formula_asks or example_asks) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
             # never leaves them unexplained.
             self._write_plan_section(path, [
@@ -11479,7 +12692,7 @@ class Engine:
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "
                               "stopped; it is not made again")
-        elif (requests or findings or formula_asks) and not progress.get("asked"):
+        elif (requests or findings or formula_asks or example_asks) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
             for f in formula_asks:
@@ -11491,18 +12704,42 @@ class Engine:
             # Recorded before the request: it is made at most once, even if this run stops while it is out.
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
-            must = [p for p in (_forms.request(requests, last=not (findings or formula_asks)) if requests else "",
-                                _forms.formula_request(formula_asks, last=not findings)) if p]
-            parts = [*must, _review.request(findings) if findings else ""]
+            equations_before = self._planned_equations()
+            for r in example_asks:
+                self._log.info("[plan] asking the plan for a worked example of equation %s (%s)", r["id"], r["why"])
+            must = [p for p in (_forms.request(requests, last=not (findings or formula_asks or example_asks)) if requests else "",
+                                _forms.formula_request(formula_asks, last=not (findings or example_asks), fixed=fixed_now),
+                                _equation_tests.request(example_asks, last=not findings)) if p]
+            parts = [*must, _review.request(findings, equations=bool(review.get("equation_objections")),
+                                            isolation=bool(review.get("isolation_objections")))
+                     if findings else ""]
             if len(must) + bool(findings) > 1:
                 parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
                                 "give or change must be done" + ("; the last is a reader's findings, to follow where "
                                                                  "they are right." if findings else "."))
-            failed = await self._revise_checks_only("\n\n".join(p for p in parts if p))
+            failed = await self._revise_checks_only(
+                "\n\n".join(p for p in parts if p),
+                equations=True if review.get("equation_objections") else ("example" if example_asks else False),
+                isolation=bool(review.get("isolation_objections")))
             if failed:
                 self._log.warning("[oracle] %s", failed)
             after = self._planned_oracles()
             changes = _forms.describe_changes(before, after)
+            equations_after = self._planned_equations()
+            equation_changes = [f"equation {eid} was changed: it was `{was}`, it is now `{equations_after[eid]}`"
+                                for eid, was in equations_before.items()
+                                if eid in equations_after and equations_after[eid] != was]
+            for line in equation_changes:
+                self._log.warning("[oracle] after the reader's objection, the plan's %s", line)
+            still_untested: list[str] = []
+            if example_asks:
+                design_after, _why = _plan.load_design(self.quest_root)
+                protocol_after = design_after.get("protocol") if isinstance(design_after, dict) else None
+                still_untested = _equation_tests.untested_notes(
+                    [r for r in _equation_tests.example_rows(protocol_after if isinstance(protocol_after, dict) else None)
+                     if r["state"] in ("missing", "unusable")], {})
+                for note in still_untested:
+                    self._log.warning("[plan] after the plan was asked once, %s", note)
             if len(after) < len(before):
                 self._log.warning("[oracle] the plan has fewer checks against known answers after it was asked (%d, was %d)",
                                   len(after), len(before))
@@ -11517,6 +12754,8 @@ class Engine:
                 *(["- FI asked the plan, once, to look at what the second reader found."] if findings else []),
                 *([f"- {failed[0].upper()}{failed[1:]}; nothing was changed for it."] if failed else
                   [f"- What changed: {c}." for c in changes] or ["- The plan did not change the checks."]),
+                *[f"- {c[0].upper()}{c[1:]}." for c in equation_changes],
+                *[f"- After the plan was asked once for a worked example, {n}." for n in still_untested],
                 *[f"- {r}" for r in again],
                 *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
             ], note="the checks against known answers looked at")
@@ -11559,7 +12798,8 @@ class Engine:
         design, _why = _plan.load_design(self.quest_root)
         protocol = design.get("protocol") if isinstance(design, dict) else None
         left = []
-        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None):
+        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None,
+                                         _forms.fixed_settings_of_design(design)):
             if f["state"] in ("missing", "unusable", "ambiguous"):
                 why = ("the plan gave no formula for it" if f["state"] == "missing"
                        else f"its formula can be read two ways, so FI did not use it: {f.get('formula')}"
@@ -11703,7 +12943,7 @@ class Engine:
             figures_count="0",
             result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         try:
@@ -11900,7 +13140,7 @@ class Engine:
             figures_count="0",
             result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         why = ""
@@ -12133,7 +13373,7 @@ class Engine:
             runner = _trial_runner.TrialsRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
-                log=self._log,
+                log=self._log, leave_out=self._left_out_quantities,
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
             )
@@ -12251,10 +13491,24 @@ class Engine:
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
+        # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
+        # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
+        await self._results_from_computation(state)
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
         self._check_code_layout(state)
+        # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
+        # function that computes another equation than the plan's is found here, not after the study.
+        failed_review = await self._code_review_gate(state)
+        if failed_review is not None:
+            return failed_review
+        failed_equations = await self._equation_gate(state, py, exec_env)
+        if failed_equations is not None:
+            return failed_equations
+        # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
+        # text is never read twice), before the oracle gate tests it.
+        await self._results_from_computation(state)
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
@@ -12267,6 +13521,11 @@ class Engine:
             # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
             self._check_equation_labels(state)
             self._check_code_layout(state)
+            # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
+            # the gate tests the text that will run.
+            oracle_code, unchecked = await self._typed_results_stable(state, py, exec_env, seed_path, oracle_code)
+            if unchecked is not None:
+                return unchecked
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -12282,8 +13541,22 @@ class Engine:
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
         self._hold_added_oracles()
+        # The whole run is timed on a few real trials and made smaller by the plan's model when it would not fit the time
+        # allowed (core/run_estimate.py); one that still would not fit stops the quest here, with no paper.
+        too_long = await self._size_the_run(state, runner, py, exec_env)
+        if too_long is not None:
+            return too_long
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
+        # The code can have changed since it was read (a repair by the equation or oracle gate): a version no second model
+        # has read is read before a run whose results will be reported (at most code_review.MAX_REVIEWS in a quest).
+        failed_review = await self._code_review_gate(state)
+        if failed_review is not None:
+            return failed_review
+        # A figure is drawn from what the run computed, never from numbers typed into the plotting code: the scripts are
+        # read (not run) and sent back to draw it from the saved results, a bounded number of times
+        # (core/figure_data_check.py).
+        figure_repairs, figure_rewrote = await self._figures_from_results(state)
 
         # Pilot pass: run the experiment small before running it for real.
         #
@@ -12382,6 +13655,7 @@ class Engine:
                 env=primary_env,
             ),
             label="running simulate.py and experiment.py" if split else "running experiment.py",
+            progress=getattr(runner, "progress_text", None),
         )
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
@@ -12536,7 +13810,7 @@ class Engine:
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
-        result_json = _extract_result_json(result.stdout)
+        result_json = self._without_typed_results(_extract_result_json(result.stdout))
         self._log.info(
             "[execute] rc=%d duration=%.1fs figures=%d result_json=%s",
             result.returncode, result.duration_s, len(figures), bool(result_json),
@@ -12789,6 +14063,7 @@ class Engine:
                     "[execute] %d figure(s) not drawn as the mean of the seeds show seed 0: %s",
                     len(restored), ", ".join(restored),
                 )
+        figures = self._drop_typed_figures(figures, records_dir)
         figure_records = _read_figure_records(records_dir, figures)
         for name, n_seeds in replotted.items():
             if name in figure_records:
@@ -12812,6 +14087,9 @@ class Engine:
                 # The script a two-script quest's failure is in ("simulate.py" or
                 # "experiment.py"): the repair rewrites that one. None for one script.
                 "failed_script": failed_script,
+                # Set when the run was sent back because the simulation's numbers did not depend on what it was given
+                # (core/flat_output.py): the honest stop after the repairs says so in those words.
+                "flat_output": (str(getattr(runner, "flat", None) or "") if result.returncode != 0 else ""),
                 "numeric_warnings": self._scan_numeric_warnings(state, result.stderr, result_json),
             },
             "figures": figures,
@@ -12881,6 +14159,11 @@ class Engine:
         self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
+        patch["figure_data_repairs"] = figure_repairs
+        if (sized_design := self._design_after_sizing(state)) is not None:
+            patch["design"] = sized_design  # the plan's smaller run (core/run_estimate.py)
+        if figure_rewrote and code_path.is_file():
+            patch["code"] = code_path.read_text(encoding="utf-8")  # the plotting code was rewritten to use the results
         await self._record_criteria(
             state, attempt=run_record_id, result=patch["result_json"] if run_accepted else None,
             repaired=gate_repaired or int(state.get("exec_reflect_iter", 0) or 0) > 0)
@@ -13255,6 +14538,8 @@ class Engine:
         if resumed is not None:
             return resumed
         exec_result = state.get("exec_result") or {}
+        if exec_result.get("too_long") or exec_result.get("not_run"):
+            return {}  # the study would not fit the time allowed: there is no script to repair (core/run_estimate.py)
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
         # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
@@ -13459,7 +14744,7 @@ class Engine:
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
             reflect_history_block=history_block,
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         try:
@@ -14097,6 +15382,7 @@ class Engine:
         # the same way as the single-call path, so the rest of the
         # pipeline (cross_check, write) sees an identical shape.
         ensemble_cfg = self._ensemble_for_node("analyze")
+        analysis: dict[str, Any] = {}
         if ensemble_cfg is not None:
             from core.ensemble import EnsembleError
             try:
@@ -14109,14 +15395,20 @@ class Engine:
                         "[analyze] ensemble disagreement_score=%.2f (%d models)",
                         result.disagreement_score, len(ensemble_cfg.models),
                     )
+                analysis = _parse_json_lenient(text, node="analyze") or {}
             except EnsembleError as e:
                 self._log.warning(
                     "[analyze] ensemble all-failed (%s); falling back to single-call path", e,
                 )
-                text = await self._chat(prompt, node="analyze")
-        else:
-            text = await self._chat(prompt, node="analyze")
-        analysis = _parse_json_lenient(text) or {"summary": "(parse failed)", "key_findings": []}
+        if not analysis:
+            # One call; an answer that cannot be read is asked for once more. (When the ensemble's merged answer could
+            # not be read, this is a fresh ask, so up to two more calls follow it.)
+            _, analysis = await self._chat_json(prompt, node="analyze", want=("summary",), usable=bool)
+        if not analysis:
+            # Unreadable twice: no finding is invented. The evidence gate reads `unreadable` and fails closed.
+            self._log.warning("[analyze] the model's analysis could not be read, even when asked once more; the run is "
+                              "treated as having no findings (the evidence gate says so)")
+            analysis = {"summary": "(parse failed)", "key_findings": [], "unreadable": True}
         # Default `next_step` to publish when the LLM omits it (older
         # prompts, parse failures) so the route doesn't break.
         analysis.setdefault("next_step", "publish")
@@ -14497,7 +15789,7 @@ class Engine:
                 ),
                 "key_findings_preview": [str(f)[:200] for f in findings[:6]],
             }
-            ruled = self._no_results_verdict(state) or _evidence_gate_rule(
+            ruled = self._unreadable_analysis_verdict(state) or self._no_results_verdict(state) or _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
                 retrieval_on=self.config.knowledge.enabled,
@@ -14550,16 +15842,18 @@ class Engine:
         # An experiment that produced no results goes back to design once while there is an iteration left (the new
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
+        no_findings = bool(parsed.get("stuck")) and status == "ok"
         assessment = {
             "verdict": verdict,
             "status": status,
             "failure": failure,
-            "route": "redesign" if redesign else "broaden_lit" if will_broaden else "write",
+            "route": "stuck" if no_findings else "redesign" if redesign else "broaden_lit" if will_broaden else "write",
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
             "n_supporting": n_supporting,
             "decided_by": decided_by,
+            **({"stuck_reason": str(parsed["stuck_reason"])} if no_findings and parsed.get("stuck_reason") else {}),
         }
         self._log.info(
             "[evidence_gate] verdict=%s status=%s route=%s decided=%s type=%s policy=%s "
@@ -14594,6 +15888,144 @@ class Engine:
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
         return patch
 
+    def _unreadable_analysis_verdict(self, state: QuestState) -> dict[str, Any] | None:
+        """The gate's verdict when the model's analysis of the results could not be read (twice): ``insufficient``, never
+        a count over findings that were not read. ``None`` for every other analysis."""
+        analysis = state.get("analysis")
+        if not (isinstance(analysis, dict) and analysis.get("unreadable")):
+            return None
+        why = "the model's analysis of the results could not be read, even when asked twice, so there are no findings"
+        self._log.warning("[evidence_gate] %s; the evidence is judged insufficient", why)
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True}
+
+    def _set_aside_stuck_record(self) -> None:
+        """A refine that re-opens a quest which ended in an honest stop moves ``needs/STUCK.json`` (and so its to-do card)
+        aside, to ``.fi/set_aside_by_stuck/<time>/``, kept for the history: the pass that follows is not that stop's."""
+        record = self.quest_root / "needs" / "STUCK.json"
+        if not record.is_file():
+            return
+        aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
+        try:
+            aside.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(record), str(aside / "STUCK.json"))
+            self._log.info("[run] the earlier stop (needs/STUCK.json) is kept in %s; this pass starts without it",
+                           aside.relative_to(self.quest_root).as_posix())
+        except OSError as exc:
+            self._log.warning("[run] could not set needs/STUCK.json aside (%r)", exc)
+
+    async def _node_stuck_no_findings(self, state: QuestState) -> QuestState:
+        """The experiment ran but the model's reading of its results could not be read, even when asked twice: FI has no
+        findings to write up, so the quest stops here without a paper. The same stop as a simulation that would not work
+        (``needs/STUCK.json``, which the to-do card reads); what FI tried is in the record; nobody is asked to debug.
+        The run's results stay on disk; a paper an earlier round left is set aside (kept, not deleted)."""
+        reason = (state.get("evidence_assessment") or {}).get("stuck_reason")
+        no_numbers = reason == "no_numbers"
+        crashed = reason == "crashed"
+        headline_missing = reason == "headline_missing"
+        claims = [str(h) for h in (state.get("review") or {}).get("must_flag_hits") or []
+                  if _hit_name(h) == _record_claims.HIT]
+        repairs = int(state.get("exec_reflect_iter") or 0)
+        # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
+        redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
+        again = ", even after the design was asked for again" if redesigned else ""
+        repaired = f"repaired the script {repairs} time{'s' if repairs != 1 else ''}" if repairs else ""
+        after = " and ".join(x for x in (repaired, "asked for the design again" if redesigned else "") if x)
+        problem = (f"the experiment ran, but its result has no number in it{again}, so FI has nothing measured to write up"
+                   if no_numbers else
+                   f"the experiment could not run to the end{', even after FI ' + after if after else ''}, "
+                   "so FI has nothing measured to write up" if crashed else
+                   "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
+                   "so FI has no findings to write up")
+        redo = (["sent the quest back to the design once, so the script was written again"] if redesigned else [])
+        tried = (["ran the experiment and read the result it printed: no number in it", *redo,
+                  *(["ran it again: the result still has no number in it"] if redesigned else [])] if no_numbers else
+                 [*(["asked the model to repair the script when it failed"
+                     + (f" ({repairs} repair{'s' if repairs != 1 else ''})" if repairs else "")] if repairs else
+                    ["ran the experiment: it stopped with an error"]), *redo,
+                  *(["ran it again: it still could not run to the end"] if redesigned else [])] if crashed else
+                 ["asked the model to analyse the results",
+                  "read its reply as written, then again with the backslashes of formulas kept as written",
+                  "asked the model a second time for one short answer; that reply could not be read either"])
+        ended = ("the run gave no result with a number in it" + again if no_numbers else
+                 "the script could not run to the end" + again if crashed else "the analysis could not be read twice")
+        if claims and reason not in ("flat", "no_numbers", "crashed"):
+            # The paper claimed what FI's own records contradict, even after it was written again (core/record_claims.py).
+            problem = (f"the paper still claims what FI's own records contradict, even after it was written again "
+                       f"{_RECORD_REWRITES} times, so FI will not hand it over as a finished paper")
+            tried = ["compared the paper with FI's records of the search, the known-answer checks and the figures the run drew",
+                     *[_one_line(c, 400) for c in claims[:3]],
+                     f"asked for the paper to be written again with the contradiction named ({_RECORD_REWRITES} times); "
+                     "the claim was still there"]
+            ended = "the paper still claimed what FI's records contradict"
+        if headline_missing:
+            # A second model compared the code with the plan and the main quantity is not in it, even after repairs.
+            left = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
+            problem = ("the code does not compute the study's main quantity"
+                       f"{' (' + _one_line('; '.join(left), 200) + ')' if left else ''}"
+                       f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
+            tried = ["asked a second model to read the code against what the plan requires it to compute",
+                     *[_one_line(x, 300) for x in left[:3]],
+                     *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
+                       if repairs else [])]
+            ended = "the code still did not compute the study's main quantity"
+        if reason == "not_run":
+            said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
+            problem = f"{said}, so nothing was run for the study"
+            tried = ["rewrote the simulation to compute the results it had typed in, and ran the known-answer checks on it",
+                     said]
+            ended = "the simulation's text still could not be checked for typed-in results"
+        if reason == "too_long":
+            # The study would not finish in the time allowed, even made smaller (core/run_estimate.py): nothing was run.
+            said = str((state.get("exec_result") or {}).get("too_long") or "").strip().rstrip(".")
+            problem = f"{said}, so nothing was run for the study" if said else "the experiment would not fit the time allowed"
+            tried = ["timed a few real trials of the experiment and added them up",
+                     said or "the total is more than the time allowed"]
+            ended = "the experiment would still take longer than the time allowed"
+        if reason == "flat":
+            # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
+            symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
+            problem = ("the simulation gives the same result whatever it is given"
+                       f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
+            tried = ["ran the simulation: " + (_one_line(symptom, 300) or "its result did not change with its inputs"),
+                     *(["asked the model to repair the simulation" + (f" ({repairs} repair{'s' if repairs != 1 else ''})"
+                                                                      if repairs else "")] if repairs else []),
+                     *redo, *(["ran it again: its result still did not change with its inputs"] if redesigned else [])]
+            ended = "the simulation's result still did not depend on its inputs" + again
+        record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
+                                  "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
+                                  "why_repairs_ended": ended}
+        aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
+        for name in [n for n in _rerun_from._PAPER
+                     if "*" not in n and n not in ("frontier_insight_summary.json", "NEXT_STEP.md")]:
+            src = self.quest_root / name
+            if src.exists():
+                try:
+                    aside.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(aside / name))
+                except OSError as exc:
+                    self._log.warning("[stuck] could not set %s aside (%r)", name, exc)
+        if aside.is_dir():
+            record["set_aside"] = aside.relative_to(self.quest_root).as_posix()
+        try:
+            needs = self.quest_root / "needs"
+            needs.mkdir(parents=True, exist_ok=True)
+            (needs / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[stuck] could not write needs/STUCK.json (%r)", exc)
+        self._log.warning("[stuck] %s; stopping without a paper (needs/STUCK.json)", problem)
+        for line in tried:
+            self._log.info("[stuck] tried: %s", line)
+        print(f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
+              "fix: needs/STUCK.json says what FI tried; run the quest again, "
+              + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
+                 or reason == "flat" or headline_missing else
+                 "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
+                 "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
+                 "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
+                 "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
+        self._audit("stuck", problem=problem, repairs=len(tried))
+        return {"stuck": record}
+
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.
 
@@ -14602,15 +16034,40 @@ class Engine:
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
+        if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
+                _missing_headline := _code_review.resolve_headline(
+                    self.quest_root, self.quest_root / "code", state.get("result_json"))):
+            # A second model found the study's main quantity missing from the code, the repairs did not add it, and the
+            # run's own results do not hold it either (a reviewer's word alone never stops a quest).
+            why = ("the code does not compute the study's main quantity, and the run's results do not hold it "
+                   "(" + "; ".join(_missing_headline)[:200] + ")")
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                    "stuck_reason": "headline_missing"}
+        from . import numeric_oracle as _numeric_oracle
+
+        result = state.get("result_json")
+        # A result with no number in it (the script printed its RESULT_JSON line with nothing measured) is no result.
+        # A run whose result has no number in it (none printed, `{}`, `[]`, only words) is no result; a `0` is a number.
+        no_numbers = not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
         if (
-            state.get("result_json")
+            not no_numbers
             or not isinstance(exec_result, dict) or not exec_result  # no experiment has run: not this case
             or state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
             or self.config.engine.analyze_local_first
         ):
             return None
-        why = f"the experiment produced no results (exit code {exec_result.get('returncode')!s}"
+        too_long = str(exec_result.get("too_long") or exec_result.get("not_run") or "")
+        if too_long:  # stopped before the study (it would not fit the time allowed, or a text of it was not checked): no second try
+            self._log.warning("[evidence_gate] %s; there is nothing measured to write up", too_long)
+            return {"verdict": "insufficient", "rationale": too_long, "gaps": [too_long], "stuck": True,
+                    "stuck_reason": "too_long" if exec_result.get("too_long") else "not_run"}
+        flat = str(exec_result.get("flat_output") or "")
+        why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
+               if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
+        if flat:
+            why = f"the simulation's result does not depend on what it is given (exit code {exec_result.get('returncode')!s}"
         if state.get("exec_give_up_reason"):
             why += f"; the repair gave up: {_one_line(state.get('exec_give_up_reason'), 160)}"
         why += ")"
@@ -14621,7 +16078,12 @@ class Engine:
             self._log.warning("[evidence_gate] %s; sending the quest back to design once", why)
             return {"verdict": "insufficient", "rationale": why + "; tried once more from the design", "gaps": [why],
                     "redesign": True}
-        return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
+        # Asked from the design once and still nothing measured: there is nothing to write up, so no paper is written.
+        # "Could not run to the end" only when the script really exited with an error; one that finished (exit 0) and printed
+        # nothing measured is the other wording, whether or not a repair was tried.
+        crashed = exec_result.get("returncode") not in (0, None)
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                "stuck_reason": "flat" if flat else "crashed" if crashed else "no_numbers"}
 
     async def _write_whole_paper(
         self, state: QuestState, persona_block: str, *, refine_round: bool = False, extra_note: str = "",
@@ -14683,6 +16145,12 @@ class Engine:
             evidence_note = f"{evidence_note}\n\n{best_note}".strip()
         if once_note := self._ran_once_note():
             evidence_note = f"{evidence_note}\n\n{once_note}".strip()
+        if typed_note := self._typed_figures_note():
+            evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
+        if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
+            evidence_note = f"{evidence_note}\n\n{code_note}".strip()
+        if run_note := self._run_checks_note():
+            evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -16869,6 +18337,9 @@ class Engine:
             for hit in missing_figures:
                 self._log.warning("[figure_check] %s", hit)
             review["must_flag_hits"] += missing_figures
+            # Forced: a claim FI's own records contradict (core/record_claims.py).
+            record_hits = self._record_contradiction_hits(paper_md, state)
+            review["must_flag_hits"] += record_hits
             # Forced as well: nothing checked this draft's citations.
             review["must_flag_hits"] += _citations_unchecked(state)
             # And a draft over the page limit.
@@ -16880,6 +18351,8 @@ class Engine:
                 update["claim_grounding"] = pruned
             if page_hits:
                 update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
+            # Counted here so the router can cap the rewrites for it, and end the quest honestly after them.
+            update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
             # Counted here, like the shortening rewrites above, so the router
             # can cap it: a must-flag about something the run computed sends
             # the experiment back, at most ``_CODE_REEXECUTES`` times.
@@ -17064,6 +18537,9 @@ class Engine:
             self._log.warning("[figure_check] %s", hit)
         if missing_figures:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *missing_figures]
+        record_hits = self._record_contradiction_hits(paper_md, state)
+        if record_hits:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *record_hits]
         unchecked = _citations_unchecked(state)
         if unchecked:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
@@ -17078,6 +18554,7 @@ class Engine:
             update["claim_grounding"] = pruned
         if page_hits:
             update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
+        update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
         # As on the single-reviewer path: count a review that sends the
         # experiment back, so the router can cap those re-executes.
         if _review_sends_the_experiment_back(review, state):
@@ -17352,14 +18829,17 @@ class Engine:
         relevance_guard) run at 0 for reproducible decisions; generative nodes
         use the 0.2 default. Pass an explicit value to override."""
         assert self._client is not None
+        if node == "plan_revise":
+            self._plan_chat_calls = getattr(self, "_plan_chat_calls", 0) + 1  # counted before it is made, so a failure counts
         temp = (
             temperature if temperature is not None
             else _temperature_for_node(node)
         )
         messages = [{"role": "user", "content": prompt}]
+        client, _reports = await self._client_for(node)
         response, served = await self._recorded_call(
             node or "", messages,
-            lambda: self._client.chat(messages, temperature=temp, model=self._model_for_node(node), node=node or ""),
+            lambda: client.chat(messages, temperature=temp, model=self._model_for_node(node), node=node or ""),
         )
         # The model that answered THIS call (not the client's shared latest, which a call made meanwhile can change).
         self._log_chat_cost(node=node or "", messages=messages, response=response, model=served.get("model") or None,
@@ -17369,8 +18849,10 @@ class Engine:
             # it is recorded truthfully and calls made at the same time do not overwrite each other. The client's
             # shared attributes are the fallback for a transport that sets nothing.
             self._last_chat[node] = {
-                "provider": served.get("provider") or getattr(self._client, "last_provider", None) or self.config.provider.name,
-                "model": (served.get("model") or getattr(self._client, "last_model", None) or self._model_for_node(node)
+                "provider": (served.get("provider") or getattr(client, "last_provider", None)
+                             or (step[1].name if (step := node_provider_for(getattr(self.config.provider, "node_providers", None), node))
+                                 else self.config.provider.name)),
+                "model": (served.get("model") or getattr(client, "last_model", None) or self._model_for_node(node)
                           or self.config.provider.model),
                 "fallback": bool(served.get("fallback")),
                 "reported": bool(served.get("reported")),
@@ -17638,6 +19120,16 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- a cost row never touches the quest
             self._log.debug("[cost] failed attempt not recorded: %r", e)
 
+    def _reports_for(self, node: str) -> bool:
+        """Whether the connection ``node``'s calls go on names the model that answered (a step on its own provider has
+        its own connection; known once its first call has built the client)."""
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        if step is not None:
+            built = self.__dict__.get("_step_clients", {}).get(step[0])
+            if built is not None:
+                return bool(built[1])
+        return bool(getattr(self, "_reports_model", False))
+
     def _record_model_call(self, node: str, messages: Any, response: Any, *, served: dict[str, Any] | None = None,
                            outcome: str = "ok", usage: dict[str, Any] | None = None,
                            requested_model: str | None = None) -> str | None:
@@ -17654,7 +19146,7 @@ class Engine:
                 # A call of a step paused and run again after a resume is numbered on from the record's own lines.
                 node=node, attempt=max(counts[node], _attempts.next_attempt(fi_dir, node)), served=served,
                 requested_model=requested_model or self._model_for_node(node) or self.config.provider.model or None,
-                reports_model=bool(getattr(self, "_reports_model", False)), messages=messages, response=response,
+                reports_model=self._reports_for(node), messages=messages, response=response,
                 outcome=outcome, usage=usage if isinstance(usage, dict) else None,
             )
             _attempts.append_model_call(fi_dir, getattr(self, "quest_id", ""), row)
@@ -17674,7 +19166,7 @@ class Engine:
         model did."""
         return dict(self._last_chat.get(node, {}))
 
-    def _make_fallback_factory(self, name: str):
+    def _make_fallback_factory(self, name: str, base: Any = None):
         """Build an async factory that lazily resolves+constructs an
         ``LLMClient`` for fallback provider ``name`` (used by
         :class:`FallbackLLMClient`). Nothing is resolved and no proxy spawned
@@ -17684,7 +19176,7 @@ class Engine:
         node_model_fallbacks — those name provider-specific models that would
         be wrong for a different provider."""
         async def _factory() -> LLMClient:
-            derived = self.config.provider.model_copy(update={
+            derived = (base or self.config.provider).model_copy(update={
                 "name": name,
                 "model": None,
                 "base_url": None,
@@ -17700,20 +19192,7 @@ class Engine:
             self._log.info(
                 "[fallback] resolved %s -> %s (%s)", name, ep.base_url, ep.model,
             )
-            return LLMClient(
-                ep,
-                timeout_s=self.config.provider.http_timeout_s,
-                cli_timeout_s=self.config.provider.cli_timeout_s,
-                cli_inactivity_timeout_s=(
-                    self.config.provider.cli_inactivity_timeout_s
-                ),
-                node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
-                node_http_timeout_s=self.config.provider.node_http_timeout_s,
-                node_model_fallbacks={},
-                max_prompt_chars=self.config.provider.max_prompt_chars,
-                heartbeat_cb=self._llm_heartbeat,
-                run_log=self._log,
-            )
+            return self._new_llm_client(ep)
         return _factory
 
     def _llm_heartbeat(self, payload: dict[str, Any]) -> None:
@@ -17880,10 +19359,11 @@ class Engine:
         source-router) that build their own messages array. Honors the
         same Phase-O per-node model routing as ``_chat``."""
         assert self._client is not None
+        client, _reports = await self._client_for(node)
         response, _served = await self._recorded_call(
             node or "", messages,
-            lambda: self._client.chat(messages, temperature=temperature, model=self._model_for_node(node),
-                                      node=node or ""),
+            lambda: client.chat(messages, temperature=temperature, model=self._model_for_node(node),
+                                node=node or ""),
         )
         self._log_chat_cost(node=node or "", messages=messages, response=response, model=_served.get("model") or None,
                             usage=_served.get("usage") if isinstance(_served.get("usage"), dict) else None)
@@ -17928,7 +19408,7 @@ class Engine:
             self._log.debug("[clarify] could not keep the asked questions: %r", e)
 
     async def _await_with_heartbeat(
-        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0,
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None,
     ) -> Any:
         """Await ``coro`` while emitting a periodic ``[execute] … still running,
         Ns elapsed`` line to run.log. Long-running work that blocks silently —
@@ -17946,6 +19426,17 @@ class Engine:
                 try:
                     await asyncio.wait_for(done.wait(), timeout=interval_s)
                 except asyncio.TimeoutError:
+                    where = ""
+                    try:  # where the study is, in plain words (core/run_estimate.py); never stops the beat
+                        where = str(progress() or "") if callable(progress) else ""
+                    except Exception:  # noqa: BLE001
+                        where = ""
+                    if where:
+                        from .run_estimate import plain_duration
+
+                        self._log.info("[execute] %s — still running, %s elapsed: %s", label,
+                                       plain_duration(time.monotonic() - start), where)
+                        continue
                     self._log.info(
                         "[execute] %s — still running, %ds elapsed",
                         label, int(time.monotonic() - start),
@@ -18566,6 +20057,9 @@ class Engine:
         (review-panel personas)."""
         if not node:
             return None
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        if step is not None:  # the step's own provider's model (a step in node_models too uses this one)
+            return step[1].model
         return model_for_node(self.config.provider.node_models, node)
 
     def _one_model_panel(self) -> bool:
@@ -18854,7 +20348,14 @@ class Engine:
         # An extension of code kept as two scripts is not asked to restructure it into a package.
         extending_two_scripts = bool(state.get("refine_extend")) and not self._package_in_use(state)
         if layout and layout["shape"] == _code_layout.PACKAGE and not extending_two_scripts:
-            block += _code_layout.prompt_block(layout["package"], _oracle.generating_equations(self._protocol_block(state)))
+            package = layout["package"]
+            if _function_steps.is_ready(self.quest_root, package):
+                # FI wrote and checked the package function by function: only the two scripts are asked for.
+                block += _code_layout.prefilled_block(
+                    package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"))
+            else:
+                block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)))
+                block += self._function_steps_note(package)
         return block
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
@@ -19065,10 +20566,14 @@ class Engine:
                 for p in figures.iterdir()
             )
         )
+        # A quest that ended in an honest stop (needs/STUCK.json, written by this run; a rerun or a refine moves it aside)
+        # has no paper: one an earlier round left on disk is not this quest's result, so no PDF, slides or poster are
+        # made from it. The record is read, not the checkpoint, so a rerun that went on is not held back by it.
+        stuck = (self.quest_root / "needs" / "STUCK.json").is_file()
         return QuestArtifacts(
             quest_id=self.quest_id,
             quest_root=self.quest_root,
-            paper_md=paper_md if paper_md.exists() else None,
+            paper_md=paper_md if paper_md.exists() and not stuck else None,
             paper_pdf=None,
             figures_dir=figures if figures_present else None,
             bundle_manifest=manifest if manifest.exists() else None,
@@ -19444,11 +20949,14 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "oracle_review",                    # a second model reads the plan's checks against known answers
+        "code_review",                      # a second model reads the code against the plan's required outputs
         "oracle_recompute",                 # a failing check's expected value worked out again, blind to the measurement
         "implement",                      # legacy one-shot (resume fallback)
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
+        "implement_function",               # the model's package: ONE function body for ONE equation
+        "implement_function_repair",        # ONE function repaired alone (never the whole script)
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
         "cross_check",
@@ -20524,6 +22032,19 @@ _REFERENCE_FORMS = (
 
 # Written once FI has asked the plan step to fill in where the checks' expected values come from (``_fill_plan_sources``).
 _FILL_MARKER = "plan_sources_asked.json"
+# Written each time FI asks the plan's model to write the search part of a plan for the best design
+# (``_ask_plan_for_the_search``): how many times it asked of this plan, so a resume does not ask again; at most this many.
+_SEARCH_ASKED = "search_block_asked.json"
+_PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
+_PART_HEADING = "Checks already made"
+_SEARCH_ASKS = 2
+_SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
+_SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model
+
+
+class _PlanEditedMeanwhile(Exception):
+    """plan.md was changed (by a person) while the plan's model was answering: the model's answer is not written."""
+
 #: What a plan with no way to judge whether the code got better means, in one line (never a stop of its own).
 _NO_CRITERIA_LINE = ("The plan has no measure of whether the code got better (FI looked in the literature once and found "
                      "none), so FI will not try to improve the simulation step by step. Nothing to do: the quest goes on.")
@@ -20675,12 +22196,12 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
     "assumptions": ["<what the model assumes>"],
     "holds_for": "<the range of parameters where it holds>",
-    "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>"}]
+    "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>", "example": {"inputs": {"<the equation's input, named as the code will name its argument>": <a number>}, "expected_formula": "<the equation's output for those inputs, as a formula>"}}]
   },
   "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
 
-`model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
+`model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
 Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
@@ -20704,6 +22225,7 @@ Every number the topic sets (a set in braces, a count of runs, a threshold) must
 """
 
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@FORMULA@@", _forms.EXPECTED_FORMULA_LANGUAGE)
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@EXAMPLE@@", _equation_tests.EXAMPLE_RULE)
 
 # The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan
 # directive, so the rules above stay as they are for a measurement.
@@ -22216,13 +23738,35 @@ def _unseeded_rng_directive(calls: list[tuple[int, str]]) -> str:
 # Stands where the traceback would be in the ``execute_reflect`` prompt, for the
 # one repair a script that ignores ``FI_REPLICATE_SEED`` is offered before it
 # has run (see ``Engine._repair_ignored_replicate_seed``).
+def _stripped(protocol: dict[str, Any]) -> dict[str, Any]:
+    copy_ = copy.deepcopy(protocol)
+    _strip_plan_numbers(copy_)
+    return copy_
+
+
+def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -> None:
+    """In place: the plan's own numbers for what the code must reproduce, removed from a protocol that is shown to a
+    request that writes or repairs code (see :meth:`Engine._code_design_block`)."""
+    model = protocol.get("model")
+    for eq in (model.get("equations") if isinstance(model, dict) and isinstance(model.get("equations"), list) else []):
+        if isinstance(eq, dict) and "example" in eq:
+            example = eq.pop("example")
+            inputs = example.get("inputs") if isinstance(example, dict) else None
+            if names_only and isinstance(inputs, dict):
+                eq["example"] = {"input_names": list(inputs)}
+    for oracle in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
+        if isinstance(oracle, dict):
+            oracle.pop("expected", None)
+            oracle.pop("expected_formula", None)
+
+
 def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
     """What stands where a traceback would in the repair request: the protocol the plan fixed and how the script differs."""
     return (
         "This script has NOT been run, and it has not failed: the account of a crash above does not apply. It "
         "contradicts the experiment protocol that was fixed in the plan, and needs the changes below before it is "
         "run, and no other.\n\n"
-        "The protocol:\n" + json.dumps(protocol, indent=2) + "\n\n"
+        "The protocol:\n" + json.dumps(_stripped(protocol), indent=2) + "\n\n"
         "How the script differs from it:\n" + "\n".join(f"- {m.message()}" for m in mismatches) + "\n\n"
         "Change exactly this: make the script use the protocol's values, every one of them, and none the protocol does "
         "not name. Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT "
@@ -22399,7 +23943,7 @@ def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
 # engine.max_iterations, and each script's own repairs by engine.exec_reflect_max_iterations.
 _FRESH_SCRIPT: dict[str, Any] = {
     "exec_reflect_iter": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
-    "run_manifest_failures": 0, "figure_overlap_repaired": False, "bounded_seen": [],
+    "run_manifest_failures": 0, "figure_data_repairs": 0, "figure_overlap_repaired": False, "bounded_seen": [],
 }
 
 
@@ -23196,8 +24740,12 @@ _TEXT_ONLY_HITS = frozenset({
     # A person's refine point the paper does not answer: the writer said it needs no new experiment (a point that
     # does goes to the design from the writing step), so the paper is written again.
     "user_feedback_unaddressed",
+    # A claim FI's own records contradict (core/record_claims.py): the paper is written again with it named.
+    "record_contradiction",
 })
 _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
+# How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
+_RECORD_REWRITES = 2
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be
@@ -24479,6 +26027,28 @@ def _parse_json_lenient(
     return _parse_json_lenient_once(text, node=node, _log_truncate_chars=_log_truncate_chars)
 
 
+def _read_latex_object(chunk: str, *, strict: bool = False) -> dict[str, Any] | None:
+    """The JSON object in ``chunk`` after the backslashes of LaTeX a model wrote in its strings (``$\\sigma$``,
+    ``\\text{SNR}``) are kept as the LaTeX they are (:func:`core.latex_text.escape_latex_backslashes`), or ``None`` when
+    that does not make it parse. It also catches a reply that parses but whose LaTeX came out as an escape (``\\text`` read as a
+    tab and ``ext``): any other valid reply gives ``None`` here and is used exactly as parsed. ``strict`` is for a chunk
+    that parsed as written: only what cannot be a real newline or tab followed by a word is taken for LaTeX (a script
+    in a JSON string has lines that start with ``nu`` or ``to``)."""
+    fixed = escape_latex_backslashes(chunk, strict=strict)
+    if fixed == chunk:
+        return None
+    try:
+        result = json.loads(fixed)
+    except (ValueError, RecursionError):
+        return None
+    if isinstance(result, dict):
+        logging.getLogger("frontier_insight.engine").info(
+            "a model's JSON reply held LaTeX with single backslashes (as in \\sigma or \\text{...}); read with them kept"
+            " as written%s", " (it had parsed, with some read as a tab or a form feed)" if strict else "")
+        return result
+    return None
+
+
 def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
     """Every JSON object written at the top level of ``text`` (an object inside one already read is not counted
     again), in order. Prose, fences and objects that do not parse between them are skipped."""
@@ -24489,6 +26059,13 @@ def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
         try:
             obj, end = decoder.raw_decode(text, i)
         except (ValueError, RecursionError):
+            # LaTeX written with single backslashes in a string (`$\sigma$`): read once more with them kept.
+            closes = _matching_brace_end(text, i)
+            repaired = _read_latex_object(text[i:closes])
+            if repaired is not None:
+                out.append(repaired)
+                i = text.find("{", closes)
+                continue
             # An object that does not parse (a trailing comma, a reply cut off) is skipped whole, to its matching
             # brace: an object inside it is never read as one of the reply's own (an evidence gate's per-source
             # "verdict" taken for the gate's). A brace in prose ("{ opens a set") is not an object: only the next
@@ -24497,7 +26074,8 @@ def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
             i = text.find("{", _matching_brace_end(text, i) if looks_like_object else i + 1)
             continue
         if isinstance(obj, dict):
-            out.append(obj)
+            # `\text`, `\frac`, `\beta`, `\nabla`, `\rho` are valid JSON escapes: the text came out as a tab, a form feed...
+            out.append(_read_latex_object(text[i:end], strict=True) or obj)
         i = text.find("{", end)
     return out
 
@@ -24570,7 +26148,9 @@ def _parse_json_lenient_once(
         # WARNING — the JSON itself was valid, the prompt told the
         # model to return an object, the contract is upstream of
         # this function.
-        return result if isinstance(result, dict) else None
+        # `\text`, `\frac`, `\beta`, `\nabla`, `\rho` are valid JSON escapes, so LaTeX written with single backslashes can
+        # parse as a tab or a form feed: read as the LaTeX it is.
+        return (_read_latex_object(candidate, strict=True) or result) if isinstance(result, dict) else None
     except json.JSONDecodeError:
         pass
     # Find the first '{' and last '}' and try the slice.
@@ -24579,8 +26159,11 @@ def _parse_json_lenient_once(
     if start >= 0 and end > start:
         try:
             result = json.loads(candidate[start : end + 1])
-            return result if isinstance(result, dict) else None
+            return (_read_latex_object(candidate[start : end + 1], strict=True) or result) if isinstance(result, dict) else None
         except json.JSONDecodeError:
+            repaired = _read_latex_object(candidate[start : end + 1])
+            if repaired is not None:
+                return repaired
             if not _quiet:
                 _log_parse_failure(candidate, node, _log_truncate_chars)
             return None

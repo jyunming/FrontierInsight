@@ -41,6 +41,8 @@ from typing import Any
 
 import yaml
 
+from .latex_text import escape_latex_backslashes
+
 PLAN_FILE = "plan.md"
 DESIGN_HEADING = "The design (used as written)"
 _HEADING_RE = re.compile(r"^#{2,3}\s+the design\b.*$", re.IGNORECASE | re.MULTILINE)
@@ -397,7 +399,7 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
         fixed, why = normalize_model(model)
         return fixed, ([] if fixed is not None else [
             f"the model behind the numbers (`protocol.model`) was left out of the plan because it could not be read "
-            f"({why}); write it here"
+            f"({why}); it is not used"
         ])
     equations = model["equations"]
     if isinstance(equations, dict) and equations and all(_EQ_KEY_RE.match(str(k)) for k in equations):
@@ -418,20 +420,49 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
         label = str(item.get("id") or index).strip() if isinstance(item, dict) else str(index)
         if fixed is None:
             notes.append(f"equation {label} was left out of the model behind the numbers because it could not be read "
-                         f"({why}); put it right here if it matters")
+                         f"({why}); it is not used")
             continue
         if any(str(k.get("id")).strip() == label for k in kept):
-            notes.append(f"a second equation called {label} was left out of the model behind the numbers; give it its "
-                         "own id here if it matters")
+            notes.append(f"a second equation called {label} was left out of the model behind the numbers: it has the same id "
+                         "as an earlier one")
             continue
         kept.append(item)
     fixed, why = normalize_model({**model, "equations": kept})
     if fixed is None:
-        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); write it here"]
+        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); it is not used"]
     return fixed, notes
 
 
 _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
+
+#: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
+#: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
+ASKED_PARTS = ("grid", "metrics", "runs_per_setting", "precision")
+ASK_MARK = "FI asks the plan's model to write"
+PART_RULES = {
+    "grid": "`protocol.grid`: the settings the experiment varies, as a mapping from each setting's name to the list of "
+            "values it takes. Each list is non-empty and holds only numbers, or only names (text), never a mix: numbers "
+            "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
+            "the method and the topic.",
+    "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
+               "(`proportion` or `mean`), an `estimand` (text: what the number estimates) and a `unit` (text: what one "
+               "independent observation is).",
+    "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
+    "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
+                 "`metric` and `reason` (text).",
+}
+
+
+def part_request(topic: str, unread: dict[str, str]) -> str:
+    """The request FI makes of the plan's model, in place of asking a person, for each protocol part that could not be read:
+    the sentence that says what could not be read (quoted) and the rule the part must meet. Nothing else may change."""
+    lines = [f"- {PART_RULES[part]}\n  What could not be read: {why}" for part, why in unread.items() if part in PART_RULES]
+    return (
+        "Parts of this plan's protocol could not be read, so the experiment would not run what the study needs. Write "
+        f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"
+        + "\n".join(lines)
+        + "\nChange nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not a part of the "
+        "protocol that could be read.")
 
 
 def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -463,7 +494,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 out["metrics"] = kept
                 notes.extend(
                     f"a `protocol.metrics` entry was left out of the plan because it could not be checked ({reason}); "
-                    "put it right here if it matters"
+                    "the metrics that could be read are used"
                     for reason in dropped
                 )
                 continue
@@ -476,7 +507,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 out["thresholds"] = kept_t
                 notes.extend(
                     f"the threshold `{name}` was left out of `protocol.thresholds` because it is not one number "
-                    f"({out_value!r}); put it right here if it matters"
+                    f"({out_value!r}); it is not used"
                     for name, out_value in ((n, protocol["thresholds"][n]) for n in left_out)
                 )
                 continue
@@ -525,7 +556,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 label = (str(item.get("name") or "").strip() if isinstance(item, dict) else "") or f"number {index}"
                 reason = (why_one or "").replace("`protocol.oracles` entry 1: ", "").replace("`protocol.oracles` entry 1 ", "")
                 notes.append(f"the check {label!r} was left out of `protocol.oracles` because it could not be read "
-                             f"({reason}); put it right here if it matters")
+                             f"({reason}); it is not used")
             if len(kept_o) < len(out["oracles"]):
                 if kept_o:
                     out["oracles"] = kept_o
@@ -543,12 +574,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             continue
         if key == "grid":
             notes.append(
-                f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has NO settings to vary and the "
-                "experiment would run one setting only. Write each parameter as a list of numbers, or a list of names such as "
-                "[euler, rk4], in the protocol of this plan before the experiment runs."
+                f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has no settings to vary yet. "
+                f"{ASK_MARK} them before the experiment runs; if that fails, the quest stops."
             )
+        elif key in ASKED_PARTS:
+            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); "
+                         f"{ASK_MARK} it before the experiment runs.")
         else:
-            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
+            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); it is not used")
         del out[key]
     return None, notes
 
@@ -808,6 +841,17 @@ def replace_design_block(text: str, block: str) -> str | None:
     return text[:start] + block.strip("\n") + text[end:]
 
 
+def keep_latex_in_block(text: str) -> str:
+    """``text`` with the LaTeX a model wrote with single backslashes in a double-quoted value of its design block kept as
+    LaTeX (a double-quoted ``\\text`` or ``\\frac`` is a valid YAML escape that would read as a tab or a form feed).
+    Any other block, and a text with none, is returned unchanged."""
+    found = design_block(text)
+    if found is None:
+        return text
+    fixed = escape_latex_backslashes(found[2], yaml=True, strict=True)
+    return text if fixed == found[2] else (replace_design_block(text, fixed) or text)
+
+
 def yaml_problem(block: str) -> dict[str, Any] | None:
     """Where ``block`` stops being valid YAML: ``{line, column, problem, lines}`` (1-based line and column; ``lines`` the
     numbered lines around the place, that one marked), or ``None`` when it is valid."""
@@ -886,12 +930,17 @@ def _fold_plain_value(rows: list[str], owner: int) -> list[str] | None:
 
 def repair_block(block: str) -> tuple[str | None, list[str]]:
     """``(the block repaired, what was repaired)`` when a repair that changes no key and no value makes ``block`` valid
-    YAML, else ``(None, [])``. Two repairs, nothing else: a plain value with `: ` in it is written as a folded block (the
+    YAML, else ``(None, [])``. Three repairs, nothing else: LaTeX in a double-quoted value keeps its single backslashes, a plain value with `: ` in it is written as a folded block (the
     same text), and an indentation made only of tabs is written with two spaces a tab."""
     if yaml_problem(block) is None:
         return block, []
-    rows = block.split("\n")
     notes: list[str] = []
+    # LaTeX a model wrote in a double-quoted value with single backslashes (`"$\\sigma$"`): the backslashes are kept as text.
+    with_latex = escape_latex_backslashes(block, yaml=True)
+    if with_latex != block:
+        block = with_latex
+        notes.append("a quoted value had LaTeX with single backslashes in it; they are kept as written")
+    rows = block.split("\n")
     indented = [r for r in rows if r.strip() and r[:1] in (" ", "\t")]
     if indented and all(re.match(r"^\t+(?=[^ \t])", r) for r in indented):
         rows = [re.sub(r"^\t+", lambda m: "  " * len(m.group(0)), r) for r in rows]
@@ -1047,6 +1096,34 @@ def refresh_model_section(text: str) -> str:
         end = criteria.end() + after.start() if after else len(text)
         text = text[:criteria.start()] + "\n".join(crit_lines).rstrip("\n") + "\n\n" + text[end:]
     return text
+
+
+def refresh_optimisation_section(text: str) -> str:
+    """``text`` with its section on the kind of study (*What is being optimised*, or *What kind of study this is*) shown
+    again from its design block, after a rewrite changed the block (the section is shown from it and never read back).
+    Unchanged when the block cannot be read or the design says nothing of its kind of study."""
+    from . import optimisation_plan
+
+    parsed = parse(text)
+    if parsed.design is None:
+        return text
+    lines = optimisation_plan.plan_lines(parsed.design)
+    if not lines:
+        return text
+    heads = "|".join(re.escape(h) for h in (optimisation_plan.HEADING, "What kind of study this is"))
+    found = re.search(rf"^##\s+(?:{heads})\s*$", text or "", re.MULTILINE)
+    body = "\n".join(lines).rstrip("\n") + "\n\n"
+    if found:
+        after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
+        end = found.end() + after.start() if after else len(text)
+        return text[:found.start()] + body + text[end:]
+    anchor = None
+    for heading in (MODEL_HEADING, CRITERIA_HEADING):
+        anchor = re.search(rf"^##\s+{re.escape(heading)}\s*$", text, re.MULTILINE)
+        if anchor:
+            break
+    anchor = anchor or _HEADING_RE.search(text)
+    return text[:anchor.start()] + body + text[anchor.start():] if anchor else text
 
 
 def add_to_section(text: str, heading: str, lines: list[str]) -> str:

@@ -33,6 +33,10 @@ $endif$
 % then calls \refstepcounter{none} internally, so the counter must exist.
 \newcounter{none}
 \usepackage{hyperref}
+% xurl lets a URL break at ANY character, so a long address in the references
+% wraps inside the text column instead of running past the right margin.
+\usepackage{xurl}
+\setlength{\emergencystretch}{3em}
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
 \usepackage{microtype}
@@ -40,6 +44,11 @@ $endif$
 % LaTeX's "Missing \begin{document}" on \author[N]{}. Use titling alone.
 \usepackage{titling}
 \usepackage{titlesec}
+% Two columns are set flush at the bottom by default, which stretches the
+% space between paragraphs when a figure cannot fit under them and is held
+% back to the next column: a large blank gap in the middle of the column.
+% Ragged bottoms leave that space where it is, at the foot of the column.
+\raggedbottom
 
 % Pandoc-compatibility preamble — see generic/template.tex for the
 % full rationale.
@@ -118,6 +127,12 @@ $highlighting-macros$
 \let\FIlongtable\longtable
 \let\FIendlongtable\endlongtable
 \newsavebox{\FItablebox}
+% longtable starts with \global\@colroom\@colht: the room left in the column is
+% set back to a whole column, so the space the figures already placed in it take
+% is forgotten. Typeset in the middle of a column, the table's box did that, and
+% the text under it ran off the foot of the page (a vbox 369 pt too high). The
+% room is put back after the box.
+\newdimen\FIcolroom
 \newcount\FIsavedtables
 \newcount\FIsavedtable
 \long\def\FIfloattable#1{\begin{table}[!htbp]\usebox{\FItablebox}\end{table}}
@@ -126,8 +141,9 @@ $highlighting-macros$
   \onecolumn\FIlongtable#1\FIendlongtable\twocolumn}
 \RenewDocumentEnvironment{longtable}{+b}{%
   \FIsavedtables=\c@LT@tables \FIsavedtable=\c@table
+  \FIcolroom=\@colroom
   \sbox{\FItablebox}{\begin{minipage}{\columnwidth}\@twocolumnfalse
-    \setlength{\LTcapwidth}{\columnwidth}\FIlongtable#1\FIendlongtable\end{minipage}}%
+    \setlength{\LTcapwidth}{\columnwidth}\FIlongtable#1\FIendlongtable\end{minipage}}\global\@colroom=\FIcolroom\relax%
   \ifdim\dimexpr\ht\FItablebox+\dp\FItablebox\relax>\textheight
     \let\FInexttable\FIonecolumntable
   \else

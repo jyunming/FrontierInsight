@@ -463,7 +463,7 @@ def assess(
                           "measured value passes: nothing independent confirms it" for n in fitted)
     if settings.get("oracle_check") == "off":
         valid_gaps.append("the oracle check was turned off")
-    elif protocol is not None and isinstance(oracle_record, dict) and oracle_record.get("status") == "went_on_failing":
+    elif isinstance(oracle_record, dict) and oracle_record.get("status") == "went_on_failing":
         # A check failed and the quest went on: a person's named choice, or automatic for an exploration. Each is a gap
         # in its own plain words (core/accepted_checks.py), so the result never reaches this level or the ones above.
         from .accepted_checks import gap as _went_on_gap

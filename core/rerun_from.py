@@ -119,10 +119,12 @@ _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", 
 _CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json", "paper/numeric_audit.json",
                 "paper/statistics_audit.json", "paper/provenance_audit.json", "needs/receipts/claim_check.json"]
 # What the evidence gate writes.
-_EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json"]
+_EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json", "needs/STUCK.json"]
 # What the run and its checks leave under needs/ (the run writes them again).
 _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json",
                 "needs/ENVIRONMENT.json", "needs/HIDDEN_CHECK.json"]
+# The model's functions written and checked one at a time, and the equation tests: they follow the code.
+_FUNCTION_STEPS = [".fi/function_steps.json", ".fi/equation_tests.json", ".fi/code_review.json"]
 # The frozen protocol: what a redesign replaces. The amendments and the saved versions stay, so the new protocol is
 # frozen as a change made after results were seen and the paper says so.
 _PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json"]
@@ -132,7 +134,7 @@ _SEARCH = ["results/best_design.json", ".fi/optimisation", "needs/OPTIMUM_CHECK.
 _FROM_DESIGN = [*_PROTOCOL, "needs/DESIGN_CRITIQUE.json", "needs/receipts", *_RUN_RECORDS, "needs/EVIDENCE.json",
                 # The test run of the checks before the study is read once per protocol: a new one reads it again.
                 ".fi/oracle_dry_run.json",
-                "code", "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
+                "code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, "data/auto_collected", *_PAPER]
 # The once-per-plan look at the plan's checks (core/oracle_forms.py): a new plan is looked at again.
 _PLAN_LOOK = [".fi/oracle_guidance.json", ".fi/oracle_review.json", ".fi/oracle_corrections.json"]
 
@@ -150,8 +152,8 @@ _OWN: dict[str, list[str]] = {
             "data/auto_collected", "needs/RUN_MANIFEST_CHECK.json", "needs/ENVIRONMENT.json",
             # The improve loop's record and saved copies belong to the run they started from.
             ".fi/improve.json", ".fi/improve", *_PAPER],
-    "code": ["code", "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
-    "skills": ["code", "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
+    "code": ["code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
+    "skills": ["code", *_FUNCTION_STEPS, "figures", "raw", "results.json", *_SEARCH, *_RUN_RECORDS, *_PAPER],
     # A redesign starts the protocol over: the old one is moved aside, and the run's records with it.
     "design": _FROM_DESIGN,
     # The record of the oracles the engine added to plan.md goes with plan.md: a design rerun keeps both.
@@ -312,6 +314,9 @@ NODES: dict[str, dict[str, str]] = {
     "evidence_gate": {"block": "judge", "title": "Evidence check",
                       "sentence": "Weighs how strong the evidence for each result is.",
                       "reads": "findings", "writes": "evidence level"},
+    "stuck_no_findings": {"block": "judge", "title": "Stop without a paper",
+                          "sentence": "Ends the quest with no paper when the experiment left no findings to write up.",
+                          "reads": "findings", "writes": "the reason it stopped"},
     "write": {"block": "write", "title": "Write the paper",
               "sentence": "Drafts paper.md and the outputs made from it.",
               "reads": "findings", "writes": "paper.md"},

@@ -203,7 +203,7 @@ if not os.environ.get('FI_PILOT'):
     with open('seen.jsonl', 'a') as f:
         f.write(json.dumps({'seed': seed, 'index': os.environ.get('FI_REPLICATE_INDEX'), 'rows': rows}) + '\\n')
 os.makedirs('figures', exist_ok=True)
-plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
+plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('figures/result.png', dpi=72)
 import random
 print('RESULT_JSON: ' + json.dumps({'score': 0.5, 'rows': rows, 'draw': random.Random(seed).random()}))
 """

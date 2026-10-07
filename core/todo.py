@@ -45,6 +45,11 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "(`provider.node_models.<step>`), then go on.",
         ["Change what the quest asks (the topic or the plan), then go on."],
     ),
+    "model_unreadable": (
+        "A model's answer could not be read, even when asked twice. How should that step answer?",
+        "Give the step another model (`provider.node_models.<step>`), then go on.",
+        ["Go on as it is: the same model is asked again."],
+    ),
     "code_project": (
         "You edited files in code/ that FI would otherwise update. Keep your version?",
         "Go on: your edited files stay as you wrote them, and FI does not touch them.",
@@ -358,6 +363,14 @@ def waiting(quest_root: Path) -> list[Item]:
     root = Path(quest_root)
     needs = root / "needs"
     out: list[Item] = []
+    stuck = _read_json(needs / "STUCK.json")
+    if isinstance(stuck, dict):
+        # The quest stopped without a paper, and says what it could not do and what it tried: never a request to debug.
+        tried = [str(t) for t in stuck.get("tried") or []]
+        out.append(Item("stuck", str(stuck.get("say") or f"FI stopped: {stuck.get('problem') or 'it could not go on'}."),
+                        recommended="Nothing for you to fix. needs/STUCK.json lists what FI tried; run the quest again, "
+                                    "or give the step another model (`provider.node_models.<step>`).",
+                        steps=tried[-6:]))
     failed = root / "quest_failed.md"
     if failed.is_file():
         from . import crash_kind as _crash_kind

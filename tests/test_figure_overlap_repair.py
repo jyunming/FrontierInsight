@@ -367,7 +367,7 @@ os.makedirs("figures", exist_ok=True)
 noise = [random.random() * 0.02 for _ in range(3)]
 fig, ax = plt.subplots()
 ax.plot([0, 0.5, 1], [0.0 + noise[0], 0.5 + noise[1], 1.0 + noise[2]], label="rising")
-ax.plot([0, 0.5, 1], [0.5, 0.5, 0.5], label="level")
+ax.plot([0, 0.5, 1], [0.5 + 0 * n for n in noise], label="level")
 ax.legend(loc="center")
 fig.savefig("figures/lines.png")
 fig2, ax2 = plt.subplots()

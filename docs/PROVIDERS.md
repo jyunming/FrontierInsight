@@ -337,6 +337,48 @@ building this: `antigravity_cli` rejected `gemini-2.5-flash` outright
 model-list command before setting a cheap-tier override, rather than
 copying a model name from elsewhere.
 
+## A step on another provider
+
+`node_models` changes the model inside the one provider you chose. To send a few steps to a different provider (a
+different company's model, its own address and key), name them under `provider.node_providers`, with the same step
+names as `node_models`:
+
+```yaml
+provider:
+  name: ollama
+  model: gemma4:31b                    # every step not named below
+  base_url: https://ollama.com/v1
+  api_key_env: OLLAMA_API_KEY
+  node_providers:
+    implement:                         # the step that writes the simulation
+      name: openai                     # Moonshot speaks the OpenAI protocol
+      model: kimi-k3
+      base_url: https://api.moonshot.ai/v1
+      api_key_env: MOONSHOT_API_KEY
+      fixed_temperature: 1             # kimi-k3 accepts only temperature 1
+    oracle_review: { name: openai, model: kimi-k3, base_url: https://api.moonshot.ai/v1, api_key_env: MOONSHOT_API_KEY, fixed_temperature: 1 }
+```
+
+An entry needs `name` and `model`; it may also set `base_url`, `api_key_env`, `fixed_temperature`, `extra_body`,
+`reasoning_effort` and `fallback` (providers to try when this one fails), each meaning what it means for `provider`.
+Only the entry's own values go to its provider: the main provider's temperature, request fields and reasoning level
+are never sent to it, and its key and address are never sent to the main provider. Timeouts, retries, per-step output
+limits, `.fi/model_calls.jsonl`, the reasoning kept in `.fi/thinking.jsonl` and the cost log work as for every other
+step, and name the provider and model that really answered.
+
+Keys follow `node_models`: an exact step name first, then the part before the first dot, so `oracle_review` also
+covers `oracle_review.recompute`. The steps that write or repair the simulation are `implement`, `implement_outline`,
+`implement_seed`, `implement_protocol`, `implement_oracle`, `implement_figures`, `execute_reflect` and `improve`; each
+is its own key (`implement` does not cover `implement_oracle`). A step named in both `node_models` and
+`node_providers` uses `node_providers`; run.log says so once. A step in `provider.node_ensemble` keeps asking its
+models on the main provider.
+
+At the start of a run, run.log says one line per step: `[provider] the step `implement` uses kimi-k3 on openai (...)`.
+Before anything is spent, a key that is not set for a step's provider stops the launch with the variable's name, and
+the provider's free model list is asked whether its server answers and has the model. A review on another provider
+counts as a different model for the known-answer check review (`oracle_review`): the same model name on two
+providers still counts as one model. The key is read from the environment only; no key goes in the config.
+
 ## When the provider's server is down or busy
 
 A provider sometimes answers with a server error for a few minutes (an HTTP
