@@ -180,12 +180,54 @@ async def test_a_reviewer_s_word_alone_never_stops_a_quest_the_results_decide(tm
     assert "quality_factor" not in cr.write_note(engine.quest_root, code), "the paper is not told it was not computed"
 
 
-def test_a_value_under_the_quantity_s_name_counts_and_an_empty_one_does_not() -> None:
-    assert cr.in_results("settling_time", {"a": {"settling_time_mean": 1.0}})
+def test_only_the_quantity_s_own_name_counts_as_having_it() -> None:
+    assert cr.in_results("settling_time", {"a": {"Settling_Time": 1.0}})
     assert cr.in_results("quality_factor", {"qualityFactor": 2})
-    assert cr.in_results("quality_factor", {"quality_factor_values": [1, 2]})
+    assert cr.in_results("error", {"Error": 0.1}) and cr.in_results("quality_factor", {"quality_factor": [1, 2]})
+    assert not cr.in_results("error", {"error_count": 3, "error_rate_nm": 1.0}), "a different quantity is not an alias"
+    assert not cr.in_results("settling_time", {"settling_time_mean": 1.0})
     assert not cr.in_results("quality_factor", {"quality_factor": None}) and not cr.in_results("quality_factor", {"x": 1})
     assert not cr.in_results("quality_factor", {"quality_factor": True}) and not cr.in_results("", {"a": 1})
+
+
+@pytest.mark.asyncio
+async def test_a_result_with_only_a_similar_name_does_not_stand_in_for_the_headline(tmp_path: Path) -> None:
+    design = {**DESIGN, "variables": {"independent": ["c"], "dependent": ["error"]}}
+    engine = _engine(tmp_path)
+    state = {**STATE, "design": design}
+    engine._client = _Reader(missing=("error",))
+    assert await engine._code_review_gate({**state, "exec_reflect_iter": 3}) is None
+    verdict = engine._no_results_verdict({**state, "result_json": {"error_count": 4}})
+    assert verdict and verdict["stuck_reason"] == "headline_missing", "error_count is not error"
+    assert engine._no_results_verdict({**state, "result_json": {"Error": 0.2}}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_code_version_that_ran_without_a_successful_reading_is_disclosed(tmp_path: Path) -> None:
+    class _Fails(_Reader):
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            raise TimeoutError("no answer")
+
+    engine = _engine(tmp_path)
+    engine._client = _Fails()
+    assert await engine._code_review_gate(STATE) is None
+    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
+    assert "not compared with the plan by another model" in note and "the call failed" in note
+    # The same model as the writer, and the cap: also disclosed.
+    same = _engine(tmp_path / "b", other=False)
+    same._client = _Reader()
+    await same._code_review_gate(STATE)
+    assert "the reader is the model that wrote the code" in cr.write_note(same.quest_root, same.quest_root / "code")
+    capped = _engine(tmp_path / "c")
+    capped._client = _Reader()
+    for i in range(cr.MAX_REVIEWS):
+        (capped.quest_root / "code" / "simulate.py").write_text(SIM_FULL + f"# v{i}" + chr(10), encoding="utf-8")
+        await capped._code_review_gate(STATE)
+    # A successful reading discloses nothing.
+    fine = _engine(tmp_path / "d")
+    fine._client = _Reader()
+    await fine._code_review_gate(STATE)
+    assert cr.write_note(fine.quest_root, fine.quest_root / "code") == ""
 
 
 @pytest.mark.asyncio

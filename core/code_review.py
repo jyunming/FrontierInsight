@@ -212,8 +212,9 @@ def _norm(text: Any) -> str:
 
 
 def in_results(name: str, result: Any) -> bool:
-    """Whether the run's own results hold a value under ``name`` (or a key that contains it or is contained in it, ignoring
-    case and punctuation, so ``settling_time_mean`` and ``settlingTime`` count): a number, not an empty or null one."""
+    """Whether the run's own results hold a value under exactly ``name``, ignoring case, punctuation and underscores
+    (``Quality_Factor`` and ``qualityFactor`` are one name; ``error_count`` is not ``error``): a number, or a
+    non-empty list or mapping, never null or a flag."""
     want = _norm(name)
     if not want:
         return False
@@ -227,13 +228,8 @@ def in_results(name: str, result: Any) -> bool:
 
     def walk(node: Any) -> bool:
         if isinstance(node, dict):
-            for key, value in node.items():
-                k = _norm(key)
-                if len(k) >= 3 and (want in k or k in want) and holds(value):
-                    return True
-                if walk(value):
-                    return True
-        elif isinstance(node, (list, tuple)):
+            return any((_norm(k) == want and holds(v)) or walk(v) for k, v in node.items())
+        if isinstance(node, (list, tuple)):
             return any(walk(v) for v in node if isinstance(v, (dict, list)))
         return False
 
@@ -267,7 +263,13 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
     """For the write prompt: what the code does not compute, to be said plainly in the limitations. ``""`` when nothing."""
     record = load(quest_root)
     notes: list[str] = []
-    if record.get("read_version") and record["read_version"] != version(code_dir):
+    if record and not record.get("read_version"):
+        # The code that runs was never read by another model (the reading failed, the same model was the reader, or the
+        # readings allowed are spent): the writer says so.
+        why = record.get("error") or record.get("skipped") or "no reading was made"
+        notes.append("The code that produced these results was not compared with the plan by another model "
+                     f"({why}): say so plainly in the limitations.")
+    elif record.get("read_version") and record["read_version"] != version(code_dir):
         notes.append("The code was read against the plan by a second model, but it was changed afterwards and the final "
                      "version was not read again by another model: say so in the limitations.")
     elif record.get("version") == version(code_dir) and record.get("not_reviewed"):
