@@ -9844,6 +9844,8 @@ class Engine:
             _code_review.save(self.quest_root, record)
             return self._code_review_outcome(record)
         counters = {k: record.get(k, 0) for k in ("reviews_total", "send_backs")}
+        if record.get("read_version"):
+            counters["read_version"] = record["read_version"]  # the last version a second model really read
         record = {"version": version, **counters, "requirements": len(reqs)}
         same, reader, planner, _named = self._reader_vs_planner(_review.NODE, after_call=False)
         if same is True:
@@ -9854,18 +9856,27 @@ class Engine:
         if int(record["reviews_total"]) >= _code_review.MAX_REVIEWS:
             record["skipped"] = f"the {_code_review.MAX_REVIEWS} readings of the code allowed in a quest are spent"
             _code_review.save(self.quest_root, record)
-            self._log.info("[code_review] %s", _code_review.plain_lines(record))
+            self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
+                              "; the final version of the code was not read again by another model"
+                              if record.get("read_version") else "")
             return None
         record["reviews_total"] = int(record["reviews_total"]) + 1
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
         sources, _partial = _code_review.sources_text(code)
-        prompt = self._prompts["code_review"].substitute(
-            topic=" ".join(str(state.get("topic") or self.config.topic or "").split())[:1500],
-            requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in reqs], indent=2), code=sources)
-        verdicts = None
+        topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
+        verdicts: list[dict[str, Any]] | None = None
         try:
-            reply = await self._chat(prompt, node=_review.NODE)
-            verdicts = _code_review.parse(_parse_json_lenient(reply, node=_review.NODE), reqs)
+            # One request, and one more for the requirements a reply left unanswered (never a third).
+            for _ask in range(2):
+                left = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts or []}]
+                if not left:
+                    break
+                prompt = self._prompts["code_review"].substitute(
+                    topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
+                    code=sources)
+                reply = await self._chat(prompt, node=_review.NODE)
+                got = _code_review.parse(_parse_json_lenient(reply, node=_review.NODE), left)
+                verdicts = [*(verdicts or []), *(got or [])] or None
             if verdicts is None:
                 record["error"] = "its answer named none of the plan's requirements"
         except _ModelAnswerProblem as e:
@@ -9874,6 +9885,13 @@ class Engine:
             record["error"] = f"the call failed ({str(e)[:120] or type(e).__name__})"
         same, reader, planner, named = self._reader_vs_planner(_review.NODE, after_call=True)
         record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
+        if verdicts is not None and same is False:
+            unanswered = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts}]
+            if unanswered:
+                record["not_reviewed"] = [r["text"] for r in unanswered]
+                record["not_reviewed_headline"] = any(r["headline"] for r in unanswered)
+                self._log.warning("[code_review] the reader did not answer, even when asked again, for: %s",
+                                  "; ".join(r["text"] for r in unanswered))
         if verdicts is None:
             _code_review.save(self.quest_root, record)
             self._log.warning("[code_review] %s", _code_review.plain_lines(record))
@@ -9885,6 +9903,7 @@ class Engine:
             self._log.info("[code_review] %s", _code_review.plain_lines(record))
             return None
         record["verdicts"] = verdicts
+        record["read_version"] = version
         record["problems"] = _code_review.problems(verdicts)
         self._log.info("[code_review] %s", _code_review.plain_lines(record))
         if not record["problems"]:
@@ -9921,19 +9940,15 @@ class Engine:
         return patch
 
     def _code_review_outcome(self, record: dict[str, Any]) -> QuestState | None:
-        """The code, read and repaired as far as the budget goes, still misses something. A missing headline quantity
-        stops the quest (``stuck_no_findings`` says so, and no paper is written); anything else is not reported, and the
-        paper's limitations say it was not computed."""
+        """The code, read and repaired as far as the budget goes, still misses something in the reader's view. The reader
+        can be wrong, so nothing stops here: the run goes on, and a headline quantity the reader still calls missing
+        stops the quest only if the run's own results lack it too (:meth:`_no_results_verdict`); what the results do
+        hold is recorded as a disagreement. Anything else is not reported, and the limitations say it was not computed."""
         problems = [v for v in record.get("problems") or [] if isinstance(v, dict)]
-        headline = [v["text"] for v in problems if v.get("headline")]
         for v in problems:
-            self._log.warning("[code_review] still %s after the repairs: %s",
-                              "missing" if v.get("status") == _code_review.MISSING else "implemented differently", v["text"])
-        if headline:
-            self._log.warning("[code_review] the main quantity of the study is not in the code: %s; stopping without a "
-                              "paper", "; ".join(headline))
-            return self._code_review_failed_run("The code does not compute " + "; ".join(headline),
-                                                give_up="the code does not compute the study's main quantity")
+            self._log.warning("[code_review] still %s after the repairs: %s%s",
+                              "missing" if v.get("status") == _code_review.MISSING else "implemented differently", v["text"],
+                              " (the run's results decide whether the study stops)" if v.get("headline") else "")
         return None
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
@@ -13515,6 +13530,11 @@ class Engine:
         self._hold_added_oracles()
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
+        # The code can have changed since it was read (a repair by the equation or oracle gate): a version no second model
+        # has read is read before a run whose results will be reported (at most code_review.MAX_REVIEWS in a quest).
+        failed_review = await self._code_review_gate(state)
+        if failed_review is not None:
+            return failed_review
         # A figure is drawn from what the run computed, never from numbers typed into the plotting code: the scripts are
         # read (not run) and sent back to draw it from the saved results, a bounded number of times
         # (core/figure_data_check.py).
@@ -15976,10 +15996,13 @@ class Engine:
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
-        if (_missing_headline := _code_review.headline_missing(self.quest_root, self.quest_root / "code")) and isinstance(
-                exec_result, dict) and exec_result and not state.get("no_simulation_resolved"):
-            # A second model found the study's main quantity missing from the code, and the repairs did not add it.
-            why = "the code does not compute the study's main quantity (" + "; ".join(_missing_headline)[:200] + ")"
+        if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
+                _missing_headline := _code_review.resolve_headline(
+                    self.quest_root, self.quest_root / "code", state.get("result_json"))):
+            # A second model found the study's main quantity missing from the code, the repairs did not add it, and the
+            # run's own results do not hold it either (a reviewer's word alone never stops a quest).
+            why = ("the code does not compute the study's main quantity, and the run's results do not hold it "
+                   "(" + "; ".join(_missing_headline)[:200] + ")")
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
             return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                     "stuck_reason": "headline_missing"}

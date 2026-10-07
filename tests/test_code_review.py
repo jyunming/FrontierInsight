@@ -150,23 +150,132 @@ async def test_what_is_still_missing_after_the_repairs_is_not_reported_and_the_p
     assert "decay.png" in note and "not computed" in note and "limitations" in note
     # Other code, other record: the note follows the code that ran.
     (engine.quest_root / "code" / "simulate.py").write_text(SIM_OTHER, encoding="utf-8")
-    assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
+    assert "changed afterwards" in cr.write_note(engine.quest_root, engine.quest_root / "code")
+
+
+HEADLINE = "the dependent variable quality_factor is computed and reported in the result"
 
 
 @pytest.mark.asyncio
-async def test_a_missing_headline_quantity_ends_in_the_honest_stop(tmp_path: Path) -> None:
+async def test_a_reviewer_s_word_alone_never_stops_a_quest_the_results_decide(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._client = _Reader(missing=("quality_factor",))
-    patch = await engine._code_review_gate({**STATE, "exec_reflect_iter": 3})
-    assert patch is not None and patch["exec_give_up_reason"], "no more repairs are asked"
-    assert cr.headline_missing(engine.quest_root, engine.quest_root / "code") == [
-        "the dependent variable quality_factor is computed and reported in the result"]
-    verdict = engine._no_results_verdict({**STATE, **patch})
+    out = await engine._code_review_gate({**STATE, "exec_reflect_iter": 3})
+    assert out is None, "nothing stops before the run, and no repair is given up on"
+    code = engine.quest_root / "code"
+    assert cr.headline_missing(engine.quest_root, code) == [HEADLINE]
+    # The run's results do not hold the quantity either: now the honest stop.
+    lacking = {**STATE, "result_json": {"settling_time_mean": 1.2}}
+    verdict = engine._no_results_verdict(lacking)
     assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
-    stuck = await engine._node_stuck_no_findings({**STATE, **patch, "evidence_assessment": verdict})
+    stuck = await engine._node_stuck_no_findings({**lacking, "evidence_assessment": verdict})
     problem = stuck["stuck"]["problem"]
     assert "does not compute the study's main quantity" in problem and "quality_factor" in problem
     assert (engine.quest_root / "needs" / "STUCK.json").is_file()
+    # The results do hold it (the reviewer was wrong): the quest goes on and the disagreement is recorded.
+    holding = {**STATE, "result_json": {"by_c": {"quality_factor": 3.4}}}
+    assert engine._no_results_verdict(holding) is None
+    record = cr.load(engine.quest_root)
+    assert record["disagreement"] == [HEADLINE] and cr.headline_missing(engine.quest_root, code) == []
+    assert "quality_factor" not in cr.write_note(engine.quest_root, code), "the paper is not told it was not computed"
+
+
+def test_a_value_under_the_quantity_s_name_counts_and_an_empty_one_does_not() -> None:
+    assert cr.in_results("settling_time", {"a": {"settling_time_mean": 1.0}})
+    assert cr.in_results("quality_factor", {"qualityFactor": 2})
+    assert cr.in_results("quality_factor", {"quality_factor_values": [1, 2]})
+    assert not cr.in_results("quality_factor", {"quality_factor": None}) and not cr.in_results("quality_factor", {"x": 1})
+    assert not cr.in_results("quality_factor", {"quality_factor": True}) and not cr.in_results("", {"a": 1})
+
+
+@pytest.mark.asyncio
+async def test_code_changed_after_the_reading_is_read_again_before_the_run(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    reader = _Reader()
+    engine._client = reader
+    assert await engine._code_review_gate(STATE) is None and len(reader.prompts) == 1
+    # A repair of a gate rewrote the code: the version that will run has not been read.
+    (engine.quest_root / "code" / "simulate.py").write_text(SIM_OTHER, encoding="utf-8")
+    reader.missing = ("planned figure",)
+    out = await engine._code_review_gate(STATE)
+    assert len(reader.prompts) == 2 and out is not None and "decay.png" in out["exec_result"]["stderr_tail"]
+    assert cr.load(engine.quest_root)["read_version"] == cr.version(engine.quest_root / "code")
+
+
+@pytest.mark.asyncio
+async def test_after_the_cap_the_final_version_is_said_not_to_have_been_read_again(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    engine._client = _Reader()
+    for i in range(cr.MAX_REVIEWS):
+        (engine.quest_root / "code" / "simulate.py").write_text(SIM_FULL + f"# v{i}" + chr(10), encoding="utf-8")
+        await engine._code_review_gate(STATE)
+    (engine.quest_root / "code" / "simulate.py").write_text(SIM_FULL + "# final" + chr(10), encoding="utf-8")
+    await engine._code_review_gate(STATE)
+    assert len(engine._client.prompts) == cr.MAX_REVIEWS == 3
+    record = cr.load(engine.quest_root)
+    assert "allowed in a quest" in record["skipped"]
+    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
+    assert "final version was not read again by another model" in note
+    assert "final version of the code was not read again" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    again = Engine(engine.config, resume_quest_id=engine.quest_id)
+    assert cr.load(again.quest_root)["reviews_total"] == 3, "a resume keeps the count"
+
+
+class _Partial(_Reader):
+    """Answers only the first requirement of a request, unless told to answer the rest when asked again."""
+
+    def __init__(self, answers_again: bool) -> None:
+        super().__init__()
+        self.answers_again = answers_again
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        self.prompts.append(prompt)
+        reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
+        shown = reqs[:1] if (len(self.prompts) == 1 or not self.answers_again) else reqs
+        return json.dumps({"requirements": [{"id": r["id"], "status": "implemented", "file": "simulate.py", "line": 1}
+                                            for r in shown]})
+
+
+@pytest.mark.asyncio
+async def test_requirements_a_reply_leaves_unanswered_are_asked_once_more(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    reader = _Partial(answers_again=True)
+    engine._client = reader
+    assert await engine._code_review_gate(STATE) is None
+    assert len(reader.prompts) == 2
+    first = json.loads(reader.prompts[0].split("```json", 1)[1].split("```", 1)[0])
+    again = json.loads(reader.prompts[1].split("```json", 1)[1].split("```", 1)[0])
+    assert [r["id"] for r in again] == [r["id"] for r in first[1:]], "only what was not answered is asked again"
+    record = cr.load(engine.quest_root)
+    assert len(record["verdicts"]) == len(first) and "not_reviewed" not in record
+
+
+@pytest.mark.asyncio
+async def test_what_is_still_unanswered_is_recorded_per_requirement_and_an_unreviewed_headline_is_said(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    reader = _Partial(answers_again=False)
+    engine._client = reader
+    await engine._code_review_gate(STATE)
+    assert len(reader.prompts) == 2, "asked once more and never a third time"
+    record = cr.load(engine.quest_root)
+    judged = {v["text"] for v in record["verdicts"]}
+    assert record["not_reviewed"] and judged and not judged & set(record["not_reviewed"])
+    assert len(judged) + len(record["not_reviewed"]) == record["requirements"]
+    assert record["not_reviewed_headline"] is False  # the headline (R1) was answered
+    # An unreviewed headline is said plainly.
+    engine2 = _engine(tmp_path / "b")
+    class _SkipHeadline(_Reader):
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            prompt = messages[-1]["content"]
+            self.prompts.append(prompt)
+            reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
+            return json.dumps({"requirements": [{"id": r["id"], "status": "implemented", "file": "simulate.py", "line": 1}
+                                                for r in reqs if "quality_factor" not in r["text"]]})
+    engine2._client = _SkipHeadline()
+    await engine2._code_review_gate(STATE)
+    note = cr.write_note(engine2.quest_root, engine2.quest_root / "code")
+    assert "did not check these requirements" in note and "quality_factor" in note and "main quantity among them" in note
 
 
 @pytest.mark.asyncio

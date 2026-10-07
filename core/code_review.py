@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-
+import re
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ from . import oracle_check as _oracle
 
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version), and the times a review sends the code back for repair.
-MAX_REVIEWS = 4
+MAX_REVIEWS = 3
 MAX_SEND_BACKS = 2
 #: How much code the reader is shown (whole files; the rest is said not to be shown).
 _MAX_CODE_CHARS = 60000
@@ -55,23 +55,23 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
     protocol = protocol if isinstance(protocol, dict) else {}
     out: list[dict[str, Any]] = []
 
-    def add(kind: str, text: str, headline: bool = False) -> None:
+    def add(kind: str, text: str, headline: bool = False, name: str = "") -> None:
         text = _text(text)
         if text and not any(r["kind"] == kind and r["text"] == text for r in out):
-            out.append({"id": f"R{len(out) + 1}", "kind": kind, "text": text, "headline": headline})
+            out.append({"id": f"R{len(out) + 1}", "kind": kind, "text": text, "headline": headline, "name": _text(name, 80)})
 
     precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
     headline_metric = _text(precision.get("metric")).lower()
     variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
     dependent = [d for d in (variables.get("dependent") if isinstance(variables.get("dependent"), list) else []) if _text(d)]
     for i, name in enumerate(dependent):
-        add("dependent variable", f"the dependent variable {_text(name)} is computed and reported in the result", i == 0)
+        add("dependent variable", f"the dependent variable {_text(name)} is computed and reported in the result", i == 0, str(name))
     for m in protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []:
         if isinstance(m, dict) and _text(m.get("id")):
             mid = _text(m["id"])
             est = _text(m.get("estimand"))
             add("metric", f"the result reports {mid}" + (f" ({est})" if est else ""),
-                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()))
+                bool(headline_metric) and (mid.lower() == headline_metric or headline_metric in mid.lower()), mid)
     for fig in design.get("figures_planned") if isinstance(design.get("figures_planned"), list) else []:
         add("figure", f"the script draws the planned figure {Path(str(fig)).name}")
     grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
@@ -142,7 +142,7 @@ def parse(reply: Any, reqs: list[dict[str, Any]]) -> list[dict[str, Any]] | None
             continue
         line = item.get("line")
         out.append({"id": req["id"], "kind": req["kind"], "text": req["text"], "headline": req["headline"],
-                    "status": status, "file": _text(item.get("file"), 80),
+                    "name": req.get("name", ""), "status": status, "file": _text(item.get("file"), 80),
                     "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
                     "note": _text(item.get("note"))})
     return out or None
@@ -204,14 +204,80 @@ def not_computed(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
 
 
 def headline_missing(quest_root: Path, code_dir: Path) -> list[str]:
-    return [v["text"] for v in not_computed(quest_root, code_dir) if v.get("headline")]
+    return [v["text"] for v in not_computed(quest_root, code_dir) if v.get("headline") and not v.get("contradicted")]
+
+
+def _norm(text: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def in_results(name: str, result: Any) -> bool:
+    """Whether the run's own results hold a value under ``name`` (or a key that contains it or is contained in it, ignoring
+    case and punctuation, so ``settling_time_mean`` and ``settlingTime`` count): a number, not an empty or null one."""
+    want = _norm(name)
+    if not want:
+        return False
+
+    def holds(value: Any) -> bool:
+        if isinstance(value, bool) or value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return True
+        return isinstance(value, (list, tuple, dict)) and len(value) > 0
+
+    def walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                k = _norm(key)
+                if len(k) >= 3 and (want in k or k in want) and holds(value):
+                    return True
+                if walk(value):
+                    return True
+        elif isinstance(node, (list, tuple)):
+            return any(walk(v) for v in node if isinstance(v, (dict, list)))
+        return False
+
+    return walk(result)
+
+
+def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
+    """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
+    either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
+    reader and the results (the reader was wrong, and the paper is not told they were not computed)."""
+    record = load(quest_root)
+    if not record.get("final") or record.get("version") != version(code_dir):
+        return []
+    absent: list[str] = []
+    changed = False
+    for v in record.get("problems") or []:
+        if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted"):
+            continue
+        if in_results(str(v.get("name") or ""), result):
+            v["contradicted"] = True
+            changed = True
+        else:
+            absent.append(v["text"])
+    if changed:
+        record["disagreement"] = [v["text"] for v in record["problems"] if v.get("contradicted")]
+        save(quest_root, record)
+    return absent
 
 
 def write_note(quest_root: Path, code_dir: Path) -> str:
     """For the write prompt: what the code does not compute, to be said plainly in the limitations. ``""`` when nothing."""
-    left = not_computed(quest_root, code_dir)
+    record = load(quest_root)
+    notes: list[str] = []
+    if record.get("read_version") and record["read_version"] != version(code_dir):
+        notes.append("The code was read against the plan by a second model, but it was changed afterwards and the final "
+                     "version was not read again by another model: say so in the limitations.")
+    elif record.get("version") == version(code_dir) and record.get("not_reviewed"):
+        names = "; ".join(str(x) for x in record["not_reviewed"][:8])
+        notes.append("A second model was asked to compare the code with the plan, and did not check these requirements: "
+                     f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
+                     + (", the study's main quantity among them." if record.get("not_reviewed_headline") else "."))
+    left = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
     if not left:
-        return ""
+        return " ".join(notes)
     names = "; ".join(f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
                       for v in left[:8])
     return ("A second model compared the code with what the plan requires, and the code was sent back to be repaired; "
