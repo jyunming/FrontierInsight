@@ -102,6 +102,7 @@ from . import plan_settings as _plan_settings
 from . import receipts as _receipts
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
+from . import figure_data_check as _figdata
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
@@ -317,6 +318,7 @@ class QuestState(TypedDict, total=False):
     design_history: list[dict[str, Any]]
     # How many times the simulation was sent back because its run manifest differed from the frozen protocol.
     run_manifest_failures: int
+    figure_data_repairs: int
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -8318,6 +8320,129 @@ class Engine:
         return _trial_runner.given_rows_problems(
             protocol, _trial_runner.recorded_rows_by_cell(self.quest_root), result_json, ok_trials=ok_trials)
 
+    #: How many times, in all, a script that draws typed-in numbers is sent back.
+    _FIGURE_DATA_REPAIRS = 2
+
+    def _figure_scripts_with_typed_numbers(self) -> dict[Path, list[_figdata.TypedSeries]]:
+        """Each script in ``code/`` that saves a figure and has a plotting call drawing numbers typed into the code."""
+        found: dict[Path, list[_figdata.TypedSeries]] = {}
+        code_dir = self.quest_root / "code"
+        for path in sorted(code_dir.glob("*.py")) if code_dir.is_dir() else []:
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if ".savefig(" not in text:
+                continue
+            typed = _figdata.typed_series(text, path.name)
+            if typed:
+                found[path] = typed
+        return found
+
+    async def _figures_from_results(self, state: QuestState) -> tuple[int, bool]:
+        """Send a script that draws typed-in numbers back to draw its figures from the run's saved results: ``(the
+        repairs used so far for this script, whether a script was rewritten)``. Bounded by ``_FIGURE_DATA_REPAIRS``; what
+        is still typed in after that is left out of the paper (:meth:`_drop_typed_figures`)."""
+        used = int(state.get("figure_data_repairs") or 0)
+        rewrote = False
+        self._typed_figures = self._figure_scripts_with_typed_numbers()
+        while self._typed_figures and used < self._FIGURE_DATA_REPAIRS:
+            used += 1
+            for path, found in self._typed_figures.items():
+                self._log.warning(
+                    "[execute] %s draws figures from numbers typed into the code (%s); asking for them to be drawn from the "
+                    "run's saved results (%d of %d)", path.name, "; ".join(f.says() for f in found[:4]), used,
+                    self._FIGURE_DATA_REPAIRS)
+                rewrote = await self._repair_typed_figures(state, path, found) or rewrote
+            self._typed_figures = self._figure_scripts_with_typed_numbers()
+        return used, rewrote
+
+    async def _repair_typed_figures(self, state: QuestState, path: Path, found: list[_figdata.TypedSeries]) -> bool:
+        """ONE repair of one script's plotting code: kept only if it parses and has fewer typed-in series than before."""
+        code = path.read_text(encoding="utf-8")
+        prompt = self._prompts["execute_reflect"].substitute(
+            previous_code=code, returncode="(not run yet)", stdout_tail=_figdata.directive(found), stderr_tail="",
+            duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
+            reflect_history_block=_format_reflect_history([]),
+            design_block=json.dumps(state.get("design") or {}, indent=2), clarify_block=_format_clarify(state),
+        )
+        try:
+            text = await self._chat(prompt, node="implement_figures")
+        except Exception as exc:  # noqa: BLE001 -- a repair is best-effort
+            self._log.warning("[execute] the call to redraw the figures from the results failed (%r); keeping %s as written",
+                              exc, path.name)
+            return False
+        parsed: dict[str, Any] = {}
+        if _strip_outer_fence(text).lstrip().startswith("{"):
+            parsed = _parse_json_lenient(text, node="implement_figures") or {}
+        new_code = parsed.get("code")
+        if not (isinstance(new_code, str) and new_code.strip()):
+            new_code, _deps = _parse_implement_response(text)
+        try:
+            ast.parse(new_code)
+            # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
+            # seed, the simulation's entry points) is another script and is not used.
+            usable = bool(new_code.strip()) and all(
+                mark in new_code for mark in _figdata.KEEP_MARKS if mark in code)
+        except (SyntaxError, ValueError):
+            usable = False
+        if not usable:
+            self._log.warning("[execute] the redraw of %s is not the same script with its figures drawn from the results; "
+                              "keeping it as written", path.name)
+            return False
+        left = _figdata.typed_series(new_code, path.name)
+        if len(left) >= len(found):
+            self._log.warning("[execute] the rewritten %s still draws %d figure series from typed-in numbers; keeping it "
+                              "as written", path.name, len(left))
+            return False
+        path.write_text(new_code, encoding="utf-8")
+        self._log.info("[execute] rewrote %s so its figures come from the run's results (%d typed-in series left): %s",
+                       path.name, len(left), str(parsed.get("patch_summary") or "no summary")[:120])
+        return True
+
+    def _drop_typed_figures(self, figures: list[str], records_dir: Path) -> list[str]:
+        """The run's figures without those still drawn from typed-in numbers after the repairs: removed from ``figures/``
+        (and their records), said in run.log and in ``needs/FIGURE_DATA_CHECK.json``, which the writer's note reads. An
+        earlier pass's record goes first: it is this run's alone."""
+        record_path = self.quest_root / "needs" / "FIGURE_DATA_CHECK.json"
+        record_path.unlink(missing_ok=True)
+        typed = getattr(self, "_typed_figures", None) or {}
+        self._typed_figures = {}
+        if not typed:
+            return figures
+        wherever = [f for found in typed.values() for f in found]
+        drop: set[str] = set()
+        for found in typed.values():
+            drop |= set(_figdata.figures_to_drop(found, figures))
+        stems = {Path(n).stem for n in drop}
+        removed = [n for n in figures if Path(n).stem in stems]
+        for name in removed:
+            for target in (self.quest_root / "figures" / name, records_dir / f"{Path(name).stem}.json",
+                           self.quest_root / "figures" / f"{Path(name).stem}.json"):
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError as exc:
+                    self._log.warning("[execute] could not remove %s (%r)", target.name, exc)
+        note = _figdata.plain_note(sorted(removed), wherever)
+        try:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps(_figdata.record(sorted(removed), wherever), indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/FIGURE_DATA_CHECK.json (%r)", exc)
+        self._log.warning("[execute] %s The paper does not use %s and says so in its limitations.", note,
+                          "it" if len(removed) == 1 else "them")
+        return [n for n in figures if n not in removed]
+
+    def _typed_figures_note(self) -> str:
+        """For the writer: figures left out because they showed typed-in numbers, so the limitations say so."""
+        record = _read_json_or_none_path(self.quest_root / "needs" / "FIGURE_DATA_CHECK.json")
+        note = record.get("note") if isinstance(record, dict) else None
+        if not isinstance(note, str) or not note.strip():
+            return ""
+        return (f"{note} Do not show, describe or quote anything from "
+                f"{'that figure' if len(record.get('removed_figures') or []) == 1 else 'those figures'}: say plainly, in "
+                "the limitations, that a figure was left out because it was not drawn from the run's results.")
+
     def _ran_once_note(self) -> str:
         """For the analysis and the paper: the frozen protocol still says N runs per setting, but FI ran each setting
         once (a simulation with no randomness), so the text must say what ran. The run check's record is written again
@@ -12614,6 +12739,10 @@ class Engine:
         self._hold_added_oracles()
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
+        # A figure is drawn from what the run computed, never from numbers typed into the plotting code: the scripts are
+        # read (not run) and sent back to draw it from the saved results, a bounded number of times
+        # (core/figure_data_check.py).
+        figure_repairs, figure_rewrote = await self._figures_from_results(state)
 
         # Pilot pass: run the experiment small before running it for real.
         #
@@ -13119,6 +13248,7 @@ class Engine:
                     "[execute] %d figure(s) not drawn as the mean of the seeds show seed 0: %s",
                     len(restored), ", ".join(restored),
                 )
+        figures = self._drop_typed_figures(figures, records_dir)
         figure_records = _read_figure_records(records_dir, figures)
         for name, n_seeds in replotted.items():
             if name in figure_records:
@@ -13214,6 +13344,9 @@ class Engine:
         self._check_replicate_manifests(state, split, replicates_n)
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
+        patch["figure_data_repairs"] = figure_repairs
+        if figure_rewrote and code_path.is_file():
+            patch["code"] = code_path.read_text(encoding="utf-8")  # the plotting code was rewritten to use the results
         await self._record_criteria(
             state, attempt=run_record_id, result=patch["result_json"] if run_accepted else None,
             repaired=gate_repaired or int(state.get("exec_reflect_iter", 0) or 0) > 0)
@@ -15139,6 +15272,8 @@ class Engine:
             evidence_note = f"{evidence_note}\n\n{best_note}".strip()
         if once_note := self._ran_once_note():
             evidence_note = f"{evidence_note}\n\n{once_note}".strip()
+        if typed_note := self._typed_figures_note():
+            evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -22872,7 +23007,7 @@ def _replicate_metric_kinds(state: "QuestState") -> dict[str, str]:
 # engine.max_iterations, and each script's own repairs by engine.exec_reflect_max_iterations.
 _FRESH_SCRIPT: dict[str, Any] = {
     "exec_reflect_iter": 0, "exec_reflect_history": [], "exec_give_up_reason": "", "exec_patch_pending": False,
-    "run_manifest_failures": 0, "figure_overlap_repaired": False, "bounded_seen": [],
+    "run_manifest_failures": 0, "figure_data_repairs": 0, "figure_overlap_repaired": False, "bounded_seen": [],
 }
 
 

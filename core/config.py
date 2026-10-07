@@ -190,6 +190,7 @@ class ProviderConfig(BaseModel):
             # retry starts the answer over, so four tries ended the call after 8 minutes with nothing.
             "implement_oracle": 600.0,
             "implement_protocol": 600.0,
+            "implement_figures": 600.0,
             "plan": 600.0,
             "plan_revise": 600.0,
             "design_self_critique": 600.0,
@@ -241,6 +242,7 @@ class ProviderConfig(BaseModel):
             # table above for what timed out without them).
             "implement_oracle": 900.0,
             "implement_protocol": 900.0,
+            "implement_figures": 900.0,
             "plan": 900.0,
             "plan_revise": 900.0,
             "design_self_critique": 900.0,

@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt
 
 os.makedirs('figures', exist_ok=True)
 plt.figure()
-plt.plot([0, 1, 2], [0, 1, 4])
+plt.plot(list(range(3)), [i * i for i in range(3)])
 plt.title('toy fake-LLM smoke test')
 plt.savefig('figures/result.png', dpi=72)
 

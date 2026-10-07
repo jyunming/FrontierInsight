@@ -349,7 +349,7 @@ NUM_RUNS = 300
 res = {"by_R0": {"1.5": {"outbreak_probability": (60 + seed) / 300, "outbreak_probability_count": 60 + seed, "outbreak_probability_total": 300},
                   "3.0": {"outbreak_probability": (120 + seed) / 300, "outbreak_probability_count": 120 + seed, "outbreak_probability_total": 300}}}
 os.makedirs('figures', exist_ok=True)
-plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
+plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('figures/result.png', dpi=72)
 print('RESULT_JSON: ' + json.dumps(res))
 """
 

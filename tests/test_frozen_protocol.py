@@ -129,7 +129,7 @@ _SCRIPT = _HEAD + (
     "    print('ORACLE_JSON: ' + json.dumps({'checks': [{'name': 'final size closed form', 'passed': True, 'value': 0.99, 'expected': 1.0, 'tolerance': 0.05}]}))\n"
     "    raise SystemExit(0)\n"
     "os.makedirs('figures', exist_ok=True)\n"
-    "plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)\n"
+    "plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('figures/result.png', dpi=72)\n"
     "print('RESULT_JSON: {\"score\": 0.987}')\n"
 )
 

@@ -37,7 +37,7 @@ _GOOD_EXPERIMENT = textwrap.dedent("""\
     import matplotlib.pyplot as plt
 
     os.makedirs('figures', exist_ok=True)
-    plt.figure(); plt.plot([0, 1, 2], [0, 1, 4])
+    plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)])
     plt.savefig('figures/result.png', dpi=72)
     print('RESULT_JSON: {"score": 0.5}')
 """)

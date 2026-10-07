@@ -195,7 +195,7 @@ import matplotlib.pyplot as plt
 seed = int(os.environ.get("FI_REPLICATE_SEED", "0"))
 k = 100 - (seed // 1000000) % 3
 os.makedirs('figures', exist_ok=True)
-plt.figure(); plt.plot([0, 1, 2], [0, 1, 4]); plt.savefig('figures/result.png', dpi=72)
+plt.figure(); plt.plot(list(range(3)), [i * i for i in range(3)]); plt.savefig('figures/result.png', dpi=72)
 print('RESULT_JSON: ' + json.dumps({"p": k / 300, "p_count": k, "p_total": 300}))
 """
 
