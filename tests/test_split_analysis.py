@@ -325,7 +325,8 @@ async def test_a_one_script_quest_is_unchanged_by_the_switch_being_on(tmp_path: 
     )
     out = await eng._node_execute({"deps": []})
     assert out["result_json"] == {"x": 1.0} and out["exec_result"]["failed_script"] is None
-    assert not (eng.quest_root / "raw").exists()
+    # No raw data files: the oracle gate's empty scratch folder (raw/oracle_check) is not a record of any run.
+    assert not [p for p in (eng.quest_root / "raw").rglob("*") if p.is_file()]
 
 
 @pytest.mark.asyncio
@@ -336,7 +337,8 @@ async def test_the_switch_off_runs_one_script_and_records_no_raw_files(tmp_path:
     )
     out = await eng._node_execute({"deps": []})
     assert out["result_json"] == {"x": 1.0} and out["exec_result"]["failed_script"] is None
-    assert not (eng.quest_root / "raw").exists()
+    # No raw data files: the oracle gate's empty scratch folder (raw/oracle_check) is not a record of any run.
+    assert not [p for p in (eng.quest_root / "raw").rglob("*") if p.is_file()]
 
 
 @pytest.mark.asyncio

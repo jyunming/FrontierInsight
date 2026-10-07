@@ -25,7 +25,7 @@ _READS_THE_EXAMPLE = """\
 import json, os
 d = os.environ["FI_INPUT_DIR"]
 text = open(os.path.join(d, "example", "setup.in"), encoding="utf-8").read().strip()
-print("RESULT_JSON: " + json.dumps({"first_line": text.splitlines()[0]}))
+print("RESULT_JSON: " + json.dumps({"first_line": text.splitlines()[0], "n_lines": len(text.splitlines())}))
 """
 
 
@@ -75,7 +75,7 @@ async def test_a_quest_run_from_another_folder_keeps_everything_relative_to_it(
     assert artifacts.paper_md == quest.resolve() / "paper" / "paper.md" and artifacts.paper_md.is_file()
     assert (quest / ".fi" / "state.sqlite").is_file() and (quest / ".fi" / "run.log").is_file()
     assert (quest / "inputs" / "examples" / "example" / "setup.in").is_file()
-    assert artifacts.raw_state["result_json"] == {"first_line": "temperature 300"}
+    assert artifacts.raw_state["result_json"] == {"first_line": "temperature 300", "n_lines": 1}
     assert f"quest: {engine.quest_id}" in dump_state(quest)
     assert _top_level() == before, "nothing was written into the FI checkout"
 
