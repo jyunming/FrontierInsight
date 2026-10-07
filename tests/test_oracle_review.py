@@ -17,8 +17,10 @@ from core.engine import Engine
 from tests.test_engine_smoke import _FAKE_RESPONSES, _classify, _fake_response_for
 
 MODEL = {"summary": "a lossless two-port network", "equations": [
-    {"id": "E1", "formula": "P_out = P_in", "role": "generates", "source": "derivation", "derivation": "energy balance: P_out = P_in"},
-    {"id": "E2", "formula": "V = I R", "role": "generates", "source": "derivation", "derivation": "Ohm's law: V = I R"},
+    {"id": "E1", "formula": "P_out = P_in", "role": "generates", "source": "derivation", "derivation": "energy balance: P_out = P_in",
+     "example": {"inputs": {"P_in": 2.0}, "expected_formula": "P_in"}},
+    {"id": "E2", "formula": "V = I R", "role": "generates", "source": "derivation", "derivation": "Ohm's law: V = I R",
+     "example": {"inputs": {"I": 2.0, "R": 3.0}, "expected_formula": "I * R"}},
 ]}
 CHECK = {"name": "power_conservation", "kind": "invariant", "check": "output power equals input power", "expected": 0,
          "tolerance": 1e-6, "case": {"n": 4}, "measure": "abs(P_out - P_in) / P_in",
@@ -368,9 +370,10 @@ def test_a_rewrite_is_fi_s_own_version_even_if_the_run_stops_during_the_reading(
 
 CUP_MODEL = {"summary": "a cup of liquid cooling towards the room's temperature", "equations": [
     {"id": "E1", "formula": "T(t) = T_env + (T0 - T_env) * exp(-k * t)", "role": "generates", "source": "derivation",
-     "derivation": "Newton cooling, solved"},
+     "derivation": "Newton cooling, solved",
+     "example": {"inputs": {"T_env": 20.0, "T0": 80.0, "k": 0.5, "t": 0.0}, "expected_formula": "T0"}},
     {"id": "E2", "formula": "tau = 2 / k", "role": "analyses", "source": "derivation",
-     "derivation": "the time constant of E1"},
+     "derivation": "the time constant of E1", "example": {"inputs": {"k": 4.0}, "expected_formula": "2 / k"}},
 ]}
 CUP_CHECK = {"name": "half_way", "kind": "special_case", "check": "temperature after one time constant", "expected": 0.3679,
              "tolerance": 1e-3, "tolerance_mode": "absolute", "case": {"k": 1.0}, "measure": "frac",

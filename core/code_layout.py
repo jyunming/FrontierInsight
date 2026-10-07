@@ -640,6 +640,15 @@ def project_files(code_dir: Path, protocol: dict[str, Any] | None, package: str)
     tests = oracle_tests(protocol)
     if tests:
         files[TEST_PATH] = tests
+    # One small test per equation, from the plan's own worked example (core/equation_tests.py).
+    from . import equation_tests as _eqt
+
+    sources = dict(package_sources(code_dir))
+    if (Path(code_dir) / "simulate.py").is_file():
+        sources["simulate.py"] = (Path(code_dir) / "simulate.py").read_text(encoding="utf-8")
+    cases = _eqt.cases(_eqt.example_rows(protocol), _eqt.locate(protocol, sources))
+    if cases:
+        files[_eqt.TEST_PATH] = _eqt.test_source(cases)
     return files
 
 

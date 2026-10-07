@@ -274,11 +274,19 @@ def never_looser(old: list[Any], new: list[Any]) -> list[Any]:
     return out
 
 
-def keep_every_equation(old: Any, new: Any) -> list[Any]:
+def keep_every_equation(old: Any, new: Any, *, only_example: bool = False) -> list[Any]:
     """The equations after a rewrite that may correct one: every equation of ``old`` is still there (an id the rewrite
-    dropped is put back as it was); one the rewrite added is kept."""
+    dropped is put back as it was); one the rewrite added is kept. With ``only_example`` (the rewrite was asked for
+    worked examples only) each equation is as it was except for its ``example``."""
     old_items = _oracle.equation_items(old)
     new_items = _oracle.equation_items(new)
+    if only_example:
+        fresh = {str(e.get("id")).strip().upper(): e for e in new_items}
+        out = []
+        for e in old_items:
+            got = fresh.get(str(e.get("id")).strip().upper())
+            out.append({**e, "example": got["example"]} if got is not None and "example" in got else e)
+        return out
     have = {str(e.get("id")).strip().upper() for e in new_items}
     return [*new_items, *[e for e in old_items if str(e.get("id")).strip().upper() not in have]]
 

@@ -108,6 +108,7 @@ from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
+from . import equation_tests as _equation_tests
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
@@ -9769,6 +9770,110 @@ class Engine:
         _code_layout.save(self.quest_root, {**layout, "fell_back": fell_back})
         return scripts, text, files if _code_layout.complete(files, package) else {}
 
+    # --- the model's functions, one at a time, and a small test per equation (core/function_steps.py, core/equation_tests.py)
+
+    async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
+                          env: dict[str, str] | None = None) -> tuple[int, str, str]:
+        """Run ``python <argv>`` from ``code/`` in the quest's environment: ``(returncode, stdout, stderr)``."""
+        py = self.executor.python_path(self.quest_root)
+        # A function rewritten within the same second to the same size would be read from its stale compiled copy.
+        for cache in (self.quest_root / "code").glob("**/__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
+        try:
+            ran = await self.executor.execute([str(py), "-B", *argv], cwd=self.quest_root / "code", timeout_s=timeout_s,
+                                              env=env)
+        except Exception as e:  # noqa: BLE001 -- a check that could not start is a failed check, said as such
+            return -1, "", repr(e)
+        return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
+
+    def _equation_sources(self) -> dict[str, str]:
+        """The files of ``code/`` that can hold a function an equation test imports: the packages and ``simulate.py``
+        (``experiment.py`` runs when it is imported, so it is never one)."""
+        code = self.quest_root / "code"
+        out = dict(_code_layout.package_sources(code))
+        simulate = code / _split_run.SIMULATE_NAME
+        if simulate.is_file():
+            out[_split_run.SIMULATE_NAME] = simulate.read_text(encoding="utf-8")
+        return out
+
+    async def _equation_gate(self, state: QuestState, py: Any, exec_env: Any) -> QuestState | None:
+        """Before the oracle gate and the study: one small test per equation of the plan's model, written by FI from the
+        plan's own worked example (core/equation_tests.py), run in the quest's environment. What fails is returned as
+        a failed run naming the function and the equation (never the expected value), so the existing whole-script
+        repair and the honest stop apply. An equation that cannot be tested this way is said plainly and the quest
+        goes on. ``None`` when nothing fails."""
+        if self.config.engine.oracle_check == "off" or not self._runs_code(state):
+            return None
+        protocol = self._protocol_block(state)
+        simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
+        if not isinstance(protocol, dict) or not simulate.is_file() or not _equation_tests.eligible(protocol):
+            return None
+        if self.config.execution.sandbox != "venv":
+            self._log.info("[equations] the tests of the model's equations are run in the quest's own environment, "
+                           "not in Docker: skipped")
+            return None
+        rows = _equation_tests.example_rows(protocol)
+        record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows}}
+        env = {**(exec_env or os.environ)}
+        raw_dir = self._raw_root() / "equation_tests"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
+        failures: list[dict[str, Any]] = []
+        for attempt in range(1):
+            sources = self._equation_sources()
+            located = _equation_tests.locate(protocol, sources)
+            case_list = _equation_tests.cases(rows, located)
+            notes = _equation_tests.untested_notes(rows, located)
+            record["not_tested"] = notes
+            if attempt == 0:
+                for n in notes:
+                    self._log.info("[equations] %s", n)
+            if not case_list:
+                _equation_tests.write(self.quest_root / "code", [])
+                failures = []
+                break
+            _equation_tests.write(self.quest_root / "code", case_list)
+            rc, out, err = await self._run_in_env([_equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
+            results = _equation_tests.parse_results(out)
+            if results is None:
+                self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
+                                  (err or out).strip().splitlines()[-1][:160] if (err or out).strip() else f"exit code {rc}")
+                record["error"] = (err or out)[-400:]
+                failures = []
+                break
+            by_id = {c["id"]: c for c in case_list}
+            failures = [{**r, "formula": by_id.get(str(r.get("id")), {}).get("formula", ""),
+                         "module": by_id.get(str(r.get("id")), {}).get("module", "")}
+                        for r in results if r.get("status") != _equation_tests.OK]
+            record["tested"] = [str(r.get("id")) for r in results]
+            if not failures:
+                self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
+                               len(results))
+                break
+            break
+        record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status")} for f in failures]
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / "equation_tests.json").write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+        if not failures:
+            return None
+        message = " ".join(_equation_tests.failure_message(f, str(f.get("formula") or "")) for f in failures)
+        self._log.warning("[equations] %s do not compute what the plan's worked example says; the whole script is "
+                          "repaired next", ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures))
+        return {
+            "exec_result": {
+                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "",
+                "stderr_tail": ("FI tested the model's equations before the study ran and "
+                                + ("one does" if len(failures) == 1 else "some do") + " not compute what the plan says. "
+                                + message)[-2000:],
+                "packages_note": getattr(self, "_packages_note", ""), "failed_script": _split_run.SIMULATE_NAME,
+                "flat_output": "", "numeric_warnings": [],
+            },
+            "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
+        }
+
     def _package_in_use(self, state: QuestState) -> str | None:
         """The model's package when this quest's code is laid out as a research tool and the package is there."""
         layout = self._code_layout(state)
@@ -11942,7 +12047,7 @@ class Engine:
         path.write_text(text, encoding="utf-8")
         _plan.record_version(self.quest_root, text, by="engine", note=note)
 
-    async def _revise_checks_only(self, request: str, *, equations: bool = False) -> str:
+    async def _revise_checks_only(self, request: str, *, equations: bool | str = False) -> str:
         """Ask the plan (``plan_revise``) for ``request`` and keep only what it changed in the checks
         (``protocol.oracles``): anything else it changed in the design block is put back, so a request about the checks
         can never move the grid, the thresholds or the criteria. ``""`` when the plan was rewritten, else why not (a
@@ -12002,8 +12107,9 @@ class Engine:
                 model_before = protocol.get("model")
                 model_after = (after.get("protocol") or {}).get("model") if isinstance(after.get("protocol"), dict) else None
                 if isinstance(model_before, dict) and isinstance(model_after, dict):
+                    # ``"example"``: only the worked examples may change; an equation itself only when a reader objected.
                     protocol["model"] = {**model_before, "equations": _review.keep_every_equation(
-                        model_before.get("equations"), model_after.get("equations"))}
+                        model_before.get("equations"), model_after.get("equations"), only_example=equations == "example")}
             if criteria or "criteria" in protocol:
                 protocol["criteria"] = criteria
             return {**block, "protocol": protocol}
@@ -12228,6 +12334,7 @@ class Engine:
         # FI's own computation of each expected value, from the formula the plan gives (core/oracle_forms.py): what the
         # plan must still say goes into the SAME request as the rest; nothing is asked on a resume that already asked.
         formula_asks: list[dict[str, Any]] = []
+        example_asks: list[dict[str, Any]] = []
         fixed_now: dict[str, float] = {}
         if not progress.get("asked") and not self._simulation_ran():
             design_now, _why = _plan.load_design(self.quest_root)
@@ -12236,7 +12343,12 @@ class Engine:
             formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None,
                                                                fixed_now)
                             if f["state"] != "agrees"]
-        if (rewrites or requests or review.get("lines") or formula_asks) and not progress.get("written"):
+            # A worked example for each equation the code computes as a function (core/equation_tests.py): one that is
+            # missing or cannot be used goes into the SAME request, never guessed.
+            if fi_runs:
+                example_asks = [r for r in _equation_tests.example_rows(
+                    protocol_now if isinstance(protocol_now, dict) else None) if r["state"] in ("missing", "unusable")]
+        if (rewrites or requests or review.get("lines") or formula_asks or example_asks) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
             # never leaves them unexplained.
             self._write_plan_section(path, [
@@ -12258,7 +12370,7 @@ class Engine:
             self._oracle_review_write({**progress, "answered": True})
             self._log.warning("[oracle] the request to the plan about its checks was not answered before the quest "
                               "stopped; it is not made again")
-        elif (requests or findings or formula_asks) and not progress.get("asked"):
+        elif (requests or findings or formula_asks or example_asks) and not progress.get("asked"):
             for r in requests:
                 self._log.warning("[oracle] asking the plan to change a check: %s", r)
             for f in formula_asks:
@@ -12271,16 +12383,20 @@ class Engine:
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
             equations_before = self._planned_equations()
-            must = [p for p in (_forms.request(requests, last=not (findings or formula_asks)) if requests else "",
-                                _forms.formula_request(formula_asks, last=not findings, fixed=fixed_now)) if p]
+            for r in example_asks:
+                self._log.info("[plan] asking the plan for a worked example of equation %s (%s)", r["id"], r["why"])
+            must = [p for p in (_forms.request(requests, last=not (findings or formula_asks or example_asks)) if requests else "",
+                                _forms.formula_request(formula_asks, last=not (findings or example_asks), fixed=fixed_now),
+                                _equation_tests.request(example_asks, last=not findings)) if p]
             parts = [*must, _review.request(findings, equations=bool(review.get("equation_objections")))
                      if findings else ""]
             if len(must) + bool(findings) > 1:
                 parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
                                 "give or change must be done" + ("; the last is a reader's findings, to follow where "
                                                                  "they are right." if findings else "."))
-            failed = await self._revise_checks_only("\n\n".join(p for p in parts if p),
-                                                    equations=bool(review.get("equation_objections")))
+            failed = await self._revise_checks_only(
+                "\n\n".join(p for p in parts if p),
+                equations=True if review.get("equation_objections") else ("example" if example_asks else False))
             if failed:
                 self._log.warning("[oracle] %s", failed)
             after = self._planned_oracles()
@@ -12291,6 +12407,15 @@ class Engine:
                                 if eid in equations_after and equations_after[eid] != was]
             for line in equation_changes:
                 self._log.warning("[oracle] after the reader's objection, the plan's %s", line)
+            still_untested: list[str] = []
+            if example_asks:
+                design_after, _why = _plan.load_design(self.quest_root)
+                protocol_after = design_after.get("protocol") if isinstance(design_after, dict) else None
+                still_untested = _equation_tests.untested_notes(
+                    [r for r in _equation_tests.example_rows(protocol_after if isinstance(protocol_after, dict) else None)
+                     if r["state"] in ("missing", "unusable")], {})
+                for note in still_untested:
+                    self._log.warning("[plan] after the plan was asked once, %s", note)
             if len(after) < len(before):
                 self._log.warning("[oracle] the plan has fewer checks against known answers after it was asked (%d, was %d)",
                                   len(after), len(before))
@@ -12306,6 +12431,7 @@ class Engine:
                 *([f"- {failed[0].upper()}{failed[1:]}; nothing was changed for it."] if failed else
                   [f"- What changed: {c}." for c in changes] or ["- The plan did not change the checks."]),
                 *[f"- {c[0].upper()}{c[1:]}." for c in equation_changes],
+                *[f"- After the plan was asked once for a worked example, {n}." for n in still_untested],
                 *[f"- {r}" for r in again],
                 *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
             ], note="the checks against known answers looked at")
@@ -13045,6 +13171,11 @@ class Engine:
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
         self._check_code_layout(state)
+        # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
+        # function that computes another equation than the plan's is found here, not after the study.
+        failed_equations = await self._equation_gate(state, py, exec_env)
+        if failed_equations is not None:
+            return failed_equations
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
@@ -21645,12 +21776,12 @@ Also add a design key `protocol` (a sibling of `hypothesis`, NOT inside `plan`).
     "summary": "<in one sentence, the model that produces the numbers, e.g. classical RK4 on the linear ODE y' = -y>",
     "assumptions": ["<what the model assumes>"],
     "holds_for": "<the range of parameters where it holds>",
-    "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>"}]
+    "equations": [{"id": "E1", "formula": "<the equation as the source writes it>", "role": "<generates | analyses>", "source": "<the [n] of a source listed above, or derivation>", "derivation": "<only when source is derivation: the steps, written out>", "example": {"inputs": {"<the equation's input, named as the code will name its argument>": <a number>}, "expected_formula": "<the equation's output for those inputs, as a formula>"}}]
   },
   "criteria": [{"name": "<short name>", "what": "<one sentence>", "oracle": "<the name of one of the oracles above>", "use": "<error (how far it lands from its expected value, the default) | value (the measured value itself)>", "direction": "<lower | higher | target>", "target": <a number: for lower the most it may be, for higher the least, for target the value aimed at>, "tolerance": <a number: how close to the target counts as met, and how much a later version may change before it counts as worse>}]
 }
 
-`model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead.
+`model` says what produces the numbers, so that a wrong number can be traced to the model or to the code. List its core equations, E1, E2, and so on: `generates` for an equation the simulation computes the data with, `analyses` for one used on the results (a fitted rate, an estimator). Each equation's `source` is a source listed above, by its [n], or `derivation` with the steps written out in `derivation`. A source you remember but that is not listed above does not count: derive the equation instead. @@EXAMPLE@@
 
 Each oracle's `kind` is one of six: `special_case` (a special or limiting case with a known answer, such as an exact solution), `invariant` (a conserved quantity or other invariant), `symmetry` (a symmetry or scaling law), `second_implementation` (an independent second implementation), `convergence_rate` (a convergence rate) or `published_value` (a benchmark value a source reports). Each kind has ONE numeric form, and FI holds the plan to it: for `invariant`, `symmetry` and `second_implementation` the number is the worst violation (absolute, or relative when you divide by the reference in the formula) and `expected` is 0 (a conservation check measures `abs(P_out - P_in) / P_in` expecting 0, never the ratio expecting 1); for `special_case`, `published_value` and `convergence_rate` the number is the quantity itself (the solution at that step, the benchmark quantity, the observed order) with its known value as `expected`. `measure` says how the number is computed from what the simulation function returns on the `case`: one returned name, or a formula of them written with numbers, + - * / ** %, parentheses and the functions abs, sqrt, exp, log, log10, log2, sin, cos, tan, asin, acos, atan, atan2, sinh, cosh, tanh, hypot, floor, ceil, min, max, sum (and pi); nothing else, and never a formula that takes nothing the simulation returns. FI computes it itself from what the simulation returns, so the simulation must return every name the formula uses. An `expected` compared at a finite step is the value AT that step (worked out, or the limit plus the method's known error there), never the limit as the step goes to 0; and it is written to full precision (0.36787944117144233, not 0.367879) when the tolerance is tight. Its `reference` says where `expected` comes from, in one of four forms: `derivation: <the steps that give the number, written as relations, e.g. y(1) = exp(-1) = 0.3679>`; a source listed above, by its [n] (and where in it); an equation of `model`, by its id (E1), whose own source counts; or, for a second implementation, what it is and that it shares no code with the simulation. FI checks this: a reference that is empty, or names a source that is not listed above, is reported, and a strict quest stops at the plan until it is fixed.
 
@@ -21674,6 +21805,7 @@ Every number the topic sets (a set in braces, a count of runs, a threshold) must
 """
 
 _PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@FORMULA@@", _forms.EXPECTED_FORMULA_LANGUAGE)
+_PLAN_DIRECTIVE = _PLAN_DIRECTIVE.replace("@@EXAMPLE@@", _equation_tests.EXAMPLE_RULE)
 
 # The kind of study, and the block of a search for the best design (core/optimisation_plan.py). Added after the plan
 # directive, so the rules above stay as they are for a measurement.

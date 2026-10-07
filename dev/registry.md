@@ -492,6 +492,13 @@ same PR that adds, splits or renames one.
   not an interval. This is the only early stop in `_node_execute`'s replicate loop: a script with any random source runs
   every configured seed, and only then is an all-agreeing set classified (`result_json_deterministic` = every seed agreed,
   replicates kept; or `result_json_replicate_seed_ignored` = one run repeated, when the seed reaches no generator).
+- `core/equation_tests.py` — a small test per equation of the plan's model, from the plan's own worked example
+  (`example_rows`: FI computes the output with `oracle_forms`' calculator; `request` asks the plan for a missing or
+  unusable one; `locate` finds the function labelled `# E<n>`; `cases` / `test_source` / `write` produce
+  `code/tests/test_equations.py`; `failure_message` names the function and equation, never the expected value). Called
+  by `Engine._equation_gate` (in `_node_execute` before the oracle gate; returns a failed run for the existing
+  `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
+  the plan, `_revise_checks_only(equations="example")`) and by `code_layout.project_files`. Record: `.fi/equation_tests.json`.
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
   `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
