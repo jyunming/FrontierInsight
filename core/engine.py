@@ -13351,6 +13351,11 @@ class Engine(RunChecksMixin):
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
         self._hold_added_oracles()
+        # The whole run is timed on a few real trials and made smaller by the plan's model when it would not fit the time
+        # allowed (core/run_estimate.py); one that still would not fit stops the quest here, with no paper.
+        too_long = await self._size_the_run(state, runner, py, exec_env)
+        if too_long is not None:
+            return too_long
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
         # A figure is drawn from what the run computed, never from numbers typed into the plotting code: the scripts are
@@ -13455,6 +13460,7 @@ class Engine(RunChecksMixin):
                 env=primary_env,
             ),
             label="running simulate.py and experiment.py" if split else "running experiment.py",
+            progress=getattr(runner, "progress_text", None),
         )
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
@@ -13959,6 +13965,8 @@ class Engine(RunChecksMixin):
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         patch["figure_data_repairs"] = figure_repairs
+        if (sized_design := self._design_after_sizing(state)) is not None:
+            patch["design"] = sized_design  # the plan's smaller run (core/run_estimate.py)
         if figure_rewrote and code_path.is_file():
             patch["code"] = code_path.read_text(encoding="utf-8")  # the plotting code was rewritten to use the results
         await self._record_criteria(
@@ -14335,6 +14343,8 @@ class Engine(RunChecksMixin):
         if resumed is not None:
             return resumed
         exec_result = state.get("exec_result") or {}
+        if exec_result.get("too_long"):
+            return {}  # the study would not fit the time allowed: there is no script to repair (core/run_estimate.py)
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
         # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
@@ -15751,6 +15761,13 @@ class Engine(RunChecksMixin):
                      f"asked for the paper to be written again with the contradiction named ({_RECORD_REWRITES} times); "
                      "the claim was still there"]
             ended = "the paper still claimed what FI's records contradict"
+        if reason == "too_long":
+            # The study would not finish in the time allowed, even made smaller (core/run_estimate.py): nothing was run.
+            said = str((state.get("exec_result") or {}).get("too_long") or "").strip().rstrip(".")
+            problem = f"{said}, so nothing was run for the study" if said else "the experiment would not fit the time allowed"
+            tried = ["timed a few real trials of the experiment and added them up",
+                     said or "the total is more than the time allowed"]
+            ended = "the experiment would still take longer than the time allowed"
         if reason == "flat":
             # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
             symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
@@ -15789,6 +15806,7 @@ class Engine(RunChecksMixin):
               "fix: needs/STUCK.json says what FI tried; run the quest again, "
               + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                  or reason == "flat" else
+                 "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
                  "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                  "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
@@ -15816,6 +15834,11 @@ class Engine(RunChecksMixin):
             or self.config.engine.analyze_local_first
         ):
             return None
+        too_long = str(exec_result.get("too_long") or "")
+        if too_long:  # stopped before the study, because it would not fit the time allowed: no second try from the design
+            self._log.warning("[evidence_gate] %s; there is nothing measured to write up", too_long)
+            return {"verdict": "insufficient", "rationale": too_long, "gaps": [too_long], "stuck": True,
+                    "stuck_reason": "too_long"}
         flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
@@ -19159,7 +19182,7 @@ class Engine(RunChecksMixin):
             self._log.debug("[clarify] could not keep the asked questions: %r", e)
 
     async def _await_with_heartbeat(
-        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0,
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None,
     ) -> Any:
         """Await ``coro`` while emitting a periodic ``[execute] … still running,
         Ns elapsed`` line to run.log. Long-running work that blocks silently —
@@ -19177,6 +19200,17 @@ class Engine(RunChecksMixin):
                 try:
                     await asyncio.wait_for(done.wait(), timeout=interval_s)
                 except asyncio.TimeoutError:
+                    where = ""
+                    try:  # where the study is, in plain words (core/run_estimate.py); never stops the beat
+                        where = str(progress() or "") if callable(progress) else ""
+                    except Exception:  # noqa: BLE001
+                        where = ""
+                    if where:
+                        from .run_estimate import plain_duration
+
+                        self._log.info("[execute] %s — still running, %s elapsed: %s", label,
+                                       plain_duration(time.monotonic() - start), where)
+                        continue
                     self._log.info(
                         "[execute] %s — still running, %ds elapsed",
                         label, int(time.monotonic() - start),

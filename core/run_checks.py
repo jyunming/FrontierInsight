@@ -1,10 +1,14 @@
-"""A check made on the simulation before it runs, as methods the engine mixes in.
+"""Two checks made on the simulation before and while it runs, as methods the engine mixes in.
 
 * **A reported result is computed** (``core/typed_results.py``): the simulation is read, never run, and a returned value that
   is a number typed into the code is sent back to be computed (or removed), at most twice; one that is still typed in
   afterwards is left out of the results the paper may use, and the paper says so.
+* **The run fits the time it is allowed** (``core/run_estimate.py``): a few real trials are timed before the freeze and
+  added up; a study that would not finish is shrunk by the plan's model (fewer runs per setting, fewer or coarser
+  settings, with the measured numbers in the request; nothing that decides whether a result is right may change), at most
+  twice; one that still would not fit stops the quest plainly with no paper.
 
-It lives here and not in ``engine.py`` so the node only calls it. Every method uses the engine's own attributes
+They live here and not in ``engine.py`` so the node only calls them. Every method uses the engine's own attributes
 (``quest_root``, ``fi_dir``, ``config``, ``_log``, ``_chat`` ...).
 """
 
@@ -12,11 +16,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
+from . import frozen_protocol as _frozen
 from . import oracle_forms as _forms
+from . import plan as _plan
+from . import run_estimate as _estimate
 from . import split_run as _split_run
+from . import trial_runner as _trial_runner
 from . import typed_results as _typed
 
 #: How many times, in all, a simulation that returns typed-in numbers is sent back.
@@ -168,7 +177,8 @@ class RunChecksMixin:
     # ---- the note for the writer ---------------------------------------------------------------------------------------
 
     def _run_checks_note(self) -> str:
-        """For the writer: quantities left out because they were typed into the code,, so the limitations say so."""
+        """For the writer: quantities left out because they were typed into the code, and a run FI made smaller to fit the
+        time allowed, so the limitations say so."""
         parts: list[str] = []
         record = _read_json(self.quest_root / "needs" / TYPED_RECORD)  # type: ignore[attr-defined]
         note = record.get("note")
@@ -176,4 +186,185 @@ class RunChecksMixin:
             names = ", ".join(f"`{k}`" for k in record.get("removed_quantities") or [])
             parts.append(f"{note} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
                          "limitations, that this quantity was not computed by the simulation and is left out.")
+        sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
+        reduced = sized.get("reduced")
+        if isinstance(reduced, dict) and reduced.get("note"):
+            parts.append(f"{reduced['note']} Say so plainly in the limitations, with the numbers.")
         return "\n\n".join(parts)
+
+    # ---- the run fits the time it is allowed ---------------------------------------------------------------------------
+
+    def _grid_and_runs(self, state: Any) -> tuple[dict[str, list[Any]], int, dict[str, Any]]:
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
+        grid = {str(k): list(v) for k, v in grid.items() if isinstance(v, list) and v}
+        thresholds = protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else {}
+        return grid, max(1, int(protocol.get("runs_per_setting") or 1)), thresholds
+
+    def _sizing_key(self, runner: Any, grid: dict[str, list[Any]], runs: int, limit_s: float) -> str:
+        return _trial_runner._run_key(runner.simulate, {"grid": grid}, runs, 0, runner.deterministic) + f"|{int(limit_s)}"
+
+    async def _size_the_run(self, state: Any, runner: Any, python: Any, env: Any) -> dict[str, Any] | None:
+        """Before the protocol is frozen and the study starts: time a few real trials, add them up, and compare the total with
+        ``execution.timeout_s``. Fits (or cannot be timed): go on, saying so in one line. Does not fit: ask the plan's model to
+        make the run smaller (at most :data:`core.run_estimate.ASKS` times, each followed by timing the new plan), and when
+        it still would not fit return the quest's stop (no paper). ``None`` to go on.
+
+        Only the trial contract is timed, and only before the first freeze: a frozen protocol cannot be changed, a search for
+        the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
+        self._sized_protocol: dict[str, Any] | None = None
+        if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
+                or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
+            return None
+        limit_s = float(self.config.execution.timeout_s)  # type: ignore[attr-defined]
+        budget_s = max(limit_s * float(self.config.engine.pilot_timeout_frac), 30.0)  # type: ignore[attr-defined]
+        cached: dict[str, _estimate.Probe] = {}
+        prior = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
+        # A sizing that did not finish (a request was made, or the run did not fit) goes on counting; one that fitted is over.
+        unfinished = prior.get("fits") is False
+        asks = int(prior.get("asks") or 0) if unfinished else 0
+        reduced = prior.get("reduced") if unfinished or prior.get("fits") else None
+        for _round in range(_estimate.ASKS + 1):
+            grid, runs, thresholds = self._grid_and_runs(state)
+            key = self._sizing_key(runner, grid, runs, limit_s)
+            record = _estimate.read_record(self.quest_root)  # type: ignore[attr-defined]
+            if record.get("key") == key and record.get("fits"):
+                self._log.info("[execute] %s (timed before; nothing in the experiment has changed)",  # type: ignore[attr-defined]
+                               record.get("says") or "the experiment fits")
+                return None
+            if record.get("key") == key and record.get("stopped"):
+                return self._stop_too_long(str(record["stopped"]))
+            probes, why = await _estimate.measure(
+                self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
+                runs=runs, deterministic=runner.deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                thresholds=thresholds, cached=cached)
+            if probes is None:
+                self._log.info("[execute] FI could not time the experiment before running it (%s); going on", why)  # type: ignore[attr-defined]
+                return None
+            for p in probes:
+                cached[_estimate.probe_key(p.cell, runs)] = p
+            est = _estimate.estimate(grid, runs, runner.deterministic, probes)
+            if est is None:
+                return None
+            line = _estimate.says(est, limit_s)
+            base = {"key": key, "estimate_s": est.seconds * _estimate.SAFETY, "limit_s": limit_s, "says": line,
+                    "reduced": reduced, "at": time.time(), "timed": est.timed, "cells": est.cells, "trials": est.trials}
+            if not _estimate.known_too_long(est, limit_s):
+                self._log.info("[execute] %s", line)  # type: ignore[attr-defined]
+                print(f"[FI] {line}")
+                _estimate.write_record(self.quest_root, {**base, "fits": True, "asks": 0})  # type: ignore[attr-defined]
+                return None
+            self._log.warning("[execute] %s, so it would not finish", line)  # type: ignore[attr-defined]
+            design, sha = self._design_from_plan()  # type: ignore[attr-defined]
+            can_ask = design is not None and bool(sha) and self._client is not None  # type: ignore[attr-defined]
+            if asks >= _estimate.ASKS or not can_ask:
+                text = self._too_long_text(est, limit_s, asks, can_ask)
+                _estimate.write_record(self.quest_root, {**base, "fits": False, "asks": asks, "stopped": text})  # type: ignore[attr-defined]
+                return self._stop_too_long(text)
+            asks += 1
+            # Counted BEFORE the request, so a quest killed during it never asks more often than it may.
+            _estimate.write_record(self.quest_root, {**base, "fits": False, "asks": asks})  # type: ignore[attr-defined]
+            changed, reduced_now, made = await self._ask_to_make_the_run_smaller(
+                state, est, limit_s, runs, runner.deterministic, _estimate.ASKS - (asks - 1))
+            asks = asks - 1 + max(1, made)
+            if changed:
+                reduced = reduced_now
+                self._sized_protocol = {**(self._sized_protocol or {}), **changed}
+                _estimate.write_record(  # type: ignore[attr-defined]
+                    self.quest_root, {**base, "fits": False, "asks": asks, "reduced": reduced})
+                await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
+        return None
+
+    def _design_after_sizing(self, state: Any) -> dict[str, Any] | None:
+        """The state's design with the protocol parts the plan's model made smaller, or ``None`` when none were."""
+        sized = getattr(self, "_sized_protocol", None)
+        if not sized:
+            return None
+        design = dict(state.get("design") or {})
+        design["protocol"] = {**(design.get("protocol") if isinstance(design.get("protocol"), dict) else {}), **sized}
+        return design
+
+    async def _ask_to_make_the_run_smaller(self, state: Any, est: _estimate.Estimate, limit_s: float, runs: int,
+                                           deterministic: bool, remaining: int) -> tuple[dict[str, Any], dict[str, Any] | None, int]:
+        """One request to the plan's model (the bounded one every part of the plan uses): ``({"grid": ..., "runs_per_setting":
+        ...}, the note, requests made)`` as the plan now has them when it was made smaller, else ``({}, None, n)``. Only those two parts of the
+        answer are kept; a different set of settings, or a run that is not smaller, is not used."""
+        design, sha = self._design_from_plan()  # type: ignore[attr-defined]
+        if design is None or not sha or self._client is None:  # type: ignore[attr-defined]
+            return {}, None, 0
+        before_grid, before_runs, _t = self._grid_and_runs(state)
+        words = "at least " if est.at_least else "about "
+        asked = {"n": 0}
+
+        def lacks(now: Any) -> list[str]:
+            # The run is still too big while it has not become smaller; never more requests than are left.
+            protocol = now.get("protocol") if isinstance(now, dict) and isinstance(now.get("protocol"), dict) else {}
+            grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
+            now_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
+            smaller = (_estimate.trial_count(grid, now_runs, deterministic)
+                       < _estimate.trial_count(before_grid, before_runs, deterministic))
+            if smaller or (remaining < 2 and asked["n"] >= remaining):  # two is also what the helper itself allows
+                return []
+            return [f"a smaller run (the experiment would take {words}"
+                    f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
+                    f"{_estimate.plain_duration(limit_s)} allowed)"]
+
+        def request(_now: Any, _text: str) -> str:
+            asked["n"] += 1
+            return _estimate.request(est, limit_s, runs, deterministic)
+
+        def keep(before: str, revised: str) -> str:
+            kept = self._keep_only_the_parts(before, revised, ["grid", "runs_per_setting"])  # type: ignore[attr-defined]
+            if kept is None:
+                raise ValueError("the revised plan has no smaller run in a form that can be read; plan.md is unchanged")
+            block = _plan.raw_design_block(kept)
+            protocol = block.get("protocol") if isinstance(block, dict) and isinstance(block.get("protocol"), dict) else {}
+            grid = {str(k): list(v) for k, v in (protocol.get("grid") or {}).items() if isinstance(v, list) and v}
+            new_runs = max(1, int(protocol.get("runs_per_setting") or before_runs))
+            if before_grid and set(grid) != set(before_grid):
+                raise ValueError("the revised plan changes which settings the experiment varies; plan.md is unchanged")
+            if (_estimate.trial_count(grid, new_runs, deterministic)
+                    >= _estimate.trial_count(before_grid, before_runs, deterministic)):
+                raise ValueError("the revised plan is not a smaller run; plan.md is unchanged")
+            return kept
+
+        await self._ask_plan_to_complete(  # type: ignore[attr-defined]
+            design, sha, lacks=lacks, request=request, keep=keep, file="run_size_asked.json", what="run size",
+            short="a smaller run", note="a smaller run, so the experiment fits the time allowed, written by the plan's model")
+        grid, new_runs, _t = self._grid_and_runs(state)
+        if (grid, new_runs) == (before_grid, before_runs):
+            return {}, None, asked["n"]
+        note = (f"FI made the experiment smaller so that it fits the time allowed ({_estimate.plain_duration(limit_s)}): it "
+                f"would have taken {words}{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}. The plan's model changed "
+                f"it from {_estimate.cell_count(before_grid)} setting(s) with {before_runs} run(s) each to "
+                f"{_estimate.cell_count(grid)} setting(s) with {new_runs} run(s) each; the checks, thresholds and "
+                "tolerances are unchanged.")
+        self._log.warning("[execute] %s", note)  # type: ignore[attr-defined]
+        print(f"[FI] {note}")
+        return ({"grid": grid, "runs_per_setting": new_runs},
+                {"note": note, "from": {"grid": before_grid, "runs_per_setting": before_runs},
+                 "to": {"grid": grid, "runs_per_setting": new_runs}}, asked["n"])
+
+    @staticmethod
+    def _too_long_text(est: _estimate.Estimate, limit_s: float, asks: int, can_ask: bool) -> str:
+        said = (f"the experiment would take {'at least ' if est.at_least else 'about '}"
+                f"{_estimate.plain_duration(est.seconds * _estimate.SAFETY)}, more than the "
+                f"{_estimate.plain_duration(limit_s)} allowed")
+        if asks:
+            return f"{said}; FI asked the plan {asks} time{'s' if asks != 1 else ''} to make it smaller"
+        return said if can_ask else f"{said}; FI had no way to ask the plan to make it smaller"
+
+    def _stop_too_long(self, text: str) -> dict[str, Any]:
+        """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
+        self._log.warning("[execute] %s; stopping, the study was not run", text)  # type: ignore[attr-defined]
+        return {
+            "exec_result": {
+                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],
+                "packages_note": getattr(self, "_packages_note", ""), "failed_script": "", "flat_output": "",
+                "numeric_warnings": [], "too_long": text,
+            },
+            "exec_give_up_reason": text,
+            "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
+            "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
+            "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
+        }

@@ -1,21 +1,26 @@
-"""A result typed into the code is sent back to be computed and, when it stays, left out of the paper
-(core/run_checks.py). Fake model, toy simulations (a cooling cup), real subprocesses."""
+"""The two checks the engine makes on the simulation (core/run_checks.py): a result typed into the code is sent back to be
+computed and, when it stays, left out of the paper; the whole run is timed on a few real trials before it starts, made
+smaller by the plan's model when it would not fit the time allowed, and stops the quest plainly when it still would not.
+Fake model, toy simulations (a cooling cup, a damped spring), real subprocesses."""
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import re
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from core import trial_runner
+from core import plan, run_estimate, trial_runner
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 from core.execution import SharedInterpreterExecutor
+from tests.test_plan_optimisation import EXTRA, HEAT_SINK, _NO_OBJECTIONS, _engine as _plan_engine
 
 # ---- a result typed into the code ---------------------------------------------------------------------------------------
 
@@ -142,3 +147,253 @@ def test_the_analysis_is_not_given_a_left_out_quantity_but_the_ledger_keeps_ever
     assert "values_sha256" in ledger
     summary = json.loads((root / "raw" / "trials.json").read_text(encoding="utf-8"))
     assert "lid_on" in summary["cells"][0]["metrics"], "FI's own summary is not changed"
+
+
+# ---- the run fits the time allowed -------------------------------------------------------------------------------------
+
+SLOW_SIM = '''\
+import time
+
+def run_trial(cell, trial, seed):
+    time.sleep(0.05 * cell["n"])
+    return {"y": float(cell["n"]) * 2.0 + (seed % 3)}
+'''
+TOPIC = "Measure how a damped spring settles"
+
+
+def _draft(grid: dict[str, list[int]], runs: int) -> dict[str, Any]:
+    draft = copy.deepcopy(HEAT_SINK)
+    draft["study_type"] = "measure"
+    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": grid,
+                         "runs_per_setting": runs}
+    return draft
+
+
+MARK = "would take longer than the time it is allowed"
+
+
+class Model:
+    """The plan's model: drafts the plan, and answers the request to make the run smaller with the next answer."""
+
+    def __init__(self, eng: Engine, draft: dict[str, Any], answers: list[Any]) -> None:
+        self.eng, self.draft, self.answers = eng, draft, list(answers)
+        self.asked: list[str] = []
+        self.drafted = False
+        eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=self.chat)})()
+
+    async def chat(self, messages: list[dict[str, str]], **kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        if MARK in prompt:
+            self.asked.append(prompt)
+            answer = self.answers.pop(0) if self.answers else None
+            if answer is None:
+                raise RuntimeError("no answer")
+            return answer(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+        if not self.drafted:
+            self.drafted = True
+            return json.dumps({**self.draft, "plan": EXTRA})
+        return _NO_OBJECTIONS
+
+
+def _smaller(grid: dict[str, list[int]], runs: int, **tamper: Any) -> Any:
+    def answer(text: str) -> str:
+        out = plan.edit_design_block(text, lambda d: {**d, "protocol": {**d["protocol"], "grid": grid,
+                                                                       "runs_per_setting": runs, **tamper}})
+        assert out is not None
+        return out
+    return answer
+
+
+class _Counting(SharedInterpreterExecutor):
+    def __init__(self) -> None:
+        super().__init__(python_version="3.11")
+        self.calls = 0
+
+    async def execute(self, cmd, **kw):  # noqa: ANN001, ANN003
+        self.calls += 1
+        return await super().execute(cmd, **kw)
+
+
+async def _sizing(tmp_path: Path, *, timeout_s: int, answers: list[Any], grid: dict[str, list[int]] | None = None,
+                  runs: int = 40) -> tuple[Engine, Model, Any, _Counting]:
+    eng = _plan_engine(tmp_path, [])
+    eng.config.execution.timeout_s = timeout_s
+    model = Model(eng, _draft(grid or {"n": [1, 2, 4]}, runs), answers)
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    code = eng.quest_root / "code"
+    code.mkdir(parents=True, exist_ok=True)
+    (code / "simulate.py").write_text(SLOW_SIM, encoding="utf-8")
+    (code / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    eng.executor = _Counting()  # type: ignore[assignment]
+    state: dict[str, Any] = {"topic": TOPIC, "iteration": 0}
+    runner = trial_runner.TrialsRunner(
+        eng.executor, quest_root=eng.quest_root, protocol=lambda: eng._protocol_block(state) or {}, deterministic=False,
+        simulate=code / "simulate.py", analysis=code / "experiment.py", log=eng._log)
+    return eng, model, runner, eng.executor  # type: ignore[return-value]
+
+
+def _log(eng: Engine) -> str:
+    return (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_fits_goes_on_after_one_plain_line(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=3600, answers=[])
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert model.asked == []
+    line = re.search(r"FI estimates the experiment takes about (.+?); the limit is 1 h", _log(eng))
+    assert line, _log(eng)
+    assert "FI estimates the experiment takes about" in capsys.readouterr().out
+    assert not (eng.quest_root / "raw").exists(), "the timed trials are not results"
+    record = run_estimate.read_record(eng.quest_root)
+    assert record["fits"] is True and record["timed"] == 3 and eng._run_checks_note() == ""
+    # A resume with the same simulation and plan does not time it again.
+    before = ex.calls
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert ex.calls == before and "timed before" in _log(eng)
+    # A changed simulation is timed again.
+    (eng.quest_root / "code" / "simulate.py").write_text(SLOW_SIM + "\n# changed\n", encoding="utf-8")
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert ex.calls > before
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_is_too_long_is_made_smaller_by_the_plans_model_and_then_goes_on(tmp_path: Path) -> None:
+    tolerance_tamper = {"oracles": [{"name": "baseline_energy_balance", "kind": "invariant", "check": "x", "expected": 0,
+                                     "tolerance": 5.0, "reference": "derivation: steady state"}]}
+    eng, model, runner, ex = await _sizing(
+        tmp_path, timeout_s=8, answers=[_smaller({"n": [1, 2]}, 4, **tolerance_tamper)])
+    before = copy.deepcopy(plan.load_design(eng.quest_root)[0]["protocol"]["oracles"])
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None
+    assert len(model.asked) == 1
+    ask = model.asked[0]
+    assert "3 settings, each setting 40 runs" in ask
+    assert "`n` = 4 costs" in ask and "protocol.runs_per_setting" in ask and "protocol.grid" in ask
+    asked_part = ask[ask.index(MARK) - 80:]
+    assert "not a check, a threshold, a tolerance" in asked_part
+    design = plan.load_design(eng.quest_root)[0]
+    assert design["protocol"]["grid"] == {"n": [1, 2]} and design["protocol"]["runs_per_setting"] == 4
+    assert design["protocol"]["oracles"] == before, "a check the model also changed is put back"
+    assert eng._draft_protocol({"iteration": 0})["grid"] == {"n": [1, 2]}
+    assert eng._design_after_sizing({"design": {"hypothesis": "h"}})["protocol"]["runs_per_setting"] == 4
+    log = _log(eng)
+    assert "FI made the experiment smaller" in log and "the checks, thresholds and tolerances are unchanged" in log
+    assert re.search(r"FI estimates the experiment takes about .+; the limit is 8 seconds", log)
+    note = eng._run_checks_note()
+    assert "3 setting(s) with 40 run(s) each to 2 setting(s) with 4 run(s) each" in note and "limitations" in note
+    assert run_estimate.read_record(eng.quest_root)["fits"] is True
+    assert not (eng.quest_root / "raw").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_is_still_too_long_after_the_requests_stops_plainly_and_a_resume_asks_no_more(
+        tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(
+        tmp_path, timeout_s=6, answers=[_smaller({"n": [1, 2, 4]}, 30), _smaller({"n": [1, 2, 4]}, 20), _smaller({"n": [1]}, 1)])
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and len(model.asked) == 2, "asked twice, never a third time"
+    text = patch["exec_result"]["too_long"]
+    assert re.fullmatch(r"the experiment would take about .+, more than the 6 seconds allowed; "
+                        r"FI asked the plan 2 times to make it smaller", text), text
+    assert patch["exec_give_up_reason"] == text and patch["result_json"] == {} and patch["exec_result"]["returncode"] == 1
+    # The repair step does not try to fix a script, the gate stops without a second design, and the stop says it plainly.
+    assert await eng._node_execute_reflect({"exec_result": patch["exec_result"],
+                                            "exec_give_up_reason": text}) == {}
+    assert eng._route_after_execute_reflect({"exec_result": patch["exec_result"], "exec_give_up_reason": text}) == "proceed"
+    verdict = eng._no_results_verdict({"exec_result": patch["exec_result"], "result_json": {},
+                                       "exec_give_up_reason": text, "iteration": 0})
+    assert verdict is not None and verdict["stuck"] is True and verdict["stuck_reason"] == "too_long"
+    stuck = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": "too_long"},
+                                               "exec_result": patch["exec_result"]})
+    assert "more than the 6 seconds allowed" in stuck["stuck"]["say"] and "asked the plan 2 times" in stuck["stuck"]["say"]
+    assert "No paper was written" in stuck["stuck"]["say"]
+    assert (eng.quest_root / "needs" / "STUCK.json").is_file() and not (eng.quest_root / "paper.md").exists()
+    # A resume stops again with the same words, asking and timing nothing.
+    calls = ex.calls
+    again = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert again is not None and again["exec_result"]["too_long"] == text
+    assert len(model.asked) == 2 and ex.calls == calls
+
+
+@pytest.mark.asyncio
+async def test_a_plan_that_cannot_be_asked_stops_plainly_without_saying_it_asked(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, answers=[])
+    eng._client = None  # type: ignore[assignment]
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None
+    text = patch["exec_result"]["too_long"]
+    assert "FI had no way to ask the plan to make it smaller" in text and "asked the plan" not in text
+
+
+@pytest.mark.asyncio
+async def test_an_answer_that_is_not_a_smaller_run_of_the_same_settings_is_not_used(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    eng, model, runner, ex = await _sizing(
+        tmp_path, timeout_s=8,
+        answers=[_smaller({"m": [1, 2]}, 4), _smaller({"n": [1, 2, 4, 8]}, 40)])
+    patch = await eng._size_the_run({"iteration": 0}, runner, sys.executable, None)
+    assert patch is not None and len(model.asked) == 2
+    design = plan.load_design(eng.quest_root)[0]
+    assert design["protocol"]["grid"] == {"n": [1, 2, 4]} and design["protocol"]["runs_per_setting"] == 40
+    assert "complete now" not in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_timed_for_a_later_pass_or_a_cluster_job(tmp_path: Path) -> None:
+    eng, model, runner, ex = await _sizing(tmp_path, timeout_s=8, answers=[])
+    assert await eng._size_the_run({"iteration": 1}, runner, sys.executable, None) is None and ex.calls == 0
+    eng.config.execution.background_jobs = True
+    assert await eng._size_the_run({"iteration": 0}, runner, sys.executable, None) is None and ex.calls == 0
+
+
+# ---- "N of M settings done, about T left" -------------------------------------------------------------------------------
+
+PROGRESS_SIM = '''\
+import time
+
+def run_trial(cell, trial, seed):
+    time.sleep(0.15)
+    return {"y": float(cell["n"])}
+'''
+
+
+@pytest.mark.asyncio
+async def test_the_still_running_line_says_how_many_settings_are_done_and_how_long_is_left(tmp_path: Path) -> None:
+    root = tmp_path / "quest"
+    (root / "code").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(PROGRESS_SIM, encoding="utf-8")
+    (root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    runner = trial_runner.TrialsRunner(
+        SharedInterpreterExecutor(python_version="3.11"), quest_root=root,
+        protocol={"grid": {"n": [1, 2, 3, 4]}, "runs_per_setting": 3}, deterministic=False,
+        simulate=root / "code" / "simulate.py", analysis=root / "code" / "experiment.py")
+    assert runner.progress_text() == "", "nothing to say before the settings are run"
+    seen: list[str] = []
+    task = asyncio.ensure_future(runner.execute([sys.executable, str(root / "code" / "experiment.py")], cwd=root,
+                                                timeout_s=120, env={}))
+    while not task.done():
+        text = runner.progress_text()
+        if text and (not seen or seen[-1] != text):
+            seen.append(text)
+        await asyncio.sleep(0.05)
+    await task
+    assert seen and all(re.fullmatch(r"\d of 4 settings done(, about .+ left)?", t) for t in seen), seen
+    assert any("about" in t for t in seen), "once a trial has finished, a time left is given"
+    assert runner.progress_text() == "", "and nothing once the settings are done"
+
+
+@pytest.mark.asyncio
+async def test_the_heartbeat_puts_that_line_into_the_log(tmp_path: Path) -> None:
+    eng = _plan_engine(tmp_path, [])
+
+    async def work() -> int:
+        await asyncio.sleep(0.25)
+        return 7
+
+    out = await eng._await_with_heartbeat(work(), label="running experiment.py", interval_s=0.05,
+                                          progress=lambda: "3 of 96 settings done, about 2 h left")
+    assert out == 7
+    assert "running experiment.py — still running, 1 second elapsed: 3 of 96 settings done, about 2 h left" in _log(eng)
+    # Without a line to add, the heartbeat is the one it always was.
+    await eng._await_with_heartbeat(work(), label="running x.py", interval_s=0.05)
+    assert re.search(r"running x\.py — still running, \d+s elapsed", _log(eng))

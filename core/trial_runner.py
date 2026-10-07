@@ -354,10 +354,11 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
 async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
-    run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False,
+    run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False, on_plan: Any = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
-    the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study."""
+    the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
+    plan before the first cell runs (for a progress line while it does)."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -367,6 +368,8 @@ async def run_trials(
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
                  thresholds=thresholds)
+    if on_plan is not None:
+        on_plan(plan)
     results: dict[int, Any] = {}
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for task in plan:
@@ -509,6 +512,32 @@ class TrialsRunner:
         #: Quantities the analysis must not be given (the simulation typed their value into its code, core/typed_results.py):
         #: a function returning their names, or ``None``. The ledger keeps every value the simulation returned.
         self._leave_out = leave_out
+        self._plan_seen: list[dict[str, Any]] | None = None
+        self._plan_started = 0.0
+
+    def _note_plan(self, plan: list[dict[str, Any]]) -> None:
+        self._plan_seen, self._plan_started = plan, time.monotonic()
+
+    def progress_text(self) -> str:
+        """For the "still running" line: how many settings are done and how long is left, in plain words; empty when the
+        settings are not being run (nothing to say yet, or the trials were already run)."""
+        plan = self._plan_seen
+        if not plan:
+            return ""
+        from . import run_estimate as _estimate
+
+        done_trials = 0
+        done_cells = 0
+        for task in plan:
+            try:
+                lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            seen = sum(1 for ln in lines if '"status"' in ln)
+            done_trials += seen
+            done_cells += seen >= len(task["trials"])
+        return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan),
+                                       time.monotonic() - self._plan_started)
 
     def _without_left_out(self, summary: Path) -> Path:
         """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
@@ -601,8 +630,9 @@ class TrialsRunner:
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                paired=paired,
+                paired=paired, on_plan=self._note_plan,
             )
+            self._plan_seen = None
             _save_run(self.quest_root, key, run)
         self.last = run
         if self.log is not None:
