@@ -15874,6 +15874,7 @@ class Engine:
         # instead of "a number is wrong somewhere".
         #
         # Labelled by the finding's OWN kind — ``transposed``,
+        # ``formula_slip`` (the paper's own arithmetic; no result path),
         # ``near_miss``, ``trivial_reference`` — rather than one blanket
         # ``unverified_number:`` prefix over all of them. That prefix
         # argues with the trivial-reference finding it is pasted onto:
@@ -23144,7 +23145,8 @@ def _rerun_evidence(review: dict[str, Any], state: QuestState) -> str:
     caption that this is one seed" name none, and stay a rewrite.
 
     The advisory checks are deliberately not read: every
-    ``numeric_oracle_warnings`` finding quotes a result path, and those findings
+    ``numeric_oracle_warnings`` finding quotes a result path (a ``formula_slip``
+    quotes the paper's own calculation instead), and those findings
     are advisory precisely because a pattern match over prose misreads a DOI
     often enough that a forced re-run costs more than a flagged number. Nor are
     the hits themselves: they are short identifiers, and the ones the engine
