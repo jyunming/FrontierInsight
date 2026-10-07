@@ -21,7 +21,7 @@ MARK = "the plan has no `protocol.optimisation` block FI can search with yet"
 def _broken_draft() -> dict[str, Any]:
     """The real quest's draft: the objective names neither a quantity nor a direction, so the block is left out."""
     draft = copy.deepcopy(HEAT_SINK)
-    draft["protocol"]["optimisation"]["objective"] = {"meaning": "the common depth of focus"}
+    draft["protocol"]["optimisation"]["objective"] = {"meaning": "the quantity to improve"}
     return draft
 
 

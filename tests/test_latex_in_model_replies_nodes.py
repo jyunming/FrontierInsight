@@ -15,16 +15,16 @@ from core.engine import Engine
 BS = "\\"
 
 DESIGN = {
-    "hypothesis": "NILS rises as SIGMA falls",
-    "variables": {"independent": ["sigma"], "dependent": ["nils"], "controls": ["seed"]},
+    "hypothesis": "SNR rises as SIGMA falls",
+    "variables": {"independent": ["sigma"], "dependent": ["snr"], "controls": ["seed"]},
     "method": "sweep SIGMA from 0.3 to 0.9 and measure TEXT",
-    "expected_outcome": "NILS falls with sigma",
+    "expected_outcome": "SNR falls with sigma",
     "figures_planned": ["c.png"],
     "dependencies": ["numpy"],
     "protocol": {"runs_per_setting": 300},
 }
-SIGMA = "$" + BS + "sigma_{in}=0.6$"
-TEXT = "$" + BS + "text{NILS}$"
+SIGMA = "$" + BS + "sigma=0.6$"
+TEXT = "$" + BS + "text{SNR}$"
 
 
 def _latex_json(obj: dict) -> str:
@@ -34,7 +34,7 @@ def _latex_json(obj: dict) -> str:
 
 def _engine(tmp_path: Path, replies: list) -> Engine:
     cfg = Config(
-        topic="NILS under partial coherence", title="nils", provider=ProviderConfig(name="openai"),
+        topic="SNR under noise", title="snr", provider=ProviderConfig(name="openai"),
         engine=EngineConfig(max_iterations=1, review_loop=False, clarify_mode="off"),
         execution=ExecutionConfig(sandbox="venv", timeout_s=60),
         knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "out"),
@@ -64,10 +64,10 @@ async def test_the_plan_node_with_a_latex_reply_makes_a_real_design(tmp_path: Pa
     with pytest.raises(json.JSONDecodeError):
         json.loads(reply)
     eng = _engine(tmp_path, [reply, _latex_json(AUDIT)])
-    await eng._node_plan({"topic": "NILS", "iteration": 0})
+    await eng._node_plan({"topic": "SNR", "iteration": 0})
     design, why = _plan.load_design(eng.quest_root)
     assert design is not None, why
-    assert design["hypothesis"] == "NILS rises as " + SIGMA + " falls"
+    assert design["hypothesis"] == "SNR rises as " + SIGMA + " falls"
     assert TEXT in design["method"]
     assert "(parse failed)" not in _plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
     log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
@@ -77,17 +77,17 @@ async def test_the_plan_node_with_a_latex_reply_makes_a_real_design(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_the_design_node_with_a_latex_reply_makes_a_real_design(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [_latex_json(DESIGN), _latex_json(AUDIT)])
-    out = await eng._node_design({"topic": "NILS", "iteration": 0})
-    assert out["design"]["hypothesis"] == "NILS rises as " + SIGMA + " falls"
+    out = await eng._node_design({"topic": "SNR", "iteration": 0})
+    assert out["design"]["hypothesis"] == "SNR rises as " + SIGMA + " falls"
     assert TEXT in out["design"]["method"]
 
 
 @pytest.mark.asyncio
 async def test_a_design_that_cannot_be_read_is_asked_for_once_more_then_the_quest_stops_and_nothing_runs(tmp_path: Path) -> None:
-    eng = _engine(tmp_path, ["I would design an experiment about {NILS", "sorry, here is a description instead"])
+    eng = _engine(tmp_path, ["I would design an experiment about {SNR", "sorry, here is a description instead"])
     stops = _stops(eng)
     with pytest.raises(RuntimeError, match="stopped"):
-        await eng._node_plan({"topic": "NILS", "iteration": 0})
+        await eng._node_plan({"topic": "SNR", "iteration": 0})
     assert eng._client.chat.await_count == 2  # asked once, then once more: no third call, no audit of an empty design
     (stop,) = stops
     assert stop["kind"] == "model_unreadable" and stop["interaction"] == "supply"
@@ -104,7 +104,7 @@ async def test_the_design_node_stops_the_same_way_instead_of_going_on_with_an_em
     eng = _engine(tmp_path, ["no json here", "still none"])
     stops = _stops(eng)
     with pytest.raises(RuntimeError, match="stopped"):
-        await eng._node_design({"topic": "NILS", "iteration": 0})
+        await eng._node_design({"topic": "SNR", "iteration": 0})
     assert [s["kind"] for s in stops] == ["model_unreadable"]
     assert eng._client.chat.await_count == 2
 
@@ -112,12 +112,12 @@ async def test_the_design_node_stops_the_same_way_instead_of_going_on_with_an_em
 @pytest.mark.asyncio
 async def test_a_second_answer_that_can_be_read_is_used(tmp_path: Path) -> None:
     eng = _engine(tmp_path, ["no json here", json.dumps(DESIGN), json.dumps(AUDIT)])
-    out = await eng._node_design({"topic": "NILS", "iteration": 0})
+    out = await eng._node_design({"topic": "SNR", "iteration": 0})
     assert out["design"]["hypothesis"] == DESIGN["hypothesis"]
 
 
 _ANALYZE_STATE = {
-    "result_json": {"contrast": 0.45, "NILS": 1.42}, "exec_result": {"returncode": 0}, "figures": [], "design": {},
+    "result_json": {"contrast": 0.45, "SNR": 1.42}, "exec_result": {"returncode": 0}, "figures": [], "design": {},
 }
 
 
@@ -129,7 +129,7 @@ def _analysis_engine(tmp_path: Path, replies: list) -> Engine:
 
 @pytest.mark.asyncio
 async def test_an_analysis_with_latex_is_read(tmp_path: Path) -> None:
-    reply = ('{"summary": "NILS of ' + TEXT + ' is 1.42 at ' + SIGMA + '", "key_findings": ["a"], "next_step": "publish"}')
+    reply = ('{"summary": "SNR of ' + TEXT + ' is 1.42 at ' + SIGMA + '", "key_findings": ["a"], "next_step": "publish"}')
     eng = _analysis_engine(tmp_path, [reply])
     patch = await eng._node_analyze(dict(_ANALYZE_STATE))  # type: ignore[arg-type]
     assert patch["analysis"]["key_findings"] == ["a"] and "unreadable" not in patch["analysis"]
@@ -144,7 +144,7 @@ async def test_an_analysis_unreadable_twice_is_not_findings_and_the_evidence_gat
     assert patch["analysis"]["unreadable"] is True and patch["analysis"]["key_findings"] == []
 
     gate = _analysis_engine(tmp_path / "g", [RuntimeError("the gate must not ask a model")])
-    out = await gate._node_evidence_gate({"topic": "NILS", **_ANALYZE_STATE, "analysis": patch["analysis"]})
+    out = await gate._node_evidence_gate({"topic": "SNR", **_ANALYZE_STATE, "analysis": patch["analysis"]})
     assessment = out["evidence_assessment"]
     assert assessment["verdict"] == "insufficient" and "could not be read" in assessment["rationale"]
     assert assessment["decided_by"] == "rule" and not out.get("redesign")
@@ -152,15 +152,15 @@ async def test_an_analysis_unreadable_twice_is_not_findings_and_the_evidence_gat
 
 
 def test_a_plan_rewrite_with_latex_in_a_double_quoted_value_keeps_it() -> None:
-    block = ('hypothesis: "NILS of $' + BS + 'text{NILS}$ rises"\n'
-             'variables:\n  independent: ["' + BS + 'sigma"]\n  dependent: [nils]\n  controls: []\n'
+    block = ('hypothesis: "SNR of $' + BS + 'text{SNR}$ rises"\n'
+             'variables:\n  independent: ["' + BS + 'sigma"]\n  dependent: [snr]\n  controls: []\n'
              'method: "sweep ' + BS + 'sigma"\nexpected_outcome: x\nfigures_planned: [c.png]\ndependencies: [numpy]\n')
     text = "# Plan\n\n## " + _plan.DESIGN_HEADING + "\n\n```yaml\n" + block + "```\n"
     # as written, `\t` of `\text` is read as a tab, and `\s` is no escape at all
     assert _plan.parse(text).design is None
     kept = _plan.keep_latex_in_block(text)
     design = _plan.parse(kept).design
-    assert design["hypothesis"] == "NILS of $" + BS + "text{NILS}$ rises"
+    assert design["hypothesis"] == "SNR of $" + BS + "text{SNR}$ rises"
     assert design["variables"]["independent"] == [BS + "sigma"]
     assert _plan.keep_latex_in_block("no block here " + BS + "text") == "no block here " + BS + "text"
 

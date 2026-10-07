@@ -1,4 +1,4 @@
-"""LaTeX a model writes inside a JSON or YAML string (single backslashes: ``$\\sigma$``, ``\\text{NILS}``) is read back as
+"""LaTeX a model writes inside a JSON or YAML string (single backslashes: ``$\\sigma$``, ``\\text{SNR}``) is read back as
 LaTeX, not as an unreadable reply or as a tab, a form feed or a backspace."""
 from __future__ import annotations
 
@@ -20,17 +20,17 @@ def _reply(objection: str) -> str:
 
 
 def test_a_backslash_sigma_reply_is_read() -> None:
-    reply = _reply("use $" + BS + "sigma_{in}=0.6$")
+    reply = _reply("use $" + BS + "sigma=0.6$")
     with pytest.raises(json.JSONDecodeError):
         json.loads(reply)
     parsed = _parse_json_lenient(reply, node="t")
     assert parsed is not None
-    assert parsed["objections"][0]["objection"] == "use $" + BS + "sigma_{in}=0.6$"
+    assert parsed["objections"][0]["objection"] == "use $" + BS + "sigma=0.6$"
     assert parsed["amended_design"] == {"a": 1}
 
 
 @pytest.mark.parametrize("latex", [
-    BS + "text{NILS}", BS + "frac{a}{b}", BS + "beta", BS + "nabla", BS + "nu", BS + "rho", BS + "right)", BS + "times",
+    BS + "text{SNR}", BS + "frac{a}{b}", BS + "beta", BS + "nabla", BS + "nu", BS + "rho", BS + "right)", BS + "times",
     BS + "tau_0", BS + "theta", BS + "upsilon", BS + "lambda", BS + "mathrm{dose}", BS + "approx", BS + "pi", BS + "cdot",
     BS + "sqrt{2}", BS + "left(", BS + "rightarrow", BS + "tilde{x}", BS + "bar{x}", BS + "forall",
 ])
@@ -41,7 +41,7 @@ def test_latex_commands_survive_as_literal_latex(latex: str) -> None:
 
 
 @pytest.mark.parametrize("latex", [
-    BS + "text{NILS}", BS + "frac{a}{b}", BS + "beta", BS + "nabla", BS + "rho", BS + "right)", BS + "times",
+    BS + "text{SNR}", BS + "frac{a}{b}", BS + "beta", BS + "nabla", BS + "rho", BS + "right)", BS + "times",
     BS + "theta", BS + "rightarrow", BS + "tilde{x}", BS + "bar{x}", BS + "forall",
 ])
 def test_a_command_that_parses_as_a_tab_or_a_form_feed_is_read_as_latex_alone(latex: str) -> None:
@@ -58,12 +58,12 @@ def test_code_in_a_valid_json_reply_is_never_read_as_latex() -> None:
 
 
 def test_latex_survives_with_want_and_in_a_fence_and_nested() -> None:
-    reply = ("Here you go:\n```json\n" + '{"design": {"hypothesis": "NILS $' + BS + 'text{NILS}>2$", '
+    reply = ("Here you go:\n```json\n" + '{"design": {"hypothesis": "SNR $' + BS + 'text{SNR}>2$", '
              '"variables": [{"name": "' + BS + 'sigma", "range": "0.3 to 0.9"}]}, "plan": {"in_short": "x"}}'
              + "\n```\n")
     parsed = _parse_json_lenient(reply, node="t", want=("design", "plan"))
     assert parsed is not None
-    assert parsed["design"]["hypothesis"] == "NILS $" + BS + "text{NILS}>2$"
+    assert parsed["design"]["hypothesis"] == "SNR $" + BS + "text{SNR}>2$"
     assert parsed["design"]["variables"][0]["name"] == BS + "sigma"
     plain = _parse_json_lenient(reply, node="t")
     assert plain == parsed
@@ -105,21 +105,21 @@ def test_a_reply_that_is_not_json_is_still_none() -> None:
 # --- YAML (the design block of plan.md) ---------------------------------------------------------------------------
 
 def test_a_double_quoted_yaml_value_with_latex_is_repaired_to_the_same_text() -> None:
-    block = ('hypothesis: "use $' + BS + 'sigma_{in}$ and ' + BS + 'text{NILS}"\n'
+    block = ('hypothesis: "use $' + BS + 'sigma$ and ' + BS + 'text{SNR}"\n'
              'note: \'single ' + BS + 'quoted stays\'\n'
              'variables:\n  - name: "' + BS + 'lambda"\n    values: [1, 2]  # a ' + BS + 'comment "q"\n')
     assert _plan.yaml_problem(block) is not None
     fixed, notes = _plan.repair_block(block)
     assert fixed is not None and notes
     loaded = yaml.safe_load(fixed)
-    assert loaded["hypothesis"] == "use $" + BS + "sigma_{in}$ and " + BS + "text{NILS}"
+    assert loaded["hypothesis"] == "use $" + BS + "sigma$ and " + BS + "text{SNR}"
     assert loaded["note"] == "single " + BS + "quoted stays"
     assert loaded["variables"][0]["name"] == BS + "lambda"
 
 
 def test_a_plan_the_engine_writes_with_latex_reads_back_unchanged() -> None:
-    design = {"hypothesis": "NILS $" + BS + "text{NILS}$ rises with " + BS + "sigma", "dependencies": ["numpy"],
-              "variables": {"independent": [BS + "beta"], "dependent": ["NILS"], "controls": []}}
+    design = {"hypothesis": "SNR $" + BS + "text{SNR}$ rises with " + BS + "sigma", "dependencies": ["numpy"],
+              "variables": {"independent": [BS + "beta"], "dependent": ["SNR"], "controls": []}}
     block = yaml.safe_dump(design, sort_keys=False, allow_unicode=True, default_flow_style=False, width=100)
     assert yaml.safe_load(block) == design
     text = "## " + _plan.DESIGN_HEADING + "\n\n```yaml\n" + block + "```\n"

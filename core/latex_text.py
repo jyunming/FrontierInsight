@@ -1,6 +1,6 @@
 """LaTeX a model wrote inside a JSON or YAML string, read back as the LaTeX it is.
 
-A model asked for JSON writes ``"use $\\sigma_{in}=0.6$ and $\\text{NILS}$"`` with ONE backslash. ``\\s`` is not a JSON
+A model asked for JSON writes ``"use $\\sigma=0.6$ and $\\text{SNR}$"`` with ONE backslash. ``\\s`` is not a JSON
 escape (the reply cannot be read at all), and ``\\t`` of ``\\text``, ``\\f`` of ``\\frac``, ``\\b`` of ``\\beta``, ``\\n`` of
 ``\\nabla`` and ``\\r`` of ``\\rho`` ARE escapes (the text is silently turned into a tab, a form feed, ...). A double-quoted
 YAML string has the same trouble. :func:`escape_latex_backslashes` rewrites, inside string literals only, every
