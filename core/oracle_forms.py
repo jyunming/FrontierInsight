@@ -29,6 +29,7 @@ engine holds it:
 from __future__ import annotations
 
 import ast
+import keyword
 import math
 import re
 from dataclasses import dataclass, field
@@ -500,20 +501,114 @@ def case_numbers(oracle: dict[str, Any]) -> dict[str, float]:
             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)}
 
 
-def formula_value(oracle: dict[str, Any]) -> tuple[float | None, str]:
-    """``(value, "")`` the check's ``expected_formula`` computes, or ``(None, why not)``; why is ``"missing"`` when the
-    check has none."""
+def _plain_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def fixed_settings(protocol: dict[str, Any] | None) -> dict[str, float]:
+    """The plan's fixed numeric settings by name, from the structured places a plan states them: ``protocol.thresholds``,
+    a ``protocol.grid`` parameter with one value and ``protocol.optimisation.baseline.values`` (a design's controls given
+    as ``{name, value}`` are added by :func:`fixed_settings_of_design`). Prose is never read. A name given two different
+    numbers is dropped: it cannot be told which is meant."""
+    found: dict[str, float] = {}
+    clash: set[str] = set()
+
+    def take(name: Any, value: Any) -> None:
+        number = _plain_number(value)
+        key = str(name).strip()
+        if number is None or not key:
+            return
+        if key in found and found[key] != number:
+            clash.add(key)
+        found.setdefault(key, number)
+
+    if isinstance(protocol, dict):
+        thresholds = protocol.get("thresholds")
+        for name, value in (thresholds.items() if isinstance(thresholds, dict) else []):
+            take(name, value)
+        for key in ("fixed", "constants", "controls"):
+            stated = protocol.get(key)
+            for name, value in (stated.items() if isinstance(stated, dict) else []):
+                take(name, value)
+        grid = protocol.get("grid")
+        for name, values in (grid.items() if isinstance(grid, dict) else []):
+            if isinstance(values, list) and len(values) == 1:
+                take(name, values[0])
+        block = protocol.get("optimisation")
+        baseline = block.get("baseline") if isinstance(block, dict) else None
+        values = baseline.get("values") if isinstance(baseline, dict) else None
+        for name, value in (values.items() if isinstance(values, dict) else []):
+            take(name, value)
+    return {k: v for k, v in found.items() if k not in clash}
+
+
+def fixed_settings_of_design(design: dict[str, Any] | None) -> dict[str, float]:
+    """:func:`fixed_settings` of a design, with the controls of its ``variables`` given as ``{name, value}``."""
+    if not isinstance(design, dict):
+        return {}
+    protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else None
+    found = fixed_settings(protocol)
+    variables = design.get("variables")
+    controls = variables.get("controls") if isinstance(variables, dict) else None
+    for item in (controls if isinstance(controls, list) else []):
+        if isinstance(item, dict) and str(item.get("name") or "").strip() and _plain_number(item.get("value")) is not None:
+            found.setdefault(str(item["name"]).strip(), float(item["value"]))
+    return found
+
+
+def _kept(name: str) -> str:
+    """``name`` as the calculator can hold it: a word Python reserves (``lambda``) takes a trailing underscore."""
+    return f"{name}_" if keyword.iskeyword(name) and name not in ("True", "False", "None") else name
+
+
+def _renamed(text: str) -> str:
+    return re.sub(r"(?<![A-Za-z0-9_.])([A-Za-z_][A-Za-z_0-9]*)(?![A-Za-z0-9_])",
+                  lambda m: _kept(m.group(1)), text)
+
+
+def _formula_result(oracle: dict[str, Any], fixed: dict[str, float] | None) -> tuple[float | None, str, list[str], str]:
+    r"""``(value, why not, names it uses that nothing sets, the formula as it was read)``. A formula is read as written;
+    only one that cannot be read as written is read again with its LaTeX spelled as the calculator writes it
+    (``\lambda`` / ``\lambda`` -> the name ``lambda``, ``\frac``, ``\cdot``, ``\sqrt{}``, ``^``). A name is
+    set by the check's ``case``, else by the plan's fixed settings (:func:`fixed_settings`); never guessed."""
     text = oracle.get("expected_formula")
     if text is None or (isinstance(text, str) and not text.strip()):
-        return None, "missing"
+        return None, "missing", [], ""
     if isinstance(text, bool) or not isinstance(text, (str, int, float)):
-        return None, "it is not a formula"
-    result = evaluate(str(text), case_numbers(oracle), special=True)
+        return None, "it is not a formula", [], ""
+    text = str(text)
+    values = {**(fixed or {}), **case_numbers(oracle)}
+    result = evaluate(text, values, special=True)
+    used = text
+    if result.unreadable:
+        from .numeric_oracle import latex_to_arithmetic
+
+        again = latex_to_arithmetic(text, names=True).strip()
+        if again and again != text:
+            held = _renamed(again)
+            held_values = {_kept(k): v for k, v in values.items()}
+            second = evaluate(held, held_values, special=True)
+            if not second.unreadable:
+                result, used = second, again
+                if second.missing:
+                    second.missing = [m[:-1] if m.endswith("_") and keyword.iskeyword(m[:-1]) else m
+                                      for m in second.missing]
     if result.value is not None:
-        return result.value, ""
+        return result.value, "", [], used
     if result.missing:
-        return None, f"it uses {', '.join(result.missing)}, which the check's case does not set as a number"
-    return None, result.unreadable or result.problem or "it cannot be computed"
+        return (None, f"it uses {', '.join(result.missing)}, which neither the check's case nor the plan's fixed "
+                      "settings give as a number", list(result.missing), used)
+    return None, result.unreadable or result.problem or "it cannot be computed", [], used
+
+
+def formula_value(oracle: dict[str, Any], fixed: dict[str, float] | None = None) -> tuple[float | None, str]:
+    """``(value, "")`` the check's ``expected_formula`` computes, or ``(None, why not)``; why is ``"missing"`` when the
+    check has none. ``fixed``: the plan's fixed numeric settings (:func:`fixed_settings`), used for a name the check's
+    ``case`` does not set."""
+    value, why, _missing, _used = _formula_result(oracle, fixed)
+    return value, why
 
 
 #: Said to the plan, and in plan.md, about a formula that can be read two ways.
@@ -521,13 +616,17 @@ AMBIGUOUS_WHY = ("it can be read two ways: write it so it can only be read one w
                  "ln named, ellipk(k**2))")
 
 
-def formula_findings(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | None = None) -> list[dict[str, Any]]:
     """What FI's own computation of each check's expected value found, for the checks FI may correct that can be judged
     (a number ``expected`` and a ``tolerance``): ``{"name", "state", ...}`` with ``state`` ``agrees``, ``missing``,
     ``unusable`` (``why``), ``ambiguous`` (a disagreeing formula that can be read two ways: never applied) or ``differs``
     (``value``, ``expected``). A check whose number is a violation, expecting 0
-    by its form, has no formula to compute."""
+    by its form, has no formula to compute. ``fixed``: the plan's fixed settings a formula may use by name (default: those
+    of ``protocol``, :func:`fixed_settings`); an ``unusable`` finding names the ``names`` nothing sets."""
     from . import oracle_triage as _triage
+
+    if fixed is None:
+        fixed = fixed_settings(protocol)
 
     found: list[dict[str, Any]] = []
     for oracle in _oracle.declared(protocol):
@@ -535,13 +634,13 @@ def formula_findings(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         if expected is None or limit is None or not _triage.correctable(oracle):
             continue
         name = str(oracle["name"]).strip()
-        value, why = formula_value(oracle)
+        value, why, unset, used = _formula_result(oracle, fixed)
         if value is None:
             found.append({"name": name, "state": "missing" if why == "missing" else "unusable", "why": why,
-                          "formula": str(oracle.get("expected_formula") or "")})
+                          "formula": str(oracle.get("expected_formula") or ""), "names": unset})
         elif abs(value - expected) > limit and not math.isclose(value, expected, rel_tol=1e-12, abs_tol=0.0):
             formula = str(oracle.get("expected_formula"))
-            if _triage.ambiguous(formula):
+            if _triage.ambiguous(used or formula):
                 # A formula that can be read two ways (sin(30) for 30 degrees, a bare log, ellipk of a modulus) is never
                 # used to change `expected`: FI's reading may not be the plan's.
                 found.append({"name": name, "state": "ambiguous", "value": value, "expected": expected,
@@ -558,7 +657,7 @@ def _digits(value: float) -> str:
     return f"{value:.12g}"
 
 
-def formula_request(findings: list[dict[str, Any]], *, last: bool = True) -> str:
+def formula_request(findings: list[dict[str, Any]], *, last: bool = True, fixed: dict[str, float] | None = None) -> str:
     """The part of the one request to the plan about the expected values FI computed itself: a check with no usable
     formula, and one whose formula gives another number than its ``expected`` (both numbers shown: no measured value
     exists yet). ``""`` when every check agrees."""
@@ -566,6 +665,10 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True) -> str
     for f in findings:
         if f["state"] == "missing":
             lines.append(f"- {f['name']!r}: give `expected_formula`.")
+        elif f["state"] == "unusable" and f.get("names"):
+            lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` uses {', '.join(f['names'])}, which "
+                         "are neither settings of this check's `case` nor fixed settings of the plan. Give the value of "
+                         "each of these names (add it to the check's `case`), or write the formula with numbers.")
         elif f["state"] == "unusable":
             lines.append(f"- {f['name']!r}: its `expected_formula` `{f['formula']}` cannot be computed ({f['why']}); give "
                          "one that can.")
@@ -581,7 +684,10 @@ def formula_request(findings: list[dict[str, Any]], *, last: bool = True) -> str
         return ""
     return (
         "FI works out each expected value itself before anything runs, from a formula the plan gives: "
-        f"{EXPECTED_FORMULA_LANGUAGE}. `expected` must be the number that formula gives, to full precision (a special "
+        f"{EXPECTED_FORMULA_LANGUAGE}. A name in a formula must be a setting of that check's `case`"
+        + (f" or one of the plan's fixed settings ({', '.join(f'{k} = {_digits(v)}' for k, v in sorted(fixed.items()))})"
+           if fixed else " (the plan states no fixed setting by name)")
+        + f"; any other name cannot be computed. `expected` must be the number that formula gives, to full precision (a special "
         "function's value written from memory is the usual mistake: let the formula compute it).\n" + "\n".join(lines)
         + ("\nChange only these checks, and nothing else in the plan." if last else ""))
 
@@ -598,7 +704,8 @@ def apply_formulas(text: str) -> tuple[str, list[dict[str, Any]]]:
         protocol = block.get("protocol")
         if not isinstance(protocol, dict) or not isinstance(protocol.get("oracles"), list):
             return None
-        wrong = {f["name"]: f for f in formula_findings(protocol) if f["state"] == "differs"}
+        wrong = {f["name"]: f for f in formula_findings(protocol, fixed_settings_of_design(block))
+                 if f["state"] == "differs"}
         if not wrong:
             return None
         items = []

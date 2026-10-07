@@ -420,15 +420,22 @@ _ARITH_TOKEN = re.compile(
 _RELATION_ANY = re.compile(r"=|[\u2248\u2243\u223c~]|\\(?:approx|simeq|sim)\b")
 
 
-def _arithmetic_of(expr: str) -> str | None:
-    """The formula as plain arithmetic the calculator reads (``\\frac{a}{b}`` ->
-    ``((a)/(b))``, ``\\cdot`` / ``×`` -> ``*``, ``\\sqrt{x}`` -> ``sqrt(x)``,
-    ``\\pi`` -> ``pi``, ``^`` -> ``**``, braces -> parentheses), or ``None`` when it
-    still holds a symbol or anything else the calculator does not know: ``L``, ``g``,
-    ``T_0``, a function it does not have, ``log`` (natural or base 10?)."""
-    from core import oracle_forms as forms
+_GREEK = (
+    "alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|rho|varrho|"
+    "sigma|tau|upsilon|phi|varphi|chi|psi|omega|Gamma|Delta|Theta|Lambda|Xi|Sigma|Upsilon|Phi|Psi|Omega"
+)
+_GREEK_RE = re.compile(r"\\(" + _GREEK + r")(?![A-Za-z])")
 
-    s = _RELATION_ANY.split(expr.replace(_MINUS_SIGN, "-"))[-1]
+
+def latex_to_arithmetic(s: str, *, names: bool = False) -> str:
+    """``s`` (one formula, no relation sign) with its LaTeX spelled as the calculator reads it: ``\\frac{a}{b}`` ->
+    ``((a)/(b))``, ``\\cdot`` / ``\\times`` -> ``*``, ``\\sqrt{x}`` -> ``sqrt(x)``, ``\\pi`` -> ``pi``, ``^`` -> ``**``,
+    braces -> parentheses. ``names``: a formula of named settings, where ``\\\\lambda`` (a backslash written twice, as it
+    is in a YAML string) and ``\\lambda`` both become the plain name ``lambda`` (a Greek letter is a name, never a
+    guess of a value), and a name is kept as it is."""
+    if names:
+        s = re.sub(r"\\{2,}(?=[A-Za-z])", r"\\", s)
+        s = _GREEK_RE.sub(lambda m: f" {m.group(1)} ", s)
     s = _LATEX_NOISE.sub(" ", s)
     s = re.sub(r"\\(?:cdot|times)(?![A-Za-z])|[\u00d7\u00b7]", "*", s)
     s = re.sub(r"\\div(?![A-Za-z])|\u00f7", "/", s)
@@ -443,7 +450,20 @@ def _arithmetic_of(expr: str) -> str | None:
         s = t
     s = re.sub(r"\u221a\s*(\d+(?:\.\d+)?)", r"sqrt(\1)", s).replace("\u221a", "sqrt")
     s = s.replace("{", "(").replace("}", ")")
-    s = re.sub(r"(?<=\d),(?=\d{3}\b)", "", s)
+    if not names:  # in a formula an argument list is `max(3,400)`, not a thousands separator
+        s = re.sub(r"(?<=\d),(?=\d{3}\b)", "", s)
+    return s
+
+
+def _arithmetic_of(expr: str) -> str | None:
+    """The formula as plain arithmetic the calculator reads (``\\frac{a}{b}`` ->
+    ``((a)/(b))``, ``\\cdot`` / ``×`` -> ``*``, ``\\sqrt{x}`` -> ``sqrt(x)``,
+    ``\\pi`` -> ``pi``, ``^`` -> ``**``, braces -> parentheses), or ``None`` when it
+    still holds a symbol or anything else the calculator does not know: ``L``, ``g``,
+    ``T_0``, a function it does not have, ``log`` (natural or base 10?)."""
+    from core import oracle_forms as forms
+
+    s = latex_to_arithmetic(_RELATION_ANY.split(expr.replace(_MINUS_SIGN, "-"))[-1])
 
     known = (set(forms.FUNCTIONS) - {"log"}) | {"pi", "ln"}
     tokens = _ARITH_TOKEN.findall(s)

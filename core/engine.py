@@ -11949,10 +11949,13 @@ class Engine:
         # FI's own computation of each expected value, from the formula the plan gives (core/oracle_forms.py): what the
         # plan must still say goes into the SAME request as the rest; nothing is asked on a resume that already asked.
         formula_asks: list[dict[str, Any]] = []
+        fixed_now: dict[str, float] = {}
         if not progress.get("asked") and not self._simulation_ran():
             design_now, _why = _plan.load_design(self.quest_root)
             protocol_now = design_now.get("protocol") if isinstance(design_now, dict) else None
-            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None)
+            fixed_now = _forms.fixed_settings_of_design(design_now)
+            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None,
+                                                               fixed_now)
                             if f["state"] != "agrees"]
         if (rewrites or requests or review.get("lines") or formula_asks) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
@@ -11989,7 +11992,7 @@ class Engine:
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
             must = [p for p in (_forms.request(requests, last=not (findings or formula_asks)) if requests else "",
-                                _forms.formula_request(formula_asks, last=not findings)) if p]
+                                _forms.formula_request(formula_asks, last=not findings, fixed=fixed_now)) if p]
             parts = [*must, _review.request(findings) if findings else ""]
             if len(must) + bool(findings) > 1:
                 parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
@@ -12056,7 +12059,8 @@ class Engine:
         design, _why = _plan.load_design(self.quest_root)
         protocol = design.get("protocol") if isinstance(design, dict) else None
         left = []
-        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None):
+        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None,
+                                         _forms.fixed_settings_of_design(design)):
             if f["state"] in ("missing", "unusable", "ambiguous"):
                 why = ("the plan gave no formula for it" if f["state"] == "missing"
                        else f"its formula can be read two ways, so FI did not use it: {f.get('formula')}"
