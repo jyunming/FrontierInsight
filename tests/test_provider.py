@@ -13,6 +13,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from core.config import ProviderConfig
+
+
+@pytest.fixture(autouse=True)
+def _plain_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests drive the plain request through a mocked ``post``; the streamed call has its own tests
+    (test_provider_http_streaming.py, test_provider_kimi_streaming.py)."""
+    monkeypatch.setattr("core.provider._http_streams", lambda endpoint: False)
 from core.provider import (
     _DIRECT_DEFAULTS,
     _PROXY_PROVIDERS,

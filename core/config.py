@@ -455,10 +455,11 @@ class ProviderConfig(BaseModel):
     @field_validator("extra_body")
     @classmethod
     def _no_stream_in_extra_body(cls, v: dict[str, Any]) -> dict[str, Any]:
-        """FI decides whether a call streams (it streams calls to Moonshot's API) and reads the answer to match."""
+        """FI decides whether a call streams (it streams every direct provider's calls) and reads the answer to match."""
         if "stream" in (v or {}):
-            raise ValueError("provider.extra_body cannot set `stream`: FI decides that itself (it streams calls to "
-                             "Moonshot's API and sends every other request whole). Remove `stream` from extra_body.")
+            raise ValueError("provider.extra_body cannot set `stream`: FI decides that itself (it streams the calls of "
+                             "every direct provider, and sends one whole when a server does not take it). Remove "
+                             "`stream` from extra_body.")
         return v
 
     @field_validator("reasoning_effort", mode="before")
