@@ -109,6 +109,7 @@ from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import equation_tests as _equation_tests
+from . import function_steps as _function_steps
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
 from . import optimisation_plan as _optim
@@ -8139,6 +8140,9 @@ class Engine:
                 "[implement] filling scaffold (%d functions to body)",
                 len(outline.get("functions") or []),
             )
+            # The model's package, one function at a time (core/function_steps.py): when it is written and checked, the
+            # request below asks for the two scripts only.
+            await self._fill_model_functions(state, outline)
             prompt = body_prompt.substitute(
                 design_block=json.dumps(state.get("design") or {}, indent=2),
                 clarify_block=_format_clarify(state),
@@ -9706,6 +9710,12 @@ class Engine:
         if extend and not on_disk:
             # An extension changes as little as it can: code kept as two scripts is not restructured for it.
             return scripts, text, {}
+        if not extend and _function_steps.is_ready(self.quest_root, package):
+            if _code_layout.reply_files(text, _PY_FENCE_RE, package):
+                self._log.info("[implement] the reply also wrote the model's package; FI keeps the package it wrote and "
+                               "checked function by function")
+            _code_layout.save(self.quest_root, {**layout, "fell_back": "", "function_steps": True})
+            return scripts, text, {}
         files = _code_layout.reply_files(text, _PY_FENCE_RE, package)
         if not _code_layout.complete(files, package) and not extend:
             adopted = self._adopt_reply_package(text, scripts, package)
@@ -9786,6 +9796,17 @@ class Engine:
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
 
+    def _function_steps_note(self, package: str) -> str:
+        """For the code-writing prompt when the function-by-function attempt ended: which function it could not get right
+        (its name and equation, nothing else)."""
+        record = _function_steps.load(self.quest_root)
+        if record.get("package") != package or record.get("status") != "fell_back":
+            return ""
+        failed = [f"`{n}` (equation {e.get('equation')})" for n, e in (record.get("functions") or {}).items()
+                  if isinstance(e, dict) and e.get("status") == _function_steps.FAILED]
+        return ("\nFI first tried to write the package one function at a time and " + ", ".join(failed or ["one function"])
+                + " still failed its checks: take extra care that each function computes exactly its equation.\n")
+
     def _equation_sources(self) -> dict[str, str]:
         """The files of ``code/`` that can hold a function an equation test imports: the packages and ``simulate.py``
         (``experiment.py`` runs when it is imported, so it is never one)."""
@@ -9796,12 +9817,81 @@ class Engine:
             out[_split_run.SIMULATE_NAME] = simulate.read_text(encoding="utf-8")
         return out
 
+    async def _fill_model_functions(self, state: QuestState, outline: dict[str, Any]) -> bool:
+        """After the outline, before the code is written whole: fill the model's package one function at a time, each
+        import-checked and tested against the plan's worked example for its equation, a failing function repaired alone
+        (bounded). ``True`` when the package is written and checked, so the code-writing request asks for the two scripts
+        only; ``False`` (the code is written whole, as before) when the step does not apply or a function still fails
+        after its repairs. Never stops a quest."""
+        ex = self.config.execution
+        try:
+            layout = self._code_layout(state)
+            if (not ex.code_function_steps or ex.code_function_steps_max_functions <= 0 or not layout
+                    or layout["shape"] != _code_layout.PACKAGE):
+                return False
+            if ex.sandbox != "venv":
+                self._log.info("[implement] the model's functions are written with the rest of the code: checking them "
+                               "one at a time is done in the quest's own environment, not in Docker")
+                return False
+            protocol = self._protocol_block(state)
+            specs, notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
+            if not specs:
+                self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
+                               "; ".join(notes) or "the outline names no function per equation")
+                return False
+            if len(specs) > ex.code_function_steps_max_functions:
+                self._log.info("[implement] the model has %d functions, over the %d that are written one at a time "
+                               "(execution.code_function_steps_max_functions): written with the rest of the code",
+                               len(specs), ex.code_function_steps_max_functions)
+                return False
+            if not self.executor.python_path(self.quest_root).is_file():
+                self._log.info("[implement] the model's functions are written with the rest of the code: the quest's "
+                               "environment is not there to check them in")
+                return False
+            package = layout["package"]
+            record = _function_steps.load(self.quest_root)
+            if (self.quest_root / "code" / package / _code_layout.MODEL_NAME).is_file() and record.get("package") != package:
+                return False  # a package written whole earlier is not replaced by this step
+            deps = _coerce_dep_list(outline.get("deps")) + _coerce_dep_list((state.get("design") or {}).get("dependencies"))
+            install_list, _dropped = _experiment_deps.split_deps(
+                deps, local_modules=[p.stem for p in (self.quest_root / "code").glob("*.py")])
+            if install_list:
+                failed = await self._install_packages(install_list)
+                for dep, why in failed:
+                    self._log.info("[implement] %r could not be installed for the function checks: %s", dep, why)
+            view = _oracle.model_view((protocol or {}).get("model") if isinstance(protocol, dict) else None) or {}
+            constants = "\n".join(f"- {c.get('name')} = {c.get('value')} ({c.get('source')})"
+                                  for c in outline.get("constants") or [] if isinstance(c, dict) and c.get("name"))
+
+            async def chat(prompt: str) -> str:
+                return await self._chat(prompt, node="implement")
+
+            filler = _function_steps.FunctionFiller(
+                quest_root=self.quest_root, package=package, protocol=protocol if isinstance(protocol, dict) else None,
+                summary=str(view.get("summary") or ""),
+                prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"]},
+                chat=chat, run=self._run_in_env, log=self._log, repairs=ex.code_function_repairs,
+                max_calls=ex.code_function_steps_max_calls, constants=constants)
+            outcome = await filler.run_all(specs)
+            if outcome.status == "done":
+                self._log.info("[implement] the model's package is written: %d function(s), each checked "
+                               "(%d request(s) to the model in this quest)", len(specs), outcome.calls)
+                return True
+            return False
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- writing the code function by function must never stop a quest
+            self._log.warning("[implement] writing the model's functions one at a time failed (%r); the code is written "
+                              "whole", e)
+            return False
+
     async def _equation_gate(self, state: QuestState, py: Any, exec_env: Any) -> QuestState | None:
         """Before the oracle gate and the study: one small test per equation of the plan's model, written by FI from the
-        plan's own worked example (core/equation_tests.py), run in the quest's environment. What fails is returned as
-        a failed run naming the function and the equation (never the expected value), so the existing whole-script
-        repair and the honest stop apply. An equation that cannot be tested this way is said plainly and the quest
-        goes on. ``None`` when nothing fails."""
+        plan's own worked example (core/equation_tests.py), run in the quest's environment. A failing function is
+        repaired alone (the function and its equation, never the expected value), at most
+        ``execution.code_function_repairs`` times and within ``execution.code_function_steps_max_calls`` in the quest;
+        what still fails is returned as a failed run, so the existing whole-script repair and the honest stop apply.
+        An equation that cannot be tested this way is said plainly and the quest goes on. ``None`` when nothing fails."""
         if self.config.engine.oracle_check == "off" or not self._runs_code(state):
             return None
         protocol = self._protocol_block(state)
@@ -9812,14 +9902,16 @@ class Engine:
             self._log.info("[equations] the tests of the model's equations are run in the quest's own environment, "
                            "not in Docker: skipped")
             return None
+        ex = self.config.execution
         rows = _equation_tests.example_rows(protocol)
         record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows}}
         env = {**(exec_env or os.environ)}
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
+        spent: dict[str, int] = {}
         failures: list[dict[str, Any]] = []
-        for attempt in range(1):
+        for attempt in range(ex.code_function_repairs + 1):
             sources = self._equation_sources()
             located = _equation_tests.locate(protocol, sources)
             case_list = _equation_tests.cases(rows, located)
@@ -9850,8 +9942,21 @@ class Engine:
                 self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
                                len(results))
                 break
-            break
+            if attempt == ex.code_function_repairs:
+                break
+            for f in failures:
+                eid = str(f.get("id"))
+                if spent.get(eid, 0) >= ex.code_function_repairs:
+                    continue
+                if not _function_steps.spend(self.quest_root, ex.code_function_steps_max_calls):
+                    self._log.warning("[equations] the most requests the function steps may make in this quest are spent; "
+                                      "equation %s is not repaired alone", eid)
+                    spent[eid] = ex.code_function_repairs
+                    continue
+                spent[eid] = spent.get(eid, 0) + 1
+                await self._repair_equation_function(f, sources, located)
         record["failed"] = [{"id": f.get("id"), "function": f.get("function"), "status": f.get("status")} for f in failures]
+        record["repairs"] = spent
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / "equation_tests.json").write_text(json.dumps(record, indent=1, default=str) + "\n", encoding="utf-8")
@@ -9860,8 +9965,9 @@ class Engine:
         if not failures:
             return None
         message = " ".join(_equation_tests.failure_message(f, str(f.get("formula") or "")) for f in failures)
-        self._log.warning("[equations] %s do not compute what the plan's worked example says; the whole script is "
-                          "repaired next", ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures))
+        self._log.warning("[equations] %s still fail their worked example after %d repair(s) each: %s",
+                          ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures), ex.code_function_repairs,
+                          "; the whole script is repaired next")
         return {
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "",
@@ -9872,7 +9978,45 @@ class Engine:
                 "flat_output": "", "numeric_warnings": [],
             },
             "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,
+            # Last-value channels the full run writes on every pass: a failed pass must not leave an earlier script's.
+            "result_json_replicates": [], "result_json_deterministic": False, "result_json_trials": False,
+            "result_json_replicate_seed_ignored": False, "result_json_no_random_source": False,
         }
+
+    async def _repair_equation_function(self, failure: dict[str, Any], sources: dict[str, str],
+                                        located: dict[str, dict[str, str] | None]) -> bool:
+        """ONE repair of the function a failed equation test names, alone: it is shown that function, its equation and the
+        problem (never the expected value or the study's script). Kept only when the file still parses and the function
+        keeps the parameters it had."""
+        where = located.get(str(failure.get("id")))
+        if not where:
+            return False
+        path = self.quest_root / "code" / where["file"]
+        try:
+            source = path.read_text(encoding="utf-8")
+            node = _function_steps._find(source, where["function"])
+            if node is None:
+                return False
+            # The parameters exactly as the function has them now (the contract the test calls it by).
+            header = f"def {where['function']}({ast.unparse(node.args)}):"
+            problem = _equation_tests.failure_message(failure, str(failure.get("formula") or ""))
+            equation = str(failure.get("id"))
+            block = f"{equation}: {failure.get('formula') or ''}"
+            new, why = await _function_steps.repair_one(
+                source=source, name=where["function"], signature=header, equation=equation, equation_block=block,
+                problem=problem, prompt=self._prompts["implement_function_repair"],
+                chat=lambda prompt: self._chat(prompt, node="implement"), package=where["file"].split("/")[0])
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the code as it was
+            self._log.warning("[equations] the repair of %s could not be asked for: %r", failure.get("function"), e)
+            return False
+        if new is None:
+            self._log.warning("[equations] the repair of %s was not used: %s", failure.get("function"), why)
+            return False
+        path.write_text(new, encoding="utf-8")
+        self._log.info("[equations] rewrote the function %s alone (equation %s)", failure.get("function"), failure.get("id"))
+        return True
 
     def _package_in_use(self, state: QuestState) -> str | None:
         """The model's package when this quest's code is laid out as a research tool and the package is there."""
@@ -19938,7 +20082,14 @@ class Engine:
         # An extension of code kept as two scripts is not asked to restructure it into a package.
         extending_two_scripts = bool(state.get("refine_extend")) and not self._package_in_use(state)
         if layout and layout["shape"] == _code_layout.PACKAGE and not extending_two_scripts:
-            block += _code_layout.prompt_block(layout["package"], _oracle.generating_equations(self._protocol_block(state)))
+            package = layout["package"]
+            if _function_steps.is_ready(self.quest_root, package):
+                # FI wrote and checked the package function by function: only the two scripts are asked for.
+                block += _code_layout.prefilled_block(
+                    package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"))
+            else:
+                block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)))
+                block += self._function_steps_note(package)
         return block
 
     def _wait_for_job(self, job: dict[str, Any], code_path: Path) -> None:
@@ -20537,6 +20688,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_outline",                # two-stage implement: scaffold
         "select_skills",        # pick which skills this quest carries
         "implement_body",                   # two-stage implement: fills bodies
+        "implement_function",               # the model's package: ONE function body for ONE equation
+        "implement_function_repair",        # ONE function repaired alone (never the whole script)
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
         "cross_check",

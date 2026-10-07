@@ -154,5 +154,5 @@ def test_the_design_prompt_and_the_outline_prompt_state_the_contract() -> None:
 
     assert "worked example" in engine._PLAN_DIRECTIVE and '"example": {"inputs"' in engine._PLAN_DIRECTIVE
     outline = (Path(__file__).resolve().parents[1] / "agents" / "implement_outline.md").read_text(encoding="utf-8")
-    assert "`implements`" in outline and "example.inputs" in outline
+    assert "`implements`" in outline and "`depends_on`" in outline and "example.inputs" in outline
     json.dumps(eqt.EXAMPLE_RULE)

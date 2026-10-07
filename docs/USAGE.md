@@ -457,6 +457,10 @@ execution:
   code_package: true                # default: with two scripts, the code is a small research tool (the model's equations in code/<package>/, tests/test_oracles.py and METHODS.md written by FI); false keeps two scripts
   code_package_max_extra_lines: 400 # over this many extra lines of code (estimated at plan time) the quest keeps two scripts and says so in plan.md and run.log
   code_package_max_extra_calls: 3   # at most this many extra requests to the model in the whole quest (only when a reply leaves the package out); once spent, the quest keeps the code it has and says so
+  code_function_steps: true         # default: the model's package is written one function at a time (each checked against the plan's worked example for its equation); false writes the code whole
+  code_function_repairs: 2          # repairs of ONE failing function, alone, before the code is written whole
+  code_function_steps_max_functions: 10 # more model functions than this: the code is written whole
+  code_function_steps_max_calls: 40 # the most requests the function steps (fills, repairs, and the repairs after the equation tests) may make in the whole quest
   raw_dir: ""                       # only with split_analysis: where the raw files go (relative to the quest, or absolute; relative with docker); empty = raw/
   shared_interpreter: true          # default: run quest code on the Python that runs FI, no per-quest venv
   python_version: "3.11"            # only when shared_interpreter: false (venv per quest)

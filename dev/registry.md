@@ -496,9 +496,16 @@ same PR that adds, splits or renames one.
   (`example_rows`: FI computes the output with `oracle_forms`' calculator; `request` asks the plan for a missing or
   unusable one; `locate` finds the function labelled `# E<n>`; `cases` / `test_source` / `write` produce
   `code/tests/test_equations.py`; `failure_message` names the function and equation, never the expected value). Called
-  by `Engine._equation_gate` (in `_node_execute` before the oracle gate; returns a failed run for the existing
-  `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
+  by `Engine._equation_gate` (in `_node_execute` before the oracle gate; repairs a failing function alone, then returns
+  a failed run for the existing `execute_reflect`), by `_hold_oracle_forms` (missing examples ride in the one request to
   the plan, `_revise_checks_only(equations="example")`) and by `code_layout.project_files`. Record: `.fi/equation_tests.json`.
+- `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
+  `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
+  `model.py`, parameters and `# E<n>` label kept), `FunctionFiller` (fill, import-check, equation test, repair alone,
+  bounded; `fell_back` removes the package so the code is written whole), `repair_one`, `spend` (the quest-wide request
+  cap). Called by `Engine._fill_model_functions` from `_node_implement`; `_split_block` then uses
+  `code_layout.prefilled_block`. Prompts `agents/implement_function.md`, `agents/implement_function_repair.md`; record
+  `.fi/function_steps.json` (per-function status, so a resume does not write a done function).
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
   `simulate.py` as the scenario FI still calls, `tests/test_oracles.py` (`oracle_tests`, the plan's checks as unit tests,
