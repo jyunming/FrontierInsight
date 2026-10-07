@@ -510,7 +510,7 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
         if key in out:
             del out[key]
             notes.append(f"`protocol.optimisation.{key}` was left out of the plan because it could not be read ({why}); "
-                         "put it right here if it matters")
+                         "it is not used")
             continue
         return None, notes + [f"the optimisation block was left out because it could not be repaired ({why})"]
     return None, notes + ["the optimisation block was left out because it could not be repaired"]

@@ -717,4 +717,5 @@ def test_a_grid_axis_may_be_names_but_not_a_mix_or_a_bool() -> None:
 def test_a_grid_that_cannot_be_read_is_reported_in_plain_words() -> None:
     out, notes = plan.repair_protocol({"grid": {"method": ["euler", 2]}, "runs_per_setting": 3})
     assert "grid" not in out and len(notes) == 1
-    assert "NO settings to vary" in notes[0] and "[euler, rk4]" in notes[0]
+    assert "no settings to vary yet" in notes[0] and "FI asks the plan's model to write them" in notes[0]
+    assert "[euler, rk4]" not in notes[0] and "in the protocol of this plan" not in notes[0], "a person is not asked to write it"

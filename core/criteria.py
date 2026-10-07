@@ -216,7 +216,7 @@ def repair(items: Any, protocol: dict[str, Any] | None) -> tuple[list[dict[str, 
     for index, item in enumerate(items, start=1):
         fixed, why = _one(item, index, protocol)
         if fixed is None:
-            notes.append(f"{why}; it was left out of the plan, put it right there if it matters")
+            notes.append(f"{why}; it was left out of the plan and is not used")
         elif any(c["name"].lower() == fixed["name"].lower() for c in kept):
             notes.append(f"`protocol.criteria` names {fixed['name']!r} twice; the second was left out of the plan")
         elif len(kept) >= MAX:

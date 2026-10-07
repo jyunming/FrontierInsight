@@ -5307,12 +5307,12 @@ class Engine:
         """The model the plan step's requests go to (for the record of what FI asked it, so another model is asked afresh)."""
         return str(self._model_for_node("plan_revise") or self.config.provider.model or "")
 
-    def _search_record(self, sha: str) -> tuple[int, int]:
+    def _search_record(self, sha: str, file: str | None = None) -> tuple[int, int]:
         """``(requests, chat calls)`` FI has made of the plan's model to write the search part of the plan that ``plan.md``
         (``sha``) still lacks, on the model asked now. Zero for a plan someone changed since (a person, another request) or a
         model changed since: each is a new plan, or a new asker, and is asked afresh."""
         try:
-            record = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8"))
+            record = json.loads((self.fi_dir / (file or _SEARCH_ASKED)).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return 0, 0
         if (isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name()):
@@ -5327,13 +5327,25 @@ class Engine:
         """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
         return self._search_record(sha)[0]
 
-    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str) -> bool:
+    def _parts_asked(self, sha: str) -> list[str]:
+        """The protocol parts FI has already asked the plan's model about, for the plan (``sha``) and model asked now (the
+        record is kept by part name too, because FI's own note in plan.md changes the plan's hash between two steps)."""
+        try:
+            record = json.loads((self.fi_dir / _PART_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name():
+            return [str(p) for p in record.get("parts") or []]
+        return []
+
+    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str, file: str | None = None,
+                             extra: dict[str, Any] | None = None) -> bool:
         """Write the record; ``False`` when it could not be written."""
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / _SEARCH_ASKED).write_text(json.dumps({
+            (self.fi_dir / (file or _SEARCH_ASKED)).write_text(json.dumps({
                 "count": count, "calls": calls, "sha": sha, "model": self._plan_model_name(), "outcome": outcome,
-                "at": _frozen.now(),
+                "at": _frozen.now(), **(extra or {}),
             }) + "\n", encoding="utf-8")
             return True
         except OSError as e:
@@ -5350,24 +5362,47 @@ class Engine:
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha):
             return design, plan_sha
-        wanted, missing, _why = self._search_problems(state, design)
+
+        def lacks(now: Any) -> list[str]:
+            wanted, missing, why = self._search_problems(state, now)
+            return _optim.plain_gaps(now, why) if wanted and missing else []
+
+        def request(now: Any, text: str) -> str:
+            _wanted, missing, _why = self._search_problems(state, now)
+            left_out = [m.group(0).lstrip("- ").strip() for m in re.finditer(
+                r"^.*the optimisation block was left out.*$", text, re.MULTILINE)][:3]
+            return _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
+
+        return await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request, keep=self._keep_only_the_search, file=_SEARCH_ASKED,
+            what="search for the best design", short="the search",
+            note="the search for the best design, written by the plan's model")
+
+    async def _ask_plan_to_complete(
+        self, design: Any, plan_sha: str, *, lacks: Any, request: Any, keep: Any, file: str, what: str, short: str,
+        note: str, extra: dict[str, Any] | None = None,
+    ) -> tuple[Any, str]:
+        """The bounded request to the plan's model to write a part of the plan that is missing or cannot be read, shared by
+        every such part (the search block, the settings to sweep, the metrics ...): at most ``_SEARCH_ASKS`` requests and
+        ``_SEARCH_CALLS`` chat calls per plan and model, counted in ``.fi/<file>`` BEFORE each call so a resume never asks
+        again. ``lacks(design)``: what the plan still lacks, in plain sentences (empty when complete);
+        ``request(design, text)``: what to ask; ``keep(before_text, revised_text)``: the text to write, which keeps only the
+        asked part (``None`` or ``ValueError``: the answer is not used). Returns the design to use and its plan's hash."""
         path = _plan.plan_path(self.quest_root)
-        if not wanted or not missing or not path.is_file():
+        gaps = lacks(design)
+        if not gaps or not path.is_file():
             return design, plan_sha
-        count, calls = self._search_record(plan_sha)
+        count, calls = self._search_record(plan_sha, file)
         while count < _SEARCH_ASKS and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS:
             text = path.read_text(encoding="utf-8")
             sha_before = _plan.sha256(text)
-            gaps = _optim.plain_gaps(design, self._search_problems(state, design)[2])
-            left_out = [m.group(0).lstrip("- ").strip() for m in re.finditer(
-                r"^.*the optimisation block was left out.*$", text, re.MULTILINE)][:3]
-            self._log.warning("[plan] the plan's search for the best design was missing %s; FI asked the plan to complete "
-                              "it (%d of %d)", "; ".join(gaps), count + 1, _SEARCH_ASKS)
-            self._progress("Asking the model to complete the search for the best design in the plan")
-            request = _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
+            self._log.warning("[plan] the plan's %s was missing %s; FI asked the plan to complete it (%d of %d)", what,
+                              "; ".join(gaps), count + 1, _SEARCH_ASKS)
+            self._progress(f"Asking the model to complete the {what} in the plan")
+            ask = request(design, text)
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
-            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking"):
+            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra):
                 # No durable count, no request: a request that could not be counted could be asked again on every resume.
                 self._log.warning("[plan] FI could not write down that it was asking the plan's model, so it did not ask")
                 return design, plan_sha
@@ -5375,9 +5410,8 @@ class Engine:
             outcome = "kept"
             try:
                 await self._rewrite_plan(
-                    request, path, by="engine", expect=text,
-                    finish=lambda revised, text=text: self._keep_only_the_search(text, revised),
-                    note="the search for the best design, written by the plan's model")
+                    ask, path, by="engine", expect=text,
+                    finish=lambda revised, text=text: keep(text, revised), note=note)
             except _PlanEditedMeanwhile:
                 outcome = "plan changed meanwhile"
                 self._log.warning("[plan] plan.md was changed while FI waited for the plan's model; FI kept the version "
@@ -5385,16 +5419,16 @@ class Engine:
                 print("[FI] plan.md was changed while FI waited for the plan's model: your version is kept.")
             except _ModelAnswerProblem as e:
                 outcome = "no complete answer"
-                self._log.warning("[plan] the plan step's answer to complete the search was not complete: %s", e)
+                self._log.warning("[plan] the plan step's answer to complete %s was not complete: %s", short, e)
             except ValueError as e:
                 outcome = "not usable"
-                self._log.warning("[plan] the plan step's answer to complete the search could not be used: %s", e)
+                self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
             except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
                 outcome = "no answer"
-                self._log.warning("[plan] the plan step could not be asked to complete the search: %s", e)
+                self._log.warning("[plan] the plan step could not be asked to complete %s: %s", short, e)
             count += 1
             calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
-            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome)
+            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file, extra)
             if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
                 again, sha = self._design_from_plan()
                 return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
@@ -5402,19 +5436,154 @@ class Engine:
             if again is None:
                 return design, plan_sha
             design, plan_sha = again, sha
-            wanted, missing, _why = self._search_problems(state, design)
-            if wanted and not missing:
-                self._log.info("[plan] the plan's search for the best design is complete now (asked %d time(s))", count)
-                print("[FI] the plan's search for the best design is complete now; going on")
+            gaps = lacks(design)
+            if not gaps:
+                self._log.info("[plan] the plan's %s is complete now (asked %d time(s))", what, count)
+                print(f"[FI] the plan's {what} is complete now; going on")
                 return design, plan_sha
         return design, plan_sha
 
     async def _complete_the_search_in_the_plan(self, state: QuestState) -> None:
         """At the plan step, before a person reads the plan: a search for the best design whose block is missing is
-        asked of the plan's model (:meth:`_ask_plan_for_the_search`), so the plan a person reads is complete."""
+        asked of the plan's model (:meth:`_ask_plan_for_the_search`), and so is a protocol part that could not be read
+        (:meth:`_ask_plan_for_the_parts`), so the plan a person reads is complete."""
         design, sha = self._design_from_plan()
         if design is not None and sha:
-            await self._ask_plan_for_the_search(state, design, sha)
+            design, sha = await self._ask_plan_for_the_search(state, design, sha)
+            await self._ask_plan_for_the_parts(state, design, sha)
+
+    def _unread_parts(self, design: Any) -> dict[str, str]:
+        """``{part: the sentence of plan.md that says it could not be read}`` for each protocol part that changes what is
+        measured (:data:`core.plan.ASKED_PARTS`: the settings to sweep, the metrics, the runs per setting, the precision)
+        that the plan's own notes say could not be read and that the design block still lacks. Only structured parts and
+        the notes FI wrote about them: no prose of the plan is read. A search for the best design has no separate sweep."""
+        path = _plan.plan_path(self.quest_root)
+        if not isinstance(design, dict) or not path.is_file():
+            return {}
+        protocol = design.get("protocol") if isinstance(design.get("protocol"), dict) else {}
+        found: dict[str, str] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if _plan.ASK_MARK not in line:
+                continue
+            for part in _plan.ASKED_PARTS:
+                if f"`protocol.{part}`" in line and part not in protocol and part not in found:
+                    if part == "grid" and _optim.study_type_of(design) == "find_best_design":
+                        continue
+                    found[part] = line.strip().lstrip("-").strip()
+        return found
+
+    def _keep_only_the_parts(self, before_text: str, after_text: str, parts: list[str]) -> str | None:
+        """``before_text`` with only the asked ``parts`` of the protocol taken from ``after_text`` (each only when it can be
+        read as the plan reads it); everything else, a check, a threshold, a tolerance, is the plan's own as it was.
+        ``None`` when none of the asked parts came back usable."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return None
+        old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
+        new_protocol = new.get("protocol") if isinstance(new.get("protocol"), dict) else {}
+        merged = dict(old_protocol)
+        taken: list[str] = []
+        for part in parts:
+            if new_protocol.get(part) is None:
+                continue
+            fixed, why = _plan.normalize_protocol({**merged, part: new_protocol[part]})
+            if fixed is None or part not in fixed:
+                self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
+                continue
+            merged[part] = fixed[part]
+            taken.append(part)
+        if not taken:
+            return None
+        edited = _plan.edit_design_block(before_text, lambda design: {**design, "protocol": merged})
+        if edited is None or _plan.parse(edited).design is None:
+            return None
+        return _plan.refresh_model_section(edited)
+
+    async def _ask_plan_for_the_parts(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """A protocol part that could not be read (the settings to sweep, the metrics, ...) is asked of the plan's model, in
+        place of asking a person to write it: the same bounded request as the search block
+        (:meth:`_ask_plan_to_complete`, counted in ``.fi/protocol_part_asked.json``), quoting what could not be read and
+        the rule. Only the asked parts are kept from the rewrite. plan.md says what was done."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha):
+            return design, plan_sha
+        before = self._parts_asked(plan_sha)
+        # A part asked about at the plan step is not asked about again at the design step of the same run.
+        asked = [p for p in self._unread_parts(design) if p not in before]
+        if not asked:
+            return design, plan_sha
+        record_parts = {"parts": [*before, *asked]}
+
+        def lacks(now: Any) -> list[str]:
+            return [f"`protocol.{part}` (could not be read)" for part in self._unread_parts(now) if part in asked]
+
+        def request(now: Any, _text: str) -> str:
+            return _plan.part_request(state.get("topic") or self.config.topic,
+                                      {k: v for k, v in self._unread_parts(now).items() if k in asked})
+
+        def keep(before: str, revised: str) -> str:
+            kept = self._keep_only_the_parts(before, revised, asked)
+            if kept is None:
+                raise ValueError("the revised plan has none of the asked parts in a form that can be read; plan.md is unchanged")
+            return kept
+
+        design, plan_sha = await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
+            what="settings the experiment needs", short="the protocol",
+            note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts)
+        path = _plan.plan_path(self.quest_root)
+        if path.is_file():
+            left = self._unread_parts(design)
+            lines = [f"FI asked the plan's model to write `protocol.{part}` again, and it is "
+                     + (f"still not readable ({'; the quest stops' if part == 'grid' else 'the experiment goes on without it'})"
+                        if part in left else "now in the plan") + "." for part in asked]
+            text = path.read_text(encoding="utf-8")
+            if not any(line in text for line in lines):
+                count, calls = self._search_record(_plan.sha256(text), _PART_ASKED)
+                updated = _plan.add_to_section(text, _PART_HEADING, ["", *[f"- {line}" for line in lines]])
+                path.write_text(updated, encoding="utf-8")
+                if count:  # the record names the plan it was made on: the plan as FI wrote its note on it
+                    self._record_search_asked(count, calls, _plan.sha256(updated), "told in the plan", _PART_ASKED,
+                                              record_parts)
+                plan_sha = _plan.sha256(updated)
+                _plan.record_version(self.quest_root, updated, by="engine", note="what FI did about protocol parts that could not be read")
+        return design, plan_sha
+
+    def _stop_if_no_settings_to_vary(self, state: QuestState, design: Any) -> None:
+        """A study whose plan tried to list settings to vary (``protocol.grid`` was drafted and could not be read, even when
+        the plan's model was asked to write it again) must not run one setting and call it a sweep: stop plainly, with no
+        paper, saying what was tried. A plan that never listed a sweep is a study with one setting and goes on. The other
+        unreadable parts (the metrics ...) go on, said in plan.md."""
+        if not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
+            return
+        if "grid" not in self._unread_parts(design):
+            return
+        path = _plan.plan_path(self.quest_root)
+        tried = self._search_record(_plan.sha256(path.read_text(encoding="utf-8")), _PART_ASKED)[0] if path.is_file() else 0
+        steps = [
+            "Nothing was run. The plan lists settings to vary, but FI could not read them, so the experiment would have run "
+            "one setting only and called it a study of several.",
+            (f"FI asked the plan's model {tried} time(s) to write them again, and it still could not."
+             if tried else "FI did not ask the plan's model to write them again (no model was available to ask, or the plan "
+             "was already settled)."),
+            "You do not need to write them yourself. What to do:",
+            "1. Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) another "
+            f"model in the quest's config.yaml, then `python launch.py --update {self.quest_id}`.",
+            f"2. Or ask for a change in words: `--resume {self.quest_id} --revise-plan \"<the settings to vary and their values>\"`.",
+        ]
+        self._log.warning("[design] the settings to sweep could not be read, even when the plan's model was asked (%d time(s)); "
+                          "stopping, nothing was run", tried)
+        print(f"[FI] quest {self.quest_id}: the settings to vary could not be read, even when the plan's model was asked; "
+              "nothing was run (see NEXT_STEP.md)")
+        self._pause_for_human(
+            kind="plan",
+            interaction="supply",
+            headline="the settings to vary could not be read",
+            steps=steps,
+            recommended="Try another model for the plan step.",
+            alternatives=[steps[-1][3:]],
+            payload={"quest_id": self.quest_id, "plan_file": str(path), "settings_stage": True},
+        )
 
     def _keep_only_the_search(self, before_text: str, after_text: str) -> str | None:
         """``before_text`` with only the search part of ``after_text`` (``study_type`` and ``protocol.optimisation``)
@@ -6170,6 +6339,8 @@ class Engine:
             # A plan that lacks the search part is completed by the plan's model before this stops (a person is not
             # asked to write it); the design to run is then the plan as rewritten.
             design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
+            design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
+        self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
         audited = await self._audit_the_design_that_runs(state, design)
         if audited is not design:
@@ -11949,10 +12120,13 @@ class Engine:
         # FI's own computation of each expected value, from the formula the plan gives (core/oracle_forms.py): what the
         # plan must still say goes into the SAME request as the rest; nothing is asked on a resume that already asked.
         formula_asks: list[dict[str, Any]] = []
+        fixed_now: dict[str, float] = {}
         if not progress.get("asked") and not self._simulation_ran():
             design_now, _why = _plan.load_design(self.quest_root)
             protocol_now = design_now.get("protocol") if isinstance(design_now, dict) else None
-            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None)
+            fixed_now = _forms.fixed_settings_of_design(design_now)
+            formula_asks = [f for f in _forms.formula_findings(protocol_now if isinstance(protocol_now, dict) else None,
+                                                               fixed_now)
                             if f["state"] != "agrees"]
         if (rewrites or requests or review.get("lines") or formula_asks) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
@@ -11989,7 +12163,7 @@ class Engine:
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
             must = [p for p in (_forms.request(requests, last=not (findings or formula_asks)) if requests else "",
-                                _forms.formula_request(formula_asks, last=not findings)) if p]
+                                _forms.formula_request(formula_asks, last=not findings, fixed=fixed_now)) if p]
             parts = [*must, _review.request(findings) if findings else ""]
             if len(must) + bool(findings) > 1:
                 parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
@@ -12056,7 +12230,8 @@ class Engine:
         design, _why = _plan.load_design(self.quest_root)
         protocol = design.get("protocol") if isinstance(design, dict) else None
         left = []
-        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None):
+        for f in _forms.formula_findings(protocol if isinstance(protocol, dict) else None,
+                                         _forms.fixed_settings_of_design(design)):
             if f["state"] in ("missing", "unusable", "ambiguous"):
                 why = ("the plan gave no formula for it" if f["state"] == "missing"
                        else f"its formula can be read two ways, so FI did not use it: {f.get('formula')}"
@@ -21187,6 +21362,8 @@ _FILL_MARKER = "plan_sources_asked.json"
 # Written each time FI asks the plan's model to write the search part of a plan for the best design
 # (``_ask_plan_for_the_search``): how many times it asked of this plan, so a resume does not ask again; at most this many.
 _SEARCH_ASKED = "search_block_asked.json"
+_PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
+_PART_HEADING = "Checks already made"
 _SEARCH_ASKS = 2
 _SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
 _SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model

@@ -399,7 +399,7 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
         fixed, why = normalize_model(model)
         return fixed, ([] if fixed is not None else [
             f"the model behind the numbers (`protocol.model`) was left out of the plan because it could not be read "
-            f"({why}); write it here"
+            f"({why}); it is not used"
         ])
     equations = model["equations"]
     if isinstance(equations, dict) and equations and all(_EQ_KEY_RE.match(str(k)) for k in equations):
@@ -420,20 +420,49 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
         label = str(item.get("id") or index).strip() if isinstance(item, dict) else str(index)
         if fixed is None:
             notes.append(f"equation {label} was left out of the model behind the numbers because it could not be read "
-                         f"({why}); put it right here if it matters")
+                         f"({why}); it is not used")
             continue
         if any(str(k.get("id")).strip() == label for k in kept):
-            notes.append(f"a second equation called {label} was left out of the model behind the numbers; give it its "
-                         "own id here if it matters")
+            notes.append(f"a second equation called {label} was left out of the model behind the numbers: it has the same id "
+                         "as an earlier one")
             continue
         kept.append(item)
     fixed, why = normalize_model({**model, "equations": kept})
     if fixed is None:
-        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); write it here"]
+        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); it is not used"]
     return fixed, notes
 
 
 _PROTOCOL_KEY = re.compile(r"`protocol\.([A-Za-z_]+)")
+
+#: The parts of the protocol that change what is measured: when one cannot be read, FI asks the plan's model to write it
+#: (``Engine._ask_plan_for_the_parts``), and the note says so in these words.
+ASKED_PARTS = ("grid", "metrics", "runs_per_setting", "precision")
+ASK_MARK = "FI asks the plan's model to write"
+PART_RULES = {
+    "grid": "`protocol.grid`: the settings the experiment varies, as a mapping from each setting's name to the list of "
+            "values it takes. Each list is non-empty and holds only numbers, or only names (text), never a mix: numbers "
+            "such as [0.1, 0.2, 0.4], or names such as [euler, rk4]. Take the settings to vary from `variables.independent`, "
+            "the method and the topic.",
+    "metrics": "`protocol.metrics`: a list; each entry has an `id` (the name the script gives the number), a `kind` "
+               "(`proportion` or `mean`), an `estimand` (text: what the number estimates) and a `unit` (text: what one "
+               "independent observation is).",
+    "runs_per_setting": "`protocol.runs_per_setting`: a whole number of at least 1.",
+    "precision": "`protocol.precision`: a mapping with `target_half_width`, a number between 0 and 1, and optionally "
+                 "`metric` and `reason` (text).",
+}
+
+
+def part_request(topic: str, unread: dict[str, str]) -> str:
+    """The request FI makes of the plan's model, in place of asking a person, for each protocol part that could not be read:
+    the sentence that says what could not be read (quoted) and the rule the part must meet. Nothing else may change."""
+    lines = [f"- {PART_RULES[part]}\n  What could not be read: {why}" for part, why in unread.items() if part in PART_RULES]
+    return (
+        "Parts of this plan's protocol could not be read, so the experiment would not run what the study needs. Write "
+        f"each of them again in the design block, from the plan and the topic: “{' '.join(str(topic or '').split())[:600]}”.\n"
+        + "\n".join(lines)
+        + "\nChange nothing else in the plan: not a check, a threshold, a tolerance or a criterion, and not a part of the "
+        "protocol that could be read.")
 
 
 def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
@@ -465,7 +494,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 out["metrics"] = kept
                 notes.extend(
                     f"a `protocol.metrics` entry was left out of the plan because it could not be checked ({reason}); "
-                    "put it right here if it matters"
+                    "the metrics that could be read are used"
                     for reason in dropped
                 )
                 continue
@@ -478,7 +507,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 out["thresholds"] = kept_t
                 notes.extend(
                     f"the threshold `{name}` was left out of `protocol.thresholds` because it is not one number "
-                    f"({out_value!r}); put it right here if it matters"
+                    f"({out_value!r}); it is not used"
                     for name, out_value in ((n, protocol["thresholds"][n]) for n in left_out)
                 )
                 continue
@@ -527,7 +556,7 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 label = (str(item.get("name") or "").strip() if isinstance(item, dict) else "") or f"number {index}"
                 reason = (why_one or "").replace("`protocol.oracles` entry 1: ", "").replace("`protocol.oracles` entry 1 ", "")
                 notes.append(f"the check {label!r} was left out of `protocol.oracles` because it could not be read "
-                             f"({reason}); put it right here if it matters")
+                             f"({reason}); it is not used")
             if len(kept_o) < len(out["oracles"]):
                 if kept_o:
                     out["oracles"] = kept_o
@@ -545,12 +574,14 @@ def repair_protocol(protocol: Any) -> tuple[dict[str, Any] | None, list[str]]:
             continue
         if key == "grid":
             notes.append(
-                f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has NO settings to vary and the "
-                "experiment would run one setting only. Write each parameter as a list of numbers, or a list of names such as "
-                "[euler, rk4], in the protocol of this plan before the experiment runs."
+                f"The settings to sweep (`protocol.grid`) could not be read ({why}), so the plan has no settings to vary yet. "
+                f"{ASK_MARK} them before the experiment runs; if that fails, the quest stops."
             )
+        elif key in ASKED_PARTS:
+            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); "
+                         f"{ASK_MARK} it before the experiment runs.")
         else:
-            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); put it right here if it matters")
+            notes.append(f"`protocol.{key}` was left out of the plan because it could not be checked ({why}); it is not used")
         del out[key]
     return None, notes
 

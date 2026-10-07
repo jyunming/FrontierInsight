@@ -115,7 +115,11 @@ same PR that adds, splits or renames one.
   allows and that can be judged), `formula_request` (the part of the SAME one request about the checks),
   `apply_formulas` (a formula that still disagrees by more than the check's own tolerance sets `expected`; the
   tolerance, mode, case and measure are never touched), `EXPECTED_FORMULA_LANGUAGE` (generated from the
-  calculator's tables, spliced into `_PLAN_DIRECTIVE`). Applied by `Engine._apply_expected_formulas` from
+  calculator's tables, spliced into `_PLAN_DIRECTIVE`). A formula is read as written first; one that cannot be read is
+  read again with its LaTeX spelled as the calculator writes it (`numeric_oracle.latex_to_arithmetic(names=True)`: Greek
+  letters become plain names, never values). A name may be a setting of the check's `case` or one of the plan's fixed
+  settings (`fixed_settings` / `fixed_settings_of_design`: one-valued grid axes (never a threshold), the baseline's values, `{name,
+  value}` controls; never prose); any other name goes into the one request, never guessed. Applied by `Engine._apply_expected_formulas` from
   `_hold_oracle_forms`: before the freeze and any run, once (`formulas` in `.fi/oracle_review.json`), as the
   engine's change (`_note_engine_change`, plan version `by="engine"`). `oracle_triage.blind` withholds it.
   The plan.md section is `HEADING`; `plan.raw_design_block` / `plan.edit_design_block` read and edit the block as
@@ -196,6 +200,12 @@ same PR that adds, splits or renames one.
   rewrite, `Engine._keep_only_the_search`, which also keeps every part of the plan's own block that was readable; a plan saved meanwhile is not overwritten, `_PlanEditedMeanwhile`; "measure instead" is checked by `Engine._check_measure_instead`; `plan.refresh_optimisation_section` shows the section again). The stop speaks in
   plain words (`optimisation_plan.plain_gaps`) and offers another model for the plan step or
   `optimisation_plan.MEASURE_INSTEAD` as a `--revise-plan` request; it never asks a person to write the block.
+  `Engine._ask_plan_to_complete` is the bounded request itself (counted in the record BEFORE each call; the search block
+  and the protocol parts share it). A protocol part that changes what is measured and could not be read (`plan.ASKED_PARTS`:
+  grid, metrics, runs_per_setting, precision; FI's own note in plan.md names it, `plan.ASK_MARK`) is asked the same way by
+  `Engine._ask_plan_for_the_parts` (`plan.part_request`, `PART_RULES`; record `.fi/protocol_part_asked.json`; only the asked
+  parts are kept, `_keep_only_the_parts`). `Engine._stop_if_no_settings_to_vary` stops a sweep that stays unreadable
+  (no paper); a study that never listed a sweep, or an unreadable metrics part, goes on and plan.md says so.
 - `core/optimise.py` — the engine runs the search for the best design: `OptimisationRunner` (the executor stand-in
   `_node_execute` picks when the design has an `optimisation` block and two scripts, instead of
   `trial_runner.TrialsRunner`; it runs the search, then `experiment.py` with `FI_OPTIMISATION` / `FI_BEST_DESIGN`, and
