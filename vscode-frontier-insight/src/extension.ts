@@ -50,7 +50,7 @@ import { AxonDiscovery, discoverAxon } from "./axon-endpoint";
 import { runProbe } from "./probe";
 import { openQuestMap, tabAreaColumn } from "./quest-map";
 import { IndexEntry, describeAmbiguous, findInIndex, loadIndex, matchIds, shortId } from "./quest-index";
-import { runFollow, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
+import { runFollow, runQuality, runRename, runRerunSteps, runTrace, runWhy } from "./trace";
 
 
 /**
@@ -405,6 +405,11 @@ async function handleRequest(
         // Why it stopped / why the review asked for a revision / why the evidence is at its level / why a step decided
         // what it did (core/why.py), exactly as `launch.py --why` prints it.
         await runWhy(prompt, stream, token);
+        return;
+    }
+    if (cmd === "quality") {
+        // The quest's quality report (core/quality_report.py), exactly as `launch.py --quality` prints it.
+        await runQuality(prompt, stream, token);
         return;
     }
     if (cmd === "rename") {

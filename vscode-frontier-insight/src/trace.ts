@@ -151,6 +151,28 @@ export async function runWhy(
 }
 
 /**
+ * `@fi /quality <quest_id>` - the quest's quality report (core/quality_report.py): where it went wrong, who caught it, what
+ * was fixed, what to try, what it cost. The same text as `python launch.py --quality` and the web quest page's Quality report.
+ */
+export async function runQuality(
+    promptArgs: string,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken,
+): Promise<void> {
+    const questId = promptArgs.trim().split(/\s+/).filter((w) => w)[0] ?? "";
+    if (!questId) {
+        stream.markdown("Which quest? Example: `@fi /quality 1790003131-my-quest` (where it went wrong, who caught it, what was fixed, what to try, what it cost).\n");
+        return;
+    }
+    const ctx = await launchContext(stream);
+    if (!ctx || token.isCancellationRequested) return;
+    stream.progress(`Reading the quality of ${questId}…`);
+    const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, ["--quality", questId, "--output-root", ctx.outputRoot]);
+    const text = (res.code === 0 ? res.stdout : [res.stdout, res.stderr].filter((t) => t.trim()).join("\n")).trim();
+    stream.markdown(text ? text.slice(0, OUTPUT_CHARS) + "\n" : `No output (exit ${res.code}).\n`);
+}
+
+/**
  * `@fi /rename <quest_id> <new title>` — change a finished or paused quest's title (core/quest_title.py): the paper's
  * title line, config.yaml, the summary and the saved state, recorded in its audit trace. The same change as
  * `python launch.py --rename` and **Rename** beside the title on the web quest page.
