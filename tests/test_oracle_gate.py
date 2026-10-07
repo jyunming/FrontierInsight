@@ -212,7 +212,7 @@ def _fake(calls: list[str], *, implement: str, repair: str | None = None, protoc
                 return "no plan file here"
             current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
             design = plan.parse(current).design
-            design["protocol"] = {**design["protocol"], "oracles": [ORACLE]}
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
             return plan.render("smoke", {}, design)
         return _fake_response_for(prompt)
 
@@ -324,10 +324,10 @@ async def test_warn_records_the_problem_and_the_quest_goes_on(
 
 
 @pytest.mark.asyncio
-async def test_off_and_a_quest_with_no_protocol_are_not_looked_at(
+async def test_off_is_not_looked_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    for name, extra, protocol in (("off", {"oracle_check": "off"}, _PROTOCOL), ("none", {}, {})):
+    for name, extra, protocol in (("off", {"oracle_check": "off"}, _PROTOCOL),):
         calls: list[str] = []
         monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_UNAWARE, protocol=protocol))
         engine = Engine(_cfg(tmp_path / name, **extra))
@@ -422,7 +422,7 @@ async def test_an_oracle_with_no_numbers_is_completed_in_the_plan_before_anythin
             calls.append("PlanRevise")
             current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
             design = plan.parse(current).design
-            design["protocol"] = {**design["protocol"], "oracles": [ORACLE]}
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
             return plan.render("smoke", {}, design)
         return await _fake(calls, implement=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
 
@@ -567,7 +567,7 @@ async def test_completing_the_plan_does_not_use_up_the_scripts_repair(
             calls.append("PlanRevise")
             current = prompt.split("# The plan as it stands", 1)[1].split("# What the person asked for", 1)[0].strip()
             design = plan.parse(current).design
-            design["protocol"] = {**design["protocol"], "oracles": [ORACLE]}
+            design["protocol"] = {**(design.get("protocol") or {}), "oracles": [ORACLE]}
             return plan.render("smoke", {}, design)
         return await _fake(calls, implement=_UNAWARE, repair=_PASSING, protocol={**_PROTOCOL, "oracles": [bare]})(self, messages, **kw)
 
@@ -1059,3 +1059,32 @@ async def test_unusable_repairs_are_exempt_only_once_so_the_loop_stays_bounded(
     # One free, then the one allowed: two calls, never more.
     assert calls.count("OracleRepair") == 2
     assert _record(engine)["status"] != "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_plan_with_no_protocol_at_all_is_asked_for_a_known_answer_check_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plan that names no protocol declares no known-answer check either: the gate used to skip it, so the simulation
+    ran with nothing checking it. It is asked for one, as a protocol with none is, and then checked."""
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_PASSING, protocol={}))
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and calls.count("PlanRevise") == 1
+    record = _record(engine)
+    assert record["status"] == "ok" and "declares no oracle" in record["attempts"][0]["problems"][0]
+
+
+@pytest.mark.asyncio
+async def test_a_plan_with_no_protocol_that_cannot_be_given_a_check_goes_on_and_says_nothing_checked_the_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import evidence
+
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_PASSING, protocol={}, revise=False))
+    engine = Engine(_cfg(tmp_path))
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None
+    assert "no known-answer check could be judged" in json.dumps(evidence.read(engine.quest_root) or {})

@@ -9529,6 +9529,10 @@ class Engine:
             self._oracle_record_clear()
             return None
         protocol = self._protocol_block(state)
+        if protocol is None and self._runs_code(state) and _frozen.load(self.quest_root) is None:
+            # A plan with no protocol at all declares no known-answer check either: the plan is asked for one below
+            # (as for a protocol that has none), never skipped, so a simulation never runs with nothing checking it.
+            protocol = {}
         if protocol is None:
             self._oracle_record_clear()
             return None
@@ -14564,6 +14568,7 @@ class Engine:
             "n_sources": n_sources,
             "n_supporting": n_supporting,
             "decided_by": decided_by,
+            **({"stuck_reason": str(parsed["stuck_reason"])} if no_findings and parsed.get("stuck_reason") else {}),
         }
         self._log.info(
             "[evidence_gate] verdict=%s status=%s route=%s decided=%s type=%s policy=%s "
@@ -14628,11 +14633,17 @@ class Engine:
         findings to write up, so the quest stops here without a paper. The same stop as a simulation that would not work
         (``needs/STUCK.json``, which the to-do card reads); what FI tried is in the record; nobody is asked to debug.
         The run's results stay on disk; a paper an earlier round left is set aside (kept, not deleted)."""
-        problem = ("the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
+        no_numbers = (state.get("evidence_assessment") or {}).get("stuck_reason") == "no_numbers"
+        problem = ("the experiment ran, but its result has no number in it, even after the design was asked for again, "
+                   "so FI has nothing measured to write up" if no_numbers else
+                   "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
                    "so FI has no findings to write up")
-        tried = ["asked the model to analyse the results",
-                 "read its reply as written, then again with the backslashes of formulas kept as written",
-                 "asked the model a second time for one short answer; that reply could not be read either"]
+        tried = (["ran the experiment and read the result it printed: no number in it",
+                  "sent the quest back to the design once, so the script was written again",
+                  "ran it again: the result still has no number in it"] if no_numbers else
+                 ["asked the model to analyse the results",
+                  "read its reply as written, then again with the backslashes of formulas kept as written",
+                  "asked the model a second time for one short answer; that reply could not be read either"])
         record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
                                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
                                   "why_repairs_ended": "the analysis could not be read twice"}
@@ -14658,8 +14669,9 @@ class Engine:
         for line in tried:
             self._log.info("[stuck] tried: %s", line)
         print(f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
-              "fix: needs/STUCK.json says what FI tried; run the quest again, or ask for the analysis again with another "
-              "model for `analyze` (`provider.node_models.analyze`).")
+              "fix: needs/STUCK.json says what FI tried; run the quest again, "
+              + ("or try another model for the design (`provider.node_models.design`)." if no_numbers else
+                 "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
         return {"stuck": record}
 
@@ -14671,15 +14683,21 @@ class Engine:
         the rule. The writer got no note, and the papers went out on no experiment. Now the quest goes back to design
         once while an iteration is left; after that the verdict is ``insufficient`` and the evidence note says why."""
         exec_result = state.get("exec_result")
+        from . import numeric_oracle as _numeric_oracle
+
+        result = state.get("result_json")
+        # A result with no number in it (the script printed its RESULT_JSON line with nothing measured) is no result.
+        no_numbers = bool(result) and not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
         if (
-            state.get("result_json")
+            (result and not no_numbers)
             or not isinstance(exec_result, dict) or not exec_result  # no experiment has run: not this case
             or state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
             or self.config.engine.analyze_local_first
         ):
             return None
-        why = f"the experiment produced no results (exit code {exec_result.get('returncode')!s}"
+        why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
+               if no_numbers else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
         if state.get("exec_give_up_reason"):
             why += f"; the repair gave up: {_one_line(state.get('exec_give_up_reason'), 160)}"
         why += ")"
@@ -14690,6 +14708,9 @@ class Engine:
             self._log.warning("[evidence_gate] %s; sending the quest back to design once", why)
             return {"verdict": "insufficient", "rationale": why + "; tried once more from the design", "gaps": [why],
                     "redesign": True}
+        if no_numbers:
+            # Asked from the design once and still nothing measured: there is nothing to write up, so no paper is written.
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True, "stuck_reason": "no_numbers"}
         return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
 
     async def _write_whole_paper(
