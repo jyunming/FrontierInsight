@@ -5644,6 +5644,119 @@ class Engine(RunChecksMixin):
             return None
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
 
+    def _drafted_search_record(self) -> tuple[int, str, int]:
+        """``(requests, model, iteration)`` of the last time FI asked the design step's model to write a drafted design's
+        search block (``.fi/drafted_search_asked.json``); zeros when it never did."""
+        try:
+            record = json.loads((self.fi_dir / _DRAFTED_SEARCH_ASKED).read_text(encoding="utf-8"))
+            return max(0, int(record.get("count") or 0)), str(record.get("model") or ""), int(record.get("iteration") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return 0, "", 0
+
+    def _drafted_search_asked(self, iteration: int) -> int:
+        """How many times FI has asked the design step's model, on the model and design round asked now."""
+        count, model, at = self._drafted_search_record()
+        return count if (model == str(self._model_for_node("design") or self.config.provider.model or "")
+                         and at == iteration) else 0
+
+    def _plan_block_for(self, design: Any) -> dict[str, Any] | None:
+        """The search block of ``plan.md`` when it can be used and describes the same search as ``design``: the same
+        settings to change and the same quantity and direction. ``None`` otherwise (a different search is never swapped in)."""
+        planned, _sha = self._design_from_plan()
+        if planned is None or not _optim.has_block(planned) or _optim.normalize(planned["protocol"]["optimisation"])[0] is None:
+            return None
+        theirs = planned["protocol"]["optimisation"]
+        mine = design["protocol"].get("optimisation") if isinstance(design.get("protocol"), dict) else None
+        if not isinstance(mine, dict):
+            return None
+
+        def names(block: dict[str, Any]) -> set[str]:
+            return {str(v.get("name")) for v in block.get("design_variables") or [] if isinstance(v, dict) and v.get("name")}
+
+        if not names(mine) or names(mine) != names(theirs):
+            return None
+        a, b = mine.get("objective"), theirs.get("objective")
+        if isinstance(a, dict) and a.get("quantity") and a.get("direction") and not (
+                isinstance(b, dict) and a.get("quantity") == b.get("quantity") and a.get("direction") == b.get("direction")):
+            return None
+        return theirs
+
+    async def _complete_a_drafted_search(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+        """A design drafted at this step (a redesign: it did not come from ``plan.md``) that is a search for the best
+        design whose block is missing or cannot be used is completed here, the way the plan's is
+        (:meth:`_ask_plan_for_the_search`), instead of stopping the quest. In this order: (1) the block of ``plan.md``, when
+        it is usable and describes the same search (same settings to change, same quantity and direction), is taken as it
+        is, since the plan step or a person already settled it; (2) otherwise the design step's model is asked to write just
+        that block (at most ``_SEARCH_ASKS`` requests of one chat call each per design round and model, counted in
+        ``.fi/drafted_search_asked.json`` BEFORE each call so a resume never asks again), and only a block that
+        passes the same reading as the plan's is kept; the rest of the design is untouched. What is still missing after
+        that stops the quest as before; a search is never run as a sweep."""
+        if not isinstance(design, dict) or not self._runs_code(state):
+            return design
+        wanted, missing, why = self._search_problems(state, design)
+        if not wanted or not missing:
+            return design
+        if _frozen.load(self.quest_root) is not None:
+            # After the freeze the block that runs is the frozen one (as at the run step): no model is asked.
+            frozen_block = _optimise.block_of(self._protocol_block(state))
+            if frozen_block is None:
+                return design
+            protocol = {k: v for k, v in (design.get("protocol") or {}).items() if k != "grid"}
+            self._log.warning("[design] the redesign's search block was missing %s; FI used the frozen protocol's block",
+                              "; ".join(missing))
+            return {**design, "study_type": "find_best_design", "protocol": {**protocol, "optimisation": frozen_block}}
+        if self._client is None:
+            return design
+
+        def with_block(block: dict[str, Any]) -> dict[str, Any]:
+            protocol = {k: v for k, v in (design.get("protocol") or {}).items() if k != "grid"}
+            return {**design, "study_type": "find_best_design", "protocol": {**protocol, "optimisation": block}}
+
+        if isinstance(design.get("protocol"), dict):
+            planned = self._plan_block_for(design)
+            if planned is not None:
+                self._log.warning("[design] the redesign's search block was missing %s; FI took the block of plan.md, "
+                                  "which describes the same search", "; ".join(missing))
+                return with_block(planned)
+        model = str(self._model_for_node("design") or self.config.provider.model or "")
+        while self._drafted_search_asked(iteration) < _SEARCH_ASKS:
+            count = self._drafted_search_asked(iteration) + 1
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                (self.fi_dir / _DRAFTED_SEARCH_ASKED).write_text(json.dumps(
+                    {"count": count, "model": model, "iteration": iteration, "at": _frozen.now()}) + "\n", encoding="utf-8")
+            except OSError as e:
+                self._log.warning("[design] FI could not write down that it was asking for the search block, so it did "
+                                  "not ask: %r", e)
+                return design
+            gaps = _optim.plain_gaps(design, why)
+            self._log.warning("[design] the redesign is a search for the best design and lacks %s; FI asked the design "
+                              "step's model to write it (%d of %d)", "; ".join(gaps), count, _SEARCH_ASKS)
+            self._progress("Asking the model to complete the search for the best design")
+            current = design["protocol"].get("optimisation") if isinstance(design.get("protocol"), dict) else None
+            ask = (_optim.ask_request(state.get("topic") or self.config.topic, missing)
+                   + "\n\nThe block drafted so far (keep what is usable in it, and write what is missing or cannot be "
+                   "read):\n" + json.dumps(current, ensure_ascii=False, default=str)[:4000]
+                   + "\n\nAnswer with the `optimisation` block alone, as one JSON object.")
+            try:
+                reply = await self._chat(ask, node="design")
+                obj = _parse_json_lenient(reply)
+            except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
+                self._log.warning("[design] the design step could not be asked to complete the search: %s", e)
+                continue
+            block = obj.get("optimisation") if isinstance(obj, dict) and isinstance(obj.get("optimisation"), dict) else obj
+            if not isinstance(block, dict) or _optim.normalize(block)[0] is None:
+                self._log.warning("[design] the design step's answer to complete the search could not be used: %s",
+                                  _optim.normalize(block)[1] if isinstance(block, dict) else "not a JSON object")
+                continue
+            design = with_block(block)
+            wanted, missing, why = self._search_problems(state, design)
+            if not missing:
+                self._log.info("[design] the redesign's search block is complete now (asked %d time(s))", count)
+                print("[FI] the search for the best design is complete now; going on")
+                break
+        return design
+
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Stop before anything runs when the design is a search for the best design that FI cannot start: the plan lacks
         what a search needs (the ``optimisation`` block, its budget), the simulation is not a script of its own
@@ -5683,11 +5796,14 @@ class Engine(RunChecksMixin):
         alternatives = ["Ask for a change in words: `--revise-plan \"<what to change>\"`."]
         if missing:
             tried = self._search_asked(_plan.sha256(path.read_text(encoding="utf-8"))) if path.is_file() else 0
+            drafted = self._drafted_search_record()[0]
             steps.append(f"Still missing from the plan: {'; '.join(gaps)}.")
             steps.append(
                 (f"FI asked the plan's model {tried} time(s) to write it from your topic, and it still could not."
-                 if tried else "FI did not ask the plan's model to write it (no model was available to ask, the plan was "
-                 "already settled, or this design did not come from the plan).")
+                 if tried else
+                 f"FI asked the design step's model {drafted} time(s) to write it for the redesign, and it still could not."
+                 if drafted else "FI did not ask the plan's model to write it (no model was available to ask, or the plan "
+                 "was already settled).")
                 if path.is_file() else
                 "This quest has no plan file (its plan could not be written), so FI had nothing to ask the model to complete.")
             can_measure = path.is_file() and self._measure_instead_possible(path.read_text(encoding="utf-8"))
@@ -6421,6 +6537,9 @@ class Engine(RunChecksMixin):
             # asked to write it); the design to run is then the plan as rewritten.
             design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
             design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
+        else:
+            # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
+            design = await self._complete_a_drafted_search(state, design, iteration=iteration)
         self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
         audited = await self._audit_the_design_that_runs(state, design)
@@ -22035,6 +22154,7 @@ _FILL_MARKER = "plan_sources_asked.json"
 # Written each time FI asks the plan's model to write the search part of a plan for the best design
 # (``_ask_plan_for_the_search``): how many times it asked of this plan, so a resume does not ask again; at most this many.
 _SEARCH_ASKED = "search_block_asked.json"
+_DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _SEARCH_ASKS = 2
