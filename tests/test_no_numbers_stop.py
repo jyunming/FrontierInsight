@@ -85,3 +85,29 @@ def test_only_a_real_number_counts_as_a_result(tmp_path: Path) -> None:
         assert ruled is not None and ruled["stuck"] is True and ruled["stuck_reason"] == "no_numbers"
     assert eng._no_results_verdict({**base, "result_json": {"x": {"y": [1.5]}}}) is None
     assert eng._no_results_verdict({**base, "result_json": {"x": 0}}) is None
+
+
+@pytest.mark.asyncio
+async def test_a_script_that_cannot_run_to_the_end_is_said_so_not_called_a_result_with_no_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+    crash = _FAKE_EXPERIMENT_CODE + "\nraise RuntimeError('boom')\n"
+    monkeypatch.setattr("core.engine.LLMClient.chat", _chat(calls, crash.replace("print('RESULT_JSON", "#")))
+    eng = Engine(_cfg(tmp_path, exec_reflect_max_iterations=0))
+    art = await eng.run()
+    assert art.paper_md is None and "Writing" not in calls
+    record = json.loads((eng.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "could not run to the end" in record["problem"] and "no number" not in record["problem"]
+    assert any("could not run to the end" in line for line in record["tried"])
+    assert "no number" not in " ".join(record["tried"])
+    assert "could not run to the end" in capsys.readouterr().out
+
+
+def test_the_stop_names_a_crash_and_a_finished_run_differently(tmp_path: Path) -> None:
+    eng = Engine(_cfg(tmp_path))
+    base = {"exec_result": {"returncode": 1}, "iteration": 2}
+    assert eng._no_results_verdict({**base, "result_json": None})["stuck_reason"] == "crashed"
+    assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "result_json": {}})["stuck_reason"] == "no_numbers"
+    assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "exec_give_up_reason": "x",
+                                    "result_json": None})["stuck_reason"] == "no_numbers"  # it finished, printing nothing
