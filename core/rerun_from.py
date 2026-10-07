@@ -119,7 +119,7 @@ _PAPER = ["paper", "paper.md", "paper.pdf", "paper.html", "paper_html_body.md", 
 _CLAIM_CHECK = ["paper/claims.json", "paper/CLAIMS.md", "paper/goal_coverage.json", "paper/numeric_audit.json",
                 "paper/statistics_audit.json", "paper/provenance_audit.json", "needs/receipts/claim_check.json"]
 # What the evidence gate writes.
-_EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json"]
+_EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json", "needs/STUCK.json"]
 # What the run and its checks leave under needs/ (the run writes them again).
 _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json",
                 "needs/ENVIRONMENT.json", "needs/HIDDEN_CHECK.json"]

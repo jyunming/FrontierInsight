@@ -3026,6 +3026,12 @@ async def _run_generators(
     web server) can record the failure for the quest."""
     written: dict[str, Path] = {}
     carried: set[str] = set()
+    if (Path(art.quest_root) / "needs" / "STUCK.json").is_file():
+        # The quest ended in an honest stop (needs/STUCK.json): there is no paper from this run, so none is made
+        # from one an earlier round left, and no slides, poster or talk from it.
+        print(f"[FI] quest {art.quest_id}: no paper, slides or poster were made, because the quest stopped without "
+              "findings to write up (needs/STUCK.json says why).")
+        return written
     _apply_paper_venue_override(cfg, art)
     _apply_quest_byline(cfg, Path(art.quest_root))
     if ask_byline:

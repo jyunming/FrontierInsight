@@ -1025,6 +1025,7 @@ class Engine:
                         # iteration==0).
                         if reopen and not prior_snapshot.next:
                             forget_papers_asked(self.fi_dir, declined=False)
+                            self._set_aside_stuck_record()
                             _it = int((prior_snapshot.values or {}).get("iteration", 0))
                             # The notes of earlier refines were answered by earlier passes: this pass redoes the
                             # design, and neither the writer nor the review treats them as new.
@@ -1040,6 +1041,8 @@ class Engine:
                                     "feedback_rounds_from": len((prior_snapshot.values or {}).get("feedback_history") or []),
                                     # A request to search further (core/optimise_refine.py) belongs to its own pass.
                                     "optimise_refine": {},
+                                    # An honest stop belongs to the pass that ended in it.
+                                    "stuck": {},
                                 },
                                 as_node="human_feedback",
                             )
@@ -14453,6 +14456,21 @@ class Engine:
         self._log.warning("[evidence_gate] %s; the evidence is judged insufficient", why)
         return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True}
 
+    def _set_aside_stuck_record(self) -> None:
+        """A refine that re-opens a quest which ended in an honest stop moves ``needs/STUCK.json`` (and so its to-do card)
+        aside, to ``.fi/set_aside_by_stuck/<time>/``, kept for the history: the pass that follows is not that stop's."""
+        record = self.quest_root / "needs" / "STUCK.json"
+        if not record.is_file():
+            return
+        aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
+        try:
+            aside.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(record), str(aside / "STUCK.json"))
+            self._log.info("[run] the earlier stop (needs/STUCK.json) is kept in %s; this pass starts without it",
+                           aside.relative_to(self.quest_root).as_posix())
+        except OSError as exc:
+            self._log.warning("[run] could not set needs/STUCK.json aside (%r)", exc)
+
     async def _node_stuck_no_findings(self, state: QuestState) -> QuestState:
         """The experiment ran but the model's reading of its results could not be read, even when asked twice: FI has no
         findings to write up, so the quest stops here without a paper. The same stop as a simulation that would not work
@@ -18936,10 +18954,14 @@ class Engine:
                 for p in figures.iterdir()
             )
         )
+        # A quest that ended in an honest stop (needs/STUCK.json, written by this run; a rerun or a refine moves it aside)
+        # has no paper: one an earlier round left on disk is not this quest's result, so no PDF, slides or poster are
+        # made from it. The record is read, not the checkpoint, so a rerun that went on is not held back by it.
+        stuck = (self.quest_root / "needs" / "STUCK.json").is_file()
         return QuestArtifacts(
             quest_id=self.quest_id,
             quest_root=self.quest_root,
-            paper_md=paper_md if paper_md.exists() else None,
+            paper_md=paper_md if paper_md.exists() and not stuck else None,
             paper_pdf=None,
             figures_dir=figures if figures_present else None,
             bundle_manifest=manifest if manifest.exists() else None,
