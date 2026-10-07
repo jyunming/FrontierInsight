@@ -56,7 +56,7 @@ def _symptom(quantities: list[str], values: dict[str, float], varied: list[str],
 
 
 def flat_search(rows: list[dict[str, Any]], objective: str = "the objective") -> str | None:
-    """The plain description of a search whose evaluations all returned the same numbers, else ``None``. ``rows`` are
+    """The plain description of a search whose evaluations all returned the same objective, else ``None``. ``rows`` are
     the search's evaluations as FI wrote them (``status``, ``design``, ``objective``, ``constraints``); ``objective`` is
     the name the plan gives the quantity."""
     ok = [r for r in rows if isinstance(r, dict) and r.get("status") == "ok" and isinstance(r.get("design"), dict)]
@@ -65,13 +65,9 @@ def flat_search(rows: list[dict[str, Any]], objective: str = "the objective") ->
         return None
     if not all(_is_number(r.get("objective")) for r in ok):
         return None
+    # The objective alone: a quantity that does not depend on the design is broken even when a limit's quantity varies.
     quantities = {objective: [float(r["objective"]) for r in ok]}
-    for name in sorted({n for r in ok for n in (r.get("constraints") or {})}):
-        column = [r["constraints"][name] for r in ok if isinstance(r.get("constraints"), dict) and name in r["constraints"]]
-        if len(column) != len(ok) or not all(_is_number(v) for v in column):
-            return None
-        quantities[name] = [float(v) for v in column]
-    if not all(_all_same(v) for v in quantities.values()):
+    if not _all_same(quantities[objective]):
         return None
     names = sorted({n for r in ok for n in r["design"]})
     varied = [n for n in names if len({repr(r["design"].get(n)) for r in ok}) > 1] or names

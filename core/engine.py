@@ -8432,11 +8432,13 @@ class Engine:
         drop: set[str] = set()
         for found in typed.values():
             drop |= set(_figdata.figures_to_drop(found, figures))
-        stems = {Path(n).stem for n in drop}
-        removed = [n for n in figures if Path(n).stem in stems]
+        removed = [n for n in figures if Path(n).name in drop]
         for name in removed:
-            for target in (self.quest_root / "figures" / name, records_dir / f"{Path(name).stem}.json",
-                           self.quest_root / "figures" / f"{Path(name).stem}.json"):
+            targets = [self.quest_root / "figures" / name]
+            # The figure's record is shared by its other formats: it goes with the last of them.
+            if not any(Path(n).stem == Path(name).stem and n not in removed for n in figures):
+                targets += [records_dir / f"{Path(name).stem}.json", self.quest_root / "figures" / f"{Path(name).stem}.json"]
+            for target in targets:
                 try:
                     target.unlink(missing_ok=True)
                 except OSError as exc:

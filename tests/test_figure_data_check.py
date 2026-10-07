@@ -101,6 +101,21 @@ def test_a_script_that_does_not_parse_reports_nothing() -> None:
     assert fdc.typed_series("ax.plot(x, [1, 2, 3") == []
 
 
+def test_a_literal_file_name_drops_exactly_that_file_and_an_untold_one_only_the_scripts_own_files() -> None:
+    src = ('fig, ax = plt.subplots()\nax.plot(x, [1, 2, 3])\nfig.savefig("figures/curve.png")\n'
+           'fig2, ax2 = plt.subplots()\nax2.plot(x, y)\nfig2.savefig("figures/curve.svg")\n'
+           'fig3, ax3 = plt.subplots()\nax3.plot(x, y)\nfig3.savefig(f"figures/{name}.png")\n')
+    found = fdc.typed_series(src)
+    assert fdc.figures_to_drop(found, ["curve.png", "curve.svg", "mine.png"]) == ["curve.png"]
+    untold = fdc.typed_series('ax.plot(x, [1, 2, 3])\nfig.savefig(f"figures/{n}.png")\nfig.savefig("figures/own.png")\n')
+    assert fdc.figures_to_drop(untold, ["own.png", "someone_elses.png"]) == ["own.png"]
+
+
+def test_the_repair_says_a_reference_curve_is_computed_not_typed() -> None:
+    d = fdc.directive(fdc.typed_series("ax.plot(x_from_run, [1, 2, 3, 4])"))
+    assert "compute the curve from its formula" in d and "do not type its values" in d
+
+
 def test_the_figure_a_call_is_saved_into_is_named_and_otherwise_every_figure_is() -> None:
     src = ('fig, ax = plt.subplots()\nax.plot(x, [1, 2, 3])\nfig.savefig("figures/a.png")\n'
            'fig2, ax2 = plt.subplots()\nax2.plot(x, y)\nfig2.savefig("figures/b.png")\n')
@@ -178,15 +193,16 @@ async def test_a_typed_in_series_that_persists_leaves_its_figure_out_with_a_plai
         (figs / name).write_bytes(b"x")
     (records / "cooling.json").write_text("{}", encoding="utf-8")
     kept = eng._drop_typed_figures(["cooling.pdf", "cooling.png", "other.png"], records)
-    assert kept == ["other.png"], "only the figure that call is saved into (and its other formats) is left out"
-    assert not (figs / "cooling.png").exists() and not (figs / "cooling.pdf").exists() and not (records / "cooling.json").exists()
+    assert kept == ["cooling.pdf", "other.png"], "exactly the file the call is saved into; another format of it stays"
+    assert not (figs / "cooling.png").exists() and (figs / "cooling.pdf").exists() and (records / "cooling.json").exists()
     assert (figs / "other.png").is_file()
     record = json.loads((eng.quest_root / "needs" / "FIGURE_DATA_CHECK.json").read_text(encoding="utf-8"))
-    assert record["removed_figures"] == ["cooling.pdf", "cooling.png"] and "typed into the code" in record["note"]
+    assert record["removed_figures"] == ["cooling.png"] and "typed into the code" in record["note"]
+    assert "fabricat" not in record["note"].lower() and "fabricat" not in eng._typed_figures_note().lower()
     note = eng._typed_figures_note()
     assert "left out" in note and "limitations" in note and "figures/cooling.png" in note
     log = (eng.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
-    assert "The paper does not use them and says so in its limitations" in log
+    assert "The paper does not use it and says so in its limitations" in log
     # The next pass's own record replaces it: a pass with nothing typed in leaves none.
     (eng.quest_root / "code" / "experiment.py").write_text(FROM_RESULTS, encoding="utf-8")
     await eng._figures_from_results({"figure_data_repairs": 2})

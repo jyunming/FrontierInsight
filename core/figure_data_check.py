@@ -48,6 +48,9 @@ class TypedSeries:
     count: int
     #: File names the figure is saved as, when the script's own ``savefig`` names it; ``None`` when that cannot be told.
     saved_as: set[str] | None = None
+    #: Every file name the script's ``savefig`` calls give as a plain string: the figures it saves, for when the file a
+    #: call is saved into cannot be told.
+    script_saves: set[str] = field(default_factory=set)
 
     def says(self) -> str:
         return (f"{self.script} line {self.line}: {self.call}() draws {self.argument}, {self.count} numbers typed into "
@@ -199,8 +202,10 @@ def _saves_after(scope_body: list[ast.stmt], line: int) -> set[str] | None:
         for node in ast.walk(stmt):
             if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "savefig"
                     and node.lineno >= line and node.args):
-                names = {Path(c.value).name for c in ast.walk(node.args[0])
-                         if isinstance(c, ast.Constant) and isinstance(c.value, str) and "." in c.value}
+                first = node.args[0]
+                # Only a file name written out as a string: a built-up name (an f-string, a variable) cannot be told.
+                names = ({Path(first.value).name} if isinstance(first, ast.Constant) and isinstance(first.value, str)
+                         and "." in first.value else set())
                 if best is None or node.lineno < best[0]:
                     best = (node.lineno, names or None)
     return best[1] if best else None
@@ -269,23 +274,29 @@ def typed_series(source: str, script: str = "experiment.py") -> list[TypedSeries
                                  saved_as=_saves_after(body, call.lineno)))
 
     visit(tree, [], tree.body)
+    every = {Path(n.args[0].value).name for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "savefig" and n.args
+             and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)}
+    for f in found:
+        f.script_saves = every
     return sorted(found, key=lambda s: s.line)
 
 
 def figures_to_drop(findings: list[TypedSeries], saved: list[str]) -> list[str]:
-    """The saved figure files a script's typed-in series may be in: those the call's own ``savefig`` names, and every saved
-    figure when a call's file cannot be told (never fewer than the figure it is in)."""
+    """The saved figure files a script's typed-in series are in: exactly the file the call's own ``savefig`` names (a figure
+    in another format of the same name is a different file and stays). When that file cannot be told, the figures this
+    script saves (its own ``savefig`` names), and only when it names none, every saved figure."""
     if not findings:
         return []
     names = {Path(n).name for n in saved}
     drop: set[str] = set()
     for f in findings:
-        if f.saved_as is None:
+        if f.saved_as is not None:
+            drop |= names & f.saved_as
+        elif f.script_saves and names & f.script_saves:
+            drop |= names & f.script_saves
+        else:
             return sorted(names)
-        hit = {n for n in names if n in f.saved_as}
-        if not hit:
-            return sorted(names)  # the file the call is saved to is not among this run's figures: cannot tell which
-        drop |= hit
     return sorted(drop)
 
 
@@ -298,8 +309,9 @@ def directive(findings: list[TypedSeries]) -> str:
         + "\n\nDraw each of these figures from the run's saved results instead: read the values from the raw results files "
         "the simulation wrote (or from the values the analysis already holds), and pass those to the plotting call. Do "
         "not replace one typed list with another, and do not change anything else (the analysis, the printed "
-        "RESULT_JSON, the other figures). Reference lines (a limit, a target, y = x) and axis limits may stay as they "
-        "are. Return the whole corrected script."
+        "RESULT_JSON, the other figures). A reference or theory curve is no exception: compute the curve from its formula "
+        "(or from the results); do not type its values. Reference lines (a limit, a target, y = x) and axis limits may "
+        "stay as they are. Return the whole corrected script."
     )
 
 

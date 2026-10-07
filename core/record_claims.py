@@ -45,7 +45,9 @@ _HEDGE = re.compile(
     r"wasn't|weren't|without|unable|fail\w*|whether|unclear|unverified|unconfirmed|if|would|might|may|should|"
     r"hypothes\w+|candidate|any|unless|until|rather\s+than|instead|exploratory|caveat\w*|limitation\w*)\b|n't",
     re.IGNORECASE)
+_CLAUSE_BREAK = re.compile(r"[,;:()]|\b(?:but|however|although|though|while|whereas|yet)\b|\s[-\u2013\u2014]\s", re.IGNORECASE)
 _SAME_AS_BASELINE = re.compile(r"\b(?:same|identical|itself|equal|equals|unchanged)\b", re.IGNORECASE)
+_CAPTION_OPTIMISED = re.compile(r"\b(?:optimi[sz]ed|optimal|optimum|best)\s+design\b|\bthe\s+optimum\b", re.IGNORECASE)
 _IMAGE = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)")
 _CAPTION = re.compile(r"^\s*(?:\*\*|_|\*)?\s*(?:figure|fig\.)\s*\d+", re.IGNORECASE)
 _NOT_BETTER_VERDICTS = frozenset({"improvement_not_shown", "infeasible", "not_local_optimum"})
@@ -64,6 +66,17 @@ def _sentences(markdown: str) -> list[str]:
             continue
         out.extend(s.strip() for s in re.split(r"(?<=[.!?])\s+", line) if s.strip())
     return out
+
+
+def _asserted(sentence: str, pattern: re.Pattern[str]) -> bool:
+    """Whether ``sentence`` asserts what ``pattern`` finds: some match of it with no hedge or negation in its own clause
+    (a clause ends at a comma, semicolon, colon, bracket or "but"). A hedge elsewhere in the sentence does not govern it."""
+    for m in pattern.finditer(sentence):
+        start = max((c.end() for c in _CLAUSE_BREAK.finditer(sentence, 0, m.start())), default=0)
+        stop = next((c.start() for c in _CLAUSE_BREAK.finditer(sentence, m.end())), len(sentence))
+        if not _HEDGE.search(sentence[start:stop]):
+            return True
+    return False
 
 
 def _shown(sentence: str) -> str:
@@ -101,7 +114,7 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
     why_not = search_not_better(best_design, optimum_check)
     if why_not:
         for s in sentences:
-            if _OPTIMISED.search(s) and not _HEDGE.search(s) and not _SAME_AS_BASELINE.search(s):
+            if _asserted(s, _OPTIMISED) and not _SAME_AS_BASELINE.search(s):
                 hits.append(f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the search says {why_not}. "
                             "Remove the claim, or say plainly what the record shows (no better design was found).")
                 break
@@ -118,8 +131,7 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
         captions = [m.group(1) for m in _IMAGE.finditer(paper_md or "")] + [
             s for s in sentences if _CAPTION.match(s)]
         for c in captions:
-            if re.search(r"\b(?:optimi[sz]ed|optimal|optimum|best)\s+design\b|\bthe\s+optimum\b", c, re.IGNORECASE) \
-                    and not _HEDGE.search(c):
+            if _asserted(c, _CAPTION_OPTIMISED):
                 hits.append(f"{HIT}: a figure is captioned \"{_shown(c)}\", but FI's record of the search says {why_not}, "
                             "so no optimised design was computed to draw. Take the figure out, or caption what it does show.")
                 break
@@ -128,7 +140,7 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
     status = str((oracle or {}).get("status") or "") if isinstance(oracle, dict) else ""
     if status in _UNCONFIRMED_ORACLE:
         for s in sentences:
-            if _VALIDATED.search(s) and not _HEDGE.search(s):
+            if _asserted(s, _VALIDATED):
                 hits.append(f"{HIT}: the paper says \"{_shown(s)}\", but FI's record of the known-answer checks says they "
                             "were unconfirmed or failed (needs/ORACLE_CHECK.json). Do not call the result validated or "
                             "confirmed against known answers; say plainly that those checks did not pass.")

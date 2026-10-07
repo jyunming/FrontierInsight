@@ -57,6 +57,20 @@ def test_a_sentence_that_denies_or_doubts_it_is_not_flagged(sentence: str) -> No
     assert rc.contradictions(f"# T\n\n{sentence}\n", best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN) == []
 
 
+def test_a_hedge_exempts_a_claim_only_in_its_own_clause() -> None:
+    def hits(sentence: str) -> list[str]:
+        return rc.contradictions(f"# T\n\n{sentence}\n", best_design=NOT_BETTER, optimum_check=CHECK_NOT_SHOWN)
+
+    # Still exempt: the hedge governs the claim.
+    assert hits("The optimised design may be better than the baseline, but this was not shown.") == []
+    assert hits("If the optimised design were best, the heat sink would run cooler.") == []
+    assert hits("It is unclear whether the optimised design is best.") == []
+    # Flagged: an unrelated hedge elsewhere in the sentence does not exempt a plain claim.
+    assert hits("If the plots are read carefully, the optimised design is best.")
+    assert hits("The optimised design is best; any reader can see it.")
+    assert hits("The optimised design is best, although we did not test whether it is robust.")
+
+
 def test_no_feasible_design_means_there_is_no_best_design_to_call_best() -> None:
     hits = rc.contradictions("# T\n\nThe best design reduces the mass.\n", best_design=NO_FEASIBLE)
     assert hits and "no design that meets every limit" in hits[0]

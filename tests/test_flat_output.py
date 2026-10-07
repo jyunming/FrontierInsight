@@ -47,9 +47,12 @@ def test_a_search_whose_objective_moves_is_not_flat() -> None:
     assert flat.flat_search(rows) is None
 
 
-def test_a_search_is_not_flat_while_a_limit_quantity_still_moves() -> None:
+def test_a_flat_objective_is_broken_even_while_a_limit_quantity_still_moves() -> None:
     rows = [_row(i, 1.0 + i, 3.0, {"mass": 5.0 + i}) for i in range(6)]
-    assert flat.flat_search(rows) is None
+    why = flat.flat_search(rows, "peak")
+    assert why is not None and "`peak` was the same at all 6 designs" in why and "mass" not in why
+    # A moving objective is fine whatever the limits do.
+    assert flat.flat_search([_row(i, 1.0 + i, 3.0 + i, {"mass": 5.0}) for i in range(6)]) is None
 
 
 def test_two_evaluations_or_one_design_prove_nothing() -> None:
