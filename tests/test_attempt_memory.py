@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import threading
 import os
 import textwrap
@@ -398,7 +399,7 @@ async def test_a_script_that_fails_the_same_way_twice_is_a_block_at_the_third_ru
 
 
 #: The only fields two runs of the same quest may differ in: when something was recorded and how long it took.
-_TIMING = ("recorded_at", "duration_s")
+_TIMING = ("recorded_at", "duration_s", "at")
 
 
 def _without_timing(value):
@@ -415,6 +416,7 @@ def _normalized_state(artifacts, quest_root: Path) -> dict:
     recording on there is one more record file); nothing else is left out."""
     state = {k: v for k, v in (artifacts.raw_state or {}).items() if k != "record_anchor"}
     text = json.dumps(state, sort_keys=True, default=str)
+    text = re.sub(r"\d{8}-\d{6}", "<stamp>", text)  # a folder named by the moment something was set aside
     for old in (str(quest_root).replace("\\", "\\\\"), quest_root.as_posix(), str(quest_root), quest_root.name):
         text = text.replace(old, "<quest>")
     return _without_timing(json.loads(text))

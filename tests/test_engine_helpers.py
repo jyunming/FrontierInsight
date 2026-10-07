@@ -902,7 +902,7 @@ async def test_evidence_gate_decides_only_the_settled_cases_without_the_model(
     assert patch["research_protocol"]["topic_type"]
 
 
-async def test_a_simulation_with_no_results_goes_back_once_then_writes_an_honest_failure(
+async def test_a_simulation_with_no_results_goes_back_once_then_stops_with_no_paper(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Two live quests' final scripts crashed; the count rule still said "sufficient" (the analysis had summarised the
@@ -924,12 +924,12 @@ async def test_a_simulation_with_no_results_goes_back_once_then_writes_an_honest
     assert (ev["verdict"], ev["route"], ev["decided_by"]) == ("insufficient", "redesign", "rule") and calls == []
     assert first["iteration"] == 1 and first["evidence_no_result_retries"] == 1
     assert engine._route_after_evidence_gate(first) == "redesign"
-    # The second time (or with no iteration left) it writes, and the writer is told why.
+    # The second time (or with no iteration left) there is nothing to write up: the quest stops with no paper.
     again = await engine._node_evidence_gate({**state, **first})
     ev = again["evidence_assessment"]
-    assert (ev["verdict"], ev["route"]) == ("insufficient", "write") and "no results (exit code 1)" in ev["gaps"][0]
+    assert (ev["verdict"], ev["route"]) == ("insufficient", "stuck") and "no results (exit code 1)" in ev["gaps"][0]
     last = await engine._node_evidence_gate({**state, "iteration": 2})
-    assert last["evidence_assessment"]["route"] == "write"
+    assert last["evidence_assessment"]["route"] == "stuck"
     # A quest on user data, or with results, is not this case.
     assert engine._no_results_verdict({**state, "no_simulation_resolved": True}) is None
     assert engine._no_results_verdict({**state, "result_json": {"x": 1}}) is None

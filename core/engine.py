@@ -14753,7 +14753,8 @@ class Engine:
                   "asked the model a second time for one short answer; that reply could not be read either"])
         record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
                                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
-                                  "why_repairs_ended": "the analysis could not be read twice"}
+                                  "why_repairs_ended": ("the run gave no result with a number in it, even after the design was asked for again"
+                                  if no_numbers else "the analysis could not be read twice")}
         aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
         for name in [n for n in _rerun_from._PAPER
                      if "*" not in n and n not in ("frontier_insight_summary.json", "NEXT_STEP.md")]:
