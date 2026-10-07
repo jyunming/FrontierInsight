@@ -996,9 +996,18 @@ class PaperGenerator:
             sanitized_md = blank_lines_around_figures(sanitized_md)
             # A table right under its caption line would be read as more text
             # of the caption's paragraph and print as raw pipes.
-            from generation._tables import blank_line_before_tables
+            from generation._tables import (
+                TWO_COLUMN_FORMATS,
+                blank_line_before_tables,
+                fit_tables_to_column,
+            )
 
             sanitized_md = blank_line_before_tables(sanitized_md)
+            # A table wider than its column wraps its cells inside it (widths
+            # from its text) instead of running over the next column.
+            sanitized_md = fit_tables_to_column(
+                sanitized_md, two_column=self.config.output.paper_format in TWO_COLUMN_FORMATS,
+            )
             if glyph_count:
                 _log.info(
                     "paper.pdf: rewrote %d Unicode glyph occurrence(s) "
