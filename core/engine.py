@@ -4779,11 +4779,16 @@ class Engine(RunChecksMixin):
         )
 
     async def _audit_design(
-        self, state: QuestState, design: dict[str, Any], *, adopt: bool = True,
+        self, state: QuestState, design: dict[str, Any], *, adopt: bool = True, writer: str = "design",
     ) -> tuple[dict[str, Any], Any]:
         """The second-pass methodology audit of a drafted design: ``(design, objections addressed)``. With
         ``adopt=False`` it only checks a design that is already settled (one a person edited in plan.md, or an amended
-        one): nothing it proposes is taken, and the receipt passes only when it had no objection."""
+        one): nothing it proposes is taken, and the receipt passes only when it had no objection.
+
+        It is the design's reviewer (core/review_pairs.py): the step ``design_review`` when a person set a model or a
+        provider for it, else the main model's own audit as before. ``writer`` is the step that wrote the design (the
+        plan step, or the design step). What the reviewer is, against that writer, is recorded with the audit: a
+        different model is an independent review, the same model a self-review, and never the one as the other."""
         iteration = state.get("iteration", 0)
         # The design's ``rationale`` is the model's own account for the audit trace, not part of what the audit reviews or
         # what its amended design must repeat (its reply shape does not list it): it is set aside here and put back after.
@@ -4867,7 +4872,17 @@ class Engine(RunChecksMixin):
             "[design_self_critique] iteration=%d objections_addressed=%d",
             iteration, n_addressed,
         )
-        self._record_design_critique(iteration, before, design, objections, failure, node=review_node)
+        same, reviewer, writer_model, named = self._reader_vs_planner(review_node, after_call=True, writer=writer)
+        review_info = {"kind": "independent_review" if same is False else "self_review" if same else "unclear",
+                       "reviewer": reviewer, "writer": writer_model, "same_model": same, "reported": named,
+                       "step": review_node}
+        self._record_design_critique(iteration, before, design, objections, failure, node=review_node, review=review_info)
+        if not failure:
+            self._log.info(
+                "[design_self_critique] the design was read by %s: %s", reviewer,
+                "a different model than the one that wrote it" if same is False else
+                "the model that wrote it (a self-review, not an independent one)" if same else
+                f"FI cannot tell whether it is another model than the one that wrote it ({writer_model})")
         objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt else []
         if not adopt and not failure and proposed_change and not objected:
             objected = ["it proposed a different design without naming why"]
@@ -4897,16 +4912,21 @@ class Engine(RunChecksMixin):
             return []
         if last.get("status") == "failed":
             return [f"The methodology audit did not complete: {last.get('failure')} (see needs/DESIGN_CRITIQUE.json)."]
+        review = last.get("review") if isinstance(last.get("review"), dict) else {}
+        who = {"independent_review": f"The design was read by a different model ({review.get('reviewer')}), not the one "
+                                     f"that wrote it ({review.get('writer')}).",
+               "self_review": "The design was read again by the model that wrote it: a self-review, not an independent "
+                              "one."}.get(str(review.get("kind")), "")
         if last.get("changed_keys"):
             return [
                 "The methodology audit amended the design: " + ", ".join(last["changed_keys"])
-                + " (before and after are in needs/DESIGN_CRITIQUE.json)."
+                + " (before and after are in needs/DESIGN_CRITIQUE.json)." + (f" {who}" if who else "")
             ]
-        return []
+        return [who] if who else []
 
     def _record_design_critique(
         self, iteration: int, before: dict[str, Any], after: dict[str, Any], objections: Any, failure: str,
-        *, node: str = "design_self_critique",
+        *, node: str = "design_self_critique", review: dict[str, Any] | None = None,
     ) -> None:
         """Keep what the methodology audit said and did in ``needs/DESIGN_CRITIQUE.json``, one entry per pass: the
         objections in full, the design before and after and the keys that changed, and whether the audit ran at all. Until
@@ -4921,6 +4941,7 @@ class Engine(RunChecksMixin):
                 "status": "failed" if failure else "ok",
                 "failure": failure,
                 "objections": objections if isinstance(objections, list) else [],
+                **({"review": review} if review else {}),
                 "changed_keys": changed,
                 "before": before,
                 "after": after_plain,
@@ -5079,7 +5100,7 @@ class Engine(RunChecksMixin):
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
         design = obj
-        design, objections = await self._audit_design(state, design)
+        design, objections = await self._audit_design(state, design, writer="plan")
         if isinstance(design, dict):
             # ``plan`` asks the same design prompt as ``design`` (``_design_prompt`` + ``_PLAN_DIRECTIVE``) and can get
             # the same ``rationale`` block back. Unlike ``design``, this node writes straight to ``plan.md`` and never
@@ -9570,18 +9591,19 @@ class Engine(RunChecksMixin):
         for the design that runs. Returns the design to run."""
         if self.config.engine.analyze_local_first or not isinstance(design, dict):
             return design
+        writer = "plan" if _plan.plan_path(self.quest_root).is_file() else "design"  # the step that wrote the design
         _status, record, problem = _receipts.read(self.quest_root, "design_audit")
         key = _receipts.sha256(_receipts.design_core(design))
         if not problem and record is not None and record.get("output_hash") == key:
             return design
         if self._design_audit_acted_on(key) or not self._fi_wrote_the_plan_unfrozen(design):
             self._log.info("[design] the design that will run is not the one the methodology audit saw; auditing it (no change taken)")
-            await self._audit_design(state, design, adopt=False)
+            await self._audit_design(state, design, adopt=False, writer=writer)
             return design
         self._log.info("[design] the design that will run is not the one the methodology audit saw; FI rewrote it "
                        "itself and nothing has run, so the audit may change it once")
         self._mark_design_audit_acted(key)
-        amended, objections = await self._audit_design(state, design, adopt=True)
+        amended, objections = await self._audit_design(state, design, adopt=True, writer=writer)
         kept_checks = False
         if isinstance(amended, dict):
             amended, kept_checks = self._keep_what_the_results_are_judged_by(design, amended)
@@ -9598,7 +9620,7 @@ class Engine(RunChecksMixin):
         if kept_checks:
             self._log.info("[design] the audit also suggested changing the checks the results are judged by; FI kept "
                            "them as they were")
-        await self._audit_design(state, design, adopt=False)
+        await self._audit_design(state, design, adopt=False, writer=writer)
         if kept_checks:
             _receipts.add_detail(self.quest_root, "design_audit",
                                  "The audit also suggested changing the checks the results are judged by (the protocol's "

@@ -310,9 +310,11 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     critic = _first_model(q.calls, ("design_review", "design_self_critique")) or "a second look"
     for it in q.critique:
+        kind = _dict(it.get("review")).get("kind")
+        label = "design review" if kind == "independent_review" else "design self-critique"
         for o in _list(it.get("objections")):
             o = _dict(o)
-            out.append(_problem("design", o.get("objection") or o.get("check") or "", f"{critic} (design self-critique)",
+            out.append(_problem("design", o.get("objection") or o.get("check") or "", f"{critic} ({label})",
                                 "fixed" if o.get("fix") else "not fixed", "needs/DESIGN_CRITIQUE.json"))
         if it.get("status") not in (None, "ok") and it.get("failure"):
             out.append(_problem("design", f"the design's self-critique could not be used: {_one(it['failure'], 120)}",
@@ -514,6 +516,12 @@ def _stage_models(q: _Quest, stage: str) -> tuple[list[str], str, bool | None, s
             same = _bare(reader) == _bare(wrote[0])
     if stage in ("design", "analysis", "paper") and reader and wrote and same is None:
         same = _bare(reader) == _bare(wrote[0])
+    if stage == "design" and q.critique:
+        # What the design audit recorded about who read the design against who wrote it (an independent review, or the
+        # writer's own self-review) is what the report says; the call log only fills in when it recorded nothing.
+        kind = _dict(q.critique[-1].get("review")).get("kind")
+        if kind in ("independent_review", "self_review"):
+            same = kind == "self_review"
     return wrote, reader, same, note
 
 
