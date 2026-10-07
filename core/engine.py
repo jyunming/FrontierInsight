@@ -6721,6 +6721,41 @@ class Engine(RunChecksMixin):
         _todo.write(self.quest_root, self.fi_dir, self.quest_id, item)
         return item
 
+    def _provider_for_step(self, node: str | None) -> tuple[str, str, str]:
+        """``(provider name, model, the provider.node_providers key)`` of the provider that serves ``node``: the step's own
+        when it is routed (``provider.node_providers``; the key is ``""`` otherwise), else its model from
+        ``provider.node_models``, else the quest's main provider and model. A failure or stop text names this one, never
+        the main provider when the step runs on another."""
+        first = (node or "").split(",")[0].strip()
+        provider = getattr(getattr(self, "config", None), "provider", None)
+        step = node_provider_for(getattr(provider, "node_providers", None), first) if first else None
+        if step is not None:
+            return str(step[1].name), str(step[1].model), str(step[0])
+        models = getattr(provider, "node_models", None)
+        model = model_for_node(models, first) if first and models else None
+        return str(getattr(provider, "name", "") or ""), str(model or getattr(provider, "model", "") or ""), ""
+
+    def _routed_words(self, text: str) -> str:
+        """A step's model is set in ``provider.node_providers.<step>`` when the step is routed there (which wins over
+        ``provider.node_models``): advice that names the other setting would do nothing. Rewritten to the right one."""
+        if not text or "node_models" not in text:
+            return text
+        providers = getattr(self.config.provider, "node_providers", None)
+        if not providers:
+            return text
+
+        def dotted(m: Any) -> str:
+            hit = node_provider_for(providers, m.group(1))
+            return f"`provider.node_providers.{hit[0]}.model`" if hit else m.group(0)
+
+        def snippet(m: Any) -> str:
+            hit = node_provider_for(providers, m.group(1))
+            return (f"provider: {{node_providers: {{{hit[0]}: {{name: <provider>, model: <model>}}}}}}" if hit
+                    else m.group(0))
+
+        text = re.sub(r"`provider\.node_models\.(\w+)`", dotted, text)
+        return re.sub(r"provider: \{node_models: \{(\w+): <model>\}\}", snippet, text)
+
     def _pause_for_human(
         self,
         *,
@@ -6749,6 +6784,9 @@ class Engine(RunChecksMixin):
         Returns whatever the resume sent (ANSWER pauses). SUPPLY pauses
         pause-exit: ``interrupt()`` raises ``GraphInterrupt`` and never returns.
         """
+        steps = [self._routed_words(x) for x in steps]
+        recommended = self._routed_words(recommended) if recommended else recommended
+        alternatives = [self._routed_words(x) for x in alternatives] if alternatives else alternatives
         self._audit_pause = kind
         self._audit("pause_requested", pause=kind, interaction=interaction, headline=headline)
         item = self._write_next_step(
@@ -16074,14 +16112,16 @@ class Engine(RunChecksMixin):
         self._log.warning("[stuck] %s; stopping without a paper (needs/STUCK.json)", problem)
         for line in tried:
             self._log.info("[stuck] tried: %s", line)
-        print(f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
-              "fix: needs/STUCK.json says what FI tried; run the quest again, "
-              + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
-                 or reason == "flat" or headline_missing else
-                 "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
-                 "or try another model for the design (`provider.node_models.design`)." if reason in ("not_run", "cannot_repair") else
-                 "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
-                 "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
+        print(self._routed_words(
+            f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
+            "fix: needs/STUCK.json says what FI tried; run the quest again, "
+            + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
+               or reason == "flat" or headline_missing else
+               "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
+               "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
+               "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
+               "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
+               "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`).")))
         self._audit("stuck", problem=problem, repairs=len(tried))
         return {"stuck": record}
 
@@ -19551,8 +19591,10 @@ class Engine(RunChecksMixin):
             # The same provider and model the failure card is sorted with, so the retry and the card never disagree.
             config = getattr(self, "config", None)
             prov = getattr(config, "provider", None)
-            kind = _crash_kind.classify(exc, node=step, provider=str(getattr(prov, "name", "") or ""),
-                                        model=str(getattr(prov, "model", "") or "")).kind
+            served_name, served_model, routed_key = self._provider_for_step(step)
+            kind = _crash_kind.classify(exc, node=step, provider=served_name or str(getattr(prov, "name", "") or ""),
+                                        model=served_model or str(getattr(prov, "model", "") or ""),
+                                        routed=routed_key).kind
             if kind != "transient":
                 return False
             if done >= len(_crash_kind.RETRY_WAITS_S):
@@ -19760,8 +19802,17 @@ class Engine(RunChecksMixin):
 
         # Provider context — separate the YAML transport from any
         # bridge override that landed in ``provider.extra``.
-        provider_name = self.config.provider.name
-        provider_model = self.config.provider.model or "(provider default)"
+        # The provider and model that served the failing step: the step's own when it runs on one
+        # (``provider.node_providers``), else what the error's own note says, else the quest's main one.
+        provider_name, model_raw, routed_key = self._provider_for_step(failing_node)
+        served = _crash_kind.served_by(exc)
+        step_name = failing_node
+        if served is not None:
+            provider_name, model_raw = served[0], served[1]
+            if served[2]:  # the call's own step, which is the one to name when no checkpoint says which step failed
+                routed_key = routed_key or self._provider_for_step(served[2])[2]
+                step_name = served[2] if failing_node.startswith("(") else failing_node
+        provider_model = model_raw or "(provider default)"
         bridge_extras = []
         for key in ("bridge_port", "bridge_socket"):
             val = (self.config.provider.extra or {}).get(key)
@@ -19787,8 +19838,8 @@ class Engine(RunChecksMixin):
         # The failure as the person sees it first (core/crash_kind.py): what happened and the one thing to do. The
         # exception, the provider and the log tail are details for a bug report, below.
         failure = _crash_kind.classify(
-            exc, node=failing_node, provider=provider_name, model=self.config.provider.model or "",
-            retries=int((getattr(self, "_step_retries", None) or {}).get(failing_node, ("", 0))[1]))
+            exc, node=step_name, provider=provider_name, model=model_raw,
+            routed=routed_key, retries=int((getattr(self, "_step_retries", None) or {}).get(failing_node, ("", 0))[1]))
         try:
             _crash_kind.write(self.fi_dir, failure)
         except OSError as e:

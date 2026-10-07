@@ -130,7 +130,7 @@ def _winerror(cls, winerror: int, msg: str, filename: str | None = None):
     (_spawn_missing(), "not found on this machine"),
     (OSError(errno.ENOSPC, "No space left on device"), "disk is full"),
     (httpx.UnsupportedProtocol("Request URL is missing an 'http://' or 'https://' protocol."), "not a valid web address"),
-    (_local_refused(model_call=True), "The model service on this machine (openai) is not running"),
+    (_local_refused(model_call=True), "The model service on this machine (ollama) is not running"),  # the call's own note names who was asked
     (_local_refused(model_call=False), "A service on this machine that FI uses (127.0.0.1:11434) is not running"),
     (RuntimeError("bridge connection dropped"), "VS Code's connection"),
     (_winerror(PermissionError, 32, "being used by another process", "C:/q/data/results.csv"), "(results.csv)"),
