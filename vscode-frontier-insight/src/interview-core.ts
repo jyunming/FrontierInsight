@@ -287,7 +287,7 @@ export const LIGHT_NODES: readonly string[] = [
  */
 export const OTHER_NODES: readonly string[] = [
     "clarify", "ideate", "ideate_reflect", "ideate_query", "literature_query", "literature_foundational",
-    "plan", "plan_revise", "oracle_review", "design", "design_self_critique", "implement_outline", "implement", "execute_reflect",
+    "plan", "plan_revise", "oracle_review", "design", "design_review", "design_self_critique", "code_review", "implement_outline", "implement", "execute_reflect",
     "analyze", "write", "claim_check", "review", "speech",
 ];
 

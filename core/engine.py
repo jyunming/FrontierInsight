@@ -112,6 +112,7 @@ from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import equation_tests as _equation_tests
 from . import code_review as _code_review
+from . import review_pairs as _pairs
 from . import quality_report as _quality_report
 from . import function_steps as _function_steps
 from . import hidden_check as _hidden
@@ -238,7 +239,10 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "figures",
     "write.trim",
     "oracle_review",  # a referee's verdict on the plan's checks
+    "design_review",  # the design audit, when another step reads the design than the one that wrote it
+    "code_review",  # the code read against the plan, when it has a step of its own
     "oracle_review.recompute",  # a failing check's expected value worked out again (core/oracle_triage.py)
+    "oracle_review.code",  # the code read against the plan, while no step of its own is set for it
 })
 
 
@@ -4803,6 +4807,7 @@ class Engine(RunChecksMixin):
         # quest. Parse failures and shape drift on the response are
         # also non-fatal — the original draft survives in those
         # cases. The audit is strictly advisory.
+        review_node = self._review_node("design_review")
         critique_prompt = self._prompts["design_self_critique"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
@@ -4816,7 +4821,7 @@ class Engine(RunChecksMixin):
         try:
             # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
             _, critique = await self._chat_json(
-                critique_prompt, node="design_self_critique", want=("objections_addressed",),
+                critique_prompt, node=review_node, want=("objections_addressed",),
                 usable=lambda p: isinstance(p.get("objections_addressed"), list),
             )
         except Exception as e:  # noqa: BLE001 — see "Failure isolation" above
@@ -4862,7 +4867,7 @@ class Engine(RunChecksMixin):
             "[design_self_critique] iteration=%d objections_addressed=%d",
             iteration, n_addressed,
         )
-        self._record_design_critique(iteration, before, design, objections, failure)
+        self._record_design_critique(iteration, before, design, objections, failure, node=review_node)
         objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt else []
         if not adopt and not failure and proposed_change and not objected:
             objected = ["it proposed a different design without naming why"]
@@ -4901,6 +4906,7 @@ class Engine(RunChecksMixin):
 
     def _record_design_critique(
         self, iteration: int, before: dict[str, Any], after: dict[str, Any], objections: Any, failure: str,
+        *, node: str = "design_self_critique",
     ) -> None:
         """Keep what the methodology audit said and did in ``needs/DESIGN_CRITIQUE.json``, one entry per pass: the
         objections in full, the design before and after and the keys that changed, and whether the audit ran at all. Until
@@ -4928,7 +4934,7 @@ class Engine(RunChecksMixin):
                 "design_self_critique", path, status=entry["status"],
                 summary="changed " + (", ".join(changed) or "nothing") if not failure else failure,
             )
-            prov = self._chat_provenance("design_self_critique")
+            prov = self._chat_provenance(node)
             for o in entry["objections"]:
                 o = o if isinstance(o, dict) else {"objection": o}
                 self._audit(
@@ -9973,21 +9979,21 @@ class Engine(RunChecksMixin):
 
     # --- a different model reads the code against the plan's required outputs (core/code_review.py)
 
-    def _reader_vs_planner(self, node: str, *, after_call: bool) -> tuple[bool | None, str, str, bool]:
-        """``(same model?, reader, planner, the connection named the reader)`` for the step ``node`` against the plan
-        step, as :meth:`_review_oracles` decides it: from the models the connections named after a call, else the ones
-        asked for. ``None`` when it cannot be told."""
+    def _reader_vs_planner(self, node: str, *, after_call: bool, writer: str = "plan") -> tuple[bool | None, str, str, bool]:
+        """``(same model?, reader, writer's model, the connection named the reader)`` for the step ``node`` against the
+        step that wrote what it reads (``writer``: the plan by default), as :meth:`_review_oracles` decides it: from the
+        models the connections named after a call, else the ones asked for. ``None`` when it cannot be told."""
         answered = self._chat_provenance(node) if after_call else {}
-        planned = self._chat_provenance("plan")
+        planned = self._chat_provenance(writer)
         reader_asked = self._model_for_node(node) or self.config.provider.model or ""
-        planner_asked = self._model_for_node("plan") or self.config.provider.model or ""
+        planner_asked = self._model_for_node(writer) or self.config.provider.model or ""
         reader = str(answered.get("model") if answered.get("reported") else reader_asked or "")
         planner = str(planned.get("model") if planned.get("reported") else planner_asked or "")
         if answered.get("reported") and planned.get("reported"):
             same: bool | None = _review.same_model(answered.get("model"), planned.get("model"))
         elif reader_asked and planner_asked:
             same = _review.same_model(reader_asked, planner_asked)
-        elif not self._model_for_node(node) and not self._model_for_node("plan"):
+        elif not self._model_for_node(node) and not self._model_for_node(writer):
             same = True
         else:
             same = None
@@ -10023,7 +10029,8 @@ class Engine(RunChecksMixin):
         if record.get("read_version"):
             counters["read_version"] = record["read_version"]  # the last version a second model really read
         record = {"version": version, **counters, "requirements": len(reqs)}
-        same, reader, planner, _named = self._reader_vs_planner(_review.NODE, after_call=False)
+        review_node = self._review_node("code_review")
+        same, reader, planner, _named = self._reader_vs_planner(review_node, after_call=False, writer="implement")
         if same is True:
             record["skipped"] = f"the reader is the model that wrote the code ({planner})"
             _code_review.save(self.quest_root, record)
@@ -10050,8 +10057,8 @@ class Engine(RunChecksMixin):
                 prompt = self._prompts["code_review"].substitute(
                     topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
                     code=sources)
-                reply = await self._chat(prompt, node=_review.NODE)
-                got = _code_review.parse(_parse_json_lenient(reply, node=_review.NODE), left)
+                reply = await self._chat(prompt, node=review_node)
+                got = _code_review.parse(_parse_json_lenient(reply, node=review_node), left)
                 verdicts = [*(verdicts or []), *(got or [])] or None
             if verdicts is None:
                 record["error"] = "its answer named none of the plan's requirements"
@@ -10059,7 +10066,7 @@ class Engine(RunChecksMixin):
             record["error"] = f"the provider withheld or cut off its answer ({str(e)[:120] or type(e).__name__})"
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
             record["error"] = f"the call failed ({str(e)[:120] or type(e).__name__})"
-        same, reader, planner, named = self._reader_vs_planner(_review.NODE, after_call=True)
+        same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")
         record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
         if verdicts is not None and same is False:
             unanswered = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts}]
@@ -20164,6 +20171,17 @@ class Engine(RunChecksMixin):
                                       or _attempts.last_id(self.fi_dir, _attempts.ATTEMPTS, ("run",))),
                     "answered_by": self._answering_model(), "context": context}
         self._record(_attempts.ATTEMPTS, build)
+
+    def _step_is_set(self, step: str) -> bool:
+        """Whether a model or a provider is set for ``step`` (``provider.node_models`` / ``provider.node_providers``)."""
+        provider = self.config.provider
+        return bool(node_provider_for(getattr(provider, "node_providers", None), step)
+                    or model_for_node(provider.node_models, step))
+
+    def _review_node(self, step: str) -> str:
+        """The node a reviewer's calls are made under: its own step (``design_review``, ``code_review``) when a person set
+        a model or provider for it, else the step it falls back to (core/review_pairs.py)."""
+        return _pairs.node_for(step, self._step_is_set)
 
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node via the shared

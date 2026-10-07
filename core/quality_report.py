@@ -23,6 +23,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import review_pairs as _pairs
+
 SCHEMA = "fi.quality/v1"
 STAGES = ("plan", "checks", "design", "code", "run", "analysis", "paper", "review")
 STAGE_NAME = {"plan": "Plan", "checks": "Checks", "design": "Design", "code": "Code", "run": "Run",
@@ -33,9 +35,9 @@ _NODE_STAGE = {
     "literature_query": "plan", "literature_foundational": "plan", "literature_screen": "plan", "source_router": "plan",
     "select_skills": "plan", "plan": "plan", "plan_revise": "plan", "plan_criteria": "plan",
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
-    "design": "design", "design_self_critique": "design",
+    "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
-    "implement_function_repair": "code", "code_review": "code",
+    "implement_function_repair": "code", "code_review": "code", "oracle_review.code": "code",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
     "write": "paper", "figures": "paper", "claim_check": "paper",
@@ -48,8 +50,8 @@ _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "d
                      "implement_function_repair"),
             "run": ("execute_reflect", "improve"), "analysis": ("analyze",), "paper": ("write", "figures"),
             "review": ("review",)}
-_READERS = {"checks": ("oracle_review", "oracle_recompute"), "design": ("design_self_critique",),
-            "code": ("oracle_review",), "analysis": ("cross_check",), "paper": ("claim_check",)}
+_READERS = {"checks": ("oracle_review", "oracle_recompute"), "design": ("design_review", "design_self_critique"),
+            "code": ("code_review", "oracle_review.code"), "analysis": ("cross_check",), "paper": ("claim_check",)}
 #: A stage's step to name when a person asks for another model to write (or read) it.
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
@@ -128,8 +130,16 @@ def _mtime(path: Path) -> float:
 
 
 def _stage_of(node: str) -> str | None:
-    base = str(node or "").split(".")[0]
-    return _NODE_STAGE.get(base)
+    node = str(node or "")
+    return _NODE_STAGE.get(node) or _NODE_STAGE.get(node.split(".")[0])
+
+
+def _reads(stage: str, node: Any) -> bool:
+    """Whether a call of ``node`` is a reviewer's call for ``stage`` (``oracle_review.code`` is the code's, not the
+    plan's checks'; any other ``oracle_review.<x>`` is the checks')."""
+    node = str(node or "")
+    names = _READERS.get(stage, ())
+    return node in names or (node.split(".")[0] in names and node not in _NODE_STAGE)
 
 
 def _model_name(row: dict[str, Any]) -> str:
@@ -298,7 +308,7 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
 
 def _design_problems(q: _Quest) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
-    critic = _first_model(q.calls, ("design_self_critique",)) or "a second look"
+    critic = _first_model(q.calls, ("design_review", "design_self_critique")) or "a second look"
     for it in q.critique:
         for o in _list(it.get("objections")):
             o = _dict(o)
@@ -498,7 +508,7 @@ def _stage_models(q: _Quest, stage: str) -> tuple[list[str], str, bool | None, s
     elif stage == "run":
         reader = "the engine's own checks (no model)"
     elif stage in _READERS:
-        readers = Counter(_who(r) for r in q.calls if str(r.get("node", "")).split(".")[0] in _READERS[stage])
+        readers = Counter(_who(r) for r in q.calls if _reads(stage, r.get("node")))
         reader = readers.most_common(1)[0][0] if readers else ""
         if reader and wrote:
             same = _bare(reader) == _bare(wrote[0])
@@ -625,12 +635,13 @@ def _suggestions(q: _Quest, stages: dict[str, dict[str, Any]], outcome: dict[str
     for stage in order:
         row = stages[stage]
         if row["same_model"] and stage in _READERS:
-            reader_key = _READERS[stage][0]
+            reader_key = _pairs.READER_STEP.get(stage) or _READERS[stage][0]
             if row["problems"]["total"] or stage == (failure or {}).get("stage") or stage == "code":
                 add(f"The {STAGE_NAME[stage].lower()} stage was read by the model that wrote it "
                     f"({row['reviewed_by'] or 'the same model'}): give the reading step another provider's model "
                     f"(provider.node_providers.{reader_key}: name, model, base_url, api_key_env)"
-                    + (" - the code is read by this same step" if stage == "code" else "") + ".",
+                    + (" - until it is set, the code is read by `oracle_review`, the step that reads the plan's checks"
+                       if stage == "code" else "") + ".",
                     {"checks": ".fi/oracle_review.json", "code": ".fi/code_review.json"}.get(stage, ".fi/model_calls.jsonl"))
     # The stage with the most problems left.
     left = {s: stages[s]["problems"]["not_fixed"] + stages[s]["problems"]["left_out"] for s in STAGES}

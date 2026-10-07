@@ -284,7 +284,7 @@ def test_every_suggested_key_routes_the_step_it_names(tmp_path: Path) -> None:
     steps = set(re.findall(r'node="([a-z_]+)', engine)) | set(re.findall(r'^NODE = "([a-z_]+)"', oracle_review, re.M))
     root = tmp_path / "q-keys"
     _calls(root, [_call("implement", outcome="ReadTimeout")] * 3 + [_call("design", outcome="HTTPStatusError")] * 3
-           + [_call(n) for n in ("plan", "oracle_review", "design", "design_self_critique", "implement", "analyze",
+           + [_call(n) for n in ("plan", "oracle_review", "design", "design_review", "implement", "analyze",
                                  "cross_check", "write", "claim_check", "review", "execute_reflect")])
     _w(root / ".fi" / "oracle_review.json", {"reviewer": "model-a", "planner": "model-a", "same_model": True,
                                               "findings": ["x"]})
@@ -292,15 +292,23 @@ def test_every_suggested_key_routes_the_step_it_names(tmp_path: Path) -> None:
     keys = set()
     for sug in qr.build(root)["suggestions"]:
         keys |= set(re.findall(r"provider\.node_(?:models|providers)\.([a-z_]+)", sug["text"]))
-    assert {"oracle_review", "implement", "design", "design_self_critique"} <= keys
+    assert {"oracle_review", "implement", "design", "design_review", "code_review"} <= keys
+    from core import review_pairs as pairs
+
+    # A reviewer's own step is a key a person routes with; the engine calls it under that key when it is set (and under
+    # the step it falls back to when it is not), so the key must resolve to a node the engine really calls.
+    reviewer_steps = set(pairs.READER_STEP.values())
     for key in keys:
-        assert key in steps, key
+        assert key in steps or key in reviewer_steps, key
+        if key in reviewer_steps:
+            assert pairs.node_for(key, lambda step, key=key: step == key) == key
         assert prov.node_provider_for({key: 1}, key) == (key, 1)
         assert prov.model_for_node({key: "m"}, key + ".sub") == "m"
     for stage_key in qr._KEY.values():
         assert stage_key in steps, stage_key
-    for readers in qr._READERS.values():
-        assert readers[0] in steps, readers
+    for stage, step in pairs.READER_STEP.items():
+        assert step in steps or step in reviewer_steps, (stage, step)
+        assert any(qr._reads(stage, n) for n in (step, pairs.FALLBACK_NODE.get(step, step))), (stage, step)
 
 
 def test_the_same_model_on_two_providers_is_the_same_model(tmp_path: Path) -> None:

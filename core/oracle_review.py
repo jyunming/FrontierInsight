@@ -35,8 +35,9 @@ from . import oracle_check as _oracle
 #: The node a model is named for in ``provider.node_models``.
 NODE = "oracle_review"
 #: The steps whose answers write the plan's checks: the plan, every rewrite of it (FI's own requests about the checks
-#: included), the design step of a quest with no plan.md, and the design's own critique (which may amend the checks).
-WRITER_NODES = ("plan", "plan_revise", "design", "design_self_critique")
+#: included), the design step of a quest with no plan.md, and the design's own review (``design_review``, or the audit
+#: under its old step name), which may amend the checks.
+WRITER_NODES = ("plan", "plan_revise", "design", "design_self_critique", "design_review")
 #: How a person gives the review another model (the key that already names a step's model; nothing new).
 HOW_TO_NAME_ANOTHER = ("set `oracle_review: <another model your provider offers>` under `provider: node_models:` in "
                        "the quest's config.yaml (or give it another provider's model under `provider: node_providers:`); it reads the checks when the plan is written (for this quest, do the "
