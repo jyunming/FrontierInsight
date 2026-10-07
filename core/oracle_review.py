@@ -80,6 +80,10 @@ class Review:
     summary: str = ""
     #: The reviewer was shown only part of the plan's checks (so what it says no check tests is not read).
     partial: bool = False
+    #: What the reviewer said about each equation of the model (``protocol.model.equations``): ``{"id", "formula",
+    #: "standard" (True / False / None), "correct", "why"}``, only for equations the plan lists. Whether these count is
+    #: decided by who the reviewer was (:func:`equation_findings` is used only when it was another model).
+    equations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def prompt_parts(protocol: dict[str, Any] | None) -> tuple[str, str, bool]:
@@ -168,6 +172,47 @@ def parse(reply: Any, protocol: dict[str, Any] | None, *, partial: bool = False)
         if kept is not None and len(out.add) < 2:
             out.add.append(kept)
     out.summary = _text(reply.get("summary"), 600)
+    out.equations = _equation_verdicts(reply.get("equations"), model)
+    return out
+
+
+def equations_of(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """The equations of the plan's model that a reader is asked about: every one that has an id and a formula."""
+    model = protocol.get("model") if isinstance(protocol, dict) else None
+    view = _oracle.model_view(model)
+    return [e for e in (view["equations"] if view else []) if isinstance(e, dict) and str(e.get("id") or "").strip()
+            and str(e.get("formula") or "").strip()]
+
+
+def _equation_verdicts(value: Any, model: Any) -> list[dict[str, Any]]:
+    """The reviewer's per-equation verdicts, only for equations the plan lists (one verdict each, the first)."""
+    view = _oracle.model_view(model)
+    known = {str(e.get("id")).strip().upper(): e for e in (view["equations"] if view else [])
+             if isinstance(e, dict) and str(e.get("id") or "").strip()}
+    out: list[dict[str, Any]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict):
+            continue
+        eq = known.get(str(item.get("id") or "").strip().upper())
+        if eq is None or any(v["id"] == str(eq["id"]).strip() for v in out):
+            continue
+        standard = _yes(item.get("standard"))
+        out.append({"id": str(eq["id"]).strip(), "formula": _text(eq.get("formula"), 300), "standard": standard,
+                    "correct": _text(item.get("correct"), 400) if standard is False else "",
+                    "why": _text(item.get("why"), 300)})
+    return out
+
+
+def equation_findings(review: Review) -> list[str]:
+    """One plain sentence per equation the reader says is not the standard definition of the quantity it names (or a
+    correct derivation), with the equation it gives instead. Used only when the reader is another model than the
+    planner (:func:`equation_lines` says what is recorded otherwise)."""
+    out: list[str] = []
+    for e in review.equations:
+        if e["standard"] is False:
+            out.append(f"the equation {e['id']} ({e['formula']}) is not the standard definition of the quantity it "
+                       f"names, or a correct derivation: the reader gives {e['correct'] or 'no replacement'} "
+                       f"({e['why'] or 'no reason given'})")
     return out
 
 
@@ -193,9 +238,55 @@ def findings(review: Review) -> list[str]:
     return out
 
 
-def request(found: list[str]) -> str:
+#: Added to the request when the reader objected to an equation: the plan rewrites the equation and what depends on it.
+EQUATION_REQUEST = (
+    "\nWhere the reader objected to an equation: decide whether the equation it gives is the standard definition (or "
+    "derive it again from the source); if it is, rewrite that equation in `protocol.model.equations` (its `formula`, "
+    "`source` and `derivation`), and rewrite every check, `expected_formula`, `expected` or `example` that depends on "
+    "it so they agree with the corrected equation. Never change a tolerance or a threshold, and never remove an "
+    "equation. If the plan's equation is the right one, leave it and say why in its `derivation`.")
+
+
+def never_looser(old: list[Any], new: list[Any]) -> list[Any]:
+    """``new`` (the checks after a rewrite) with each check that also existed in ``old`` (matched by name) keeping its
+    old ``tolerance`` and ``tolerance_mode`` when the rewrite made it larger or changed its mode: a rewrite of an
+    equation may move an expected value, never loosen the bar a check is held to."""
+    before = {str(o.get("name") or "").strip().lower(): o for o in old if isinstance(o, dict)}
+    out: list[Any] = []
+    for item in new:
+        was = before.get(str(item.get("name") or "").strip().lower()) if isinstance(item, dict) else None
+        if was is None or not isinstance(item, dict):
+            out.append(item)
+            continue
+        old_mode = str(was.get("tolerance_mode") or "absolute").strip().lower()
+        new_mode = str(item.get("tolerance_mode") or "absolute").strip().lower()
+        try:
+            looser = (float(item.get("tolerance")) > float(was.get("tolerance"))
+                      if "tolerance" in item and "tolerance" in was else "tolerance" in item and "tolerance" not in was)
+        except (TypeError, ValueError):
+            looser = True
+        if looser or new_mode != old_mode:
+            item = {k: v for k, v in item.items() if k not in ("tolerance", "tolerance_mode")}
+            for key in ("tolerance", "tolerance_mode"):
+                if key in was:
+                    item[key] = was[key]
+        out.append(item)
+    return out
+
+
+def keep_every_equation(old: Any, new: Any) -> list[Any]:
+    """The equations after a rewrite that may correct one: every equation of ``old`` is still there (an id the rewrite
+    dropped is put back as it was); one the rewrite added is kept."""
+    old_items = _oracle.equation_items(old)
+    new_items = _oracle.equation_items(new)
+    have = {str(e.get("id")).strip().upper() for e in new_items}
+    return [*new_items, *[e for e in old_items if str(e.get("id")).strip().upper() not in have]]
+
+
+def request(found: list[str], *, equations: bool = False) -> str:
     """The part of the one request to the plan that carries the reviewer's findings. The reviewer is a second reader,
-    not the person: its findings are applied only when they are right."""
+    not the person: its findings are applied only when they are right. ``equations``: some finding is about an
+    equation of the model (the plan may then rewrite that equation too)."""
     return (
         "A second model read the plan's checks against known answers as a referee would (it is not the person; apply "
         "what it found only where it is right) and found:\n"
@@ -204,15 +295,73 @@ def request(found: list[str]) -> str:
         "value worked out at the step it is compared at, a reachable tolerance, or one more check for an equation no "
         "check tests, with a `reference` saying how its expected value follows. Replace a check found trivial with a "
         "better one; never remove a check without putting one in its place. Keep each kind's numeric form. Change only "
-        "the checks (and a criterion that reads a check you change, when its number changes meaning), and nothing else "
-        "in the plan."
+        "the checks (and a criterion that reads a check you change, when its number changes meaning)"
+        + (", and an equation of the model that a finding names" if equations else "")
+        + ", and nothing else in the plan."
+        + (EQUATION_REQUEST if equations else "")
     )
 
 
+def equation_record(review: Review | None, protocol: dict[str, Any] | None, *, same_model: bool | None,
+                    reviewer: str, planner: str) -> dict[str, Any] | None:
+    """What is recorded about the plan's equations (``None`` when the model lists none): how many there are, which the
+    reader judged, and whether they were read by a model other than the planner (``read_by_other_model``). They count
+    as read by another model only when the reader is shown to be another model AND it gave a verdict on each equation;
+    otherwise ``why`` says plainly what is missing. The reader's objections are used (:func:`equation_findings`) only
+    when they count."""
+    listed = equations_of(protocol)
+    if not listed:
+        return None
+    judged = [e["id"] for e in (review.equations if review is not None else []) if e["standard"] is not None]
+    ids = [str(e["id"]).strip() for e in listed]
+    unjudged = [i for i in ids if i not in judged]
+    if review is None:
+        why = "the second reading gave no usable answer"
+    elif same_model is not False:
+        why = (f"the reader is the model that wrote the plan ({planner})" if same_model
+               else f"FI cannot tell whether the reader ({reviewer}) is another model than the one that wrote the plan")
+    elif unjudged:
+        why = f"the reader gave no verdict on {_names(unjudged)}"
+    else:
+        why = ""
+    return {"total": len(ids), "judged": judged, "read_by_other_model": not why, "why": why,
+            "verdicts": review.equations if review is not None else []}
+
+
+def equation_lines(record: dict[str, Any] | None, *, reviewer: str, research: bool) -> list[str]:
+    """What plan.md says about the equations of the model (prose, never read back)."""
+    if not record:
+        return []
+    n = record["total"]
+    plural = "equation" if n == 1 else "equations"
+    if not record["read_by_other_model"]:
+        below = (" Under research this keeps the result below *independently validated*." if research else "")
+        return [f"- The model's {n} {plural} {'was' if n == 1 else 'were'} not read by another model "
+                f"({record['why']}): nobody but the model that wrote them has checked that each is the standard "
+                f"definition of its quantity.{below}"]
+    rows = [f"- The model's {n} {plural} {'was' if n == 1 else 'were'} read by {reviewer}, not the model that wrote "
+            "them:"]
+    for v in record["verdicts"]:
+        if v["standard"] is False:
+            rows.append(f"  - **{v['id']}** is not the standard definition: {v['correct'] or 'no replacement given'}"
+                        f"{' (' + v['why'] + ')' if v['why'] else ''}.")
+        elif v["standard"]:
+            rows.append(f"  - **{v['id']}** is the standard definition or a correct derivation.")
+    return rows
+
+
 def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model: bool | None, research: bool,
-               reported: bool = True, error: str = "", sent: bool = True) -> list[str]:
+               reported: bool = True, error: str = "", sent: bool = True,
+               equations: dict[str, Any] | None = None) -> list[str]:
     """What plan.md says about the second opinion, in plain words (never read back). ``same_model`` is ``None`` when
     it cannot be told whether the two were different models (a provider default FI cannot name)."""
+    return [*_check_lines(review, reviewer=reviewer, planner=planner, same_model=same_model, research=research,
+                          reported=reported, error=error, sent=sent),
+            *equation_lines(equations, reviewer=reviewer, research=research)]
+
+
+def _check_lines(review: Review | None, *, reviewer: str, planner: str, same_model: bool | None, research: bool,
+                 reported: bool, error: str, sent: bool) -> list[str]:
     asked = "" if reported else " (the connection did not say which model answered)"
     if same_model is False:
         who = f"The checks were read by a second model ({reviewer}{asked}), not the one that wrote the plan ({planner})."
@@ -328,6 +477,24 @@ def _names(items: list[str]) -> str:
 
 def independence_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]], *, configured: bool,
                       protocol: dict[str, Any] | None = None) -> list[str]:
+    """:func:`_check_gaps` (the checks), and the same sentence for the plan's equations: when the record says the model's
+    equations were not read by another model (a record from before equations were read says nothing about them), the
+    gap names them too, so the paper and the evidence level never imply that a different model checked them."""
+    gaps = _check_gaps(record, calls, configured=configured, protocol=protocol)
+    eq = record.get("equations") if isinstance(record, dict) else None
+    if isinstance(eq, dict) and eq.get("total") and not eq.get("read_by_other_model"):
+        n = int(eq["total"])
+        tail = (f"the model's {n} equation{'s were' if n != 1 else ' was'} not read by another model either "
+                f"({eq.get('why') or 'no reason recorded'})")
+        if gaps:
+            gaps[-1] = f"{gaps[-1]}; {tail}"
+        else:
+            gaps.append(f"the plan's equations were not read by a second, different model ({eq.get('why') or 'no reason recorded'})")
+    return gaps
+
+
+def _check_gaps(record: dict[str, Any] | None, calls: list[dict[str, Any]], *, configured: bool,
+                protocol: dict[str, Any] | None = None) -> list[str]:
     """Under ``rigor_profile: research``: why the second reading of the plan's checks does not count, one plain sentence
     (empty when it counts). It counts only when
 

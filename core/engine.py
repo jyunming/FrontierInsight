@@ -11854,6 +11854,13 @@ class Engine:
         protocol = planned.get("protocol") if isinstance(planned, dict) else None
         return {str(o["name"]): o for o in _oracle.declared(protocol if isinstance(protocol, dict) else None)}
 
+    def _planned_equations(self) -> dict[str, str]:
+        """The formulas of the model's equations in ``plan.md``, by id."""
+        planned, _why = _plan.load_design(self.quest_root)
+        protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        return {str(e["id"]).strip(): " ".join(str(e.get("formula") or "").split())
+                for e in _review.equations_of(protocol if isinstance(protocol, dict) else None)}
+
     def _oracles_added_path(self) -> Path:
         return self.fi_dir / "oracles_added.json"
 
@@ -11935,11 +11942,13 @@ class Engine:
         path.write_text(text, encoding="utf-8")
         _plan.record_version(self.quest_root, text, by="engine", note=note)
 
-    async def _revise_checks_only(self, request: str) -> str:
+    async def _revise_checks_only(self, request: str, *, equations: bool = False) -> str:
         """Ask the plan (``plan_revise``) for ``request`` and keep only what it changed in the checks
         (``protocol.oracles``): anything else it changed in the design block is put back, so a request about the checks
         can never move the grid, the thresholds or the criteria. ``""`` when the plan was rewritten, else why not (a
-        failed call is reported, never a crash)."""
+        failed call is reported, never a crash). With ``equations`` (a reader of another model objected to an equation
+        of the model), the equations of ``protocol.model`` are also taken from the rewrite, none removed; and then no
+        check keeps a looser tolerance than it had (the equation changes, the bar never does)."""
         path = _plan.plan_path(self.quest_root)
         before_text = path.read_text(encoding="utf-8")
         try:
@@ -11988,6 +11997,13 @@ class Engine:
         def keep(block: dict[str, Any]) -> dict[str, Any]:
             protocol = dict(block.get("protocol") or {})
             protocol["oracles"] = part(after, "oracles")
+            if equations:
+                protocol["oracles"] = _review.never_looser(part(before, "oracles"), protocol["oracles"])
+                model_before = protocol.get("model")
+                model_after = (after.get("protocol") or {}).get("model") if isinstance(after.get("protocol"), dict) else None
+                if isinstance(model_before, dict) and isinstance(model_after, dict):
+                    protocol["model"] = {**model_before, "equations": _review.keep_every_equation(
+                        model_before.get("equations"), model_after.get("equations"))}
             if criteria or "criteria" in protocol:
                 protocol["criteria"] = criteria
             return {**block, "protocol": protocol}
@@ -12145,6 +12161,21 @@ class Engine:
                 f"{below}; for a second opinion from another model set provider.node_models.oracle_review"
                 if research else "")
         found = _review.findings(review) if review is not None else []
+        # The model's equations, read in the same call: a reader that is shown to be another model than the planner may
+        # object to one (its objection goes into the one request to the plan); the planner's own reading is never
+        # counted as a second reading of them, and the record says so.
+        eq_record = _review.equation_record(review, protocol, same_model=same, reviewer=reviewer or "the reviewer",
+                                            planner=planner or "the planner")
+        eq_found = _review.equation_findings(review) if review is not None and same is False else []
+        if eq_record is not None and not error:
+            if eq_record["read_by_other_model"]:
+                self._log.info("[oracle] the model's %d equation(s) were read by another model than the one that wrote "
+                               "the plan; %s", eq_record["total"],
+                               f"it objects to {len(eq_found)}" if eq_found else "it has no objection")
+            else:
+                self._log.info("[oracle] the model's %d equation(s) were not read by another model (%s)",
+                               eq_record["total"], eq_record["why"])
+        found = [*found, *eq_found]
         for f in found:
             self._log.info("[oracle] the second reader of the checks: %s", f)
         if error:
@@ -12164,7 +12195,9 @@ class Engine:
             "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
                                         same_model=same, research=research,
                                         reported=bool(answered.get("reported")), error=error,
-                                        sent=not oracles_text.lstrip().startswith("[]")),
+                                        sent=not oracles_text.lstrip().startswith("[]"), equations=eq_record),
+            **({"equations": eq_record} if eq_record is not None else {}),
+            **({"equation_objections": eq_found} if eq_found else {}),
             **({"verdicts": review.checks, "add": review.add, "summary": review.summary} if review is not None else {}),
             **({"error": error} if error else {}),
         }
@@ -12237,18 +12270,27 @@ class Engine:
             # Recorded before the request: it is made at most once, even if this run stops while it is out.
             self._oracle_review_write({**progress, "asked": True})
             before = self._planned_oracles()
+            equations_before = self._planned_equations()
             must = [p for p in (_forms.request(requests, last=not (findings or formula_asks)) if requests else "",
                                 _forms.formula_request(formula_asks, last=not findings, fixed=fixed_now)) if p]
-            parts = [*must, _review.request(findings) if findings else ""]
+            parts = [*must, _review.request(findings, equations=bool(review.get("equation_objections")))
+                     if findings else ""]
             if len(must) + bool(findings) > 1:
                 parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
                                 "give or change must be done" + ("; the last is a reader's findings, to follow where "
                                                                  "they are right." if findings else "."))
-            failed = await self._revise_checks_only("\n\n".join(p for p in parts if p))
+            failed = await self._revise_checks_only("\n\n".join(p for p in parts if p),
+                                                    equations=bool(review.get("equation_objections")))
             if failed:
                 self._log.warning("[oracle] %s", failed)
             after = self._planned_oracles()
             changes = _forms.describe_changes(before, after)
+            equations_after = self._planned_equations()
+            equation_changes = [f"equation {eid} was changed: it was `{was}`, it is now `{equations_after[eid]}`"
+                                for eid, was in equations_before.items()
+                                if eid in equations_after and equations_after[eid] != was]
+            for line in equation_changes:
+                self._log.warning("[oracle] after the reader's objection, the plan's %s", line)
             if len(after) < len(before):
                 self._log.warning("[oracle] the plan has fewer checks against known answers after it was asked (%d, was %d)",
                                   len(after), len(before))
@@ -12263,6 +12305,7 @@ class Engine:
                 *(["- FI asked the plan, once, to look at what the second reader found."] if findings else []),
                 *([f"- {failed[0].upper()}{failed[1:]}; nothing was changed for it."] if failed else
                   [f"- What changed: {c}." for c in changes] or ["- The plan did not change the checks."]),
+                *[f"- {c[0].upper()}{c[1:]}." for c in equation_changes],
                 *[f"- {r}" for r in again],
                 *[f"- Still not in its kind's form (read it before the run): {r}" for r in left],
             ], note="the checks against known answers looked at")
