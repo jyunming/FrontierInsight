@@ -147,3 +147,17 @@ async def test_unreadable_metrics_are_asked_once_and_when_still_unreadable_the_s
     patch = await other._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and _record(other)["count"] == 2 and "metrics" not in patch["design"]["protocol"]
     assert "goes on without it" in plan.plan_path(other.quest_root).read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_part_asked_about_at_the_plan_step_is_not_asked_again_at_the_design_step(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Model(eng, [], _draft(grid={"fin_spacing": [2.0, "wide"]}))  # every request fails
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    after_plan = len(model.asked)
+    assert after_plan >= 1 and _record(eng)["parts"] == ["grid"]
+    seen = _stop(eng)
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert len(model.asked) == after_plan, "one normal run asks at most once per part"
+    assert "asked the plan's model" in " ".join(seen[0]["steps"])

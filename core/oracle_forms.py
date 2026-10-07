@@ -508,8 +508,8 @@ def _plain_number(value: Any) -> float | None:
 
 
 def fixed_settings(protocol: dict[str, Any] | None) -> dict[str, float]:
-    """The plan's fixed numeric settings by name, from the structured places a plan states them: ``protocol.thresholds``,
-    a ``protocol.grid`` parameter with one value and ``protocol.optimisation.baseline.values`` (a design's controls given
+    """The plan's fixed numeric settings by name, from the structured places a plan states them (a threshold is a pass or fail limit, not a quantity of the model, so
+    it is never one): a ``protocol.grid`` parameter with one value and ``protocol.optimisation.baseline.values`` (a design's controls given
     as ``{name, value}`` are added by :func:`fixed_settings_of_design`). Prose is never read. A name given two different
     numbers is dropped: it cannot be told which is meant."""
     found: dict[str, float] = {}
@@ -525,9 +525,6 @@ def fixed_settings(protocol: dict[str, Any] | None) -> dict[str, float]:
         found.setdefault(key, number)
 
     if isinstance(protocol, dict):
-        thresholds = protocol.get("thresholds")
-        for name, value in (thresholds.items() if isinstance(thresholds, dict) else []):
-            take(name, value)
         for key in ("fixed", "constants", "controls"):
             stated = protocol.get(key)
             for name, value in (stated.items() if isinstance(stated, dict) else []):

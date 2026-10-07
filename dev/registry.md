@@ -118,7 +118,7 @@ same PR that adds, splits or renames one.
   calculator's tables, spliced into `_PLAN_DIRECTIVE`). A formula is read as written first; one that cannot be read is
   read again with its LaTeX spelled as the calculator writes it (`numeric_oracle.latex_to_arithmetic(names=True)`: Greek
   letters become plain names, never values). A name may be a setting of the check's `case` or one of the plan's fixed
-  settings (`fixed_settings` / `fixed_settings_of_design`: thresholds, one-valued grid axes, the baseline's values, `{name,
+  settings (`fixed_settings` / `fixed_settings_of_design`: one-valued grid axes (never a threshold), the baseline's values, `{name,
   value}` controls; never prose); any other name goes into the one request, never guessed. Applied by `Engine._apply_expected_formulas` from
   `_hold_oracle_forms`: before the freeze and any run, once (`formulas` in `.fi/oracle_review.json`), as the
   engine's change (`_note_engine_change`, plan version `by="engine"`). `oracle_triage.blind` withholds it.

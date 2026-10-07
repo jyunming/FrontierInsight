@@ -46,7 +46,7 @@ def test_a_double_backslash_and_a_greek_name_are_plain_names_never_a_value() -> 
 
 
 def test_a_name_the_plan_fixes_is_used_and_the_check_case_wins() -> None:
-    plan_fixed = of.fixed_settings({"thresholds": {"k": 200.0}, "grid": {"A": [0.0004], "n": [1, 2]},
+    plan_fixed = of.fixed_settings({"grid": {"k": [200.0], "A": [0.0004], "n": [1, 2]},
                                     "optimisation": {"baseline": {"values": {"h": 5}}}})
     assert plan_fixed == {"k": 200.0, "A": 0.0004, "h": 5.0}, "a swept parameter is not a fixed setting"
     value, why = of.formula_value(_oracle("L / (k * A)", L=0.5), plan_fixed)
@@ -55,8 +55,15 @@ def test_a_name_the_plan_fixes_is_used_and_the_check_case_wins() -> None:
     assert value == pytest.approx(12.5)
 
 
+def test_a_threshold_is_never_a_fixed_setting_and_a_formula_name_like_it_is_asked_about() -> None:
+    assert of.fixed_settings({"thresholds": {"k": 200.0}}) == {}
+    findings = of.formula_findings({"thresholds": {"k": 200.0}, "oracles": [
+        {**SINK, "expected_formula": "L / (k * 0.0004)"}]})
+    assert findings[0]["state"] == "unusable" and findings[0]["names"] == ["k"]
+
+
 def test_a_name_given_two_numbers_in_the_plan_is_not_a_fixed_setting() -> None:
-    assert of.fixed_settings({"thresholds": {"k": 1.0}, "grid": {"k": [2.0]}}) == {}
+    assert of.fixed_settings({"optimisation": {"baseline": {"values": {"k": 1.0}}}, "grid": {"k": [2.0]}}) == {}
 
 
 def test_a_formula_that_already_worked_gives_the_same_number() -> None:
@@ -68,7 +75,7 @@ def test_a_formula_that_already_worked_gives_the_same_number() -> None:
 
 def test_the_request_says_where_a_name_may_come_from_and_asks_for_the_values_of_the_rest() -> None:
     findings = of.formula_findings({"oracles": [{**SINK, "expected_formula": "L / (k * A)"}],
-                                    "thresholds": {"k": 200.0}})
+                                    "grid": {"k": [200.0]}})
     assert findings[0]["state"] == "unusable" and findings[0]["names"] == ["A"]
     text = of.formula_request(findings, fixed={"k": 200.0})
     assert "setting of that check's `case` or one of the plan's fixed settings (k = 200)" in text
@@ -78,7 +85,7 @@ def test_the_request_says_where_a_name_may_come_from_and_asks_for_the_values_of_
 @pytest.mark.asyncio
 async def test_a_latex_formula_with_a_fixed_setting_is_applied_by_the_engine(tmp_path: Path) -> None:
     engine = Engine(_config(tmp_path))
-    protocol = {"grid": {"dt": [0.01]}, "thresholds": {"k": 200.0, "A": 0.0004}, "model": MODEL,
+    protocol = {"grid": {"dt": [0.01]}, "grid": {"k": [200.0], "A": [0.0004]}, "model": MODEL,
                 "oracles": [{**SINK, "expected_formula": r"\frac{L}{k \cdot A}"}]}
     model = _Model(protocol, NO_REVIEW)
     engine._client = model

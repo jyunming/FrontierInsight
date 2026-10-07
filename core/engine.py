@@ -5327,13 +5327,25 @@ class Engine:
         """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
         return self._search_record(sha)[0]
 
-    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str, file: str | None = None) -> bool:
+    def _parts_asked(self, sha: str) -> list[str]:
+        """The protocol parts FI has already asked the plan's model about, for the plan (``sha``) and model asked now (the
+        record is kept by part name too, because FI's own note in plan.md changes the plan's hash between two steps)."""
+        try:
+            record = json.loads((self.fi_dir / _PART_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name():
+            return [str(p) for p in record.get("parts") or []]
+        return []
+
+    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str, file: str | None = None,
+                             extra: dict[str, Any] | None = None) -> bool:
         """Write the record; ``False`` when it could not be written."""
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / (file or _SEARCH_ASKED)).write_text(json.dumps({
                 "count": count, "calls": calls, "sha": sha, "model": self._plan_model_name(), "outcome": outcome,
-                "at": _frozen.now(),
+                "at": _frozen.now(), **(extra or {}),
             }) + "\n", encoding="utf-8")
             return True
         except OSError as e:
@@ -5368,7 +5380,7 @@ class Engine:
 
     async def _ask_plan_to_complete(
         self, design: Any, plan_sha: str, *, lacks: Any, request: Any, keep: Any, file: str, what: str, short: str,
-        note: str,
+        note: str, extra: dict[str, Any] | None = None,
     ) -> tuple[Any, str]:
         """The bounded request to the plan's model to write a part of the plan that is missing or cannot be read, shared by
         every such part (the search block, the settings to sweep, the metrics ...): at most ``_SEARCH_ASKS`` requests and
@@ -5390,7 +5402,7 @@ class Engine:
             ask = request(design, text)
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
-            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file):
+            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra):
                 # No durable count, no request: a request that could not be counted could be asked again on every resume.
                 self._log.warning("[plan] FI could not write down that it was asking the plan's model, so it did not ask")
                 return design, plan_sha
@@ -5416,7 +5428,7 @@ class Engine:
                 self._log.warning("[plan] the plan step could not be asked to complete %s: %s", short, e)
             count += 1
             calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
-            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file)
+            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file, extra)
             if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
                 again, sha = self._design_from_plan()
                 return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
@@ -5495,9 +5507,12 @@ class Engine:
         if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
                 or not plan_sha):
             return design, plan_sha
-        asked = list(self._unread_parts(design))
+        before = self._parts_asked(plan_sha)
+        # A part asked about at the plan step is not asked about again at the design step of the same run.
+        asked = [p for p in self._unread_parts(design) if p not in before]
         if not asked:
             return design, plan_sha
+        record_parts = {"parts": [*before, *asked]}
 
         def lacks(now: Any) -> list[str]:
             return [f"`protocol.{part}` (could not be read)" for part in self._unread_parts(now) if part in asked]
@@ -5515,7 +5530,7 @@ class Engine:
         design, plan_sha = await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request, keep=keep, file=_PART_ASKED,
             what="settings the experiment needs", short="the protocol",
-            note="the parts of the protocol that could not be read, written by the plan's model")
+            note="the parts of the protocol that could not be read, written by the plan's model", extra=record_parts)
         path = _plan.plan_path(self.quest_root)
         if path.is_file():
             left = self._unread_parts(design)
@@ -5528,7 +5543,8 @@ class Engine:
                 updated = _plan.add_to_section(text, _PART_HEADING, ["", *[f"- {line}" for line in lines]])
                 path.write_text(updated, encoding="utf-8")
                 if count:  # the record names the plan it was made on: the plan as FI wrote its note on it
-                    self._record_search_asked(count, calls, _plan.sha256(updated), "told in the plan", _PART_ASKED)
+                    self._record_search_asked(count, calls, _plan.sha256(updated), "told in the plan", _PART_ASKED,
+                                              record_parts)
                 plan_sha = _plan.sha256(updated)
                 _plan.record_version(self.quest_root, updated, by="engine", note="what FI did about protocol parts that could not be read")
         return design, plan_sha
