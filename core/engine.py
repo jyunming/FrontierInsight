@@ -104,6 +104,7 @@ from . import receipts as _receipts
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
+from .run_checks import RunChecksMixin
 from . import record_claims as _record_claims
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -647,7 +648,7 @@ from core.config import ProviderName as _ProviderName  # noqa: E402
 #: which reports the vendor that answered (copilot, customendpoint, ollama-models).
 _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
-class Engine:
+class Engine(RunChecksMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -5389,7 +5390,7 @@ class Engine:
 
     async def _ask_plan_to_complete(
         self, design: Any, plan_sha: str, *, lacks: Any, request: Any, keep: Any, file: str, what: str, short: str,
-        note: str, extra: dict[str, Any] | None = None,
+        note: str, extra: dict[str, Any] | None = None, ask_limit: int | None = None,
     ) -> tuple[Any, str]:
         """The bounded request to the plan's model to write a part of the plan that is missing or cannot be read, shared by
         every such part (the search block, the settings to sweep, the metrics ...): at most ``_SEARCH_ASKS`` requests and
@@ -5402,7 +5403,8 @@ class Engine:
         if not gaps or not path.is_file():
             return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
-        while count < _SEARCH_ASKS and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS:
+        while (count < (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
+               and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS):
             text = path.read_text(encoding="utf-8")
             sha_before = _plan.sha256(text)
             self._log.warning("[plan] the plan's %s was missing %s; FI asked the plan to complete it (%d of %d)", what,
@@ -13371,7 +13373,7 @@ class Engine:
             runner = _trial_runner.TrialsRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
-                log=self._log,
+                log=self._log, leave_out=self._left_out_quantities,
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
             )
@@ -13489,6 +13491,9 @@ class Engine:
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
+        # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
+        # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
+        await self._results_from_computation(state)
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
@@ -13501,6 +13506,9 @@ class Engine:
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations
+        # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
+        # text is never read twice), before the oracle gate tests it.
+        await self._results_from_computation(state)
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
@@ -13513,6 +13521,11 @@ class Engine:
             # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
             self._check_equation_labels(state)
             self._check_code_layout(state)
+            # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
+            # the gate tests the text that will run.
+            oracle_code, unchecked = await self._typed_results_stable(state, py, exec_env, seed_path, oracle_code)
+            if unchecked is not None:
+                return unchecked
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -13528,6 +13541,11 @@ class Engine:
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
         self._hold_added_oracles()
+        # The whole run is timed on a few real trials and made smaller by the plan's model when it would not fit the time
+        # allowed (core/run_estimate.py); one that still would not fit stops the quest here, with no paper.
+        too_long = await self._size_the_run(state, runner, py, exec_env)
+        if too_long is not None:
+            return too_long
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
         # The code can have changed since it was read (a repair by the equation or oracle gate): a version no second model
@@ -13637,6 +13655,7 @@ class Engine:
                 env=primary_env,
             ),
             label="running simulate.py and experiment.py" if split else "running experiment.py",
+            progress=getattr(runner, "progress_text", None),
         )
         # Observed on Windows-native: the first invocation of a freshly-
         # created venv's python.exe — even after a warmup `python -c
@@ -13791,7 +13810,7 @@ class Engine:
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
-        result_json = _extract_result_json(result.stdout)
+        result_json = self._without_typed_results(_extract_result_json(result.stdout))
         self._log.info(
             "[execute] rc=%d duration=%.1fs figures=%d result_json=%s",
             result.returncode, result.duration_s, len(figures), bool(result_json),
@@ -14141,6 +14160,8 @@ class Engine:
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         patch["figure_data_repairs"] = figure_repairs
+        if (sized_design := self._design_after_sizing(state)) is not None:
+            patch["design"] = sized_design  # the plan's smaller run (core/run_estimate.py)
         if figure_rewrote and code_path.is_file():
             patch["code"] = code_path.read_text(encoding="utf-8")  # the plotting code was rewritten to use the results
         await self._record_criteria(
@@ -14517,6 +14538,8 @@ class Engine:
         if resumed is not None:
             return resumed
         exec_result = state.get("exec_result") or {}
+        if exec_result.get("too_long") or exec_result.get("not_run"):
+            return {}  # the study would not fit the time allowed: there is no script to repair (core/run_estimate.py)
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
         # exits 0 WITHOUT a RESULT_JSON marker lands as an empty dict — which
@@ -15945,6 +15968,19 @@ class Engine:
                      *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
                        if repairs else [])]
             ended = "the code still did not compute the study's main quantity"
+        if reason == "not_run":
+            said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
+            problem = f"{said}, so nothing was run for the study"
+            tried = ["rewrote the simulation to compute the results it had typed in, and ran the known-answer checks on it",
+                     said]
+            ended = "the simulation's text still could not be checked for typed-in results"
+        if reason == "too_long":
+            # The study would not finish in the time allowed, even made smaller (core/run_estimate.py): nothing was run.
+            said = str((state.get("exec_result") or {}).get("too_long") or "").strip().rstrip(".")
+            problem = f"{said}, so nothing was run for the study" if said else "the experiment would not fit the time allowed"
+            tried = ["timed a few real trials of the experiment and added them up",
+                     said or "the total is more than the time allowed"]
+            ended = "the experiment would still take longer than the time allowed"
         if reason == "flat":
             # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
             symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
@@ -15983,6 +16019,8 @@ class Engine:
               "fix: needs/STUCK.json says what FI tried; run the quest again, "
               + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                  or reason == "flat" or headline_missing else
+                 "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
+                 "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
                  "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                  "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
@@ -16020,6 +16058,11 @@ class Engine:
             or self.config.engine.analyze_local_first
         ):
             return None
+        too_long = str(exec_result.get("too_long") or exec_result.get("not_run") or "")
+        if too_long:  # stopped before the study (it would not fit the time allowed, or a text of it was not checked): no second try
+            self._log.warning("[evidence_gate] %s; there is nothing measured to write up", too_long)
+            return {"verdict": "insufficient", "rationale": too_long, "gaps": [too_long], "stuck": True,
+                    "stuck_reason": "too_long" if exec_result.get("too_long") else "not_run"}
         flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
@@ -16106,6 +16149,8 @@ class Engine:
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
             evidence_note = f"{evidence_note}\n\n{code_note}".strip()
+        if run_note := self._run_checks_note():
+            evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
@@ -19363,7 +19408,7 @@ class Engine:
             self._log.debug("[clarify] could not keep the asked questions: %r", e)
 
     async def _await_with_heartbeat(
-        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0,
+        self, coro: Awaitable[Any], *, label: str, interval_s: float = 30.0, progress: Any = None,
     ) -> Any:
         """Await ``coro`` while emitting a periodic ``[execute] … still running,
         Ns elapsed`` line to run.log. Long-running work that blocks silently —
@@ -19381,6 +19426,17 @@ class Engine:
                 try:
                     await asyncio.wait_for(done.wait(), timeout=interval_s)
                 except asyncio.TimeoutError:
+                    where = ""
+                    try:  # where the study is, in plain words (core/run_estimate.py); never stops the beat
+                        where = str(progress() or "") if callable(progress) else ""
+                    except Exception:  # noqa: BLE001
+                        where = ""
+                    if where:
+                        from .run_estimate import plain_duration
+
+                        self._log.info("[execute] %s — still running, %s elapsed: %s", label,
+                                       plain_duration(time.monotonic() - start), where)
+                        continue
                     self._log.info(
                         "[execute] %s — still running, %ds elapsed",
                         label, int(time.monotonic() - start),

@@ -354,10 +354,11 @@ def _collect(quest_root: Path, plan: list[dict[str, Any]], results: dict[int, An
 async def run_trials(
     executor: Any, python: Path | str, quest_root: Path, module: Path | str, grid: dict[str, list[Any]], *,
     runs_per_setting: int, base_seed: int, deterministic: bool, timeout_s: int, env: dict[str, str] | None = None,
-    run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False,
+    run_id: str = "", thresholds: dict[str, Any] | None = None, paired: bool = False, on_plan: Any = None,
 ) -> TrialRun:
     """Run every cell of ``grid`` in its own process and record every trial (see the module docstring). ``module`` is
-    the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study."""
+    the simulation file relative to ``quest_root``; ``timeout_s`` bounds the whole study. ``on_plan(plan)`` is told the
+    plan before the first cell runs (for a progress line while it does)."""
     quest_root = Path(quest_root)
     work = quest_root / ".fi" / "trials"
     work.mkdir(parents=True, exist_ok=True)
@@ -367,6 +368,8 @@ async def run_trials(
     plan = _plan(quest_root, module, grid, runs_per_setting=runs_per_setting, base_seed=base_seed,
                  deterministic=deterministic, folder=work, out_name="cell{index}.out.jsonl", paired=paired,
                  thresholds=thresholds)
+    if on_plan is not None:
+        on_plan(plan)
     results: dict[int, Any] = {}
     started = time.monotonic()  # timeout_s bounds the whole study, as it bounded one simulation script before
     for task in plan:
@@ -491,7 +494,8 @@ class TrialsRunner:
     check). ``failed_script`` says which script to repair; ``last`` keeps the trial run for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
-                 simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None) -> None:
+                 simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None,
+                 leave_out: Any = None) -> None:
         self.executor = executor
         self.quest_root = Path(quest_root)
         self._protocol = protocol
@@ -505,6 +509,51 @@ class TrialsRunner:
         self.last: TrialRun | None = None
         # On a cluster: the experiment's script that submits the job array FI prepared and reports it pending or done.
         self.submit = Path(submit) if submit is not None else None
+        #: Quantities the analysis must not be given (the simulation typed their value into its code, core/typed_results.py):
+        #: a function returning their names, or ``None``. The ledger keeps every value the simulation returned.
+        self._leave_out = leave_out
+        self._plan_seen: list[dict[str, Any]] | None = None
+        self._plan_started = 0.0
+
+    def _note_plan(self, plan: list[dict[str, Any]]) -> None:
+        self._plan_seen, self._plan_started = plan, time.monotonic()
+
+    def progress_text(self) -> str:
+        """For the "still running" line: how many settings are done and how long is left, in plain words; empty when the
+        settings are not being run (nothing to say yet, or the trials were already run)."""
+        plan = self._plan_seen
+        if not plan:
+            return ""
+        from . import run_estimate as _estimate
+
+        done_trials = 0
+        done_cells = 0
+        for task in plan:
+            try:
+                lines = (self.quest_root / task["out"]).read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            seen = sum(1 for ln in lines if '"status"' in ln)
+            done_trials += seen
+            done_cells += seen >= len(task["trials"])
+        return _estimate.progress_line(done_cells, len(plan), done_trials, sum(len(t["trials"]) for t in plan),
+                                       time.monotonic() - self._plan_started)
+
+    def _without_left_out(self, summary: Path) -> Path:
+        """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
+        beside it. FI's summary and the ledger are not changed."""
+        names = {str(n) for n in (self._leave_out() if callable(self._leave_out) else self._leave_out or ())}
+        if not names:
+            return summary
+        try:
+            data = json.loads(summary.read_text(encoding="utf-8"))
+            for cell in data.get("cells") or []:
+                cell["metrics"] = {k: v for k, v in (cell.get("metrics") or {}).items() if k not in names}
+            copy = summary.with_name("trials.analysis.json")
+            copy.write_text(json.dumps(data, indent=1, allow_nan=True), encoding="utf-8")
+            return copy
+        except (OSError, ValueError, AttributeError):
+            return summary
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
@@ -581,8 +630,9 @@ class TrialsRunner:
                 self.executor, cmd[0], self.quest_root, self.simulate.relative_to(self.quest_root).as_posix(), grid,
                 runs_per_setting=runs, base_seed=base, deterministic=self.deterministic, timeout_s=timeout_s, env=env,
                 thresholds=protocol.get("thresholds") if isinstance(protocol.get("thresholds"), dict) else None,
-                paired=paired,
+                paired=paired, on_plan=self._note_plan,
             )
+            self._plan_seen = None
             _save_run(self.quest_root, key, run)
         self.last = run
         if self.log is not None:
@@ -609,7 +659,8 @@ class TrialsRunner:
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI's run gave a result that is not usable: {flat}".strip())
         # Relative to the quest folder the analysis runs in: the same path inside a container (/work) as on the host.
-        analysis_env = {**(env or {}), RESULTS_ENV: run.summary_path.relative_to(self.quest_root).as_posix(),
+        summary_path = self._without_left_out(run.summary_path)
+        analysis_env = {**(env or {}), RESULTS_ENV: summary_path.relative_to(self.quest_root).as_posix(),
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name
