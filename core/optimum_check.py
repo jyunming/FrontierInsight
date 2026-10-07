@@ -872,7 +872,7 @@ def read(quest_root: Path) -> dict[str, Any] | None:
 
 
 def _write(quest_root: Path, record: dict[str, Any], key: str) -> str:
-    text = json.dumps(record, indent=1, allow_nan=False, default=str) + "\n"
+    text = json.dumps(_search.plain_zero(record), indent=1, allow_nan=False, default=str) + "\n"
     path = Path(quest_root) / CHECK_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(text.encode("utf-8"))
@@ -886,6 +886,8 @@ def _clean(value: Any) -> Any:
     """A record with every non-finite number as ``None`` (JSON has none)."""
     if isinstance(value, float) and not math.isfinite(value):
         return None
+    if isinstance(value, float) and value == 0.0:
+        return 0.0  # never -0.0
     if isinstance(value, dict):
         return {k: _clean(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):

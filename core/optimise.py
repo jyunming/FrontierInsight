@@ -744,7 +744,7 @@ def attach_check(quest_root: Path, run: SearchRun, check: dict[str, Any], text: 
         if old in says:
             says = says[:says.index(old)]
     best["says"] = f"{says} Checked at finer numerical settings: {summary['says']}".strip()
-    best_text = json.dumps(best, indent=1) + "\n"
+    best_text = json.dumps(_search.plain_zero(best), indent=1) + "\n"
     saved["best"] = {"sha256": _sha(best_text.encode("utf-8")), "text": best_text}
     record_text = json.dumps(saved)
     for rel, body in ((BEST_PATH, best_text), (RECORD, record_text)):
@@ -1059,5 +1059,6 @@ def with_fi_record(stdout: str, record: dict[str, Any]) -> tuple[str, list[str]]
                                                                   "baseline_objective", "improvement",
                                                                   "improvement_numerical_error",
                                                                   "best_numerical_error")}
+    result = _search.plain_zero(result)
     lines[index] = "RESULT_JSON: " + json.dumps(result, allow_nan=True, default=str)
     return "\n".join(lines) + ("\n" if (stdout or "").endswith("\n") else ""), differs
