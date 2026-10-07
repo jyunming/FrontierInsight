@@ -166,6 +166,16 @@ def test_paragraphs_pulled_apart_in_a_column_are_found(tmp_path: Path) -> None:
     assert len(gaps) == 1 and "left column" in gaps[0]["problem"], report["findings"]
 
 
+def test_the_space_around_a_float_in_a_column_is_not_a_gap(tmp_path: Path) -> None:
+    # paragraph, a 150 pt figure with its caption, paragraph: 70 pt either side of the figure is the float's own space.
+    left = (_lines_of_text(54, 700, 6, PROSE) + [("image", 54, 480, 280, 630)]
+            + [("text", "Figure 1: A made-up picture of nothing", 9, 54, 470, False)]
+            + _lines_of_text(54, 380, 10, PROSE))
+    right = _lines_of_text(320, 700, 40, PROSE)
+    report = pm.paper_report(pm.measure_pdf(_pdf(tmp_path, [(612, 792, left + right)])))
+    assert [f for f in report["findings"] if f["check"] == "column_gap"] == [], report["findings"]
+
+
 def test_a_blank_stretch_under_the_last_line_of_a_column_is_not_a_gap(tmp_path: Path) -> None:
     left = _lines_of_text(54, 700, 14, PROSE)
     right = _lines_of_text(320, 700, 40, PROSE)

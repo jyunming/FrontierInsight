@@ -905,6 +905,7 @@ _COLUMN_GAP_SHARE = 0.07
 # Blank between two paragraphs of body text, in lines of its size: LaTeX leaves
 # up to about one with a paragraph skip; more is a column pulled apart.
 _PARAGRAPH_GAP_LINES = 1.5
+_CAPTION_START = re.compile(r"^(Figure|Fig\.?|Table)\s*\d+", re.IGNORECASE)
 
 
 def _is_prose(line: Line, words: int = 2) -> bool:
@@ -978,7 +979,7 @@ def _column_gap_findings(page: Page, *, region: str = "page") -> list[dict]:
     """Blank stretches inside a column, between two things set in it: one larger
     than ``_COLUMN_GAP_SHARE`` of the page, or at least two between paragraphs of
     body text (one body line over another) wider than a line and a half of
-    blank (a large gap counts only beside body text, not around the title block): the paragraphs of a column stretched apart because a figure did not
+    blank (a gap counts only between two lines of body text: not around the title block, nor beside a figure, a table or its caption): the paragraphs of a column stretched apart because a figure did not
     fit under them. The stretch under the last thing of a column is not one (the
     column ended there), a heading's own space is not one, and a text area that
     is empty from the top is the half-empty-page check's."""
@@ -995,15 +996,36 @@ def _column_gap_findings(page: Page, *, region: str = "page") -> list[dict]:
             return  # set across both columns
         columns[0 if middle is None or (box[0] + box[2]) / 2 < middle else 1].append((box, kind))
 
-    for line in page.lines:
-        if line.visible:
-            # 2: a line of body text that is part of a paragraph, 1: one that is
-            # long enough to be a paragraph's own (not an author line), 0: other.
-            same = body is not None and abs(line.size - body) <= 0.05 * body
-            place(line.box, (1 + _is_prose(line, 5)) if same and _is_prose(line) else 0)
+    visible = [line for line in page.lines if line.visible]
+
+    def in_a_row(line: Line) -> bool:
+        """A table cell: another line close beside it on the same row."""
+        for other in visible:
+            if other is line:
+                continue
+            if gutter is not None and ((line.box[0] + line.box[2]) / 2 < middle) != ((other.box[0] + other.box[2]) / 2 < middle):
+                continue  # the other column's line is not a cell
+            high = min(line.box[3] - line.box[1], other.box[3] - other.box[1])
+            same_row = min(line.box[3], other.box[3]) - max(line.box[1], other.box[1]) > 0.5 * high
+            beside = max(line.box[0], other.box[0]) - min(line.box[2], other.box[2])
+            if same_row and 0 <= beside < 40.0:
+                return True
+        return False
+
+    for line in visible:
+        # 2: a line of body text that is part of a paragraph, 1: one that is
+        # long enough to be a paragraph's own (not an author line), 0: other,
+        # -1: part of a float (a table's cell, a caption), whose own space
+        # above and below is the template's.
+        same = body is not None and abs(line.size - body) <= 0.05 * body
+        if _CAPTION_START.match(line.text) or in_a_row(line):
+            kind = -1
+        else:
+            kind = (1 + _is_prose(line, 5)) if same and _is_prose(line) else 0
+        place(line.box, kind)
     for image in page.images:
         if image[2] - image[0] < 0.9 * page.width and image[3] - image[1] >= 24.0:  # not a decoration or a logo
-            place(image, 0)
+            place(image, -1)
     found = []
     big = _COLUMN_GAP_SHARE * page.height
     stretched = _PARAGRAPH_GAP_LINES * 1.2 * (body or 10.0)
@@ -1016,9 +1038,11 @@ def _column_gap_findings(page: Page, *, region: str = "page") -> list[dict]:
         widest, paragraph_gaps, para_widest = 0.0, 0, 0.0
         for box, kind in ordered[1:]:
             gap = reach - box[3]
-            if kind == 2 or reach_kind == 2:  # the space around a title block is the template's
+            # The space around a title block is the template's, and so is the
+            # space above and below a figure or a table with its caption.
+            if kind >= 1 and reach_kind >= 1 and 2 in (kind, reach_kind):
                 widest = max(widest, gap)
-            if gap > stretched and kind and reach_kind:
+            if gap > stretched and kind >= 1 and reach_kind >= 1:
                 paragraph_gaps += 1
                 para_widest = max(para_widest, gap)
             if box[1] < reach:
