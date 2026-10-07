@@ -386,3 +386,40 @@ def test_the_retry_line_says_the_server_is_down_and_how_long_it_waits() -> None:
     assert "attempt 2 of 6" in line
     assert "the provider's server is down or busy (HTTP 521)" in line
     assert line.endswith("trying again in 21s")
+
+
+# --- a step that times out on every try is not a passing problem -----------------------------------------------------
+
+
+async def test_every_try_timing_out_is_said_on_the_error_and_sorted_as_a_setup_problem(waits: list[float]) -> None:
+    from core import crash_kind
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(httpx.ReadTimeout) as e:
+        await _chat(PLAIN, handler, node="implement")
+    assert len(calls) >= 2 and e.value.fi_timeouts["all"] is True and e.value.fi_timeouts["tries"] == len(calls)
+    failure = crash_kind.classify(e.value, node="implement", provider="openai", model="gpt-x")
+    assert failure.kind == "setup" and "`implement`" in failure.say and "gpt-x" in failure.say
+    assert "http_timeout_s" in failure.do
+
+
+async def test_a_timeout_among_other_failures_stays_a_passing_problem(waits: list[float]) -> None:
+    from core import crash_kind
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return _cloudflare(503)
+        raise httpx.ReadTimeout("slow", request=request)
+
+    with pytest.raises(httpx.ReadTimeout) as e:
+        await _chat(PLAIN, handler, node="implement")
+    assert e.value.fi_timeouts["all"] is False
+    assert crash_kind.classify(e.value, node="implement", provider="openai", model="gpt-x").kind == "transient"

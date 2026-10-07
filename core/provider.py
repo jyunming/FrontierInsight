@@ -74,7 +74,8 @@ from .config import ProviderConfig
 from .proc_tree import _DESCENDANT_WAIT_S as _TREE_KILL_WAIT_S
 from .proc_tree import AsyncProcessTree, ProcessTree
 from .thinking_capture import (
-    add_thinking, as_text, has_holder, note_declined, note_empty_parts, note_extension_older, note_thinking,
+    LOOP_CHECK_EVERY, LOOP_TAIL_KEPT, ThinkingLoop, add_thinking, as_text, has_holder, note_declined, note_empty_parts,
+    note_extension_older, note_loop, note_sampling, note_thinking, note_timing, repeating_cycle,
     wanted as thinking_wanted,
 )
 
@@ -1057,11 +1058,11 @@ def _stream_error(error: Any, request: Any) -> BaseException:
     # A permanent type or code wins over a hopeful message ("invalid request ... try again with a shorter prompt"),
     # unless the type or code itself says it will clear.
     if _STREAM_PERMANENT.search(norm(kind)) and not _STREAM_TRANSIENT.search(norm(kind)):
-        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text))
     if _STREAM_TRANSIENT.search(norm(f"{kind} {message}")):
         return httpx.RemoteProtocolError(text)
     if status is not None and 400 <= int(status) < 500:
-        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request))
+        return httpx.HTTPStatusError(text, request=request, response=httpx.Response(400, request=request, text=text))
     return httpx.RemoteProtocolError(text)
 
 
@@ -1087,11 +1088,13 @@ def _ollama_native(base_url: str) -> str | None:
     return base[: -len("/v1")] + "/api/chat" if base.endswith("/v1") else None
 
 
-def _ollama_native_body(body: dict[str, Any]) -> dict[str, Any] | None:
+def _ollama_native_body(body: dict[str, Any], *, keep_temperature: bool = True) -> dict[str, Any] | None:
     """The same request in Ollama's native ``/api/chat`` form, asking the model to think (``think``): Ollama's
     OpenAI-compatible endpoint never returns a model's reasoning, its own API does (``message.thinking``). The user's
     ``reasoning_effort`` (``body["reasoning_effort"]``) is passed on as ``think``'s named level; ``None`` when the
-    request has something the native form would change (a message with an image, or a field of ``extra_body``)."""
+    request has something the native form would change (a message with an image, or a field of ``extra_body``).
+    ``keep_temperature`` False leaves the temperature out, so Ollama uses the model's own recommended sampling (a model
+    that thinks at length can loop at FI's temperature 0)."""
     known = {"model", "messages", "temperature", "max_tokens", "reasoning_effort"}
     messages = body.get("messages")
     if set(body) - known or not isinstance(messages, list):
@@ -1099,11 +1102,11 @@ def _ollama_native_body(body: dict[str, Any]) -> dict[str, Any] | None:
     if any(not isinstance(m, dict) or not isinstance(m.get("content"), str) for m in messages):
         return None
     options: dict[str, Any] = {}
-    if body.get("temperature") is not None:
+    if keep_temperature and body.get("temperature") is not None:
         options["temperature"] = body["temperature"]
     if isinstance(body.get("max_tokens"), int) and not isinstance(body.get("max_tokens"), bool):
         options["num_predict"] = body["max_tokens"]
-    return {"model": body["model"], "messages": messages, "stream": False, "think": body.get("reasoning_effort") or True,
+    return {"model": body["model"], "messages": messages, "stream": True, "think": body.get("reasoning_effort") or True,
             **({"options": options} if options else {})}
 
 
@@ -1123,14 +1126,117 @@ def _ollama_as_openai(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+#: A streamed call's whole-call budget as a multiple of the step's HTTP timeout (which stays the limit on silence between
+#: two chunks): a model that keeps streaming its thinking can finish a long step, a call that goes on for ever is still
+#: ended.
+_STREAM_TOTAL_FACTOR = 4
+
+
+async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
+                                timeout: float, inactivity: float | None = None) -> dict[str, Any]:
+    """Ollama's native chat call as a stream (newline-delimited JSON), put back together into the shape
+    :func:`_ollama_as_openai` returns (a model that thinks can be silent to a plain request for longer than its read
+    timeout; a stream sends its thinking as it goes).
+
+    Time: ``inactivity`` (default ``timeout``, the step's HTTP timeout) bounds the silence between two lines, so a model
+    whose thinking keeps arriving is not cut off by it and a stalled stream is; ``timeout`` x
+    :data:`_STREAM_TOTAL_FACTOR` bounds the whole call. Both end as ``httpx.ReadTimeout`` and are tried again under the usual rules. An error
+    status raises as ``raise_for_status`` would (the caller reads a refusal of ``think`` from it); an ``error`` sent
+    inside the stream is classified by :func:`_stream_error`; a stream that ends without ``done: true`` was cut off
+    and is tried again."""
+    wait = timeout if inactivity is None else inactivity
+    total = timeout * _STREAM_TOTAL_FACTOR
+    content: list[str] = []
+    thinking: list[str] = []
+    last: dict[str, Any] = {}
+    done = False
+    request = httpx.Request("POST", url)
+    # When the first line, the first thinking and the first answer text arrived (seconds after the call started), for
+    # one run.log line: it tells a model that was thinking from one that was waiting (queued) before saying anything.
+    started = time.monotonic()
+    first_any: float | None = None
+    first_thinking: float | None = None
+    first_content: float | None = None
+    tail, unchecked = "", 0  # the end of the reasoning so far, and how much of it has arrived since the last look
+    try:
+        async with asyncio.timeout(total):
+            async with http.stream("POST", url, json=body, headers=headers, timeout=timeout) as r:
+                request = r.request
+                if r.status_code >= 400:
+                    await r.aread()
+                    r.raise_for_status()
+                lines = r.aiter_lines().__aiter__()
+                while True:
+                    try:
+                        raw = await asyncio.wait_for(lines.__anext__(), wait)
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        raise httpx.ReadTimeout(
+                            f"the model's stream sent nothing for {wait:g} s (its read timeout)") from None
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except ValueError:
+                        raise httpx.RemoteProtocolError(
+                            f"the model's stream sent a line that is not JSON: {line[:200]!r}") from None
+                    if not isinstance(chunk, dict):
+                        raise httpx.RemoteProtocolError(
+                            f"the model's stream sent a line that is not an object: {line[:200]!r}")
+                    if chunk.get("error"):
+                        raise _stream_error(chunk["error"], request)
+                    message = chunk.get("message") if isinstance(chunk.get("message"), dict) else {}
+                    now = time.monotonic() - started
+                    first_any = now if first_any is None else first_any
+                    if isinstance(message.get("content"), str) and message["content"]:
+                        content.append(message["content"])
+                        first_content = now if first_content is None else first_content
+                    if isinstance(message.get("thinking"), str) and message["thinking"]:
+                        thinking.append(message["thinking"])
+                        first_thinking = now if first_thinking is None else first_thinking
+                        tail = (tail + message["thinking"])[-LOOP_TAIL_KEPT:]
+                        unchecked += len(message["thinking"])
+                        if unchecked >= LOOP_CHECK_EVERY and not content:
+                            unchecked = 0
+                            cycle = repeating_cycle(tail)
+                            if cycle is not None:
+                                # Stop reading at once (leaving the `async with` closes the stream): a loop only ends
+                                # when the model's context is full.
+                                raise ThinkingLoop(kind=cycle[0], block=cycle[1], repeats=cycle[2],
+                                                   chars=sum(map(len, thinking)))
+                    if chunk.get("done"):
+                        last, done = chunk, True
+                        break
+    except TimeoutError:
+        raise httpx.ReadTimeout(
+            f"the model's stream did not finish its answer within {total:g} s ({_STREAM_TOTAL_FACTOR} times the step's {timeout:g} s limit)") from None
+    if not done:
+        raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no done message)")
+    end = time.monotonic() - started
+
+    def _s(v: float | None) -> str:
+        return "none" if v is None else f"{v:.0f} s"
+
+    summary = (f"{last.get('model') or body.get('model') or 'the model'}: first output after {_s(first_any)}, thinking "
+               f"from {_s(first_thinking)}, answer from {_s(first_content)}, done after {_s(end)} "
+               f"({sum(map(len, thinking))} thinking chars, {sum(map(len, content))} answer chars)")
+    _log.info("[ollama] %s", summary)
+    note_timing(summary)  # the engine writes it in run.log (this module's log does not reach it)
+    return {"model": last.get("model"), "done_reason": last.get("done_reason"),
+            "prompt_eval_count": last.get("prompt_eval_count"), "eval_count": last.get("eval_count"),
+            "message": {"content": "".join(content), **({"thinking": "".join(thinking)} if thinking else {})}}
+
+
 async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
                          timeout: float) -> dict[str, Any]:
     """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
     ``finish_reason``, ``usage``, ``model``).
 
-    Time: ``timeout`` (the step's own HTTP budget) bounds the whole call, as it bounded a plain request, which sends
-    nothing until its answer is complete; a stream kept open by keep-alive comments, or one that trickles for longer
-    than that, fails with ``httpx.ReadTimeout`` and is tried again under the usual rules. Events follow the SSE format
+    Time: ``timeout`` (the step's own HTTP timeout) is the limit on silence between two reads (httpx's read timeout);
+    ``timeout`` x :data:`_STREAM_TOTAL_FACTOR` bounds the whole call. A stream kept open by keep-alive comments, or one
+    that trickles for longer than that, fails with ``httpx.ReadTimeout`` and is tried again under the usual rules. Events follow the SSE format
     (several ``data:`` lines of one event are joined; an event that does not parse is a protocol error, never skipped).
     An error status raises as ``raise_for_status`` would; an error sent inside the stream is a 4xx-equivalent when
     retrying cannot fix it (:func:`_stream_error`) and transient otherwise. A stream that ends without a
@@ -1187,7 +1293,7 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
         return False
 
     try:
-        async with asyncio.timeout(timeout):
+        async with asyncio.timeout(timeout * _STREAM_TOTAL_FACTOR):
             async with http.stream("POST", url, json=stream_body, headers=headers, timeout=timeout) as r:
                 request = r.request
                 if r.status_code >= 400:
@@ -1214,7 +1320,8 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
                     done = take(event_name, data_lines)
     except TimeoutError:
         raise httpx.ReadTimeout(
-            f"the model's stream did not finish its answer within the step's {timeout:g} s budget"
+            f"the model's stream did not finish its answer within {timeout * _STREAM_TOTAL_FACTOR:g} s "
+            f"({_STREAM_TOTAL_FACTOR} times the step's {timeout:g} s limit)"
         ) from None
     if finish is None:
         raise httpx.RemoteProtocolError("the model's stream ended before its answer did (no finish reason)")
@@ -4180,18 +4287,49 @@ class LLMClient:
         # POST instead of letting it propagate. Re-run the two
         # cancellation tests in tests/test_provider.py if you touch
         # this retry config.
+        think_off = {"on": False}  # a loop (or a thinking that used up the answer) once: this call asks no more for reasoning
+
         async def send(request_body: dict[str, Any]) -> dict[str, Any]:
             # Ollama only hands a model's reasoning back through its own API, so when the reasoning will be kept
             # (``output.save_thinking``) the call goes there; a model that cannot think (or a server that does not
             # know the call) is remembered and sent to the OpenAI-compatible endpoint as before.
             native_url = _ollama_native(self.endpoint.base_url) if self.endpoint.provider_name == "ollama" else None
             refused = self.__dict__.setdefault("_ollama_not_thinking", set())
-            native = (_ollama_native_body(request_body) if native_url and thinking_wanted()
+            # FI's own temperature is not sent with a request to think (the model's recommended sampling is used
+            # then), unless the person set one: ``provider.fixed_temperature`` or a ``temperature`` of their own.
+            explicit = (self.endpoint.fixed_temperature is not None or "temperature" in (self.endpoint.extra_body or {})
+                        or "temperature" in (extra or {}))
+            native = (_ollama_native_body(request_body, keep_temperature=explicit)
+                      if native_url and thinking_wanted() and not think_off["on"]
                       and request_body.get("model") not in refused else None)
             if native is None or native_url is None:
                 return await send_to(url, request_body)
             try:
-                return _ollama_as_openai(await send_to(native_url, native))
+                note_sampling(await self._ollama_sampling_note(native_url, request_body, explicit))
+            except Exception:  # noqa: BLE001 -- a note about sampling never stops the call
+                pass
+
+            async def without_reasoning() -> dict[str, Any]:
+                think_off["on"] = True
+                return await send_to(url, request_body)
+
+            try:
+                reply = _ollama_as_openai(await send_to(native_url, native, native=True))
+            except ThinkingLoop as loop:
+                note_loop(loop.kind, loop.block, loop.repeats, loop.chars)
+                # The cut stream never reported its usage; the reasoning it spent is paid for, so it is counted as
+                # a failed attempt with an estimate (about four characters a token), like any attempt that did answer.
+                spent = max(1, loop.chars // self._CHARS_PER_TOKEN)
+                asked_tokens = max(1, sum(len(_content_text(m.get("content", ""))) for m in messages)
+                                   // self._CHARS_PER_TOKEN)
+                _note_failed_attempt(self.last_provider, request_body.get("model"), cut_off(
+                    {"model": request_body.get("model"), "usage": {"prompt_tokens": asked_tokens,
+                                                                    "completion_tokens": spent,
+                                                                    "total_tokens": asked_tokens + spent,
+                                                                    "estimated": True}},
+                    request_body.get("max_tokens")))
+                _log.info("[%s] %s; asking again without reasoning", node or "chat", loop)
+                return await without_reasoning()
             except httpx.HTTPStatusError as e:
                 sc = getattr(getattr(e, "response", None), "status_code", None)
                 if sc not in (400, 404, 405, 501):
@@ -4206,9 +4344,23 @@ class LLMClient:
                           "%s (HTTP %s); using the OpenAI-compatible call, whose answers carry no reasoning",
                           node or "chat", request_body.get("model"), sc)
                 return await send_to(url, request_body)
+            message = reply["choices"][0]["message"]
+            if _finish_reason(reply) == "length" and message.get("reasoning_content") and not str(
+                    message.get("content") or "").strip():
+                # The reasoning used up all the room there was and no answer came: paid for, noted, asked once more
+                # without reasoning (asking again with it would spend the same).
+                spent = len(message["reasoning_content"])
+                _note_failed_attempt(self.last_provider, reply.get("model") or request_body.get("model"),
+                                     cut_off(reply, request_body.get("max_tokens")))
+                note_loop("length", 0, 0, spent)
+                _log.info("[%s] the model's reasoning used up the whole answer space (%d characters) without an answer; "
+                          "asking again without reasoning", node or "chat", spent)
+                return await without_reasoning()
+            return reply
 
-        async def send_to(call_url: str, request_body: dict[str, Any]) -> dict[str, Any]:
+        async def send_to(call_url: str, request_body: dict[str, Any], *, native: bool = False) -> dict[str, Any]:
             data: dict[str, Any] = {}
+            tries = timeouts = 0  # attempts made, and how many of them ended in a timeout
             async for attempt in AsyncRetrying(
                 # Six attempts over about 3-4.5 minutes once the provider's
                 # server is down or busy (5xx, 429 rate limit; a sane
@@ -4237,21 +4389,31 @@ class LLMClient:
                     http_timeout = node_budget(
                         self._node_http_timeout_s, node, self._http_timeout_s,
                     )
-                    if streams:
-                        data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
-                    else:
-                        r = await self._http.post(
-                            call_url, json=request_body, headers=headers, timeout=http_timeout,
-                        )
-                        # Raise for any error status; the retry predicate
-                        # (_retry_http_error) retries only 5xx / 429, letting a 4xx
-                        # (bad key, quota, content policy, oversized body) surface
-                        # immediately instead of burning the backoff budget.
-                        r.raise_for_status()
-                        data = r.json()
+                    tries += 1
+                    try:
+                        if native:
+                            data = await _post_ollama_streamed(self._http, call_url, request_body, headers, http_timeout)
+                        elif streams:
+                            data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
+                        else:
+                            r = await self._http.post(
+                                call_url, json=request_body, headers=headers, timeout=http_timeout,
+                            )
+                            # Raise for any error status; the retry predicate
+                            # (_retry_http_error) retries only 5xx / 429, letting a 4xx
+                            # (bad key, quota, content policy, oversized body) surface
+                            # immediately instead of burning the backoff budget.
+                            r.raise_for_status()
+                            data = r.json()
+                    except httpx.TimeoutException as e:
+                        # Said on the error for whoever sorts the failure (core/crash_kind.py): when every try ended
+                        # like this, retrying later will not help; the step needs more time (or a faster model).
+                        timeouts += 1
+                        e.fi_timeouts = {"tries": tries, "all": timeouts == tries, "limit_s": http_timeout}  # type: ignore[attr-defined]
+                        raise
             return data
 
-        def usage_of(reply: dict[str, Any]) -> dict[str, int] | None:
+        def usage_of(reply: dict[str, Any]) -> dict[str, Any] | None:
             u = reply.get("usage") or {}
             if not (u and isinstance(u, dict)):
                 return None
@@ -4260,6 +4422,8 @@ class LLMClient:
                 "completion_tokens": int(u.get("completion_tokens", 0) or 0),
                 "total_tokens": int(u.get("total_tokens", 0) or (u.get("prompt_tokens", 0) or 0)
                                     + (u.get("completion_tokens", 0) or 0)),
+                # a count FI estimated from characters stays marked as one in the record of calls
+                **({"estimated": True} if u.get("estimated") else {}),
             }
 
         def problem(kind: type, reply: dict[str, Any], why: str, limit: int | None,
@@ -4351,6 +4515,29 @@ class LLMClient:
         # carries real numbers instead of nulls.
         self._fill_usage_estimate_if_missing(messages, text)
         return text
+
+    async def _ollama_sampling_note(self, native_url: str, request_body: dict[str, Any], explicit: bool) -> str:
+        """One plain phrase for which sampling a request to think uses: the person's own temperature, or the model's
+        recommended one (its ``parameters`` as Ollama's ``/api/show`` lists them, asked once per model; "the model's own
+        defaults" when they cannot be read)."""
+        model = str(request_body.get("model") or "")
+        if explicit:
+            return f"{model}: FI sends temperature {request_body.get('temperature')} (set in the provider settings)"
+        cache = self.__dict__.setdefault("_ollama_defaults", {})
+        if model not in cache:
+            cache[model] = ""
+            try:
+                r = await self._http.post(native_url[: -len("/chat")] + "/show", json={"model": model},
+                                          headers={"Content-Type": "application/json"}, timeout=10)
+                r.raise_for_status()
+                params = r.json().get("parameters")
+                if isinstance(params, str):
+                    cache[model] = ", ".join(" ".join(x.split()) for x in params.splitlines() if x.strip())[:200]
+            except Exception:  # noqa: BLE001 -- the model's defaults not being readable only changes the wording
+                pass
+        got = cache[model]
+        return (f"{model}: reasoning is on, so FI sent no temperature of its own and the model's own defaults are used"
+                + (f" ({got})" if got else ""))
 
     # ~4 chars per token holds reasonably well across English-text
     # tokenizers (BPE / tiktoken / SentencePiece). It's not exact —
@@ -4998,6 +5185,13 @@ class FallbackLLMClient:
         # Every provider failed on this call, or all circuits are already open.
         if errors:
             _, last_err = errors[-1]
+            if len(errors) > 1 and not all(getattr(e, "fi_timeouts", {}).get("all") for _, e in errors):
+                # The last provider timing out on every try is not "the model is too slow" when another failed another
+                # way: crash_kind reads it as a passing problem.
+                try:
+                    last_err.fi_timeouts["all"] = False  # type: ignore[attr-defined]
+                except Exception:  # noqa: BLE001 -- no mark on the error
+                    pass
             try:
                 chain = ", ".join(lbl for lbl, _ in errors)
                 last_err.add_note(f"[FI] all providers exhausted: {chain}")

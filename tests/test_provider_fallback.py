@@ -231,3 +231,27 @@ async def test_breaker_half_open_recovers_after_cooldown():
     # Circuit closed: the next call goes straight to the primary again.
     assert await client.chat([{"role": "user", "content": "4"}]) == "primary-recovered"
     assert primary.calls == 4
+
+
+async def test_a_last_provider_timing_out_does_not_blame_the_model_when_another_failed_otherwise():
+    import httpx
+
+    def slow() -> httpx.ReadTimeout:
+        e = httpx.ReadTimeout("slow")
+        e.fi_timeouts = {"tries": 4, "all": True, "limit_s": 900.0}  # type: ignore[attr-defined]
+        return e
+
+    # A different failure first: the aggregate is mixed, so the timeout mark is withdrawn.
+    primary = _FakeClient("primary", error=httpx.ConnectError("down"))
+    fb = _FakeClient("fallback", error=slow())
+    client = FallbackLLMClient(primary, [("fallback", _factory_for(fb, [0]))])
+    with pytest.raises(httpx.ReadTimeout) as e:
+        await client.chat([{"role": "user", "content": "x"}])
+    assert e.value.fi_timeouts["all"] is False
+    # Every provider timed out on every try: the mark stays.
+    primary = _FakeClient("primary", error=slow())
+    fb = _FakeClient("fallback", error=slow())
+    client = FallbackLLMClient(primary, [("fallback", _factory_for(fb, [0]))])
+    with pytest.raises(httpx.ReadTimeout) as e:
+        await client.chat([{"role": "user", "content": "x"}])
+    assert e.value.fi_timeouts["all"] is True
