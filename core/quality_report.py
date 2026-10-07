@@ -17,6 +17,7 @@ import csv
 import io
 import json
 import re
+import time
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -507,6 +508,9 @@ def _stage_models(q: _Quest, stage: str) -> tuple[list[str], str, bool | None, s
 
 
 def _bare(who: str) -> str:
+    # The provider is dropped on purpose: one model reached through two providers is still one model, and a reading by it
+    # is not an independent one. FI's own check does the same (``oracle_review.same_model`` ignores the provider), so this
+    # report must agree with it.
     return who.split("/", 1)[-1]
 
 
@@ -692,10 +696,36 @@ def _config(q: _Quest, stages: dict[str, dict[str, Any]]) -> dict[str, Any]:
     return {"main_model": main, "routed": dict(sorted(routed.items()))}
 
 
-def build(quest_root: Path | str) -> dict[str, Any]:
-    """The report of one quest, from its records. Never raises for a missing or old-format record."""
+def _run_started(q: _Quest) -> float | None:
+    """When the current run began: the latest ``quest_started`` in the audit trace (a resume writes one too)."""
+    for e in reversed(q.audit):
+        if e.get("kind") == "quest_started":
+            return _epoch(e.get("ts"))
+    return None
+
+
+def _stamp(t: float | None) -> str | None:
+    return datetime.fromtimestamp(t).astimezone().isoformat(timespec="seconds") if t else None
+
+
+def _day(iso: Any) -> str:
+    return str(iso or "an unknown time").replace("T", " ")[:16]
+
+
+def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
+    """The report of one quest, from its records. Never raises for a missing or old-format record.
+
+    ``running`` says whether the quest is running now; ``None`` finds out the way the quest list does
+    (``quest_title.looks_running``). A running quest's outcome is "running", never an earlier run's stop or paper."""
     root = Path(quest_root)
     q = _Quest(root)
+    if running is None:
+        try:
+            from . import quest_title
+            running = quest_title.looks_running(root)
+        except Exception:  # noqa: BLE001
+            running = False
+    started = _run_started(q)
     problems: list[dict[str, str]] = [*_plan_problems(q), *_checks_problems(q), *_design_problems(q), *_code_problems(q),
                                       *_run_problems(q), *_analysis_problems(q), *_paper_problems(q), *_review_problems(q),
                                       *_call_problems(q)]
@@ -716,12 +746,19 @@ def build(quest_root: Path | str) -> dict[str, Any]:
             "seconds": round(seconds[stage]) if stage in seconds else None,
         }
     outcome = _outcome(q)
-    failure = _failure(q, outcome, problems)
+    if running:
+        previous = _dict(_json(root / ".fi" / "quality.json")).get("written_at")
+        outcome = {"kind": "running", "needs_person": False, "evidence": "",
+                   "line": "The quest is running now" + (f" (this run started {_day(_stamp(started))})" if started else "")
+                   + ". This report is built from the records so far; the outcome is not known yet."
+                   + (f" The QUALITY.md in the quest folder is from the previous run of {_day(previous)}." if previous else "")}
+    failure = None if running else _failure(q, outcome, problems)
     totals = Counter(p["status"].replace(" ", "_") for p in problems)
     total = len(problems)
     quest_id = str(q.summary.get("quest_id") or (q.audit[0].get("quest_id") if q.audit else "") or root.name)
     return {
-        "schema": SCHEMA, "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
+        "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
+        "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure,
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
@@ -752,7 +789,9 @@ def _cell(text: str) -> str:
 def render(report: dict[str, Any]) -> str:
     """QUALITY.md: plain words for a scientist."""
     o = report["outcome"]
-    lines = ["# Quality report", "", f"Quest `{report['quest_id']}`" + (f" - {report['title']}" if report.get("title") else ""),
+    lines = ["# Quality report", "", f"Written {_day(report.get('written_at'))}"
+             + (f", for the run that started {_day(report['run_started_at'])}" if report.get("run_started_at") else "") + ".", "",
+             f"Quest `{report['quest_id']}`" + (f" - {report['title']}" if report.get("title") else ""),
              "", "## Outcome", "", o["line"] + (f" Evidence: {o['evidence']}" if o.get("evidence") else ""), "",
              "## Stage by stage", "",
              "| Stage | Written by | Read by | Problems found | Fixed / not fixed / left out | Calls | Tokens (prompt/completion) | Time |",
@@ -797,11 +836,11 @@ def render(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def write(quest_root: Path | str, out_dir: Path | str | None = None) -> dict[str, Any]:
+def write(quest_root: Path | str, out_dir: Path | str | None = None, *, running: bool | None = None) -> dict[str, Any]:
     """Build the report and write ``QUALITY.md`` and ``quality.json``: at the quest root and in ``.fi/``, or both into
     ``out_dir`` when one is given (the quest is then left untouched)."""
     root = Path(quest_root)
-    report = build(root)
+    report = build(root, running=running)
     if out_dir is None:
         md, js = root / "QUALITY.md", root / ".fi" / "quality.json"
     else:
@@ -816,7 +855,7 @@ def write(quest_root: Path | str, out_dir: Path | str | None = None) -> dict[str
 def write_quietly(quest_root: Path | str) -> None:
     """The engine's call: a report that cannot be written never changes the quest."""
     try:
-        write(quest_root)
+        write(quest_root, running=False)  # the engine calls this as its run ends: the run is over
     except Exception:  # noqa: BLE001
         pass
 
@@ -852,7 +891,20 @@ def quest_dirs(folders: list[Path | str]) -> list[Path]:
 def load(quest_root: Path) -> dict[str, Any]:
     """The stored report when there is one, else one built from the records (never written)."""
     stored = _dict(_json(Path(quest_root) / ".fi" / "quality.json"))
-    return stored if stored.get("schema") == SCHEMA else build(quest_root)
+    if stored.get("schema") != SCHEMA:
+        return build(quest_root)
+    # A quest that is running now has moved on from its stored report: say so, built from the records so far.
+    if build_running(Path(quest_root)):
+        return build(quest_root, running=True)
+    return stored
+
+
+def build_running(root: Path) -> bool:
+    try:
+        from . import quest_title
+        return bool(quest_title.looks_running(root))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _row(root: Path, report: dict[str, Any]) -> dict[str, Any]:

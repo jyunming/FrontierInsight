@@ -301,3 +301,37 @@ def test_every_suggested_key_routes_the_step_it_names(tmp_path: Path) -> None:
         assert stage_key in steps, stage_key
     for readers in qr._READERS.values():
         assert readers[0] in steps, readers
+
+
+def test_the_same_model_on_two_providers_is_the_same_model(tmp_path: Path) -> None:
+    """FI's own check (`oracle_review.same_model`) ignores the provider; so does the report."""
+    root = tmp_path / "q-prov"
+    _calls(root, [_call("design", "model-a", provider="prov-one"), _call("design_self_critique", "model-a", provider="prov-two")])
+    _w(root / "paper" / "paper.md", "x")
+    assert _stage(qr.build(root), "design")["same_model"] is True
+
+
+def test_a_running_quest_is_not_shown_with_an_earlier_runs_outcome(tmp_path: Path) -> None:
+    root = tmp_path / "q-run"
+    _calls(root, [_call("plan")])
+    _w(root / "needs" / "STUCK.json", {"kind": "no_findings", "problem": "an earlier run stopped"})
+    _w(root / "paper" / "paper.md", "old paper")
+    _audit(root, [{"kind": "quest_started", "quest_id": "q-run", "resumed": True}])
+    _w(root / ".fi" / "run.log", "[run] working")  # fresh log: it is running
+    first = qr.write(root, running=False)
+    assert first["outcome"]["kind"] != "running" and first["written_at"] and first["running"] is False
+    live = qr.build(root)  # detects the running quest
+    assert live["outcome"]["kind"] == "running" and live["failure"] is None and live["running"] is True
+    assert "previous run of" in live["outcome"]["line"] and "running now" in live["outcome"]["line"]
+    assert live["run_started_at"]
+    text = qr.render(live)
+    assert "running now" in text and "for the run that started" in text
+    assert qr.load(root)["outcome"]["kind"] == "running"  # the stored report is not presented as current
+    _, md, _csv = qr.table([tmp_path])
+    assert "running" in md
+    # The engine's own call ends a run: it never writes "running".
+    qr.write_quietly(root)
+    assert json.loads((root / ".fi" / "quality.json").read_text(encoding="utf-8"))["outcome"]["kind"] != "running"
+    # Stopped for a person: not running.
+    _w(root / ".fi" / "pause.json", {"kind": "plan", "headline": "h"})
+    assert qr.build(root)["outcome"]["kind"] == "paused"
