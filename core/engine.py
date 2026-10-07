@@ -8261,6 +8261,7 @@ class Engine(RunChecksMixin):
         return {"implement_outline": outline}
 
     async def _node_implement(self, state: QuestState) -> QuestState:
+        self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
         await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
@@ -9040,6 +9041,25 @@ class Engine(RunChecksMixin):
         # The older contract's record is the simulation's own statement, never the level FI's own record reaches.
         return ("differs" if found else "self_reported"), found
 
+    def _manifest_stop(self, found: list[str], attempts: int) -> QuestState:
+        """The run's record still differs from the frozen protocol after the repairs (``engine.run_manifest_check: block``):
+        the quest ends in the honest stop (no paper), with what differed and how often the script was sent back. Nobody is
+        asked to change a script, the protocol or a setting."""
+        analysis_only = set(found) <= set(getattr(self, "_manifest_analysis_problems", None) or [])
+        trials = bool(getattr(self, "_trial_mode", False))
+        said = ("the analysis does not report the values the protocol's metrics need" if analysis_only else
+                "the simulation does not do what the protocol fixed")
+        return self._stop_before_run(
+            f"{said}: " + "; ".join(found),
+            "cannot_repair",
+            tried=[
+                ("compared FI's record of the trials it ran (`raw/ledger.jsonl`) with the frozen protocol" if trials
+                 else "compared the run's own manifest with the frozen protocol"),
+                *[_one_line(f, 400) for f in found[:3]],
+                f"sent {_split_run.ANALYSIS_NAME if analysis_only else _split_run.SIMULATE_NAME} back to be repaired "
+                f"{attempts} time(s) with the missing items named; the difference stood",
+            ])
+
     def _check_replicate_manifests(self, state: QuestState, split: bool, replicates: int) -> None:
         """The other seeds' manifests against the same protocol. A difference is recorded (and is a gap of the evidence
         level), not repaired: the primary run was already held to it."""
@@ -9074,18 +9094,10 @@ class Engine(RunChecksMixin):
         if self.config.execution.split_failure != "block":
             self._log.warning("[implement] %s: %s", what, "; ".join(found))
             return
-        self._pause_for_contract(
-            kind="split",
-            headline=what,
-            steps=[
-                what[0].upper() + what[1:] + ": " + "; ".join(found) + ".",
-                "The quest keeps its simulation and its analysis in two scripts (execution.split_failure: block), so it does not go on "
-                "with something else. Resume to ask for the scripts again"
-                + ("." if getattr(self.config, "rigor_profile", "default") == "research" else
-                   "; set `execution.split_failure: warn` to let the quest run as one script instead."),
-            ],
-            problems=found,
-        )
+        self._record_cannot_repair(
+            what[0].upper() + what[1:] + ": " + "; ".join(found),
+            ["asked for both scripts, and once more when the reply did not hold both (`execution.split_failure: block`)",
+             *[_one_line(f, 300) for f in found[:3]]])
 
     def _pause_for_contract(self, *, kind: str, headline: str, steps: list[str], problems: list[str]) -> None:
         self._pause_for_human(
@@ -9371,8 +9383,8 @@ class Engine(RunChecksMixin):
         if self.config.engine.protocol_check == "warn":
             self._log.warning("[protocol] the script still differs from the plan's protocol: %s", "; ".join(m.message() for m in final))
             return code, deps
-        self._pause_for_protocol(final, deps)
-        return code, deps  # not reached: the pause exits the run
+        self._stop_for_protocol(final)
+        return code, deps  # the run step ends in the honest stop without running it
 
     async def _repair_script_for_protocol(
         self, state: QuestState, path: Path, code: str, deps: list[str],
@@ -9621,7 +9633,7 @@ class Engine(RunChecksMixin):
             steps=[
                 f"What failed: {failure}.",
                 f"Look at {look}: this is usually a provider outage, a rate limit, or a reply that could not be read.",
-                "Fix it if you can (another model, a retry later), then resume: the check is tried once more.",
+                "Choose another model for it, or retry later, then resume: the check is tried once more.",
                 "If it fails again, the quest goes on and the result is not marked publication-ready "
                 f"({name} is listed as a gap in needs/EVIDENCE.json).",
             ],
@@ -10373,6 +10385,70 @@ class Engine(RunChecksMixin):
         except OSError as e:
             self._log.warning("[oracle] could not put the model's package back as it was: %r", e)
 
+    _CANNOT_REPAIR_FILE = "cannot_repair.json"
+
+    def _record_cannot_repair(self, text: str, tried: list[str]) -> None:
+        """Write down, before the study runs, that FI's repairs of the code ended with a problem that stands: the run step
+        then ends in the honest stop (no paper) without running the script. Nobody is asked to change code."""
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / self._CANNOT_REPAIR_FILE).write_text(
+                json.dumps({"text": text, "tried": tried, "at": _frozen.now()}) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[stuck] couldn't write down the problem FI could not repair: %r", e)
+
+    def _forget_cannot_repair(self) -> None:
+        """The code is written again: an earlier problem does not stop the new code."""
+        try:
+            (self.fi_dir / self._CANNOT_REPAIR_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _cannot_repair_stop(self) -> QuestState | None:
+        """The honest stop for a problem the code step recorded (:meth:`_record_cannot_repair`), or ``None``."""
+        try:
+            record = json.loads((self.fi_dir / self._CANNOT_REPAIR_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(record, dict) or not record.get("text"):
+            return None
+        return self._stop_before_run(str(record["text"]), "cannot_repair", tried=[str(t) for t in record.get("tried") or []])
+
+    def _code_problems_stop(self, state: QuestState) -> QuestState | None:
+        """Under ``rigor_profile: research``, before anything runs: a simulation that does not say where it implements each
+        equation of the plan, or a ``code/`` folder missing its package, tests or equation list, goes to the existing repair
+        like a failed run, with a plain directive naming what is missing (at most ``engine.exec_reflect_max_iterations``
+        repairs); what is still missing after them ends in the honest stop. Nobody is asked to edit code. ``None`` when
+        nothing is missing (or for a profile that only says so in run.log)."""
+        labels = self._check_equation_labels(state)
+        layout = self._check_code_layout(state)
+        if self.config.rigor_profile != "research" or not (labels or layout):
+            return None
+        problems = [*labels, *layout]
+        iters = int(state.get("exec_reflect_iter") or 0)
+        if iters < self.config.engine.exec_reflect_max_iterations:
+            self._log.warning("[implement] the code is not laid out as this quest needs (%s); sending it back to be repaired",
+                              "; ".join(problems))
+            main, missing = self._unlabelled(state, self._protocol_block(state)) if labels else (None, [])
+            where = (f"code/{self._label_target(state, main).relative_to(self.quest_root / 'code').as_posix()}"
+                     if main is not None else "code/")
+            directive = (
+                "FI read the code before running it, and it is not laid out as this quest needs:\n"
+                + "\n".join(f"- {p}" for p in problems[:8])
+                + ("\n\nPut a comment with the equation's id (for example `# " + missing[0] + "`) on or above the code in "
+                   f"{where} that computes it. Only the label is checked, not the mathematics. " if labels and missing else "\n\n")
+                + ("Add what the folder lacks (the model's equations in their own package, each function labelled with its "
+                   "equation and used by simulate.py, with unit tests and an equation list). " if layout else "")
+                + "Keep everything else as it is."
+            )
+            return self._code_review_failed_run(
+                directive, script=_split_run.SIMULATE_NAME if self._split_on(state) else "experiment.py")
+        return self._stop_before_run(
+            "; ".join(problems), "cannot_repair",
+            tried=["read the code against what the plan requires of it before running it",
+                   *[_one_line(p, 300) for p in problems[:3]],
+                   f"sent the code back to be repaired {iters} time(s); it still lacked this"])
+
     def _check_code_layout(self, state: QuestState) -> list[str]:
         """After the code is written, before anything runs: say in run.log what the research-tool layout of ``code/`` is
         missing (the package, the unit tests, which function computes each equation); under ``rigor_profile: research``
@@ -10402,20 +10478,6 @@ class Engine(RunChecksMixin):
             return []
         for why in problems:
             self._log.warning("[implement] code/ as a small research tool: %s", why)
-        if problems and research:
-            self._pause_for_human(
-                kind="code_layout",
-                interaction="supply",
-                headline="the code in code/ is missing its package of equations, its unit tests or its equation list",
-                steps=[
-                    f"{problems[0][0].upper()}{problems[0][1:]}." + (f" Also: {'; '.join(problems[1:])}." if problems[1:] else ""),
-                    f"Fix it in code/ (the model's equations in code/{package}/, each function labelled with its "
-                    "equation, used by simulate.py), or set `execution.code_package: false` in the quest's YAML to "
-                    "keep two scripts.",
-                    "Then resume: the folder is read again before anything runs.",
-                ],
-                payload={"contract_stage": True, "layout": True, "quest_id": self.quest_id, "problems": problems},
-            )
         return problems
 
     def _check_equation_labels(self, state: QuestState) -> list[str]:
@@ -10431,22 +10493,6 @@ class Engine(RunChecksMixin):
             return []
         for why in gaps:
             self._log.warning("[implement] %s", why)
-        if gaps and self.config.rigor_profile == "research":
-            target = self._label_target(state, main)
-            script = f"code/{target.relative_to(self.quest_root / 'code').as_posix()}" if target != main else f"code/{main.name}"
-            self._pause_for_human(
-                kind="equation_labels",
-                interaction="supply",
-                headline="the simulation does not say where it implements each equation of the plan",
-                steps=[
-                    f"{gaps[0][0].upper()}{gaps[0][1:]}.",
-                    f"Open {script} and put a comment with the equation's id (`# {missing[0]}`) on or above the code that "
-                    f"computes {'it' if len(missing) == 1 else 'each of ' + ', '.join(missing)}. Only the label is "
-                    "checked, not the mathematics.",
-                    "Then resume: the script on disk is read again before anything runs.",
-                ],
-                payload={"contract_stage": True, "quest_id": self.quest_id, "problems": gaps},
-            )
         return gaps
 
     def _write_evidence(self, state: QuestState, *, sealing: bool = False, write: bool = True) -> dict[str, Any] | None:
@@ -10657,33 +10703,6 @@ class Engine(RunChecksMixin):
             if path.is_file():
                 digest.update(name.encode("utf-8") + b"\0" + path.read_bytes().replace(b"\r\n", b"\n") + b"\0")
         return digest.hexdigest()
-
-    def _pause_for_numeric(self, findings: list[Any]) -> None:
-        """Stop: the run's numerics warned and the repairs did not remove it. The person reads the warnings, then either
-        changes the script (a resume runs it again) or resumes as it is (the run is used, its warnings accepted)."""
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / "numeric_stop.json").write_text(
-                json.dumps({"scripts_sha": self._scripts_sha(), "warnings": [w.describe() for w in findings]}, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[numeric] couldn't write the stop record: %r", e)
-        steps = [
-            "The experiment ran and printed its results, but its numerics warned, and the repairs did not remove the "
-            "warnings: " + "; ".join(w.describe() for w in findings) + ".",
-            f"Read them, and fix the script (`{self.quest_root / 'code' / 'experiment.py'}`) if they mean the numbers are "
-            "not what it claims (a solver that did not converge, an argument that had no effect, an overflow). "
-            "Then resume: a script you changed is run again; a script you did not change is used as it is, with these "
-            "warnings accepted (they stay in `needs/NUMERIC_WARNINGS.json`).",
-        ]
-        self._pause_for_human(
-            kind="numeric",
-            interaction="supply",
-            headline="the run's numerics warned",
-            steps=steps,
-            payload={"numeric_stage": True, "quest_id": self.quest_id, "warnings": [w.describe() for w in findings]},
-        )
 
     def _resume_after_numeric_stop(self) -> QuestState | None:
         """After a stop for numeric warnings: a script the person changed is run again, and one they did not change
@@ -13121,53 +13140,15 @@ class Engine(RunChecksMixin):
         )
         return new_code, False, "applied"
 
-    def _pause_for_protocol(self, mismatches: list[Any], deps: list[str]) -> None:
-        """Stop for the person: the script still contradicts the plan after the repairs. They edit ``plan.md`` (the
-        protocol) or the script the differences name and resume; a script that then agrees with the plan is used as it is."""
-        try:
-            self.fi_dir.mkdir(parents=True, exist_ok=True)
-            (self.fi_dir / "protocol_stop.json").write_text(
-                json.dumps({"deps": deps, "differences": [m.message() for m in mismatches]}, indent=2) + "\n",
-                encoding="utf-8",
-            )
-        except OSError as e:
-            self._log.warning("[protocol] couldn't write the stop record: %r", e)
-        # Name the script each difference was found in (``Mismatch.where`` reads "n_runs in simulate.py, line 242"): a
-        # two-script quest's differences are usually in simulate.py, and a stop that said "change experiment.py" sent the
-        # person to the wrong file.
-        named = sorted({m.group(1) for d in mismatches if (m := re.search(r" in ([\w.\-]+\.py), line ", str(getattr(d, "where", ""))))})
-        if not named:
-            named = [p.name for p in (self.quest_root / "code" / _split_run.SIMULATE_NAME, self.quest_root / "code" / "experiment.py") if p.is_file()] or ["experiment.py"]
-        scripts = ", ".join(f"`{self.quest_root / 'code' / n}`" for n in named)
-        if _frozen.load(self.quest_root) is not None:
-            how = (
-                f"Change the script ({scripts}) to use those values. The protocol is "
-                "frozen, so editing plan.md does not change it: a different protocol needs an amendment (ask for the change "
-                "when the quest is refined, then approve the request). Then resume: a script that agrees with the protocol "
-                "is used as it is; otherwise it is written again."
-            )
-        else:
-            how = (
-                f"Either change the script ({scripts}) to use those values, or, if the "
-                f"plan is what should change, edit the protocol in `{_plan.plan_path(self.quest_root)}` (or ask for a change: "
-                f"`--revise-plan`). Then resume: a script that agrees with the plan is used as it is; otherwise it is written again."
-            )
-        steps = [
-            "The experiment's script differs from the protocol the plan fixed, and the repairs did not remove it: "
-            + "; ".join(m.message() for m in mismatches) + ".",
-            how,
-        ]
-        self._pause_for_human(
-            kind="protocol",
-            interaction="supply",
-            headline="the experiment does not follow the plan",
-            steps=steps,
-            payload={
-                "protocol_stage": True, "quest_id": self.quest_id,
-                "differences": [m.message() for m in mismatches],
-                "plan_file": str(_plan.plan_path(self.quest_root)),
-            },
-        )
+    def _stop_for_protocol(self, mismatches: list[Any]) -> None:
+        """The script still contradicts the plan's protocol after the repairs: the quest ends in the honest stop at the run
+        step (:meth:`_cannot_repair_stop`), with what differed, and the script is not run. Nobody is asked to edit it."""
+        differences = [m.message() for m in mismatches]
+        self._record_cannot_repair(
+            "the experiment's script differs from the protocol the plan fixed: " + "; ".join(differences),
+            ["compared the script with the protocol the plan fixed", *[_one_line(d, 300) for d in differences[:3]],
+             f"asked the model to repair the script up to {int(self.config.engine.protocol_repair_attempts)} time(s); "
+             "the difference stood"])
 
     def _adopt_scripts_fixed_by_hand(self, state: QuestState) -> QuestState | None:
         """After a protocol stop, keep the scripts on disk when they now agree with the plan (a person edited them, or
@@ -13300,33 +13281,13 @@ class Engine(RunChecksMixin):
                     "measurement with no confidence interval", why,
                 )
             if self.config.rigor_profile == "research":
-                # The re-audit's P1-3: this repair failing never blocked the quest, so a research-grade
-                # run could still finish on results nobody could reproduce (or a single measurement
-                # reported as if it were replicated). Fail closed here instead -- pause re-enters this
-                # whole node on resume, so fixing the script by hand (or accepting the risk by dropping
-                # the profile) and resuming tries again from scratch.
-                self._pause_for_human(
-                    kind="replicate_seed_unrepairable",
-                    interaction="supply",
-                    headline=(
-                        "the script's randomness cannot be traced to FI_REPLICATE_SEED, and "
-                        "rigor_profile: research requires it before running"
-                    ),
-                    steps=[
-                        f"What the repair could not fix: {why}",
-                        (
-                            "The replicates would not be reproducible from a rerun"
-                            if reads_seed else
-                            "Every replicate would repeat the same run, reported as if it had a confidence interval"
-                        ),
-                        f"Check {code_path.name} (in code/) -- it must seed every random generator it "
-                        "builds from FI_REPLICATE_SEED, and nowhere else.",
-                        "Fix the script by hand and resume to try the repair again, or drop rigor_profile "
-                        "to \"default\" for this quest to proceed unblocked -- but that gives up the "
-                        "research-grade guarantee.",
-                    ],
-                    payload={"why": why, "reads_seed": reads_seed},
-                )
+                # This repair failing used to let a research run finish on results nobody could reproduce (or a single
+                # measurement reported as if it were replicated). The quest ends in the honest stop at the run step; the
+                # script is not run, and nobody is asked to fix it by hand.
+                self._record_cannot_repair(
+                    "the script's randomness cannot be traced to FI_REPLICATE_SEED, which a research run requires: " + why,
+                    ["read the script for the seed FI gives each repeat",
+                     "asked the model for one repair: " + _one_line(why, 300)])
             return code, deps
         code_path.write_text(new_code, encoding="utf-8")
         self._log.info(
@@ -13347,6 +13308,9 @@ class Engine(RunChecksMixin):
         # what protects a `--resume` that continues straight into execute without design re-running
         # (design's own tamper check, in `_hold_design_to_frozen`, only fires when design executes).
         self._resolved_frozen()
+        recorded = self._cannot_repair_stop()  # the code step ended in a problem FI could not repair: nothing is run
+        if recorded is not None:
+            return recorded
         # A search for the best design that cannot run (the setup changed since the design, or a resume past it) stops
         # here too: it is never run as a plain script instead (core/optimise.py).
         design_now = state.get("design")
@@ -13615,8 +13579,9 @@ class Engine(RunChecksMixin):
         await self._results_from_computation(state)
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
-        self._check_equation_labels(state)
-        self._check_code_layout(state)
+        stop = self._cannot_repair_stop() or self._code_problems_stop(state)
+        if stop is not None:
+            return stop
         # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
         # function that computes another equation than the plan's is found here, not after the study.
         failed_review = await self._code_review_gate(state)
@@ -13638,13 +13603,14 @@ class Engine(RunChecksMixin):
         gate_repaired = oracle_code is not None or gate_rewrote
         if gate_rewrote:
             # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
-            self._check_equation_labels(state)
-            self._check_code_layout(state)
             # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
             # the gate tests the text that will run.
             oracle_code, unchecked = await self._typed_results_stable(state, py, exec_env, seed_path, oracle_code)
             if unchecked is not None:
                 return unchecked
+            stop = self._code_problems_stop(state)
+            if stop is not None:
+                return stop
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -13887,44 +13853,7 @@ class Engine(RunChecksMixin):
                 pass
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
             self._clear_stale_figures()
-            research = getattr(self.config, "rigor_profile", "default") == "research"
-            # A research quest cannot relax this check, nor reach the review where an amendment is asked for.
-            otherwise = (
-                " This quest is set up for research, so the difference cannot be accepted inside it: if the protocol "
-                "itself is wrong, start a new quest whose plan states the right one."
-            ) if research else ""
-            if set(manifest_found) <= set(self._manifest_analysis_problems):
-                headline = "the analysis does not report the values the protocol's metrics need"
-                fix = (
-                    f"Change `{self.quest_root / 'code' / _split_run.ANALYSIS_NAME}` so that its RESULT_JSON lists the per-trial "
-                    "values (`<metric>_values`, read from the raw files) each mean metric above is computed from, then resume. "
-                    "If a metric is not a mean over trials at all (a closed-form value), the protocol declared it wrongly"
-                    + (": " + otherwise.strip() if research else ": that needs an amendment. Set "
-                       "`engine.run_manifest_check: warn` to go on with the difference recorded.")
-                )
-            else:
-                headline = "the simulation does not do what the protocol fixed"
-                trials = bool(getattr(self, "_trial_mode", False))
-                fix = (
-                    f"Change `{self.quest_root / 'code' / _split_run.SIMULATE_NAME}` so that "
-                    + ("what FI runs matches the protocol's design (run_trial for a study with randomness, run_cell for "
-                       "one with none), then resume." if trials else
-                       "it runs the protocol's design and writes the manifest from what its loops did, then resume.")
-                    + (otherwise if research else " (The protocol is frozen: a different design needs an amendment.) "
-                       "Set `engine.run_manifest_check: warn` to go on with the difference recorded.")
-                )
-            self._pause_for_contract(
-                kind="manifest",
-                headline=headline,
-                steps=[
-                    ("FI's record of the trials it ran (`raw/ledger.jsonl`)" if getattr(self, "_trial_mode", False)
-                     else "The run's own manifest (`run_manifest.json` in its raw-data folder)")
-                    + " differs from the frozen protocol, and no repair removed it (the repairs failed, gave up, or none "
-                    "was left): " + "; ".join(manifest_found) + ".",
-                    fix,
-                ],
-                problems=manifest_found,
-            )
+            return self._manifest_stop(manifest_found, manifest_attempts_next or manifest_attempts)
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
@@ -14657,7 +14586,7 @@ class Engine(RunChecksMixin):
         if resumed is not None:
             return resumed
         exec_result = state.get("exec_result") or {}
-        if exec_result.get("too_long") or exec_result.get("not_run"):
+        if any(exec_result.get(k) for k in _STOPPED_BEFORE_THE_STUDY):
             return {}  # the study would not fit the time allowed: there is no script to repair (core/run_estimate.py)
         rc = exec_result.get("returncode", 0)
         # ``_node_execute`` stores ``result_json or {}``, so a script that
@@ -14709,7 +14638,12 @@ class Engine(RunChecksMixin):
             # flag against the final result (covers max_iterations=0 too).
             if rc == 0 and has_result_json and findings and not degenerate and not implausible:
                 # Numeric warnings the repairs did not remove: not something to write a paper over.
-                self._pause_for_numeric(findings)
+                return self._stop_before_run(
+                    "the run's numerics warned: " + "; ".join(w.describe() for w in findings),
+                    "cannot_repair",
+                    tried=["ran the experiment and read the numerical warnings it raised",
+                           *[_one_line(w.describe(), 300) for w in findings[:3]],
+                           f"sent the script back to be repaired {iters} time(s); the warnings stood"])
             self._log.warning(
                 "[execute_reflect] %s after %d attempt(s); proceeding to analyze",
                 "result still degenerate (all metrics ~0)" if degenerate
@@ -16100,6 +16034,12 @@ class Engine(RunChecksMixin):
             tried = ["timed a few real trials of the experiment and added them up",
                      said or "the total is more than the time allowed"]
             ended = "the experiment would still take longer than the time allowed"
+        if reason == "cannot_repair":
+            said = str((state.get("exec_result") or {}).get("cannot_repair") or "").strip().rstrip(".")
+            problem = f"{_one_line(said, 400)}, and FI's repairs did not remove it, so there is nothing it can vouch for"
+            tried = [str(t) for t in (state.get("exec_result") or {}).get("cannot_repair_tried") or []] or [
+                "repaired the code as far as its limit allows", said]
+            ended = "FI's repairs ended and the problem stood"
         if reason == "flat":
             # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
             symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
@@ -16139,7 +16079,7 @@ class Engine(RunChecksMixin):
               + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                  or reason == "flat" or headline_missing else
                  "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
-                 "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
+                 "or try another model for the design (`provider.node_models.design`)." if reason in ("not_run", "cannot_repair") else
                  "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                  "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
@@ -16177,11 +16117,12 @@ class Engine(RunChecksMixin):
             or self.config.engine.analyze_local_first
         ):
             return None
-        too_long = str(exec_result.get("too_long") or exec_result.get("not_run") or "")
-        if too_long:  # stopped before the study (it would not fit the time allowed, or a text of it was not checked): no second try
+        stopped = next((k for k in _STOPPED_BEFORE_THE_STUDY if exec_result.get(k)), "")
+        too_long = str(exec_result.get(stopped) or "") if stopped else ""
+        if too_long:  # stopped before the study (it would not fit the time allowed, a text of it was not checked, or FI's repairs ended with a problem standing): no second try
             self._log.warning("[evidence_gate] %s; there is nothing measured to write up", too_long)
             return {"verdict": "insufficient", "rationale": too_long, "gaps": [too_long], "stuck": True,
-                    "stuck_reason": "too_long" if exec_result.get("too_long") else "not_run"}
+                    "stuck_reason": stopped}
         flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
@@ -22153,6 +22094,10 @@ _REFERENCE_FORMS = (
 _FILL_MARKER = "plan_sources_asked.json"
 # Written each time FI asks the plan's model to write the search part of a plan for the best design
 # (``_ask_plan_for_the_search``): how many times it asked of this plan, so a resume does not ask again; at most this many.
+# The kinds of stop before the study (``Engine._stop_before_run``): the key in ``exec_result`` that holds the plain text.
+# ``cannot_repair``: FI's repairs of the code ended and the problem stands (the run record differs from the protocol, the
+# numerics still warn, the code still lacks what the plan requires ...): the quest ends without a paper, nobody debugs.
+_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair")
 _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read

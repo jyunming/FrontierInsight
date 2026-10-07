@@ -417,7 +417,7 @@ class RunChecksMixin:
         """The quest's plain stop: nothing was run for the study, it would not fit, and no paper is written."""
         return self._stop_before_run(text, "too_long")
 
-    def _stop_before_run(self, text: str, kind: str) -> dict[str, Any]:
+    def _stop_before_run(self, text: str, kind: str, tried: list[str] | None = None) -> dict[str, Any]:
         """The quest's plain stop before the study (``too_long``: it would not fit the time allowed; ``not_run``: a text of
         the simulation could not be checked), with no paper."""
         self._log.warning("[execute] %s; stopping, the study was not run", text)  # type: ignore[attr-defined]
@@ -425,7 +425,7 @@ class RunChecksMixin:
             "exec_result": {
                 "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": text[-2000:],
                 "packages_note": getattr(self, "_packages_note", ""), "failed_script": "", "flat_output": "",
-                "numeric_warnings": [], kind: text,
+                "numeric_warnings": [], kind: text, **({f"{kind}_tried": tried} if tried else {}),
             },
             "exec_give_up_reason": text,
             "figures": [], "figure_records": {}, "result_json": {}, "exec_patch_pending": False,

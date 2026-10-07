@@ -262,14 +262,18 @@ def test_a_missing_part_is_a_warning_and_a_stop_only_under_research(tmp_path: Pa
     assert problems and stops == []
     assert "package code/engine_callable/ is missing" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     monkeypatch.setattr(engine.config, "rigor_profile", "research")
-    engine._check_code_layout({"design": {"protocol": PROTOCOL}})
-    assert len(stops) == 1 and stops[0]["kind"] == "code_layout" and stops[0]["payload"]["contract_stage"]
-    assert any("execution.code_package: false" in s for s in stops[0]["steps"])
-    from core import todo
-    assert "package of their own" in todo.advice("code_layout")[0], "the to-do card speaks of this stop"
-    # The person adds the missing parts and resumes: the folder is read again and nothing stops.
+    # Under research the missing parts go to the repair as a failed run, naming them; nobody is asked to edit code.
+    patch = engine._code_problems_stop({"design": {"protocol": PROTOCOL}, "exec_reflect_iter": 0})
+    assert patch is not None and "package code/engine_callable/ is missing" in patch["exec_result"]["stderr_tail"]
+    assert "cannot_repair" not in patch["exec_result"] and stops == []
+    # With the repairs used up the quest ends in the honest stop.
+    last = engine._code_problems_stop({"design": {"protocol": PROTOCOL},
+                                       "exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations})
+    assert last is not None and last["exec_result"]["cannot_repair"] and stops == []
+    # Once the repair has added the missing parts the folder is read again and nothing is sent back.
     _write_tool(code)
-    assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == [] and len(stops) == 1
+    assert engine._check_code_layout({"design": {"protocol": PROTOCOL}}) == []
+    assert engine._code_problems_stop({"design": {"protocol": PROTOCOL}, "exec_reflect_iter": 0}) is None
 
 
 def _cfg(tmp_path: Path, **execution: Any) -> Config:

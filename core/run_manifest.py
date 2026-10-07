@@ -995,11 +995,36 @@ def directive(found: list[str], protocol: dict[str, Any], *, trial_mode: bool = 
     )
 
 
+_MISSING_KEY = re.compile(r"`([A-Za-z_][\w]*_(?:values|count|total))`")
+
+
+def missing_keys(found: list[str]) -> list[str]:
+    """The ``<metric>_values`` (or ``_count`` / ``_total``) keys the findings name as absent from the analysis's output,
+    in order, each once."""
+    keys: list[str] = []
+    for line in found:
+        if "no `" in line or "prints no" in line or "has no" in line:
+            for key in _MISSING_KEY.findall(line):
+                if key not in keys:
+                    keys.append(key)
+    return keys
+
+
 def analysis_directive(found: list[str]) -> str:
-    """The repair request for :func:`analysis_output_problems`: the simulation stands, the analysis must print its values."""
+    """The repair request for :func:`analysis_output_problems`: the simulation stands, the analysis must print its values.
+    It names the exact keys that are missing and where the per-trial values are (FI's per-setting results, the file
+    ``FI_TRIALS`` names), so the repair does not have to guess."""
+    keys = missing_keys(found)
+    named = (
+        "\n\nThese keys are missing from RESULT_JSON and must be added: " + ", ".join(f"`{k}`" for k in keys[:12]) + ". "
+        "The per-trial values are already on disk: `json.load(open(os.environ[\"FI_TRIALS\"]))[\"cells\"]` has one entry per "
+        "setting, and `entry[\"metrics\"][<outcome name>][\"values\"]` lists the values of the trials that succeeded "
+        "(`entry[\"metrics\"][<outcome name>][\"trials\"]` the trial each came from). Copy those lists, per setting when "
+        "the metric is reported per setting; do not recompute them."
+    ) if keys else ""
     return (
         "This run finished, and the simulation's raw files stand, but the analysis did not print what the contract asks:\n"
-        + "\n".join(f"- {line}" for line in found[:8])
+        + "\n".join(f"- {line}" for line in found[:8]) + named
         + "\n\nRewrite experiment.py (not simulate.py) so that, for each of those metrics, RESULT_JSON carries a "
         "`<metric>_values` list: the per-trial values, read from the raw files, that the metric's mean is computed from "
         "(per setting when the metric is reported per setting). " + NESTING + " " + DERIVED + " Do not invent values: "

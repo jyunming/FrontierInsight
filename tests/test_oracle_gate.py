@@ -346,15 +346,15 @@ _BAD_GRID = "R0_LIST = [0.8, 1.2, 3.0]\nNUM_RUNS = 300\n" + _PASSING
 async def test_a_protocol_edited_in_the_plan_while_stopped_is_the_one_the_script_is_held_to(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The protocol stop tells a person to fix the script or the plan. Fixing the plan must work: the check reads the
-    protocol from plan.md, not the copy the design step left in the checkpoint."""
+    """After the stop, a plan revised by a person is the protocol the code is held to when the code step runs again: the
+    check reads the protocol from plan.md, not the copy the design step left in the checkpoint."""
     calls: list[str] = []
     protocol = {"grid": {"R0": [0.9, 1.5, 3.0]}, "runs_per_setting": 300, "oracles": [ORACLE]}
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_BAD_GRID, repair=_BAD_GRID, protocol=protocol))
     cfg = _cfg(tmp_path)
     first = Engine(cfg)
     await first.run()
-    assert (first.fi_dir / "protocol_stop.json").is_file()
+    assert (first.fi_dir / "cannot_repair.json").is_file()
 
     path = plan.plan_path(first.quest_root)
     edited = path.read_text(encoding="utf-8").replace("- 0.9\n", "- 0.8\n").replace("- 1.5\n", "- 1.2\n")
@@ -362,9 +362,10 @@ async def test_a_protocol_edited_in_the_plan_while_stopped_is_the_one_the_script
     path.write_text(edited, encoding="utf-8")
 
     second = Engine(cfg, resume_quest_id=first.quest_id)
-    artifacts = await second.run()
+    artifacts = await second.run(from_step="code")
     assert artifacts.paper_md is not None and artifacts.paper_md.exists()
-    assert "agrees with the plan's protocol; keeping it" in (second.quest_root / ".fi" / "run.log").read_text(encoding="utf-8")
+    record = json.loads((second.quest_root / "needs" / "PROTOCOL_CHECK.json").read_text(encoding="utf-8"))
+    assert record["status"] == "ok"
 
 
 def test_the_dashboard_and_the_quest_page_name_the_oracle_stop() -> None:
