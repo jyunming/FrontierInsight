@@ -103,6 +103,7 @@ from . import receipts as _receipts
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
+from . import record_claims as _record_claims
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
@@ -319,6 +320,7 @@ class QuestState(TypedDict, total=False):
     # How many times the simulation was sent back because its run manifest differed from the frozen protocol.
     run_manifest_failures: int
     figure_data_repairs: int
+    record_rewrites: int
     # Two-stage implement scaffold from ``_node_implement_outline``.
     # Carries ``{scaffold, functions, data_flow, constants,
     # result_json_template, deps}`` for the body node to consume.
@@ -2531,6 +2533,8 @@ class Engine:
                 "re_execute": "implement",
                 "done": END,
                 "human_feedback": "human_feedback",
+                # The paper still claims what FI's own records contradict after its rewrites: no paper (needs/STUCK.json).
+                "stuck": "stuck_no_findings",
             },
         )
         # human_feedback resolves to one of three outcomes after the callback returns: accept / reject → END,
@@ -3245,6 +3249,20 @@ class Engine:
         # write it again, shorter. These rewrites have their own cap (the
         # review stops forcing them after ``_PAGE_LIMIT_REWRITES``), so the
         # iteration budget neither pays for them nor stops them.
+        # The paper claims what FI's own records contradict: it is written again, with the contradiction named, up to
+        # ``_RECORD_REWRITES`` times (outside engine.max_iterations, so even a one-round quest gets them). A paper
+        # that still claims it is not delivered as a finished paper: the quest ends in the honest stop.
+        if any(_hit_name(h) == _record_claims.HIT for h in must_flag):
+            if int(state.get("record_rewrites") or 0) <= _RECORD_REWRITES:
+                self._log.info(
+                    "[route] the paper claims what FI's own records contradict — writing it again "
+                    "(rewrite %d of %d, outside engine.max_iterations)",
+                    int(state.get("record_rewrites") or 0), _RECORD_REWRITES)
+                return "rewrite"
+            self._log.warning(
+                "[route] the paper still claims what FI's own records contradict after %d rewrites — "
+                "stopping without a paper", _RECORD_REWRITES)
+            return "stuck"
         page_rewrites = int(state.get("page_limit_rewrites") or 0)
         if _only_page_limit_hits(must_flag) and page_rewrites <= _PAGE_LIMIT_REWRITES:
             self._log.info(
@@ -8442,6 +8460,26 @@ class Engine:
         return (f"{note} Do not show, describe or quote anything from "
                 f"{'that figure' if len(record.get('removed_figures') or []) == 1 else 'those figures'}: say plainly, in "
                 "the limitations, that a figure was left out because it was not drawn from the run's results.")
+
+    def _record_contradiction_hits(self, paper_md: str, state: QuestState) -> list[str]:
+        """Must-fix hits for what the paper claims against FI's own records (core/record_claims.py). FI's own "Best design
+        found" section is left out (it is FI's record, printed). Never raises: a check that cannot be made flags nothing."""
+        try:
+            recs = _best_report.records(self.quest_root)
+            text = _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md))
+            figures: set[str] | None = None
+            if (self.quest_root / "figures").is_dir() or (self.quest_root / "paper").is_dir():
+                figures = {p.name for sub in ("figures", "paper") if (self.quest_root / sub).is_dir()
+                           for p in (self.quest_root / sub).rglob("*") if p.is_file()}
+            hits = _record_claims.contradictions(
+                text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
+                oracle=self._oracle_record_read(), figures_on_disk=figures)
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[record_check] could not compare the paper with FI's records (%r)", exc)
+            return []
+        for hit in hits:
+            self._log.warning("[record_check] %s", hit)
+        return hits
 
     def _ran_once_note(self) -> str:
         """For the analysis and the paper: the frozen protocol still says N runs per setting, but FI ran each setting
@@ -15102,6 +15140,8 @@ class Engine:
         reason = (state.get("evidence_assessment") or {}).get("stuck_reason")
         no_numbers = reason == "no_numbers"
         crashed = reason == "crashed"
+        claims = [str(h) for h in (state.get("review") or {}).get("must_flag_hits") or []
+                  if _hit_name(h) == _record_claims.HIT]
         repairs = int(state.get("exec_reflect_iter") or 0)
         # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
         redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
@@ -15126,6 +15166,15 @@ class Engine:
                   "asked the model a second time for one short answer; that reply could not be read either"])
         ended = ("the run gave no result with a number in it" + again if no_numbers else
                  "the script could not run to the end" + again if crashed else "the analysis could not be read twice")
+        if claims and reason not in ("flat", "no_numbers", "crashed"):
+            # The paper claimed what FI's own records contradict, even after it was written again (core/record_claims.py).
+            problem = (f"the paper still claims what FI's own records contradict, even after it was written again "
+                       f"{_RECORD_REWRITES} times, so FI will not hand it over as a finished paper")
+            tried = ["compared the paper with FI's records of the search, the known-answer checks and the figures the run drew",
+                     *[_one_line(c, 400) for c in claims[:3]],
+                     f"asked for the paper to be written again with the contradiction named ({_RECORD_REWRITES} times); "
+                     "the claim was still there"]
+            ended = "the paper still claimed what FI's records contradict"
         if reason == "flat":
             # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
             symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
@@ -15164,6 +15213,7 @@ class Engine:
               "fix: needs/STUCK.json says what FI tried; run the quest again, "
               + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                  or reason == "flat" else
+                 "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                  "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
         return {"stuck": record}
@@ -17460,6 +17510,9 @@ class Engine:
             for hit in missing_figures:
                 self._log.warning("[figure_check] %s", hit)
             review["must_flag_hits"] += missing_figures
+            # Forced: a claim FI's own records contradict (core/record_claims.py).
+            record_hits = self._record_contradiction_hits(paper_md, state)
+            review["must_flag_hits"] += record_hits
             # Forced as well: nothing checked this draft's citations.
             review["must_flag_hits"] += _citations_unchecked(state)
             # And a draft over the page limit.
@@ -17471,6 +17524,8 @@ class Engine:
                 update["claim_grounding"] = pruned
             if page_hits:
                 update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
+            # Counted here so the router can cap the rewrites for it, and end the quest honestly after them.
+            update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
             # Counted here, like the shortening rewrites above, so the router
             # can cap it: a must-flag about something the run computed sends
             # the experiment back, at most ``_CODE_REEXECUTES`` times.
@@ -17655,6 +17710,9 @@ class Engine:
             self._log.warning("[figure_check] %s", hit)
         if missing_figures:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *missing_figures]
+        record_hits = self._record_contradiction_hits(paper_md, state)
+        if record_hits:
+            review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *record_hits]
         unchecked = _citations_unchecked(state)
         if unchecked:
             review["must_flag_hits"] = [*(review.get("must_flag_hits") or []), *unchecked]
@@ -17669,6 +17727,7 @@ class Engine:
             update["claim_grounding"] = pruned
         if page_hits:
             update["page_limit_rewrites"] = int(state.get("page_limit_rewrites") or 0) + 1
+        update["record_rewrites"] = (int(state.get("record_rewrites") or 0) + 1) if record_hits else 0
         # As on the single-reviewer path: count a review that sends the
         # experiment back, so the router can cap those re-executes.
         if _review_sends_the_experiment_back(review, state):
@@ -23804,8 +23863,12 @@ _TEXT_ONLY_HITS = frozenset({
     # A person's refine point the paper does not answer: the writer said it needs no new experiment (a point that
     # does goes to the design from the writing step), so the paper is written again.
     "user_feedback_unaddressed",
+    # A claim FI's own records contradict (core/record_claims.py): the paper is written again with it named.
+    "record_contradiction",
 })
 _UNANSWERED_NOTE_HIT = "user_feedback_unaddressed"
+# How many times a paper that claims what FI's own records contradict is written again before the quest ends with no paper.
+_RECORD_REWRITES = 2
 
 # A paper with a page limit: the review renders each draft the way paper.pdf
 # is rendered and counts its pages. A draft over the limit is sent back to be
