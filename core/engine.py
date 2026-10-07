@@ -8468,9 +8468,11 @@ class Engine:
             recs = _best_report.records(self.quest_root)
             text = _best_report.strip_for_checks(paper_md, self._best_design_section(state, paper_md))
             figures: set[str] | None = None
-            if (self.quest_root / "figures").is_dir() or (self.quest_root / "paper").is_dir():
+            if (self.quest_root / "figures").is_dir():  # no figures folder at all: which figures the run drew is not known
                 figures = {p.name for sub in ("figures", "paper") if (self.quest_root / sub).is_dir()
                            for p in (self.quest_root / sub).rglob("*") if p.is_file()}
+                if not any(Path(n).suffix.lower() in _FIGURE_SUFFIXES for n in figures):
+                    figures = None  # the run drew none: a paper citing one is not judged here
             hits = _record_claims.contradictions(
                 text, best_design=recs["best_design"], optimum_check=recs["optimum_check"],
                 oracle=self._oracle_record_read(), figures_on_disk=figures)

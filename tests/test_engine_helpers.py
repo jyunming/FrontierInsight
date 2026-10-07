@@ -1117,6 +1117,8 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
         # picks ``human_feedback`` instead of revise/done so the user
         # can accept / reject / refine.
         "human_feedback": "human_feedback",
+        # The paper still claims what FI's own records contradict after its rewrites: no paper.
+        "stuck": "stuck_no_findings",
     }
     # human_feedback node itself routes back to design (refine) or END
     # (accept/reject). Same ``revise``/``done`` labels the auto path uses.

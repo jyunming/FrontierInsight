@@ -155,3 +155,12 @@ async def test_the_stop_says_what_the_paper_claimed_and_keeps_no_paper(tmp_path:
     assert (eng.quest_root / "needs" / "STUCK.json").is_file()
     assert not (eng.quest_root / "paper" / "paper.md").exists(), "the paper is set aside, not delivered"
     assert "No paper was written" in capsys.readouterr().out
+
+
+def test_a_run_that_drew_no_figure_does_not_judge_the_papers_figures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    (eng.quest_root / "figures").mkdir(parents=True)
+    paper = "# T\n\nSee the plot.\n\n![Cooling curve](figures/cooling.png)\n"
+    assert eng._record_contradiction_hits(paper, {}) == []
+    (eng.quest_root / "figures" / "other.png").write_bytes(b"x")
+    assert len(eng._record_contradiction_hits(paper, {})) == 1
