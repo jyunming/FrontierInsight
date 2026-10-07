@@ -25,7 +25,8 @@ Each kind has one numeric form: an `invariant`, a `symmetry` or a `second_implem
 1. **Appropriate**: does it test the model and the code that computes it, or something trivial (a number the code sets itself, an identity that holds whatever the code does, the input read back)?
 2. **Discriminating**: name one plausible bug in the simulation (a wrong coefficient, a wrong sign, a first-order step where a fourth-order one is claimed, a missing term of an equation, a wrong boundary condition) and say whether this check, at its case and tolerance, would fail because of it.
 3. **Its number is well defined**: its units and representation (a ratio or a violation, a per cent or a fraction, a sum or a mean), whether its form fits its kind, whether an expected value compared at a finite step is the value at that step and not the limit as the step goes to 0, and whether the tolerance is reachable by a correct method at that case and no tighter than the precision the expected value is written to.
-4. **Better or additional**: a better check, or one more, when there is one; otherwise leave it empty.
+4. **Its case isolates what its measure claims**: does the `case` produce a number that is the quantity the `measure` and the `check` text describe, and nothing else? Name what is wrong when it does not: a statistic computed over a region where the stated condition does not hold everywhere, a case that mixes two regimes, a measure computed from a different quantity than the expected value describes. Say "yes" only when you traced it; if you cannot tell, leave `isolates` empty.
+5. **Better or additional**: a better check, or one more, when there is one; otherwise leave it empty.
 
 Then say which equations of the model (their ids) the checks together test, and which none of them tests.
 
@@ -37,7 +38,7 @@ The plan's own model lists equations (`equations` above). The code will implemen
 
 Return ONE JSON object and nothing else:
 
-{"checks": [{"name": "<the check's name, exactly as the plan writes it>", "appropriate": "<yes | no>", "why": "<one sentence>", "discriminating": "<yes | no>", "bug_it_would_catch": "<the plausible bug you tried, and whether this check fails on it>", "well_defined": "<yes | no>", "definition_note": "<one sentence: what is unclear or wrong about its number, or empty>", "better": "<a better or additional check, in one sentence, or empty>"}],
+{"checks": [{"name": "<the check's name, exactly as the plan writes it>", "appropriate": "<yes | no>", "why": "<one sentence>", "discriminating": "<yes | no>", "bug_it_would_catch": "<the plausible bug you tried, and whether this check fails on it>", "well_defined": "<yes | no>", "definition_note": "<one sentence: what is unclear or wrong about its number, or empty>", "isolates": "<yes | no | empty when you cannot tell>", "isolation_note": "<when no: what the case mixes or leaves out, in one sentence; else empty>", "better": "<a better or additional check, in one sentence, or empty>"}],
  "equations_tested": ["<ids>"], "equations_not_tested": ["<ids of equations no check tests>"],
  "equations": [{"id": "<the equation's id, exactly as the plan writes it>", "standard": "<yes | no | empty when you cannot tell>", "correct": "<the correct equation, when standard is no; else empty>", "why": "<one line: what is different, or empty>"}],
  "add": [<zero to two new checks written exactly as the plan writes one: {"name", "kind", "check", "expected", "expected_formula", "tolerance", "tolerance_mode", "reference", "case", "measure"}>],

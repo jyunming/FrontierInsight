@@ -487,3 +487,64 @@ def test_an_equation_the_reader_cannot_tell_is_not_recorded_as_standard() -> Non
     record = orv.equation_record(review, CUP_PROTOCOL, same_model=False, reviewer="reviewer-model", planner="planner-model")
     assert record["judged"] == ["E1"] and record["read_by_other_model"] is False and "no verdict on 'E2'" in record["why"]
     assert orv.equation_findings(review) == [], "no verdict is not an objection"
+
+
+# --- does a check's case isolate what its measure claims? ---------------------------------------------------------------
+
+ISO_CHECK = {**CUP_CHECK, "name": "mean_drop", "check": "the mean temperature drop over the whole run",
+             "case": {"k": 1.0, "t_end": 10.0}, "measure": "frac"}
+
+
+def _iso_review(isolates: str = "no") -> dict[str, Any]:
+    return {**_cup_review(e2_standard="yes"), "checks": [
+        {"name": "mean_drop", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes", "isolates": isolates,
+         "isolation_note": "the mean runs over a stretch where the cup is already at room temperature"}]}
+
+
+def _fix_case(block: dict[str, Any]) -> dict[str, Any]:
+    fixed = [{**o, "case": {"k": 1.0, "t_end": 1.0}, "expected_formula": "exp(-1)", "tolerance": 0.5, "expected": 99.0}
+             for o in block["protocol"]["oracles"]]  # a rewrite that also loosens and hand-writes: neither may stick
+    return {**block, "protocol": {**block["protocol"], "oracles": fixed}}
+
+
+def test_the_reader_s_verdict_on_a_case_is_read_and_only_a_no_is_an_objection() -> None:
+    protocol = {**CUP_PROTOCOL, "oracles": [ISO_CHECK]}
+    review = orv.parse(_iso_review(), protocol)
+    assert review.checks[0]["isolates"] is False
+    found = orv.isolation_findings(review)
+    assert len(found) == 1 and "mean_drop" in found[0] and "already at room temperature" in found[0]
+    assert orv.isolation_findings(orv.parse(_iso_review(""), protocol)) == []
+    text = orv.request(found, isolation=True)
+    assert "does not isolate" in text and "Never loosen a tolerance" in text
+    rec = orv.isolation_record(review, same_model=True, reviewer="m", planner="m")
+    assert rec["read_by_other_model"] is False and "wrote the plan" in rec["why"] and rec["objections"] == 0
+    assert orv.isolation_record(review, same_model=False, reviewer="r", planner="p")["objections"] == 1
+
+
+@pytest.mark.asyncio
+async def test_another_model_s_objection_to_a_case_goes_in_the_one_request_and_nothing_is_loosened(tmp_path: Path) -> None:
+    protocol = {**CUP_PROTOCOL, "oracles": [ISO_CHECK]}
+    engine = Engine(_config(tmp_path, research=True, node_models={"oracle_review": "reviewer-model"}))
+    model = _Model(protocol, _iso_review(), revise=_fix_case)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    asked = _asked_about_checks(model)
+    assert len(asked) == 1 and "The case of the check 'mean_drop' does not isolate" in asked[0]
+    check = plan.load_design(engine.quest_root)[0]["protocol"]["oracles"][0]
+    assert check["case"] == {"k": 1.0, "t_end": 1.0} and check["expected_formula"] == "exp(-1)"
+    assert check["tolerance"] == 1e-3, "the bar is not loosened"
+    assert check["expected"] != 99.0, "an expected value written by hand is not kept (FI computes it from the formula)"
+    assert "its case may not isolate what it measures" in _section(engine)
+
+
+@pytest.mark.asyncio
+async def test_the_same_model_judging_a_case_is_recorded_plainly_and_asks_nothing(tmp_path: Path) -> None:
+    protocol = {**CUP_PROTOCOL, "oracles": [ISO_CHECK]}
+    engine = Engine(_config(tmp_path, research=True))
+    model = _Model(protocol, _iso_review(), revise=_fix_case)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    assert _asked_about_checks(model) == []
+    assert "cases were not judged by another model" in _section(engine)
+    record = json.loads((engine.fi_dir / "oracle_review.json").read_text(encoding="utf-8"))
+    assert record["isolation"]["read_by_other_model"] is False

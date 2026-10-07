@@ -12195,7 +12195,7 @@ class Engine:
         path.write_text(text, encoding="utf-8")
         _plan.record_version(self.quest_root, text, by="engine", note=note)
 
-    async def _revise_checks_only(self, request: str, *, equations: bool | str = False) -> str:
+    async def _revise_checks_only(self, request: str, *, equations: bool | str = False, isolation: bool = False) -> str:
         """Ask the plan (``plan_revise``) for ``request`` and keep only what it changed in the checks
         (``protocol.oracles``): anything else it changed in the design block is put back, so a request about the checks
         can never move the grid, the thresholds or the criteria. ``""`` when the plan was rewritten, else why not (a
@@ -12250,8 +12250,12 @@ class Engine:
         def keep(block: dict[str, Any]) -> dict[str, Any]:
             protocol = dict(block.get("protocol") or {})
             protocol["oracles"] = part(after, "oracles")
+            if isolation and not equations:
+                # A case or a measure was objected to: no tolerance loosens and no `expected` is written by hand.
+                protocol["oracles"] = _review.never_looser(part(before, "oracles"), protocol["oracles"], keep_expected=True)
             if equations:
-                protocol["oracles"] = _review.never_looser(part(before, "oracles"), protocol["oracles"])
+                protocol["oracles"] = _review.never_looser(part(before, "oracles"), protocol["oracles"],
+                                                           keep_expected=isolation)
                 model_before = protocol.get("model")
                 model_after = (after.get("protocol") or {}).get("model") if isinstance(after.get("protocol"), dict) else None
                 if isinstance(model_before, dict) and isinstance(model_after, dict):
@@ -12429,7 +12433,15 @@ class Engine:
             else:
                 self._log.info("[oracle] the model's %d equation(s) were not read by another model (%s)",
                                eq_record["total"], eq_record["why"])
-        found = [*found, *eq_found]
+        # The checks' cases, judged in the same call: objections count only from another model than the planner.
+        iso_record = _review.isolation_record(review, same_model=same, reviewer=reviewer or "the reviewer",
+                                              planner=planner or "the planner") if review is not None else None
+        iso_found = _review.isolation_findings(review) if review is not None and same is False else []
+        if iso_record is not None and not error:
+            self._log.info("[oracle] the checks' cases %s", (
+                f"were judged by another model than the one that wrote the plan; it objects to {len(iso_found)}"
+                if iso_record["read_by_other_model"] else f"were not judged by another model ({iso_record['why']})"))
+        found = [*found, *eq_found, *iso_found]
         for f in found:
             self._log.info("[oracle] the second reader of the checks: %s", f)
         if error:
@@ -12449,7 +12461,10 @@ class Engine:
             "lines": _review.plan_lines(review, reviewer=reviewer or default, planner=planner or default,
                                         same_model=same, research=research,
                                         reported=bool(answered.get("reported")), error=error,
-                                        sent=not oracles_text.lstrip().startswith("[]"), equations=eq_record),
+                                        sent=not oracles_text.lstrip().startswith("[]"), equations=eq_record,
+                                        isolation=iso_record),
+            **({"isolation": iso_record} if iso_record is not None else {}),
+            **({"isolation_objections": iso_found} if iso_found else {}),
             **({"equations": eq_record} if eq_record is not None else {}),
             **({"equation_objections": eq_found} if eq_found else {}),
             **({"verdicts": review.checks, "add": review.add, "summary": review.summary} if review is not None else {}),
@@ -12536,7 +12551,8 @@ class Engine:
             must = [p for p in (_forms.request(requests, last=not (findings or formula_asks or example_asks)) if requests else "",
                                 _forms.formula_request(formula_asks, last=not (findings or example_asks), fixed=fixed_now),
                                 _equation_tests.request(example_asks, last=not findings)) if p]
-            parts = [*must, _review.request(findings, equations=bool(review.get("equation_objections")))
+            parts = [*must, _review.request(findings, equations=bool(review.get("equation_objections")),
+                                            isolation=bool(review.get("isolation_objections")))
                      if findings else ""]
             if len(must) + bool(findings) > 1:
                 parts.insert(0, "Several things about the checks against known answers, below. Those that say what to "
@@ -12544,7 +12560,8 @@ class Engine:
                                                                  "they are right." if findings else "."))
             failed = await self._revise_checks_only(
                 "\n\n".join(p for p in parts if p),
-                equations=True if review.get("equation_objections") else ("example" if example_asks else False))
+                equations=True if review.get("equation_objections") else ("example" if example_asks else False),
+                isolation=bool(review.get("isolation_objections")))
             if failed:
                 self._log.warning("[oracle] %s", failed)
             after = self._planned_oracles()

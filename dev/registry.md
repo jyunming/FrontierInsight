@@ -126,6 +126,8 @@ same PR that adds, splits or renames one.
   written, `plan.add_to_section` / `plan.refresh_model_section` keep the prose in step.
 - `core/oracle_review.py` — a second opinion on the plan's checks (`agents/oracle_review.md`, node `oracle_review`):
   `prompt_parts`, `parse` (strict: only declared checks and equations), `findings`, `request`, `plan_lines`; the same call
+  also judges each check's case (`isolation_findings`, `isolation_record`, `ISOLATION_REQUEST`; objections used only from another model);
+  the same call
   also reads the model's equations (`equations_of`, `equation_findings`, `equation_record`, `equation_lines`, used only
   when the reader is another model; `never_looser` / `keep_every_equation` guard the plan's rewrite). Called by
   `Engine._review_oracles` from `_hold_oracle_forms` (one call; its findings share the one `plan_revise` request with

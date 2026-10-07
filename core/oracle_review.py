@@ -153,6 +153,7 @@ def parse(reply: Any, protocol: dict[str, Any] | None, *, partial: bool = False)
             "discriminating": _yes(item.get("discriminating")), "bug": _text(item.get("bug_it_would_catch")),
             "well_defined": _yes(item.get("well_defined")), "definition_note": _text(item.get("definition_note")),
             "better": _text(item.get("better")),
+            "isolates": _yes(item.get("isolates")), "isolation_note": _text(item.get("isolation_note")),
         })
     if not out.checks:
         return None
@@ -216,6 +217,31 @@ def equation_findings(review: Review) -> list[str]:
     return out
 
 
+def isolation_findings(review: Review) -> list[str]:
+    """One plain sentence per check whose ``case`` the reader says does not isolate what its ``measure`` claims. Used
+    only when the reader is another model than the planner (:func:`isolation_record` says what is recorded otherwise)."""
+    return [f"the case of the check {c['name']!r} does not isolate what its measure claims: "
+            f"{c['isolation_note'] or 'no reason given'}" for c in review.checks if c["isolates"] is False]
+
+
+def isolation_record(review: Review | None, *, same_model: bool | None, reviewer: str, planner: str) -> dict[str, Any]:
+    """Whether the checks' cases were judged by a model other than the planner: ``{"read_by_other_model", "why",
+    "judged", "objections"}``. A reader that is the planner's own model, or that FI cannot tell apart from it, or that
+    gave no verdict on a check, does not count; ``why`` says so."""
+    judged = [c["name"] for c in (review.checks if review else []) if c["isolates"] is not None]
+    if review is None:
+        why = "the second reading gave no usable answer"
+    elif same_model is not False:
+        why = (f"the reader is the model that wrote the plan ({planner})" if same_model
+               else f"FI cannot tell whether the reader ({reviewer}) is another model than the one that wrote the plan")
+    elif len(judged) < len(review.checks):
+        why = "the reader gave no verdict on every check's case"
+    else:
+        why = ""
+    return {"read_by_other_model": not why, "why": why, "judged": judged,
+            "objections": len(isolation_findings(review)) if review and same_model is False else 0}
+
+
 def findings(review: Review) -> list[str]:
     """One plain sentence per thing the plan should change: a check found not to test the model, to miss a plausible
     bug or to have an ill-defined number, an equation no check tests, a check to add. A better check alone is a
@@ -247,10 +273,12 @@ EQUATION_REQUEST = (
     "equation. If the plan's equation is the right one, leave it and say why in its `derivation`.")
 
 
-def never_looser(old: list[Any], new: list[Any]) -> list[Any]:
+def never_looser(old: list[Any], new: list[Any], *, keep_expected: bool = False) -> list[Any]:
     """``new`` (the checks after a rewrite) with each check that also existed in ``old`` (matched by name) keeping its
     old ``tolerance`` and ``tolerance_mode`` when the rewrite made it larger or changed its mode: a rewrite of an
-    equation may move an expected value, never loosen the bar a check is held to."""
+    equation may move an expected value, never loosen the bar a check is held to. ``keep_expected``: the rewrite was
+    asked to change a check's case or measure only, so each check keeps the ``expected`` it had; a changed
+    ``expected_formula`` still moves it, through FI's own computation before the run."""
     before = {str(o.get("name") or "").strip().lower(): o for o in old if isinstance(o, dict)}
     out: list[Any] = []
     for item in new:
@@ -270,6 +298,8 @@ def never_looser(old: list[Any], new: list[Any]) -> list[Any]:
             for key in ("tolerance", "tolerance_mode"):
                 if key in was:
                     item[key] = was[key]
+        if keep_expected and "expected" in was and item.get("expected") != was["expected"]:
+            item = {**item, "expected": was["expected"]}
         out.append(item)
     return out
 
@@ -291,7 +321,15 @@ def keep_every_equation(old: Any, new: Any, *, only_example: bool = False) -> li
     return [*new_items, *[e for e in old_items if str(e.get("id")).strip().upper() not in have]]
 
 
-def request(found: list[str], *, equations: bool = False) -> str:
+#: Added to the request when the reader objected to a check's case: the plan fixes the case or the measure.
+ISOLATION_REQUEST = (
+    "\nWhere the reader objected that a check's `case` does not isolate what its `measure` claims: decide whether it is "
+    "right; if so change the check's `case` (or its `measure`) so the number is the one the check describes, in the "
+    "regime where its condition holds everywhere, and rewrite its `expected_formula` for that case. Never loosen a "
+    "tolerance, and do not write an `expected` by hand: FI computes it from the formula.")
+
+
+def request(found: list[str], *, equations: bool = False, isolation: bool = False) -> str:
     """The part of the one request to the plan that carries the reviewer's findings. The reviewer is a second reader,
     not the person: its findings are applied only when they are right. ``equations``: some finding is about an
     equation of the model (the plan may then rewrite that equation too)."""
@@ -307,6 +345,7 @@ def request(found: list[str], *, equations: bool = False) -> str:
         + (", and an equation of the model that a finding names" if equations else "")
         + ", and nothing else in the plan."
         + (EQUATION_REQUEST if equations else "")
+        + (ISOLATION_REQUEST if isolation else "")
     )
 
 
@@ -360,16 +399,16 @@ def equation_lines(record: dict[str, Any] | None, *, reviewer: str, research: bo
 
 def plan_lines(review: Review | None, *, reviewer: str, planner: str, same_model: bool | None, research: bool,
                reported: bool = True, error: str = "", sent: bool = True,
-               equations: dict[str, Any] | None = None) -> list[str]:
+               equations: dict[str, Any] | None = None, isolation: dict[str, Any] | None = None) -> list[str]:
     """What plan.md says about the second opinion, in plain words (never read back). ``same_model`` is ``None`` when
     it cannot be told whether the two were different models (a provider default FI cannot name)."""
     return [*_check_lines(review, reviewer=reviewer, planner=planner, same_model=same_model, research=research,
-                          reported=reported, error=error, sent=sent),
+                          reported=reported, error=error, sent=sent, isolation=isolation),
             *equation_lines(equations, reviewer=reviewer, research=research)]
 
 
 def _check_lines(review: Review | None, *, reviewer: str, planner: str, same_model: bool | None, research: bool,
-                 reported: bool, error: str, sent: bool) -> list[str]:
+                 reported: bool, error: str, sent: bool, isolation: dict[str, Any] | None = None) -> list[str]:
     asked = "" if reported else " (the connection did not say which model answered)"
     if same_model is False:
         who = f"The checks were read by a second model ({reviewer}{asked}), not the one that wrote the plan ({planner})."
@@ -399,13 +438,19 @@ def _check_lines(review: Review | None, *, reviewer: str, planner: str, same_mod
             {True: "its number is well defined", False: "its number is not well defined",
              None: "no verdict on its number"}[c["well_defined"]],
         ]
-        extra = "; ".join(x for x in (c["definition_note"], c["better"] and f"a better check: {c['better']}") if x)
+        if c.get("isolates") is not None and not (isolation and not isolation.get("read_by_other_model")):
+            verdict.append("its case isolates what it measures" if c["isolates"] else "its case may not isolate what it measures")
+        extra = "; ".join(x for x in (c["definition_note"], c["isolates"] is False and c.get("isolation_note"),
+                                      c["better"] and f"a better check: {c['better']}") if x)
         rows.append(f"  - **{c['name']}**: {', '.join(verdict)}." + (f" {extra}." if extra else ""))
     if review.tested or review.untested:
         rows.append(f"  - Equations the checks test: {', '.join(review.tested) or 'none named'}"
                     + ("." if review.partial else f"; not tested by any: {', '.join(review.untested) or 'none'}."))
     if review.partial:
         rows.append("  - The plan has more checks than the reader was shown; it did not judge the rest.")
+    if isolation and not isolation.get("read_by_other_model"):
+        rows.append(f"  - The checks' cases were not judged by another model ({isolation.get('why')}): nobody but the "
+                    "model that wrote them has checked that each case isolates what its measure claims.")
     return rows
 
 
