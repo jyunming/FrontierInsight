@@ -5307,15 +5307,18 @@ class Engine:
         """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
         return self._search_record(sha)[0]
 
-    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str) -> None:
+    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str) -> bool:
+        """Write the record; ``False`` when it could not be written."""
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / _SEARCH_ASKED).write_text(json.dumps({
                 "count": count, "calls": calls, "sha": sha, "model": self._plan_model_name(), "outcome": outcome,
                 "at": _frozen.now(),
             }) + "\n", encoding="utf-8")
+            return True
         except OSError as e:
             self._log.warning("[plan] couldn't record that FI asked the plan's model for the search: %r", e)
+            return False
 
     async def _ask_plan_for_the_search(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
         """Before a search for the best design stops because the plan's ``optimisation`` block is missing or cannot be
@@ -5344,7 +5347,10 @@ class Engine:
             request = _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
-            self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking")
+            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking"):
+                # No durable count, no request: a request that could not be counted could be asked again on every resume.
+                self._log.warning("[plan] FI could not write down that it was asking the plan's model, so it did not ask")
+                return design, plan_sha
             used_before = getattr(self, "_plan_chat_calls", 0)
             outcome = "kept"
             try:
@@ -5969,18 +5975,28 @@ class Engine:
             for item in old_block.get("design_variables") or []:
                 if isinstance(item, dict) and item.get("name"):
                     listed[str(item["name"])] = item
+        # A plan whose search block could not be read lists its settings only as the independent variables: no range to hold
+        # the values to, but still the only settings that may be measured over.
+        independent = (old.get("variables") or {}).get("independent") if isinstance(old.get("variables"), dict) else None
+        for name in independent if isinstance(independent, list) else []:
+            listed.setdefault(str(name), None)
         grid = (new.get("protocol") or {}).get("grid") if isinstance(new.get("protocol"), dict) else None
-        if listed and isinstance(grid, dict):
-            for name, values in grid.items():
-                variable = listed.get(str(name))
-                values = values if isinstance(values, list) else [values]
-                if variable is None:
-                    raise ValueError(f"the plan was not changed to a measurement: the rewrite measures over {name}, which the plan "
-                                     "did not list as a setting; plan.md is unchanged")
-                for value in values:
-                    if not _optim._inside(variable, value):
-                        raise ValueError(f"the plan was not changed to a measurement: the rewrite measures {name} at {value}, "
-                                         "outside what the plan listed for it; plan.md is unchanged")
+        if not listed or not isinstance(grid, dict) or not grid:
+            raise ValueError("the plan was not changed to a measurement: the rewrite does not say which of the plan's own "
+                             "settings to measure over, at which values; plan.md is unchanged")
+        for name, values in grid.items():
+            variable = listed.get(str(name))
+            known = str(name) in listed
+            values = values if isinstance(values, list) else [values]
+            if not values:
+                raise ValueError(f"the plan was not changed to a measurement: the rewrite lists no values for {name}; plan.md is unchanged")
+            if not known:
+                raise ValueError(f"the plan was not changed to a measurement: the rewrite measures over {name}, which the plan "
+                                 "did not list as a setting; plan.md is unchanged")
+            for value in values:
+                if variable is not None and not _optim._inside(variable, value):
+                    raise ValueError(f"the plan was not changed to a measurement: the rewrite measures {name} at {value}, "
+                                     "outside what the plan listed for it; plan.md is unchanged")
         return after_text
 
     async def _usable_design_block(self, revised: str, *, ask: bool) -> tuple[str, str, bool]:
@@ -14778,9 +14794,10 @@ class Engine:
 
         result = state.get("result_json")
         # A result with no number in it (the script printed its RESULT_JSON line with nothing measured) is no result.
-        no_numbers = bool(result) and not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
+        # A run whose result has no number in it (none printed, `{}`, `[]`, only words) is no result; a `0` is a number.
+        no_numbers = not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
         if (
-            (result and not no_numbers)
+            not no_numbers
             or not isinstance(exec_result, dict) or not exec_result  # no experiment has run: not this case
             or state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
@@ -14788,7 +14805,7 @@ class Engine:
         ):
             return None
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
-               if no_numbers else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
+               if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
         if state.get("exec_give_up_reason"):
             why += f"; the repair gave up: {_one_line(state.get('exec_give_up_reason'), 160)}"
         why += ")"

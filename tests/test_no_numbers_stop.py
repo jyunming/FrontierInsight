@@ -13,6 +13,9 @@ from core.engine import Engine
 from tests.test_engine_smoke import _FAKE_EXPERIMENT_CODE, _classify, _fake_response_for
 
 EMPTY_CODE = _FAKE_EXPERIMENT_CODE.replace('{"score": 0.987}', '{"status": "done", "ok": true}')
+EMPTY_DICT_CODE = _FAKE_EXPERIMENT_CODE.replace('{"score": 0.987}', '{}')
+NO_LINE_CODE = _FAKE_EXPERIMENT_CODE.replace("print('RESULT_JSON: {\"score\": 0.987}')", "print('done')")
+ZERO_CODE = _FAKE_EXPERIMENT_CODE.replace('{"score": 0.987}', '{"x": 0}')
 
 
 def _cfg(tmp_path: Path, **engine: Any) -> Config:
@@ -41,11 +44,13 @@ def test_the_fixture_prints_a_result_with_no_number() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", [EMPTY_CODE, EMPTY_DICT_CODE, NO_LINE_CODE], ids=["words", "empty_dict", "no_result_line"])
 async def test_a_result_with_no_number_goes_back_to_design_once_then_stops_with_no_paper(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], code: str,
 ) -> None:
+    assert code != _FAKE_EXPERIMENT_CODE
     calls: list[str] = []
-    monkeypatch.setattr("core.engine.LLMClient.chat", _chat(calls, EMPTY_CODE))
+    monkeypatch.setattr("core.engine.LLMClient.chat", _chat(calls, code))
     eng = Engine(_cfg(tmp_path))
     art = await eng.run()
     assert art.paper_md is None
@@ -60,9 +65,12 @@ async def test_a_result_with_no_number_goes_back_to_design_once_then_stops_with_
 
 
 @pytest.mark.asyncio
-async def test_a_result_with_a_number_is_written_up_as_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("code", [_FAKE_EXPERIMENT_CODE, ZERO_CODE], ids=["number", "zero_is_a_number"])
+async def test_a_result_with_a_number_is_written_up_as_before(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str,
+) -> None:
     calls: list[str] = []
-    monkeypatch.setattr("core.engine.LLMClient.chat", _chat(calls, _FAKE_EXPERIMENT_CODE))
+    monkeypatch.setattr("core.engine.LLMClient.chat", _chat(calls, code))
     eng = Engine(_cfg(tmp_path))
     art = await eng.run()
     assert art.paper_md is not None and not (eng.quest_root / "needs" / "STUCK.json").is_file()
@@ -72,7 +80,8 @@ async def test_a_result_with_a_number_is_written_up_as_before(tmp_path: Path, mo
 def test_only_a_real_number_counts_as_a_result(tmp_path: Path) -> None:
     eng = Engine(_cfg(tmp_path))
     base = {"exec_result": {"returncode": 0}, "iteration": 2}  # no iteration left: the verdict is final
-    for empty in ({"status": "done", "ok": True, "note": "n/a"}, {"a": [], "b": {"c": None}}):
+    for empty in ({"status": "done", "ok": True, "note": "n/a"}, {"a": [], "b": {"c": None}}, {}, [], None):
         ruled = eng._no_results_verdict({**base, "result_json": empty})
         assert ruled is not None and ruled["stuck"] is True and ruled["stuck_reason"] == "no_numbers"
     assert eng._no_results_verdict({**base, "result_json": {"x": {"y": [1.5]}}}) is None
+    assert eng._no_results_verdict({**base, "result_json": {"x": 0}}) is None

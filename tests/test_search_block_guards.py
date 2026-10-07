@@ -145,3 +145,57 @@ async def test_measure_instead_that_changes_the_question_or_the_settings_is_put_
     with pytest.raises(ValueError, match=said):
         await _revise(eng, _measure(grid, **top))
     assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_no_request_is_made_when_it_cannot_be_written_down(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, [])
+    model = Model(eng, [_complete, _complete], _broken_draft())
+    real = Path.write_text
+
+    def failing(self: Path, *a: Any, **kw: Any) -> Any:
+        if self.name == "search_block_asked.json":
+            raise OSError("disk full")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", failing)
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert model.asked == [], "no marker, no request"
+    assert seen, "the quest went on to the plain stop"
+
+
+@pytest.mark.asyncio
+async def test_measure_instead_with_no_grid_is_put_back(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], copy.deepcopy(HEAT_SINK))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+
+    def no_grid(design: dict[str, Any]) -> dict[str, Any]:
+        out = {k: v for k, v in design.items() if k != "study_type"}
+        out["study_type"] = "measure"
+        out["protocol"] = {k: v for k, v in design["protocol"].items() if k != "optimisation"}
+        return out
+
+    with pytest.raises(ValueError, match="does not say which of the plan's own settings"):
+        await _revise(eng, no_grid)
+    assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_measure_instead_of_a_plan_that_listed_no_settings_is_put_back(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], copy.deepcopy(HEAT_SINK))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    path = plan.plan_path(eng.quest_root)
+    path.write_text(plan.edit_design_block(path.read_text(encoding="utf-8"), lambda d: {
+        **d, "protocol": {k: v for k, v in d["protocol"].items() if k != "optimisation"}, "study_type": "measure",
+        "variables": {**d["variables"], "independent": []}}),
+        encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="does not say which of the plan's own settings"):
+        await _revise(eng, _measure({"fin_spacing": [2.0, 3.0]}))
+    assert path.read_text(encoding="utf-8") == before
