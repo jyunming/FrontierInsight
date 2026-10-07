@@ -399,7 +399,7 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
         fixed, why = normalize_model(model)
         return fixed, ([] if fixed is not None else [
             f"the model behind the numbers (`protocol.model`) was left out of the plan because it could not be read "
-            f"({why}); write it here"
+            f"({why}); it is not used"
         ])
     equations = model["equations"]
     if isinstance(equations, dict) and equations and all(_EQ_KEY_RE.match(str(k)) for k in equations):
@@ -429,7 +429,7 @@ def repair_model(model: Any) -> tuple[dict[str, Any] | None, list[str]]:
         kept.append(item)
     fixed, why = normalize_model({**model, "equations": kept})
     if fixed is None:
-        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); write it here"]
+        return None, notes + [f"the model behind the numbers (`protocol.model`) was left out ({why}); it is not used"]
     return fixed, notes
 
 
