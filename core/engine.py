@@ -112,6 +112,7 @@ from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import equation_tests as _equation_tests
 from . import code_review as _code_review
+from . import quality_report as _quality_report
 from . import function_steps as _function_steps
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
@@ -1709,6 +1710,10 @@ class Engine(RunChecksMixin):
                 self._emit_source_failure_summary(started_at=_run_started_at)
             except Exception:  # noqa: BLE001 - reporting must not mask the outcome
                 pass
+            # The quality report (QUALITY.md, .fi/quality.json): where the quest went wrong, who caught it, what was
+            # fixed and what it cost, read from the records above. Every way a run ends passes here: finished, an
+            # honest stop, a pause, a crash. Never in the way of the outcome.
+            _quality_report.write_quietly(self.quest_root)
             try:
                 _source_failures.current_quest.reset(_quest_ctx)
             except ValueError:
