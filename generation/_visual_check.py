@@ -417,7 +417,8 @@ def _write_report(quest_root: Path, kind: str, report: dict[str, Any]) -> None:
 # below is unchanged). The poster's layout is the planner's, so only text the
 # model wrote counts there: a new reply would not change empty space, uneven
 # columns or overflow. The paper is never rewritten; a script repairs a last
-# page that holds only a line or two by making the text area taller.
+# page that holds only a line or two by making the text area taller, and text
+# over an edge or over other text by setting the tables a size smaller.
 REDO_CHECKS = {
     "slides": frozenset({
         "overflow", "small_font", "cut_off_text", "overlap", "unreadable_figure",
@@ -425,8 +426,25 @@ REDO_CHECKS = {
         "figure_ticks_small",
     }),
     "poster": frozenset({"raw_markup", "broken_math", "garbled_text", "captions"}),
-    "paper": frozenset({"last_page_nearly_empty"}),
+    "paper": frozenset({"last_page_nearly_empty", "overwide", "overflow", "text_overlap"}),
 }
+# What recompiling the paper repairs. A last page of a line or two: the text area
+# grows by a line. Text or a table over the edge of its column or the page, or
+# over other text: every table is set a size smaller (its cells wrap in less room).
+# A blank gap inside a column is not repaired here: the template sets columns
+# ragged at the foot, so no recompile would change it.
+PAPER_FEEDBACK_TAG = "fi-checks:"
+_TAKES_A_LINE = frozenset({"last_page_nearly_empty"})
+_TAKES_SMALLER_TABLES = frozenset({"overwide", "overflow", "text_overlap"})
+
+
+def paper_repairs(feedback: str) -> tuple[bool, bool]:
+    """``(taller text area, smaller tables)`` for the feedback a paper redo is given (the first line names the checks)."""
+    first = (feedback or "").split("\n", 1)[0].strip()
+    if not first.startswith(PAPER_FEEDBACK_TAG):
+        return True, False  # feedback that names no check: the repair that was the only one
+    checks = set(first[len(PAPER_FEEDBACK_TAG):].replace(",", " ").split())
+    return bool(checks & _TAKES_A_LINE), bool(checks & _TAKES_SMALLER_TABLES)
 _WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 # The files one version of an output consists of, copied aside before a redo
 # so a version that checks worse can be put back.
@@ -513,7 +531,10 @@ async def check_and_redo(
         entry: dict[str, Any] = {"attempt": attempt, "redo_for": sorted({f["check"] for f in fixable})}
         attempts.append(entry)
         try:
-            await regenerate(feedback_text(fixable))
+            feedback = feedback_text(fixable)
+            if kind == "paper":
+                feedback = f"{PAPER_FEEDBACK_TAG} {' '.join(sorted({f['check'] for f in fixable}))}\n{feedback}"
+            await regenerate(feedback)
         except Exception as exc:  # noqa: BLE001 — a redo must never stop the quest
             _log.warning("visual check: redo %d of %s failed: %r", attempt, kind, exc)
             entry.update({"error": f"{type(exc).__name__}: {exc}"[:300], "kept": False})

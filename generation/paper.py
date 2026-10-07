@@ -829,7 +829,7 @@ class PaperGenerator:
         return None
 
     def _compile_pdf(
-        self, paper_md: Path, out_dir: Path, *, extra_lines: int = 0,
+        self, paper_md: Path, out_dir: Path, *, extra_lines: int = 0, smaller_tables: bool = False,
     ) -> tuple[Path | None, _PdfSkipReason | None]:
         """Run pandoc + a LaTeX engine over ``paper_md`` to produce
         ``out_dir/paper.pdf``. Returns ``(path, None)`` on success,
@@ -839,7 +839,8 @@ class PaperGenerator:
 
         ``extra_lines`` makes the LaTeX text area that many lines taller;
         the visual check uses it to pull a nearly empty last page back onto
-        the page before.
+        the page before. ``smaller_tables`` sets every table a size smaller; the
+        visual check uses it when text ran over the edge of a column or the page.
         """
         # Wipe any stale ``paper_pdf_source.md`` from a prior run BEFORE
         # we do anything else. The semantic this guarantees: after
@@ -996,9 +997,19 @@ class PaperGenerator:
             sanitized_md = blank_lines_around_figures(sanitized_md)
             # A table right under its caption line would be read as more text
             # of the caption's paragraph and print as raw pipes.
-            from generation._tables import blank_line_before_tables
+            from generation._tables import (
+                TWO_COLUMN_FORMATS,
+                blank_line_before_tables,
+                fit_tables_to_column,
+            )
 
             sanitized_md = blank_line_before_tables(sanitized_md)
+            # A table wider than its column wraps its cells inside it (widths
+            # from its text) instead of running over the next column.
+            sanitized_md = fit_tables_to_column(
+                sanitized_md, two_column=self.config.output.paper_format in TWO_COLUMN_FORMATS,
+                smaller=smaller_tables,
+            )
             if glyph_count:
                 _log.info(
                     "paper.pdf: rewrote %d Unicode glyph occurrence(s) "

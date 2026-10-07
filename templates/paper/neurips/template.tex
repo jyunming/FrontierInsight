@@ -36,6 +36,10 @@ $endif$
 % then calls \refstepcounter{none} internally, so the counter must exist.
 \newcounter{none}
 \usepackage{hyperref}
+% xurl lets a URL break at ANY character, so a long address in the references
+% wraps inside the text column instead of running past the right margin.
+\usepackage{xurl}
+\setlength{\emergencystretch}{3em}
 \usepackage{amsmath, amssymb}
 \usepackage{booktabs}
 \usepackage{microtype}

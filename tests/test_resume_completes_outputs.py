@@ -228,8 +228,8 @@ async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(
         def generate(self, art, out_dir):  # noqa: ANN001
             return {"paper_md": out_dir / "paper.md", "paper_pdf": out_dir / "paper.pdf"}
 
-        def _compile_pdf(self, paper_md, out_dir, *, extra_lines=0):  # noqa: ANN001
-            compiled.append((paper_md.name, extra_lines))
+        def _compile_pdf(self, paper_md, out_dir, *, extra_lines=0, smaller_tables=False):  # noqa: ANN001
+            compiled.append((paper_md.name, extra_lines, smaller_tables))
             return out_dir / "paper.pdf", None
 
     class _Nothing:
@@ -251,7 +251,44 @@ async def test_the_paper_is_repaired_by_recompiling_one_line_taller_per_attempt(
     monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
     art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "source.md")
     await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock())
-    assert compiled == [("paper.md", 1), ("paper.md", 2)]
+    assert compiled == [("paper.md", 1, False), ("paper.md", 2, False)]
+
+
+@pytest.mark.asyncio
+async def test_text_over_an_edge_is_repaired_by_setting_the_tables_smaller(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(fi_launch, "_apply_paper_venue_override", lambda c, a: None)
+    compiled: list[tuple[int, bool]] = []
+
+    class _Paper:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        def generate(self, art, out_dir):  # noqa: ANN001
+            return {"paper_md": out_dir / "paper.md", "paper_pdf": out_dir / "paper.pdf"}
+
+        def _compile_pdf(self, paper_md, out_dir, *, extra_lines=0, smaller_tables=False):  # noqa: ANN001
+            compiled.append((extra_lines, smaller_tables))
+            return out_dir / "paper.pdf", None
+
+    class _Nothing:
+        def __init__(self, cfg):  # noqa: ANN001
+            pass
+
+        async def generate(self, art, out_dir, *, supervisor, feedback=""):  # noqa: ANN001
+            return {}
+
+    monkeypatch.setattr(fi_launch, "PaperGenerator", _Paper)
+    for name in ("SlideGenerator", "PosterGenerator", "SpeechGenerator"):
+        monkeypatch.setattr(fi_launch, name, _Nothing)
+
+    async def fake_check_and_redo(cfg, kind, pdf, quest_root, regenerate, *, supervisor):  # noqa: ANN001
+        await regenerate("fi-checks: text_overlap overwide\n- page 3: lines drawn over each other")
+        return {"transport": "images", "findings": [], "measured": {"findings": []}}
+
+    monkeypatch.setattr(fi_launch, "check_and_redo", fake_check_and_redo)
+    art = QuestArtifacts(quest_id="q", quest_root=tmp_path, paper_md=tmp_path / "source.md")
+    await fi_launch._run_generators(_cfg(visual_check=True), art, supervisor=MagicMock())
+    assert compiled == [(0, True)], "no taller text area for a layout problem, and the tables are set smaller"
 
 
 @pytest.mark.asyncio
