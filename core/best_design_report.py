@@ -63,11 +63,45 @@ def _num(value: Any) -> bool:
 
 
 def _fmt(value: Any) -> str:
+    """A number as the paper prints it. A negative zero (``-0.0``, what ``0 - 0`` or ``-1 * 0`` gives, and what a tiny
+    negative becomes once rounded) is printed as ``0``: no reader means anything by the sign of nothing."""
     if isinstance(value, float):
         if value.is_integer() and abs(value) < 1e15:
             return str(int(value))
-        return f"{value:.4g}"
+        text = f"{value:.4g}"
+        return "0" if float(text) == 0.0 else text
     return str(value)
+
+
+#: The search methods FI has, as a scientist reads them. The paper names what the method does, never FI's identifier.
+_METHOD_NAMES = {
+    "bounded_local": "a local search inside the ranges, from several starting points",
+    "global_then_local": "a search over the whole range first, then a local search from the best point found",
+    "exhaustive": "every combination evaluated",
+    "scan": "a coarse scan of the design space",
+}
+_LIBRARY_METHOD = re.compile(r"^(scipy|optuna):([A-Za-z][A-Za-z0-9_.-]*)$")
+
+
+def method_name(method: Any) -> str:
+    """The plain-language name of a search method id (``bounded_local``, ``scipy:differential_evolution``, ...), a
+    neutral phrase for one this function does not know (an id is never printed in the paper)."""
+    key = str(method or "").strip()
+    if key in _METHOD_NAMES:
+        return _METHOD_NAMES[key]
+    library = _LIBRARY_METHOD.match(key)
+    if library:
+        where = "SciPy" if library.group(1) == "scipy" else "Optuna"
+        return f"the {library.group(2)} method of {where}"
+    return "a search method chosen for this study"
+
+
+def _plain(text: Any) -> str:
+    """``text`` with every method id in it replaced by its plain name."""
+    out = str(text or "")
+    for key in sorted(_METHOD_NAMES, key=len, reverse=True):
+        out = re.sub(r"(?<![A-Za-z0-9_])" + re.escape(key) + r"(?![A-Za-z0-9_])", _METHOD_NAMES[key], out)
+    return _LIBRARY_METHOD.sub(lambda m: method_name(m.group(0)), out)
 
 
 def _design(design: dict[str, Any] | None) -> str:
@@ -198,9 +232,8 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
     sign = _sign(best)
     hashes = "#" * max(1, min(6, heading_level))
     lines = [f"{hashes} {HEADING}", "",
-             "The numbers in this section are FI's own record of the search (`results/best_design.json`, every "
-             "evaluation in `raw/optimisation_ledger.jsonl`) and of its check at finer numerical settings "
-             "(`needs/OPTIMUM_CHECK.json`).", ""]
+             "The numbers in this section are FI's own record of the search, every evaluation of it included, and of "
+             "its check at finer numerical settings.", ""]
     what = f"**What was optimised.** {quantity}"
     if objective.get("meaning"):
         what += f" ({objective['meaning']})"
@@ -227,8 +260,9 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                       "): that one did not hold at the finest settings (see the check below).", ""]
     ev = best.get("evaluations") or {}
     method = best.get("method") or {}
-    search = (f"**How the search ran.** Method {method.get('used')}"
-              + (f" ({method.get('requested')} was asked for, but {method.get('why')})" if method.get("why") else "")
+    search = (f"**How the search ran.** Method: {method_name(method.get('used'))}"
+              + (f" ({method_name(method.get('requested'))} was asked for, but {_plain(method.get('why'))})"
+                 if method.get("why") else "")
               + f"; {ev.get('search')} of {ev.get('budget')} evaluations allowed were used")
     if _num(ev.get("starts")) and _num(ev.get("per_start")):
         search += f" (a budget of {ev['per_start']} evaluations for each of {ev['starts']} starting points"
@@ -245,11 +279,11 @@ def section(quest_root: Path, block: dict[str, Any] | None = None, *, heading_le
                   f"{r.get('added')} more evaluations{toward}, from {_design(r.get('from'))}; stopped because "
                   f"{_STOPPED.get(str(r.get('stopped_because')), r.get('stopped_because'))}.", ""]
     if check:
-        lines += [f"**Check at finer numerical settings.** {check.get('says')}", ""]
+        lines += [f"**Check at finer numerical settings.** {_plain(check.get('says'))}", ""]
         for name, label in _CHECK_LABELS.items():
             c = (check.get("checks") or {}).get(name)
             if isinstance(c, dict):
-                lines.append(f"- {label}: {_STATUS.get(str(c.get('status')), c.get('status'))}: {c.get('says')}.")
+                lines.append(f"- {label}: {_STATUS.get(str(c.get('status')), c.get('status'))}: {_plain(c.get('says'))}.")
         if check.get("checks"):
             lines.append("")
     else:
@@ -426,7 +460,8 @@ def summary_line(quest_root: Path) -> str:
     value = (imp or {}).get("value") if imp else (best.get("improvement") or {}).get("value")
     text = _design(design)
     if _num(value):
-        text += f" — {quantity} {_fmt(abs(value))}{u} {'better' if value > 0 else 'worse'} than the baseline"
+        text += (f" — {quantity} {_fmt(abs(value))}{u} {'better' if value > 0 else 'worse'} than the baseline"
+                 if value else f" — {quantity} no better than the baseline")
         if imp and _num(imp.get("numerical_error")):
             text += f" (± {_fmt(imp['numerical_error'])}{u})"
     verdict = str((check or {}).get("verdict") or "unverified")
