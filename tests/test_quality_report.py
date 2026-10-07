@@ -85,7 +85,7 @@ def test_same_model_reviewer_is_named_and_suggested(tmp_path: Path) -> None:
     assert _stage(r, "checks")["same_model"] is True
     assert _stage(r, "design")["same_model"] is True
     texts = " ".join(s["text"] for s in r["suggestions"])
-    assert "provider.node_models.oracle_review" in texts
+    assert "provider.node_providers.oracle_review" in texts
     assert all(s["source"] for s in r["suggestions"])
     assert "(same model)" in qr.render(r)
 
@@ -121,7 +121,7 @@ def test_known_answer_check_that_keeps_failing(tmp_path: Path) -> None:
     items = _stage(r, "run")["problems"]["items"]
     assert items[0]["status"] == "not fixed" and "failed 2 times" in items[0]["text"]
     texts = [s["text"] for s in r["suggestions"]]
-    assert texts[0] == "Look at the formula."
+    assert "Look at the formula." not in texts  # advice to look at code is not quoted (people do not debug)
     assert any("kept failing" in t for t in texts)
 
 
@@ -261,3 +261,43 @@ def test_quest_dirs_finds_nested_quests(tmp_path: Path) -> None:
     _finished(tmp_path / "y" / "q2")
     names = sorted(p.name for p in qr.quest_dirs([tmp_path]))
     assert names == ["q1", "q2"]
+
+
+def test_advice_to_fix_code_or_files_is_never_quoted(tmp_path: Path) -> None:
+    root = tmp_path / "q-advice"
+    _w(root / ".fi" / "pause.json", {"kind": "manifest", "headline": "h", "recommended": "Fix the script as listed, then go on."})
+    assert not any("Fix the script" in s["text"] for s in qr.build(root)["suggestions"])
+    _w(root / ".fi" / "pause.json", {"kind": "plan", "headline": "h", "recommended": "Try another model for the plan step."})
+    assert qr.build(root)["suggestions"][0]["text"] == "Try another model for the plan step."
+    assert qr._is_choice("Raise `provider.http_timeout_s`, or use a faster model.")
+    assert not qr._is_choice("Edit plan.md and add the missing check.")
+
+
+def test_every_suggested_key_routes_the_step_it_names(tmp_path: Path) -> None:
+    """Each `provider.node_models.<step>` / `node_providers.<step>` names a step the engine really calls (`_chat(..., node=)`),
+    and the engine's own key matching (exact, then the part before the first dot) finds it."""
+    import re
+    from core import provider as prov
+
+    engine = (Path(__file__).resolve().parent.parent / "core" / "engine.py").read_text(encoding="utf-8")
+    oracle_review = (Path(__file__).resolve().parent.parent / "core" / "oracle_review.py").read_text(encoding="utf-8")
+    steps = set(re.findall(r'node="([a-z_]+)', engine)) | set(re.findall(r'^NODE = "([a-z_]+)"', oracle_review, re.M))
+    root = tmp_path / "q-keys"
+    _calls(root, [_call("implement", outcome="ReadTimeout")] * 3 + [_call("design", outcome="HTTPStatusError")] * 3
+           + [_call(n) for n in ("plan", "oracle_review", "design", "design_self_critique", "implement", "analyze",
+                                 "cross_check", "write", "claim_check", "review", "execute_reflect")])
+    _w(root / ".fi" / "oracle_review.json", {"reviewer": "model-a", "planner": "model-a", "same_model": True,
+                                              "findings": ["x"]})
+    _w(root / ".fi" / "code_review.json", {"skipped": "the reader is the model that wrote the code (model-a)"})
+    keys = set()
+    for sug in qr.build(root)["suggestions"]:
+        keys |= set(re.findall(r"provider\.node_(?:models|providers)\.([a-z_]+)", sug["text"]))
+    assert {"oracle_review", "implement", "design", "design_self_critique"} <= keys
+    for key in keys:
+        assert key in steps, key
+        assert prov.node_provider_for({key: 1}, key) == (key, 1)
+        assert prov.model_for_node({key: "m"}, key + ".sub") == "m"
+    for stage_key in qr._KEY.values():
+        assert stage_key in steps, stage_key
+    for readers in qr._READERS.values():
+        assert readers[0] in steps, readers

@@ -48,12 +48,21 @@ _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "d
             "run": ("execute_reflect", "improve"), "analysis": ("analyze",), "paper": ("write", "figures"),
             "review": ("review",)}
 _READERS = {"checks": ("oracle_review", "oracle_recompute"), "design": ("design_self_critique",),
-            "code": ("code_review",), "analysis": ("cross_check",), "paper": ("claim_check",)}
+            "code": ("oracle_review",), "analysis": ("cross_check",), "paper": ("claim_check",)}
 #: A stage's step to name when a person asks for another model to write (or read) it.
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}
 _RECORD_FILES = ("model_calls.jsonl", "audit.jsonl", "oracle_review.json", "code_review.json", "equation_tests.json",
                  "function_steps.json")
+
+
+def _is_choice(text: str) -> bool:
+    """A record's advice is quoted only when it is a genuine choice (a model, more time), never a request to fix code or
+    edit a file: people do not debug."""
+    low = text.lower()
+    if any(w in low for w in ("fix ", "edit", "debug", "script", "code", "file", "rewrite", "by hand", "yourself", "patch")):
+        return False
+    return any(w in low for w in ("model", "provider.", "timeout", "time limit", "more time", "faster"))
 
 
 # ----------------------------------------------------------------------------------------------------- reading
@@ -585,9 +594,9 @@ def _suggestions(q: _Quest, stages: dict[str, dict[str, Any]], outcome: dict[str
     # What the record itself says to do comes first.
     if outcome["kind"] == "crashed":
         m = re.search(r"\*\*What to do:\*\*\s*(.+)", q.failed_md)
-        if m:
+        if m and _is_choice(m.group(1)):
             add(_one(m.group(1), 300), "quest_failed.md")
-    if outcome["kind"] == "paused" and q.pause.get("recommended"):
+    if outcome["kind"] == "paused" and _is_choice(str(q.pause.get("recommended") or "")):
         add(_one(q.pause["recommended"], 300), ".fi/pause.json")
     # A step that timed out or was limited, again and again.
     errors: dict[tuple[str, str], int] = Counter()
@@ -614,8 +623,10 @@ def _suggestions(q: _Quest, stages: dict[str, dict[str, Any]], outcome: dict[str
         if row["same_model"] and stage in _READERS:
             reader_key = _READERS[stage][0]
             if row["problems"]["total"] or stage == (failure or {}).get("stage") or stage == "code":
-                add(f"The {STAGE_NAME[stage].lower()} stage was read by the model that wrote it ({row['reviewed_by'] or 'the same model'}): "
-                    f"set another model to read it (provider.node_models.{reader_key}).",
+                add(f"The {STAGE_NAME[stage].lower()} stage was read by the model that wrote it "
+                    f"({row['reviewed_by'] or 'the same model'}): give the reading step another provider's model "
+                    f"(provider.node_providers.{reader_key}: name, model, base_url, api_key_env)"
+                    + (" - the code is read by this same step" if stage == "code" else "") + ".",
                     {"checks": ".fi/oracle_review.json", "code": ".fi/code_review.json"}.get(stage, ".fi/model_calls.jsonl"))
     # The stage with the most problems left.
     left = {s: stages[s]["problems"]["not_fixed"] + stages[s]["problems"]["left_out"] for s in STAGES}
@@ -623,12 +634,13 @@ def _suggestions(q: _Quest, stages: dict[str, dict[str, Any]], outcome: dict[str
     if left[worst] >= 2 and worst in ("code", "design", "plan", "run"):
         who = f" (now {stages[worst]['wrote'][0]})" if stages[worst]["wrote"] else ""
         add(f"Most problems left are in the {STAGE_NAME[worst].lower()}: try a stronger model for it{who} "
-            f"(provider.node_models.{_KEY[worst]}).", "QUALITY: problems per stage")
+            f"(provider.node_models.{_KEY[worst]}, or another provider with provider.node_providers.{_KEY[worst]}).", "QUALITY: problems per stage")
     # A check that kept failing for a reason the record names.
     repeated = [p for p in _oracle_problems(q) if "failed " in p["text"] and "times" in p["text"] and p["status"] != "fixed"]
     for p in repeated[:2]:
-        add(f"A known-answer check kept failing ({_one(p['text'], 170)}). Either the check or the code is wrong: look at "
-            "the check in the plan and at the formula in the code.", p["source"])
+        add(f"A known-answer check kept failing ({_one(p['text'], 170)}). Either the check or the code is wrong; "
+            f"try another model for the code (provider.node_models.implement) or the plan (provider.node_models.plan).",
+            p["source"])
     # A pause or an honest stop with no record advice: the stage's own model.
     if outcome["kind"] == "honest_stop" and not any("provider.node_models" in s["text"] for s in out):
         stage = failure["stage"] if failure else "analysis"

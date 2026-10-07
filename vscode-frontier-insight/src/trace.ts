@@ -161,19 +161,15 @@ export async function runQuality(
 ): Promise<void> {
     const questId = promptArgs.trim().split(/\s+/).filter((w) => w)[0] ?? "";
     if (!questId) {
-        stream.markdown("Which quest? Example: `@fi /quality 1790003131-my-quest` (where it went wrong, who caught it, what was fixed, what to try, what it cost).
-");
+        stream.markdown("Which quest? Example: `@fi /quality 1790003131-my-quest` (where it went wrong, who caught it, what was fixed, what to try, what it cost).\n");
         return;
     }
     const ctx = await launchContext(stream);
     if (!ctx || token.isCancellationRequested) return;
     stream.progress(`Reading the quality of ${questId}…`);
     const res = await runLaunch(ctx.python, ctx.repo, ctx.workDir, ["--quality", questId, "--output-root", ctx.outputRoot]);
-    const text = (res.code === 0 ? res.stdout : [res.stdout, res.stderr].filter((t) => t.trim()).join("
-")).trim();
-    stream.markdown(text ? text.slice(0, OUTPUT_CHARS) + "
-" : `No output (exit ${res.code}).
-`);
+    const text = (res.code === 0 ? res.stdout : [res.stdout, res.stderr].filter((t) => t.trim()).join("\n")).trim();
+    stream.markdown(text ? text.slice(0, OUTPUT_CHARS) + "\n" : `No output (exit ${res.code}).\n`);
 }
 
 /**
