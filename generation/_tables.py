@@ -103,11 +103,12 @@ def _plan_widths(table: list[list[str]], usable: float) -> list[int]:
     return [max(3, round(100 * s / total)) for s in share]
 
 
-def fit_tables_to_column(markdown: str, *, two_column: bool) -> str:
+def fit_tables_to_column(markdown: str, *, two_column: bool, smaller: bool = False) -> str:
     """``markdown`` with each pipe table that is wider than its column (or that pandoc would wrap with equal columns)
     given column widths in proportion to its text, so its cells wrap inside the column instead of running over the
     next one. A table whose longest words cannot sit side by side at the body size is set one size smaller. The
-    writer's paper.md is not touched; this is the copy pandoc reads. Code blocks are left alone."""
+    writer's paper.md is not touched; this is the copy pandoc reads. ``smaller`` sets every table
+    one size smaller (the repair after a check found text over an edge). Code blocks are left alone."""
     lines = markdown.split("\n")
     out: list[str] = []
     fence = None
@@ -139,13 +140,13 @@ def fit_tables_to_column(markdown: str, *, two_column: bool) -> str:
         words = [max([len(w) for r in rows for w in _shown(r[c]).split()] or [1]) for c in range(count)]
         chars = _COLUMN_CHARS[two_column]
         too_wide = sum(widest) > chars - _CELL_PAD_CHARS * count
-        if not too_wide and max(len(r) for r in block) <= _PANDOC_COLUMNS:
+        if not smaller and not too_wide and max(len(r) for r in block) <= _PANDOC_COLUMNS:
             out.extend(block)
             i = end
             continue
         size = ""
         scale = 1.0
-        for name, factor in _SMALLER:
+        for name, factor in _SMALLER[1 if smaller else 0:]:
             size, scale = name, factor
             if sum(words) <= (chars - _CELL_PAD_CHARS * count) * factor:
                 break

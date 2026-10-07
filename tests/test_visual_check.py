@@ -289,8 +289,8 @@ def test_only_medium_and_high_findings_of_a_redo_check_count() -> None:
     report = _checked(_problem("raw_markup", "low"), _problem("reading_order"), measured=(_problem("small_font"),))
     assert [f["check"] for f in vc.redo_findings("slides", report)] == ["small_font"]
     assert vc.redo_findings("paper", report) == []
-    paper = _checked(measured=(_problem("last_page_nearly_empty", "medium"), _problem("overwide")))
-    assert [f["check"] for f in vc.redo_findings("paper", paper)] == ["last_page_nearly_empty"]
+    paper = _checked(measured=(_problem("last_page_nearly_empty", "medium"), _problem("overwide"), _problem("small_font")))
+    assert [f["check"] for f in vc.redo_findings("paper", paper)] == ["last_page_nearly_empty", "overwide"]
 
 
 @pytest.mark.asyncio

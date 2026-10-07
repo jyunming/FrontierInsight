@@ -3117,13 +3117,18 @@ async def _run_generators(
         paper_lines = 0
 
         async def redo_paper(feedback: str) -> None:
-            # Each attempt makes the text area one more line taller, so a last
-            # page holding a line or two moves back onto the page before.
+            # A last page holding a line or two moves back onto the page before
+            # when the text area is one line taller; text over an edge or over
+            # other text is set again with every table a size smaller.
             nonlocal paper_lines
-            paper_lines += 1
+            from generation._visual_check import paper_repairs
+
+            taller, smaller_tables = paper_repairs(feedback)
+            paper_lines += 1 if taller else 0
             source = written.get("paper_md") or art.paper_md
             pdf, skip = await asyncio.to_thread(
-                PaperGenerator(cfg)._compile_pdf, Path(source), art.quest_root, extra_lines=paper_lines,
+                PaperGenerator(cfg)._compile_pdf, Path(source), art.quest_root,
+                extra_lines=paper_lines, smaller_tables=smaller_tables,
             )
             if pdf is None:
                 raise RuntimeError(skip.summary if skip else "the paper did not recompile")
