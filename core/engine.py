@@ -5287,26 +5287,32 @@ class Engine:
         """The model the plan step's requests go to (for the record of what FI asked it, so another model is asked afresh)."""
         return str(self._model_for_node("plan_revise") or self.config.provider.model or "")
 
-    def _search_asked(self, sha: str) -> int:
-        """How many times FI has asked the plan's model to write the search part of the plan that ``plan.md`` (``sha``)
-        still lacks, on the model asked now. Zero for a plan someone changed since (a person, another request) or a model
-        changed since: each is a new plan, or a new asker, and is asked afresh."""
+    def _search_record(self, sha: str) -> tuple[int, int]:
+        """``(requests, chat calls)`` FI has made of the plan's model to write the search part of the plan that ``plan.md``
+        (``sha``) still lacks, on the model asked now. Zero for a plan someone changed since (a person, another request) or a
+        model changed since: each is a new plan, or a new asker, and is asked afresh."""
         try:
             record = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return 0
+            return 0, 0
         if (isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name()):
             try:
-                return max(0, int(record.get("count") or 0))
+                count = max(0, int(record.get("count") or 0))
+                return count, max(0, int(record.get("calls") if record.get("calls") is not None else count * _SEARCH_CALLS_PER_ASK))
             except (TypeError, ValueError):
-                return 0
-        return 0
+                return 0, 0
+        return 0, 0
 
-    def _record_search_asked(self, count: int, sha: str, outcome: str) -> None:
+    def _search_asked(self, sha: str) -> int:
+        """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
+        return self._search_record(sha)[0]
+
+    def _record_search_asked(self, count: int, calls: int, sha: str, outcome: str) -> None:
         try:
             self.fi_dir.mkdir(parents=True, exist_ok=True)
             (self.fi_dir / _SEARCH_ASKED).write_text(json.dumps({
-                "count": count, "sha": sha, "model": self._plan_model_name(), "outcome": outcome, "at": _frozen.now(),
+                "count": count, "calls": calls, "sha": sha, "model": self._plan_model_name(), "outcome": outcome,
+                "at": _frozen.now(),
             }) + "\n", encoding="utf-8")
         except OSError as e:
             self._log.warning("[plan] couldn't record that FI asked the plan's model for the search: %r", e)
@@ -5325,9 +5331,10 @@ class Engine:
         path = _plan.plan_path(self.quest_root)
         if not wanted or not missing or not path.is_file():
             return design, plan_sha
-        count = self._search_asked(plan_sha)
-        while count < _SEARCH_ASKS:
+        count, calls = self._search_record(plan_sha)
+        while count < _SEARCH_ASKS and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS:
             text = path.read_text(encoding="utf-8")
+            sha_before = _plan.sha256(text)
             gaps = _optim.plain_gaps(design, self._search_problems(state, design)[2])
             left_out = [m.group(0).lstrip("- ").strip() for m in re.finditer(
                 r"^.*the optimisation block was left out.*$", text, re.MULTILINE)][:3]
@@ -5335,37 +5342,36 @@ class Engine:
                               "it (%d of %d)", "; ".join(gaps), count + 1, _SEARCH_ASKS)
             self._progress("Asking the model to complete the search for the best design in the plan")
             request = _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
+            # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
+            # killed during it, still counts, so a broken model is never asked again and again across resumes.
+            self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking")
+            used_before = getattr(self, "_plan_chat_calls", 0)
+            outcome = "kept"
             try:
-                await self._rewrite_plan(request, path, by="engine")
-                outcome = "kept"
+                await self._rewrite_plan(
+                    request, path, by="engine", expect=text,
+                    finish=lambda revised, text=text: self._keep_only_the_search(text, revised),
+                    note="the search for the best design, written by the plan's model")
+            except _PlanEditedMeanwhile:
+                outcome = "plan changed meanwhile"
+                self._log.warning("[plan] plan.md was changed while FI waited for the plan's model; FI kept the version "
+                                  "you saved and did not write the model's answer over it")
+                print("[FI] plan.md was changed while FI waited for the plan's model: your version is kept.")
             except _ModelAnswerProblem as e:
-                # A cut-off or withheld answer is not an answer: not counted, and a resume asks again.
+                outcome = "no complete answer"
                 self._log.warning("[plan] the plan step's answer to complete the search was not complete: %s", e)
-                return design, plan_sha
             except ValueError as e:
                 outcome = "not usable"
                 self._log.warning("[plan] the plan step's answer to complete the search could not be used: %s", e)
-            except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing; a resume asks again
+            except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
+                outcome = "no answer"
                 self._log.warning("[plan] the plan step could not be asked to complete the search: %s", e)
-                return design, plan_sha
-            if outcome == "kept":
-                # Only the search part (``study_type`` and ``protocol.optimisation``) is kept from the rewrite; anything
-                # else the model changed in passing is put back, so this request never moves a check or a threshold.
-                kept_text = self._keep_only_the_search(text, path.read_text(encoding="utf-8"))
-                if kept_text is None:
-                    outcome = "put back"
-                    path.write_text(text, encoding="utf-8")
-                    _plan.record_version(self.quest_root, text, by="engine",
-                                         note="put back: the rewrite that was to complete the search gave no usable one")
-                    self._log.warning("[plan] the rewrite that was to complete the search gave no usable block; "
-                                      "it was put back")
-                else:
-                    path.write_text(kept_text, encoding="utf-8")
-                    _plan.record_version(self.quest_root, kept_text, by="engine",
-                                         note="the search for the best design, written by the plan's model")
             count += 1
-            now = path.read_text(encoding="utf-8")
-            self._record_search_asked(count, _plan.sha256(now), outcome)
+            calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
+            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome)
+            if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
+                again, sha = self._design_from_plan()
+                return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
             again, sha = self._design_from_plan()
             if again is None:
                 return design, plan_sha
@@ -5386,13 +5392,40 @@ class Engine:
 
     def _keep_only_the_search(self, before_text: str, after_text: str) -> str | None:
         """``before_text`` with only the search part of ``after_text`` (``study_type`` and ``protocol.optimisation``)
-        taken in, its sections shown again from the block; a plain ``protocol.grid`` beside the block is dropped. ``None``
-        when the rewrite has no search block or the result cannot be used."""
+        taken in, its sections shown again from the block; a plain ``protocol.grid`` beside the block is dropped. Every part
+        of the plan's own block that could already be read is kept as the plan had it (a tolerance, a target, a margin, a
+        range, a baseline): the model supplies only what was missing or could not be read, and a value it changed for a part
+        the plan already had is put back. ``None`` when the rewrite has no search block or the result cannot be used."""
         old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
         protocol = new.get("protocol") if isinstance(new, dict) else None
         block = protocol.get("optimisation") if isinstance(protocol, dict) else None
         if not isinstance(old, dict) or not isinstance(block, dict):
             return None
+        old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
+        old_block = old_protocol.get("optimisation")
+        if isinstance(old_block, dict):
+            _fixed, why = _optim.normalize(old_block)
+            named = re.match(r"`protocol\.optimisation\.?(\w*)", why or "")
+            unreadable = {named.group(1)} if named else set()
+            if not isinstance(old_block.get("evaluation_budget"), dict):
+                unreadable.add("evaluation_budget")
+            if "" in unreadable:
+                unreadable = set(old_block)  # the block as a whole could not be read: nothing of it is kept
+            merged = dict(block)
+            put_back: list[str] = []
+            for key, value in old_block.items():
+                if key in unreadable or value is None or value == "" or value == [] or value == {}:
+                    continue
+                if merged.get(key) != value:
+                    if key in merged:
+                        put_back.append(str(key).replace("_", " "))
+                    merged[key] = value
+            if put_back:
+                self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
+                                  "plan's own", ", ".join(put_back))
+            block = merged
+            if _optim.normalize(block)[0] is None:
+                return None
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             kept = {k: v for k, v in (design.get("protocol") or {}).items() if k != "grid"}
@@ -5400,10 +5433,10 @@ class Engine:
             out["study_type"] = "find_best_design"
             return out
 
-        merged = _plan.edit_design_block(before_text, change)
-        if merged is None or _plan.parse(merged).design is None:
+        merged_text = _plan.edit_design_block(before_text, change)
+        if merged_text is None or _plan.parse(merged_text).design is None:
             return None
-        return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged))
+        return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
 
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Stop before anything runs when the design is a search for the best design that FI cannot start: the plan lacks
@@ -5897,6 +5930,11 @@ class Engine:
         if connected_here:
             await self._connect_llm()
         try:
+            if request.strip().rstrip(".").lower() == _optim.MEASURE_INSTEAD:
+                before = path.read_text(encoding="utf-8")
+                return await self._rewrite_plan(
+                    request, path, by=by, expect=before,
+                    finish=lambda revised: self._check_measure_instead(before, revised))
             return await self._rewrite_plan(request, path, by=by)
         finally:
             if connected_here and self._client is not None:
@@ -5904,6 +5942,46 @@ class Engine:
                 if self.config.provider.name in PROXY_PROVIDERS:
                     await self.supervisor.release(self.config.provider.name)
                 self._client = None
+
+    def _check_measure_instead(self, before_text: str, after_text: str) -> str:
+        """``after_text`` when a rewrite to "measure over the planned settings instead of searching" kept the plan's question
+        and settings: its hypothesis, expected outcome and measured quantity are unchanged, and every setting it measures
+        over is one the plan already listed (a design variable) with values inside the range or list the plan gave. Otherwise
+        ``ValueError`` (plan.md stays as it was), in plain words."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            raise ValueError("the plan could not be changed to a measurement: the rewrite could not be read; plan.md is unchanged")
+
+        def flat(value: Any) -> str:
+            return " ".join(str(value or "").split())
+
+        for key in ("hypothesis", "expected_outcome"):
+            if flat(old.get(key)) != flat(new.get(key)):
+                raise ValueError(f"the plan was not changed to a measurement: the rewrite also changed the plan's {key.replace('_', ' ')}, "
+                                 "and a measurement over the same settings must keep the question; plan.md is unchanged")
+        old_dep = (old.get("variables") or {}).get("dependent") if isinstance(old.get("variables"), dict) else None
+        new_dep = (new.get("variables") or {}).get("dependent") if isinstance(new.get("variables"), dict) else None
+        if old_dep != new_dep:
+            raise ValueError("the plan was not changed to a measurement: the rewrite changed what is measured; plan.md is unchanged")
+        old_block = (old.get("protocol") or {}).get("optimisation") if isinstance(old.get("protocol"), dict) else None
+        listed: dict[str, Any] = {}
+        if isinstance(old_block, dict):
+            for item in old_block.get("design_variables") or []:
+                if isinstance(item, dict) and item.get("name"):
+                    listed[str(item["name"])] = item
+        grid = (new.get("protocol") or {}).get("grid") if isinstance(new.get("protocol"), dict) else None
+        if listed and isinstance(grid, dict):
+            for name, values in grid.items():
+                variable = listed.get(str(name))
+                values = values if isinstance(values, list) else [values]
+                if variable is None:
+                    raise ValueError(f"the plan was not changed to a measurement: the rewrite measures over {name}, which the plan "
+                                     "did not list as a setting; plan.md is unchanged")
+                for value in values:
+                    if not _optim._inside(variable, value):
+                        raise ValueError(f"the plan was not changed to a measurement: the rewrite measures {name} at {value}, "
+                                         "outside what the plan listed for it; plan.md is unchanged")
+        return after_text
 
     async def _usable_design_block(self, revised: str, *, ask: bool) -> tuple[str, str, bool]:
         """``(the rewritten plan, "", asked)`` when its design block can be used, else ``(it, why not, asked)``; ``asked``
@@ -5948,7 +6026,13 @@ class Engine:
         self._log.info("[plan] the model corrected the plan's design block (asked once, for the block alone)")
         return candidate, "", True
 
-    async def _rewrite_plan(self, request: str, path: Path, *, by: str = "request") -> dict[str, Any]:
+    async def _rewrite_plan(
+        self, request: str, path: Path, *, by: str = "request", expect: str | None = None,
+        finish: Any = None, note: str | None = None,
+    ) -> dict[str, Any]:
+        """``expect``: the plan as it was when the request was made; when plan.md differs just before the write (a person
+        saved a change meanwhile) nothing is written (:class:`_PlanEditedMeanwhile`). ``finish(revised)`` may return the text
+        to write instead, or ``None``/raise ``ValueError`` for an answer that must not be used."""
         current = path.read_text(encoding="utf-8")
         _plan.note_edit(self.quest_root, current)  # a hand edit made before this request is its own version
         prompt = self._prompts["plan_revise"].substitute(
@@ -5976,8 +6060,15 @@ class Engine:
         # plan never shows a model or a check's source the block does not hold (or leaves out one it does).
         revised = _plan.refresh_model_section(revised)
         revised = _plan.refresh_optimisation_section(revised)
+        if finish is not None:
+            kept = finish(revised)
+            if kept is None:
+                raise ValueError("the revised plan has no search block that can be used; plan.md is unchanged")
+            revised = kept
+        if expect is not None and path.read_text(encoding="utf-8") != expect:
+            raise _PlanEditedMeanwhile("plan.md was changed while the request was being answered")
         path.write_text(revised, encoding="utf-8")
-        entry = _plan.record_version(self.quest_root, revised, by=by, note=request[:300])
+        entry = _plan.record_version(self.quest_root, revised, by=by, note=(note or request)[:300])
         self._log.info("[plan] revised %s: version %d",
                        "by the engine for its oracle check" if by == "engine" else "on request", entry["version"])
         return {"version": entry["version"], "sha256": entry["sha256"], "path": str(path)}
@@ -17441,6 +17532,8 @@ class Engine:
         relevance_guard) run at 0 for reproducible decisions; generative nodes
         use the 0.2 default. Pass an explicit value to override."""
         assert self._client is not None
+        if node == "plan_revise":
+            self._plan_chat_calls = getattr(self, "_plan_chat_calls", 0) + 1  # counted before it is made, so a failure counts
         temp = (
             temperature if temperature is not None
             else _temperature_for_node(node)
@@ -20594,6 +20687,13 @@ _FILL_MARKER = "plan_sources_asked.json"
 # (``_ask_plan_for_the_search``): how many times it asked of this plan, so a resume does not ask again; at most this many.
 _SEARCH_ASKED = "search_block_asked.json"
 _SEARCH_ASKS = 2
+_SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
+_SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model
+
+
+class _PlanEditedMeanwhile(Exception):
+    """plan.md was changed (by a person) while the plan's model was answering: the model's answer is not written."""
+
 #: What a plan with no way to judge whether the code got better means, in one line (never a stop of its own).
 _NO_CRITERIA_LINE = ("The plan has no measure of whether the code got better (FI looked in the literature once and found "
                      "none), so FI will not try to improve the simulation step by step. Nothing to do: the quest goes on.")

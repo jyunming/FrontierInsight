@@ -151,7 +151,7 @@ async def test_a_reply_that_cannot_be_used_counts_as_a_request_and_leaves_the_pl
 
 
 @pytest.mark.asyncio
-async def test_a_model_that_gives_no_answer_is_not_counted_and_a_resume_asks_again(tmp_path: Path) -> None:
+async def test_a_model_that_gives_no_answer_counts_once_and_a_resume_asks_again(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     model = Model(eng, [], _broken_draft())  # every request fails
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
@@ -159,8 +159,12 @@ async def test_a_model_that_gives_no_answer_is_not_counted_and_a_resume_asks_aga
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
     with pytest.raises(Paused):
         await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert not (eng.fi_dir / "search_block_asked.json").is_file()
-    assert "did not ask the plan's model" in " ".join(seen[0]["steps"])
+    assert _record(eng)["count"] == 2  # a failed call counts too (the plan step asked once, the design step once)
+    assert "asked the plan's model 2 time(s)" in " ".join(seen[0]["steps"])
+    with pytest.raises(Paused):  # a resume does not ask a broken model again
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert _record(eng)["count"] == 2
+    eng.config.provider.node_models = {"plan_revise": "another-model"}  # another model is asked afresh
     model.answers = [_complete]
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert patch["design"]["protocol"]["optimisation"]["objective"]["direction"] == "minimise"
