@@ -19,7 +19,7 @@ error (for a failed equation test: the function and the equation, never the expe
 always was (:func:`FunctionFiller.run` returns ``fell_back``), after which the equation tests before the run, the
 whole-script repair and the honest stop of the existing flow apply.
 
-The most the step can ask of the model in a quest is ``max_calls`` (``execution.code_function_steps_max_calls``): at
+The most the step can ask of the model in a quest is ``max_calls`` (:data:`MAX_CALLS`): at
 most ``functions x (1 + repairs)`` per pass, and never more than that in all passes together. Every call is counted in
 ``.fi/function_steps.json``, which also keeps each function's status, so a resume does not fill a function that is done.
 """
@@ -38,6 +38,12 @@ from typing import Any, Awaitable, Callable
 from . import equation_tests as _eqt
 
 RECORD = Path(".fi") / "function_steps.json"
+#: Fixed limits (not settings): repairs of ONE function before the code is written whole; model functions above which the
+#: code is written whole; the most requests the step (fills, repairs, and the repairs after the equation tests) may make
+#: in a whole quest.
+REPAIRS = 2
+MAX_FUNCTIONS = 10
+MAX_CALLS = 40
 #: A fenced Python block in a reply.
 _FENCE = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
 PENDING, DONE, FAILED = "pending", "done", "failed"
@@ -288,8 +294,9 @@ except BaseException:
 """
 
 
-def import_script(code_dir: Path, module: str, name: str) -> str:
-    return _IMPORT_CHECK.format(code=str(Path(code_dir)), module=module, name=name)
+def import_script(code_dir: Path | str, module: str, name: str) -> str:
+    """The check as a ``-c`` script; ``code_dir`` is relative to the folder it runs from (the quest folder)."""
+    return _IMPORT_CHECK.format(code=str(code_dir), module=module, name=name)
 
 
 # A third-party module that is not installed is a problem of the environment, not of the function.
@@ -334,7 +341,7 @@ def is_ready(quest_root: Path, package: str) -> bool:
 
 def spend(quest_root: Path, max_calls: int) -> bool:
     """Count one more request of the step in the quest's total (``.fi/function_steps.json``); ``False`` when the most
-    the step may make in the quest (``execution.code_function_steps_max_calls``) is spent."""
+    the step may make in the quest (:data:`MAX_CALLS`) is spent."""
     record = load(quest_root)
     if int(record.get("calls_total") or 0) >= int(max_calls):
         return False
@@ -407,7 +414,7 @@ class FunctionFiller:
         except SyntaxError as e:
             return f"model.py is not valid Python ({e.msg}, line {e.lineno})"
         module = f"{self.package}.model"
-        rc, _out, err = await self.run(["-c", import_script(self.code, module, spec.name)])
+        rc, _out, err = await self.run(["-c", import_script("code", module, spec.name)])
         if rc != 0:
             missing = environment_problem(err, self.package)
             if missing:
@@ -421,7 +428,7 @@ class FunctionFiller:
             return ""
         case_list = _eqt.cases([row], {spec.equation: {"module": module, "function": spec.name, "file": f"{self.package}/model.py"}})
         _eqt.write(self.code, case_list)
-        rc, out, err = await self.run([_eqt.TEST_PATH, "--json", "--only", spec.equation])
+        rc, out, err = await self.run(["code/" + _eqt.TEST_PATH, "--json", "--only", spec.equation])
         results = _eqt.parse_results(out)
         if results is None:
             return "the equation test did not run:\n" + (err or out or "")[-800:]

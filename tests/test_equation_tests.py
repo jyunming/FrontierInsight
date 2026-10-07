@@ -59,7 +59,7 @@ def test_the_tolerance_is_a_rule_a_closed_form_is_relative_1e_6_and_a_method_bri
             {"id": "E1", "formula": "y = a^2", "role": "generates", "example": {**base, **example}}]}})[0]
 
     closed = row({})
-    assert closed["rel"] == eqt.RELATIVE == 1e-6 and closed["abs"] == eqt.ABSOLUTE_FLOOR
+    assert closed["rel"] == eqt.RELATIVE == 1e-6 and closed["abs"] == 0.0, "a non-zero output has no absolute floor"
     assert row({"tolerance": 1e-3})["rel"] == 1e-6, "a stated tolerance without a method never loosens the test"
     assert row({"tolerance": 1e-9})["rel"] == 1e-9, "but it may tighten it"
     stepped = row({"method": "explicit Euler, dt = 0.01", "tolerance": 5e-3, "tolerance_mode": "relative"})
@@ -156,3 +156,19 @@ def test_the_design_prompt_and_the_outline_prompt_state_the_contract() -> None:
     outline = (Path(__file__).resolve().parents[1] / "agents" / "implement_outline.md").read_text(encoding="utf-8")
     assert "`implements`" in outline and "`depends_on`" in outline and "example.inputs" in outline
     json.dumps(eqt.EXAMPLE_RULE)
+
+
+def test_a_tiny_output_is_held_to_its_size_and_only_an_exact_zero_gets_the_round_off_floor(tmp_path: Path) -> None:
+    def case(formula: str, inputs: dict[str, float]) -> dict[str, Any]:
+        rows = eqt.example_rows({"model": {"equations": [{"id": "E1", "formula": "y = f(x)", "role": "generates",
+                                                          "example": {"inputs": inputs, "expected_formula": formula}}]}})
+        return eqt.cases(rows, {"E1": {"module": "m", "function": "f", "file": "m.py"}})[0]
+
+    tiny = case("exp(-x)", {"x": 40.0})
+    zero = case("x - x", {"x": 3.0})
+    assert tiny["abs"] == 0.0 and zero["abs"] == eqt.ABSOLUTE_FLOOR
+    (tmp_path / "m.py").write_text("def f(x):" + chr(10) + "    return 0.0" + chr(10), encoding="utf-8")
+    for name, c, want in (("tiny", tiny, "mismatch"), ("zero", zero, "ok")):
+        (tmp_path / "t.py").write_text(eqt.test_source([{**c, "module": "m", "function": "f"}]), encoding="utf-8")
+        done = subprocess.run([sys.executable, "-B", "t.py", "--json"], cwd=tmp_path, capture_output=True, text=True)
+        assert eqt.parse_results(done.stdout)[0]["status"] == want, name

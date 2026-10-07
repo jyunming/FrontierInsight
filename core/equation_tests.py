@@ -18,7 +18,7 @@ The contract with the code: the function is a top-level function whose parameter
 inputs and which returns the equation's output as one number. The outline step names one function per equation
 (``implements``), so the contract is known before any body is written.
 
-**The tolerance is a rule, not a guess.** A closed form agrees within a relative 1e-6 (and, for an output that is exactly
+**The tolerance is a rule, not a guess.** A closed form agrees within a relative 1e-6 (and, only for an output that is exactly
 0, an absolute 1e-12: the size of floating-point round-off). When the plan states a numerical method for the equation
 (``"method"``), the plan's own numerical setting decides (``"tolerance"`` and ``"tolerance_mode"``, required with a
 method); a stated tolerance without a method can only make the test tighter. FI never invents a looser one.
@@ -145,6 +145,8 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         if problem:
             row.update(state="unusable", why=problem)
             continue
+        if float(value) != 0.0 and abs_tol == ABSOLUTE_FLOOR:
+            abs_tol = 0.0  # the round-off floor is only for an output that is exactly 0: a small output is held to its size
         row.update(state="ok", why="", inputs={k: float(v) for k, v in good.items()}, expected=float(value), rel=rel,
                    abs=abs_tol, method=method)
     return rows

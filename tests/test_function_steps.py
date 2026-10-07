@@ -74,7 +74,7 @@ async def _run(argv: list[str], root: Path) -> tuple[int, str, str]:
     code = root / "code"
     for cache in code.glob("**/__pycache__"):
         shutil.rmtree(cache, ignore_errors=True)
-    proc = await asyncio.create_subprocess_exec(sys.executable, "-B", *argv, cwd=str(code),
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-B", *argv, cwd=str(root),
                                                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     out, err = await proc.communicate()
     return proc.returncode or 0, out.decode(), err.decode()

@@ -1082,7 +1082,9 @@ def directive(oracles: list[dict[str, Any]], found: list[str], disputed: list[st
     (their proposals wait for a person); they are left out of what to fix, and the script is not to be changed for them.
     ``trial``: the simulation is a function FI calls itself (the two-script layout), so the request states that
     contract and never the FI_ORACLE / ORACLE_JSON one, which does not exist there."""
-    declared_block = json.dumps(oracles, indent=2)
+    # The formula that computes a check's expected value is the plan's working for it, not something to write code toward.
+    declared_block = json.dumps([{k: v for k, v in o.items() if k != "expected_formula"} if isinstance(o, dict) else o
+                                 for o in oracles], indent=2)
     set_aside = (
         "Checks already found to be wrong themselves (by an earlier repair, or by FI's own look at them): " + ", ".join(repr(str(n)) for n in disputed) + ". "
         "What was found is recorded and waits for a person. Do not change the script for these checks (do not "

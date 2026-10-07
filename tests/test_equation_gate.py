@@ -216,3 +216,22 @@ def test_the_code_layout_writes_the_equation_tests_with_the_other_files(tmp_path
     (code / "spring" / "model.py").write_text(GOOD["frequency"] + "\n\n" + GOOD["quality"], encoding="utf-8")
     files = cl.project_files(code, PROTOCOL, "spring")
     assert eqt.TEST_PATH in files and "def test_e1" in files[eqt.TEST_PATH] and "def test_e2" in files[eqt.TEST_PATH]
+
+
+@pytest.mark.asyncio
+async def test_the_checks_run_from_the_quest_folder_with_paths_relative_to_it_so_a_container_can_run_them(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    seen: list[dict[str, Any]] = []
+    real = engine.executor.execute
+
+    async def spy(cmd, *, cwd, timeout_s, env=None):  # noqa: ANN001
+        seen.append({"cmd": [str(c) for c in cmd], "cwd": cwd})
+        return await real(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
+
+    engine.executor.execute = spy  # type: ignore[method-assign]
+    _plan_md(engine)
+    _write_code(engine, GOOD["quality"])
+    assert await engine._equation_gate(STATE, None, None) is None
+    assert seen and all(c["cwd"] == engine.quest_root for c in seen)
+    assert all(str(engine.quest_root) not in " ".join(c["cmd"][1:]) for c in seen), "no host path for a container to miss"
+    assert "code/tests/test_equations.py" in seen[-1]["cmd"]

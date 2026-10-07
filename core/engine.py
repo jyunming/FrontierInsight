@@ -11,6 +11,7 @@ coexist in one process for the fleet runner.
 from __future__ import annotations
 
 import ast
+import copy
 import asyncio
 import fnmatch
 import concurrent.futures
@@ -8058,6 +8059,17 @@ class Engine:
             "figures": [],
         }
 
+    @staticmethod
+    def _code_design_block(state: QuestState, *, names_only: bool = False) -> str:
+        """The design as a request that writes or repairs code may see it: without the plan's own numbers for what the
+        code must reproduce. Each equation's worked ``example`` is dropped (``names_only``: kept as the names of its
+        inputs, which the outline needs to name a function's parameters), and each check's ``expected`` and
+        ``expected_formula`` are dropped; the code is judged against them by FI, never written toward them."""
+        design = copy.deepcopy(state.get("design") or {})
+        if isinstance(design, dict) and isinstance(design.get("protocol"), dict):
+            _strip_plan_numbers(design["protocol"], names_only=names_only)
+        return json.dumps(design, indent=2)
+
     async def _node_implement_outline(self, state: QuestState) -> QuestState:
         """First half of the two-stage implement flow: produce a
         structural outline (scaffold + function signatures + constants
@@ -8083,7 +8095,7 @@ class Engine:
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
             prompt = self._prompts["implement_outline"].substitute(
-                design_block=json.dumps(state.get("design") or {}, indent=2),
+                design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=(self._outline_skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
@@ -8144,7 +8156,7 @@ class Engine:
             # request below asks for the two scripts only.
             await self._fill_model_functions(state, outline)
             prompt = body_prompt.substitute(
-                design_block=json.dumps(state.get("design") or {}, indent=2),
+                design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
                 timeout_s=str(self.config.execution.timeout_s),
@@ -8171,7 +8183,7 @@ class Engine:
             else:
                 self._log.info("[implement] generating experiment code (legacy one-shot)")
             prompt = self._prompts["implement"].substitute(
-                design_block=json.dumps(state.get("design") or {}, indent=2),
+                design_block=self._code_design_block(state),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
                 inputs_block=self._inputs_block(),
@@ -8633,7 +8645,7 @@ class Engine:
             previous_code=code, returncode="(not run yet)", stdout_tail=_figdata.directive(found), stderr_tail="",
             duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2), clarify_block=_format_clarify(state),
+            design_block=self._code_design_block(state), clarify_block=_format_clarify(state),
         )
         try:
             text = await self._chat(prompt, node="implement_figures")
@@ -9255,7 +9267,7 @@ class Engine:
             figures_count="0",
             result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         try:
@@ -9784,14 +9796,15 @@ class Engine:
 
     async def _run_in_env(self, argv: list[str], *, timeout_s: int = 180,
                           env: dict[str, str] | None = None) -> tuple[int, str, str]:
-        """Run ``python <argv>`` from ``code/`` in the quest's environment: ``(returncode, stdout, stderr)``."""
+        """Run ``python <argv>`` from the quest folder, in the quest's environment (a venv, the shared interpreter, or the
+        Docker container): ``(returncode, stdout, stderr)``."""
         py = self.executor.python_path(self.quest_root)
         # A function rewritten within the same second to the same size would be read from its stale compiled copy.
         for cache in (self.quest_root / "code").glob("**/__pycache__"):
             shutil.rmtree(cache, ignore_errors=True)
         try:
-            ran = await self.executor.execute([str(py), "-B", *argv], cwd=self.quest_root / "code", timeout_s=timeout_s,
-                                              env=env)
+            # From the quest folder with paths relative to it: in Docker that folder is what is mounted as /work.
+            ran = await self.executor.execute([str(py), "-B", *argv], cwd=self.quest_root, timeout_s=timeout_s, env=env)
         except Exception as e:  # noqa: BLE001 -- a check that could not start is a failed check, said as such
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
@@ -9826,12 +9839,8 @@ class Engine:
         ex = self.config.execution
         try:
             layout = self._code_layout(state)
-            if (not ex.code_function_steps or ex.code_function_steps_max_functions <= 0 or not layout
+            if (not ex.code_function_steps or not layout
                     or layout["shape"] != _code_layout.PACKAGE):
-                return False
-            if ex.sandbox != "venv":
-                self._log.info("[implement] the model's functions are written with the rest of the code: checking them "
-                               "one at a time is done in the quest's own environment, not in Docker")
                 return False
             protocol = self._protocol_block(state)
             specs, notes = _function_steps.model_functions(outline, protocol if isinstance(protocol, dict) else None)
@@ -9839,12 +9848,11 @@ class Engine:
                 self._log.info("[implement] the model's functions are written with the rest of the code (%s)",
                                "; ".join(notes) or "the outline names no function per equation")
                 return False
-            if len(specs) > ex.code_function_steps_max_functions:
-                self._log.info("[implement] the model has %d functions, over the %d that are written one at a time "
-                               "(execution.code_function_steps_max_functions): written with the rest of the code",
-                               len(specs), ex.code_function_steps_max_functions)
+            if len(specs) > _function_steps.MAX_FUNCTIONS:
+                self._log.info("[implement] the model has %d functions, over the %d that are written one at a time: "
+                               "written with the rest of the code", len(specs), _function_steps.MAX_FUNCTIONS)
                 return False
-            if not self.executor.python_path(self.quest_root).is_file():
+            if ex.sandbox == "venv" and not self.executor.python_path(self.quest_root).is_file():
                 self._log.info("[implement] the model's functions are written with the rest of the code: the quest's "
                                "environment is not there to check them in")
                 return False
@@ -9870,8 +9878,8 @@ class Engine:
                 quest_root=self.quest_root, package=package, protocol=protocol if isinstance(protocol, dict) else None,
                 summary=str(view.get("summary") or ""),
                 prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"]},
-                chat=chat, run=self._run_in_env, log=self._log, repairs=ex.code_function_repairs,
-                max_calls=ex.code_function_steps_max_calls, constants=constants)
+                chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
+                max_calls=_function_steps.MAX_CALLS, constants=constants)
             outcome = await filler.run_all(specs)
             if outcome.status == "done":
                 self._log.info("[implement] the model's package is written: %d function(s), each checked "
@@ -9889,7 +9897,7 @@ class Engine:
         """Before the oracle gate and the study: one small test per equation of the plan's model, written by FI from the
         plan's own worked example (core/equation_tests.py), run in the quest's environment. A failing function is
         repaired alone (the function and its equation, never the expected value), at most
-        ``execution.code_function_repairs`` times and within ``execution.code_function_steps_max_calls`` in the quest;
+        ``function_steps.REPAIRS`` times and within ``function_steps.MAX_CALLS`` in the quest;
         what still fails is returned as a failed run, so the existing whole-script repair and the honest stop apply.
         An equation that cannot be tested this way is said plainly and the quest goes on. ``None`` when nothing fails."""
         if self.config.engine.oracle_check == "off" or not self._runs_code(state):
@@ -9897,10 +9905,6 @@ class Engine:
         protocol = self._protocol_block(state)
         simulate = self.quest_root / "code" / _split_run.SIMULATE_NAME
         if not isinstance(protocol, dict) or not simulate.is_file() or not _equation_tests.eligible(protocol):
-            return None
-        if self.config.execution.sandbox != "venv":
-            self._log.info("[equations] the tests of the model's equations are run in the quest's own environment, "
-                           "not in Docker: skipped")
             return None
         ex = self.config.execution
         rows = _equation_tests.example_rows(protocol)
@@ -9911,7 +9915,7 @@ class Engine:
         env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
         spent: dict[str, int] = {}
         failures: list[dict[str, Any]] = []
-        for attempt in range(ex.code_function_repairs + 1):
+        for attempt in range(_function_steps.REPAIRS + 1):
             sources = self._equation_sources()
             located = _equation_tests.locate(protocol, sources)
             case_list = _equation_tests.cases(rows, located)
@@ -9925,7 +9929,7 @@ class Engine:
                 failures = []
                 break
             _equation_tests.write(self.quest_root / "code", case_list)
-            rc, out, err = await self._run_in_env([_equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
+            rc, out, err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
             results = _equation_tests.parse_results(out)
             if results is None:
                 self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
@@ -9942,16 +9946,16 @@ class Engine:
                 self._log.info("[equations] the model's %d tested equation(s) agree with the plan's worked examples",
                                len(results))
                 break
-            if attempt == ex.code_function_repairs:
+            if attempt == _function_steps.REPAIRS:
                 break
             for f in failures:
                 eid = str(f.get("id"))
-                if spent.get(eid, 0) >= ex.code_function_repairs:
+                if spent.get(eid, 0) >= _function_steps.REPAIRS:
                     continue
-                if not _function_steps.spend(self.quest_root, ex.code_function_steps_max_calls):
+                if not _function_steps.spend(self.quest_root, _function_steps.MAX_CALLS):
                     self._log.warning("[equations] the most requests the function steps may make in this quest are spent; "
                                       "equation %s is not repaired alone", eid)
-                    spent[eid] = ex.code_function_repairs
+                    spent[eid] = _function_steps.REPAIRS
                     continue
                 spent[eid] = spent.get(eid, 0) + 1
                 await self._repair_equation_function(f, sources, located)
@@ -9966,7 +9970,7 @@ class Engine:
             return None
         message = " ".join(_equation_tests.failure_message(f, str(f.get("formula") or "")) for f in failures)
         self._log.warning("[equations] %s still fail their worked example after %d repair(s) each: %s",
-                          ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures), ex.code_function_repairs,
+                          ", ".join(f"{f.get('id')} ({f.get('function')})" for f in failures), _function_steps.REPAIRS,
                           "; the whole script is repaired next")
         return {
             "exec_result": {
@@ -12763,7 +12767,7 @@ class Engine:
             figures_count="0",
             result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         try:
@@ -12960,7 +12964,7 @@ class Engine:
             figures_count="0",
             result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         why = ""
@@ -14535,7 +14539,7 @@ class Engine:
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
             reflect_history_block=history_block,
-            design_block=json.dumps(state.get("design") or {}, indent=2),
+            design_block=self._code_design_block(state),
             clarify_block=_format_clarify(state),
         )
         try:
@@ -23471,13 +23475,35 @@ def _unseeded_rng_directive(calls: list[tuple[int, str]]) -> str:
 # Stands where the traceback would be in the ``execute_reflect`` prompt, for the
 # one repair a script that ignores ``FI_REPLICATE_SEED`` is offered before it
 # has run (see ``Engine._repair_ignored_replicate_seed``).
+def _stripped(protocol: dict[str, Any]) -> dict[str, Any]:
+    copy_ = copy.deepcopy(protocol)
+    _strip_plan_numbers(copy_)
+    return copy_
+
+
+def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -> None:
+    """In place: the plan's own numbers for what the code must reproduce, removed from a protocol that is shown to a
+    request that writes or repairs code (see :meth:`Engine._code_design_block`)."""
+    model = protocol.get("model")
+    for eq in (model.get("equations") if isinstance(model, dict) and isinstance(model.get("equations"), list) else []):
+        if isinstance(eq, dict) and "example" in eq:
+            example = eq.pop("example")
+            inputs = example.get("inputs") if isinstance(example, dict) else None
+            if names_only and isinstance(inputs, dict):
+                eq["example"] = {"input_names": list(inputs)}
+    for oracle in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
+        if isinstance(oracle, dict):
+            oracle.pop("expected", None)
+            oracle.pop("expected_formula", None)
+
+
 def _protocol_directive(protocol: dict[str, Any], mismatches: list[Any]) -> str:
     """What stands where a traceback would in the repair request: the protocol the plan fixed and how the script differs."""
     return (
         "This script has NOT been run, and it has not failed: the account of a crash above does not apply. It "
         "contradicts the experiment protocol that was fixed in the plan, and needs the changes below before it is "
         "run, and no other.\n\n"
-        "The protocol:\n" + json.dumps(protocol, indent=2) + "\n\n"
+        "The protocol:\n" + json.dumps(_stripped(protocol), indent=2) + "\n\n"
         "How the script differs from it:\n" + "\n".join(f"- {m.message()}" for m in mismatches) + "\n\n"
         "Change exactly this: make the script use the protocol's values, every one of them, and none the protocol does "
         "not name. Keep everything else unchanged: the same functions, outputs and figures, the handling of FI_PILOT "

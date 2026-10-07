@@ -1227,15 +1227,10 @@ class ExecutionConfig(BaseModel):
     code_package_max_extra_calls: int = Field(default=3, ge=0)
     # The model's package written one function at a time (core/function_steps.py): after the outline names one function
     # per equation, each body is filled, import-checked and tested against the plan's worked example for its equation
-    # before the next is written, and a function that fails is repaired alone, at most ``code_function_repairs`` times.
-    # ``code_function_steps_max_calls`` is the most requests the step may make in the whole quest (the worst case is
-    # one pass: functions x (1 + repairs)); a quest with more than ``code_function_steps_max_functions`` model
-    # functions, or whose outline names no function per equation, writes its code whole, as before. Only for a quest
+    # before the next is written; a failing function is repaired alone. The limits are fixed (2 repairs per function, at
+    # most 10 model functions, at most 40 requests in a whole quest); ``false`` writes the code whole. Only for a quest
     # laid out as a package (``code_package``).
     code_function_steps: bool = True
-    code_function_repairs: int = Field(default=2, ge=0, le=5)
-    code_function_steps_max_functions: int = Field(default=10, ge=0)
-    code_function_steps_max_calls: int = Field(default=40, ge=0)
     # Where ``split_analysis`` keeps the raw files: a folder relative to the quest folder,
     # or an absolute path (a big disk, an HPC scratch area). Empty means ``raw/`` in the
     # quest folder. FI records the path and each file's size and hash; it does not copy

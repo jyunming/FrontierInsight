@@ -107,7 +107,7 @@ async def test_a_function_still_wrong_after_its_repairs_is_sent_to_the_existing_
     writer = _Writer({"quality": [WRONG_Q]})
     engine._client = writer
     patch = await engine._equation_gate(STATE, None, None)
-    assert len(writer.prompts) == 2, "at most execution.code_function_repairs repairs of one function"
+    assert len(writer.prompts) == 2, "at most function_steps.REPAIRS repairs of one function"
     assert patch is not None and patch["exec_result"]["returncode"] == 1 and patch["result_json"] == {}
     assert patch["exec_result"]["failed_script"] == "simulate.py"
     stderr = patch["exec_result"]["stderr_tail"]
@@ -144,3 +144,69 @@ async def test_a_failed_equation_test_leaves_no_earlier_script_s_seeds_behind(tm
     patch = await engine._equation_gate(STATE, None, None)
     assert patch["result_json_replicates"] == [] and patch["result_json_deterministic"] is False
     assert patch["result_json_trials"] is False
+
+
+# --- the plan's own numbers never reach a request that writes or repairs code -----------------------------------------
+
+_SECRET_PROTOCOL = {
+    "grid": {"c": [0.5, 1.0]},
+    "model": {"summary": "a mass on a damped spring", "equations": [
+        {"id": "E1", "formula": "w = sqrt(k / m)", "role": "generates", "source": "derivation", "derivation": "Newton",
+         "example": {"inputs": {"k": 7.3137, "m": 4.2719}, "expected_formula": "sqrt(k / m) * 1.0000001"}},
+        {"id": "E2", "formula": "Q = m * w / c", "role": "generates", "source": "derivation",
+         "example": {"inputs": {"m": 2.0, "w": 3.0, "c": 0.5}, "expected_formula": "m * w / c * 1.0000002"}},
+    ]},
+    "oracles": [{"name": "w_check", "kind": "special_case", "check": "w at one setting", "expected": 0.123456789,
+                 "expected_formula": "0.123456789 + 0.0000000001", "tolerance": 1e-9, "case": {"c": 0.5}, "measure": "w",
+                 "reference": "derivation: by hand"}],
+}
+_SECRETS = ("7.3137", "4.2719", "1.0000001", "1.0000002", "0.0000000001", "expected_formula")
+
+
+@pytest.mark.asyncio
+async def test_no_request_that_writes_or_repairs_code_holds_an_example_or_an_expected_value(tmp_path: Path) -> None:
+    from core.engine import _parse_json_lenient  # noqa: F401  (the helper the nodes use)
+
+    engine = _engine(tmp_path)
+    protocol = _SECRET_PROTOCOL
+    _plan_md(engine, protocol)
+    state: dict = {"design": {"hypothesis": "h", "protocol": protocol}, "code": "x = 1", "deps": [],
+                   "implement_outline": OUTLINE,
+                   "exec_result": {"returncode": 1, "stderr_tail": "boom", "stdout_tail": "", "failed_script": "simulate.py"}}
+    prompts: list[tuple[str, str]] = []
+
+    class _Spy:
+        async def chat(self, messages, **kw):  # noqa: ANN001
+            prompts.append((str(kw.get("node") or ""), messages[-1]["content"]))
+            return "{}"  # nothing usable: the repairs and writes all end without a change
+
+        async def aclose(self) -> None:
+            return None
+
+    engine._client = _Spy()
+    code = engine.quest_root / "code"
+    _write_code(engine, WRONG_Q)
+    (code / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    steps = [
+        lambda: engine._node_implement_outline({**state, "implement_outline": {}}),
+        lambda: engine._node_implement(state),
+        lambda: engine._fill_model_functions(state, OUTLINE),
+        lambda: engine._equation_gate({"design": state["design"]}, None, None),
+        lambda: engine._repair_script_for_oracle(state, code / "simulate.py", protocol["oracles"], ["w_check is off"]),
+        lambda: engine._repair_script_for_protocol(state, code / "simulate.py", "x = 1", [], protocol, []),
+        lambda: engine._node_execute_reflect(state),
+    ]
+    for step in steps:
+        _write_code(engine, WRONG_Q)  # an earlier step may have removed or changed the scripts
+        try:
+            await step()
+        except Exception as e:  # noqa: BLE001 -- only what was asked of the model matters here
+            print("step raised", repr(e))
+    nodes = {n for n, _p in prompts}
+    assert {"implement", "implement_outline", "implement_oracle", "implement_protocol", "execute_reflect"} <= nodes, nodes
+    for node, prompt in prompts:
+        # (A check's own `expected` stays in the oracle repair: its `oracle_change` reply argues about that number.)
+        for secret in _SECRETS:
+            assert secret not in prompt, f"{secret!r} reached a request of the step {node!r}"
+    outline = next(p for n, p in prompts if n == "implement_outline")
+    assert '"input_names"' in outline and '"k"' in outline, "the outline may know the NAMES of an example's inputs"
