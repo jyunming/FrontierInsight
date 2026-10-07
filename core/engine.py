@@ -374,6 +374,8 @@ class QuestState(TypedDict, total=False):
     exec_reflect_iter: int
     exec_reflect_history: list[dict[str, Any]]
     exec_give_up_reason: str
+    # The quest stopped with no paper (``needs/STUCK.json``): what it could not do and what it tried.
+    stuck: dict[str, Any]
     # True from the moment the reflect node writes a patch until ``execute``
     # runs it. The router runs a pending patch even when it used the last
     # repair attempt; otherwise the paper is written from the run before it,
@@ -2381,6 +2383,8 @@ class Engine:
         # sends the quest back for ONE bounded literature broaden. A
         # logged passthrough when engine.evidence_gate is off.
         g.add_node("evidence_gate", self._audited("evidence_gate", self._node_evidence_gate))
+        g.add_node("stuck_no_findings", self._audited("stuck_no_findings", self._node_stuck_no_findings))
+        g.add_edge("stuck_no_findings", END)
         g.add_node("write", self._audited("write", self._node_write))
         g.add_node("claim_check", self._audited("claim_check", self._node_claim_check))
         g.add_node("replot_layout", self._audited("replot_layout", self._node_replot_layout))
@@ -2481,7 +2485,7 @@ class Engine:
         )
         # evidence_gate → write (sufficient / insufficient-but-write) OR
         # back to literature for ONE bounded broaden pass.
-        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design"}
+        after_gate = {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings"}
         if _phased.enabled(self.config):
             # Explore, then confirm (core/phased.py): when exploration ends, the frozen design runs once more; a quest
             # that analyses data reads the held-back rows once more with it.
@@ -2732,6 +2736,8 @@ class Engine:
         Fails open to ``write`` when the gate was a passthrough. Under ``engine.phased`` a write at the end of
         exploration goes to the confirm run first (``_phased_route``)."""
         route = (state.get("evidence_assessment") or {}).get("route", "write")
+        if route == "stuck":
+            return route  # no findings to write up: the quest stops here, in every mode
         if _phased.enabled(self.config):
             return self._phased_route(state, route)
         return route
@@ -14392,11 +14398,12 @@ class Engine:
         # An experiment that produced no results goes back to design once while there is an iteration left (the new
         # script gets its own repairs); after that the verdict stays insufficient and the writer is told why.
         redesign = bool(parsed.get("redesign")) and status == "ok"
+        no_findings = bool(parsed.get("stuck")) and status == "ok"
         assessment = {
             "verdict": verdict,
             "status": status,
             "failure": failure,
-            "route": "redesign" if redesign else "broaden_lit" if will_broaden else "write",
+            "route": "stuck" if no_findings else "redesign" if redesign else "broaden_lit" if will_broaden else "write",
             "rationale": str(parsed.get("rationale") or ""),
             "gaps": [str(g) for g in (parsed.get("gaps") or []) if str(g).strip()],
             "n_sources": n_sources,
@@ -14444,7 +14451,47 @@ class Engine:
             return None
         why = "the model's analysis of the results could not be read, even when asked twice, so there are no findings"
         self._log.warning("[evidence_gate] %s; the evidence is judged insufficient", why)
-        return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True}
+
+    async def _node_stuck_no_findings(self, state: QuestState) -> QuestState:
+        """The experiment ran but the model's reading of its results could not be read, even when asked twice: FI has no
+        findings to write up, so the quest stops here without a paper. The same stop as a simulation that would not work
+        (``needs/STUCK.json``, which the to-do card reads); what FI tried is in the record; nobody is asked to debug.
+        The run's results stay on disk; a paper an earlier round left is set aside (kept, not deleted)."""
+        problem = ("the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
+                   "so FI has no findings to write up")
+        tried = ["asked the model to analyse the results",
+                 "read its reply as written, then again with the backslashes of formulas kept as written",
+                 "asked the model a second time for one short answer; that reply could not be read either"]
+        record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
+                                  "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
+                                  "why_repairs_ended": "the analysis could not be read twice"}
+        aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
+        for name in [n for n in _rerun_from._PAPER
+                     if "*" not in n and n not in ("frontier_insight_summary.json", "NEXT_STEP.md")]:
+            src = self.quest_root / name
+            if src.exists():
+                try:
+                    aside.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(aside / name))
+                except OSError as exc:
+                    self._log.warning("[stuck] could not set %s aside (%r)", name, exc)
+        if aside.is_dir():
+            record["set_aside"] = aside.relative_to(self.quest_root).as_posix()
+        try:
+            needs = self.quest_root / "needs"
+            needs.mkdir(parents=True, exist_ok=True)
+            (needs / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[stuck] could not write needs/STUCK.json (%r)", exc)
+        self._log.warning("[stuck] %s; stopping without a paper (needs/STUCK.json)", problem)
+        for line in tried:
+            self._log.info("[stuck] tried: %s", line)
+        print(f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
+              "fix: needs/STUCK.json says what FI tried; run the quest again, or ask for the analysis again with another "
+              "model for `analyze` (`provider.node_models.analyze`).")
+        self._audit("stuck", problem=problem, repairs=len(tried))
+        return {"stuck": record}
 
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.

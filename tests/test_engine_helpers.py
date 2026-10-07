@@ -1145,7 +1145,7 @@ def test_build_graph_review_has_conditional_edges_to_design_and_end(tmp_path: Pa
     assert "evidence_gate" in g.nodes
     assert "evidence_gate" in g.branches
     ev_branch = next(iter(g.branches["evidence_gate"].values()))
-    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design"}
+    assert ev_branch.ends == {"write": "write", "broaden_lit": "literature", "redesign": "design", "stuck": "stuck_no_findings"}
     design_branch = next(iter(g.branches["design"].values()))
     # Two-stage implement: the simulate-path routing key stays
     # ``implement`` (for resume contract compatibility — the 609990

@@ -163,3 +163,43 @@ def test_a_plan_rewrite_with_latex_in_a_double_quoted_value_keeps_it() -> None:
     assert design["hypothesis"] == "NILS of $" + BS + "text{NILS}$ rises"
     assert design["variables"]["independent"] == [BS + "sigma"]
     assert _plan.keep_latex_in_block("no block here " + BS + "text") == "no block here " + BS + "text"
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_unreadable_twice_stops_the_whole_quest_with_no_paper_and_a_stuck_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_engine_smoke import _classify, _fake_response_for
+
+    analysis_calls: list[str] = []
+
+    async def fake_chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if _classify(prompt) == "Analysis":
+            analysis_calls.append(prompt)
+            return "I looked at the results but cannot put them in the shape asked for"
+        return _fake_response_for(prompt)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "k")
+    monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
+    cfg = Config(
+        topic="a topic for the unreadable analysis test", title="unreadable-analysis", provider=ProviderConfig(name="openai"),
+        engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True),
+        execution=ExecutionConfig(sandbox="venv", timeout_s=120),
+        knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=tmp_path / "outputs"),
+    )
+    eng = Engine(cfg)
+    await eng.run()
+
+    assert len(analysis_calls) == 2  # asked, then asked once more: nothing else
+    root = eng.quest_root
+    assert not (root / "paper.md").exists() and not (root / "paper" / "paper.md").exists()
+    record = json.loads((root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "could not be read, even when asked twice" in record["problem"] and "no findings to write up" in record["problem"]
+    assert len(record["tried"]) == 3
+    assert "debug" not in json.dumps(record).lower()
+    log = (root / ".fi" / "run.log").read_text(encoding="utf-8")
+    assert "[stuck] the experiment ran, but the model's reading of its results could not be read" in log
+    assert (root / "code").is_dir() and any((root / "code").iterdir())  # the run's files are kept
+    from core import todo
+    assert any(i.kind == "stuck" for i in todo.waiting(root))
