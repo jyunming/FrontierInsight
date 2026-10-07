@@ -160,7 +160,7 @@ async def test_a_model_that_gives_no_answer_is_not_counted_and_a_resume_asks_aga
     with pytest.raises(Paused):
         await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert not (eng.fi_dir / "search_block_asked.json").is_file()
-    assert "could not get the plan's model" in " ".join(seen[0]["steps"])
+    assert "did not ask the plan's model" in " ".join(seen[0]["steps"])
     model.answers = [_complete]
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert patch["design"]["protocol"]["optimisation"]["objective"]["direction"] == "minimise"
@@ -247,3 +247,24 @@ async def test_it_is_not_specific_to_one_field(tmp_path: Path) -> None:
     design = plan.parse(plan.plan_path(eng.quest_root).read_text(encoding="utf-8")).design
     assert model.requests == 1 and design["protocol"]["optimisation"]["objective"]["quantity"] == "heat_loss_W"
     assert topic in model.asked[0]
+
+
+@pytest.mark.asyncio
+async def test_a_stop_without_an_ask_does_not_say_the_model_was_asked(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [_complete], _broken_draft())
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    (eng.fi_dir / "search_block_asked.json").unlink(missing_ok=True)
+    plan_text = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    plan.plan_path(eng.quest_root).write_text(plan_text.replace("find_best_design", "measure"), encoding="utf-8")
+    # A plan that no longer holds the block, with no model to ask (a one-shot resume without a connection).
+    text = plan_text.replace("optimisation:", "ignored_optimisation:") if "optimisation:" in plan_text else plan_text
+    plan.plan_path(eng.quest_root).write_text(text, encoding="utf-8")
+    eng._client = None
+    seen: list[dict[str, Any]] = []
+    eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": TOPIC, "iteration": 0, "clarify_answers": {"study_type": "2"}})
+    steps = " ".join(seen[0]["steps"])
+    assert "did not ask the plan's model" in steps and "asked the plan's model" not in steps.replace("did not ask the plan's model", "")
+    assert "Choose one" in steps and op.MEASURE_INSTEAD in steps

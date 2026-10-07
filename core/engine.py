@@ -5447,7 +5447,8 @@ class Engine:
             steps.append(f"Still missing from the plan: {'; '.join(gaps)}.")
             steps.append(
                 (f"FI asked the plan's model {tried} time(s) to write it from your topic, and it still could not."
-                 if tried else "FI could not get the plan's model to write it from your topic.")
+                 if tried else "FI did not ask the plan's model to write it (no model was available to ask, the plan was "
+                 "already settled, or this design did not come from the plan).")
                 if path.is_file() else
                 "This quest has no plan file (its plan could not be written), so FI had nothing to ask the model to complete.")
             steps.append("You do not need to write any of it yourself. Choose one:")
