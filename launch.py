@@ -3780,6 +3780,21 @@ async def main_async(args: argparse.Namespace) -> int:
                 if (missing := missing_api_key(cfg.provider)) is not None:
                     print(f"[FI] {missing}", file=sys.stderr)
                     return 2
+                from core.provider import missing_step_api_keys
+
+                if (step_missing := missing_step_api_keys(cfg.provider)):
+                    print(f"[FI] {step_missing[0]} Nothing was started.", file=sys.stderr)
+                    return 2
+                # The key is there: the free model list of each step's own provider says whether its server answers
+                # and has the model (never a paid call), so a wrong address stops here and not at the first code step.
+                if cfg.provider.node_providers:
+                    from core.provider_readiness import check_steps, one_line
+
+                    for step, state in await check_steps(cfg.provider, deep=True):
+                        if state.blocked:
+                            print(f"[FI] the step `{step}` runs on its own provider: {one_line(state)} "
+                                  "Nothing was started.", file=sys.stderr)
+                            return 2
             if args.revise_plan is not None:
                 if not args.resume:
                     print("[FI] --revise-plan requires --resume <quest_id>",

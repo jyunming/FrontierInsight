@@ -149,8 +149,12 @@ from .provider import (
     PROXY_PROVIDERS,
     ProxySupervisor,
     append_cost_row,
+    missing_step_api_keys,
     model_for_node,
+    node_provider_for,
     outcome_of as _outcome_of,
+    step_provider_config,
+    step_provider_lines,
     _ModelAnswerProblem,
     ModelAnswerTruncated,
     resolve_endpoint_async,
@@ -1459,6 +1463,7 @@ class Engine:
                 # ``aclose()`` on None would raise AttributeError and mask
                 # the real error. Same logic for the proxy release —
                 # only release a handle we actually acquired.
+                await self._close_step_clients()
                 if self._client is not None:
                     await self._client.aclose()
                 if (
@@ -6071,26 +6076,12 @@ class Engine:
             self.config.provider.name, where, endpoint.model,
         )
         self._say_model_change()
+        self._say_step_providers()
         # A connection that names the model that answered each call (an HTTP API, the claude CLI): a call on it whose
         # model went unnamed is a gap in the quest's record of its calls (core/attempt_records.py::model_call_gaps).
         self._reports_model = (getattr(endpoint, "transport", "") == "http"
                                or self.config.provider.name == "claude_cli")
-        self._client = LLMClient(
-            endpoint,
-            timeout_s=self.config.provider.http_timeout_s,
-            cli_timeout_s=self.config.provider.cli_timeout_s,
-            cli_inactivity_timeout_s=(
-                self.config.provider.cli_inactivity_timeout_s
-            ),
-            node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
-            node_http_timeout_s=self.config.provider.node_http_timeout_s,
-            node_model_fallbacks=(
-                self.config.provider.node_model_fallbacks
-            ),
-            max_prompt_chars=self.config.provider.max_prompt_chars,
-            heartbeat_cb=self._llm_heartbeat,
-            run_log=self._log,
-        )
+        self._client = self._new_llm_client(endpoint, node_model_fallbacks=self.config.provider.node_model_fallbacks)
         # Wrap in a fallback chain so a single provider's outage doesn't
         # forfeit the quest. No-op (unwrapped) when no fallback configured.
         if self.config.provider.fallback:
@@ -6106,6 +6097,89 @@ class Engine:
                 self.config.provider.name,
                 " -> ".join(self.config.provider.fallback),
             )
+
+    def _say_step_providers(self) -> None:
+        """``provider.node_providers``: before anything is spent, a step whose provider's key is not set stops the quest
+        with the plain sentence; then one run.log line per step on its own provider, and one for a step that is in
+        ``provider.node_models`` or ``provider.node_ensemble`` too (the provider wins; the ensemble stays on the main
+        one). Once per engine."""
+        provider = self.config.provider
+        steps = getattr(provider, "node_providers", None) or {}
+        if not steps or self.__dict__.get("_step_providers_said"):
+            return
+        self.__dict__["_step_providers_said"] = True
+        missing = missing_step_api_keys(provider)
+        if missing:
+            raise RuntimeError(missing[0] + " Nothing was started.")
+        for line in step_provider_lines(provider):
+            self._log.info("[provider] %s", line)
+        for step in steps:
+            if provider.node_models and node_provider_for(provider.node_models, step) is not None:
+                self._log.warning("[provider] `%s` is in provider.node_models and provider.node_providers: the step "
+                                  "uses its own provider's model (node_providers wins)", step)
+            if provider.node_ensemble and node_provider_for(provider.node_ensemble, step) is not None:
+                self._log.warning("[provider] `%s` is a multi-model ensemble step: its models are asked on the main "
+                                  "provider, not on the one set in provider.node_providers", step)
+
+    async def _client_for(self, node: str | None) -> tuple[Any, bool]:
+        """The model client for ``node`` and whether its connection names the model that answered: the quest's own,
+        or, for a step in ``provider.node_providers``, that step's provider's, built on its first call and kept for
+        the quest (one per entry, not per step, so ``implement`` and ``implement_oracle`` named by one key share one;
+        concurrent first calls build it once)."""
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        if step is None:
+            return self._client, bool(getattr(self, "_reports_model", False))
+        key, entry = step
+        built = self.__dict__.setdefault("_step_clients", {})
+        if key not in built:
+            lock = self.__dict__.setdefault("_step_client_lock", asyncio.Lock())
+            async with lock:
+                if key not in built:
+                    built[key] = await self._build_step_client(key, entry)
+        return built[key]
+
+    async def _build_step_client(self, key: str, entry: Any) -> tuple[Any, bool]:
+        derived = step_provider_config(self.config.provider, entry)
+        endpoint = await resolve_endpoint_async(derived, self.supervisor)
+        if derived.name in PROXY_PROVIDERS:
+            self.__dict__.setdefault("_step_proxies", []).append(derived.name)
+        self._log.info("[provider] step `%s`: %s -> %s (model asked for: %s)", key, derived.name,
+                       endpoint.base_url or getattr(endpoint, "transport", ""), endpoint.model)
+        client: Any = self._new_llm_client(endpoint)
+        if derived.fallback:
+            client = FallbackLLMClient(
+                client, [(n, self._make_fallback_factory(n, base=derived)) for n in derived.fallback], log=self._log)
+        reports = getattr(endpoint, "transport", "") == "http" or derived.name == "claude_cli"
+        return client, reports
+
+    def _new_llm_client(self, endpoint: Any, *, node_model_fallbacks: dict[str, str] | None = None) -> LLMClient:
+        provider = self.config.provider
+        return LLMClient(
+            endpoint,
+            timeout_s=provider.http_timeout_s,
+            cli_timeout_s=provider.cli_timeout_s,
+            cli_inactivity_timeout_s=provider.cli_inactivity_timeout_s,
+            node_cli_timeout_s=provider.node_cli_timeout_s,
+            node_http_timeout_s=provider.node_http_timeout_s,
+            node_model_fallbacks=node_model_fallbacks or {},
+            max_prompt_chars=provider.max_prompt_chars,
+            heartbeat_cb=self._llm_heartbeat,
+            run_log=self._log,
+        )
+
+    async def _close_step_clients(self) -> None:
+        """Close the step providers' clients and release the proxies they started (the fallbacks they built too)."""
+        built = self.__dict__.pop("_step_clients", {})
+        for client, _reports in built.values():
+            try:
+                await client.aclose()
+            except Exception:  # noqa: BLE001 -- best-effort cleanup
+                pass
+            for fb_name in getattr(client, "built_fallback_providers", ()):
+                if fb_name in PROXY_PROVIDERS:
+                    await self.supervisor.release(fb_name)
+        for name in self.__dict__.pop("_step_proxies", []):
+            await self.supervisor.release(name)
 
     async def revise_plan(self, request: str, *, by: str = "request") -> dict[str, Any]:
         """Rewrite ``plan.md`` as the person asked (``--revise-plan``): the whole file goes to the model with the
@@ -6134,6 +6208,7 @@ class Engine:
             return await self._rewrite_plan(request, path, by=by)
         finally:
             if connected_here and self._client is not None:
+                await self._close_step_clients()
                 await self._client.aclose()
                 if self.config.provider.name in PROXY_PROVIDERS:
                     await self.supervisor.release(self.config.provider.name)
@@ -18188,9 +18263,10 @@ class Engine:
             else _temperature_for_node(node)
         )
         messages = [{"role": "user", "content": prompt}]
+        client, _reports = await self._client_for(node)
         response, served = await self._recorded_call(
             node or "", messages,
-            lambda: self._client.chat(messages, temperature=temp, model=self._model_for_node(node), node=node or ""),
+            lambda: client.chat(messages, temperature=temp, model=self._model_for_node(node), node=node or ""),
         )
         # The model that answered THIS call (not the client's shared latest, which a call made meanwhile can change).
         self._log_chat_cost(node=node or "", messages=messages, response=response, model=served.get("model") or None,
@@ -18200,8 +18276,10 @@ class Engine:
             # it is recorded truthfully and calls made at the same time do not overwrite each other. The client's
             # shared attributes are the fallback for a transport that sets nothing.
             self._last_chat[node] = {
-                "provider": served.get("provider") or getattr(self._client, "last_provider", None) or self.config.provider.name,
-                "model": (served.get("model") or getattr(self._client, "last_model", None) or self._model_for_node(node)
+                "provider": (served.get("provider") or getattr(client, "last_provider", None)
+                             or (step[1].name if (step := node_provider_for(getattr(self.config.provider, "node_providers", None), node))
+                                 else self.config.provider.name)),
+                "model": (served.get("model") or getattr(client, "last_model", None) or self._model_for_node(node)
                           or self.config.provider.model),
                 "fallback": bool(served.get("fallback")),
                 "reported": bool(served.get("reported")),
@@ -18469,6 +18547,16 @@ class Engine:
         except Exception as e:  # noqa: BLE001 -- a cost row never touches the quest
             self._log.debug("[cost] failed attempt not recorded: %r", e)
 
+    def _reports_for(self, node: str) -> bool:
+        """Whether the connection ``node``'s calls go on names the model that answered (a step on its own provider has
+        its own connection; known once its first call has built the client)."""
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        if step is not None:
+            built = self.__dict__.get("_step_clients", {}).get(step[0])
+            if built is not None:
+                return bool(built[1])
+        return bool(getattr(self, "_reports_model", False))
+
     def _record_model_call(self, node: str, messages: Any, response: Any, *, served: dict[str, Any] | None = None,
                            outcome: str = "ok", usage: dict[str, Any] | None = None,
                            requested_model: str | None = None) -> str | None:
@@ -18485,7 +18573,7 @@ class Engine:
                 # A call of a step paused and run again after a resume is numbered on from the record's own lines.
                 node=node, attempt=max(counts[node], _attempts.next_attempt(fi_dir, node)), served=served,
                 requested_model=requested_model or self._model_for_node(node) or self.config.provider.model or None,
-                reports_model=bool(getattr(self, "_reports_model", False)), messages=messages, response=response,
+                reports_model=self._reports_for(node), messages=messages, response=response,
                 outcome=outcome, usage=usage if isinstance(usage, dict) else None,
             )
             _attempts.append_model_call(fi_dir, getattr(self, "quest_id", ""), row)
@@ -18505,7 +18593,7 @@ class Engine:
         model did."""
         return dict(self._last_chat.get(node, {}))
 
-    def _make_fallback_factory(self, name: str):
+    def _make_fallback_factory(self, name: str, base: Any = None):
         """Build an async factory that lazily resolves+constructs an
         ``LLMClient`` for fallback provider ``name`` (used by
         :class:`FallbackLLMClient`). Nothing is resolved and no proxy spawned
@@ -18515,7 +18603,7 @@ class Engine:
         node_model_fallbacks — those name provider-specific models that would
         be wrong for a different provider."""
         async def _factory() -> LLMClient:
-            derived = self.config.provider.model_copy(update={
+            derived = (base or self.config.provider).model_copy(update={
                 "name": name,
                 "model": None,
                 "base_url": None,
@@ -18531,20 +18619,7 @@ class Engine:
             self._log.info(
                 "[fallback] resolved %s -> %s (%s)", name, ep.base_url, ep.model,
             )
-            return LLMClient(
-                ep,
-                timeout_s=self.config.provider.http_timeout_s,
-                cli_timeout_s=self.config.provider.cli_timeout_s,
-                cli_inactivity_timeout_s=(
-                    self.config.provider.cli_inactivity_timeout_s
-                ),
-                node_cli_timeout_s=self.config.provider.node_cli_timeout_s,
-                node_http_timeout_s=self.config.provider.node_http_timeout_s,
-                node_model_fallbacks={},
-                max_prompt_chars=self.config.provider.max_prompt_chars,
-                heartbeat_cb=self._llm_heartbeat,
-                run_log=self._log,
-            )
+            return self._new_llm_client(ep)
         return _factory
 
     def _llm_heartbeat(self, payload: dict[str, Any]) -> None:
@@ -18711,10 +18786,11 @@ class Engine:
         source-router) that build their own messages array. Honors the
         same Phase-O per-node model routing as ``_chat``."""
         assert self._client is not None
+        client, _reports = await self._client_for(node)
         response, _served = await self._recorded_call(
             node or "", messages,
-            lambda: self._client.chat(messages, temperature=temperature, model=self._model_for_node(node),
-                                      node=node or ""),
+            lambda: client.chat(messages, temperature=temperature, model=self._model_for_node(node),
+                                node=node or ""),
         )
         self._log_chat_cost(node=node or "", messages=messages, response=response, model=_served.get("model") or None,
                             usage=_served.get("usage") if isinstance(_served.get("usage"), dict) else None)
@@ -19397,6 +19473,9 @@ class Engine:
         (review-panel personas)."""
         if not node:
             return None
+        step = node_provider_for(getattr(self.config.provider, "node_providers", None), node)
+        if step is not None:  # the step's own provider's model (a step in node_models too uses this one)
+            return step[1].model
         return model_for_node(self.config.provider.node_models, node)
 
     def _one_model_panel(self) -> bool:

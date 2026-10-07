@@ -398,6 +398,9 @@ def context_fingerprint(config: Any, quest_root: Path, state: dict[str, Any], *,
         "model": getattr(provider, "model", "") or None,
         "settings": {
             "node_models": dict(getattr(provider, "node_models", {}) or {}),
+            # Where each such step ran (the provider, model and address; never a key's value).
+            "node_providers": {step: {"name": e.name, "model": e.model, "base_url": e.base_url}
+                               for step, e in dict(getattr(provider, "node_providers", None) or {}).items()},
             "node_max_tokens": dict(getattr(provider, "node_max_tokens", {}) or {}),
             "reasoning_effort": getattr(provider, "reasoning_effort", None) or None,
             "fixed_temperature": getattr(provider, "fixed_temperature", None),

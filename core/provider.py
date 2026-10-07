@@ -157,6 +157,62 @@ def model_for_node(node_models: dict[str, str] | None, node: str) -> str | None:
     return None
 
 
+def node_provider_for(node_providers: dict[str, Any] | None, node: str | None) -> tuple[str, Any] | None:
+    """``provider.node_providers`` for ``node``: ``(the key that matched, its entry)``. The same rules as
+    :func:`model_for_node` (an exact key first, then the part before the first dot); ``None`` on a miss, which leaves
+    the step on the main provider."""
+    if not node_providers or not node:
+        return None
+    if node in node_providers:
+        return node, node_providers[node]
+    if "." in node:
+        base = node.split(".", 1)[0]
+        if base in node_providers:
+            return base, node_providers[base]
+    return None
+
+
+def step_provider_config(main: ProviderConfig, entry: Any) -> ProviderConfig:
+    """The provider block a step's own provider is resolved from: the entry's values, with nothing of the main
+    provider's that belongs to its model (its model, address, key, sampling, request fields, reasoning level, per-step
+    models and fallback chain). What is not about a model stays: the timeouts and the per-step output limits."""
+    return main.model_copy(update={
+        "name": entry.name,
+        "model": entry.model,
+        "base_url": entry.base_url,
+        "api_key_env": entry.api_key_env,
+        "fixed_temperature": entry.fixed_temperature,
+        "extra_body": dict(entry.extra_body or {}),
+        "reasoning_effort": entry.reasoning_effort,
+        "fallback": list(entry.fallback or []),
+        "node_models": None,
+        "node_providers": None,
+        "node_model_fallbacks": {},
+        "node_ensemble": None,
+    })
+
+
+def step_provider_lines(provider: ProviderConfig) -> list[str]:
+    """One plain line per step that runs on its own provider (``provider.node_providers``), for run.log and the setup
+    screens: ``the step `implement` uses kimi-k3 on openai (https://...)``. The step in ``node_models`` too is named."""
+    lines: list[str] = []
+    for step, entry in (provider.node_providers or {}).items():
+        where = entry.base_url or (_DIRECT_DEFAULTS.get(entry.name) or {}).get("base_url") or ""
+        lines.append(f"the step `{step}` uses {entry.model} on {entry.name}" + (f" ({where})" if where else ""))
+    return lines
+
+
+def missing_step_api_keys(provider: ProviderConfig) -> list[str]:
+    """:func:`missing_api_key` for each step's own provider: the sentences for the ones whose key is not in the
+    environment (each names the step), empty when none is missing."""
+    out: list[str] = []
+    for step, entry in (provider.node_providers or {}).items():
+        missing = missing_api_key(step_provider_config(provider, entry))
+        if missing is not None:
+            out.append(f"the step `{step}` runs on its own provider: {missing}")
+    return out
+
+
 def node_output_limit(limits: dict[str, int] | None, node: str) -> int | None:
     """``provider.node_max_tokens`` for ``node``: an exact entry, then the part before the first dot (as
     :func:`model_for_node`), else ``None`` (no limit sent)."""
