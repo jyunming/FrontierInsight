@@ -13142,6 +13142,9 @@ class Engine:
                 # The script a two-script quest's failure is in ("simulate.py" or
                 # "experiment.py"): the repair rewrites that one. None for one script.
                 "failed_script": failed_script,
+                # Set when the run was sent back because the simulation's numbers did not depend on what it was given
+                # (core/flat_output.py): the honest stop after the repairs says so in those words.
+                "flat_output": (str(getattr(runner, "flat", None) or "") if result.returncode != 0 else ""),
                 "numeric_warnings": self._scan_numeric_warnings(state, result.stderr, result_json),
             },
             "figures": figures,
@@ -14988,11 +14991,21 @@ class Engine:
                  ["asked the model to analyse the results",
                   "read its reply as written, then again with the backslashes of formulas kept as written",
                   "asked the model a second time for one short answer; that reply could not be read either"])
+        ended = ("the run gave no result with a number in it" + again if no_numbers else
+                 "the script could not run to the end" + again if crashed else "the analysis could not be read twice")
+        if reason == "flat":
+            # The simulation gives the same numbers whatever it is given (core/flat_output.py): not a finding.
+            symptom = str((state.get("exec_result") or {}).get("flat_output") or "").strip().rstrip(".")
+            problem = ("the simulation gives the same result whatever it is given"
+                       f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
+            tried = ["ran the simulation: " + (_one_line(symptom, 300) or "its result did not change with its inputs"),
+                     *(["asked the model to repair the simulation" + (f" ({repairs} repair{'s' if repairs != 1 else ''})"
+                                                                      if repairs else "")] if repairs else []),
+                     *redo, *(["ran it again: its result still did not change with its inputs"] if redesigned else [])]
+            ended = "the simulation's result still did not depend on its inputs" + again
         record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
                                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
-                                  "why_repairs_ended": ("the run gave no result with a number in it" + again
-                                  if no_numbers else "the script could not run to the end" + again
-                                  if crashed else "the analysis could not be read twice")}
+                                  "why_repairs_ended": ended}
         aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
         for name in [n for n in _rerun_from._PAPER
                      if "*" not in n and n not in ("frontier_insight_summary.json", "NEXT_STEP.md")]:
@@ -15016,7 +15029,8 @@ class Engine:
             self._log.info("[stuck] tried: %s", line)
         print(f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
               "fix: needs/STUCK.json says what FI tried; run the quest again, "
-              + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed else
+              + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
+                 or reason == "flat" else
                  "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`)."))
         self._audit("stuck", problem=problem, repairs=len(tried))
         return {"stuck": record}
@@ -15043,8 +15057,11 @@ class Engine:
             or self.config.engine.analyze_local_first
         ):
             return None
+        flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
+        if flat:
+            why = f"the simulation's result does not depend on what it is given (exit code {exec_result.get('returncode')!s}"
         if state.get("exec_give_up_reason"):
             why += f"; the repair gave up: {_one_line(state.get('exec_give_up_reason'), 160)}"
         why += ")"
@@ -15060,7 +15077,7 @@ class Engine:
         # nothing measured is the other wording, whether or not a repair was tried.
         crashed = exec_result.get("returncode") not in (0, None)
         return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
-                "stuck_reason": "crashed" if crashed else "no_numbers"}
+                "stuck_reason": "flat" if flat else "crashed" if crashed else "no_numbers"}
 
     async def _write_whole_paper(
         self, state: QuestState, persona_block: str, *, refine_round: bool = False, extra_note: str = "",

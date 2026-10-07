@@ -500,6 +500,8 @@ class TrialsRunner:
         self.analysis = Path(analysis)
         self.log = log
         self.failed_script: str | None = None
+        #: Why the last run was sent back as a simulation that does not use its inputs (core/flat_output.py), or ``None``.
+        self.flat: str | None = None
         self.last: TrialRun | None = None
         # On a cluster: the experiment's script that submits the job array FI prepared and reports it pending or done.
         self.submit = Path(submit) if submit is not None else None
@@ -510,6 +512,7 @@ class TrialsRunner:
         if len(cmd) != 2 or Path(cmd[1]).name != self.analysis.name:
             return await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=env)
         started = time.monotonic()
+        self.flat = None
         base = int((env or {}).get("FI_REPLICATE_SEED") or 0)
         protocol = (self._protocol() if callable(self._protocol) else self._protocol) or {}
         grid = protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {}
@@ -593,6 +596,18 @@ class TrialsRunner:
                 (r.get("reason") for c in run.cells for r in c.rows if r.get("reason")), "every trial failed")
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI ran no trial successfully: {reason}".strip())
+        # Every setting gave the very same numbers: the simulation does not use the settings it is given. Sent back to be
+        # repaired like one that does not run (core/flat_output.py), never analysed as a finding.
+        from . import flat_output as _flat
+
+        flat = _flat.flat_sweep(run.cells)
+        if flat is not None:
+            self.flat = flat
+            self.failed_script = self.simulate.name
+            if self.log is not None:
+                self.log.warning("[execute] the simulation does not use the settings it is given: %s", flat)
+            return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
+                                   stderr=f"{run.stderr()}\nFI's run gave a result that is not usable: {flat}".strip())
         # Relative to the quest folder the analysis runs in: the same path inside a container (/work) as on the host.
         analysis_env = {**(env or {}), RESULTS_ENV: run.summary_path.relative_to(self.quest_root).as_posix(),
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
