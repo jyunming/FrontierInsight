@@ -35,7 +35,7 @@ Return ONE JSON object and nothing else:
 
 {"checks": [{"name": "<the check's name, exactly as the plan writes it>", "appropriate": "<yes | no>", "why": "<one sentence>", "discriminating": "<yes | no>", "bug_it_would_catch": "<the plausible bug you tried, and whether this check fails on it>", "well_defined": "<yes | no>", "definition_note": "<one sentence: what is unclear or wrong about its number, or empty>", "better": "<a better or additional check, in one sentence, or empty>"}],
  "equations_tested": ["<ids>"], "equations_not_tested": ["<ids of equations no check tests>"],
- "add": [<zero to two new checks written exactly as the plan writes one: {"name", "kind", "check", "expected", "tolerance", "tolerance_mode", "reference", "case", "measure"}>],
+ "add": [<zero to two new checks written exactly as the plan writes one: {"name", "kind", "check", "expected", "expected_formula", "tolerance", "tolerance_mode", "reference", "case", "measure"}>],
  "summary": "<one or two plain sentences for the person who will read the plan>"}
 
 Rules:

@@ -46,7 +46,7 @@ NOT_REVIEWED = "the plan's checks were not reviewed by a second, different model
 #: How much of the plan the reviewer is shown (whole checks only: a check cut in half is not shown at all).
 _MAX_MODEL_CHARS, _MAX_CHECK_CHARS = 8000, 12000
 #: The keys a proposed check may carry (as the plan writes one).
-_ADD_KEYS = ("name", "kind", "check", "expected", "tolerance", "tolerance_mode", "reference", "case", "measure")
+_ADD_KEYS = ("name", "kind", "check", "expected", "expected_formula", "tolerance", "tolerance_mode", "reference", "case", "measure")
 #: What a reviewer writes for "nothing": not a finding.
 _NOTHING = {"", "none", "n/a", "na", "-", "no", "nothing", "empty", "null", "not applicable", "none needed"}
 
