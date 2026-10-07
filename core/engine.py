@@ -5024,6 +5024,7 @@ class Engine:
                            and self._split_on({**state, "design": parsed.design}) and not _criteria.countable(protocol))
             await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
                                             no_criteria=no_criteria)
+            await self._complete_the_search_in_the_plan(state)
             if ask:
                 self._pause_for_plan(no_criteria=no_criteria)
             return {}
@@ -5147,6 +5148,7 @@ class Engine:
         protocol = normalized.get("protocol")
         await self._settle_plan_sources(state, protocol=protocol if isinstance(protocol, dict) else None,
                                         no_criteria=no_criteria and ask)
+        await self._complete_the_search_in_the_plan(state)
         if ask:
             self._pause_for_plan(no_criteria=no_criteria)
         return {"design_objections": objections} if isinstance(objections, list) else {}
@@ -5261,34 +5263,168 @@ class Engine:
                          "if a measurement is what you want.")
         return notes
 
+    def _search_problems(self, state: QuestState, design: Any) -> tuple[bool, list[str], str | None]:
+        """``(wanted, what the search lacks, why its block cannot be read)`` for ``design``: ``wanted`` is whether the
+        design is a search for the best design (its own ``study_type`` or block, the person's answer, or, for a design
+        that says nothing of its own, a topic that plainly asks for it); the list is the technical sentences for
+        run.log and the request to the plan's model; the last is ``normalize``'s reason for a block that cannot be used."""
+        explicit = isinstance(design, dict) and design.get("study_type") is not None
+        # The person's answer, or a topic that plainly asks for the best design, counts for a design that says nothing
+        # of its own (one drafted at this step, say); a design that says `measure` is a choice someone made and runs.
+        asked = bool(self._asks_for_best_design(state, topic=False)) and not explicit and not _optim.has_block(design)
+        if _optim.study_type_of(design) != "find_best_design" and not asked:
+            return False, [], None
+        # Read back through the check, since a design drafted at this step has not been through it.
+        _block, block_why = (_optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design)
+                             else (None, None))
+        missing = _optim.missing_parts(design) if not asked else [
+            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
+        if block_why:
+            missing.append(f"its optimisation block cannot be used ({block_why})")
+        return True, missing, block_why
+
+    def _plan_model_name(self) -> str:
+        """The model the plan step's requests go to (for the record of what FI asked it, so another model is asked afresh)."""
+        return str(self._model_for_node("plan_revise") or self.config.provider.model or "")
+
+    def _search_asked(self, sha: str) -> int:
+        """How many times FI has asked the plan's model to write the search part of the plan that ``plan.md`` (``sha``)
+        still lacks, on the model asked now. Zero for a plan someone changed since (a person, another request) or a model
+        changed since: each is a new plan, or a new asker, and is asked afresh."""
+        try:
+            record = json.loads((self.fi_dir / _SEARCH_ASKED).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        if (isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name()):
+            try:
+                return max(0, int(record.get("count") or 0))
+            except (TypeError, ValueError):
+                return 0
+        return 0
+
+    def _record_search_asked(self, count: int, sha: str, outcome: str) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _SEARCH_ASKED).write_text(json.dumps({
+                "count": count, "sha": sha, "model": self._plan_model_name(), "outcome": outcome, "at": _frozen.now(),
+            }) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't record that FI asked the plan's model for the search: %r", e)
+
+    async def _ask_plan_for_the_search(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """Before a search for the best design stops because the plan's ``optimisation`` block is missing or cannot be
+        used, ask the plan's model itself to write it (at most twice per plan; the count is kept in
+        ``.fi/search_block_asked.json``, so a resume does not ask again): a scientist does not write FI's block, and the
+        topic already says what is to be made as low or as high as possible. Only a rewrite of the block (and
+        ``study_type``) is kept; a change to anything else is put back. Returns the design to use and the hash of its
+        plan: the plan as rewritten once the block is usable, else as it was (the stop that follows says what was tried)."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha):
+            return design, plan_sha
+        wanted, missing, _why = self._search_problems(state, design)
+        path = _plan.plan_path(self.quest_root)
+        if not wanted or not missing or not path.is_file():
+            return design, plan_sha
+        count = self._search_asked(plan_sha)
+        while count < _SEARCH_ASKS:
+            text = path.read_text(encoding="utf-8")
+            gaps = _optim.plain_gaps(design, self._search_problems(state, design)[2])
+            left_out = [m.group(0).lstrip("- ").strip() for m in re.finditer(
+                r"^.*the optimisation block was left out.*$", text, re.MULTILINE)][:3]
+            self._log.warning("[plan] the plan's search for the best design was missing %s; FI asked the plan to complete "
+                              "it (%d of %d)", "; ".join(gaps), count + 1, _SEARCH_ASKS)
+            self._progress("Asking the model to complete the search for the best design in the plan")
+            request = _optim.ask_request(state.get("topic") or self.config.topic, missing, left_out)
+            try:
+                await self._rewrite_plan(request, path, by="engine")
+                outcome = "kept"
+            except _ModelAnswerProblem as e:
+                # A cut-off or withheld answer is not an answer: not counted, and a resume asks again.
+                self._log.warning("[plan] the plan step's answer to complete the search was not complete: %s", e)
+                return design, plan_sha
+            except ValueError as e:
+                outcome = "not usable"
+                self._log.warning("[plan] the plan step's answer to complete the search could not be used: %s", e)
+            except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing; a resume asks again
+                self._log.warning("[plan] the plan step could not be asked to complete the search: %s", e)
+                return design, plan_sha
+            if outcome == "kept":
+                # Only the search part (``study_type`` and ``protocol.optimisation``) is kept from the rewrite; anything
+                # else the model changed in passing is put back, so this request never moves a check or a threshold.
+                kept_text = self._keep_only_the_search(text, path.read_text(encoding="utf-8"))
+                if kept_text is None:
+                    outcome = "put back"
+                    path.write_text(text, encoding="utf-8")
+                    _plan.record_version(self.quest_root, text, by="engine",
+                                         note="put back: the rewrite that was to complete the search gave no usable one")
+                    self._log.warning("[plan] the rewrite that was to complete the search gave no usable block; "
+                                      "it was put back")
+                else:
+                    path.write_text(kept_text, encoding="utf-8")
+                    _plan.record_version(self.quest_root, kept_text, by="engine",
+                                         note="the search for the best design, written by the plan's model")
+            count += 1
+            now = path.read_text(encoding="utf-8")
+            self._record_search_asked(count, _plan.sha256(now), outcome)
+            again, sha = self._design_from_plan()
+            if again is None:
+                return design, plan_sha
+            design, plan_sha = again, sha
+            wanted, missing, _why = self._search_problems(state, design)
+            if wanted and not missing:
+                self._log.info("[plan] the plan's search for the best design is complete now (asked %d time(s))", count)
+                print("[FI] the plan's search for the best design is complete now; going on")
+                return design, plan_sha
+        return design, plan_sha
+
+    async def _complete_the_search_in_the_plan(self, state: QuestState) -> None:
+        """At the plan step, before a person reads the plan: a search for the best design whose block is missing is
+        asked of the plan's model (:meth:`_ask_plan_for_the_search`), so the plan a person reads is complete."""
+        design, sha = self._design_from_plan()
+        if design is not None and sha:
+            await self._ask_plan_for_the_search(state, design, sha)
+
+    def _keep_only_the_search(self, before_text: str, after_text: str) -> str | None:
+        """``before_text`` with only the search part of ``after_text`` (``study_type`` and ``protocol.optimisation``)
+        taken in, its sections shown again from the block; a plain ``protocol.grid`` beside the block is dropped. ``None``
+        when the rewrite has no search block or the result cannot be used."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        protocol = new.get("protocol") if isinstance(new, dict) else None
+        block = protocol.get("optimisation") if isinstance(protocol, dict) else None
+        if not isinstance(old, dict) or not isinstance(block, dict):
+            return None
+
+        def change(design: dict[str, Any]) -> dict[str, Any]:
+            kept = {k: v for k, v in (design.get("protocol") or {}).items() if k != "grid"}
+            out = {**design, "protocol": {**kept, "optimisation": block}}
+            out["study_type"] = "find_best_design"
+            return out
+
+        merged = _plan.edit_design_block(before_text, change)
+        if merged is None or _plan.parse(merged).design is None:
+            return None
+        return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged))
+
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
         """Stop before anything runs when the design is a search for the best design that FI cannot start: the plan lacks
         what a search needs (the ``optimisation`` block, its budget), the simulation is not a script of its own
         (``execution.split_analysis: false``), or the trials go to a cluster (``execution.background_jobs``: the search
         runs here, one design after another). Such a plan is never run as a plain sweep instead. Every resume checks
         again (no once-only marker). A no-op for a measurement, for a search that can start (the engine runs it:
-        :mod:`core.optimise`), and for a quest that runs no experiment of its own."""
+        :mod:`core.optimise`), and for a quest that runs no experiment of its own. What the plan lacks has first been
+        asked of the plan's model (:meth:`_ask_plan_for_the_search`), so the stop never asks a person to write it."""
         if not self._runs_code(state):
             return
-        explicit = isinstance(design, dict) and design.get("study_type") is not None
-        # The person's answer, or a topic that plainly asks for the best design, counts for a design that says nothing
-        # of its own (one drafted at this step, say); a design that says `measure` is a choice someone made and runs.
-        asked = bool(self._asks_for_best_design(state, topic=False)) and not explicit and not _optim.has_block(design)
-        if _optim.study_type_of(design) != "find_best_design" and not asked:
+        wanted, missing, block_why = self._search_problems(state, design)
+        if not wanted:
             return
         path = _plan.plan_path(self.quest_root)
-        # Read back through the check, since a design drafted at this step has not been through it.
-        block, block_why = (_optim.normalize(design["protocol"]["optimisation"]) if _optim.has_block(design)
-                            else (None, None))
+        block = _optim.normalize(design["protocol"]["optimisation"])[0] if _optim.has_block(design) else None
         goal = ""
         if block is not None:
             objective = block["objective"]
             goal = (f" (make {objective['quantity']} as {'low' if objective['direction'] == 'minimise' else 'high'} as "
                     f"possible by changing {', '.join(v['name'] for v in block['design_variables'])})")
-        missing = _optim.missing_parts(design) if not asked else [
-            "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
-        if block_why:
-            missing.append(f"its optimisation block cannot be used ({block_why})")
         setup: list[str] = []
         if not self._split_on(state):
             setup.append("the search calls the simulation as a function of its own, but this quest keeps one script "
@@ -5298,35 +5434,45 @@ class Engine:
                          "(`execution.background_jobs` is on): turn it off in the quest's config and resume")
         if not missing and not setup:
             return
-        where = (f"In `plan.md` ({path}), under “{_plan.DESIGN_HEADING}”," if path.is_file()
-                 else "This quest has no plan.md (its plan could not be written); in the quest's topic,")
+        gaps = _optim.plain_gaps(design, block_why) if missing else []
         steps = [
             f"Nothing was run. This quest is a search for the best design{goal}, and the search cannot start yet. "
             "Running the plan as a plain sweep over fixed settings would answer a different question, so the quest "
             "stops here.",
-            *[f"Missing from the plan: {m}." for m in missing],
-            *[f"In the quest's setup: {s}." for s in setup],
         ]
+        recommended = "Complete the quest's setup as the steps below say, then resume."
+        alternatives = ["Ask for a change in words: `--revise-plan \"<what to change>\"`."]
         if missing:
+            tried = self._search_asked(_plan.sha256(path.read_text(encoding="utf-8"))) if path.is_file() else 0
+            steps.append(f"Still missing from the plan: {'; '.join(gaps)}.")
             steps.append(
-                f"{where} complete the `optimisation` block (what to make as low or as high as possible, what may change "
-                "and over what range, the design to beat, and `evaluation_budget`), then resume: "
-                f"`python launch.py --config <quest.yaml> --resume {self.quest_id}`. Or ask FI to make the change: "
-                f"`--resume {self.quest_id} --revise-plan \"<what to change>\"` (the quest page's Plan box on the web, "
-                "`@fi /plan` in VS Code). To measure over settings you choose instead, set `study_type: measure` and "
-                "give a `grid`.")
-        reason = missing[0] if missing else setup[0].split(" (`")[0]
-        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping", reason)
+                (f"FI asked the plan's model {tried} time(s) to write it from your topic, and it still could not."
+                 if tried else "FI could not get the plan's model to write it from your topic.")
+                if path.is_file() else
+                "This quest has no plan file (its plan could not be written), so FI had nothing to ask the model to complete.")
+            steps.append("You do not need to write any of it yourself. Choose one:")
+            model = ("Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) "
+                     f"another model in the quest's config.yaml, then `python launch.py --update {self.quest_id}`. FI "
+                     "asks that model to write the search.")
+            measure = ("Measure over the settings the plan already lists instead of searching (this answers a different "
+                       f"question than the best design): `--resume {self.quest_id} --revise-plan "
+                       f"\"{_optim.MEASURE_INSTEAD}\"` (the quest page's Plan box on the web, `@fi /plan` in VS Code).")
+            steps += [f"1. {model}", f"2. {measure}"]
+            recommended = "Try another model for the plan step."
+            alternatives = [measure]
+        steps += [f"In the quest's setup: {s}." for s in setup]
+        reason = gaps[0] if missing else setup[0].split(" (`")[0]
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping",
+                          "; ".join(missing) if missing else setup[0].split(" (`")[0])
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but the search cannot start "
-              f"({reason}); nothing was run (see NEXT_STEP.md)")
+              f"({'the plan does not say ' + reason if missing else reason}); nothing was run (see NEXT_STEP.md)")
         self._pause_for_human(
             kind="plan",
             interaction="supply",
             headline="the search for the best design cannot start",
             steps=steps,
-            recommended="Complete the plan (or the quest's setup) as the steps below say, then resume.",
-            alternatives=["Set `study_type: measure` and give a `grid` in plan.md, then resume.",
-                          "Ask for a change in words: `--revise-plan \"<what to change>\"`."],
+            recommended=recommended,
+            alternatives=alternatives,
             payload={"quest_id": self.quest_id, "plan_file": str(path), "best_design_stage": True},
         )
 
@@ -5828,6 +5974,7 @@ class Engine:
         # The model section is shown from the block and never read back: shown again from the block as rewritten, so the
         # plan never shows a model or a check's source the block does not hold (or leaves out one it does).
         revised = _plan.refresh_model_section(revised)
+        revised = _plan.refresh_optimisation_section(revised)
         path.write_text(revised, encoding="utf-8")
         entry = _plan.record_version(self.quest_root, revised, by=by, note=request[:300])
         self._log.info("[plan] revised %s: version %d",
@@ -5867,6 +6014,10 @@ class Engine:
         # A search for the best design never runs as a plain sweep: every design, from the plan or drafted here, passes
         # this point before anything is implemented or run, and one the engine cannot search stops here
         # (core/optimisation_plan.py; the search itself: core/optimise.py).
+        if plan_sha:
+            # A plan that lacks the search part is completed by the plan's model before this stops (a person is not
+            # asked to write it); the design to run is then the plan as rewritten.
+            design, plan_sha = await self._ask_plan_for_the_search(state, design, plan_sha)
         self._stop_if_the_search_cannot_start(state, design)
         await self._audit_the_design_that_runs(state, design)
         out: dict[str, Any] = {"design": design}
@@ -20417,6 +20568,10 @@ _REFERENCE_FORMS = (
 
 # Written once FI has asked the plan step to fill in where the checks' expected values come from (``_fill_plan_sources``).
 _FILL_MARKER = "plan_sources_asked.json"
+# Written each time FI asks the plan's model to write the search part of a plan for the best design
+# (``_ask_plan_for_the_search``): how many times it asked of this plan, so a resume does not ask again; at most this many.
+_SEARCH_ASKED = "search_block_asked.json"
+_SEARCH_ASKS = 2
 #: What a plan with no way to judge whether the code got better means, in one line (never a stop of its own).
 _NO_CRITERIA_LINE = ("The plan has no measure of whether the code got better (FI looked in the literature once and found "
                      "none), so FI will not try to improve the simulation step by step. Nothing to do: the quest goes on.")

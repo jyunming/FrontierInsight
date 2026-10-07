@@ -625,6 +625,72 @@ def missing_parts(design: Any) -> list[str]:
     return out
 
 
+#: The one plain request a person can make to turn a search for the best design into a measurement over the settings the
+#: plan already lists (``--revise-plan``, the quest page's Plan box, ``@fi /plan``): the plan's model does the rewrite.
+MEASURE_INSTEAD = "measure over the planned settings instead of searching"
+
+_PLAIN_PARTS = {
+    "objective": "what the search should make as low or as high as possible",
+    "design_variables": "which settings the search may change, and over what range",
+    "baseline": "the design to beat",
+    "evaluation_budget": "how many designs the search may try",
+}
+
+
+def plain_gaps(design: Any, why: str | None = None) -> list[str]:
+    """What a search for the best design still lacks, in the words a scientist uses (no field names): the parts of the
+    ``optimisation`` block that are absent, and the part ``why`` (the reading of the block, ``normalize``'s reason) names."""
+    block = design["protocol"]["optimisation"] if has_block(design) else None
+    gaps: list[str] = []
+    if block is None:
+        return list(_PLAIN_PARTS.values())
+    objective = block.get("objective")
+    if not (isinstance(objective, dict) and objective.get("quantity") and objective.get("direction")):
+        gaps.append(_PLAIN_PARTS["objective"])
+    if not (isinstance(block.get("design_variables"), list) and block["design_variables"]):
+        gaps.append(_PLAIN_PARTS["design_variables"])
+    if not (isinstance(block.get("baseline"), dict) and isinstance(block["baseline"].get("values"), dict)):
+        gaps.append(_PLAIN_PARTS["baseline"])
+    if not isinstance(block.get("evaluation_budget"), dict):
+        gaps.append(_PLAIN_PARTS["evaluation_budget"])
+    named = re.match(r"`protocol\.optimisation\.?(\w*)", why or "")
+    plain = _PLAIN_PARTS.get(named.group(1) if named else "")
+    if plain and plain not in gaps:
+        gaps.append(plain)
+    if why and not gaps:
+        gaps.append("a part of the search description that could not be read")
+    return gaps
+
+
+def ask_request(topic: str, problems: list[str], left_out: list[str] | None = None) -> str:
+    """The request FI makes of the plan's model, in place of asking a person, when a search for the best design has no
+    usable ``optimisation`` block: what is missing or unreadable (quoted), what each part means in one line, and that the
+    goal is to be taken from the topic. The plan's model writes the block; nothing else changes."""
+    parts = [
+        "This study is a search for the best design, but the plan has no `protocol.optimisation` block FI can search "
+        "with yet. Write it (set `study_type: find_best_design`), taking the goal from the topic: "
+        f"“{' '.join(str(topic or '').split())[:600]}”.",
+    ]
+    if problems:
+        parts.append("What is missing or cannot be read:\n" + "\n".join(f"- {p}" for p in problems))
+    if left_out:
+        parts.append("An earlier draft of the block was left out because:\n" + "\n".join(f"- {n}" for n in left_out))
+    parts.append(
+        "Each part of the block, in one line:\n"
+        "- `objective`: the ONE result to improve: `quantity` (the name of the number the simulation returns), "
+        "`direction` (`minimise` or `maximise`), and optionally `unit` and `meaning`. A second goal becomes a limit "
+        "under `constraints`.\n"
+        "- `design_variables`: what the search may change: a list, each with `name`, `low` and `high` (the range it may "
+        "use), optionally `unit` and `kind` (`continuous`, `integer`, or `choice` with `values`).\n"
+        "- `baseline`: the design to beat: `values` (one value for each design variable, inside its range) and `source` "
+        "(where it comes from: the topic, or a source in the plan's list).\n"
+        "- `evaluation_budget`: how many designs the search may try: `starts` (starting points) and `per_start` "
+        "(evaluations from each), whole numbers.")
+    parts.append("Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion. A plain `grid` "
+                 "beside the block may be removed.")
+    return "\n\n".join(parts)
+
+
 # --- the section of plan.md ------------------------------------------------------------------------------------------
 
 HEADING = "What is being optimised"
@@ -674,9 +740,10 @@ def plan_lines(design: Any) -> list[str]:
              "**Kind of study:** find the best design (`study_type: find_best_design`), not a measurement over "
              "settings chosen in advance.", ""]
     if not has_block(design):
-        lines += ["- (the plan gives no `optimisation` block: write what to make as low or as high as possible, which "
-                  "settings may change and over what range, and the design to beat, in the design below; or set "
-                  "`study_type: measure` and give a `grid`)", ""]
+        lines += ["- (the plan does not yet say what to make as low or as high as possible, which settings may change and "
+                  "over what range, and the design to beat: FI asks the plan's model to write that before anything "
+                  "runs. To measure over chosen settings instead, say so with the plan box: "
+                  f"“{MEASURE_INSTEAD}”)", ""]
         return lines
     block = design["protocol"]["optimisation"]
     objective = block["objective"]

@@ -1067,6 +1067,34 @@ def refresh_model_section(text: str) -> str:
     return text
 
 
+def refresh_optimisation_section(text: str) -> str:
+    """``text`` with its section on the kind of study (*What is being optimised*, or *What kind of study this is*) shown
+    again from its design block, after a rewrite changed the block (the section is shown from it and never read back).
+    Unchanged when the block cannot be read or the design says nothing of its kind of study."""
+    from . import optimisation_plan
+
+    parsed = parse(text)
+    if parsed.design is None:
+        return text
+    lines = optimisation_plan.plan_lines(parsed.design)
+    if not lines:
+        return text
+    heads = "|".join(re.escape(h) for h in (optimisation_plan.HEADING, "What kind of study this is"))
+    found = re.search(rf"^##\s+(?:{heads})\s*$", text or "", re.MULTILINE)
+    body = "\n".join(lines).rstrip("\n") + "\n\n"
+    if found:
+        after = re.search(r"^##\s+", text[found.end():], re.MULTILINE)
+        end = found.end() + after.start() if after else len(text)
+        return text[:found.start()] + body + text[end:]
+    anchor = None
+    for heading in (MODEL_HEADING, CRITERIA_HEADING):
+        anchor = re.search(rf"^##\s+{re.escape(heading)}\s*$", text, re.MULTILINE)
+        if anchor:
+            break
+    anchor = anchor or _HEADING_RE.search(text)
+    return text[:anchor.start()] + body + text[anchor.start():] if anchor else text
+
+
 def add_to_section(text: str, heading: str, lines: list[str]) -> str:
     """``text`` with ``lines`` added at the end of its ``## heading`` section, which is made (above the design block)
     when there is none. Prose only: nothing in it is read back."""
