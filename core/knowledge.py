@@ -3516,7 +3516,13 @@ async def _route_sources_with_llm(
         a, b = s.find("{"), s.rfind("}")
         if a < 0 or b <= a:
             raise ValueError("no JSON object in router response")
-        parsed = json.loads(s[a : b + 1])
+        try:
+            parsed = json.loads(s[a : b + 1])
+        except json.JSONDecodeError:
+            # LaTeX with single backslashes in the rationale (`$\sigma$`) is kept as written, not a failed reply.
+            from .latex_text import escape_latex_backslashes
+
+            parsed = json.loads(escape_latex_backslashes(s[a : b + 1]))
         raw = parsed.get("sources_to_query") or []
         chosen = [n for n in raw if n in _SOURCE_REGISTRY]
         noteworthy = parsed.get("noteworthy_venues") or []

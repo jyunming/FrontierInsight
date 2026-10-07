@@ -45,6 +45,11 @@ _ADVICE: dict[str, tuple[str, str, list[str]]] = {
         "(`provider.node_models.<step>`), then go on.",
         ["Change what the quest asks (the topic or the plan), then go on."],
     ),
+    "model_unreadable": (
+        "A model's answer could not be read, even when asked twice. How should that step answer?",
+        "Give the step another model (`provider.node_models.<step>`), then go on.",
+        ["Go on as it is: the same model is asked again."],
+    ),
     "code_project": (
         "You edited files in code/ that FI would otherwise update. Keep your version?",
         "Go on: your edited files stay as you wrote them, and FI does not touch them.",

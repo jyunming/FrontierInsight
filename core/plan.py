@@ -41,6 +41,8 @@ from typing import Any
 
 import yaml
 
+from .latex_text import escape_latex_backslashes
+
 PLAN_FILE = "plan.md"
 DESIGN_HEADING = "The design (used as written)"
 _HEADING_RE = re.compile(r"^#{2,3}\s+the design\b.*$", re.IGNORECASE | re.MULTILINE)
@@ -808,6 +810,17 @@ def replace_design_block(text: str, block: str) -> str | None:
     return text[:start] + block.strip("\n") + text[end:]
 
 
+def keep_latex_in_block(text: str) -> str:
+    """``text`` with the LaTeX a model wrote with single backslashes in a double-quoted value of its design block kept as
+    LaTeX (a double-quoted ``\\text`` or ``\\frac`` is a valid YAML escape that would read as a tab or a form feed).
+    Any other block, and a text with none, is returned unchanged."""
+    found = design_block(text)
+    if found is None:
+        return text
+    fixed = escape_latex_backslashes(found[2], yaml=True, strict=True)
+    return text if fixed == found[2] else (replace_design_block(text, fixed) or text)
+
+
 def yaml_problem(block: str) -> dict[str, Any] | None:
     """Where ``block`` stops being valid YAML: ``{line, column, problem, lines}`` (1-based line and column; ``lines`` the
     numbered lines around the place, that one marked), or ``None`` when it is valid."""
@@ -886,12 +899,17 @@ def _fold_plain_value(rows: list[str], owner: int) -> list[str] | None:
 
 def repair_block(block: str) -> tuple[str | None, list[str]]:
     """``(the block repaired, what was repaired)`` when a repair that changes no key and no value makes ``block`` valid
-    YAML, else ``(None, [])``. Two repairs, nothing else: a plain value with `: ` in it is written as a folded block (the
+    YAML, else ``(None, [])``. Three repairs, nothing else: LaTeX in a double-quoted value keeps its single backslashes, a plain value with `: ` in it is written as a folded block (the
     same text), and an indentation made only of tabs is written with two spaces a tab."""
     if yaml_problem(block) is None:
         return block, []
-    rows = block.split("\n")
     notes: list[str] = []
+    # LaTeX a model wrote in a double-quoted value with single backslashes (`"$\\sigma$"`): the backslashes are kept as text.
+    with_latex = escape_latex_backslashes(block, yaml=True)
+    if with_latex != block:
+        block = with_latex
+        notes.append("a quoted value had LaTeX with single backslashes in it; they are kept as written")
+    rows = block.split("\n")
     indented = [r for r in rows if r.strip() and r[:1] in (" ", "\t")]
     if indented and all(re.match(r"^\t+(?=[^ \t])", r) for r in indented):
         rows = [re.sub(r"^\t+", lambda m: "  " * len(m.group(0)), r) for r in rows]

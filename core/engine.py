@@ -66,6 +66,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.errors import GraphBubbleUp, GraphInterrupt
 from langgraph.types import Command, interrupt
 
+from .latex_text import escape_latex_backslashes
 from .vscode_bridge import BridgeError
 from .proc_tree import AsyncProcessTree
 from . import acceptance as _acceptance
@@ -5024,10 +5025,9 @@ class Engine:
                 or self._study_type_asked(state) == "find_best_design")
         prompt = (self._design_prompt(state) + _PLAN_DIRECTIVE + (_STUDY_TYPE_DIRECTIVE if seek else "")
                   + self._study_type_note(state))
-        text = await self._chat(prompt, node="plan")
-        obj = _parse_json_lenient(text) or {}
-        extra = obj.pop("plan", None) if isinstance(obj, dict) else None
-        design = obj if isinstance(obj, dict) and obj else {"hypothesis": "(parse failed)", "dependencies": []}
+        obj = await self._design_reply(prompt, node="plan")
+        extra = obj.pop("plan", None)
+        design = obj
         design, objections = await self._audit_design(state, design)
         if isinstance(design, dict):
             # ``plan`` asks the same design prompt as ``design`` (``_design_prompt`` + ``_PLAN_DIRECTIVE``) and can get
@@ -5809,6 +5809,7 @@ class Engine:
                 node="plan_revise",
             )
             revised = _plan.strip_outer_fence(reply)
+            revised = _plan.keep_latex_in_block(revised)  # `"$\text{NILS}$"` is LaTeX, not a tab and `ext`
             # The block alone is asked for at most once, after the first answer: at most two calls in all.
             revised, why, asked = await self._usable_design_block(revised, ask=_attempt == 1)
             if not why or asked:
@@ -5849,8 +5850,7 @@ class Engine:
             objections = state.get("design_objections")
         if design is None:
             prompt = self._design_prompt(state)
-            text = await self._chat(prompt, node="design")
-            design = _parse_json_lenient(text) or {"hypothesis": "(parse failed)", "dependencies": []}
+            design = await self._design_reply(prompt, node="design")
             design, objections = await self._audit_design(state, design)
             # After the freeze a redesign keeps the frozen protocol; a different one is an amendment request.
             design = self._hold_design_to_frozen(state, design)
@@ -6190,6 +6190,40 @@ class Engine:
             recommended=recommended, alternatives=alternatives,
             payload={"quest_id": self.quest_id, "step": call, "setting": key,
                      "reason": "truncated" if truncated else "content_filtered"},
+        )
+
+    async def _design_reply(self, prompt: str, *, node: str) -> dict[str, Any]:
+        """The design object a model answers ``prompt`` with (the ``plan`` and ``design`` steps). An answer that cannot be
+        read is asked for once more (:meth:`_chat_json`); one that cannot be read the second time stops the quest
+        (:meth:`_stop_for_unreadable_design`): an empty design is never run."""
+        text, obj = await self._chat_json(
+            prompt, node=node, want=("hypothesis",), usable=lambda p: any(k != "plan" for k in p))
+        if not any(k != "plan" for k in obj):
+            self._stop_for_unreadable_design(node, text)
+        return obj
+
+    def _stop_for_unreadable_design(self, step: str, text: str) -> None:
+        """Stop because the model's design at ``step`` could not be read, twice. A SUPPLY pause: resume asks again."""
+        headline = f"the model's design at the {step} step could not be read, even when asked twice"
+        steps = [
+            f"Nothing was run. The model's answer at the `{step}` step could not be read as a design, and asking it once "
+            "more for one short answer gave a reply that could not be read either. FI has no design to run, and it does "
+            "not run an empty one.",
+            "What FI tried: it read the reply as written, read it again with the backslashes of formulas kept as "
+            "written, and asked the model a second time.",
+            f"Give that step another model: `provider: {{node_models: {{{step}: <model>}}}}` in the quest's "
+            f"`config.yaml`, then approve the change with `python launch.py --update {self.quest_id}` (it resumes the "
+            "quest too). Or resume as it is to ask the same model again.",
+        ]
+        self._log.warning("[%s] the design could not be read, even when asked twice (%d characters); stopping, nothing "
+                          "was run", step, len(text or ""))
+        print(f"[FI] quest {self.quest_id}: the model's design at the {step} step could not be read, even when asked "
+              "twice; nothing was run (see NEXT_STEP.md)")
+        self._pause_for_human(
+            kind="model_unreadable", interaction="supply", headline=headline, steps=steps,
+            recommended=f"Use another model for `{step}`: `provider.node_models.{step}`, then go on.",
+            alternatives=["Resume as it is: the same model is asked again."],
+            payload={"quest_id": self.quest_id, "step": step, "setting": step, "reason": "unreadable"},
         )
 
     def _pause_stage_enabled(self, stage: str) -> bool:
@@ -13898,6 +13932,7 @@ class Engine:
         # the same way as the single-call path, so the rest of the
         # pipeline (cross_check, write) sees an identical shape.
         ensemble_cfg = self._ensemble_for_node("analyze")
+        analysis: dict[str, Any] = {}
         if ensemble_cfg is not None:
             from core.ensemble import EnsembleError
             try:
@@ -13910,14 +13945,20 @@ class Engine:
                         "[analyze] ensemble disagreement_score=%.2f (%d models)",
                         result.disagreement_score, len(ensemble_cfg.models),
                     )
+                analysis = _parse_json_lenient(text, node="analyze") or {}
             except EnsembleError as e:
                 self._log.warning(
                     "[analyze] ensemble all-failed (%s); falling back to single-call path", e,
                 )
-                text = await self._chat(prompt, node="analyze")
-        else:
-            text = await self._chat(prompt, node="analyze")
-        analysis = _parse_json_lenient(text) or {"summary": "(parse failed)", "key_findings": []}
+        if not analysis:
+            # One call; an answer that cannot be read is asked for once more. (When the ensemble's merged answer could
+            # not be read, this is a fresh ask, so up to two more calls follow it.)
+            _, analysis = await self._chat_json(prompt, node="analyze", want=("summary",), usable=bool)
+        if not analysis:
+            # Unreadable twice: no finding is invented. The evidence gate reads `unreadable` and fails closed.
+            self._log.warning("[analyze] the model's analysis could not be read, even when asked once more; the run is "
+                              "treated as having no findings (the evidence gate says so)")
+            analysis = {"summary": "(parse failed)", "key_findings": [], "unreadable": True}
         # Default `next_step` to publish when the LLM omits it (older
         # prompts, parse failures) so the route doesn't break.
         analysis.setdefault("next_step", "publish")
@@ -14298,7 +14339,7 @@ class Engine:
                 ),
                 "key_findings_preview": [str(f)[:200] for f in findings[:6]],
             }
-            ruled = self._no_results_verdict(state) or _evidence_gate_rule(
+            ruled = self._unreadable_analysis_verdict(state) or self._no_results_verdict(state) or _evidence_gate_rule(
                 protocol.topic_type, n_sources, n_supporting,
                 analyze_local_first=self.config.engine.analyze_local_first,
                 retrieval_on=self.config.knowledge.enabled,
@@ -14394,6 +14435,16 @@ class Engine:
             patch["iteration"] = int(state.get("iteration", 0) or 0) + 1
             patch["evidence_no_result_retries"] = int(state.get("evidence_no_result_retries") or 0) + 1
         return patch
+
+    def _unreadable_analysis_verdict(self, state: QuestState) -> dict[str, Any] | None:
+        """The gate's verdict when the model's analysis of the results could not be read (twice): ``insufficient``, never
+        a count over findings that were not read. ``None`` for every other analysis."""
+        analysis = state.get("analysis")
+        if not (isinstance(analysis, dict) and analysis.get("unreadable")):
+            return None
+        why = "the model's analysis of the results could not be read, even when asked twice, so there are no findings"
+        self._log.warning("[evidence_gate] %s; the evidence is judged insufficient", why)
+        return {"verdict": "insufficient", "rationale": why, "gaps": [why]}
 
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.
@@ -24242,6 +24293,28 @@ def _parse_json_lenient(
     return _parse_json_lenient_once(text, node=node, _log_truncate_chars=_log_truncate_chars)
 
 
+def _read_latex_object(chunk: str, *, strict: bool = False) -> dict[str, Any] | None:
+    """The JSON object in ``chunk`` after the backslashes of LaTeX a model wrote in its strings (``$\\sigma$``,
+    ``\\text{NILS}``) are kept as the LaTeX they are (:func:`core.latex_text.escape_latex_backslashes`), or ``None`` when
+    that does not make it parse. It also catches a reply that parses but whose LaTeX came out as an escape (``\\text`` read as a
+    tab and ``ext``): any other valid reply gives ``None`` here and is used exactly as parsed. ``strict`` is for a chunk
+    that parsed as written: only what cannot be a real newline or tab followed by a word is taken for LaTeX (a script
+    in a JSON string has lines that start with ``nu`` or ``to``)."""
+    fixed = escape_latex_backslashes(chunk, strict=strict)
+    if fixed == chunk:
+        return None
+    try:
+        result = json.loads(fixed)
+    except (ValueError, RecursionError):
+        return None
+    if isinstance(result, dict):
+        logging.getLogger("frontier_insight.engine").info(
+            "a model's JSON reply held LaTeX with single backslashes (as in \\sigma or \\text{...}); read with them kept"
+            " as written%s", " (it had parsed, with some read as a tab or a form feed)" if strict else "")
+        return result
+    return None
+
+
 def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
     """Every JSON object written at the top level of ``text`` (an object inside one already read is not counted
     again), in order. Prose, fences and objects that do not parse between them are skipped."""
@@ -24252,6 +24325,13 @@ def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
         try:
             obj, end = decoder.raw_decode(text, i)
         except (ValueError, RecursionError):
+            # LaTeX written with single backslashes in a string (`$\sigma$`): read once more with them kept.
+            closes = _matching_brace_end(text, i)
+            repaired = _read_latex_object(text[i:closes])
+            if repaired is not None:
+                out.append(repaired)
+                i = text.find("{", closes)
+                continue
             # An object that does not parse (a trailing comma, a reply cut off) is skipped whole, to its matching
             # brace: an object inside it is never read as one of the reply's own (an evidence gate's per-source
             # "verdict" taken for the gate's). A brace in prose ("{ opens a set") is not an object: only the next
@@ -24260,7 +24340,8 @@ def _top_level_json_objects(text: str) -> list[dict[str, Any]]:
             i = text.find("{", _matching_brace_end(text, i) if looks_like_object else i + 1)
             continue
         if isinstance(obj, dict):
-            out.append(obj)
+            # `\text`, `\frac`, `\beta`, `\nabla`, `\rho` are valid JSON escapes: the text came out as a tab, a form feed...
+            out.append(_read_latex_object(text[i:end], strict=True) or obj)
         i = text.find("{", end)
     return out
 
@@ -24333,7 +24414,9 @@ def _parse_json_lenient_once(
         # WARNING — the JSON itself was valid, the prompt told the
         # model to return an object, the contract is upstream of
         # this function.
-        return result if isinstance(result, dict) else None
+        # `\text`, `\frac`, `\beta`, `\nabla`, `\rho` are valid JSON escapes, so LaTeX written with single backslashes can
+        # parse as a tab or a form feed: read as the LaTeX it is.
+        return (_read_latex_object(candidate, strict=True) or result) if isinstance(result, dict) else None
     except json.JSONDecodeError:
         pass
     # Find the first '{' and last '}' and try the slice.
@@ -24342,8 +24425,11 @@ def _parse_json_lenient_once(
     if start >= 0 and end > start:
         try:
             result = json.loads(candidate[start : end + 1])
-            return result if isinstance(result, dict) else None
+            return (_read_latex_object(candidate[start : end + 1], strict=True) or result) if isinstance(result, dict) else None
         except json.JSONDecodeError:
+            repaired = _read_latex_object(candidate[start : end + 1])
+            if repaired is not None:
+                return repaired
             if not _quiet:
                 _log_parse_failure(candidate, node, _log_truncate_chars)
             return None
