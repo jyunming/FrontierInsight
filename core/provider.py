@@ -1167,11 +1167,16 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
                     r.raise_for_status()
                 lines = r.aiter_lines().__aiter__()
                 while True:
+                    # A nested `asyncio.timeout`, not `asyncio.wait_for`: on Python 3.11 `wait_for` can swallow the
+                    # outer whole-call cancellation when it lands just as a line arrives, so the budget never ends.
                     try:
-                        raw = await asyncio.wait_for(lines.__anext__(), wait)
+                        async with asyncio.timeout(wait) as per_line:
+                            raw = await lines.__anext__()
                     except StopAsyncIteration:
                         break
                     except TimeoutError:
+                        if not per_line.expired():
+                            raise  # the whole-call budget, handled below
                         raise httpx.ReadTimeout(
                             f"the model's stream sent nothing for {wait:g} s (its read timeout)") from None
                     line = raw.strip()
