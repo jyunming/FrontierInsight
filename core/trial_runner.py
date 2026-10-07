@@ -491,7 +491,8 @@ class TrialsRunner:
     check). ``failed_script`` says which script to repair; ``last`` keeps the trial run for the checks after it."""
 
     def __init__(self, executor: Any, *, quest_root: Path, protocol: Any, deterministic: bool,
-                 simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None) -> None:
+                 simulate: Path, analysis: Path, log: Any = None, submit: Path | None = None,
+                 leave_out: Any = None) -> None:
         self.executor = executor
         self.quest_root = Path(quest_root)
         self._protocol = protocol
@@ -505,6 +506,25 @@ class TrialsRunner:
         self.last: TrialRun | None = None
         # On a cluster: the experiment's script that submits the job array FI prepared and reports it pending or done.
         self.submit = Path(submit) if submit is not None else None
+        #: Quantities the analysis must not be given (the simulation typed their value into its code, core/typed_results.py):
+        #: a function returning their names, or ``None``. The ledger keeps every value the simulation returned.
+        self._leave_out = leave_out
+
+    def _without_left_out(self, summary: Path) -> Path:
+        """The per-cell summary the analysis reads: FI's own, or (when quantities are left out) a copy of it without them,
+        beside it. FI's summary and the ledger are not changed."""
+        names = {str(n) for n in (self._leave_out() if callable(self._leave_out) else self._leave_out or ())}
+        if not names:
+            return summary
+        try:
+            data = json.loads(summary.read_text(encoding="utf-8"))
+            for cell in data.get("cells") or []:
+                cell["metrics"] = {k: v for k, v in (cell.get("metrics") or {}).items() if k not in names}
+            copy = summary.with_name("trials.analysis.json")
+            copy.write_text(json.dumps(data, indent=1, allow_nan=True), encoding="utf-8")
+            return copy
+        except (OSError, ValueError, AttributeError):
+            return summary
 
     async def execute(self, cmd: list[str], *, cwd: Path, timeout_s: int, env: dict[str, str] | None = None) -> Any:
         from core.execution import ExecutionResult
@@ -609,7 +629,8 @@ class TrialsRunner:
             return ExecutionResult(returncode=1, stdout="", duration_s=time.monotonic() - started,
                                    stderr=f"{run.stderr()}\nFI's run gave a result that is not usable: {flat}".strip())
         # Relative to the quest folder the analysis runs in: the same path inside a container (/work) as on the host.
-        analysis_env = {**(env or {}), RESULTS_ENV: run.summary_path.relative_to(self.quest_root).as_posix(),
+        summary_path = self._without_left_out(run.summary_path)
+        analysis_env = {**(env or {}), RESULTS_ENV: summary_path.relative_to(self.quest_root).as_posix(),
                         "FI_RAW_DIR": run.summary_path.parent.relative_to(self.quest_root).as_posix()}
         result = await self.executor.execute(cmd, cwd=cwd, timeout_s=timeout_s, env=analysis_env)
         self.failed_script = None if result.returncode == 0 else self.analysis.name

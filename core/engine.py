@@ -103,6 +103,7 @@ from . import receipts as _receipts
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
+from .run_checks import RunChecksMixin
 from . import record_claims as _record_claims
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -645,7 +646,7 @@ from core.config import ProviderName as _ProviderName  # noqa: E402
 #: which reports the vendor that answered (copilot, customendpoint, ollama-models).
 _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
-class Engine:
+class Engine(RunChecksMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -13193,7 +13194,7 @@ class Engine:
             runner = _trial_runner.TrialsRunner(
                 self.executor, quest_root=self.quest_root, protocol=lambda: self._protocol_block(state) or {},
                 deterministic="run_trial" not in trial_entries, simulate=simulate_path, analysis=code_path,
-                log=self._log,
+                log=self._log, leave_out=self._left_out_quantities,
                 submit=(self.quest_root / "code" / _trial_runner.SUBMIT_NAME
                         if self.config.execution.background_jobs else None),
             )
@@ -13311,6 +13312,9 @@ class Engine:
         # stops here, with what is missing): the script's own numbers are not evidence that they are right.
         # A plan edited while the quest was stopped is checked before the oracle run spends anything on it.
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
+        # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
+        # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
+        await self._results_from_computation(state)
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         self._check_equation_labels(state)
@@ -13605,7 +13609,7 @@ class Engine:
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
         ) if (self.quest_root / "figures").is_dir() else []
-        result_json = _extract_result_json(result.stdout)
+        result_json = self._without_typed_results(_extract_result_json(result.stdout))
         self._log.info(
             "[execute] rc=%d duration=%.1fs figures=%d result_json=%s",
             result.returncode, result.duration_s, len(figures), bool(result_json),
@@ -15896,6 +15900,8 @@ class Engine:
             evidence_note = f"{evidence_note}\n\n{once_note}".strip()
         if typed_note := self._typed_figures_note():
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
+        if run_note := self._run_checks_note():
+            evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (
