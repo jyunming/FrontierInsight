@@ -183,9 +183,9 @@ same PR that adds, splits or renames one.
   `Engine._stop_if_the_search_cannot_start` (in `_node_design`) stops a search that cannot start (no block or budget,
   `split_analysis: false`, `background_jobs`) before anything is implemented or run. Before it stops for a missing or
   unreadable block, `Engine._ask_plan_for_the_search` (called at the plan step, before the person reads the plan, and again
-  in `_node_design`) asks the plan's model to write the block (`optimisation_plan.ask_request`; at most twice per plan and
+  in `_node_design`) asks the plan's model to write the block (`optimisation_plan.ask_request`; at most twice and six chat calls per plan and
   per model, recorded in `.fi/search_block_asked.json`; only `study_type` and `protocol.optimisation` are kept from the
-  rewrite, `Engine._keep_only_the_search`; `plan.refresh_optimisation_section` shows the section again). The stop speaks in
+  rewrite, `Engine._keep_only_the_search`, which also keeps every part of the plan's own block that was readable; a plan saved meanwhile is not overwritten, `_PlanEditedMeanwhile`; "measure instead" is checked by `Engine._check_measure_instead`; `plan.refresh_optimisation_section` shows the section again). The stop speaks in
   plain words (`optimisation_plan.plain_gaps`) and offers another model for the plan step or
   `optimisation_plan.MEASURE_INSTEAD` as a `--revise-plan` request; it never asks a person to write the block.
 - `core/optimise.py` — the engine runs the search for the best design: `OptimisationRunner` (the executor stand-in
