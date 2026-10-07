@@ -5964,7 +5964,7 @@ class Engine:
                 node="plan_revise",
             )
             revised = _plan.strip_outer_fence(reply)
-            revised = _plan.keep_latex_in_block(revised)  # `"$\text{NILS}$"` is LaTeX, not a tab and `ext`
+            revised = _plan.keep_latex_in_block(revised)  # `"$\text{SNR}$"` is LaTeX, not a tab and `ext`
             # The block alone is asked for at most once, after the first answer: at most two calls in all.
             revised, why, asked = await self._usable_design_block(revised, ask=_attempt == 1)
             if not why or asked:
@@ -24519,7 +24519,7 @@ def _parse_json_lenient(
 
 def _read_latex_object(chunk: str, *, strict: bool = False) -> dict[str, Any] | None:
     """The JSON object in ``chunk`` after the backslashes of LaTeX a model wrote in its strings (``$\\sigma$``,
-    ``\\text{NILS}``) are kept as the LaTeX they are (:func:`core.latex_text.escape_latex_backslashes`), or ``None`` when
+    ``\\text{SNR}``) are kept as the LaTeX they are (:func:`core.latex_text.escape_latex_backslashes`), or ``None`` when
     that does not make it parse. It also catches a reply that parses but whose LaTeX came out as an escape (``\\text`` read as a
     tab and ``ext``): any other valid reply gives ``None`` here and is used exactly as parsed. ``strict`` is for a chunk
     that parsed as written: only what cannot be a real newline or tab followed by a word is taken for LaTeX (a script
