@@ -39,7 +39,7 @@ NODE = "oracle_review"
 WRITER_NODES = ("plan", "plan_revise", "design", "design_self_critique")
 #: How a person gives the review another model (the key that already names a step's model; nothing new).
 HOW_TO_NAME_ANOTHER = ("set `oracle_review: <another model your provider offers>` under `provider: node_models:` in "
-                       "the quest's config.yaml; it reads the checks when the plan is written (for this quest, do the "
+                       "the quest's config.yaml (or give it another provider's model under `provider: node_providers:`); it reads the checks when the plan is written (for this quest, do the "
                        "plan again: `--resume <quest_id> --from plan --approve-as <you>`)")
 #: The gap's first words, the same whatever the reason.
 NOT_REVIEWED = "the plan's checks were not reviewed by a second, different model"
