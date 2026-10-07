@@ -199,3 +199,15 @@ async def test_measure_instead_of_a_plan_that_listed_no_settings_is_put_back(tmp
     with pytest.raises(ValueError, match="does not say which of the plan's own settings"):
         await _revise(eng, _measure({"fin_spacing": [2.0, 3.0]}))
     assert path.read_text(encoding="utf-8") == before
+
+
+@pytest.mark.asyncio
+async def test_measure_instead_of_a_setting_the_plan_gave_no_values_for_is_refused(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Model(eng, [], _broken_draft())  # the search block cannot be read, so the plan only names its settings
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    path = plan.plan_path(eng.quest_root)
+    before = path.read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="write the values in the plan first"):
+        await _revise(eng, _measure({"fin_spacing": [999.0]}))
+    assert path.read_text(encoding="utf-8") == before

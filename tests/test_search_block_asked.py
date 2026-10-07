@@ -205,9 +205,9 @@ async def test_a_usable_block_and_a_measurement_are_not_asked_about(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_the_plain_choice_to_measure_instead_lets_the_quest_go_on(tmp_path: Path) -> None:
+async def test_the_plain_choice_to_measure_instead_needs_the_values_in_the_plan(tmp_path: Path) -> None:
     """The sentence the stop offers is a plain ``--revise-plan`` request: the plan's model turns the plan into a
-    measurement over the settings it lists, and the quest then runs it (it is not stopped for a search)."""
+    measurement over the settings it lists, and the quest then runs it (it is not stopped for a search)  once the plan states the values."""
     eng = _engine(tmp_path, [])
     model = Model(eng, [None, None], _broken_draft())
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
@@ -228,11 +228,12 @@ async def test_the_plain_choice_to_measure_instead_lets_the_quest_go_on(tmp_path
         return out
 
     eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=measure_reply)})()
-    await eng.revise_plan(op.MEASURE_INSTEAD)
-    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=[_NO_OBJECTIONS, _NO_OBJECTIONS])})()
-    eng._pause_for_human = lambda **kw: (_ for _ in ()).throw(AssertionError("stopped"))  # type: ignore[method-assign]
-    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert patch["design"]["study_type"] == "measure" and model.requests == 2
+    # The plan lists the setting but not the values it may take (its search block could not be read): the values to
+    # measure cannot be checked against anything, so the request is refused until the plan states them.
+    before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+    with pytest.raises(ValueError, match="write the values in the plan first"):
+        await eng.revise_plan(op.MEASURE_INSTEAD)
+    assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before and model.requests == 2
 
 
 @pytest.mark.asyncio

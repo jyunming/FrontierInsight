@@ -5990,6 +5990,10 @@ class Engine:
             values = values if isinstance(values, list) else [values]
             if not values:
                 raise ValueError(f"the plan was not changed to a measurement: the rewrite lists no values for {name}; plan.md is unchanged")
+            if known and variable is None:
+                raise ValueError(f"the plan was not changed to a measurement: the plan lists {name} as a setting but not the "
+                                 "values it may take, so FI cannot tell whether the values to measure are the plan's own; "
+                                 "write the values in the plan first; plan.md is unchanged")
             if not known:
                 raise ValueError(f"the plan was not changed to a measurement: the rewrite measures over {name}, which the plan "
                                  "did not list as a setting; plan.md is unchanged")
@@ -14744,28 +14748,31 @@ class Engine:
         no_numbers = reason == "no_numbers"
         crashed = reason == "crashed"
         repairs = int(state.get("exec_reflect_iter") or 0)
-        repaired = f"repaired the script {repairs} time{'s' if repairs != 1 else ''} and " if repairs else ""
-        problem = ("the experiment ran, but its result has no number in it, even after the design was asked for again, "
-                   "so FI has nothing measured to write up" if no_numbers else
-                   f"the experiment could not run to the end, even after FI {repaired}asked for the design again, "
+        # Said only when it happened: a quest with no iteration left stops on the first pass, with no second design.
+        redesigned = int(state.get("evidence_no_result_retries") or 0) >= 1
+        again = ", even after the design was asked for again" if redesigned else ""
+        repaired = f"repaired the script {repairs} time{'s' if repairs != 1 else ''}" if repairs else ""
+        after = " and ".join(x for x in (repaired, "asked for the design again" if redesigned else "") if x)
+        problem = (f"the experiment ran, but its result has no number in it{again}, so FI has nothing measured to write up"
+                   if no_numbers else
+                   f"the experiment could not run to the end{', even after FI ' + after if after else ''}, "
                    "so FI has nothing measured to write up" if crashed else
                    "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
                    "so FI has no findings to write up")
-        tried = (["ran the experiment and read the result it printed: no number in it",
-                  "sent the quest back to the design once, so the script was written again",
-                  "ran it again: the result still has no number in it"] if no_numbers else
+        redo = (["sent the quest back to the design once, so the script was written again"] if redesigned else [])
+        tried = (["ran the experiment and read the result it printed: no number in it", *redo,
+                  *(["ran it again: the result still has no number in it"] if redesigned else [])] if no_numbers else
                  [*(["asked the model to repair the script when it failed"
                      + (f" ({repairs} repair{'s' if repairs != 1 else ''})" if repairs else "")] if repairs else
-                    ["ran the experiment: it stopped with an error"]),
-                  "sent the quest back to the design once, so the script was written again",
-                  "ran it again: it still could not run to the end"] if crashed else
+                    ["ran the experiment: it stopped with an error"]), *redo,
+                  *(["ran it again: it still could not run to the end"] if redesigned else [])] if crashed else
                  ["asked the model to analyse the results",
                   "read its reply as written, then again with the backslashes of formulas kept as written",
                   "asked the model a second time for one short answer; that reply could not be read either"])
         record: dict[str, Any] = {"at": time.time(), "kind": "no_findings", "problem": problem, "tried": tried,
                                   "say": f"FI stopped: {problem}. No paper was written; the results are kept.",
-                                  "why_repairs_ended": ("the run gave no result with a number in it, even after the design was asked for again"
-                                  if no_numbers else "the script could not run to the end, even after the design was asked for again"
+                                  "why_repairs_ended": ("the run gave no result with a number in it" + again
+                                  if no_numbers else "the script could not run to the end" + again
                                   if crashed else "the analysis could not be read twice")}
         aside = self.fi_dir / "set_aside_by_stuck" / time.strftime("%Y%m%d-%H%M%S")
         for name in [n for n in _rerun_from._PAPER

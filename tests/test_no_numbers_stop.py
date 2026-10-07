@@ -111,3 +111,25 @@ def test_the_stop_names_a_crash_and_a_finished_run_differently(tmp_path: Path) -
     assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "result_json": {}})["stuck_reason"] == "no_numbers"
     assert eng._no_results_verdict({**base, "exec_result": {"returncode": 0}, "exec_give_up_reason": "x",
                                     "result_json": None})["stuck_reason"] == "no_numbers"  # it finished, printing nothing
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason, redesigned, said, not_said", [
+    ("crashed", 0, "could not run to the end", "asked for the design again"),
+    ("crashed", 1, "even after the design was asked for again", ""),
+    ("no_numbers", 0, "has no number in it", "asked for again"),
+    ("no_numbers", 1, "even after the design was asked for again", ""),
+])
+async def test_the_stop_says_only_what_happened(
+    tmp_path: Path, reason: str, redesigned: int, said: str, not_said: str,
+) -> None:
+    eng = Engine(_cfg(tmp_path))
+    out = await eng._node_stuck_no_findings({"evidence_assessment": {"stuck_reason": reason},
+                                             "evidence_no_result_retries": redesigned})
+    record = out["stuck"]
+    text = record["problem"] + " " + " ".join(record["tried"]) + " " + record["why_repairs_ended"]
+    assert said in text
+    if not_said:
+        assert not_said not in text
+    if not redesigned:
+        assert "back to the design" not in text and "again" not in text.replace("asked for again", "")
