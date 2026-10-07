@@ -33,6 +33,14 @@ def same(a: float, b: float) -> bool:
     return abs(float(a) - float(b)) <= SAME_TOLERANCE * (1.0 + max(abs(float(a)), abs(float(b))))
 
 
+def _varies(values: list[Any]) -> bool:
+    """Whether a design variable takes more than one value: numbers must differ by more than numerical noise (the same
+    relative and absolute tolerance as :func:`same`), anything else by its value."""
+    if all(_is_number(v) for v in values):
+        return not _all_same([float(v) for v in values])
+    return len({repr(v) for v in values}) > 1
+
+
 def _all_same(values: list[float]) -> bool:
     return bool(values) and all(same(v, values[0]) for v in values[1:])
 
@@ -60,8 +68,9 @@ def flat_search(rows: list[dict[str, Any]], objective: str = "the objective") ->
     the search's evaluations as FI wrote them (``status``, ``design``, ``objective``, ``constraints``); ``objective`` is
     the name the plan gives the quantity."""
     ok = [r for r in rows if isinstance(r, dict) and r.get("status") == "ok" and isinstance(r.get("design"), dict)]
-    designs = {repr(sorted((str(k), repr(v)) for k, v in r["design"].items())) for r in ok}
-    if len(ok) < MIN_DESIGNS or len(designs) < 2:
+    names = sorted({n for r in ok for n in r["design"]})
+    varied = [n for n in names if _varies([r["design"].get(n) for r in ok])]
+    if len(ok) < MIN_DESIGNS or not varied:
         return None
     if not all(_is_number(r.get("objective")) for r in ok):
         return None
@@ -69,8 +78,6 @@ def flat_search(rows: list[dict[str, Any]], objective: str = "the objective") ->
     quantities = {objective: [float(r["objective"]) for r in ok]}
     if not _all_same(quantities[objective]):
         return None
-    names = sorted({n for r in ok for n in r["design"]})
-    varied = [n for n in names if len({repr(r["design"].get(n)) for r in ok}) > 1] or names
     shown = {k: v[0] for k, v in quantities.items()}
     return _symptom(list(quantities), shown, varied, len(ok), "designs the search tried")
 

@@ -68,6 +68,16 @@ def test_numbers_that_differ_only_by_noise_are_the_same() -> None:
     assert flat.flat_search(rows) is None
 
 
+def test_designs_that_differ_only_by_noise_are_one_design() -> None:
+    noisy = [{"event": "evaluation", "n": i, "status": "ok", "design": {"fin": 2.0 + i * 1e-13, "gap": 4.0},
+              "objective": 7.0 + i * 1e-4, "constraints": {}} for i in range(4)]
+    assert flat.flat_search(noisy) is None, "one design, a tiny objective change: nothing to say"
+    same_objective = [{**r, "objective": 7.0} for r in noisy]
+    assert flat.flat_search(same_objective) is None, "noise-level differences are not distinct designs"
+    distinct = [_row(i, 1.0 + i, 7.0) for i in range(3)]
+    assert flat.flat_search(distinct) is not None
+
+
 def _check(no_effect: list[str], sensitivity: dict[str, float] | None = None, finished: bool = True) -> dict[str, Any]:
     return {"finished": finished, "checks": {"neighbourhood": {
         "status": "failed", "no_effect": no_effect, "sensitivity": sensitivity or {n: 0.0 for n in no_effect}}}}
