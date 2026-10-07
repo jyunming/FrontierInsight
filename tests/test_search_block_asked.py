@@ -215,7 +215,9 @@ async def test_the_plain_choice_to_measure_instead_needs_the_values_in_the_plan(
     eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
     with pytest.raises(Paused):
         await eng._node_design({"topic": TOPIC, "iteration": 0})
-    assert any(op.MEASURE_INSTEAD in step for step in seen[0]["steps"])
+    # The plan lists the setting but no values for it: measuring is not offered (it would be refused), only the other model.
+    assert not any(op.MEASURE_INSTEAD in step for step in seen[0]["steps"])
+    assert any("Try another model" in step for step in seen[0]["steps"]) and not any(step.startswith("2.") for step in seen[0]["steps"])
 
     async def measure_reply(messages: list[dict[str, str]], **kw: Any) -> str:
         assert op.MEASURE_INSTEAD in messages[-1]["content"]
@@ -231,7 +233,7 @@ async def test_the_plain_choice_to_measure_instead_needs_the_values_in_the_plan(
     # The plan lists the setting but not the values it may take (its search block could not be read): the values to
     # measure cannot be checked against anything, so the request is refused until the plan states them.
     before = plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
-    with pytest.raises(ValueError, match="write the values in the plan first"):
+    with pytest.raises(ValueError, match="FI did not change the plan"):
         await eng.revise_plan(op.MEASURE_INSTEAD)
     assert plan.plan_path(eng.quest_root).read_text(encoding="utf-8") == before and model.requests == 2
 
@@ -272,4 +274,4 @@ async def test_a_stop_without_an_ask_does_not_say_the_model_was_asked(tmp_path: 
         await eng._node_design({"topic": TOPIC, "iteration": 0, "clarify_answers": {"study_type": "2"}})
     steps = " ".join(seen[0]["steps"])
     assert "did not ask the plan's model" in steps and "asked the plan's model" not in steps.replace("did not ask the plan's model", "")
-    assert "Choose one" in steps and op.MEASURE_INSTEAD in steps
+    assert "Choose one" not in steps and op.MEASURE_INSTEAD not in steps and "Try another model" in steps

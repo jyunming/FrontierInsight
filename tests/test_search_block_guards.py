@@ -208,6 +208,6 @@ async def test_measure_instead_of_a_setting_the_plan_gave_no_values_for_is_refus
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
     path = plan.plan_path(eng.quest_root)
     before = path.read_text(encoding="utf-8")
-    with pytest.raises(ValueError, match="write the values in the plan first"):
+    with pytest.raises(ValueError, match="FI did not change the plan"):
         await _revise(eng, _measure({"fin_spacing": [999.0]}))
     assert path.read_text(encoding="utf-8") == before

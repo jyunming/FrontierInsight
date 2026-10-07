@@ -5490,16 +5490,17 @@ class Engine:
                  "already settled, or this design did not come from the plan).")
                 if path.is_file() else
                 "This quest has no plan file (its plan could not be written), so FI had nothing to ask the model to complete.")
-            steps.append("You do not need to write any of it yourself. Choose one:")
+            can_measure = path.is_file() and self._measure_instead_possible(path.read_text(encoding="utf-8"))
+            steps.append("You do not need to write any of it yourself. " + ("Choose one:" if can_measure else "What to do:"))
             model = ("Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) "
                      f"another model in the quest's config.yaml, then `python launch.py --update {self.quest_id}`. FI "
                      "asks that model to write the search.")
             measure = ("Measure over the settings the plan already lists instead of searching (this answers a different "
                        f"question than the best design): `--resume {self.quest_id} --revise-plan "
                        f"\"{_optim.MEASURE_INSTEAD}\"` (the quest page's Plan box on the web, `@fi /plan` in VS Code).")
-            steps += [f"1. {model}", f"2. {measure}"]
+            steps += [f"1. {model}"] + ([f"2. {measure}"] if can_measure else [])
             recommended = "Try another model for the plan step."
-            alternatives = [measure]
+            alternatives = [measure] if can_measure else []
         steps += [f"In the quest's setup: {s}." for s in setup]
         reason = gaps[0] if missing else setup[0].split(" (`")[0]
         self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping",
@@ -5949,6 +5950,25 @@ class Engine:
                     await self.supervisor.release(self.config.provider.name)
                 self._client = None
 
+    def _measure_instead_possible(self, text: str) -> bool:
+        """Whether "measure over the planned settings" can be done from this plan: it lists settings, each with a range or a
+        list of values (so :meth:`_check_measure_instead` can hold the measured values to them). Only then is it offered."""
+        design = _plan.raw_design_block(text)
+        if not isinstance(design, dict):
+            return False
+        block = (design.get("protocol") or {}).get("optimisation") if isinstance(design.get("protocol"), dict) else None
+        items = block.get("design_variables") if isinstance(block, dict) else None
+        if not isinstance(items, list) or not items:
+            return False
+        named: set[str] = set()
+        for index, item in enumerate(items, start=1):
+            variable = _optim._variable(item, index)[0]
+            if variable is None:
+                return False
+            named.add(str(variable["name"]))
+        independent = (design.get("variables") or {}).get("independent") if isinstance(design.get("variables"), dict) else None
+        return all(str(n) in named for n in independent) if isinstance(independent, list) else True
+
     def _check_measure_instead(self, before_text: str, after_text: str) -> str:
         """``after_text`` when a rewrite to "measure over the planned settings instead of searching" kept the plan's question
         and settings: its hypothesis, expected outcome and measured quantity are unchanged, and every setting it measures
@@ -5993,7 +6013,7 @@ class Engine:
             if known and variable is None:
                 raise ValueError(f"the plan was not changed to a measurement: the plan lists {name} as a setting but not the "
                                  "values it may take, so FI cannot tell whether the values to measure are the plan's own; "
-                                 "write the values in the plan first; plan.md is unchanged")
+                                 "FI did not change the plan")
             if not known:
                 raise ValueError(f"the plan was not changed to a measurement: the rewrite measures over {name}, which the plan "
                                  "did not list as a setting; plan.md is unchanged")
