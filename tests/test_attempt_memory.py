@@ -358,7 +358,8 @@ def _cfg(root: Path, *, repairs: int = 0, mode: str = "shadow"):
 
     return Config(topic="smoke-test topic for the engine", title="engine-smoke", provider=ProviderConfig(name="openai"),
                   engine=EngineConfig(max_iterations=1, review_loop=False, auto_accept_on_pass=True,
-                                      exec_reflect_max_iterations=repairs, attempt_memory=mode),
+                                      exec_reflect_max_iterations=repairs, attempt_memory=mode,
+                                      oracle_check="off"),  # these tests are about repeated crashes, not the known-answer check
                   execution=ExecutionConfig(sandbox="venv", timeout_s=120),
                   knowledge=KnowledgeConfig(enabled=False), output=OutputConfig(output_dir=root))
 
