@@ -107,3 +107,45 @@ async def test_a_refine_that_reopens_the_quest_moves_the_stop_aside(
     assert len(list((eng.fi_dir / "set_aside_by_stuck").glob("*/STUCK.json"))) == 1
     assert not any(i.kind == "stuck" for i in todo.waiting(eng.quest_root))
     assert art.paper_md is not None and art.paper_md.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_generators_are_never_called_while_the_stop_record_is_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard on its own: usable artifacts (a paper on disk, a paper path) and the stop record present, so only the
+    guard keeps the paper, slides and poster from being made."""
+    import launch
+    from core.engine import QuestArtifacts
+    from core.provider import ProxySupervisor
+
+    root = tmp_path / "q"
+    (root / "needs").mkdir(parents=True)
+    (root / "paper").mkdir()
+    (root / "paper" / "paper.md").write_text("# a paper\n\nSome text.\n", encoding="utf-8")
+    (root / "needs" / "STUCK.json").write_text("{}", encoding="utf-8")
+    called: list[str] = []
+
+    def _record(name: str):
+        def generate(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+            called.append(name)
+            return {}
+        return generate
+
+    async def _record_async(self, *a, **k):  # noqa: ANN001, ANN002, ANN003
+        called.append("async")
+        return {}
+
+    monkeypatch.setattr(launch.PaperGenerator, "generate", _record("paper"))
+    monkeypatch.setattr(launch.SlideGenerator, "generate", _record_async)
+    monkeypatch.setattr(launch.PosterGenerator, "generate", _record_async)
+    monkeypatch.setattr(launch.SpeechGenerator, "generate", _record_async)
+    cfg = _cfg(tmp_path)
+    cfg.output.kinds = ["paper_md", "paper_pdf", "slides", "poster"]
+    art = QuestArtifacts(quest_id="q", quest_root=root, paper_md=root / "paper" / "paper.md")
+    assert await launch._run_generators(cfg, art, supervisor=ProxySupervisor()) == {}
+    assert called == []
+    # Without the record the same artifacts do reach the generators (the test can tell the guard from its absence).
+    (root / "needs" / "STUCK.json").unlink()
+    await launch._run_generators(cfg, art, supervisor=ProxySupervisor())
+    assert "paper" in called
