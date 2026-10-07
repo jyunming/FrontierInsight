@@ -124,7 +124,7 @@ _EVIDENCE = ["needs/EVIDENCE.json", "needs/receipts/evidence_gate.json", "needs/
 _RUN_RECORDS = ["needs/RUN_MANIFEST_CHECK.json", "needs/ORACLE_CHECK.json", "needs/PROTOCOL_CHECK.json",
                 "needs/ENVIRONMENT.json", "needs/HIDDEN_CHECK.json"]
 # The model's functions written and checked one at a time, and the equation tests: they follow the code.
-_FUNCTION_STEPS = [".fi/function_steps.json", ".fi/equation_tests.json"]
+_FUNCTION_STEPS = [".fi/function_steps.json", ".fi/equation_tests.json", ".fi/code_review.json"]
 # The frozen protocol: what a redesign replaces. The amendments and the saved versions stay, so the new protocol is
 # frozen as a change made after results were seen and the paper says so.
 _PROTOCOL = ["needs/FROZEN_PROTOCOL.json", "needs/PROTOCOL_AMENDMENT_PENDING.json", "needs/AMENDMENT_APPROVAL.json"]
