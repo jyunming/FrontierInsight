@@ -393,7 +393,7 @@ _SERVED = re.compile(r"\[FI\] provider=([^,\s]+), transport=([^,\s]+), model=([^
 
 def served_by(exc: BaseException) -> tuple[str, str, str] | None:
     """``(provider, model, node)`` of the call that failed, read from the note every model call attaches to its error
-    (``[FI] provider=openai, transport=http, model=kimi-k3, node=implement``): the provider that actually served the
+    (``[FI] provider=openai, transport=http, model=big-model, node=implement``): the provider that actually served the
     step, which is not the quest's main one when the step runs on its own (``provider.node_providers``). ``None`` when the
     error carries no such note."""
     for e in _chain(exc):

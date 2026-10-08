@@ -467,10 +467,12 @@ def test_a_paired_metric_printed_without_pair_ids_stops_the_research_quest(
 ) -> None:
     monkeypatch.setattr("core.engine.LLMClient.chat", _fake(PAIRED, SIM, ANALYSIS_TRIAL, []))
     engine, artifacts, pauses = _run_through_pauses(_config(tmp_path))
-    assert pauses and "read and edit the plan" not in pauses[-1], pauses
-    text = (engine.quest_root / "NEXT_STEP.md").read_text(encoding="utf-8")
+    # Nobody is asked to change the analysis: FI sends it back, and when that does not remove the difference the quest
+    # ends without a paper and says what it tried.
+    assert artifacts.paper_md is None and all("read and edit the plan" in p for p in pauses), pauses
+    record = json.loads((engine.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    text = record["problem"] + " " + " ".join(record["tried"])
     assert "final_size_pair_id" in text, text[:1200]
-    assert _evidence(engine.quest_root)["status"] != "publication_ready"
 
 
 def test_a_paired_metric_with_pair_ids_pairs_trials_that_share_a_seed(

@@ -669,10 +669,11 @@ def test_a_protocol_stop_names_the_script_the_difference_was_found_in(tmp_path: 
     engine.quest_root.mkdir(parents=True, exist_ok=True)
     seen: dict[str, Any] = {}
     engine._pause_for_human = lambda **kw: seen.update(kw)  # type: ignore[method-assign]
-    engine._pause_for_protocol([Mismatch("runs", "runs_per_setting", [200.0], [50.0], "N_RUNS in simulate.py, line 7")], [])
-    how = seen["steps"][1]
-    assert str(engine.quest_root / "code" / "simulate.py") in how
-    assert "experiment.py" not in how
+    engine._stop_for_protocol([Mismatch("runs", "runs_per_setting", [200.0], [50.0], "N_RUNS in simulate.py, line 7")])
+    assert seen == {}, "nobody is asked to change the script"
+    stop = engine._cannot_repair_stop()
+    said = stop["exec_result"]["cannot_repair"]
+    assert "simulate.py" in said and "experiment.py" not in said
 
 
 async def test_evidence_gate_broaden_with_retrieval_off_writes_and_keeps_the_verdict(

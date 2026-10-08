@@ -273,20 +273,19 @@ def test_a_two_script_quest_that_must_keep_both_stops_when_the_extension_returns
     code_dir.mkdir(parents=True)
     (code_dir / "simulate.py").write_text("def run_trial(seed):\n    return {}\n", encoding="utf-8")
     (code_dir / "experiment.py").write_text("print('old')\n", encoding="utf-8")
-    stopped: list[str] = []
-
-    def pause(**kw: Any) -> None:
-        stopped.append(kw["kind"])
-        raise RuntimeError("paused")
 
     async def chat(prompt: str, *, node: str = "") -> str:
         return "```python\nprint('one script')\n```"
 
+    def asked(**kw: Any) -> None:
+        raise AssertionError(f"a person was asked to go on: {kw['kind']}")
+
     eng._chat = chat  # type: ignore[method-assign]
-    eng._pause_for_contract = pause  # type: ignore[method-assign]
-    with pytest.raises(RuntimeError, match="paused"):
-        asyncio.run(eng._node_implement({**STATE, "design": {}, "refine_extend": ["n=64"]}))  # type: ignore[arg-type]
-    assert stopped == ["split"]
+    eng._pause_for_human = asked  # type: ignore[method-assign]
+    asyncio.run(eng._node_implement({**STATE, "design": {}, "refine_extend": ["n=64"]}))  # type: ignore[arg-type]
+    # The quest ends in the honest stop at the run step; the scripts it had are left as they were.
+    stop = eng._cannot_repair_stop()
+    assert stop is not None and "did not hold both scripts" in stop["exec_result"]["cannot_repair"]
     assert (code_dir / "experiment.py").read_text(encoding="utf-8") == "print('old')\n"
 
 

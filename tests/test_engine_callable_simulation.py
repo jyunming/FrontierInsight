@@ -185,7 +185,9 @@ def test_a_missing_label_is_a_gap_below_independently_validated(tmp_path: Path) 
     assert any("E1" in g for g in got["gaps"]), got["gaps"]
 
 
-def test_under_research_a_missing_label_stops_before_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_under_research_a_missing_label_goes_to_the_repair_and_then_ends_in_the_honest_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     engine = _engine(tmp_path)
     (engine.quest_root / "code").mkdir(parents=True, exist_ok=True)
     (engine.quest_root / "code" / "simulate.py").write_text(UNLABELLED, encoding="utf-8")
@@ -193,14 +195,19 @@ def test_under_research_a_missing_label_stops_before_the_run(tmp_path: Path, mon
     stops: list[dict[str, Any]] = []
     monkeypatch.setattr(engine, "_pause_for_human", lambda **kw: stops.append(kw))
     assert engine._check_equation_labels({}) and stops == [], "outside research: a warning, no stop"
+    assert engine._code_problems_stop({}) is None
     assert "does not mark where it implements equation E1" in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
     monkeypatch.setattr(engine.config, "rigor_profile", "research")
-    engine._check_equation_labels({})
-    assert len(stops) == 1 and stops[0]["kind"] == "equation_labels" and stops[0]["payload"]["contract_stage"]
-    assert any("`# E1`" in step for step in stops[0]["steps"])
-    # A person adds the label and resumes: the script on disk is read again and nothing stops.
+    # Under research the missing label goes to the repair like a failed run, naming it; nobody is asked to add it.
+    patch = engine._code_problems_stop({"exec_reflect_iter": 0})
+    assert patch is not None and stops == []
+    assert "`# E1`" in patch["exec_result"]["stderr_tail"] and "cannot_repair" not in patch["exec_result"]
+    # With the repairs used up the quest ends in the honest stop.
+    last = engine._code_problems_stop({"exec_reflect_iter": engine.config.engine.exec_reflect_max_iterations})
+    assert last is not None and "E1" in last["exec_result"]["cannot_repair"] and stops == []
+    # Once the repair has labelled the equation the script is read again and nothing is sent back.
     (engine.quest_root / "code" / "simulate.py").write_text(SIMULATE, encoding="utf-8")
-    assert engine._check_equation_labels({}) == [] and len(stops) == 1
+    assert engine._check_equation_labels({}) == [] and engine._code_problems_stop({"exec_reflect_iter": 0}) is None
 
 
 def test_a_simulate_py_left_beside_a_one_script_quest_is_not_what_is_checked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
