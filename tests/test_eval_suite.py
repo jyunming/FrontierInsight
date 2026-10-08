@@ -626,3 +626,31 @@ def test_the_manifest_is_read_again_so_another_writers_change_is_kept(tmp_path: 
     out = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: pid == 77, sleep=lambda s: [setattr(p, "code", 0) for p in procs],
                        interval=0, pid=77)
     assert len(procs) == 2 and out["topics"][names[1]]["state"] == "adopted"
+
+
+# ------------------------------------------------------------------- a paper that does part of the topic
+
+def test_grader_prompt_states_the_partial_scope_rule(tmp_path: Path) -> None:
+    rdir, suite = _round(tmp_path, {"alpha": "paper"})
+    collect.collect_round(rdir)
+    text = grade.write_templates(rdir, {t: suite.topic_text(t) for t in suite.topic_files})[0].read_text(encoding="utf-8")
+    assert "does PART of the topic correctly AND states plainly" in text
+    assert "on what the paper DOES" in text
+    assert "without saying so" in text and "fails D5" in text
+    assert "PARTS NOT DONE:" in text
+
+
+def test_parts_not_done_are_read_from_the_report(tmp_path: Path) -> None:
+    row = "| r | d | b | m | 100 | 100 | n/a | 100 | 50 | 100 | 90 | pass | pass | pass | 4 | 1 | n |\n"
+    stated = grade.import_grade(tmp_path / "r", "a", _w_and(tmp_path / "a.md", row + "PARTS NOT DONE: 2 | STATED: yes\n"))
+    silent = grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 2 | STATED: no\n"))
+    assert stated["parts_not_done"] == 2 and stated["parts_stated"] is True
+    assert silent["parts_stated"] is False
+
+
+def test_a_partial_paper_is_trustworthy_only_when_it_says_what_it_leaves_out() -> None:
+    gates = {"g1": "pass", "g2": "pass", "g3": "pass"}
+    assert collect.paper_status("paper", {**gates, "parts_not_done": 2, "parts_stated": True}, "") == "trustworthy"
+    assert collect.paper_status("paper", {**gates, "parts_not_done": 2, "parts_stated": False}, "") == "flawed"
+    assert collect.paper_status("paper", {**gates, "parts_not_done": 0, "parts_stated": None}, "") == "trustworthy"
+    assert collect.paper_status("paper", gates, "") == "trustworthy"
