@@ -105,6 +105,7 @@ from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
 from .run_checks import RunChecksMixin
+from .result_checks import ResultChecksMixin
 from .static_checks import StaticChecksMixin
 from . import record_claims as _record_claims
 from . import numeric_warnings as _numeric
@@ -654,7 +655,7 @@ from core.config import ProviderName as _ProviderName  # noqa: E402
 #: which reports the vendor that answered (copilot, customendpoint, ollama-models).
 _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
-class Engine(RunChecksMixin, StaticChecksMixin):
+class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -13987,6 +13988,9 @@ class Engine(RunChecksMixin, StaticChecksMixin):
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
             self._clear_stale_figures()
             return self._manifest_stop(manifest_found, manifest_attempts_next or manifest_attempts)
+        # What the run reports is compared with what ran; a fault is sent back like a failed run, and what stays is left out
+        # (core/result_checks.py).
+        result, failed_script = await self._results_match_run(state, result, failed_script, split)
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES
