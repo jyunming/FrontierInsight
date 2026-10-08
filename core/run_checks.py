@@ -137,6 +137,7 @@ class RunChecksMixin:
 
         code = path.read_text(encoding="utf-8")
         prompt = self._prompts["execute_reflect"].substitute(  # type: ignore[attr-defined]
+            topic_block=self._topic_block(),
             previous_code=code, returncode="(not run yet)", stdout_tail=_typed.directive(found), stderr_tail="",
             duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
             reflect_history_block=_e._format_reflect_history([]),

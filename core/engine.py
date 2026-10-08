@@ -5550,6 +5550,11 @@ class Engine(RunChecksMixin):
         except OSError as e:
             self._log.warning("[plan] couldn't record how far the plan covers the topic: %r", e)
 
+    def _topic_block(self) -> str:
+        """The topic and the formulas it states, as every request that writes or repairs code is shown them
+        (:func:`core.topic_requirements.code_block`): a sentence that states a result is left out."""
+        return _topic_req.code_block(self.config.topic, self._topic_requirements_read())
+
     def _reader_and_planner(self, node: str) -> tuple[str, str, bool | None]:
         """``(reviewer, planner, same_model)`` for the last call under ``node``, as :meth:`_review_oracles` decides it."""
         answered, planned = self._chat_provenance(node), self._chat_provenance("plan")
@@ -8619,6 +8624,7 @@ class Engine(RunChecksMixin):
         self._log.info("[implement_outline] drafting scaffold + signatures")
         try:
             prompt = self._prompts["implement_outline"].substitute(
+                topic_block=self._topic_block(),
                 design_block=self._code_design_block(state, names_only=True),
                 clarify_block=_format_clarify(state),
                 timeout_s=str(self.config.execution.timeout_s),
@@ -8681,6 +8687,7 @@ class Engine(RunChecksMixin):
             # request below asks for the two scripts only.
             await self._fill_model_functions(state, outline)
             prompt = body_prompt.substitute(
+                topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 clarify_block=_format_clarify(state),
                 outline_block=json.dumps(outline, indent=2),
@@ -8708,6 +8715,7 @@ class Engine(RunChecksMixin):
             else:
                 self._log.info("[implement] generating experiment code (legacy one-shot)")
             prompt = self._prompts["implement"].substitute(
+                topic_block=self._topic_block(),
                 design_block=self._code_design_block(state),
                 timeout_s=str(self.config.execution.timeout_s),
                 skills_block=(self._skills_block(state) + self._dropped_skills_note(state)) or "(no skills selected for this quest)",
@@ -9167,6 +9175,7 @@ class Engine(RunChecksMixin):
         """ONE repair of one script's plotting code: kept only if it parses and has fewer typed-in series than before."""
         code = path.read_text(encoding="utf-8")
         prompt = self._prompts["execute_reflect"].substitute(
+            topic_block=self._topic_block(),
             previous_code=code, returncode="(not run yet)", stdout_tail=_figdata.directive(found), stderr_tail="",
             duration_s="0.00", figures_count="0", result_json_present="no (not run yet)",
             reflect_history_block=_format_reflect_history([]),
@@ -9796,6 +9805,7 @@ class Engine(RunChecksMixin):
         """ONE repair of one script that contradicts the protocol: ``(code, deps, the repair call itself failed)``. Kept
         only if it parses and no longer contradicts it."""
         prompt = self._prompts["execute_reflect"].substitute(
+            topic_block=self._topic_block(),
             previous_code=code,
             returncode="(not run yet)",
             stdout_tail=_protocol_directive(protocol, mismatches),
@@ -10537,7 +10547,6 @@ class Engine(RunChecksMixin):
         if not plan_for:
             return False
         values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
-        topic = _pairs.scrub(" ".join(str(state.get("topic") or self.config.topic or "").split())[:1500], values)
         equations = _code_review.equations_view(protocol if isinstance(protocol, dict) else None, values)
         ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
         package = self._package_in_use(state) or ""
@@ -10556,7 +10565,8 @@ class Engine(RunChecksMixin):
                 except OSError:
                     continue
                 prompt = self._prompts["code_review_repair"].substitute(
-                    topic=topic or "(not stated)", equations=equations, count=str(len(batch)),
+                    topic=_pairs.scrub(self._topic_block(), values) or "(not stated)", equations=equations,
+                    count=str(len(batch)),
                     findings=_code_review.findings_text(batch), files=f"### {rel}\n```python\n{old.rstrip()}\n```",
                     package=package or "(none)")
                 self._log.warning("[code_review] sending %d finding(s) to be repaired in %s: %s", len(batch), rel,
@@ -10718,7 +10728,7 @@ class Engine(RunChecksMixin):
                          "module": self._prompts["implement_module_repair"]},
                 chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
                 max_calls=_function_steps.MAX_CALLS, constants=constants, install=self._install_packages,
-                declared=deps)
+                declared=deps, topic_block=self._topic_block())
             outcome = await filler.run_all(specs)
             if outcome.status == "done":
                 self._log.info("[implement] the model's package is written: %d function(s), each checked "
@@ -10854,7 +10864,8 @@ class Engine(RunChecksMixin):
             new, why = await _function_steps.repair_one(
                 source=source, name=where["function"], signature=header, equation=equation, equation_block=block,
                 problem=problem, prompt=self._prompts["implement_function_repair"],
-                chat=lambda prompt: self._chat(prompt, node="implement"), package=where["file"].split("/")[0])
+                chat=lambda prompt: self._chat(prompt, node="implement"), package=where["file"].split("/")[0],
+                topic_block=self._topic_block())
         except _ModelAnswerProblem:
             raise
         except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the code as it was
@@ -12390,6 +12401,7 @@ class Engine(RunChecksMixin):
                 files = _improve.snapshot(root)
                 allowed = _improve.editable(root)
                 prompt = self._prompts["improve"].substitute(
+                    topic_block=self._topic_block(),
                     criteria_block=_improve.criteria_block(countable, protocol),
                     values_block="\n".join(f"- {part}" for part in _improve.values_line(best["rows"]).split("; ")),
                     history_block=_improve.history_block(record["rounds"]),
@@ -13632,6 +13644,7 @@ class Engine(RunChecksMixin):
         self._oracle_patch_summary = ""
         already = {str(n).strip().lower() for n in [*(disputed or []), *(passing or [])]}
         prompt = self._prompts["execute_reflect"].substitute(
+            topic_block=self._topic_block(),
             previous_code=code,
             returncode="(the oracle run did not pass)",
             # The contract of the layout this quest has: a two-script quest's simulation is a function FI calls, with
@@ -13795,6 +13808,7 @@ class Engine(RunChecksMixin):
                 code_path.name, self.config.engine.execute_replicates,
             )
         prompt = self._prompts["execute_reflect"].substitute(
+            topic_block=self._topic_block(),
             # Whole: a repair that returns the script must not lose the tail of it.
             previous_code=code,
             returncode="(not run yet)",
@@ -15361,6 +15375,7 @@ class Engine(RunChecksMixin):
         # The one round the redraw gets, spent whatever the model answers.
         spent: QuestState = {"figure_overlap_repaired": True} if overlaps else {}
         prompt = self._prompts["execute_reflect"].substitute(
+            topic_block=self._topic_block(),
             # Whole, always: the reply is the full corrected script, and a model shown only the first 8000 characters
             # has to make up the rest. A live kimi-k3 quest's 15,706-character analysis was repaired three times from
             # its first half; one repair came back with a helper cut off mid-name, and the run never recovered.

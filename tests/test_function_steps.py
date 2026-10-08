@@ -258,8 +258,8 @@ async def test_a_module_that_is_missing_and_cannot_be_installed_is_the_function_
 
 def test_the_two_prompts_are_templates_with_their_parts() -> None:
     fill = PROMPTS["fill"].substitute(model_block="m", equation_block="E1: y", function_block="def f(a):", related_block="(none)",
-                                      constants_block="(none)", package="p")
+                                      constants_block="(none)", package="p", topic_block="t")
     assert "ONE equation" in fill and "Function Body" in fill
     repair = PROMPTS["repair"].substitute(equation_block="E1: y", function_block="def f(a): pass", problem="p",
-                                          related_block="(none)", package="p")
+                                          related_block="(none)", package="p", topic_block="t")
     assert "repairing ONE function" in repair

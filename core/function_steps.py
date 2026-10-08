@@ -549,7 +549,9 @@ class FunctionFiller:
     def __init__(self, *, quest_root: Path, package: str, protocol: dict[str, Any] | None, summary: str,
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, log: Any, repairs: int = 2,
                  max_calls: int = 30, constants: str = "", install: InstallFn | None = None,
-                 module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None) -> None:
+                 module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None,
+                 topic_block: str = "") -> None:
+        self.topic_block = topic_block or "(the topic is not available)"
         self.root, self.package, self.protocol, self.summary = Path(quest_root), package, protocol, summary
         self.prompts, self.chat, self.run, self.log = prompts, chat, run, log
         self.install, self.module_repairs = install, max(0, int(module_repairs))
@@ -730,7 +732,8 @@ class FunctionFiller:
                 new, _why = await repair_one(
                     source=source, name=who, signature=other.signature, equation=other.equation,
                     equation_block=self._equation_block(other.equation), problem=directive,
-                    prompt=self.prompts["repair"], chat=self.chat, package=self.package)
+                    prompt=self.prompts["repair"], chat=self.chat, package=self.package,
+                    topic_block=self.topic_block)
             except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the module as it was
                 new = None
                 self.log.warning("[implement] the repair of %s could not be asked for: %r", who, e)
@@ -775,13 +778,15 @@ class FunctionFiller:
                 prompt = self.prompts["fill"].substitute(
                     model_block=self.summary or "(not stated)", equation_block=self._equation_block(spec.equation),
                     function_block=f"{spec.signature}\n    # {spec.purpose}", related_block=_text_block(related),
-                    constants_block=self.constants or "(none)", package=self.package)
+                    constants_block=self.constants or "(none)", package=self.package,
+                    topic_block=self.topic_block)
             else:
                 current = _find(source, spec.name)
                 prompt = self.prompts["repair"].substitute(
                     equation_block=self._equation_block(spec.equation),
                     function_block=ast.get_source_segment(source, current) if current is not None else spec.signature,
-                    problem=problem, related_block=_text_block(related), package=self.package)
+                    problem=problem, related_block=_text_block(related), package=self.package,
+                    topic_block=self.topic_block)
             try:
                 reply = await self.chat(prompt)
             except Exception as e:  # noqa: BLE001 -- a call that failed is a failed attempt
@@ -972,7 +977,8 @@ class FunctionFiller:
             source = self.model_path.read_text(encoding="utf-8")
             passing_block, failing_block = self._module_blocks(specs, record)
             prompt = self.prompts["module"].substitute(package=self.package, passing_block=passing_block,
-                                                        failing_block=failing_block, module=source.rstrip("\n"))
+                                                        failing_block=failing_block, module=source.rstrip("\n"),
+                                                        topic_block=self.topic_block)
             self.log.info("[implement] repairing the module for %s; %s must keep passing", ", ".join(failing(record)),
                           ", ".join(s.name for s in specs if record["functions"][s.name]["status"] == DONE) or "no function")
             try:
@@ -1045,11 +1051,12 @@ class FunctionFiller:
 
 
 async def repair_one(*, source: str, name: str, signature: str, equation: str, equation_block: str, problem: str,
-                     prompt: string.Template, chat: ChatFn, package: str = "") -> tuple[str | None, str]:
+                     prompt: string.Template, chat: ChatFn, package: str = "", topic_block: str = "") -> tuple[str | None, str]:
     """ONE repair of one function in ``source`` (a module's text), alone: ``(new module text, "")`` or ``(None, why)``.
     The request holds that function, its equation and the problem, not the script."""
     node = _find(source, name)
     current = ast.get_source_segment(source, node) if node is not None else signature
     reply = await chat(prompt.substitute(equation_block=equation_block, function_block=current or signature,
-                                         problem=problem, related_block="(none)", package=package or "the package"))
+                                         problem=problem, related_block="(none)", package=package or "the package",
+                                         topic_block=topic_block or "(the topic is not available)"))
     return replace_function(source, name, reply_code(reply), signature=signature, equation=equation)

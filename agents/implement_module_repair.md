@@ -10,6 +10,12 @@ Rules:
 - No scenario values in the package (no grid values, sizes, seeds, thresholds or file paths); every parameter is an argument.
 - Do not remove an import another function needs.
 
+# The topic, as the person wrote it
+
+This is what the study is for. The plan below was written from it; where the plan and the topic disagree about a formula, a setting or a quantity, the topic is the specification.
+
+$topic_block
+
 # The functions that already pass (they must keep passing)
 
 $passing_block

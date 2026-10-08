@@ -12,6 +12,12 @@ The model behind a study's numbers is kept in a package, one function per equati
 - Return the equation's output as the signature says.
 - Reply with ONE fenced Python block holding the function (and, if it needs them, its import lines and small helper functions). Nothing else.
 
+# The topic, as the person wrote it
+
+This is what the study is for. The plan below was written from it; where the plan and the topic disagree about a formula, a setting or a quantity, the topic is the specification.
+
+$topic_block
+
 # The model
 
 $model_block
