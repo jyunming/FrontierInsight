@@ -38,7 +38,7 @@ _NODE_STAGE = {
     "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
     "implement_function_repair": "code", "implement_module_repair": "code", "code_review_repair": "code",
-    "code_review": "code", "oracle_review.code": "code",
+    "code_review": "code", "oracle_review.code": "code", "code_review.repair": "code", "oracle_review.code.repair": "code",
     "oracle_review.topic": "plan",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
@@ -949,7 +949,11 @@ def _issue_lines(code: dict[str, Any]) -> list[str]:
     lines += ["| id | where | what | changes a result | shown by a failing test | repaired | still open |",
               "| --- | --- | --- | --- | --- | --- | --- |"]
     for row in code["issues"][:40]:
-        shown = {True: "yes", False: "no: the test passed on the code, so it was not repaired", None: "not tested"}[row["demonstrated"]]
+        if row["demonstrated"] is False:
+            shown = ("no: the test passed on the code, so it was not repaired" if "passes on the current code" in row["reason"]
+                     else "no usable test could be written, so it was not repaired")
+        else:
+            shown = "yes" if row["demonstrated"] else "not tested"
         repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
         if row["plan_problem"]:
             still = "plan problem: the plan contradicts itself, asked of the plan's model"

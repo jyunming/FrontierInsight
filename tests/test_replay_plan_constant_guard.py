@@ -133,3 +133,39 @@ async def test_a_repair_that_also_swaps_the_constant_for_the_swept_setting_is_no
     eng2 = _engine(tmp_path / "ok", monkeypatch, flagged, json.dumps({"code": fixed, "patch_summary": "only the fault"}))
     assert await eng2._static_gate({}) is None
     assert (eng2.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == fixed
+
+
+@pytest.mark.asyncio
+async def test_the_repair_of_a_readers_finding_may_not_overwrite_the_plans_constant_either(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, this_python: None) -> None:
+    """The second channel that rewrites code (a finding of the code reader, repaired after a failing test) is held to the
+    same rule: the plan's constant is never replaced by the swept setting."""
+    from core import code_review as cr
+    from core import finding_repair as fr
+    from tests.test_code_review import CHANGED_TEST
+
+    eng = _engine(tmp_path, monkeypatch, BEFORE, "")
+    line = next(n for n, text in enumerate(BEFORE.splitlines(), 1) if READ_TEXT in text)
+    problems = cr.parse_logic({"findings": [{"where": f"simulate.py:{line}", "what": "the reference follows the wrong thing",
+                                             "why": "w", "fix": "f", "severity": "high", "quantity": "reference",
+                                             "changes_result": True}]}, [])
+    record: dict[str, Any] = {"same_model": False, "reviewer": "other-model"}
+    cr.note_reading(record, "v", problems, eng.quest_root / "code")
+    # The reply is the function with the plan's constant read from the swept setting, as the guard's own rewrite did.
+    swapped = "\n".join(BEFORE.splitlines()[3:]).replace(READ_TEXT, REWRITE_LINE) + "\n"
+    assert REWRITE_LINE in swapped and READ_TEXT not in swapped
+
+    class Swapping(_Client):
+        async def chat(self, messages: list[dict[str, str]], **kw: Any) -> str:
+            prompt = messages[-1]["content"]
+            self.asked.append(prompt)
+            if prompt.lstrip().startswith(fr.TEST_HEAD):
+                return "```python\n" + CHANGED_TEST.format(rel="simulate.py") + "```"
+            return "```python\n" + swapped + "```"
+
+    eng._client = Swapping("")  # type: ignore[assignment]
+    assert await eng._repair_review_findings({}, record, PROTOCOL, "code_review") is False
+    assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == BEFORE
+    (issue,) = record["issues"].values()
+    assert issue["demonstrated"] is True and issue["outcome"] == "not repaired"
+    assert all(r["outcome"] == "rejected" and "replaced a constant the plan defines" in r["why"] for r in issue["repairs"])

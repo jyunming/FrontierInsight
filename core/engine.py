@@ -119,6 +119,7 @@ from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report
 from . import code_findings as _code_findings
+from . import grid_keys as _grid_keys
 from . import finding_repair as _finding_repair
 from . import function_steps as _function_steps
 from . import hidden_check as _hidden
@@ -10791,14 +10792,19 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if (self.config.engine.oracle_check == "off" or not self._runs_code(state)
                 or not (code / "experiment.py").is_file() or self.config.execution.background_jobs):
             return None
-        protocol = self._protocol_block(state)
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
+        protocol = self._protocol_block(state)
         reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
                                         marks=_code_review.constant_marks(code))
         if not reqs:
             return None
         review_node = self._review_node("code_review")
         for _round in range(_code_review.MAX_SEND_BACKS + 2):
+            if _round:
+                # A plan the plan's model rewrote to resolve a contradiction is the plan the next reading is made against.
+                protocol = self._protocol_block(state)
+                reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
+                                                marks=_code_review.constant_marks(code)) or reqs
             version = _code_review.version(code)
             record = _code_review.load(self.quest_root)
             if record.get("read_version") == version and record.get("version") == version:
@@ -10996,7 +11002,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         env = _finding_repair.Env(
             root=self.quest_root, code=code, record=record, save=lambda: _code_review.save(self.quest_root, record),
             ask=ask, run_tests=run_tests, snapshot=snapshot, static=static,
-            keeps=lambda old, new, rel: _code_review.repair_problem(old, new, rel, equations=ids, package=package),
+            keeps=lambda old, new, rel: (
+                _code_review.repair_problem(old, new, rel, equations=ids, package=package)
+                or _grid_keys.rejects({rel: old}, {rel: new}, *self._static_inputs(state))),
             prompts=self._prompts, topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",
             equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
             scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,

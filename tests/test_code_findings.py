@@ -223,12 +223,16 @@ def test_the_quality_report_lists_each_finding_by_id_with_what_a_test_showed_and
                              severity="high"),
                       _logic("experiment.py:5", "the ratio ignores the stiffness", "damping_ratio", changes_result=True),
                       _logic("experiment.py:11", "a note is missing", "settling_time", changes_result=False),
-                      _logic("simulate.py:2", "the plan defines it two ways", "quality", plan_conflict=True, changes_result=True)],
+                      _logic("simulate.py:2", "the plan defines it two ways", "quality", plan_conflict=True, changes_result=True),
+                      _logic("experiment.py:12", "a fifth fault", "fifth_quantity", changes_result=True)],
              code)
     by_quantity = {i["quantity"]: i for i in cf.issues_of(record).values()}
     by_quantity["qualityfactor"].update(demonstrated=True, outcome=cf.FIXED, fixed_by="model-a")
     by_quantity["dampingratio"].update(demonstrated=True, outcome=cf.GAVE_UP, reason="no repair passed its test")
-    by_quantity["settlingtime"].update(demonstrated=False, outcome=cf.NOT_DEMONSTRATED)
+    by_quantity["settlingtime"].update(demonstrated=False, outcome=cf.NOT_DEMONSTRATED,
+                                       reason="the test written for this finding passes on the current code")
+    by_quantity["fifthquantity"].update(demonstrated=False, outcome=cf.NOT_DEMONSTRATED,
+                                        reason="no test showed it (the reply held no test)")
     by_quantity["quality"].update(outcome=cf.PLAN_PROBLEM)
     root = tmp_path / "q"
     (root / ".fi").mkdir(parents=True)
@@ -245,5 +249,6 @@ def test_the_quality_report_lists_each_finding_by_id_with_what_a_test_showed_and
     text = qr.render(report)
     assert "### Findings of the code reader, by id" in text and "Repaired by: model-a (1)." in text
     assert "yes, by model-a" in text and "yes, and it changes a result" in text
-    assert "no: the test passed on the code, so it was not repaired" in text and "plan problem: the plan contradicts itself" in text
+    assert "no: the test passed on the code, so it was not repaired" in text
+    assert "no usable test could be written, so it was not repaired" in text and "plan problem: the plan contradicts itself" in text
     assert "shown by a failing test" in text and "distinct issue(s)" in text
