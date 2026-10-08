@@ -179,7 +179,9 @@ def view(design: Any, protocol: Any = None) -> dict[str, Any]:
     equations = [{"id": str(e.get("id") or ""), "formula": str(e.get("formula") or ""), "source": str(e.get("source") or "")}
                  for e in (model.get("equations") if isinstance(model.get("equations"), list) else []) if isinstance(e, dict)]
     assumptions = " ".join(str(a) for a in (model.get("assumptions") if isinstance(model.get("assumptions"), list) else []))
-    return {"axes": axes, "metrics": metrics, "equations": equations, "assumptions": assumptions}
+    topic_map = [m for m in (protocol.get("topic_map") if isinstance(protocol.get("topic_map"), list) else [])
+                 if isinstance(m, dict) and str(m.get("item") or "").strip() and str(m.get("by") or "").strip()]
+    return {"axes": axes, "metrics": metrics, "equations": equations, "assumptions": assumptions, "topic_map": topic_map}
 
 
 def _norm_formula(text: Any) -> str:
@@ -218,6 +220,47 @@ def _item_id(kind: str, index: int) -> str:
     return {"factors": "F", "quantities": "Q", "formulas": "M"}[kind] + str(index + 1)
 
 
+def _name_key(text: Any) -> str:
+    return " ".join(re.sub(r"[^0-9a-zA-Z]+", " ", str(text or "")).lower().split())
+
+
+def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[str, Any]) -> tuple[str, str] | None:
+    """What the plan itself says covers a topic item (``protocol.topic_map``: ``item`` = the item's name or formula, ``by`` =
+    ``setting:<name>`` / ``metric:<id>`` / ``equation:<id>``), checked here and not taken on trust: ``("ok", element)`` when
+    the named element exists in the plan (for a factor with stated levels or a range, its values cover them), ``("bad",
+    why)`` when it does not, ``None`` when the plan maps nothing for the item."""
+    wanted = {_name_key(item.get("name")), _name_key(item.get("text"))} - {""}
+    entries = [m for m in plan.get("topic_map") or [] if _name_key(m.get("item")) in wanted]
+    if not entries:
+        return None
+    why = "nothing it names exists"
+    for entry in entries:
+        head, _sep, name = str(entry["by"]).partition(":")
+        head, name = head.strip().lower(), name.strip()
+        if kind == "factors" and head in ("setting", "grid", "design_variable", "variable"):
+            axis = next((a for a in plan["axes"] if _name_key(a) == _name_key(name)), None)
+            if axis is None:
+                why = f"the setting {name} is not among the plan's settings"
+                continue
+            reach = _covers(plan["axes"][axis], item)
+            coded = reach is None and len(plan["axes"][axis]) >= len(item.get("levels") or [0])
+            if reach and not coded:
+                why = f"{reach}"
+                continue
+            return "ok", axis
+        if kind == "quantities" and head == "metric":
+            found = next((i for i, _t in plan["metrics"] if _name_key(i) == _name_key(name)), None)
+            if found is not None:
+                return "ok", found
+            why = f"the metric {name} is not among the plan's metrics"
+        if kind == "formulas" and head == "equation":
+            found = next((e["id"] for e in plan["equations"] if _name_key(e["id"]) == _name_key(name) and e["formula"].strip()), None)
+            if found is not None:
+                return "ok", found
+            why = f"the equation {name} is not among the plan's equations"
+    return "bad", why
+
+
 def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     """``(gaps, unresolved)``: the gaps a name match settles (a factor named by a setting whose values do not cover what the
     topic states for it), and the ids (``F1``, ``Q2``, ``M1``) of the items it cannot settle either way. An item a name
@@ -227,6 +270,9 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
     for i, factor in enumerate(req.get("factors") or []):
         wanted = _tokens(factor["name"])
         axis = next((a for a in plan["axes"] if wanted and (_tokens(a) <= wanted or wanted <= _tokens(a)) and _tokens(a)), None)
+        mapped = mapping_of(req, plan, "factors", factor) if axis is None else None
+        if mapped is not None and mapped[0] == "ok":
+            continue
         if axis is None:
             unresolved.append(_item_id("factors", i))
             continue
@@ -238,12 +284,18 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
     for i, quantity in enumerate(req.get("quantities") or []):
         wanted = _tokens(quantity["name"])
         if not (wanted and any(wanted <= _tokens(text) for _id, text in plan["metrics"])):
+            mapped = mapping_of(req, plan, "quantities", quantity)
+            if mapped is not None and mapped[0] == "ok":
+                continue
             unresolved.append(_item_id("quantities", i))
     for i, formula in enumerate(req.get("formulas") or []):
         mine = _norm_formula(formula["text"])
         if not (mine and any(mine in _norm_formula(e["formula"]) or (_norm_formula(e["formula"]) and
                                                                     _norm_formula(e["formula"]) in mine)
                              for e in plan["equations"])):
+            mapped = mapping_of(req, plan, "formulas", formula)
+            if mapped is not None and mapped[0] == "ok":
+                continue
             unresolved.append(_item_id("formulas", i))
     return gaps, unresolved
 
@@ -340,6 +392,19 @@ def main_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
 # the request to the plan, and what is kept of its answer
 # ---------------------------------------------------------------------------------------------------------------------
 
+def mapped_items(req: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
+    """``{item name: the plan's element}`` for every topic item the plan's own mapping covers and a name match did not find
+    (kept in the record: where the plan and a reader disagree, this is what overruled it)."""
+    out: dict[str, str] = {}
+    for kind in _SECTIONS:
+        for item in req.get(kind) or []:
+            by_name = {"factors": "factors", "quantities": "quantities", "formulas": "formulas"}[kind]
+            found = mapping_of(req, plan, by_name, item)
+            if found is not None and found[0] == "ok":
+                out[str(item.get("name") or item.get("text"))] = found[1]
+    return out
+
+
 def request(topic: str, gaps: list[dict[str, Any]]) -> str:
     """The request to the plan's model for what the topic asks and the plan lacks. Nothing else may change."""
     lines = [f"- {g['sentence']}" for g in gaps]
@@ -350,8 +415,12 @@ def request(topic: str, gaps: list[dict[str, Any]]) -> str:
         "states (or, for a search for the best design, a design variable of `protocol.optimisation` with its range). A quantity "
         "to report is an entry of `protocol.metrics` (an `id`, a `kind`, an `estimand` and a `unit`). A formula the topic "
         "states is an equation of `protocol.model.equations`, written as the topic writes it; if the plan needs another "
-        "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Change nothing "
-        "else: not a check, a threshold, a tolerance, a criterion, or a setting the plan already has right.")
+        "formula in its place, keep that one and say in its `source` that it replaces the topic's, and why. Also say, in "
+        "`protocol.topic_map`, which element of the plan covers each thing the topic asks for (the ones above and the ones the "
+        "plan already has): a list of entries `item` (the name of the factor or quantity, or the formula, as the topic "
+        "words it) and `by` (`setting:<the key in protocol.grid or the design variable>`, `metric:<the metric id>` or "
+        "`equation:<the equation id>`). FI checks that each named element exists and covers what the topic states. Change "
+        "nothing else: not a check, a threshold, a tolerance, a criterion, or a setting the plan already has right.")
 
 
 def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -403,6 +472,13 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
         extra = [v for v in block_new.get("design_variables") or [] if isinstance(v, dict) and str(v.get("name")) not in have_vars]
         if extra:
             protocol["optimisation"] = {**block_old, "design_variables": [*(block_old.get("design_variables") or []), *extra]}
+            taken = True
+    new_map = [m for m in (n.get("topic_map") if isinstance(n.get("topic_map"), list) else []) if isinstance(m, dict)]
+    if new_map:
+        old_map = [m for m in (o.get("topic_map") if isinstance(o.get("topic_map"), list) else []) if isinstance(m, dict)]
+        keep = [m for m in old_map if _name_key(m.get("item")) not in {_name_key(x.get("item")) for x in new_map}]
+        if [*keep, *new_map] != old_map:
+            protocol["topic_map"] = [*keep, *new_map]
             taken = True
     out = {**old, "protocol": protocol}
     new_vars = new.get("variables") if isinstance(new.get("variables"), dict) else {}

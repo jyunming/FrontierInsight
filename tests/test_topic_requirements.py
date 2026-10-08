@@ -121,6 +121,11 @@ class Reader:
                 model = dict(protocol.get("model") or {})
                 model["equations"] = [*model.get("equations", []), NEWTON]
                 protocol["model"] = model
+            if "map_cover" in self.adds:  # the same factor under another name, with the plan's own mapping
+                protocol["grid"] = {**protocol.get("grid", {}), "cover_kind": ["paper", "foam", "steel"]}
+                protocol["topic_map"] = [{"item": "lid material", "by": "setting:cover_kind"}]
+            if "map_bad" in self.adds:  # a mapping to something the plan does not have
+                protocol["topic_map"] = [{"item": "lid material", "by": "setting:nothing_like_it"}]
             return {**design, "protocol": protocol, "tolerance_changed": True}
 
         out = plan.edit_design_block(text, change)
@@ -370,3 +375,41 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
             await eng._hold_the_design_to_the_topic(state, redesign, "")
     assert len([p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]) == 1
     assert "lid material" in " ".join(seen[0]["steps"])
+
+
+@pytest.mark.asyncio
+async def test_a_reader_s_missing_is_overruled_by_a_mapping_the_plan_gives_and_fi_checked(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(), adds={"map_cover", "heat", "newton"})
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [], "the plan named a setting that exists and covers the levels: the reader's word does not stop the quest"
+    assert patch["design"]["protocol"]["grid"]["cover_kind"] == ["paper", "foam", "steel"]
+    assert "request" in model.asked[0] or "protocol.topic_map" in model.asked[0]
+    covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
+    assert covered["mapped"]["lid material"] == "cover_kind" and covered["overruled"] == ["lid material"]
+    assert covered["left"] == [], "nothing is left open"
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_to_something_the_plan_does_not_have_does_not_save_a_missing_main_factor(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Reader(eng, _draft(), adds={"map_bad"})
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert "lid material" in " ".join(seen[0]["steps"])
+
+
+def test_a_mapping_is_checked_for_the_levels_it_must_cover() -> None:
+    req = tr.parse(EXTRACTION)
+    short = tr.view(_draft(grid={"cover_kind": ["paper", "foam"]}, topic_map=[{"item": "lid material", "by": "setting:cover_kind"}]))
+    assert tr.mapping_of(req, short, "factors", req["factors"][0])[0] == "bad"
+    full = tr.view(_draft(grid={"cover_kind": ["paper", "foam", "steel"]},
+                          topic_map=[{"item": "lid material", "by": "setting:cover_kind"},
+                                     {"item": "dT/dt = -k*(T - Tr)", "by": "equation:E1"}]))
+    assert tr.mapping_of(req, full, "factors", req["factors"][0]) == ("ok", "cover_kind")
+    assert tr.mapping_of(req, full, "formulas", req["formulas"][0]) == ("ok", "E1")
+    assert tr.mapping_of(req, full, "quantities", req["quantities"][1]) is None

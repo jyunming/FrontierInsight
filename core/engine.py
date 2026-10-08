@@ -5662,9 +5662,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if _topic_req.is_empty(req):
             return [], []
         plan = _topic_req.view(design, protocol)
+        mapped = _topic_req.mapped_items(req, plan)
+        record = self._topic_covered_read()
+        ever = [str(n) for n in record.get("ever_missing") or []]
+        if mapped:
+            # What the plan itself names as covering an item (and FI checked exists and covers it) stands over a reading
+            # that called the item missing: the disagreement is kept.
+            self._topic_covered_write(mapped=mapped, overruled=sorted(set(mapped) & set(ever)))
         _gaps, unresolved = _topic_req.match(req, plan)
         verdicts = await self._judge_topic_items(req, plan, unresolved)
-        return _topic_req.gaps_from(req, plan, verdicts)
+        found, unjudged = _topic_req.gaps_from(req, plan, verdicts)
+        fresh = [g["name"] for g in found if g["name"] not in ever]
+        if fresh:
+            self._topic_covered_write(ever_missing=[*ever, *fresh])
+        return found, unjudged
 
     def _keep_only_what_the_topic_asked(self, before_text: str, after_text: str, gaps: list[dict[str, Any]]) -> str:
         """``before_text`` with only what the topic asked for taken from ``after_text`` (:func:`core.topic_requirements.merge`);

@@ -117,3 +117,37 @@ def test_every_place_that_renders_a_code_prompt_passes_the_topic() -> None:
             if "topic_block" not in text[m.end():i]:
                 missing.append(f"{path.name}:{text.count(chr(10), 0, m.start()) + 1}")
     assert not missing, f"these requests to write or repair code do not pass the topic: {missing}"
+
+
+def test_a_number_of_the_topic_that_a_check_holds_is_taken_out_even_when_the_topic_did_not_mark_it(tmp_path: Path) -> None:
+    from core.config import Config, KnowledgeConfig, OutputConfig
+    from core.engine import Engine
+
+    topic = ("At 10 mM the response is 42%. The rate follows y = 0.61*x + c with c a fitted offset. "
+             "Vary the dose from 2 to 8 units.")
+    cfg = Config(topic=topic, title="dose", knowledge=KnowledgeConfig(enabled=False),
+                 output=OutputConfig(output_dir=tmp_path / "out"))
+    eng = Engine(cfg)
+    (eng.fi_dir).mkdir(parents=True, exist_ok=True)
+    (eng.fi_dir / "topic_requirements.json").write_text(json.dumps(
+        {"factors": [], "quantities": [], "formulas": [{"name": "rate", "text": "y = 0.61*x + c", "main": False}],
+         "comparisons": [], "constraints": [], "stated_results": []}), encoding="utf-8")
+    from core import plan
+
+    design = {"hypothesis": "h", "study_type": "measure", "variables": {"independent": ["x"], "dependent": ["y"], "controls": []},
+              "method": "m", "expected_outcome": "e", "figures_planned": [], "dependencies": [],
+              "protocol": {"oracles": [{"name": "response_at_10", "kind": "published_value", "check": "the response", "expected": 0.42,
+                                        "tolerance": 0.005, "reference": "derivation: stated"}]}}
+    plan.plan_path(eng.quest_root).write_text(plan.render(topic, {"in_short": "s", "literature": [], "gap": "g"},
+                                                         plan.normalize_design(design)[0]), encoding="utf-8")
+    shown = eng._topic_block()
+    assert "42" not in shown and "[a value from the plan's checks]" in shown
+    assert "0.61*x" in shown and "from 2 to 8 units" in shown, "a formula constant and a setting that no check holds stay"
+
+
+def test_the_size_cap_is_for_the_whole_block_formulas_included() -> None:
+    req = {"formulas": [{"name": f"f{i}", "text": "y = " + "x + " * 60} for i in range(10)]}
+    shown = tr.code_block("a long topic. " * 2000, req, limit=3000)
+    assert len(shown) <= 3000
+    assert "Formulas the topic states" in shown and "f0" in shown, "the formulas are kept first"
+    assert "the rest of the topic is not shown" in shown
