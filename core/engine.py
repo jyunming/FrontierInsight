@@ -10059,7 +10059,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return None
         protocol = self._protocol_block(state)
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None)
+        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
+                                        marks=_code_review.constant_marks(code))
         if not reqs:
             return None
         version = _code_review.version(code)

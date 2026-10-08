@@ -98,13 +98,13 @@ def simple(value: float) -> bool:
 
 
 _SCALES = [float(k) for k in range(1, 13)] + [10.0 ** j for j in range(-6, 7)]
-#: Plan numbers combined pairwise (ratios and products) are read from at most this many of them.
-_PAIR_LIMIT = 400
 
 
-def traceable(value: float, numbers: set[float]) -> bool:
+def traceable(value: float, numbers: set[float], groups: list[set[float]] | tuple[set[float], ...] = ()) -> bool:
     """Whether the plan gives ``value``: as written, as a percent of what is written, a written number times or divided by
-    a small integer (up to 12) or a power of ten, or the ratio or product of two written numbers (within 1e-6 relative)."""
+    a small integer (up to 12) or a power of ten (any number written anywhere in the plan, the topic included), or the ratio
+    or product of two numbers written in the same structured place (``groups``: one equation, one check, the fixed settings,
+    the grid), within 1e-6 relative. Two numbers from free text are never combined."""
     v = abs(float(value))
     if v == 0.0:
         return True
@@ -112,18 +112,17 @@ def traceable(value: float, numbers: set[float]) -> bool:
     def near(a: float, b: float) -> bool:
         return abs(a - b) <= 1e-6 * max(abs(a), abs(b))
 
-    given = sorted(numbers)[:_PAIR_LIMIT]
-    for n in given:
-        if n == 0.0:
-            continue
-        if any(near(v, n * k) or near(v, n / k) for k in _SCALES):
+    for n in numbers:
+        if n != 0.0 and any(near(v, n * k) or near(v, n / k) for k in _SCALES):
             return True
-    for i, a in enumerate(given):
-        if a == 0.0:
-            continue
-        for b in given[i:]:
-            if b != 0.0 and (near(v, a * b) or near(v, a / b) or near(v, b / a)):
-                return True
+    for group in groups:
+        given = sorted(group)
+        for i, a in enumerate(given):
+            if a == 0.0:
+                continue
+            for b in given[i:]:
+                if b != 0.0 and (near(v, a * b) or near(v, a / b) or near(v, b / a)):
+                    return True
     return False
 
 
@@ -193,7 +192,8 @@ def _literals(fn: ast.AST, parents: dict[int, ast.AST]) -> list[tuple[float, int
     return out
 
 
-def find(files: dict[str, str], protocol: dict[str, Any] | None, plan_text: str = "") -> list[Typed]:
+def find(files: dict[str, str], protocol: dict[str, Any] | None, plan_text: str = "",
+         groups: list[set[float]] | tuple[set[float], ...] = ()) -> list[Typed]:
     """The functions with typed-in numbers the plan does not give (a clear case: a number inside a smooth function's
     argument, or three or more distinct numbers). ``plan_text``: the plan, its protocol and the topic, as text."""
     numbers = plan_numbers(plan_text)
@@ -213,7 +213,7 @@ def find(files: dict[str, str], protocol: dict[str, Any] | None, plan_text: str 
             kind = scope.get((script, name))
             if kind is None:
                 continue
-            found = [(v, ln, sm) for v, ln, sm in _literals(node, parents) if not simple(v) and not traceable(v, numbers)]
+            found = [(v, ln, sm) for v, ln, sm in _literals(node, parents) if not simple(v) and not traceable(v, numbers, groups)]
             values = tuple(dict.fromkeys(v for v, ln, sm in found))
             shape = tuple(dict.fromkeys(v for v, ln, sm in found if sm))
             clear = bool(shape) or (kind == "model" and len(values) >= MANY)
@@ -235,8 +235,24 @@ def plan_text_of(protocol: dict[str, Any] | None, design: dict[str, Any] | None)
     return "\n".join(parts)
 
 
+def structured_groups(protocol: dict[str, Any] | None, design: dict[str, Any] | None) -> list[set[float]]:
+    """The numbers of each structured place of the plan on its own: one equation, one check, the fixed settings, the grid.
+    Only within one of these may two numbers be combined into a third."""
+    import json
+
+    protocol = protocol if isinstance(protocol, dict) else {}
+    blocks: list[Any] = []
+    model = protocol.get("model") if isinstance(protocol.get("model"), dict) else {}
+    blocks += [e for e in model.get("equations") or [] if isinstance(e, dict)]
+    blocks += [o for o in protocol.get("oracles") or [] if isinstance(o, dict)]
+    blocks += [protocol.get(k) for k in ("fixed", "constants", "controls", "grid") if protocol.get(k)]
+    variables = (design or {}).get("variables") if isinstance((design or {}).get("variables"), dict) else {}
+    blocks.append(variables.get("controls"))
+    return [g for g in (plan_numbers(json.dumps(b, default=str)) for b in blocks if b) if len(g) > 1]
+
+
 def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[Typed]:
-    return find(files, protocol, plan_text_of(protocol, design))
+    return find(files, protocol, plan_text_of(protocol, design), structured_groups(protocol, design))
 
 
 def directive(found: list[Typed], protocol: dict[str, Any] | None) -> str:
@@ -283,6 +299,18 @@ def _called(fn: ast.AST) -> set[str]:
     return {_call_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call) and _call_name(n)}
 
 
+def _own(fn: ast.AST) -> list[ast.AST]:
+    """The nodes of ``fn`` that belong to it directly: not those of a nested function, class or lambda."""
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
 def _names_in(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
@@ -316,12 +344,12 @@ def tainted_outputs(files: dict[str, str], found: list[Typed]) -> set[str] | Non
         tainted: set[str] = set()
         for _ in range(8):
             before = len(tainted)
-            for node in ast.walk(fn):
+            for node in _own(fn):
                 if isinstance(node, ast.Assign) and (_called(node.value) & affected or _names_in(node.value) & tainted):
                     tainted |= {n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)}
             if len(tainted) == before:
                 break
-        returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+        returns = [n for n in _own(fn) if isinstance(n, ast.Return)]
         if not returns or not all(isinstance(r.value, ast.Dict) for r in returns):
             return None
         for node in returns:

@@ -141,10 +141,44 @@ def test_the_request_names_the_codes_numbers_and_says_what_to_do_in_plain_words(
 def test_a_number_the_plan_gives_through_a_small_integer_a_power_of_ten_or_a_ratio_is_traceable() -> None:
     assert tc.traceable(42 / 7, {42.0}) and tc.traceable(91 / 7, {91.0}) and tc.traceable(137 / 7, {137.0})
     assert tc.traceable(4200.0, {42.0}) and tc.traceable(0.42, {42.0})
-    assert tc.traceable(6.5 / 3.25 * 7.7, {6.5, 3.25, 7.7}) and tc.traceable(6.5 * 3.25, {6.5, 3.25})
+    # two numbers combine only inside one structured place of the plan, never from free text
+    assert not tc.traceable(6.5 * 3.25, {6.5, 3.25}) and not tc.traceable(6.5 / 3.25, {6.5, 3.25})
+    assert tc.traceable(6.5 * 3.25, {6.5, 3.25}, [{6.5, 3.25}]) and tc.traceable(6.5 / 3.25, {6.5, 3.25}, [{6.5, 3.25}])
+    assert not tc.traceable(6.5 * 3.25, {6.5, 3.25}, [{6.5}, {3.25}])
     assert not tc.traceable(19.5, {42.0}) and not tc.traceable(1234.567, {42.0, 7.7})
     code = "def response(x):\n    return x * 19.571428571428573 + 0.0\n"
     assert _problems({"pkg/__init__.py": "", "pkg/model.py": code}, "the gain is 137 per seven") == []
+
+
+def test_the_structured_places_of_the_plan_are_each_their_own_group() -> None:
+    protocol = {"model": {"equations": [{"id": "E1", "formula": "y = 3.5 * x / 8.5"}]},
+                "oracles": [{"name": "c", "case": {"x": 1.5, "n": 7.25}}], "fixed": {"a": 2.0, "b": 9.0}, "grid": {"x": [1, 2, 3]}}
+    groups = tc.structured_groups(protocol, {"variables": {"controls": [{"name": "g", "value": 4.25}]}})
+    assert {3.5, 8.5, 1.0} <= set().union(*groups)
+    assert any({3.5, 8.5} <= g for g in groups) and not any({3.5, 7.25} <= g for g in groups)
+    # a ratio of two numbers of one equation is the plan's; of an equation's and a check's is not
+    plan = "free text mentions 3.5 and 7.25"
+    rate = "def response(x):\n    return x * (3.5 / 8.5) + x * x * 0.1234\n"
+    assert tc.problems({"pkg/__init__.py": "", "pkg/model.py": rate}, protocol, {"_text": plan}) == []
+    mixed = "def response(x):\n    return x * (3.5 * 7.25) + x * x * 0.1234 + x * 0.4321 + 0.5678 * x ** 3\n"
+    assert [t.function for t in tc.problems({"pkg/__init__.py": "", "pkg/model.py": mixed}, protocol, {"_text": plan})] == ["response"]
+
+
+def test_the_number_of_plan_values_does_not_change_the_answer() -> None:
+    many = {float(n) for n in range(1000, 1600)} | {42.0}
+    assert tc.traceable(6.0, many) and tc.traceable(1550.0 / 5.0, many)
+
+
+def test_a_nested_helpers_return_does_not_decide_whether_the_entry_can_be_read() -> None:
+    sim = ('from pkg import model\n\n\ndef run_cell(cell):\n    def helper(v):\n        return v + 1\n    r = helper(model.response(cell["x"]))\n'
+           '    return {"y": r, "x_echo": cell["x"]}\n')
+    files = {"pkg/__init__.py": "", "pkg/model.py": SHAPED, "simulate.py": sim}
+    found = _problems(files)
+    assert tc.tainted_outputs(files, found) == {"y"}
+    assert tc.headline_hit(found, files, PROTOCOL, {"variables": {"dependent": ["y"]}}) is True
+    # ... but an entry that itself returns something else is still not read
+    bad = sim.replace('return {"y": r, "x_echo": cell["x"]}', "return r")
+    assert tc.tainted_outputs({**files, "simulate.py": bad}, found) is None
 
 
 def test_a_headline_name_must_match_exactly_and_an_unreadable_entry_is_no_hit() -> None:

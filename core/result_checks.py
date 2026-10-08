@@ -89,10 +89,16 @@ class ResultChecksMixin:
         protocol = self._protocol_block(state)  # type: ignore[attr-defined]
         quantities = _degenerate.quantity_problems(
             cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol))  # type: ignore[attr-defined]
-        marks = _degenerate.marked_by_design(_grid_keys.code_files(self.quest_root / "code"), [q.name for q in quantities])  # type: ignore[attr-defined]
-        self._result_marked = [
-            f"`{q.name}` is {'the same at every setting' if q.kind == 'constant' else 'at a bound for most settings'} "
-            f"by design ({marks[q.name]})" for q in quantities if q.name in marks]
+        marks = _degenerate.accepted_marks(_grid_keys.code_files(self.quest_root / "code"), [q.name for q in quantities],  # type: ignore[attr-defined]
+                                           self.quest_root, self.quest_root / "code")  # type: ignore[attr-defined]
+        self._result_marked = []
+        for q in quantities:
+            if q.name in marks:
+                mark, how = marks[q.name]
+                said = (f"`{q.name}` is {'the same at every setting' if q.kind == 'constant' else 'at a bound for most settings'} "
+                        f"by design ({mark.reason}; `{mark.name}`, {mark.script} line {mark.line}")
+                self._result_marked.append(said + ("; confirmed by a second model)" if how == _degenerate.CONFIRMED else
+                                                   "; declared by the code's own writer and not independently confirmed)"))
         quantities = [q for q in quantities if q.name not in marks]
         if not (drawn or quantities):
             return []
@@ -186,8 +192,10 @@ class ResultChecksMixin:
         marked = getattr(self, "_result_marked", None) or []
         if not marked:
             return []
+        loose = [m for m in marked if "not independently confirmed" in m]
         return ["The code marks " + "; ".join(marked) + ". Keep these values, and say plainly, in the limitations, that "
-                "they are constant by design and not measured."]
+                "they are constant by design and not measured"
+                + (", and that the constant was declared by the code's own writer and not independently confirmed." if loose else ".")]
 
     def _write_marked(self, record_path: Path) -> None:
         """A quantity the code marks ``# constant by design`` is accepted and noted in the limitations, never dropped."""

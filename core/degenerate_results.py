@@ -13,7 +13,9 @@ Only what the analysis reports is judged (a quantity nobody reports is a diagnos
 result, and a value of exactly 0 or 1 is never read as stuck at a bound (an indicator or a probability is allowed to be
 there). A quantity the plan expects to stay put (what an invariant, symmetry or second-implementation check measures, a declared
 bound) is exempt, and one whose line the code marks ``# constant by design: <reason>`` is accepted and noted in the
-limitations, never dropped. The all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
+limitations, never dropped (the mark must sit on the assignment of a named constant the returned value uses, with a reason
+that names a source, and the different-model code review confirms or rejects it; unreviewed, it is noted as the writer's
+own declaration). The all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
 """
 
 from __future__ import annotations
@@ -178,20 +180,156 @@ def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
     return out
 
 
-def marked_by_design(files: dict[str, str], names: list[str]) -> dict[str, str]:
-    """``{quantity: reason}`` for each of ``names`` that a line of the code names and marks ``# constant by design: <reason>``
-    (on the line itself or the line above). A mark is accepted, never dropped."""
-    out: dict[str, str] = {}
-    for text in files.values():
+#: A reason must say where the constant comes from: at least this many words.
+MIN_REASON_WORDS = 3
+_ENTRIES = ("run_cell", "run_trial")
+
+
+@dataclass
+class Mark:
+    """A ``# constant by design: <reason>`` on the assignment of a named constant."""
+
+    script: str
+    line: int
+    name: str
+    reason: str
+    scope: str  # "" for a module-level constant, else the function it is local to
+
+    def valid(self) -> bool:
+        return len(self.reason.split()) >= MIN_REASON_WORDS
+
+    def asks(self) -> str:
+        """The requirement the second model confirms or rejects (no number in it)."""
+        return (f"the constant `{self.name}` ({self.script} line {self.line}) is declared constant by design (\"{self.reason}\"): "
+                "it is a genuine fixed constant of the study that the reason names a source for, and a returned quantity may "
+                "rest on it; it is not a stand-in for a result the code should compute")
+
+
+def design_marks(files: dict[str, str]) -> list[Mark]:
+    """Every ``# constant by design: <reason>`` that sits on the line of an assignment to one name (a module-level or a local
+    constant) and has a reason of at least :data:`MIN_REASON_WORDS` words. A mark anywhere else (a ``return`` line, a
+    comment of its own) is no mark."""
+    import ast
+
+    out: list[Mark] = []
+    for script, text in files.items():
         lines = text.splitlines()
-        for i, line in enumerate(lines):
-            m = MARK.search(line)
-            if not m:
-                continue
-            near = "\n".join(lines[max(0, i - 1):i + 1])
-            for name in names:
-                if name not in out and re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", near):
-                    out[name] = m.group(1).strip() or "no reason given"
+        marked = {i + 1: m.group(1).strip() for i, line in enumerate(lines) if (m := MARK.search(line))}
+        if not marked:
+            continue
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue
+
+        def visit(node: ast.AST, scope: str) -> None:
+            for child in ast.iter_child_nodes(node):
+                inner = child.name if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) else scope
+                target = None
+                if isinstance(child, ast.Assign) and len(child.targets) == 1 and isinstance(child.targets[0], ast.Name):
+                    target = child.targets[0].id
+                elif isinstance(child, ast.AnnAssign) and isinstance(child.target, ast.Name) and child.value is not None:
+                    target = child.target.id
+                if target:
+                    for ln in range(child.lineno, (getattr(child, "end_lineno", child.lineno) or child.lineno) + 1):
+                        if ln in marked:
+                            mark = Mark(script, child.lineno, target, marked[ln], scope)
+                            if mark.valid():
+                                out.append(mark)
+                            break
+                visit(child, inner)
+
+        visit(tree, "")
+    return out
+
+
+def _uses(files: dict[str, str], mark: Mark, key: str) -> bool:
+    """Whether the dictionary ``run_cell`` / ``run_trial`` return holds ``key`` computed from the marked constant: through
+    assignments and through the functions that use it. Anything not read in full is not a use."""
+    import ast
+
+    functions: dict[str, ast.AST] = {}
+    for text in files.values():
+        try:
+            for node in ast.walk(ast.parse(text)):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    functions.setdefault(node.name, node)
+        except (SyntaxError, ValueError):
+            return False
+
+    def names(node: ast.AST) -> set[str]:
+        return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+
+    def calls(node: ast.AST) -> set[str]:
+        return {(n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else "")
+                for n in ast.walk(node) if isinstance(n, ast.Call)} - {""}
+
+    affected = {n for n, fn in functions.items() if (not mark.scope or n == mark.scope) and mark.name in names(fn)}
+    grew = True
+    while grew:
+        grew = False
+        for n, fn in functions.items():
+            if n not in affected and calls(fn) & affected:
+                affected.add(n)
+                grew = True
+    for entry in _ENTRIES:
+        fn = functions.get(entry)
+        if fn is None:
+            continue
+        own: list[ast.AST] = []
+        stack = list(ast.iter_child_nodes(fn))
+        while stack:
+            node = stack.pop()
+            own.append(node)
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                stack.extend(ast.iter_child_nodes(node))
+        tainted = {mark.name} if not mark.scope or mark.scope == entry else set()
+        for _ in range(8):
+            before = len(tainted)
+            for node in own:
+                if isinstance(node, ast.Assign) and (names(node.value) & tainted or calls(node.value) & affected):
+                    tainted |= {t.id for tt in node.targets for t in ast.walk(tt) if isinstance(t, ast.Name)}
+            if len(tainted) == before:
+                break
+        returns = [n for n in own if isinstance(n, ast.Return)]
+        if not returns or not all(isinstance(r.value, ast.Dict) for r in returns):
+            continue
+        for r in returns:
+            for k, v in zip(r.value.keys, r.value.values):
+                if isinstance(k, ast.Constant) and k.value == key and (names(v) & tainted or calls(v) & affected):
+                    return True
+    return False
+
+
+CONFIRMED, REJECTED, UNCONFIRMED = "confirmed", "rejected", "unconfirmed"
+
+
+def confirmation(quest_root: Path, code_dir: Path, mark: Mark) -> str:
+    """What the different-model code review said of this mark: ``confirmed``, ``rejected``, or ``unconfirmed`` when no other
+    model read this version of the code with the mark in it (the review was not run, or the reader is the writer)."""
+    from . import code_review as _review
+
+    record = _review.load(quest_root)
+    if record.get("read_version") != _review.version(code_dir):
+        return UNCONFIRMED
+    for v in record.get("verdicts") or []:
+        if isinstance(v, dict) and v.get("kind") == _review.MARK_KIND and v.get("name") == mark.name:
+            return CONFIRMED if v.get("status") == _review.IMPLEMENTED else REJECTED
+    return UNCONFIRMED
+
+
+def accepted_marks(files: dict[str, str], names: list[str], quest_root: Path, code_dir: Path) -> dict[str, tuple[Mark, str]]:
+    """``{quantity: (its mark, confirmed | unconfirmed)}`` for each of ``names`` whose value is computed from a valid mark that
+    the other model did not reject. A rejected mark counts as none."""
+    marks = design_marks(files)
+    out: dict[str, tuple[Mark, str]] = {}
+    for name in names:
+        for mark in marks:
+            if _uses(files, mark, name):
+                state = confirmation(quest_root, code_dir, mark)
+                if state != REJECTED:
+                    out[name] = (mark, state)
+                    break
     return out
 
 

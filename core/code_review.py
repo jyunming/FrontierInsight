@@ -58,7 +58,20 @@ def _text(value: Any, limit: int = 300) -> str:
     return " ".join(str(value if value is not None else "").replace("`", "'").split())[:limit]
 
 
-def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
+#: The kind of a requirement that asks the reader to confirm a ``# constant by design`` mark in the code.
+MARK_KIND = "constant by design"
+
+
+def constant_marks(code_dir: Path) -> list[Any]:
+    """The valid ``# constant by design`` marks in the code (:func:`core.degenerate_results.design_marks`)."""
+    from . import degenerate_results as _degenerate
+    from . import grid_keys as _grid_keys
+
+    return _degenerate.design_marks(_grid_keys.code_files(Path(code_dir)))
+
+
+def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
+                 marks: list[Any] | None = None) -> list[dict[str, Any]]:
     """The plan's required outputs, as ``{"id", "kind", "text", "headline"}`` (R1, R2 ...): the dependent variables, the
     metrics, the planned figures, the swept parameters, the checks' measures and the equations the simulation computes
     its data with. Names and descriptions only, never a number the code must reproduce."""
@@ -95,6 +108,8 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None)
             add("check", f"the simulation returns what the measure '{measure}' of the check '{_text(o['name'], 60)}' uses")
     for eid in _oracle.generating_equations(protocol):
         add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`")
+    for mark in marks or []:
+        add(MARK_KIND, mark.asks(), name=mark.name)
     return out
 
 

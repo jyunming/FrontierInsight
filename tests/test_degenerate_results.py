@@ -242,56 +242,133 @@ def test_what_the_plan_expects_to_stay_put_is_exempt() -> None:
     assert _flags(_cells(gain=lambda r: 3 * r, total_in=2.5), REPORTED | {"total_in"}, names) == []
 
 
-def test_a_line_marked_constant_by_design_is_found_for_the_quantity_it_names_only() -> None:
-    code = ('def run_cell(cell):\n'
-            '    # constant by design: the total is conserved\n'
-            '    return {"total": 1.0, "plateau": 2.0}  # constant by design: saturates at the cap\n')
-    got = dr.marked_by_design({"simulate.py": code}, ["total", "plateau", "other"])
-    assert got == {"total": "the total is conserved", "plateau": "saturates at the cap"}
-    assert dr.marked_by_design({"simulate.py": "x = 1  # constant\n"}, ["x"]) == {}
+SOURCED = "the reference level taken from the study's source table"
+MODULE_MARK = (
+    'LEVEL = 2.5  # constant by design: ' + SOURCED + '\n\n'
+    'def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": LEVEL}\n')
 
 
-@pytest.mark.asyncio
-async def test_a_quantity_marked_by_design_is_accepted_and_noted_never_dropped_and_an_unmarked_one_still_is(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_mark_counts_only_on_the_assignment_of_a_named_constant_with_a_reason_that_names_a_source() -> None:
+    marks = dr.design_marks({"simulate.py": MODULE_MARK})
+    assert [(m.name, m.line, m.scope, m.reason) for m in marks] == [("LEVEL", 1, "", SOURCED)]
+    local = ('def run_cell(cell):\n    cap = 6.0  # constant by design: the cap given in the study\'s source table\n'
+             '    return {"capped": min(cell["rate"], cap)}\n')
+    assert [(m.name, m.scope) for m in dr.design_marks({"simulate.py": local})] == [("cap", "run_cell")]
+    # on the return line, on a comment of its own, with a one-word reason, or with none: no mark
+    direct = 'def run_cell(cell):\n    return {"level": 2.5}  # constant by design: the reference level from the table\n'
+    assert dr.design_marks({"simulate.py": direct}) == []
+    assert dr.design_marks({"simulate.py": "# constant by design: from the source table\nx = 1\n"}) == []
+    assert dr.design_marks({"simulate.py": "X = 1  # constant by design: conserved\n"}) == []
+    assert dr.design_marks({"simulate.py": "X = 1  # constant by design:\n"}) == []
+    assert dr.design_marks({"simulate.py": "X = 1  # constant\n"}) == []
+
+
+def test_a_mark_is_accepted_only_for_a_quantity_computed_from_the_marked_constant(tmp_path: Path) -> None:
+    files = {"simulate.py": MODULE_MARK.replace('"level": LEVEL', '"level": LEVEL, "other": 7.0')}
+    got = dr.accepted_marks(files, ["level", "other", "gain"], tmp_path, tmp_path)
+    assert list(got) == ["level"] and got["level"][1] == dr.UNCONFIRMED
+    helper = ('LEVEL = 2.5  # constant by design: ' + SOURCED + '\n\ndef scaled(x):\n    return LEVEL * x\n\n'
+              'def run_cell(cell):\n    total = scaled(1.0)\n    return {"level": total}\n')
+    assert list(dr.accepted_marks({"simulate.py": helper}, ["level"], tmp_path, tmp_path)) == ["level"]
+    assert dr.accepted_marks({"simulate.py": "def broken(:\n"}, ["level"], tmp_path, tmp_path) == {}
+
+
+def _review(eng: Engine, status: str | None, name: str = "LEVEL") -> None:
+    """The different-model code review's record for the code as it is now."""
+    from core import code_review as cr
+
+    verdicts = [] if status is None else [{"id": "R1", "kind": cr.MARK_KIND, "name": name, "status": status, "text": "t",
+                                           "headline": False}]
+    cr.save(eng.quest_root, {"version": cr.version(eng.quest_root / "code"), "read_version": cr.version(eng.quest_root / "code"),
+                              "verdicts": verdicts, "problems": [], "final": True})
+
+
+def _flat_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str) -> Engine:
     eng = _engine(tmp_path, monkeypatch)
     (eng.quest_root / "code").mkdir(exist_ok=True)
-    (eng.quest_root / "code" / "simulate.py").write_text(
-        'def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": 2.5}  # constant by design: the total is conserved\n',
-        encoding="utf-8")
-    # only the quantity is flat here (the empty figure is not part of this case)
-    for stem in ("empty_one",):
-        (eng.quest_root / "figures" / f"{stem}.png").unlink()
-    result, script = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 0, "marked: nothing is sent back"
-    record = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
-    assert record["removed_quantities"] == [] and "`level` is the same at every setting by design (the total is conserved)" in record["note"]
-    assert "constant by design" in eng._run_checks_note() and "limitations" in eng._run_checks_note()
-    assert eng._left_out_quantities() == set()
-    # the same flat quantity without the mark is still caught
-    (eng.quest_root / "code" / "simulate.py").write_text(
-        'def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": 2.5}\n', encoding="utf-8")
-    result, script = await eng._results_match_run({"iteration": 0}, _run(), None, True)
-    assert result.returncode == 1 and "# constant by design: <reason>" in result.stderr
+    (eng.quest_root / "code" / "simulate.py").write_text(code, encoding="utf-8")
+    (eng.quest_root / "figures" / "empty_one.png").unlink()  # only the flat quantity is in question here
+    return eng
 
 
 @pytest.mark.asyncio
-async def test_a_plateau_marked_by_design_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    eng = _engine(tmp_path, monkeypatch)
+async def test_a_marked_named_constant_the_second_model_confirms_is_accepted_and_noted_never_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _flat_engine(tmp_path, monkeypatch, MODULE_MARK)
+    _review(eng, "implemented")
+    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 0, "confirmed: nothing is sent back"
+    record = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert record["removed_quantities"] == [] and "confirmed by a second model" in record["note"]
+    note = eng._run_checks_note()
+    assert "constant by design" in note and "limitations" in note and "not independently confirmed" not in note
+    assert eng._left_out_quantities() == set()
+
+
+@pytest.mark.asyncio
+async def test_a_mark_the_second_model_rejects_counts_as_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _flat_engine(tmp_path, monkeypatch, MODULE_MARK)
+    _review(eng, "different")
+    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 1 and "`level` is 2.5" in result.stderr and "# constant by design: <reason>" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_a_mark_nobody_else_read_is_accepted_but_the_paper_says_the_writer_declared_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _flat_engine(tmp_path, monkeypatch, MODULE_MARK)  # no review record at all: not run, or the reader is the writer
+    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 0
+    note = eng._run_checks_note()
+    assert "declared by the code's own writer and not independently confirmed" in note and "limitations" in note
+    _review(eng, None)  # read, but this mark was not among the verdicts
+    assert dr.accepted_marks({"simulate.py": MODULE_MARK}, ["level"], eng.quest_root, eng.quest_root / "code")["level"][1] == dr.UNCONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_a_typed_in_result_returned_directly_is_flagged_whatever_its_line_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = ('def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": 2.5}  # constant by design: the reference level '
+            'from the table\n')
+    eng = _flat_engine(tmp_path, monkeypatch, fake)
+    _review(eng, "implemented")
+    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 1 and "`level` is 2.5" in result.stderr
+    # the same flat quantity with no mark at all is flagged too
+    (eng.quest_root / "code" / "simulate.py").write_text(fake.split("  #")[0] + "\n", encoding="utf-8")
+    result, _ = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 1
+
+
+@pytest.mark.asyncio
+async def test_a_marked_plateau_passes_and_the_same_plateau_unmarked_does_not(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    code = ('CAP = 6.0  # constant by design: the cap given in the study\'s source table\n\n'
+            'def run_cell(cell):\n    return {"gain": cell["rate"], "capped": min(cell["rate"] * 2.0, CAP)}\n')
+    eng = _flat_engine(tmp_path, monkeypatch, code)
     record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
                         for c in _cells(gain=lambda r: r, capped=lambda r: min(r * 2.0, 6.0))]}
     (eng.quest_root / "raw" / "trials.json").write_text(json.dumps(record), encoding="utf-8")
-    (eng.quest_root / "figures" / "empty_one.png").unlink()
     run = ExecutionResult(0, "RESULT_JSON: " + json.dumps({"gain": 1.0, "capped": 6.0}), "", 1.0, False)
-    (eng.quest_root / "code").mkdir(exist_ok=True)
-    src = eng.quest_root / "code" / "simulate.py"
-    src.write_text('def run_cell(cell):\n    capped = min(cell["rate"] * 2.0, 6.0)  # constant by design: the cap\n    return {"gain": cell["rate"], "capped": capped}\n', encoding="utf-8")
+    _review(eng, "implemented", name="CAP")
     result, _ = await eng._results_match_run({"iteration": 0}, run, None, True)
     assert result.returncode == 0
-    src.write_text(src.read_text(encoding="utf-8").replace("  # constant by design: the cap", ""), encoding="utf-8")
+    (eng.quest_root / "code" / "simulate.py").write_text(code.replace("  # constant by design: the cap given in the study's source table", ""),
+                                                          encoding="utf-8")
     result, _ = await eng._results_match_run({"iteration": 0}, run, None, True)
     assert result.returncode == 1
+
+
+def test_the_code_reviews_checklist_asks_about_each_mark_without_a_number() -> None:
+    from core import code_review as cr
+
+    marks = dr.design_marks({"simulate.py": MODULE_MARK})
+    reqs = cr.requirements({}, {}, marks=marks)
+    asked = [r for r in reqs if r["kind"] == cr.MARK_KIND]
+    assert len(asked) == 1 and asked[0]["name"] == "LEVEL" and "simulate.py line 1" in asked[0]["text"]
+    assert "2.5" not in asked[0]["text"] and "not a stand-in for a result" in asked[0]["text"]
 
 
 @pytest.mark.asyncio
