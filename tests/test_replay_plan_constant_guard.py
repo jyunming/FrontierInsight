@@ -181,6 +181,8 @@ _WORDS = " ".join(gk._distinct_words(CONST, _ALLOWED))
     f"a {_WORDS} is chosen. 80 trials are run",                                # a sentence break between them
     f"the {_WORDS} is 75, the other setting is 80",                            # another number between / other value
     f"the {_WORDS} of 75 and 80 runs",                                         # another number in the clause
+    f"the {_WORDS} is estimated from a sample of 80 trials",                   # the binder belongs to the sample
+    f"the {_WORDS} is set from the average over a window of 80",
 ])
 def test_a_number_that_merely_stands_near_the_words_is_not_the_plans_constant(text: str) -> None:
     assert _flagged_keys(BEFORE, {"_text": text}) == [CONST_KEYS]

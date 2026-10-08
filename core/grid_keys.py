@@ -356,6 +356,8 @@ def _distinct_words(key: str, supplied: list[str] | set[str]) -> list[str]:
 _BREAK = re.compile(r"[;,\n()\[\]{}]|\.(?:\s|$)|\b(?:but|while|whereas|and|with|which|when|where)\b")
 _BINDER = re.compile(r"(?:\b(?:of|is|are|at|to|equals|equal to|set to|fixed at)\b|=|:)\s*(?:about\s+|approximately\s+)?$")
 _UNIT = re.compile(r"^\s*([A-Za-z%/][\w/%.^*-]*)\s+")
+#: Words allowed between the last word of a name and the ``of`` / ``is`` / ``=`` that gives its value.
+_BOUND_WORDS = 2
 
 
 def _structured_value(node: Any, key: str, value: float, allowed: set[str]) -> bool:
@@ -395,9 +397,15 @@ def _stated_as_value(low: str, words: list[str], value: float) -> bool:
         before = low[max(0, m.start() - _WINDOW): m.start()]
         cuts = list(_BREAK.finditer(before))
         clause = before[cuts[-1].end():] if cuts else before
-        if (all(w in clause for w in words) and _BINDER.search(clause.rstrip() + " ")
-                and not _NUMBER.search(clause)):
-            return True
+        binder = _BINDER.search(clause.rstrip() + " ")
+        if all(w in clause for w in words) and binder and not _NUMBER.search(clause):
+            # The binder must follow the name itself: at most a few words (``reference line dose of 80``) between the
+            # last of its words and ``of`` / ``is`` / ``=``. "the rate is estimated from a sample of 80" binds 80 to the
+            # sample, not to the rate.
+            last = max(clause.rfind(w) + len(w) for w in words)
+            between = clause[last:binder.start()].split()
+            if len(between) <= _BOUND_WORDS:
+                return True
         after = low[m.end(): m.end() + _WINDOW]
         cut = _BREAK.search(after)
         tail = after[:cut.start()] if cut else after
