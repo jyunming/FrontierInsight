@@ -498,6 +498,11 @@ try:
                 "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
                 "xscale": ax.get_xscale(), "yscale": ax.get_yscale(),
                 "legend": ax.get_legend() is not None,
+                # Whether the panel draws anything but lines (bars, an image, a patch, a collection that has paths): a panel
+                # with no lines and nothing else is empty.
+                "draws_other": any(_fi_draws(artist) for group in (ax.patches, ax.collections, ax.images, ax.tables,
+                                                                   ax.artists, ax.child_axes)
+                                   for artist in group if id(artist) not in bar_pieces),
                 # Only lines (error bars included), on default ticks: what a redraw can reproduce.
                 "line_only": bool(lines) and not any(
                     _fi_draws(artist) for group in others for artist in group if id(artist) not in bar_pieces

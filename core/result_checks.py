@@ -3,6 +3,8 @@
 After the run has finished and FI's own checks of it passed, the results are compared with what ran:
 
 * what the analysis reports for each setting must be what ran at that setting (:mod:`core.reported_settings`);
+* the figures and the reported quantities must show something: no empty panel, no series at one x, no quantity that is
+  the same at every setting or stuck at a bound (:mod:`core.degenerate_results`);
 
 A fault is sent back like a failed run, in plain words and with no expected value in the request: the analysis is repaired
 (or the simulation, when the fault is in what it returns), and the study's trials are not run again unless the simulation
@@ -20,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import degenerate_results as _degenerate
 from . import reported_settings as _reported
 
 #: How many times, in all, the results of one design iteration are sent back for the checks of this module.
@@ -67,7 +70,39 @@ class ResultChecksMixin:
             found.append(Found("reported_settings", ANALYSIS, _reported.directive(mismatches, cells),
                                _reported.plain_note(mismatches), _reported.writer_note(mismatches),
                                keys=_reported.keys_to_leave_out(mismatches)))
+        try:
+            found.extend(self._degenerate_findings(state, result_json, cells))
+        except Exception as exc:  # noqa: BLE001 -- a check that cannot be made flags nothing
+            self._log.warning("[execute] could not check the run's results for empty figures and constants (%r)", exc)  # type: ignore[attr-defined]
         return found
+
+    def _degenerate_findings(self, state: Any, result_json: Any, cells: list[dict[str, Any]]) -> list[Found]:
+        from . import engine as _e
+
+        reported: set[str] = set()
+        for _where, value in _reported.reported_of(self.quest_root, result_json):  # type: ignore[attr-defined]
+            reported |= _degenerate.keys_in(value)
+        folder = self.quest_root / "figures"  # type: ignore[attr-defined]
+        figures = sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
+        drawn = _degenerate.figure_problems(self.fi_dir / "figure_records", figures)  # type: ignore[attr-defined]
+        quantities = _degenerate.quantity_problems(cells, reported, self._typed_result_exempt(state))  # type: ignore[attr-defined]
+        if not (drawn or quantities):
+            return []
+        return [Found("degenerate_results", SIMULATION if quantities else ANALYSIS, _degenerate.directive(drawn, quantities),
+                      _degenerate.plain_note(drawn, quantities), _degenerate.writer_note(drawn, quantities),
+                      keys=[q.name for q in quantities], figures=sorted({p.figure for p in drawn}))]
+
+    def _drop_figures(self, names: list[str]) -> None:
+        """Take figures out of ``figures/`` with their records."""
+        for name in names:
+            stem = Path(name).stem
+            targets = list((self.quest_root / "figures").glob(f"{stem}.*")) + [  # type: ignore[attr-defined]
+                self.fi_dir / "figure_records" / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
+            for target in targets:
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError as exc:
+                    self._log.warning("[execute] could not remove %s (%r)", target.name, exc)  # type: ignore[attr-defined]
 
     def _result_counter(self, state: Any) -> int:
         record = _read_json(self.fi_dir / _COUNTER)  # type: ignore[attr-defined]
@@ -117,6 +152,7 @@ class ResultChecksMixin:
     def _leave_out_results(self, found: list[Found], record_path: Path) -> None:
         """What is still wrong after the repairs is left out of the results the paper may use: written to
         ``needs/RESULT_CHECK.json`` (read for the writer's note and for the quantities the analysis no longer sees)."""
+        self._drop_figures(sorted({n for f in found for n in f.figures}))
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
                   "checks": [{"kind": f.kind, "note": f.note} for f in found], "note": "; ".join(f.note for f in found),
