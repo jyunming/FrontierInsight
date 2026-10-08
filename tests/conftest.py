@@ -106,14 +106,20 @@ def _no_clean_venv_check(request, monkeypatch):
     monkeypatch.setattr(_cp, "verify", lambda *a, **k: {"ok": True, "says": "stub"})
 
 
+#: Tests whose point is the exact order of the scripted replies at the plan step (a list of replies handed out one by one):
+#: the reading of the topic is one more call there and would shift every reply after it, so they run without it. Every
+#: other test runs with the reading on, and the shared fakes (tests/test_engine_smoke.py ``_fake_response_for``) answer it.
+_SCRIPTED_AT_THE_PLAN_STEP = (
+    "test_plan", "test_plan_sources_way_forward", "test_oracle_review", "test_search_block_guards",
+    "test_search_block_asked", "test_protocol_part_asked",
+)
+
+
 @pytest.fixture(autouse=True)
-def _no_topic_reading(request, monkeypatch):
-    """At the plan step the engine reads what the topic asks for (one call) and looks for it in the plan (up to a few
-    more); tests that count or order the model's replies at the plan step are about something else and would each have
-    to script those calls. They run without the reading; those two end-to-end quests, tests/test_topic_requirements.py and tests/test_topic_in_code_prompts.py run it for real
-    (the end-to-end fakes answer an unknown prompt with `{}`, which the reading takes as "named nothing" and goes on)."""
-    if request.module.__name__.endswith(("test_topic_requirements", "test_topic_in_code_prompts", "test_engine_smoke",
-                                         "test_research_acceptance")):
+def _topic_reading_off_where_the_replies_are_scripted(request, monkeypatch):
+    """At the plan step the engine reads what the topic asks for (one call) and looks for it in the plan (a few more).
+    That stays on in every test except the ones listed in ``_SCRIPTED_AT_THE_PLAN_STEP``."""
+    if request.module.__name__.split(".")[-1] not in _SCRIPTED_AT_THE_PLAN_STEP:
         return
     from core.engine import Engine
 
