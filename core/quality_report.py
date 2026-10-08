@@ -37,7 +37,7 @@ _NODE_STAGE = {
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
     "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
-    "implement_function_repair": "code", "implement_module_repair": "code",
+    "implement_function_repair": "code", "implement_module_repair": "code", "code_review_repair": "code",
     "code_review": "code", "oracle_review.code": "code",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
@@ -48,7 +48,7 @@ _NODE_STAGE = {
 #: ``provider.node_models.<step>``).
 _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "design": ("design",),
             "code": ("implement", "implement_outline", "implement_body", "implement_function",
-                     "implement_function_repair", "implement_module_repair"),
+                     "implement_function_repair", "implement_module_repair", "code_review_repair"),
             "run": ("execute_reflect", "improve"), "analysis": ("analyze",), "paper": ("write", "figures"),
             "review": ("review",)}
 _READERS = {"checks": ("oracle_review", "oracle_recompute"), "design": ("design_review", "design_self_critique"),
@@ -758,9 +758,18 @@ def _day(iso: Any) -> str:
 
 def _code_metrics(q: _Quest) -> dict[str, Any]:
     """What the code step measured about itself: how many functions of the model's package were written and passed their
-    check, from ``.fi/function_steps.json``."""
+    check (``.fi/function_steps.json``), and what the second model's reading of the code came to (``.fi/code_review.json``):
+    whether the final version was read, the open findings in each reading and whether the repairs converged."""
     functions = [f for f in _dict(q.function_steps.get("functions")).values() if isinstance(f, dict)]
-    return {"functions_done": sum(1 for f in functions if f.get("status") == "done"), "functions_total": len(functions)}
+    cr = q.code_review
+    readings = [r for r in _list(cr.get("readings")) if isinstance(r, dict)]
+    return {"functions_done": sum(1 for f in functions if f.get("status") == "done"), "functions_total": len(functions),
+            "final_version_read": bool(cr.get("final_read")) if (readings or cr.get("read_version") or cr.get("skipped")
+                                                                  or cr.get("error")) else None,
+            "open_per_reading": [_int(r.get("open")) for r in readings],
+            "open_high_per_reading": [_int(r.get("high")) for r in readings],
+            "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
+            "repair_requests": _int(cr.get("repair_calls"))}
 
 
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
@@ -869,6 +878,16 @@ def render(report: dict[str, Any]) -> str:
     code = report.get("code") or {}
     if code.get("functions_total"):
         lines += ["", f"Functions written and tested: {code['functions_done']} of {code['functions_total']}."]
+    if code.get("final_version_read") is not None:
+        lines += ["", "The final version of the code was " + ("" if code["final_version_read"] else "not ")
+                  + "read by a second model."
+                  + (" Open findings per reading: " + ", ".join(
+                      f"{n} ({h} high-severity)" for n, h in zip(code["open_per_reading"], code["open_high_per_reading"]))
+                     + "." if code.get("open_per_reading") else "")
+                  + ("" if code.get("repairs_converged") is None else
+                     " The repairs " + ("converged." if code["repairs_converged"] else
+                                        "did not converge (they were stopped when a round did not reduce the high-severity "
+                                        "findings)."))]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:

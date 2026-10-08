@@ -12,7 +12,7 @@ import pytest
 
 from core import code_review as cr
 from core import review_pairs as pairs
-from tests.test_code_review import DESIGN, PROTOCOL, STATE, _engine
+from tests.test_code_review import DESIGN, PROTOCOL, REPAIR_HEAD, STATE, _engine
 
 WITH_PLAN = {**STATE, "design": {**DESIGN, "protocol": PROTOCOL}}
 WRONG = "# E1\ndef run_cell(cell):\n    return {'quality': cell['m'] * cell['w'] / cell['length']}\n"
@@ -25,9 +25,14 @@ class _Logic:
 
     def __init__(self, finding: dict[str, Any] | None = None, *, always: bool = False, checked: bool = True) -> None:
         self.finding, self.always, self.checked, self.prompts = finding, always, checked, []
+        self.repair_prompts: list[str] = []
+        self.repaired = ""
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
+        if prompt.lstrip().startswith(REPAIR_HEAD):
+            self.repair_prompts.append(prompt)
+            return f"```python\n# file: simulate.py\n{self.repaired}```" if self.repaired else ""
         assert prompt.lstrip().startswith("# Code Against the Plan"), prompt[:80]
         self.prompts.append(prompt)
         reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
@@ -80,26 +85,27 @@ def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_wrong_normalisation_is_sent_to_the_repair_without_a_value_and_is_fixed(tmp_path: Path) -> None:
+async def test_a_wrong_normalisation_is_sent_to_a_repair_request_without_a_value_and_is_fixed(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     (engine.quest_root / "code" / "simulate.py").write_text(WRONG, encoding="utf-8")
     reader = _Logic(NORMALISATION)
+    reader.repaired = RIGHT
     engine._client = reader
-    patch = await engine._code_review_gate(WITH_PLAN)
-    assert "0.123456789" not in reader.prompts[0], "the plan's expected value is never shown to the reviewer"
-    assert patch is not None and patch["exec_result"]["returncode"] == 1
-    said = patch["exec_result"]["stderr_tail"]
-    assert "E1 divides by the length" in said and "divide by cell['c']" in said and "simulate.py" in said
-    assert "0.123456789" not in said and pairs.PLACEHOLDER in said, "no value of the plan's reaches the repair"
-    assert patch["exec_result"]["failed_script"] == "simulate.py"
-    record = cr.load(engine.quest_root)
-    assert [v["kind"] for v in record["problems"]] == ["logic"] and record["send_backs"] == 1
-    # The repair changed the code: it is read again and nothing is left.
-    (engine.quest_root / "code" / "simulate.py").write_text(RIGHT, encoding="utf-8")
     assert await engine._code_review_gate(WITH_PLAN) is None
-    assert cr.load(engine.quest_root)["final"] is True and cr.not_computed(engine.quest_root, engine.quest_root / "code") == []
+    assert "0.123456789" not in reader.prompts[0], "the plan's expected value is never shown to the reviewer"
+    assert len(reader.repair_prompts) == 1
+    said = reader.repair_prompts[0]
+    assert "E1 divides by the length" in said and "divide by cell['c']" in said and "### simulate.py" in said
+    assert "0.123456789" not in said and pairs.PLACEHOLDER in said, "no value of the plan's reaches the repair"
+    assert "has NOT crashed" in said
+    # The repaired code is read again and nothing is left.
+    assert (engine.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == RIGHT
+    record = cr.load(engine.quest_root)
+    assert record["problems"] == [] and record["final"] is True and record["send_backs"] == 1
+    assert cr.not_computed(engine.quest_root, engine.quest_root / "code") == []
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
-    assert len(reader.prompts) == 2
+    assert len(reader.prompts) == 2 and "Findings still open in the version before this one" in reader.prompts[1]
+    assert "E1 divides by the length" in reader.prompts[1].split("Findings still open", 1)[1]
 
 
 @pytest.mark.asyncio
@@ -107,7 +113,7 @@ async def test_a_high_finding_still_there_after_the_repairs_is_said_in_the_limit
     engine = _engine(tmp_path)
     (engine.quest_root / "code" / "simulate.py").write_text(WRONG, encoding="utf-8")
     engine._client = _Logic(NORMALISATION)
-    assert await engine._code_review_gate({**STATE, "exec_reflect_iter": 3}) is None   # the repairs are spent
+    assert await engine._code_review_gate(STATE, final=True) is None   # no repair is made of the version that runs
     code = engine.quest_root / "code"
     note = cr.write_note(engine.quest_root, code)
     assert "still flags" in note and "E1 divides by the length" in note and "[high]" in note and "not resolved" in note
@@ -125,7 +131,7 @@ CONSTANT = {"where": "simulate.py:3", "what": "quality_factor does not depend on
 async def test_a_false_high_severity_constant_does_not_stop_a_correct_quest(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._client = _Logic(CONSTANT, always=True)
-    assert await engine._code_review_gate({**STATE, "exec_reflect_iter": 3}) is None
+    assert await engine._code_review_gate(STATE, final=True) is None
     code = engine.quest_root / "code"
     varies = {**STATE, "result_json": {"cells": [{"c": 0.2, "quality_factor": 2.5}, {"c": 0.5, "quality_factor": 1.0}]}}
     assert engine._no_results_verdict(varies) is None, "the results show the quantity varies: the reviewer was wrong"
@@ -138,17 +144,18 @@ async def test_a_false_high_severity_constant_does_not_stop_a_correct_quest(tmp_
 async def test_a_high_severity_constant_the_results_confirm_is_the_honest_stop(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     engine._client = _Logic(CONSTANT, always=True)
-    assert await engine._code_review_gate({**STATE, "exec_reflect_iter": 3}) is None
+    assert await engine._code_review_gate(STATE, final=True) is None
     flat = {**STATE, "result_json": {"cells": [{"c": 0.2, "quality_factor": 1.0}, {"c": 0.5, "quality_factor": 1.0}]}}
     verdict = engine._no_results_verdict(flat)
     assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
     stuck = await engine._node_stuck_no_findings({**flat, "evidence_assessment": verdict})
     assert "is a constant in the run's results" in stuck["stuck"]["problem"]
-    # A result that cannot tell (the quantity appears once) leaves the reviewer's word alone: no stop.
+    # A result that cannot tell (the quantity appears once) does not contradict the finding either: it stands, and stops.
     alone = _engine(tmp_path / "b")
     alone._client = _Logic(CONSTANT, always=True)
-    await alone._code_review_gate({**STATE, "exec_reflect_iter": 3})
-    assert alone._no_results_verdict({**STATE, "result_json": {"quality_factor": 1.0}}) is None
+    await alone._code_review_gate(STATE, final=True)
+    unsure = alone._no_results_verdict({**STATE, "result_json": {"quality_factor": 1.0}})
+    assert unsure and unsure["stuck"] and unsure["stuck_reason"] == "headline_missing"
 
 
 def test_a_quantity_is_constant_only_when_the_results_hold_it_at_one_value_in_more_than_one_place() -> None:

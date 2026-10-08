@@ -26,6 +26,8 @@ $plan
 
 $code
 
+$previous
+
 # What to judge, for each requirement
 
 - **implemented**: the code computes it as the plan states, and (for a quantity) puts it in the result the script prints, or (for a figure) draws it and saves it under the planned name. Give the file and the line where you found it.

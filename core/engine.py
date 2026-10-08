@@ -10043,14 +10043,17 @@ class Engine(RunChecksMixin):
             same = None
         return same, reader or "the provider's default model", planner or "the provider's default model", bool(answered.get("reported"))
 
-    async def _code_review_gate(self, state: QuestState) -> QuestState | None:
-        """After the code is written and before the equation tests and the oracle gate: the model named for
-        ``oracle_review`` (another model than the one that wrote the code, or nothing is asked) reads the plan's
-        required outputs against the scripts. What is missing or different goes to the existing repair path as a failed
-        run with a plain directive naming each requirement (at most ``code_review.MAX_SEND_BACKS`` times and one review
-        per code version, ``code_review.MAX_REVIEWS`` in the quest; ``.fi/code_review.json`` keeps it, so a resume does
-        not repeat a review). What is still missing at the end is not reported (the paper's limitations say it was not
-        computed); a missing headline quantity ends in the honest stop. ``None`` when the code goes on to the run."""
+    async def _code_review_gate(self, state: QuestState, *, final: bool = False) -> QuestState | None:
+        """A different model reads the plan's required outputs and its logic against the scripts, and what it finds is
+        repaired (core/code_review.py). Called twice in ``_node_execute``: early (``final=False``), where a version is read,
+        its findings are sent to a repair request of their own (:meth:`_repair_review_findings`: in full, to the file they
+        name, in batches), the changed version is read again against the findings still open, and so on while the open
+        high-severity findings keep dropping, within ``code_review.MAX_SEND_BACKS`` rounds; and just before the run
+        (``final=True``), where the version that will run is read with the one reading the early call may not spend, and
+        nothing is repaired any more (a repaired version would be unread). ``.fi/code_review.json`` keeps the readings, the
+        open findings in each, whether the repairs converged and whether the final version was read, so a resume does not
+        repeat a reading. What is open at the end is said in the limitations; a high-severity finding about a headline
+        quantity ends in the honest stop after the run unless the results contradict it. Always ``None``: the code goes on."""
         code = self.quest_root / "code"
         if (self.config.engine.oracle_check == "off" or not self._runs_code(state)
                 or not (code / "experiment.py").is_file() or self.config.execution.background_jobs):
@@ -10060,39 +10063,74 @@ class Engine(RunChecksMixin):
         reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None)
         if not reqs:
             return None
-        version = _code_review.version(code)
-        record = _code_review.load(self.quest_root)
-        if record.get("version") == version:
-            if record.get("final") or not record.get("problems"):
-                return None  # this code was read already
-            # Sent back, and the repair never changed it (a stop, or a repair that gave up): this is what stands.
-            record["final"] = True
-            _code_review.save(self.quest_root, record)
-            return self._code_review_outcome(record)
-        counters = {k: record.get(k, 0) for k in ("reviews_total", "send_backs")}
-        if record.get("read_version"):
-            counters["read_version"] = record["read_version"]  # the last version a second model really read
-        record = {"version": version, **counters, "requirements": len(reqs)}
         review_node = self._review_node("code_review")
+        for _round in range(_code_review.MAX_SEND_BACKS + 2):
+            version = _code_review.version(code)
+            record = _code_review.load(self.quest_root)
+            if record.get("read_version") == version and record.get("version") == version:
+                # Read already. What it found stands unless this call may repair it (and it can be read again after).
+                problems = [p for p in record.get("problems") or [] if isinstance(p, dict)]
+                if record.get("final") or not problems:
+                    break
+                why = "this is the version that will run" if final else _code_review.may_repair(record)
+                if why:
+                    record["final"] = True
+                    _code_review.save(self.quest_root, record)
+                    self._log.warning("[code_review] %d finding(s) are open and are not repaired: %s", len(problems), why)
+                    self._code_review_outcome(record)
+                    break
+                if not await self._repair_review_findings(state, record, protocol, review_node):
+                    record = _code_review.load(self.quest_root)
+                    record["final"] = True
+                    _code_review.save(self.quest_root, record)
+                    self._code_review_outcome(record)
+                    break
+                continue
+            if record.get("version") == version and record.get("skipped"):
+                break  # the reader is the model that wrote the code (or FI cannot tell): nothing to read again
+            if not _code_review.may_read(record, final=final):
+                if final:
+                    record = {**_code_review.carried(record), "version": version, "requirements": len(reqs),
+                              "skipped": f"the {_code_review.MAX_REVIEWS} readings of the code allowed in a quest are spent"}
+                    _code_review.save(self.quest_root, record)
+                    self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
+                                      "; the final version of the code was not read again by another model"
+                                      if record.get("read_version") else "")
+                else:
+                    self._log.info("[code_review] the code was repaired; the last reading is kept for the version that will "
+                                   "run, so it is read just before the run")
+                break
+            if not await self._read_code_for_review(state, record, version, reqs, protocol, design, review_node):
+                break
+        record = _code_review.load(self.quest_root)
+        if record:
+            record["final_read"] = record.get("read_version") == _code_review.version(code)
+            _code_review.save(self.quest_root, record)
+        return None
+
+    async def _read_code_for_review(self, state: QuestState, old: dict[str, Any], version: str, reqs: list[dict[str, Any]],
+                                    protocol: Any, design: dict[str, Any], review_node: str) -> bool:
+        """ONE reading of the code version ``version`` (at most two requests, one more for each that failed once). ``True``
+        when it found problems that were recorded as open (the caller may repair them); ``False`` when it found none, when
+        the reader is the model that wrote the code, or when it could not be had."""
+        code = self.quest_root / "code"
+        previous = [p for p in old.get("problems") or [] if isinstance(p, dict)] if old.get("repaired") else []
+        record: dict[str, Any] = {"version": version, **_code_review.carried(old), "requirements": len(reqs)}
+        record.setdefault("reviews_total", 0)
+        record.setdefault("send_backs", 0)
         same, reader, planner, _named = self._reader_vs_planner(review_node, after_call=False, writer="implement")
         if same is True:
             record["skipped"] = f"the reader is the model that wrote the code ({planner})"
             _code_review.save(self.quest_root, record)
             self._log.info("[code_review] %s", _code_review.plain_lines(record))
-            return None
-        if int(record["reviews_total"]) >= _code_review.MAX_REVIEWS:
-            record["skipped"] = f"the {_code_review.MAX_REVIEWS} readings of the code allowed in a quest are spent"
-            _code_review.save(self.quest_root, record)
-            self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
-                              "; the final version of the code was not read again by another model"
-                              if record.get("read_version") else "")
-            return None
+            return False
         record["reviews_total"] = int(record["reviews_total"]) + 1
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
         sources, _partial = _code_review.sources_text(code)
         topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
         values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
         plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None)
+        earlier = _code_review.earlier_block(previous)
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
         listed: list[str] = []
@@ -10111,8 +10149,8 @@ class Engine(RunChecksMixin):
                     again, left, asked_again = _pairs.REASK, list(reqs), True
                 prompt = self._prompts["code_review"].substitute(
                     topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
-                    plan=plan_text, code=sources) + again
-                reply = await self._chat(prompt, node=review_node)
+                    plan=plan_text, code=sources, previous=earlier) + again
+                reply = await self._ask_reader(prompt, review_node)
                 parsed = _parse_json_lenient(reply, node=review_node)
                 got = _code_review.parse(parsed, left, values)
                 if again:
@@ -10128,9 +10166,9 @@ class Engine(RunChecksMixin):
             elif _code_review.reply_said_nothing(verdicts, logic, listed):
                 verdicts, record["error"] = None, _pairs.NOT_A_REVIEW
         except _ModelAnswerProblem as e:
-            record["error"] = f"the provider withheld or cut off its answer ({str(e)[:120] or type(e).__name__})"
+            record["error"] = f"the provider withheld or cut off its answer, twice ({str(e)[:120] or type(e).__name__})"
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
-            record["error"] = f"the call failed ({str(e)[:120] or type(e).__name__})"
+            record["error"] = f"the call failed, twice ({str(e)[:120] or type(e).__name__})"
         same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")
         record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
         if verdicts is not None and same is False:
@@ -10143,35 +10181,105 @@ class Engine(RunChecksMixin):
         if verdicts is None:
             _code_review.save(self.quest_root, record)
             self._log.warning("[code_review] %s", _code_review.plain_lines(record))
-            return None
+            return False
         if same is not False:
             record["skipped"] = ("the reader is the model that wrote the code" if same
                                  else "FI cannot tell whether the reader is another model than the one that wrote the code")
             _code_review.save(self.quest_root, record)
             self._log.info("[code_review] %s", _code_review.plain_lines(record))
-            return None
+            return False
         record["verdicts"] = verdicts
         record["read_version"] = version
         record["logic"] = logic
         record["checked"] = listed[:40]
         record["problems"] = [*_code_review.problems(verdicts), *logic]
-        self._log.info("[code_review] %s", _code_review.plain_lines(record))
+        _code_review.note_reading(record, version, record["problems"])
+        self._log.info("[code_review] %s; %s", _code_review.plain_lines(record), _code_review.metrics_line(record))
         if not record["problems"]:
             record["final"] = True
             _code_review.save(self.quest_root, record)
-            return None
-        # Sent back to the existing repair while it has attempts left; otherwise this is what stands.
-        iters = int(state.get("exec_reflect_iter") or 0)
-        if int(record["send_backs"]) < _code_review.MAX_SEND_BACKS and iters < self.config.engine.exec_reflect_max_iterations:
-            record["send_backs"] = int(record["send_backs"]) + 1
-            _code_review.save(self.quest_root, record)
-            self._log.warning("[code_review] sending the code back to be repaired: %s",
-                              "; ".join(v["text"] for v in record["problems"][:6]))
-            return self._code_review_failed_run(_code_review.directive(record["problems"]),
-                                                script=_code_review.script_for(record["problems"], code))
-        record["final"] = True
+            return False
         _code_review.save(self.quest_root, record)
-        return self._code_review_outcome(record)
+        return True
+
+    async def _ask_reader(self, prompt: str, review_node: str) -> str:
+        """One request to the reader; a request that failed is made once more (a reading that fails twice is recorded as
+        such, and the quest goes on)."""
+        try:
+            return await self._chat(prompt, node=review_node)
+        except Exception as e:  # noqa: BLE001 -- once more; the second failure is the caller's to record
+            self._log.warning("[code_review] the request to the reader failed (%s); asking once more",
+                              str(e)[:120] or type(e).__name__)
+            return await self._chat(prompt, node=review_node)
+
+    async def _repair_review_findings(self, state: QuestState, record: dict[str, Any], protocol: Any,
+                                      review_node: str) -> bool:
+        """One round of repair of what the last reading found. The code has not crashed: it does not do what the plan
+        requires, and the request says so (``agents/code_review_repair.md``; not the crash request of ``execute_reflect``).
+        Each file the findings name is shown whole and repaired in batches of at most ``code_review.BATCH`` findings, the
+        findings IN FULL (nothing cut), by the model that writes the code (``provider.node_models.implement``). A reply
+        is used only when it parses and keeps what the file had (:func:`core.code_review.repair_problem`). ``True`` when a
+        file changed (the next reading reads it)."""
+        code = self.quest_root / "code"
+        problems = [p for p in record.get("problems") or [] if isinstance(p, dict)]
+        plan_for = _code_review.files_for(problems, code)
+        if not plan_for:
+            return False
+        values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
+        topic = _pairs.scrub(" ".join(str(state.get("topic") or self.config.topic or "").split())[:1500], values)
+        equations = _code_review.equations_view(protocol if isinstance(protocol, dict) else None, values)
+        ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
+        package = self._package_in_use(state) or ""
+        record["send_backs"] = int(record.get("send_backs") or 0) + 1
+        _code_review.save(self.quest_root, record)
+        changed: list[str] = []
+        for rel, items in plan_for.items():
+            for batch in _code_review.batches(items):
+                if int(record.get("repair_calls") or 0) >= _code_review.MAX_REPAIR_CALLS:
+                    break
+                record["repair_calls"] = int(record.get("repair_calls") or 0) + 1
+                _code_review.save(self.quest_root, record)  # counted before the request
+                path = code / rel
+                try:
+                    old = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                prompt = self._prompts["code_review_repair"].substitute(
+                    topic=topic or "(not stated)", equations=equations, count=str(len(batch)),
+                    findings=_code_review.findings_text(batch), files=f"### {rel}\n```python\n{old.rstrip()}\n```",
+                    package=package or "(none)")
+                self._log.warning("[code_review] sending %d finding(s) to be repaired in %s: %s", len(batch), rel,
+                                  "; ".join(v["text"] for v in batch[:4]))
+                try:
+                    reply = await self._chat(prompt, node="implement")
+                except _ModelAnswerProblem:
+                    raise
+                except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the code as it was
+                    self._log.warning("[code_review] the repair of %s could not be asked for: %r", rel, e)
+                    continue
+                new = _code_review.parse_files(reply, [rel]).get(rel)
+                if not new or _split_run.same_script(old, new):
+                    self._log.warning("[code_review] the repair of %s gave back no changed file; kept as it is", rel)
+                    continue
+                why = _code_review.repair_problem(old, new, rel, equations=ids, package=package)
+                if why:
+                    self._log.warning("[code_review] the repair of %s was not used: %s", rel, why)
+                    continue
+                parent = _attempts._file_sha(path)
+                path.write_text(new, encoding="utf-8")
+                changed.append(rel)
+                if Path(rel).name == "experiment.py":
+                    self._review_experiment_changed = True
+                self._record(_attempts.LEDGER, lambda: {
+                    "kind": "repair", "script": Path(rel).name, "attempt": int(record["repair_calls"]),
+                    "parent_sha256": parent, "sha256": _attempts._sha(new.encode("utf-8")),
+                    "summary": ("the second model's findings: " + "; ".join(v["text"] for v in batch))[:300]})
+        record = _code_review.load(self.quest_root) or record
+        record["repaired"] = bool(changed)
+        _code_review.save(self.quest_root, record)
+        if changed:
+            self._log.info("[code_review] repaired %s; the changed version is read again", ", ".join(sorted(set(changed))))
+        return bool(changed)
 
     def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
         """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""
@@ -10190,10 +10298,10 @@ class Engine(RunChecksMixin):
         return patch
 
     def _code_review_outcome(self, record: dict[str, Any]) -> QuestState | None:
-        """The code, read and repaired as far as the budget goes, still misses something in the reader's view. The reader
-        can be wrong, so nothing stops here: the run goes on, and a headline quantity the reader still calls missing
-        stops the quest only if the run's own results lack it too (:meth:`_no_results_verdict`); what the results do
-        hold is recorded as a disagreement. Anything else is not reported, and the limitations say it was not computed."""
+        """The code, read and repaired as far as the budget goes, still has findings open in the reader's view. The reader
+        can be wrong, so nothing stops before the run. After it, a high-severity finding about a headline quantity that
+        the run's results do not contradict ends in the honest stop (:meth:`_no_results_verdict`); what the results do
+        hold is recorded as a disagreement; anything else open is said in the paper's limitations."""
         problems = [v for v in record.get("problems") or [] if isinstance(v, dict)]
         for v in problems:
             self._log.warning("[code_review] still %s after the repairs: %s%s",
@@ -13728,9 +13836,7 @@ class Engine(RunChecksMixin):
             return stop
         # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
         # function that computes another equation than the plan's is found here, not after the study.
-        failed_review = await self._code_review_gate(state)
-        if failed_review is not None:
-            return failed_review
+        await self._code_review_gate(state)
         failed_equations = await self._equation_gate(state, py, exec_env)
         if failed_equations is not None:
             return failed_equations
@@ -13777,15 +13883,14 @@ class Engine(RunChecksMixin):
             return too_long
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
-        # The code can have changed since it was read (a repair by the equation or oracle gate): a version no second model
-        # has read is read before a run whose results will be reported (at most code_review.MAX_REVIEWS in a quest).
-        failed_review = await self._code_review_gate(state)
-        if failed_review is not None:
-            return failed_review
         # A figure is drawn from what the run computed, never from numbers typed into the plotting code: the scripts are
         # read (not run) and sent back to draw it from the saved results, a bounded number of times
         # (core/figure_data_check.py).
         figure_repairs, figure_rewrote = await self._figures_from_results(state)
+        # The code can have changed since it was read (a repair by the equation or oracle gate, the figures): the version
+        # that will run is read now, with the reading the early call keeps for it (at most code_review.MAX_REVIEWS in a
+        # quest). Nothing is repaired here: a repaired version would be one nobody has read.
+        await self._code_review_gate(state, final=True)
 
         # Pilot pass: run the experiment small before running it for real.
         #
@@ -14349,6 +14454,9 @@ class Engine(RunChecksMixin):
         if result_json:
             patch["bounded_seen"] = _bounded_seen_after(state, result_json)
         self._check_replicate_manifests(state, split, replicates_n)
+        if oracle_code is None and getattr(self, "_review_experiment_changed", False) and code_path.is_file():
+            oracle_code = code_path.read_text(encoding="utf-8")  # a repair of the second model's findings
+        self._review_experiment_changed = False
         if oracle_code is not None:
             patch["code"] = oracle_code  # a repair of the script made by the oracle gate
         patch["figure_data_repairs"] = figure_repairs
@@ -14910,6 +15018,11 @@ class Engine(RunChecksMixin):
         repair_simulation = split and exec_result.get("failed_script") == _split_run.SIMULATE_NAME
         repair_submit = split and exec_result.get("failed_script") == _trial_runner.SUBMIT_NAME
         script_code = state.get("code") or ""
+        analysis_on_disk = self.quest_root / "code" / "experiment.py"
+        if analysis_on_disk.is_file() and not (repair_simulation or repair_submit):
+            # The file is what runs; the state can be a version behind it (a repair of a second model's findings, a redrawn
+            # figure), and a repair of the stale text would undo it.
+            script_code = analysis_on_disk.read_text(encoding="utf-8")
         if split:
             if repair_submit:
                 script_code = (self.quest_root / "code" / _trial_runner.SUBMIT_NAME).read_text(encoding="utf-8")
@@ -16164,8 +16277,14 @@ class Engine(RunChecksMixin):
             # A second model compared the code with the plan and the main quantity is not in it, even after repairs.
             missing = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
             constant = [] if missing else _code_review.headline_constant(self.quest_root, self.quest_root / "code")
-            left = missing or constant
-            if constant:
+            unsettled = [] if (missing or constant) else _code_review.headline_unsettled(
+                self.quest_root, self.quest_root / "code")
+            left = missing or constant or unsettled
+            if unsettled:
+                problem = ("a second model found a fault in how the study's main quantity is computed "
+                           f"({_one_line('; '.join(unsettled), 200)}), the repairs did not remove it and the run's results do "
+                           f"not show it false{', even after FI ' + after if after else ''}, so there is nothing FI can vouch for")
+            elif constant:
                 problem = ("the study's main quantity is a constant in the run's results, as a second model found in the code"
                            f" ({_one_line('; '.join(constant), 200)}){', even after FI ' + after if after else ''}, so "
                            "there is nothing measured to write up")
@@ -16173,11 +16292,16 @@ class Engine(RunChecksMixin):
                 problem = ("the code does not compute the study's main quantity"
                            f"{' (' + _one_line('; '.join(left), 200) + ')' if left else ''}"
                            f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
+            review_record = _code_review.load(self.quest_root)
+            rounds = int(review_record.get("send_backs") or 0)
             tried = ["asked a second model to read the code against what the plan requires it to compute",
                      *[_one_line(x, 300) for x in left[:3]],
+                     *([f"sent the findings to be repaired ({rounds} round{'s' if rounds != 1 else ''}); "
+                        + (_code_review.metrics_line(review_record) or "the findings stood")] if rounds else []),
                      *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
                        if repairs else [])]
-            ended = "the code still did not compute the study's main quantity"
+            ended = ("the code still had a fault in the study's main quantity that the repairs did not remove" if unsettled
+                     else "the code still did not compute the study's main quantity")
         if reason == "not_run":
             said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
             problem = f"{said}, so nothing was run for the study"
@@ -16275,6 +16399,16 @@ class Engine(RunChecksMixin):
             # run's own results hold it at one value everywhere: the results confirm it (a reader's word alone never stops).
             why = ("the study's main quantity is a constant in the run's results, as a second model found in the code "
                    "(" + "; ".join(_constant)[:200] + ")")
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                    "stuck_reason": "headline_missing"}
+        if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
+                _unsettled := _code_review.resolve_unsettled(
+                    self.quest_root, self.quest_root / "code", state.get("result_json"))):
+            # A second model flagged, with high severity, a fault in how the study's main quantity is computed; the repairs
+            # did not remove it and the run's own results do not contradict it.
+            why = ("a second model found a fault in how the study's main quantity is computed that the repairs did not "
+                   "remove, and the run's results do not show it false (" + "; ".join(_unsettled)[:200] + ")")
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
             return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                     "stuck_reason": "headline_missing"}
@@ -21221,6 +21355,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
         "implement_module_repair",          # the failing functions of the model's package, with the passing ones named
+        "code_review_repair",               # the code has not crashed: a second model's findings, to be fixed
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
         "cross_check",

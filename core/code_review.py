@@ -12,21 +12,31 @@ The same reading also checks the LOGIC against the plan (core/review_pairs.py: a
 what, why, how to fix and how serious): that each ``# E<n>`` function matches its equation (normalisations, units,
 factors), that a statistic is computed as the plan defines it, that a quantity the plan says depends on a setting uses that
 setting, that a step the plan's model names is not skipped, that nothing reported is a constant, and that a check's case
-is the plan's. Its findings go to the same repair as a plain directive naming the place and the fault, never a value;
-whatever value of the plan's checks a reviewer quotes is replaced in the directive (:func:`core.review_pairs.without_values`). A high-severity
-finding that is still there after the repairs never stops the quest on the reviewer's word: where the run's own results can
-tell (a quantity the reviewer calls constant, :func:`constant_in`) they decide; otherwise the paper's limitations say that
-a second model flagged it and it was not resolved.
+is the plan's. Its findings go to a repair request of their own, each naming the place and the fault, never a value;
+whatever value of the plan's checks a reviewer quotes is replaced in the findings (:func:`core.review_pairs.without_values`). A high-severity
+finding about a headline quantity that is still there in the final version after the repairs ends in the honest stop after
+the run, unless the run's own results contradict it (a quantity the reviewer calls constant, :func:`constant_in`); every
+other open finding is said in the paper's limitations.
 
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
-* What is missing or different goes to the existing repair path (a failed run that ``execute_reflect`` repairs) as a
-  plain directive naming the requirement; never an expected value (the requirements are names, never numbers the plan
-  wants reproduced). At most :data:`MAX_SEND_BACKS` times in a quest, and at most one review per code version
-  (:func:`version`); at most :data:`MAX_REVIEWS` reviews in a quest, so the cost is bounded.
-* What is still missing afterwards is not reported: the paper's limitations say plainly that it was not computed
-  (:func:`write_note`). A missing *headline* quantity (the first dependent variable, the metric the precision target
-  is for) ends in the honest stop (``stuck_no_findings``).
+* What is missing or different goes to its OWN repair, not the repair of a crashed script: the code has not crashed, it
+  does not do what the plan requires. A request of its own (``agents/code_review_repair.md``) holds the topic, the plan's
+  equations (never an expected value), the findings IN FULL (each with where, what, why, fix and severity; never a
+  value) and the file the findings name (:func:`files_for`: the model's package, ``simulate.py`` or ``experiment.py``),
+  in batches of at most :data:`BATCH` findings, at most :data:`MAX_SEND_BACKS` rounds and :data:`MAX_REPAIR_CALLS`
+  requests in a quest. After a round the changed version is read again (against the findings still open, and anything
+  new); when the open high-severity findings did not drop, repairing stops (no oscillation).
+* One reading per code version (:func:`version`), at most :data:`MAX_REVIEWS` in a quest, and the last of them is
+  reserved for the version that will run the full study: an intermediate version never spends it. The final version is
+  read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
+  converged.
+* What is still open afterwards is said in the paper's limitations (:func:`write_note`). A high-severity finding about
+  a headline quantity (the first dependent variable, the metric the precision target is for) that is still open in the
+  final version ends in the honest stop (``stuck_no_findings``, no paper) after the run, unless the run's own results
+  contradict it (a quantity the reviewer calls missing that the results hold, one it calls constant that they show
+  varying); that disagreement is recorded and the paper is not told it was not computed. A reviewer's word alone never
+  stops a quest before the run.
 """
 
 from __future__ import annotations
@@ -41,9 +51,13 @@ from . import oracle_check as _oracle
 from . import review_pairs as _pairs
 
 RECORD = Path(".fi") / "code_review.json"
-#: Reviews of the code in a whole quest (one per code version), and the times a review sends the code back for repair.
+#: Reviews of the code in a whole quest (one per code version; the last is reserved for the version that will run), the
+#: rounds of repair of what a review found, the findings in one repair request, and all repair requests in a quest.
 MAX_REVIEWS = 3
+RESERVED_FOR_FINAL = 1
 MAX_SEND_BACKS = 2
+BATCH = 6
+MAX_REPAIR_CALLS = 8
 #: How much code the reader is shown (whole files; the rest is said not to be shown).
 _MAX_CODE_CHARS = 60000
 IMPLEMENTED, MISSING, DIFFERENT = "implemented", "missing", "different"
@@ -225,7 +239,9 @@ def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | No
                     "line": int(match.group(2)) if match and match.group(2) else None,
                     "note": f["why"], "fix": f["fix"], "severity": f["severity"], "name": quantity,
                     "constant": bool(f.get("constant")), "where": f["where"],
-                    "headline": bool(quantity) and _norm(quantity) in headline})
+                    # About a headline quantity: it names one as the quantity, or (naming none) says one in what is wrong.
+                    "headline": (_norm(quantity) in headline) if quantity else any(
+                        len(h) >= 4 and h in _norm(f"{f['what']} {f['why']}") for h in headline)})
     return out
 
 
@@ -247,15 +263,211 @@ def reply_said_nothing(verdicts: list[dict[str, Any]] | None, logic: list[dict[s
     return _pairs.said_nothing(logic, listed, other_problem=bool(problems(verdicts or [])), evidence=shown)
 
 
-def script_for(problems: list[dict[str, Any]], code_dir: Path) -> str | None:
-    """The script a repair should rewrite for these problems: ``simulate.py`` when the reader pointed there, or all of
-    them are about the simulation (a swept parameter, a check's measure, an equation); else the analysis (``None``)."""
-    if not (Path(code_dir) / "simulate.py").is_file() or not problems:
-        return None
-    files = {v["file"].replace("\\", "/").split("/")[-1] for v in problems if v.get("file")}
-    if "simulate.py" in files or (not files and all(v["kind"] in ("sweep", "check", "equation") for v in problems)):
-        return "simulate.py"
-    return None
+_ORDER = {"high": 0, "medium": 1, "low": 2}
+_SIMULATION_KINDS = ("sweep", "check", "equation", "logic")
+
+
+def severity_of(v: dict[str, Any]) -> str:
+    """How serious an open problem is: a finding says so itself; a requirement of the plan that is missing or different is
+    high when it is about a headline quantity, else medium."""
+    if v.get("kind") == "logic":
+        return v.get("severity") if v.get("severity") in _ORDER else "medium"
+    return "high" if v.get("headline") else "medium"
+
+
+def open_counts(problems: list[dict[str, Any]]) -> tuple[int, int]:
+    """``(open findings, open high-severity findings)``."""
+    return len(problems), sum(1 for v in problems if severity_of(v) == "high")
+
+
+def files_for(problems: list[dict[str, Any]], code_dir: Path) -> dict[str, list[dict[str, Any]]]:
+    """The file each problem is to be repaired in, ``{"<path under code/>": [problems]}`` (the most serious first). The file
+    a finding names wins (``model.py`` is the model's package, ``simulate.py``, ``experiment.py``); a finding that names
+    none, or one that is not a file of the code, goes by what it is about: the simulation for a swept parameter, a check's
+    measure, an equation or a fault of logic, the analysis for the rest."""
+    from . import code_layout as _layout
+
+    code_dir = Path(code_dir)
+    scripts = [n for n in ("simulate.py", "experiment.py") if (code_dir / n).is_file()]
+    candidates = [*scripts, *sorted(_layout.package_sources(code_dir))]
+    by_name: dict[str, str] = {}
+    for rel in candidates:
+        by_name.setdefault(Path(rel).name.lower(), rel)
+    fallback = {"simulation": "simulate.py" if "simulate.py" in scripts else (scripts[0] if scripts else ""),
+                "analysis": "experiment.py" if "experiment.py" in scripts else (scripts[0] if scripts else "")}
+    out: dict[str, list[dict[str, Any]]] = {}
+    ranked = sorted(enumerate(problems), key=lambda iv: (_ORDER[severity_of(iv[1])], not iv[1].get("headline"), iv[0]))
+    for _i, v in ranked:
+        named = Path(str(v.get("file") or "").replace("\\", "/")).name.lower()
+        rel = by_name.get(named) if named else None
+        if rel is None:
+            rel = fallback["simulation" if v.get("kind") in _SIMULATION_KINDS else "analysis"]
+        if rel:
+            out.setdefault(rel, []).append(v)
+    return out
+
+
+def batches(items: list[dict[str, Any]], size: int = BATCH) -> list[list[dict[str, Any]]]:
+    return [items[i:i + size] for i in range(0, len(items), max(1, size))]
+
+
+def findings_text(items: list[dict[str, Any]]) -> str:
+    """The findings of one repair request, each IN FULL (where, what, why, fix, severity): nothing is cut."""
+    lines = []
+    for n, v in enumerate(items, 1):
+        where = (v.get("where") or "") if v.get("kind") == "logic" else ""
+        if not where and v.get("file"):
+            where = f"{v['file']}" + (f":{v['line']}" if v.get("line") else "")
+        head = f"{n}. [{severity_of(v)}] "
+        if v.get("kind") == "logic":
+            lines.append(head + f"Where: {where or 'not stated'}\n   What is wrong: {v['text']}\n"
+                         f"   Why it is wrong against the plan: {v.get('note') or 'not stated'}\n"
+                         f"   How to fix it: {v.get('fix') or 'not stated'}")
+        else:
+            what = "is missing from the code" if v["status"] == MISSING else "is implemented differently from the plan"
+            lines.append(head + f"Where: {where or 'not stated'}\n   What is wrong: the plan's {v.get('kind')} \"{v['text']}\" {what}\n"
+                         f"   Why it is wrong against the plan: {v.get('note') or 'the plan requires it'}\n"
+                         "   How to fix it: make the code compute it as the plan states, and put it where the plan says")
+    return "\n\n".join(lines)
+
+
+def equations_view(protocol: dict[str, Any] | None, values: list[float] | None = None) -> str:
+    """The plan's equations for a repair request as JSON text: id, formula, role and source; never an example or a value."""
+    model = (protocol or {}).get("model") if isinstance(protocol, dict) else None
+    items = (model.get("equations") if isinstance(model, dict) and isinstance(model.get("equations"), list) else [])
+    rows = [{k: _pairs.scrub(_text(e.get(k), 400), values) for k in ("id", "formula", "role", "source") if e.get(k)}
+            for e in items if isinstance(e, dict)]
+    return json.dumps(rows, indent=1)
+
+
+_FILE_LINE = re.compile(r"^\s*#\s*file\s*:\s*([\w.\-/\\]+)\s*$", re.IGNORECASE)
+_BLOCK = re.compile(r"```(?:python|py)?[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+
+def parse_files(reply: str, allowed: list[str]) -> dict[str, str]:
+    """The files a repair reply gives back, ``{"<path under code/>": text}``: each a fenced Python block whose first line is
+    ``# file: <name>``; only a file of ``allowed`` (by path, else by its name alone) and only one that parses."""
+    import ast
+
+    by_name = {Path(a).name.lower(): a for a in allowed}
+    out: dict[str, str] = {}
+    for m in _BLOCK.finditer(reply or ""):
+        lines = m.group(1).strip("\n").splitlines()
+        first = next((i for i, line in enumerate(lines) if line.strip()), None)
+        marker = _FILE_LINE.match(lines[first]) if first is not None else None
+        if not marker:
+            continue
+        name = marker.group(1).replace("\\", "/").strip("/")
+        name = name[len("code/"):] if name.startswith("code/") else name
+        rel = name if name in allowed else by_name.get(Path(name).name.lower())
+        text = "\n".join(lines[first + 1:]).strip("\n") + "\n"
+        if rel is None or not text.strip():
+            continue
+        try:
+            ast.parse(text)
+        except (SyntaxError, ValueError):
+            continue
+        out[rel] = text
+    return out
+
+
+def repair_problem(old: str, new: str, rel: str, *, equations: list[str], package: str = "") -> str:
+    """Why a repaired file cannot replace the file (``""`` when it can): the repair changes what the findings name and
+    nothing else, so it must keep every top-level function and constant the file had, every equation label, and (for the
+    analysis) the line it prints its result on and its not importing the package."""
+    from . import code_layout as _layout
+
+    dropped = _layout.dropped_functions(old, new)
+    if dropped:
+        return "it dropped " + ", ".join(f"`{d}`" for d in dropped[:5]) + ", which the file had"
+    for eid in equations:
+        if _oracle._labelled_in(eid, old) and not _oracle._labelled_in(eid, new):
+            return f"it lost the label `# {eid}`"
+    if Path(rel).name == "experiment.py":
+        if "RESULT_JSON" in old and "RESULT_JSON" not in new:
+            return "it dropped the RESULT_JSON line"
+        if package and _layout.imports(new, package) and not _layout.imports(old, package):
+            return f"it made experiment.py import the package `{package}`"
+    return ""
+
+
+#: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
+CARRIED = ("reviews_total", "send_backs", "repair_calls", "readings", "converged", "repaired", "read_version")
+
+
+def carried(record: dict[str, Any]) -> dict[str, Any]:
+    return {k: record[k] for k in CARRIED if k in record}
+
+
+def earlier_block(previous: list[dict[str, Any]]) -> str:
+    """For the reading of a version a repair made: the findings still open in the version before, to be judged again in this
+    one (``""`` for a first reading)."""
+    if not previous:
+        return ""
+    lines = []
+    for v in previous:
+        where = v.get("where") or (v.get("file") or "") + (f":{v['line']}" if v.get("line") else "")
+        lines.append(f"- [{severity_of(v)}] {v['text']}" + (f" ({where})" if where else "")
+                     + (f". Why: {v['note']}" if v.get("note") else ""))
+    return ("# Findings still open in the version before this one\n\nThe code above is the version after a repair. An earlier "
+            "reading of the version before it left these findings open. For each, say whether it still holds in THIS version: "
+            "if it does, list it again under `findings` (the same place, what, why and fix); if it does not, leave it out. "
+            "Then judge the plan's requirements again, and add any new problem you find.\n\n" + "\n".join(lines) + "\n")
+
+
+def may_repair(record: dict[str, Any]) -> str:
+    """Why the problems the last reading found are not to be repaired now (``""`` when they are): the rounds or the requests
+    are spent, no reading is left to read the repaired version, or the last repair did not reduce the open high-severity
+    findings."""
+    if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
+        return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
+    if int(record.get("repair_calls") or 0) >= MAX_REPAIR_CALLS:
+        return f"the {MAX_REPAIR_CALLS} repair requests allowed in a quest are spent"
+    if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
+        return "no reading is left to read a repaired version"
+    if record.get("converged") is False:
+        return "the last repair did not reduce the open high-severity findings"
+    return ""
+
+
+def may_read(record: dict[str, Any], *, final: bool) -> bool:
+    """Whether a reading is left: any but the reserved one for an intermediate version, all of them for the final one."""
+    spent = int(record.get("reviews_total") or 0)
+    return spent < MAX_REVIEWS - (0 if final else RESERVED_FOR_FINAL)
+
+
+def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[str, Any]]) -> None:
+    """Record a reading: the open findings and the high-severity ones in it. When it is the reading of a version a repair
+    made, it is compared with the reading before: the repairs have converged while each round reduced the open
+    high-severity findings (or, with none open, the open findings), and not when one did not."""
+    total, high = open_counts(problems)
+    readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
+    entry: dict[str, Any] = {"n": len(readings) + 1, "version": version_now, "open": total, "high": high}
+    if record.get("repaired") and readings:
+        before = readings[-1]
+        improved = high < int(before.get("high") or 0) or (
+            high == int(before.get("high") or 0) == 0 and total < int(before.get("open") or 0))
+        entry["improved"] = improved
+        record["converged"] = bool(improved) and record.get("converged") is not False
+    record["repaired"] = False
+    readings.append(entry)
+    record["readings"] = readings
+
+
+def final_read(quest_root: Path, code_dir: Path) -> bool:
+    """Whether the version of the code that is there now is the one a second model read last."""
+    record = load(quest_root)
+    return bool(record.get("read_version")) and record.get("read_version") == version(code_dir)
+
+
+def metrics_line(record: dict[str, Any]) -> str:
+    """The readings in one sentence: the open findings in each (for run.log and the quality report)."""
+    readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
+    if not readings:
+        return ""
+    return ("open findings per reading: " + ", ".join(f"{r.get('open')} ({r.get('high')} high)" for r in readings)
+            + ("; the repairs converged" if record.get("converged") else
+               "; the repairs did not converge" if record.get("converged") is False else ""))
 
 
 def directive(items: list[dict[str, Any]]) -> str:
@@ -439,6 +651,40 @@ def resolve_logic(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     return confirmed
 
 
+def _unsettled(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
+    """The open high-severity findings about a headline quantity of the final version that nothing in the run's results
+    contradicts (a requirement the reader calls missing is decided by :func:`resolve_headline`, a constant by
+    :func:`resolve_logic`; this is the rest)."""
+    return [v for v in not_computed(quest_root, code_dir)
+            if v.get("kind") == "logic" and v.get("headline") and v.get("severity") == "high"
+            and not v.get("contradicted") and not v.get("confirmed")]
+
+
+def headline_unsettled(quest_root: Path, code_dir: Path) -> list[str]:
+    """The texts of the findings :func:`resolve_unsettled` found standing."""
+    return [v["text"] for v in _unsettled(quest_root, code_dir)]
+
+
+def resolve_unsettled(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
+    """After a run: the high-severity findings about a headline quantity that are still open in the final version and that
+    the run's own results do not contradict (a finding that a quantity is constant is contradicted by results that show it
+    varying; nothing else in the results can show a fault of logic wrong). These end in the honest stop: the study's main
+    quantity is flagged as wrongly computed, the repairs did not remove it and nothing shows the flag false."""
+    record = load(quest_root)
+    if not record.get("final") or record.get("version") != version(code_dir):
+        return []
+    changed = False
+    for v in record.get("problems") or []:
+        if isinstance(v, dict) and v.get("kind") == "logic" and v.get("constant") and not v.get("contradicted"):
+            if constant_in(str(v.get("name") or ""), result) is False:
+                v["contradicted"] = True
+                changed = True
+    if changed:
+        record["disagreement"] = [v["text"] for v in record["problems"] if v.get("contradicted")]
+        save(quest_root, record)
+    return headline_unsettled(quest_root, code_dir)
+
+
 def write_note(quest_root: Path, code_dir: Path) -> str:
     """For the write prompt: what the code does not compute, to be said plainly in the limitations. ``""`` when nothing."""
     record = load(quest_root)
@@ -468,6 +714,9 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
                      f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
                      "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
                      "not present the quantities they concern as established.")
+    if record.get("converged") is False and (flagged or [v for v in still if v.get("kind") != "logic"]):
+        notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
+                     "high-severity findings; what is open is listed here as it stands.")
     if not left:
         return " ".join(notes)
     names = "; ".join(f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"

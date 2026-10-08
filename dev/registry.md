@@ -525,9 +525,13 @@ same PR that adds, splits or renames one.
 - `core/code_review.py` — a different model reads the code against the plan's required outputs and its logic
   (`agents/code_review.md`, step `code_review`, falling back to `oracle_review`'s routing as node `oracle_review.code`): `requirements`
   (names only), `plan_view` (the equations, method, statistics and the checks' cases, never an expected value), `sources_text`,
-  `version`, `parse`, `parse_logic` / `merge_logic` / `reply_said_nothing`, `problems`, `directive` (the repair's plain
-  text), `script_for`, `not_computed` / `headline_missing` / `headline_constant` / `write_note` (what the paper says),
-  `constant_in` / `resolve_logic` (the run's results decide a "constant" finding), `.fi/code_review.json`. Called by `Engine._code_review_gate` in `_node_execute` before the equation gate; the
+  `version`, `parse`, `parse_logic` / `merge_logic` / `reply_said_nothing`, `problems`, `files_for` (the file each finding is
+  repaired in) / `batches` / `findings_text` / `equations_view` / `parse_files` / `repair_problem` (the repair request of its own,
+  `agents/code_review_repair.md`), `may_read` / `may_repair` / `note_reading` (the reserved last reading, no oscillation),
+  `not_computed` / `headline_missing` / `headline_constant` / `write_note` (what the paper says),
+  `constant_in` / `resolve_logic` / `resolve_unsettled` (the run's results decide a "constant" finding; an open high-severity
+  finding about the main quantity they do not contradict is the honest stop), `.fi/code_review.json`. Called by
+  `Engine._code_review_gate` (reads, `_repair_review_findings`) in `_node_execute` before the equation gate (`final=False`) and just before the run (`final=True`); the
   headline stop goes through `_no_results_verdict` and `_node_stuck_no_findings` (reason `headline_missing`).
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),
