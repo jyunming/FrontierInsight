@@ -2,7 +2,7 @@
 
 The simulation is called once per cell of the protocol's grid, and the analysis reads each cell back from FI's record
 (``entry["cell"]``). A read of a name the grid does not have gives the default silently (``cell.get("x", 80.0)``), so one
-misspelt name (the grid says ``pitch``, the code reads ``pitch_nm``) makes a whole axis collapse to one value with no
+misspelt name (the grid says ``rate``, the code reads ``rate_hz``) makes a whole axis collapse to one value with no
 error anywhere. This reads the code with ``ast`` (it is never run) and finds every read of a setting by a name that is
 not among the names the plan gives: the grid's axes, the settings the plan fixes, and the keys of the cases its
 checks run at.
@@ -219,7 +219,7 @@ def _tokens(name: str) -> set[str]:
 
 def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
     """The supplied names that look like ``key``: one contains the other, they share a word of three letters or more
-    (``pitch`` and ``pitch_nm``), or they are spelt alike."""
+    (``rate`` and ``rate_hz``), or they are spelt alike."""
     low = key.lower()
     pool = sorted(supplied)
     contained = [s for s in pool if (len(s) >= 3 and s.lower() in low) or (len(low) >= 3 and low in s.lower())]

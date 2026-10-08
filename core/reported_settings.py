@@ -1,8 +1,8 @@
 """What the analysis reports for a setting must be what ran at that setting.
 
 The analysis reads FI's per-cell record (``raw/trials.json``) and prints a row, a series or a list per setting. When it
-reads a setting under a name the record does not have, every row carries the default (``pitch_nm`` = 80 for fourteen
-cells that ran at fourteen different pitches), and the paper reports an axis nobody varied. This compares what the
+reads a setting under a name the record does not have, every row carries the default (``rate_hz`` = 1 for fourteen
+cells that ran at fourteen different rates), and the paper reports an axis nobody varied. This compares what the
 analysis reported with the cells that ran, after the run, from FI's own record and never from the script's claims:
 
 * every table of rows in what the analysis reported (the printed result and the summaries it wrote under
@@ -74,7 +74,7 @@ def _tokens(name: str) -> list[str]:
 
 def names_setting(column: str, axis: str) -> bool:
     """Whether a column is named for a grid setting: the same words, or the same words with one short word added to either
-    (a unit: ``pitch`` and ``pitch_nm``)."""
+    (a unit: ``rate`` and ``rate_hz``)."""
     c, a = _tokens(column), _tokens(axis)
     if not c or not a:
         return False
