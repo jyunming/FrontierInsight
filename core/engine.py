@@ -5675,9 +5675,11 @@ class Engine(RunChecksMixin):
 
         if not names(mine) or names(mine) != names(theirs):
             return None
+        # Only a redesign that states a complete objective (quantity and direction) that is the plan's own matches it: an
+        # objective left out or half stated is not "the same search", so the model is asked for the block instead.
         a, b = mine.get("objective"), theirs.get("objective")
-        if isinstance(a, dict) and a.get("quantity") and a.get("direction") and not (
-                isinstance(b, dict) and a.get("quantity") == b.get("quantity") and a.get("direction") == b.get("direction")):
+        if not (isinstance(a, dict) and a.get("quantity") and a.get("direction") and isinstance(b, dict)
+                and a.get("quantity") == b.get("quantity") and a.get("direction") == b.get("direction")):
             return None
         return theirs
 
@@ -14676,12 +14678,18 @@ class Engine(RunChecksMixin):
             # flag against the final result (covers max_iterations=0 too).
             if rc == 0 and has_result_json and findings and not degenerate and not implausible:
                 # Numeric warnings the repairs did not remove: not something to write a paper over.
+                research = getattr(self.config, "rigor_profile", "default") == "research"
                 return self._stop_before_run(
                     "the run's numerics warned: " + "; ".join(w.describe() for w in findings),
                     "cannot_repair",
                     tried=["ran the experiment and read the numerical warnings it raised",
                            *[_one_line(w.describe(), 300) for w in findings[:3]],
-                           f"sent the script back to be repaired {iters} time(s); the warnings stood"])
+                           f"sent the script back to be repaired {iters} time(s); the warnings stood"],
+                    # A setting the person may choose (not a code edit); a research quest holds it fixed.
+                    advice=None if research else (
+                        f"To go on with the warnings noted in the evidence instead, set `engine.numeric_warnings: warn` in "
+                        f"the quest's config.yaml, approve it with `python launch.py --update {self.quest_id}`, and run it "
+                        f"again from the run step (`--resume {self.quest_id} --from run`)."))
             self._log.warning(
                 "[execute_reflect] %s after %d attempt(s); proceeding to analyze",
                 "result still degenerate (all metrics ~0)" if degenerate
@@ -16112,9 +16120,16 @@ class Engine(RunChecksMixin):
         self._log.warning("[stuck] %s; stopping without a paper (needs/STUCK.json)", problem)
         for line in tried:
             self._log.info("[stuck] tried: %s", line)
+        offered = str((state.get("exec_result") or {}).get("cannot_repair_advice") or "") if reason == "cannot_repair" else ""
+        if offered:
+            record["choice"] = offered
+            try:
+                (self.quest_root / "needs" / "STUCK.json").write_text(json.dumps(record, indent=1), encoding="utf-8")
+            except OSError:
+                pass
         print(self._routed_words(
             f"[FI] quest {self.quest_id}: {problem}. No paper was written; the results are kept. Nothing for you to "
-            "fix: needs/STUCK.json says what FI tried; run the quest again, "
+            "fix: needs/STUCK.json says what FI tried; " + (offered + " Or " if offered else "") + "run the quest again, "
             + ("or try another model for the design (`provider.node_models.design`)." if no_numbers or crashed
                or reason == "flat" or headline_missing else
                "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else

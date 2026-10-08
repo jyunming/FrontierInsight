@@ -278,3 +278,22 @@ def test_a_clean_scan_after_warnings_were_found_does_not_add_a_synthetic_entry(
     monkeypatch.setattr("core.numeric_warnings.scan", lambda *a, **k: [])
     assert engine._scan_numeric_warnings({}, "", None) == []
     assert len(_recorded(engine)) == 1, "a clean scan after warnings (not a crash) adds nothing"
+
+
+@pytest.mark.asyncio
+async def test_the_stop_offers_the_setting_and_running_again_with_it_goes_on_with_the_warnings_noted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("core.engine.LLMClient.chat", _fake(calls, implement=_WARNS, repair=_WARNS))
+    first = Engine(_cfg(tmp_path))
+    await first.run()
+    record = json.loads((first.quest_root / "needs" / "STUCK.json").read_text(encoding="utf-8"))
+    assert "engine.numeric_warnings: warn" in record["choice"] and "--from run" in record["choice"]
+    assert "engine.numeric_warnings: warn" in capsys.readouterr().out
+    assert not (first.fi_dir / "pause.json").exists()
+
+    second = Engine(_cfg(tmp_path, numeric_warnings="warn"), resume_quest_id=first.quest_id)
+    artifacts = await second.run(from_step="run")
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists()
+    assert _recorded(second)[-1]["mode"] == "warn", "the warnings are on record"

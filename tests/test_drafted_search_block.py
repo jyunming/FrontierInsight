@@ -159,3 +159,16 @@ async def test_after_the_freeze_the_frozen_block_is_used_and_no_model_is_asked(t
     out = await eng._complete_a_drafted_search({"topic": TOPIC}, drafted, iteration=1)
     assert out["protocol"]["optimisation"]["evaluation_budget"] == BLOCK["evaluation_budget"]
     assert model.asked == []
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_that_leaves_its_objective_out_is_not_the_same_search_as_the_plans(tmp_path: Path) -> None:
+    eng, model = await _setup(tmp_path, [])
+    drafted = _no_budget()  # the plan's own variables, but no objective stated
+    del drafted["protocol"]["optimisation"]["objective"]
+    answer = copy.deepcopy(BLOCK)
+    answer["evaluation_budget"] = {"starts": 2, "per_start": 20}
+    model.answers = [answer]
+    out = await eng._complete_a_drafted_search({"topic": TOPIC}, drafted, iteration=1)
+    assert len(model.asked) == 1, "the model is asked; the plan's block is not copied"
+    assert out["protocol"]["optimisation"]["evaluation_budget"] == {"starts": 2, "per_start": 20}

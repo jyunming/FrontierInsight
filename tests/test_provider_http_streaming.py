@@ -233,3 +233,35 @@ def test_the_node_timeout_is_the_silence_limit_for_that_node() -> None:
             await http.aclose()
 
     assert asyncio.run(run()) == "ok" and len(calls) == 1
+
+
+def test_a_stream_cut_after_partial_output_is_recorded_as_an_estimated_failed_attempt() -> None:
+    from core.provider import CALL_ATTEMPTS
+
+    calls: list[int] = []
+
+    class Cut(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield _event({"content": "x" * 400})
+            raise httpx.ReadError("connection dropped")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(200, stream=Cut())
+        return httpx.Response(200, stream=Paced([_event({"content": "whole"}), _event({}, "stop"), DONE]))
+
+    async def run():
+        attempts: list[dict[str, Any]] = []
+        token = CALL_ATTEMPTS.set(attempts)
+        try:
+            text, _h = await _chat({"name": "openai", "model": "m"}, handler)
+        finally:
+            CALL_ATTEMPTS.reset(token)
+        return text, attempts
+
+    text, attempts = asyncio.run(run())
+    assert text == "whole" and len(calls) == 2
+    (cut,) = attempts
+    assert cut["usage"]["estimated"] is True and cut["usage"]["completion_tokens"] == 100, cut
+    assert cut["usage"]["prompt_tokens"] >= 1

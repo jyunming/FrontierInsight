@@ -1308,7 +1308,8 @@ async def _post_ollama_streamed(http: Any, url: str, body: dict[str, Any], heade
 
 
 async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dict[str, str],
-                         timeout: float, inactivity: float | None = None) -> dict[str, Any]:
+                         timeout: float, inactivity: float | None = None,
+                         progress: dict[str, int] | None = None) -> dict[str, Any]:
     """The chat call as a stream, put back together into the shape a plain call returns (``choices[0].message.content``,
     ``finish_reason``, ``usage``, ``model``; the reasoning of a model that streams it, as ``reasoning_content``).
 
@@ -1320,7 +1321,9 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
     status raises as ``raise_for_status`` would; an error sent inside the stream is a 4xx-equivalent when retrying
     cannot fix it (:func:`_stream_error`) and transient otherwise. A stream that ends without a ``finish_reason`` was cut
     off and is tried again; one that finished without ``[DONE]`` or without usage is kept, with a warning. A server that
-    ignores ``stream`` and answers with one JSON reply (``Content-Type: application/json``) is read as a plain call."""
+    ignores ``stream`` and answers with one JSON reply (``Content-Type: application/json``) is read as a plain call.
+    ``progress``: filled with ``chars``, the characters of answer and reasoning received so far, so a stream cut after
+    partial output (paid for, then asked again) can be recorded with an estimate of what it cost."""
     wait = timeout if inactivity is None else inactivity
     total = timeout * _STREAM_TOTAL_FACTOR
     options = body.get("stream_options") if isinstance(body.get("stream_options"), dict) else {}
@@ -1372,10 +1375,14 @@ async def _post_streamed(http: Any, url: str, body: dict[str, Any], headers: dic
             piece = delta.get("content")
             if isinstance(piece, str) and piece:
                 parts.append(piece)
+                if progress is not None:
+                    progress["chars"] = progress.get("chars", 0) + len(piece)
                 first_content = (now - started) if first_content is None else first_content
             thought = as_text(delta.get("reasoning_content") or delta.get("reasoning") or delta.get("reasoning_text"))
             if thought:
                 reasoning.append(thought)
+                if progress is not None:
+                    progress["chars"] = progress.get("chars", 0) + len(thought)
                 first_thinking = (now - started) if first_thinking is None else first_thinking
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
@@ -4532,14 +4539,29 @@ class LLMClient:
                         else:
                             data = None
                             if _http_streams(self.endpoint) and not self._stream_refused:
+                                progress: dict[str, int] = {}
                                 try:
-                                    data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout)
+                                    data = await _post_streamed(self._http, call_url, request_body, headers, http_timeout,
+                                                                progress=progress)
                                 except httpx.HTTPStatusError as refused_stream:
                                     if not _refuses_streaming(refused_stream):
                                         raise
                                     self._stream_refused = True  # this server does not take `stream`: not asked again
                                     _log.info("[%s] the server does not take a streamed call (HTTP %s); sending the "
                                               "request whole", node or "chat", refused_stream.response.status_code)
+                                except Exception as cut:
+                                    if progress.get("chars"):
+                                        # A stream cut after partial output was paid for and is asked again: the cut
+                                        # attempt carries an estimate (about four characters a token) on the error, which the retry hook
+                                        # records, so a call billed twice shows in the record of calls and the cost.
+                                        sent = sum(len(_content_text(m.get("content", ""))) for m in messages)
+                                        cut.usage = {  # type: ignore[attr-defined]
+                                            "prompt_tokens": max(1, sent // self._CHARS_PER_TOKEN),
+                                            "completion_tokens": max(1, progress["chars"] // self._CHARS_PER_TOKEN),
+                                            "total_tokens": max(1, sent // self._CHARS_PER_TOKEN)
+                                            + max(1, progress["chars"] // self._CHARS_PER_TOKEN),
+                                            "estimated": True}
+                                    raise
                             if data is None:
                                 r = await self._http.post(
                                     call_url, json=request_body, headers=headers, timeout=http_timeout,
