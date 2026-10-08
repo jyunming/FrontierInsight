@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from core import code_review as cr
+from core import finding_repair as fr
 from core.config import Config, EngineConfig, ExecutionConfig, KnowledgeConfig, OutputConfig, ProviderConfig
 from core.engine import Engine
 
@@ -53,28 +54,64 @@ def _engine(tmp_path: Path, *, other: bool = True) -> Engine:
 
 
 REPAIR_HEAD = "# Code That Does Not Do What the Plan Requires"
+TEST_HEAD = "# A Test That Shows One Finding"
+pytestmark = pytest.mark.usefixtures("this_python")
+
+#: A test a fake code model writes: it fails on the code as it is and passes once the file it was asked about has changed.
+#: (The first run notes the file's hash beside the test and fails; later runs fail while the file is unchanged.)
+CHANGED_TEST = '''import hashlib, pathlib
+FILE = pathlib.Path(__file__).resolve().parents[2] / "code" / "{rel}"
+NOTE = pathlib.Path(__file__).with_suffix(".orig")
+
+
+def test_the_file_was_changed():
+    now = hashlib.sha256(FILE.read_bytes()).hexdigest()
+    if not NOTE.exists():
+        NOTE.write_text(now)
+    assert now != NOTE.read_text(), "{rel} is as it was when the problem was found"
+'''
+PASSING_TEST = "def test_nothing_is_wrong():\n    assert True\n"
+
+
+def code_model_answer(owner: Any, prompt: str) -> str | None:
+    """What a fake code-writing model answers: ``None`` when ``prompt`` is not one of its requests; a test for a request for a
+    test (one that passes when ``owner.undemonstrated`` holds the file); the file or function from ``owner.repaired`` for a
+    request for a repair (nothing when the test gave none, which is a reply with no changed file)."""
+    head = prompt.lstrip()
+    if not (head.startswith(TEST_HEAD) or head.startswith(REPAIR_HEAD)):
+        return None
+    rel = re.search(r"^### (\S+)", prompt, re.M).group(1)  # type: ignore[union-attr]
+    scoped = "(the function `" in prompt.split("### ", 1)[1].splitlines()[0]
+    if head.startswith(TEST_HEAD):
+        owner.test_prompts.append(prompt)
+        body = PASSING_TEST if rel in getattr(owner, "undemonstrated", ()) else CHANGED_TEST.format(rel=rel)
+        return f"```python\n{body}```"
+    owner.repair_prompts.append(prompt)
+    count = len(owner.repair_prompts)
+    text = owner.repaired.get(rel)
+    text = text(count) if callable(text) else text
+    if text is None:
+        return ""
+    return f"```python\n{text}```" if scoped else f"```python\n# file: {rel}\n{text}```"
 
 
 def repair_answer(owner: Any, prompt: str) -> str:
-    """What a fake code-writing model answers to a repair request: the file named in the request, whole, from
-    ``owner.repaired`` (nothing when the test gave none, which is a reply with no changed file)."""
-    owner.repair_prompts.append(prompt)
-    rel = re.search(r"^### (\S+)", prompt, re.M).group(1)  # type: ignore[union-attr]
-    text = owner.repaired.get(rel)
-    return "" if text is None else f"```python\n# file: {rel}\n{text}```"
+    return code_model_answer(owner, prompt) or ""
 
 
 class _Reader:
     def __init__(self, missing: tuple[str, ...] = (), headline: bool = False, fixed_by: str = "") -> None:
         self.missing, self.headline, self.prompts = missing, headline, []
         self.repair_prompts: list[str] = []
-        self.repaired: dict[str, str] = {}
+        self.test_prompts: list[str] = []
+        self.repaired: dict[str, Any] = {}
         self.fixed_by = fixed_by  # a text whose presence in the code the reader is shown means the problem is repaired
 
     async def chat(self, messages, **kw):  # noqa: ANN001
         prompt = messages[-1]["content"]
-        if prompt.lstrip().startswith(REPAIR_HEAD):
-            return repair_answer(self, prompt)
+        answered = code_model_answer(self, prompt)
+        if answered is not None:
+            return answered
         assert prompt.lstrip().startswith("# Code Against the Plan"), prompt[:80]
         self.prompts.append(prompt)
         reqs = json.loads(prompt.split("```json", 1)[1].split("```", 1)[0])
@@ -131,10 +168,11 @@ async def test_a_missing_quantity_goes_to_a_repair_request_of_its_own_and_the_ch
     assert "just failed" not in asked and "crash" not in asked.replace("has NOT crashed", "").replace("not crashed", "")
     record = cr.load(engine.quest_root)
     assert record["send_backs"] == 1 and record["repair_calls"] == 1 and record["same_model"] is False
-    assert [r["open"] for r in record["readings"]] == [2, 0] and record["converged"] is True
+    assert [r["open"] for r in record["readings"]] == [1, 0], "both requirements are one issue"
+    assert record["converged"] is True
     assert record["final"] is True and record["final_read"] is True and cr.not_computed(engine.quest_root, engine.quest_root / "code") == []
     assert "# settling_time is computed" in (engine.quest_root / "code" / "experiment.py").read_text(encoding="utf-8")
-    assert "Open findings per reading" in cr.metrics_line(record) or "open findings per reading" in cr.metrics_line(record)
+    assert "open issues per reading" in cr.metrics_line(record) and "1 issue(s) were repaired" in cr.metrics_line(record)
     # The version that will run is already read: the late call asks nothing.
     assert await engine._code_review_gate(WITH_PLAN, final=True) is None and len(reader.prompts) == 2
 
@@ -145,12 +183,14 @@ async def test_a_repair_that_changes_nothing_ends_the_repairs_and_what_is_open_s
     reader = _Reader(missing=("settling_time",))  # the repair answers with no file
     engine._client = reader
     assert await engine._code_review_gate(STATE) is None
-    assert len(reader.prompts) == 1 and len(reader.repair_prompts) == 1
+    assert len(reader.prompts) == 1 and len(reader.test_prompts) == 1, "one test shows it"
+    assert len(reader.repair_prompts) == fr.REPAIR_CALLS + fr.OTHER_CALLS, "the code model's tries, then the other model's one"
     record = cr.load(engine.quest_root)
     assert record["final"] is True and record["send_backs"] == 1
     assert [v["kind"] for v in cr.not_computed(engine.quest_root, engine.quest_root / "code")] == ["dependent variable"]
     # The same code is read once; asked again, it is not read or repaired again.
-    assert await engine._code_review_gate(STATE) is None and len(reader.prompts) == 1 and len(reader.repair_prompts) == 1
+    assert await engine._code_review_gate(STATE) is None and len(reader.prompts) == 1
+    assert len(reader.repair_prompts) == fr.REPAIR_CALLS + fr.OTHER_CALLS
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,12 @@
+{
+  "note": "What the scripted models say in tests/test_replay_code_findings.py. The names are the real quest's; the test file itself names none of them.",
+  "false_finding": "R27",
+  "false_name": "noise_ratio",
+  "grid_constant": "NOISE_RATIOS",
+  "grid_size": 4,
+  "function": "_validate_setting_grid",
+  "line": 167,
+  "conflict_finding": "L1",
+  "conflict_why": "the metric's estimand says mean absolute error while the method and the figure say standard deviation",
+  "merged": [["L1", "R20", "R3"], ["R21", "R5"], ["R22", "R8"]]
+}

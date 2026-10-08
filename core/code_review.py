@@ -20,12 +20,15 @@ ends in the honest stop after the run; every other open finding is said in the p
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
 * What is missing or different goes to its OWN repair, not the repair of a crashed script: the code has not crashed, it
-  does not do what the plan requires. A request of its own (``agents/code_review_repair.md``) holds the topic, the plan's
-  equations (never an expected value), the findings IN FULL (each with where, what, why, fix and severity; never a
-  value) and the file the findings name (:func:`files_for`: the model's package, ``simulate.py`` or ``experiment.py``),
-  in batches of at most :data:`BATCH` findings, at most :data:`MAX_SEND_BACKS` rounds and :data:`MAX_REPAIR_CALLS`
-  requests in a quest. After a round the changed version is read again (against the findings still open, and anything
-  new); when the open high-severity findings did not drop, repairing stops (no oscillation).
+  does not do what the plan requires. Every finding is kept by a stable id (:mod:`core.code_findings`), the reader is asked
+  for every finding (no cap) ranked by effect on the reported results, and :mod:`core.finding_repair` takes the issues one
+  at a time, the ones that can change a reported result first: a test that must fail on the current code is asked for (a
+  finding it does not show is "not demonstrated" and left alone), then a repair of the function(s) involved, kept only
+  when the new test passes and nothing that passed before fails. A request of its own (``agents/code_review_repair.md``)
+  holds the topic, the plan's equations (never an expected value) and the finding IN FULL. At most
+  :data:`MAX_SEND_BACKS` passes and :data:`MAX_FINDING_CALLS` requests in a quest. After a pass the changed version is read
+  again (against the findings still open, and anything new); when the open issues that change a result did not drop,
+  repairing stops (no oscillation). A finding that says the PLAN contradicts itself is not sent to the code at all.
 * One reading per code version (:func:`version`), at most :data:`MAX_REVIEWS` in a quest, and the last of them is
   reserved for the version that will run the full study: an intermediate version never spends it. The final version is
   read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
@@ -61,8 +64,13 @@ RESERVED_FOR_FINAL = 1
 #: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
 RUN_REPAIR_READS = 3
 MAX_SEND_BACKS = 2
-BATCH = 6
-MAX_REPAIR_CALLS = 8
+#: Every model request the finding-by-finding repair may make in a quest (a failing test asked for, a repair, the other
+#: model's one rewrite), each counted on disk before it is made. Each finding has its own smaller bounds
+#: (:mod:`core.finding_repair`).
+MAX_FINDING_CALLS = 60
+#: The most findings read from one reply. The reader is asked for every finding, ranked by effect on the reported
+#: results, so this is a guard against a runaway reply and not a cap on what is reported.
+FINDING_LIMIT = 200
 #: How much code the reader is shown (whole files; the rest is said not to be shown).
 _MAX_CODE_CHARS = 60000
 IMPLEMENTED, MISSING, DIFFERENT = "implemented", "missing", "different"
@@ -189,7 +197,8 @@ def parse(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = N
         out.append({"id": req["id"], "kind": req["kind"], "text": req["text"], "headline": req["headline"],
                     "name": req.get("name", ""), "status": status, "file": _text(item.get("file"), 80),
                     "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
-                    "note": _pairs.scrub(_text(item.get("note")), values)})
+                    "note": _pairs.scrub(_text(item.get("note")), values),
+                    "changes_result": _pairs._flag(item.get("changes_result"))})
     return out or None
 
 
@@ -250,7 +259,7 @@ def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | No
         return []
     headline = {_norm(r["name"]) for r in reqs if r.get("headline") and r.get("name")}
     out: list[dict[str, Any]] = []
-    for f in _pairs.findings(reply.get("findings"), limit=12):
+    for f in _pairs.findings(reply.get("findings"), limit=FINDING_LIMIT):
         f = _pairs.without_values(f, values)
         match = _WHERE_RE.search(f["where"])
         quantity = f["quantity"]
@@ -259,6 +268,7 @@ def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | No
                     "line": int(match.group(2)) if match and match.group(2) else None,
                     "note": f["why"], "fix": f["fix"], "severity": f["severity"], "name": quantity,
                     "constant": bool(f.get("constant")), "where": f["where"],
+                    "changes_result": f.get("changes_result"), "plan_conflict": bool(f.get("plan_conflict")),
                     "headline": bool(quantity) and _norm(quantity) in headline})
     return out
 
@@ -323,10 +333,6 @@ def files_for(problems: list[dict[str, Any]], code_dir: Path) -> dict[str, list[
         if rel:
             out.setdefault(rel, []).append(v)
     return out
-
-
-def batches(items: list[dict[str, Any]], size: int = BATCH) -> list[list[dict[str, Any]]]:
-    return [items[i:i + size] for i in range(0, len(items), max(1, size))]
 
 
 def findings_text(items: list[dict[str, Any]]) -> str:
@@ -455,7 +461,8 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
 
 
 #: What a record keeps from one code version to the next (the quest-wide counters and the history of the readings).
-CARRIED = ("reviews_total", "send_backs", "repair_calls", "readings", "converged", "repaired", "read_version")
+CARRIED = ("reviews_total", "send_backs", "repair_calls", "finding_calls", "test_calls", "readings", "converged", "repaired",
+           "read_version", "issues", "same_model", "accepted_tests", "plan_conflicts")
 
 
 def carried(record: dict[str, Any]) -> dict[str, Any]:
@@ -484,12 +491,12 @@ def may_repair(record: dict[str, Any]) -> str:
     findings."""
     if int(record.get("send_backs") or 0) >= MAX_SEND_BACKS:
         return f"the {MAX_SEND_BACKS} rounds of repair allowed in a quest are spent"
-    if int(record.get("repair_calls") or 0) >= MAX_REPAIR_CALLS:
-        return f"the {MAX_REPAIR_CALLS} repair requests allowed in a quest are spent"
+    if int(record.get("finding_calls") or 0) >= MAX_FINDING_CALLS:
+        return f"the {MAX_FINDING_CALLS} model requests allowed for repairing findings in a quest are spent"
     if int(record.get("reviews_total") or 0) >= MAX_REVIEWS:
         return "no reading is left to read a repaired version"
     if record.get("converged") is False:
-        return "the last repair did not reduce the open high-severity findings"
+        return "the last repair did not reduce the open findings that change a result"
     return ""
 
 
@@ -507,17 +514,33 @@ def may_read(record: dict[str, Any], *, final: bool, after_run_repair: bool = Fa
     return int(record.get("reviews_total") or 0) < read_cap(final=final, after_run_repair=after_run_repair)
 
 
-def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[str, Any]]) -> None:
-    """Record a reading: the open findings and the high-severity ones in it. When it is the reading of a version a repair
-    made, it is compared with the reading before: the repairs have converged while each round reduced the open
-    high-severity findings (or, with none open, the open findings), and not when one did not."""
-    total, high = open_counts(problems)
+def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[str, Any]],
+                 code_dir: Path | None = None) -> None:
+    """Record a reading: the open findings in it (distinct issues, when ``code_dir`` is given: the id of each finding is
+    stable, :mod:`core.code_findings`) and the ones that can change a reported result. When it is the reading of a version
+    a repair made, it is compared with the reading before: the repairs have converged while each round reduced the open
+    issues that change a result (or, with none open, the open issues), and not when one did not."""
+    from . import code_findings as _issues
+
     readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
-    entry: dict[str, Any] = {"n": len(readings) + 1, "version": version_now, "open": total, "high": high}
+    n = len(readings) + 1
+    if code_dir is not None:
+        _issues.index_problems(problems, Path(code_dir))
+        _issues.update_issues(record, problems, n, version_now)
+        total = len(_issues.open_issues(record))
+        changing = len(_issues.changing_open(record))
+        high = sum(1 for i in _issues.open_issues(record) if i.get("severity") == "high")
+    else:
+        total, high = open_counts(problems)
+        changing = high
+    entry: dict[str, Any] = {"n": n, "version": version_now, "open": total, "high": high, "changing": changing}
+    if code_dir is not None:
+        entry["ids"] = [i["id"] for i in _issues.open_issues(record)]
     if record.get("repaired") and readings:
         before = readings[-1]
-        improved = high < int(before.get("high") or 0) or (
-            high == int(before.get("high") or 0) == 0 and total < int(before.get("open") or 0))
+        before_changing = int(before.get("changing", before.get("high")) or 0)
+        improved = changing < before_changing or (
+            changing == before_changing == 0 and total < int(before.get("open") or 0))
         entry["improved"] = improved
         record["converged"] = bool(improved) and record.get("converged") is not False
     record["repaired"] = False
@@ -536,9 +559,13 @@ def metrics_line(record: dict[str, Any]) -> str:
     readings = [r for r in record.get("readings") or [] if isinstance(r, dict)]
     if not readings:
         return ""
-    return ("open findings per reading: " + ", ".join(f"{r.get('open')} ({r.get('high')} high)" for r in readings)
-            + ("; the repairs converged" if record.get("converged") else
-               "; the repairs did not converge" if record.get("converged") is False else ""))
+    from . import code_findings as _issues
+
+    return ("open issues per reading: " + ", ".join(
+        f"{r.get('open')} ({r.get('changing', r.get('high'))} can change a result)" for r in readings)
+        + ("; the repairs converged" if record.get("converged") else
+           "; the repairs did not converge" if record.get("converged") is False else "")
+        + (f"; {line}" if (line := _issues.convergence_line(record)) else ""))
 
 
 def directive(items: list[dict[str, Any]]) -> str:
@@ -901,8 +928,23 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
                      f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
                      + (", the study's main quantity among them." if record.get("not_reviewed_headline") else "."))
     still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
+    issues = record.get("issues") if isinstance(record.get("issues"), dict) else {}
     flagged = [v for v in still if v.get("kind") == "logic"]
     left = [v for v in still if v.get("kind") != "logic"]
+    conflicts = [v for v in flagged if v.get("plan_conflict")]
+    flagged = [v for v in flagged if not v.get("plan_conflict")]
+    if conflicts:
+        listed = "; ".join(f"{v['text']}" + (f" ({v['note']})" if v.get("note") else "") for v in conflicts[:6])
+        notes.append("A second model found that the PLAN contradicts itself: two of its parts define one thing differently "
+                     f"({listed}). This is not a fault of the code. The plan's model was asked to make the plan consistent "
+                     "and the code follows the plan as it stands now: say plainly in the limitations that the plan's own "
+                     "definitions disagreed, and which one the study used.")
+    unshown = [v for v in flagged if (issues.get(v.get("fid")) or {}).get("outcome") == "not demonstrated"]
+    if unshown:
+        listed = "; ".join(f"{v['text']}" for v in unshown[:6])
+        notes.append("A second model flagged these, and FI could not show any of them by a test that fails on the code, so "
+                     f"the code was left as it is: {listed}. Say plainly in the limitations that they are unconfirmed.")
+        flagged = [v for v in flagged if v not in unshown]
     if flagged:
         listed = "; ".join(f"{v['text']}" + (f" (in {v['file']}" + (f", line {v['line']}" if v.get("line") else "") + ")"
                                              if v.get("file") else "") + f" [{v.get('severity', 'medium')}]"
@@ -911,9 +953,9 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
                      f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
                      "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
                      "not present the quantities they concern as established.")
-    if record.get("converged") is False and (flagged or [v for v in still if v.get("kind") != "logic"]):
+    if record.get("converged") is False and (flagged or unshown or [v for v in still if v.get("kind") != "logic"]):
         notes.append("The repairs of the second model's findings were stopped because a round did not reduce the open "
-                     "high-severity findings; what is open is listed here as it stands.")
+                     "findings that change a result; what is open is listed here as it stands.")
     if not left:
         return " ".join(notes)
     names = "; ".join(f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"

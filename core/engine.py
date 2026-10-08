@@ -118,6 +118,8 @@ from . import equation_tests as _equation_tests
 from . import code_review as _code_review
 from . import review_pairs as _pairs
 from . import quality_report as _quality_report
+from . import code_findings as _code_findings
+from . import finding_repair as _finding_repair
 from . import function_steps as _function_steps
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
@@ -10777,9 +10779,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     async def _code_review_gate(self, state: QuestState, *, final: bool = False) -> QuestState | None:
         """A different model reads the plan's required outputs and its logic against the scripts, and what it finds is
         repaired (core/code_review.py). Called twice in ``_node_execute``: early (``final=False``), where a version is read,
-        its findings are sent to a repair request of their own (:meth:`_repair_review_findings`: in full, to the file they
-        name, in batches), the changed version is read again against the findings still open, and so on while the open
-        high-severity findings keep dropping, within ``code_review.MAX_SEND_BACKS`` rounds; and just before the run
+        its findings are kept by stable id and repaired test first, one at a time (:meth:`_repair_review_findings`), the
+        changed version is read again against the findings still open, and so on while the open issues that change a
+        result keep dropping, within ``code_review.MAX_SEND_BACKS`` passes; and just before the run
         (``final=True``), where the version that will run is read with the one reading the early call may not spend, and
         nothing is repaired any more (a repaired version would be unread). ``.fi/code_review.json`` keeps the readings, the
         open findings in each, whether the repairs converged and whether the final version was read, so a resume does not
@@ -10928,7 +10930,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         record["logic"] = logic
         record["checked"] = listed[:40]
         record["problems"] = [*_code_review.problems(verdicts), *logic]
-        _code_review.note_reading(record, version, record["problems"])
+        _code_review.note_reading(record, version, record["problems"], code)
         self._log.info("[code_review] %s; %s", _code_review.plain_lines(record), _code_review.metrics_line(record))
         if not record["problems"]:
             record["final"] = True
@@ -10949,72 +10951,164 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     async def _repair_review_findings(self, state: QuestState, record: dict[str, Any], protocol: Any,
                                       review_node: str) -> bool:
-        """One round of repair of what the last reading found. The code has not crashed: it does not do what the plan
-        requires, and the request says so (``agents/code_review_repair.md``; not the crash request of ``execute_reflect``).
-        Each file the findings name is shown whole and repaired in batches of at most ``code_review.BATCH`` findings, the
-        findings IN FULL (nothing cut), by the model that writes the code (``provider.node_models.implement``). A reply
-        is used only when it parses and keeps what the file had (:func:`core.code_review.repair_problem`). ``True`` when a
-        file changed (the next reading reads it)."""
+        """One pass of repair over what the last reading found, finding by finding and test first
+        (:mod:`core.finding_repair`). The findings are folded into issues with stable ids (:mod:`core.code_findings`); a
+        contradiction inside the plan itself goes to the plan's model (:meth:`_route_plan_conflicts`), never to the code;
+        for each of the others, the ones that can change a reported result first, the code model is asked for a test that
+        fails on the current code (a finding whose test passes is "not demonstrated" and left alone), then for a repair of
+        the function(s) involved; a change is kept only when the new test passes and nothing that passed before fails. A
+        function that still fails may be rewritten once by the other model configured for review. Every request is counted
+        in ``.fi/code_review.json`` before it is made. ``True`` when a file changed (the next reading reads it)."""
         code = self.quest_root / "code"
-        problems = [p for p in record.get("problems") or [] if isinstance(p, dict)]
-        plan_for = _code_review.files_for(problems, code)
-        if not plan_for:
-            return False
+        await self._route_plan_conflicts(state, record, review_node)
         values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
-        equations = _code_review.equations_view(protocol if isinstance(protocol, dict) else None, values)
-        ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
         package = self._package_in_use(state) or ""
+        ids = _oracle.generating_equations(protocol if isinstance(protocol, dict) else None)
+        same = record.get("same_model")
+        reader = str(record.get("reviewer") or "")
         record["send_backs"] = int(record.get("send_backs") or 0) + 1
         _code_review.save(self.quest_root, record)
-        changed: list[str] = []
-        for rel, items in plan_for.items():
-            for batch in _code_review.batches(items):
-                if int(record.get("repair_calls") or 0) >= _code_review.MAX_REPAIR_CALLS:
-                    break
-                record["repair_calls"] = int(record.get("repair_calls") or 0) + 1
-                _code_review.save(self.quest_root, record)  # counted before the request
-                path = code / rel
-                try:
-                    old = path.read_text(encoding="utf-8")
-                except OSError:
-                    continue
-                prompt = self._prompts["code_review_repair"].substitute(
-                    topic=_pairs.scrub(self._topic_block(), values) or "(not stated)", equations=equations,
-                    count=str(len(batch)),
-                    findings=_code_review.findings_text(batch), files=f"### {rel}\n```python\n{old.rstrip()}\n```",
-                    package=package or "(none)")
-                self._log.warning("[code_review] sending %d finding(s) to be repaired in %s: %s", len(batch), rel,
-                                  "; ".join(v["text"] for v in batch[:4]))
-                try:
-                    reply = await self._chat(prompt, node="implement")
-                except _ModelAnswerProblem:
-                    raise
-                except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the code as it was
-                    self._log.warning("[code_review] the repair of %s could not be asked for: %r", rel, e)
-                    continue
-                new = _code_review.parse_files(reply, [rel]).get(rel)
-                if not new or _split_run.same_script(old, new):
-                    self._log.warning("[code_review] the repair of %s gave back no changed file; kept as it is", rel)
-                    continue
-                why = _code_review.repair_problem(old, new, rel, equations=ids, package=package)
-                if why:
-                    self._log.warning("[code_review] the repair of %s was not used: %s", rel, why)
-                    continue
-                parent = _attempts._file_sha(path)
-                path.write_text(new, encoding="utf-8")
-                changed.append(rel)
-                if Path(rel).name == "experiment.py":
-                    self._review_experiment_changed = True
-                self._record(_attempts.LEDGER, lambda: {
-                    "kind": "repair", "script": Path(rel).name, "attempt": int(record["repair_calls"]),
-                    "parent_sha256": parent, "sha256": _attempts._sha(new.encode("utf-8")),
-                    "summary": ("the second model's findings: " + "; ".join(v["text"] for v in batch))[:300]})
-        record = _code_review.load(self.quest_root) or record
+
+        async def ask(prompt: str, who: str, kind: str) -> str:
+            node = (review_node + ".repair") if who == "other" else f"implement.finding_{'test' if kind == 'test' else 'repair'}"
+            return await self._chat(prompt, node=node)
+
+        async def run_tests(paths: list[str]) -> dict[str, Any]:
+            _rc, out, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", paths)], timeout_s=180)
+            return _finding_repair.parse_runs(out, paths)
+
+        async def snapshot() -> dict[str, str]:
+            return await self._finding_snapshot(state, protocol, record)
+
+        def static() -> dict[str, int]:
+            return self._finding_static_counts(state, protocol)
+
+        def on_accept(rel: str, old: str, new: str, issue: dict[str, Any]) -> None:
+            record["repaired"] = True
+            _code_review.save(self.quest_root, record)
+            if Path(rel).name == "experiment.py":
+                self._review_experiment_changed = True
+            self._record(_attempts.LEDGER, lambda: {
+                "kind": "repair", "script": Path(rel).name, "attempt": int(record.get("repair_calls") or 0),
+                "parent_sha256": _attempts._sha(old.encode("utf-8")), "sha256": _attempts._sha(new.encode("utf-8")),
+                "summary": ("the second model's finding " + str(issue.get("id")) + ": " + str(issue.get("text") or ""))[:300]})
+
+        env = _finding_repair.Env(
+            root=self.quest_root, code=code, record=record, save=lambda: _code_review.save(self.quest_root, record),
+            ask=ask, run_tests=run_tests, snapshot=snapshot, static=static,
+            keeps=lambda old, new, rel: _code_review.repair_problem(old, new, rel, equations=ids, package=package),
+            prompts=self._prompts, topic=_pairs.scrub(self._topic_block(), values) or "(not stated)",
+            equations=_code_review.equations_view(protocol if isinstance(protocol, dict) else None, values),
+            scrub=lambda text: _pairs.scrub(text, values), log=self._log, package=package,
+            other=(reader if same is False else ""), code_model=self._model_for_node("implement") or self.config.provider.model or "",
+            on_accept=on_accept)
+        changed = await _finding_repair.repair_issues(env)
         record["repaired"] = bool(changed)
         _code_review.save(self.quest_root, record)
+        for issue in _code_findings.issues_of(record).values():
+            if issue.get("outcome") in (_code_findings.NOT_DEMONSTRATED, _code_findings.GAVE_UP):
+                self._log.warning("[code_review] %s (%s) %s: %s", issue.get("id"),
+                                  issue.get("function") or issue.get("file") or "?", issue.get("outcome"),
+                                  issue.get("reason") or "")
         if changed:
             self._log.info("[code_review] repaired %s; the changed version is read again", ", ".join(sorted(set(changed))))
         return bool(changed)
+
+    async def _finding_snapshot(self, state: QuestState, protocol: Any, record: dict[str, Any]) -> dict[str, str]:
+        """What must keep passing while a finding is repaired: the model's equation tests (core/equation_tests.py, from the
+        plan's own worked examples) and every finding test accepted before, as ``{"equation:E1": "pass", ...}``."""
+        out: dict[str, str] = {}
+        if isinstance(protocol, dict) and _equation_tests.eligible(protocol):
+            rows = _equation_tests.example_rows(protocol)
+            located = _equation_tests.locate(protocol, self._equation_sources())
+            case_list = _equation_tests.cases(rows, located)
+            if case_list:
+                _equation_tests.write(self.quest_root / "code", case_list)
+                env = {**os.environ}
+                raw_dir = self._raw_root() / "equation_tests"
+                raw_dir.mkdir(parents=True, exist_ok=True)
+                env[_split_run.RAW_DIR_ENV] = _split_run.env_value(raw_dir, self.quest_root)
+                _rc, text, _err = await self._run_in_env(["code/" + _equation_tests.TEST_PATH, "--json"], timeout_s=300, env=env)
+                for r in _equation_tests.parse_results(text) or []:
+                    out[f"equation:{r.get('id')}"] = "pass" if r.get("status") == _equation_tests.OK else "fail"
+        accepted = [p for p in record.get("accepted_tests") or [] if isinstance(p, str)]
+        if accepted:
+            _rc, text, _err = await self._run_in_env(["-c", _finding_repair.harness_source("code", accepted)], timeout_s=300)
+            for path, run in _finding_repair.parse_runs(text, accepted).items():
+                out[f"finding:{path}"] = run.status
+        return out
+
+    def _finding_static_counts(self, state: QuestState, protocol: Any) -> dict[str, int]:
+        """The number of faults each static check (core/static_checks.py) finds in the code as it is, read without a model."""
+        files = self._static_files()
+        drafted, design = self._static_inputs(state)
+        counts: dict[str, int] = {}
+        for name, module, _on in self._static_checks():
+            try:
+                counts[name] = len(module.problems(files, protocol if isinstance(protocol, dict) else drafted, design))
+            except Exception:  # noqa: BLE001 -- a check that cannot be made counts nothing
+                counts[name] = 0
+        return counts
+
+    async def _route_plan_conflicts(self, state: QuestState, record: dict[str, Any], review_node: str) -> None:
+        """A finding that says the plan contradicts itself (two parts define one thing differently) is not a fault of the
+        code. It is recorded as a plan problem and put to the plan's model through the same bounded request as the other
+        missing parts of the plan (:meth:`_ask_plan_to_complete`); nothing is sent to the code for it. Once the protocol is
+        frozen it is only recorded. The plan's model may rewrite only the definitions a contradiction can sit in (the
+        metrics, the interval method, the model's equations); a check, a threshold or a tolerance is never changed."""
+        conflicts = [i for i in _code_findings.open_issues(record) if i.get("plan_conflict")
+                     and i.get("outcome") in (_code_findings.OPEN, _code_findings.REOPENED)]
+        if not conflicts:
+            return
+        for issue in conflicts:
+            issue.update(outcome=_code_findings.PLAN_PROBLEM, demonstrated=None,
+                         reason="the plan contradicts itself; this is not a fault of the code")
+        record["plan_conflicts"] = [{"id": i["id"], "text": i.get("text"), "why": i.get("why")} for i in conflicts]
+        _code_review.save(self.quest_root, record)
+        self._log.warning("[code_review] %d finding(s) say the plan contradicts itself, so they are not sent to the code: %s",
+                          len(conflicts), "; ".join(str(i.get("text"))[:100] for i in conflicts[:3]))
+        design, sha = self._design_from_plan()
+        if (design is None or not sha or self._client is None or _frozen.load(self.quest_root) is not None
+                or not self._runs_code(state)):
+            for issue in conflicts:
+                issue["plan_asked"] = False
+            _code_review.save(self.quest_root, record)
+            return
+        started = {"sha": sha}
+        protocol_now = self._protocol_block(state)
+        values = _pairs.plan_values(protocol_now if isinstance(protocol_now, dict) else None)
+
+        def lacks(_now: Any) -> list[str]:
+            try:
+                changed = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8")) != started["sha"]
+            except OSError:
+                changed = True
+            return [] if changed else [_pairs.scrub(str(i.get("why") or i.get("text") or ""), values) for i in conflicts]
+
+        def request(_now: Any, _text: str) -> str:
+            return _code_findings.plan_conflict_request(
+                state.get("topic") or self.config.topic,
+                [(str(i.get("text") or ""), str(i.get("why") or "")) for i in conflicts], values)
+
+        def keep(before: str, revised: str) -> str:
+            kept = self._keep_only_the_parts(before, revised, list(_code_findings.PLAN_PARTS))
+            if kept is None or _plan.sha256(kept) == _plan.sha256(before):
+                raise ValueError("the revised plan resolves none of the contradictions in a form that can be read; "
+                                 "plan.md is unchanged")
+            return kept
+
+        await self._ask_plan_to_complete(
+            design, sha, lacks=lacks, request=request, keep=keep, file="code_plan_conflict_asked.json",
+            what="a plan that does not contradict itself", short="a contradiction in the plan",
+            note="a contradiction found by the code reader, resolved by the plan's model")
+        try:
+            after = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
+        except OSError:
+            after = sha
+        for issue in conflicts:
+            issue["plan_asked"] = True
+            issue["plan_changed"] = after != sha
+        _code_review.save(self.quest_root, record)
 
     def _code_review_failed_run(self, message: str, *, give_up: str = "", script: str | None = None) -> QuestState:
         """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""
@@ -22184,7 +22278,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
         "implement_module_repair",          # the failing functions of the model's package, with the passing ones named
-        "code_review_repair",               # the code has not crashed: a second model's findings, to be fixed
+        "code_review_repair",               # the code has not crashed: a second model's finding, to be fixed
+        "code_finding_test",                # a small test that fails on the current code because of one finding
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
         "cross_check",

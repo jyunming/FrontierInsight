@@ -66,6 +66,18 @@ def severity_of(value: Any) -> str:
     return _SEVERITY_WORDS.get(" ".join(str(value or "").lower().split()).rstrip("."), "medium")
 
 
+def _flag(value: Any) -> bool | None:
+    """``True`` / ``False`` for a reply that says so (a boolean or yes / no text), ``None`` for one that does not."""
+    if isinstance(value, bool):
+        return value
+    text = str(value if value is not None else "").strip().lower()
+    if text in ("true", "yes", "y", "1"):
+        return True
+    if text in ("false", "no", "n", "0"):
+        return False
+    return None
+
+
 def finding(item: Any) -> dict[str, Any] | None:
     """One finding as ``{where, what, why, fix, severity, quantity, constant}``, or ``None`` when it does not say what is wrong.
     The keys a reviewer is likely to use for the same thing are read as one (``problem`` / ``issue`` for ``what``)."""
@@ -83,7 +95,11 @@ def finding(item: Any) -> dict[str, Any] | None:
         "fix": _first(item, "fix", "how_to_fix", "suggestion", "how"),
         "severity": severity_of(item.get("severity")),
         "quantity": _first(item, "quantity", "name", limit=80),
-        "constant": str(item.get("constant") if item.get("constant") is not None else "").strip().lower() in ("true", "yes", "y", "1"),
+        "constant": _flag(item.get("constant")) is True,
+        # Whether it can change a number or a figure the study reports (``None``: the reply did not say), and whether it is
+        # a contradiction inside the plan itself and not a fault of the code.
+        "changes_result": _flag(item.get("changes_result", item.get("changes_a_result"))),
+        "plan_conflict": _flag(item.get("plan_conflict", item.get("plan_contradicts_itself"))) is True,
     }
 
 

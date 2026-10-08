@@ -255,3 +255,27 @@ def _hermetic_pandoc_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "generation._pandoc._pypandoc_pandoc", lambda: None, raising=False,
     )
+
+
+@pytest.fixture
+def this_python(monkeypatch):
+    """Run FI's checks of the generated code (``Engine._run_in_env``) with the interpreter running the tests, from the
+    quest folder: no venv is made. For tests of the finding-by-finding repair, which run small test files."""
+    import asyncio
+    import shutil
+    import subprocess
+
+    from core.engine import Engine
+
+    async def run(self, argv, *, timeout_s=180, env=None):
+        for cache in (self.quest_root / "code").glob("**/__pycache__"):
+            shutil.rmtree(cache, ignore_errors=True)
+
+        def go():
+            done = subprocess.run([sys.executable, "-B", *argv], cwd=self.quest_root, capture_output=True, text=True,
+                                  timeout=timeout_s, env=env)
+            return done.returncode, done.stdout, done.stderr
+
+        return await asyncio.to_thread(go)
+
+    monkeypatch.setattr(Engine, "_run_in_env", run)

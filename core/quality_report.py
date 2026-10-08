@@ -812,7 +812,38 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "open_high_per_reading": [_int(r.get("high")) for r in readings],
             "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
             "repair_requests": _int(cr.get("repair_calls")), "repair_rounds": _int(cr.get("send_backs")),
-            "repairs_stopped": str(cr.get("repairs_stopped") or "")}
+            "repairs_stopped": str(cr.get("repairs_stopped") or ""),
+            "issues": _issue_rows(cr), "issue_summary": _issue_summary(cr),
+            "open_changing_per_reading": [_int(r.get("changing", r.get("high"))) for r in readings]}
+
+
+def _issue_rows(cr: dict[str, Any]) -> list[dict[str, Any]]:
+    """One row per issue of the code reader (a stable id; :mod:`core.code_findings`): what it concerns, whether it can change
+    a reported result, whether a failing test showed it, whether and by which model it was repaired, and whether it is
+    still open after the last reading."""
+    from . import code_findings as _issues
+
+    rows = []
+    for issue in _issues.ranked(cr, only_open=False):
+        outcome = str(issue.get("outcome") or "")
+        readings = [r for r in _list(issue.get("readings")) if isinstance(r, dict)]
+        still = bool(readings) and readings[-1].get("status") == "open" and outcome != _issues.FIXED
+        rows.append({
+            "id": str(issue.get("id") or ""), "what": _one(issue.get("text"), 110),
+            "where": " ".join(x for x in (str(issue.get("file") or ""), str(issue.get("function") or "")) if x),
+            "changes_result": bool(issue.get("changes_result")),
+            "demonstrated": issue.get("demonstrated") if isinstance(issue.get("demonstrated"), bool) else None,
+            "repaired": outcome == _issues.FIXED, "repaired_by": str(issue.get("fixed_by") or ""),
+            "open": still, "outcome": outcome, "plan_problem": bool(issue.get("plan_conflict")) or outcome == _issues.PLAN_PROBLEM,
+            "reason": _one(issue.get("reason"), 140), "seen_in": len(readings)})
+    return rows
+
+
+def _issue_summary(cr: dict[str, Any]) -> dict[str, Any]:
+    from . import code_findings as _issues
+
+    summary = _issues.summary(cr)
+    return {**summary, "line": _issues.convergence_line(cr)}
 
 
 def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
@@ -904,6 +935,35 @@ def _span(seconds: int | None) -> str:
     return f"{h}h {m:02d}m" if h else (f"{m}m {s:02d}s" if m else f"{s}s")
 
 
+def _issue_lines(code: dict[str, Any]) -> list[str]:
+    """The code reader's findings by stable id: shown by a test or not, repaired and by which model, still open and whether
+    it changes a result. The convergence statement counts the issues a test showed to change a result, not findings per
+    reading (the same issue comes back reworded)."""
+    summary = code.get("issue_summary") or {}
+    lines = ["", "### Findings of the code reader, by id", ""]
+    if summary.get("line"):
+        lines += [summary["line"] + ".", ""]
+    models = summary.get("fixed_by") or {}
+    if models:
+        lines += ["Repaired by: " + ", ".join(f"{m} ({n})" for m, n in sorted(models.items())) + ".", ""]
+    lines += ["| id | where | what | changes a result | shown by a failing test | repaired | still open |",
+              "| --- | --- | --- | --- | --- | --- | --- |"]
+    for row in code["issues"][:40]:
+        shown = {True: "yes", False: "no: the test passed on the code, so it was not repaired", None: "not tested"}[row["demonstrated"]]
+        repaired = f"yes, by {row['repaired_by']}" if row["repaired"] else ("no" + (f" ({row['reason']})" if row["reason"] else ""))
+        if row["plan_problem"]:
+            still = "plan problem: the plan contradicts itself, asked of the plan's model"
+        elif row["open"]:
+            still = "yes, and it changes a result" if row["changes_result"] else "yes, but it changes nothing reported"
+        else:
+            still = "no"
+        lines.append(f"| {_cell(row['id'])} | {_cell(row['where'] or '-')} | {_cell(row['what'])} | "
+                     f"{'yes' if row['changes_result'] else 'no'} | {_cell(shown)} | {_cell(repaired)} | {_cell(still)} |")
+    if len(code["issues"]) > 40:
+        lines.append(f"(+{len(code['issues']) - 40} more in .fi/code_review.json)")
+    return lines
+
+
 def _cell(text: str) -> str:
     return text.replace("|", "/").replace("\n", " ")
 
@@ -947,10 +1007,12 @@ def render(report: dict[str, Any]) -> str:
                      + "." if code.get("open_per_reading") else "")
                   + ("" if code.get("repairs_converged") is None else
                      " The repairs " + ("converged." if code["repairs_converged"] else
-                                        "did not converge (they were stopped when a round did not reduce the high-severity "
-                                        "findings)."))
+                                        "did not converge (they were stopped when a round did not reduce the open "
+                                        "findings that change a result)."))
                   + (f" Repairs ended because {code['repairs_stopped']}; {code['repair_rounds']} round(s) and "
                      f"{code['repair_requests']} request(s) were used." if code.get("repairs_stopped") else "")]
+    if code.get("issues"):
+        lines += _issue_lines(code)
     pilot = report.get("pilot")
     if pilot:
         lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
