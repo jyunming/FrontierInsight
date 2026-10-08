@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import grid_keys as _grid_keys
 from . import reported_settings as _rs
 
 #: A series is read only when it has at least this many points (a two-point line is a reference line).
@@ -195,12 +196,16 @@ class Mark:
     reason: str
     scope: str  # "" for a module-level constant, else the function it is local to
 
+    def key(self) -> str:
+        """What names this mark in the review's checklist and verdicts: where it is, not only what it is called."""
+        return f"{self.script}:{self.line}:{self.scope or '-'}:{self.name}"
+
     def valid(self) -> bool:
         return len(self.reason.split()) >= MIN_REASON_WORDS
 
     def asks(self) -> str:
         """The requirement the second model confirms or rejects (no number in it)."""
-        return (f"the constant `{self.name}` ({self.script} line {self.line}) is declared constant by design (\"{self.reason}\"): "
+        return (f"the constant `{self.name}` ({self.script} line {self.line}{', in ' + self.scope if self.scope else ''}) is declared constant by design (\"{self.reason}\"): "
                 "it is a genuine fixed constant of the study that the reason names a source for, and a returned quantity may "
                 "rest on it; it is not a stand-in for a result the code should compute")
 
@@ -245,37 +250,53 @@ def design_marks(files: dict[str, str]) -> list[Mark]:
 
 def _uses(files: dict[str, str], mark: Mark, key: str) -> bool:
     """Whether the dictionary ``run_cell`` / ``run_trial`` return holds ``key`` computed from the marked constant: through
-    assignments and through the functions that use it. Anything not read in full is not a use."""
+    assignments and through the functions that use it, read from each function's own statements. Anything not read in full is
+    not a use."""
     import ast
 
-    functions: dict[str, ast.AST] = {}
-    for text in files.values():
+    functions: dict[str, tuple[ast.AST, str]] = {}
+    defined: dict[str, set[str]] = {}
+    for script, text in files.items():
         try:
-            for node in ast.walk(ast.parse(text)):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    functions.setdefault(node.name, node)
+            tree = ast.parse(text)
         except (SyntaxError, ValueError):
             return False
+        defined[script] = {t.id for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.setdefault(node.name, (node, script))
+
+    def refers(fn: ast.AST, script: str) -> bool:
+        """Whether the function's own statements mean this mark's constant by its name."""
+        if mark.scope:
+            return script == mark.script and fn.name == mark.scope and any(  # type: ignore[attr-defined]
+                isinstance(n, ast.Name) and n.id == mark.name for n in _grid_keys.own_scope_nodes(fn))
+        if script == mark.script:
+            return any(isinstance(n, ast.Name) and n.id == mark.name for n in _grid_keys.own_scope_nodes(fn))
+        # another file means it only by importing it (not by defining a constant of the same name itself)
+        return mark.name not in defined.get(script, set()) and any(
+            (isinstance(n, ast.Name) and n.id == mark.name) or (isinstance(n, ast.Attribute) and n.attr == mark.name)
+            for n in _grid_keys.own_scope_nodes(fn))
 
     def names(node: ast.AST) -> set[str]:
         return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
-    def calls(node: ast.AST) -> set[str]:
+    def calls(nodes: list[ast.AST]) -> set[str]:
         return {(n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else "")
-                for n in ast.walk(node) if isinstance(n, ast.Call)} - {""}
+                for n in nodes if isinstance(n, ast.Call)} - {""}
 
-    affected = {n for n, fn in functions.items() if (not mark.scope or n == mark.scope) and mark.name in names(fn)}
+    affected = {n for n, (fn, script) in functions.items() if refers(fn, script)}
     grew = True
     while grew:
         grew = False
-        for n, fn in functions.items():
-            if n not in affected and calls(fn) & affected:
+        for n, (fn, _script) in functions.items():
+            if n not in affected and calls(_grid_keys.own_scope_nodes(fn)) & affected:
                 affected.add(n)
                 grew = True
     for entry in _ENTRIES:
-        fn = functions.get(entry)
-        if fn is None:
+        if entry not in functions:
             continue
+        fn, script = functions[entry]
         own: list[ast.AST] = []
         stack = list(ast.iter_child_nodes(fn))
         while stack:
@@ -283,11 +304,11 @@ def _uses(files: dict[str, str], mark: Mark, key: str) -> bool:
             own.append(node)
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
                 stack.extend(ast.iter_child_nodes(node))
-        tainted = {mark.name} if not mark.scope or mark.scope == entry else set()
+        tainted = {mark.name} if refers(fn, script) else set()
         for _ in range(8):
             before = len(tainted)
             for node in own:
-                if isinstance(node, ast.Assign) and (names(node.value) & tainted or calls(node.value) & affected):
+                if isinstance(node, ast.Assign) and (names(node.value) & tainted or calls(list(ast.walk(node.value))) & affected):
                     tainted |= {t.id for tt in node.targets for t in ast.walk(tt) if isinstance(t, ast.Name)}
             if len(tainted) == before:
                 break
@@ -296,7 +317,8 @@ def _uses(files: dict[str, str], mark: Mark, key: str) -> bool:
             continue
         for r in returns:
             for k, v in zip(r.value.keys, r.value.values):
-                if isinstance(k, ast.Constant) and k.value == key and (names(v) & tainted or calls(v) & affected):
+                if isinstance(k, ast.Constant) and k.value == key and (
+                        names(v) & tainted or calls(list(ast.walk(v))) & affected):
                     return True
     return False
 
@@ -313,7 +335,7 @@ def confirmation(quest_root: Path, code_dir: Path, mark: Mark) -> str:
     if record.get("read_version") != _review.version(code_dir):
         return UNCONFIRMED
     for v in record.get("verdicts") or []:
-        if isinstance(v, dict) and v.get("kind") == _review.MARK_KIND and v.get("name") == mark.name:
+        if isinstance(v, dict) and v.get("kind") == _review.MARK_KIND and v.get("name") == mark.key():
             return CONFIRMED if v.get("status") == _review.IMPLEMENTED else REJECTED
     return UNCONFIRMED
 

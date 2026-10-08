@@ -292,3 +292,31 @@ def code_files(code_dir: Path) -> dict[str, str]:
         except (OSError, UnicodeDecodeError):
             continue
     return out
+
+
+def own_scope_nodes(fn: ast.AST) -> list[ast.AST]:
+    """The nodes of a function that are its own: its statements, without the bodies of the functions, classes and lambdas
+    defined inside it, except a nested function the function itself calls (by name) from its own scope."""
+    nodes: list[ast.AST] = []
+    nested: dict[str, ast.AST] = {}
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            nested[node.name] = node
+            continue
+        if isinstance(node, (ast.ClassDef, ast.Lambda)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
+    used: set[str] = set()
+    grew = True
+    while grew:
+        grew = False
+        called = {n.func.id for n in nodes if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+        for name, inner in nested.items():
+            if name in called and name not in used:
+                used.add(name)
+                nodes.extend(ast.walk(inner))
+                grew = True
+    return nodes

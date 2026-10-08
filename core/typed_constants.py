@@ -299,6 +299,10 @@ def _called(fn: ast.AST) -> set[str]:
     return {_call_name(n) for n in ast.walk(fn) if isinstance(n, ast.Call) and _call_name(n)}
 
 
+def _calls_of(nodes: list[ast.AST]) -> set[str]:
+    return {_call_name(n) for n in nodes if isinstance(n, ast.Call) and _call_name(n)}
+
+
 def _own(fn: ast.AST) -> list[ast.AST]:
     """The nodes of ``fn`` that belong to it directly: not those of a nested function, class or lambda."""
     out: list[ast.AST] = []
@@ -333,7 +337,7 @@ def tainted_outputs(files: dict[str, str], found: list[Typed]) -> set[str] | Non
     while grew:
         grew = False
         for name, fn in functions.items():
-            if name not in affected and _called(fn) & affected:
+            if name not in affected and _calls_of(_grid_keys.own_scope_nodes(fn)) & affected:
                 affected.add(name)
                 grew = True
     keys: set[str] = set()

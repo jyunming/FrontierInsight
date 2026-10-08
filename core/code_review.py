@@ -109,7 +109,7 @@ def requirements(design: dict[str, Any] | None, protocol: dict[str, Any] | None,
     for eid in _oracle.generating_equations(protocol):
         add("equation", f"equation {eid} of the plan's model is computed in the code, in a function marked `# {eid}`")
     for mark in marks or []:
-        add(MARK_KIND, mark.asks(), name=mark.name)
+        add(MARK_KIND, mark.asks(), name=mark.key())
     return out
 
 

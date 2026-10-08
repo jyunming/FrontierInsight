@@ -281,3 +281,18 @@ async def test_a_model_whose_numbers_the_plan_gives_is_not_asked_about(tmp_path:
     eng, asked = _engine(tmp_path, monkeypatch, ["{}"])
     (eng.quest_root / "code" / "pkg" / "model.py").write_text(REPAIRED, encoding="utf-8")
     assert await eng._static_gate({}) is None and asked == []
+
+
+def test_an_unused_nested_function_that_calls_a_flagged_function_taints_nothing() -> None:
+    sim = ('from pkg import model\n\n\ndef run_cell(cell):\n    def never_called(v):\n        return model.response(v)\n'
+           '    return {"y": cell["x"] * 2.0, "x_echo": cell["x"]}\n')
+    files = {"pkg/__init__.py": "", "pkg/model.py": SHAPED, "simulate.py": sim}
+    found = _problems(files)
+    assert tc.tainted_outputs(files, found) == set()
+    assert tc.headline_hit(found, files, PROTOCOL, {"variables": {"dependent": ["y"]}}) is False
+    called = sim.replace('"y": cell["x"] * 2.0', '"y": never_called(cell["x"])')
+    assert tc.tainted_outputs({**files, "simulate.py": called}, found) == {"y"}
+    # a flagged function reached only through an unused nested function of another function is not reached either
+    other = ('from pkg import model\n\n\ndef wrapper(v):\n    def never_called():\n        return model.response(v)\n    return v\n\n\n'
+             'def run_cell(cell):\n    return {"y": wrapper(cell["x"])}\n')
+    assert tc.tainted_outputs({**files, "simulate.py": other}, found) == set()

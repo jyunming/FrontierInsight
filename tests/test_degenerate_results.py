@@ -273,14 +273,20 @@ def test_a_mark_is_accepted_only_for_a_quantity_computed_from_the_marked_constan
     assert dr.accepted_marks({"simulate.py": "def broken(:\n"}, ["level"], tmp_path, tmp_path) == {}
 
 
-def _review(eng: Engine, status: str | None, name: str = "LEVEL") -> None:
-    """The different-model code review's record for the code as it is now."""
+def _review(eng: Engine, status: str | None, name: str = "LEVEL", more: dict[str, str] | None = None) -> None:
+    """The different-model code review's record for the code as it is now: ``status`` for the mark named ``name``, and
+    ``more`` ({mark key: status}) for others."""
     from core import code_review as cr
+    from core import grid_keys as gk
 
-    verdicts = [] if status is None else [{"id": "R1", "kind": cr.MARK_KIND, "name": name, "status": status, "text": "t",
-                                           "headline": False}]
-    cr.save(eng.quest_root, {"version": cr.version(eng.quest_root / "code"), "read_version": cr.version(eng.quest_root / "code"),
-                              "verdicts": verdicts, "problems": [], "final": True})
+    code = eng.quest_root / "code"
+    keys = {m.name: m.key() for m in dr.design_marks(gk.code_files(code))}
+    wanted = {} if status is None else {keys.get(name, name): status}
+    wanted.update(more or {})
+    verdicts = [{"id": f"R{i}", "kind": cr.MARK_KIND, "name": k, "status": st, "text": "t", "headline": False}
+                for i, (k, st) in enumerate(wanted.items(), start=1)]
+    cr.save(eng.quest_root, {"version": cr.version(code), "read_version": cr.version(code), "verdicts": verdicts,
+                              "problems": [], "final": True})
 
 
 def _flat_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: str) -> Engine:
@@ -367,7 +373,7 @@ def test_the_code_reviews_checklist_asks_about_each_mark_without_a_number() -> N
     marks = dr.design_marks({"simulate.py": MODULE_MARK})
     reqs = cr.requirements({}, {}, marks=marks)
     asked = [r for r in reqs if r["kind"] == cr.MARK_KIND]
-    assert len(asked) == 1 and asked[0]["name"] == "LEVEL" and "simulate.py line 1" in asked[0]["text"]
+    assert len(asked) == 1 and asked[0]["name"] == "simulate.py:1:-:LEVEL" and "simulate.py line 1" in asked[0]["text"]
     assert "2.5" not in asked[0]["text"] and "not a stand-in for a result" in asked[0]["text"]
 
 
@@ -385,3 +391,62 @@ async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling
     assert (eng.fi_dir / "figure_records" / "empty_one.json").exists(), "the record stays while another format needs it"
     eng._drop_figures(["empty_one.svg"])
     assert not (eng.fi_dir / "figure_records" / "empty_one.json").exists() and (folder / "empty_one_other.png").exists()
+
+
+# ---- marks are identified by where they are ---------------------------------------------------------------------------------
+
+SAME_NAME = {
+    "simulate.py": ('import helper\n\nLEVEL = 2.5  # constant by design: ' + SOURCED + '\n\n'
+                    'def run_cell(cell):\n    return {"level": LEVEL, "second": helper.give()}\n'),
+    "helper.py": ('LEVEL = 4.5  # constant by design: the second reference from the study\'s own source\n\n'
+                  'def give():\n    return LEVEL\n'),
+}
+
+
+def test_two_marks_with_one_name_are_told_apart_by_file_and_line(tmp_path: Path) -> None:
+    marks = dr.design_marks(SAME_NAME)
+    assert sorted(m.key() for m in marks) == ["helper.py:1:-:LEVEL", "simulate.py:3:-:LEVEL"]
+    got = dr.accepted_marks(SAME_NAME, ["level", "second"], tmp_path, tmp_path)
+    assert got["level"][0].script == "simulate.py" and got["second"][0].script == "helper.py"
+    from core import code_review as cr
+
+    reqs = cr.requirements({}, {}, marks=marks)
+    asked = [r for r in reqs if r["kind"] == cr.MARK_KIND]
+    assert sorted(r["name"] for r in asked) == ["helper.py:1:-:LEVEL", "simulate.py:3:-:LEVEL"]
+    assert any("helper.py line 1" in r["text"] for r in asked) and any("simulate.py line 3" in r["text"] for r in asked)
+
+
+@pytest.mark.asyncio
+async def test_two_same_named_marks_are_judged_separately_and_a_rejected_one_stays_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _flat_engine(tmp_path, monkeypatch, "x = 1\n")
+    for name, text in SAME_NAME.items():
+        (eng.quest_root / "code" / name).write_text(text, encoding="utf-8")
+    from core import code_review as cr
+
+    def write(first: str, second: str) -> None:
+        code = eng.quest_root / "code"
+        cr.save(eng.quest_root, {"version": cr.version(code), "read_version": cr.version(code), "problems": [], "final": True,
+                                  "verdicts": [{"id": "R1", "kind": cr.MARK_KIND, "name": "simulate.py:3:-:LEVEL", "status": first,
+                                                "text": "t", "headline": False},
+                                               {"id": "R2", "kind": cr.MARK_KIND, "name": "helper.py:1:-:LEVEL", "status": second,
+                                                "text": "t", "headline": False}]})
+
+    code = eng.quest_root / "code"
+    from core import grid_keys as gk
+
+    write("implemented", "different")
+    got = dr.accepted_marks(gk.code_files(code), ["level", "second"], eng.quest_root, code)
+    assert list(got) == ["level"] and got["level"][1] == dr.CONFIRMED, "the confirmed one is accepted, the rejected one is not"
+    write("different", "implemented")
+    got = dr.accepted_marks(gk.code_files(code), ["level", "second"], eng.quest_root, code)
+    assert list(got) == ["second"]
+
+
+def test_an_unused_nested_function_does_not_link_a_mark_to_a_quantity(tmp_path: Path) -> None:
+    code = ('LEVEL = 2.5  # constant by design: ' + SOURCED + '\n\n'
+            'def run_cell(cell):\n    def never_called():\n        return LEVEL\n    return {"level": cell["rate"] * 2.0}\n')
+    assert dr.accepted_marks({"simulate.py": code}, ["level"], tmp_path, tmp_path) == {}
+    called = code.replace('return {"level": cell["rate"] * 2.0}', 'return {"level": never_called()}')
+    assert list(dr.accepted_marks({"simulate.py": called}, ["level"], tmp_path, tmp_path)) == ["level"]
