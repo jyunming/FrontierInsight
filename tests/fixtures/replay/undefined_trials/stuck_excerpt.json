@@ -1,0 +1,10 @@
+{
+ "problem": "the simulation does not do what the protocol fixed: the manifest reports 80000 successful trial(s) in total, but the metric `ler` only has 16989 real per-trial value(s) in this run's own analysis output \u2014 the claimed trial count is not backed by the data the analysis actually used. If this mean is over a subset of the trials by design (the runs that became major outbreaks, say), the protocol's me\u2026, and FI's repairs did not remove it, so there is nothing it can vouch for",
+ "tried": [
+  "compared FI's record of the trials it ran (`raw/ledger.jsonl`) with the frozen protocol",
+  "the manifest reports 80000 successful trial(s) in total, but the metric `ler` only has 16989 real per-trial value(s) in this run's own analysis output \u2014 the claimed trial count is not backed by the data the analysis actually used. If this mean is over a subset of the trials by design (the runs that became major outbreaks, say), the protocol's metric spec says so with `given`: the id of the propor\u2026",
+  "the manifest reports 80000 successful trial(s) in total, but the metric `lwr` only has 16989 real per-trial value(s) in this run's own analysis output \u2014 the claimed trial count is not backed by the data the analysis actually used. If this mean is over a subset of the trials by design (the runs that became major outbreaks, say), the protocol's metric spec says so with `given`: the id of the propor\u2026",
+  "the metric `dose_to_size` is a mean over 80000 successful trial(s) (80000), but the analysis's RESULT_JSON has no `dose_to_size_values` list at all \u2014 the analysis must print the per-trial values it averaged, so the claimed trial count can be checked against them",
+  "sent simulate.py back to be repaired 1 time(s) with the missing items named; the difference stood"
+ ]
+}

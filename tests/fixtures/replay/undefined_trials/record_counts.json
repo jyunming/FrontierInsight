@@ -1,0 +1,3525 @@
+{
+"note": "counts of the real FI record raw/trials.json of the quest: per setting and per name run_trial returned, [trials with a value, trials with none]",
+"cells": [
+{
+"key": "exposure_dose=20,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=20,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 20,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=35,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 35,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+93,
+907
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=50,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 50,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+237,
+763
+],
+"lwr": [
+237,
+763
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+276,
+724
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=65,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 65,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+338,
+662
+],
+"lwr": [
+338,
+662
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=80,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 80,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+960,
+40
+],
+"lwr": [
+960,
+40
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+525,
+475
+],
+"lwr": [
+525,
+475
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+979,
+21
+],
+"lwr": [
+979,
+21
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=95,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 95,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+98,
+902
+],
+"lwr": [
+98,
+902
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+989,
+11
+],
+"lwr": [
+989,
+11
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=110,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 110,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+863,
+137
+],
+"lwr": [
+863,
+137
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=125,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 125,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=140,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 140,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=CAR,pattern_type=lines",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "CAR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=CAR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "CAR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=MOR,pattern_type=lines",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "MOR",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=MOR,pattern_type=contacts",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "MOR",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=CAR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+0,
+1000
+],
+"lwr": [
+0,
+1000
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=CAR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "CAR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=MOR_shot_noise_ref,pattern_type=lines",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "lines"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"ler": [
+1000,
+0
+],
+"lwr": [
+1000,
+0
+],
+"roughness_eligible": [
+1000,
+0
+],
+"p_bridge": [
+1000,
+0
+],
+"p_break": [
+1000,
+0
+],
+"mean_cd_nm": [
+1000,
+0
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+],
+"high_frequency_cutoff_nm": [
+1000,
+0
+]
+}
+},
+{
+"key": "exposure_dose=150,resist_type=MOR_shot_noise_ref,pattern_type=contacts",
+"cell": {
+"exposure_dose": 150,
+"resist_type": "MOR_shot_noise_ref",
+"pattern_type": "contacts"
+},
+"ok": 1000,
+"planned": 1000,
+"metrics": {
+"p_missing": [
+1000,
+0
+],
+"p_merged": [
+1000,
+0
+],
+"mean_cd_nm": [
+0,
+1000
+],
+"absorbed_count": [
+1000,
+0
+],
+"incident_count": [
+1000,
+0
+],
+"aerial_normalization": [
+1000,
+0
+]
+}
+}
+]
+}

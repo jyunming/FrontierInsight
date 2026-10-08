@@ -9520,8 +9520,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 if self._manifest_note:
                     self._log.info("[run_manifest] %s", self._manifest_note)
             found = (row_problems + altered + ([random_run_cell] if random_run_cell else [])
-                     + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True) + not_run
+                     + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True,
+                                              recorded=recorded) + not_run
                      + row_sim)
+            derived = _run_manifest.derived_metrics(counted, recorded)
+            if derived:
+                # Said plainly, so a person sees which means FI could not count against the trials' own values.
+                note = ("the analysis derives " + ", ".join(f"`{m}`" for m in derived) + " itself (no trial returns it "
+                        "under that name), so no trial count is claimed for it")
+                self._manifest_note = (self._manifest_note + "; " if self._manifest_note else "") + note
+                self._log.info("[run_manifest] %s", note)
             self._manifest_failed_trials = _run_manifest.failure_count(manifest)
             # Values the analysis made up are the analysis's to fix; a record changed on disk is not (the trials run
             # again).
@@ -9530,7 +9538,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                       if self.config.rigor_profile == "research" else [])
             found = found + no_ids
             self._manifest_analysis_problems = (
-                _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True)
+                _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True, recorded=recorded)
                 + not_run + no_ids
             )
             return ("differs" if found else "ok"), found

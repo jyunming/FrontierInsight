@@ -1,0 +1,95 @@
+  metrics:
+  - id: ler
+    estimand: Mean across independent 1 µm line segments of per-segment 3-sigma edge-position roughness
+      at a 1 nm high-frequency cutoff
+    kind: mean
+    unit: nm
+    cluster: independent 1 µm line segment
+    paired: false
+    family: roughness
+  - id: lwr
+    estimand: Mean across independent 1 µm line segments of per-segment 3-sigma line-width roughness at
+      a 1 nm high-frequency cutoff
+    kind: mean
+    unit: nm
+    cluster: independent 1 µm line segment
+    paired: false
+    family: roughness
+  - id: p_bridge
+    estimand: Probability of at least one bridge in an independent 1 µm line segment
+    kind: proportion
+    unit: dimensionless
+    cluster: independent 1 µm line segment
+    paired: false
+    family: defects
+  - id: p_break
+    estimand: Probability of at least one break in an independent 1 µm line segment
+    kind: proportion
+    unit: dimensionless
+    cluster: independent 1 µm line segment
+    paired: false
+    family: defects
+  - id: p_missing
+    estimand: Probability that a specified contact hole is missing
+    kind: proportion
+    unit: dimensionless
+    cluster: independent contact tile
+    paired: false
+    family: defects
+  - id: p_merged
+    estimand: Probability that a specified nearest-neighbor contact pair is merged
+    kind: proportion
+    unit: dimensionless
+    cluster: independent contact tile
+    paired: false
+    family: defects
+  - id: dose_to_size
+    estimand: Dose at which the independently calibrated mean line CD is 10 nm or mean contact CD is 16
+      nm, estimated separately for each resist and pattern
+    kind: mean
+    unit: mJ/cm2
+    cluster: independent calibration image
+    paired: false
+    family: sensitivity
+  - id: tail_uncertainty
+    estimand: 95% confidence interval half-width of the estimated 1e-6 crossing dose
+    kind: mean
+    unit: mJ/cm2
+    cluster: independent crossing estimate
+    paired: false
+    family: sensitivity
+  - id: ler_shot_noise
+    estimand: Mean per-segment 3-sigma edge roughness for the chemistry-off shot-noise reference
+    kind: mean
+    unit: nm
+    cluster: independent 1 µm line segment
+    paired: false
+    family: roughness
+  - id: lwr_shot_noise
+    estimand: Mean per-segment 3-sigma width roughness for the chemistry-off shot-noise reference
+    kind: mean
+    unit: nm
+    cluster: independent 1 µm line segment
+    paired: false
+    family: roughness
+  - id: abs_photon_variance
+    estimand: Variance of the count of absorbed photons in a unit area
+    kind: mean
+    unit: dimensionless
+    cluster: independent unit area
+    paired: false
+    family: stochastics
+  - id: p_zero_abs
+    estimand: Probability that a unit area receives zero absorbed photons
+    kind: proportion
+    unit: dimensionless
+    cluster: independent unit area
+    paired: false
+    family: stochastics
+  - id: runtime
+    estimand: Wall-clock execution time per setting
+    kind: mean
+    unit: seconds
+    cluster: simulation run
+    paired: false
+    family: performance
