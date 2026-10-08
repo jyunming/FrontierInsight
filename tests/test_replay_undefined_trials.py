@@ -200,3 +200,48 @@ def test_an_inflated_pooled_list_is_flagged_beside_honest_per_setting_ones() -> 
     analysis["per_setting"][first]["ler_values"] = analysis["per_setting"][first]["ler_values"] + [1.0]
     found = _findings(analysis)
     assert found and f"`{first}`" in found[0][0]
+
+
+def _keyed_by_index(analysis: dict[str, Any]) -> dict[str, Any]:
+    """The same per-setting report under keys the grid cannot read as settings ("0", "1", ...)."""
+    return {**{k: v for k, v in analysis.items() if k != "per_setting"},
+            "by_setting": {str(i): entry for i, entry in enumerate(analysis["per_setting"].values())}}
+
+
+def test_an_honest_report_keyed_by_index_is_not_taken_for_its_largest_part() -> None:
+    analysis = _keyed_by_index(_analysis())
+    assert _findings(analysis) == []
+    assert _findings(_keyed_by_index(_analysis(nulls=False, undefined_count=True))) == []
+    # with an honest pooled copy beside it, too
+    pooled = _analysis()
+    _pooled_copy(pooled)
+    assert _findings(_keyed_by_index(pooled)) == []
+
+
+def test_values_given_as_a_mapping_of_lists_are_counted() -> None:
+    base = _analysis(nulls=False, undefined_count=True)
+    analysis: dict[str, Any] = {k: v for k, v in base.items() if k != "per_setting"}
+    for name in ("ler", "lwr"):
+        analysis[f"{name}_values"] = {str(i): e[f"{name}_values"] for i, e in enumerate(base["per_setting"].values())
+                                      if f"{name}_values" in e}
+        analysis[f"{name}_undefined"] = {str(i): e[f"{name}_undefined"]
+                                         for i, e in enumerate(base["per_setting"].values()) if f"{name}_undefined" in e}
+    assert _findings(analysis) == []
+    # the same mapping under the settings' own keys is the per-setting copy, and is held to each setting's trials
+    keyed = {k: v for k, v in base.items() if k != "per_setting"}
+    for name in ("ler", "lwr"):
+        keyed[f"{name}_values"] = {k: e[f"{name}_values"] for k, e in base["per_setting"].items()
+                                   if f"{name}_values" in e}
+        keyed[f"{name}_undefined"] = {k: e[f"{name}_undefined"] for k, e in base["per_setting"].items()
+                                      if f"{name}_undefined" in e}
+    assert _findings(keyed) == []
+
+
+def test_a_short_report_keyed_by_index_is_still_flagged() -> None:
+    found = _findings(_keyed_by_index(_analysis(keep=0.5)))
+    assert found and "accounts for" in found[0][0], found
+    # one index's list longer than the whole record is still above it
+    analysis = _keyed_by_index(_analysis())
+    analysis["by_setting"]["0"]["ler_values"] = [1.0] * 20000
+    found = _findings(analysis)
+    assert found and "reports more than that" in found[0][0], found
