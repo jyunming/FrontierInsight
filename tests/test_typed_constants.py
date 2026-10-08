@@ -87,7 +87,7 @@ def _problems(files: dict[str, str], plan: str = PLAN) -> list[tc.Typed]:
 def test_a_number_typed_into_a_smooth_functions_argument_is_caught_with_its_line() -> None:
     found = _problems({"pkg/__init__.py": "", "pkg/model.py": SHAPED})
     assert len(found) == 1 and found[0].function == "response" and found[0].script == "pkg/model.py"
-    assert set(found[0].values) == {3.7, 1.3, 0.3} and set(found[0].shape) == {1.3}
+    assert set(found[0].values) == {3.7, 1.3} and set(found[0].shape) == {1.3}
     assert "pkg/model.py line 4: `response` has" in found[0].says() and "3.7" in found[0].says()
 
 
@@ -132,9 +132,32 @@ def test_the_request_names_the_codes_numbers_and_says_what_to_do_in_plain_words(
     found = _problems({"pkg/__init__.py": "", "pkg/model.py": SHAPED})
     text = tc.directive(found, PROTOCOL)
     assert "3.7" in text and "1.3" in text and "2.5" not in text and "4.2" not in text, "the plan's numbers are not given"
-    assert "Compute each from the model's equations, or state it in the plan as a fixed setting with its source" in text
+    assert "Compute each from the model's equations; if it is a genuine constant of the study, define it once as a named constant at the top of the module" in text
+    assert "state it in the plan" not in text
     assert text.rstrip().endswith("change nothing else.")
     assert "not in the plan" in tc.writer_note(found, PROTOCOL) and "does not describe" in tc.gap(found, PROTOCOL)
+
+
+def test_a_number_the_plan_gives_through_a_small_integer_a_power_of_ten_or_a_ratio_is_traceable() -> None:
+    assert tc.traceable(42 / 7, {42.0}) and tc.traceable(91 / 7, {91.0}) and tc.traceable(137 / 7, {137.0})
+    assert tc.traceable(4200.0, {42.0}) and tc.traceable(0.42, {42.0})
+    assert tc.traceable(6.5 / 3.25 * 7.7, {6.5, 3.25, 7.7}) and tc.traceable(6.5 * 3.25, {6.5, 3.25})
+    assert not tc.traceable(19.5, {42.0}) and not tc.traceable(1234.567, {42.0, 7.7})
+    code = "def response(x):\n    return x * 19.571428571428573 + 0.0\n"
+    assert _problems({"pkg/__init__.py": "", "pkg/model.py": code}, "the gain is 137 per seven") == []
+
+
+def test_a_headline_name_must_match_exactly_and_an_unreadable_entry_is_no_hit() -> None:
+    files = {"pkg/__init__.py": "", "pkg/model.py": SHAPED, "simulate.py": SIM.replace('"y": r', '"corporate_index": r')}
+    found = _problems(files)
+    assert tc.tainted_outputs(files, found) == {"corporate_index"}
+    assert tc.headline_hit(found, files, PROTOCOL, {"variables": {"dependent": ["rate"]}}) is False
+    assert tc.headline_hit(found, files, PROTOCOL, {"variables": {"dependent": ["Corporate-Index"]}}) is True
+    # a file that does not parse, or an entry that returns a name, cannot be read with confidence
+    assert tc.tainted_outputs({**files, "other.py": "def broken(:\n"}, found) is None
+    opaque = {**files, "simulate.py": 'from pkg import model'+chr(10)*2+'def run_cell(cell):'+chr(10)+'    out = {"y": model.response(1)}'+chr(10)+'    return out'+chr(10)}
+    assert tc.tainted_outputs(opaque, found) is None
+    assert tc.headline_hit(found, opaque, PROTOCOL, {"variables": {"dependent": ["y"]}}) is False
 
 
 def test_a_headline_quantity_that_rests_on_a_flagged_function_is_found() -> None:

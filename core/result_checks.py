@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from . import degenerate_results as _degenerate
+from . import grid_keys as _grid_keys
 from . import reported_settings as _reported
 
 #: How many times, in all, the results of one design iteration are sent back for the checks of this module.
@@ -85,7 +86,14 @@ class ResultChecksMixin:
         folder = self.quest_root / "figures"  # type: ignore[attr-defined]
         figures = sorted(p.name for p in folder.iterdir() if p.is_file() and p.suffix.lower() in _e._FIGURE_SUFFIXES) if folder.is_dir() else []
         drawn = _degenerate.figure_problems(self.fi_dir / "figure_records", figures)  # type: ignore[attr-defined]
-        quantities = _degenerate.quantity_problems(cells, reported, self._typed_result_exempt(state))  # type: ignore[attr-defined]
+        protocol = self._protocol_block(state)  # type: ignore[attr-defined]
+        quantities = _degenerate.quantity_problems(
+            cells, reported, self._typed_result_exempt(state) | _degenerate.expected_constants(protocol))  # type: ignore[attr-defined]
+        marks = _degenerate.marked_by_design(_grid_keys.code_files(self.quest_root / "code"), [q.name for q in quantities])  # type: ignore[attr-defined]
+        self._result_marked = [
+            f"`{q.name}` is {'the same at every setting' if q.kind == 'constant' else 'at a bound for most settings'} "
+            f"by design ({marks[q.name]})" for q in quantities if q.name in marks]
+        quantities = [q for q in quantities if q.name not in marks]
         if not (drawn or quantities):
             return []
         return [Found("degenerate_results", SIMULATION if quantities else ANALYSIS, _degenerate.directive(drawn, quantities),
@@ -93,11 +101,17 @@ class ResultChecksMixin:
                       keys=[q.name for q in quantities], figures=sorted({p.figure for p in drawn}))]
 
     def _drop_figures(self, names: list[str]) -> None:
-        """Take figures out of ``figures/`` with their records."""
+        """Take exactly the named figure files out of ``figures/``; a figure's record (shared by its formats) goes with the last
+        of them."""
+        folder = self.quest_root / "figures"  # type: ignore[attr-defined]
         for name in names:
             stem = Path(name).stem
-            targets = list((self.quest_root / "figures").glob(f"{stem}.*")) + [  # type: ignore[attr-defined]
-                self.fi_dir / "figure_records" / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
+            targets = [folder / Path(name).name]
+            others = [p for p in (folder.iterdir() if folder.is_dir() else [])
+                      if p.is_file() and p.stem == stem and p.name != Path(name).name and p.suffix.lower() != ".json"]
+            if not others:
+                targets += [folder / f"{stem}.json", self.fi_dir / "figure_records" / f"{stem}.json",  # type: ignore[attr-defined]
+                            self.fi_dir / "figure_records" / f"{stem}.seed0.json"]  # type: ignore[attr-defined]
             for target in targets:
                 try:
                     target.unlink(missing_ok=True)
@@ -128,8 +142,11 @@ class ResultChecksMixin:
         record_path.unlink(missing_ok=True)  # an earlier pass's record is not this run's
         if result.returncode != 0 or not getattr(self, "_trial_mode", False):
             return result, failed_script
+        self._result_marked = []
         found = self._result_findings(state, _e._extract_result_json(result.stdout or ""))
         if not found:
+            if self._result_marked:
+                self._write_marked(record_path)
             return result, failed_script
         used = self._result_counter(state)
         repair_left = (int(state.get("exec_reflect_iter", 0) or 0) < self.config.engine.exec_reflect_max_iterations  # type: ignore[attr-defined]
@@ -156,7 +173,7 @@ class ResultChecksMixin:
         keys = sorted({k for f in found for k in f.keys})
         record = {"removed_quantities": keys, "removed_figures": sorted({n for f in found for n in f.figures}),
                   "checks": [{"kind": f.kind, "note": f.note} for f in found], "note": "; ".join(f.note for f in found),
-                  "say": "\n\n".join(f.say for f in found)}
+                  "say": "\n\n".join([*(f.say for f in found), *self._marked_say()])}
         try:
             record_path.parent.mkdir(parents=True, exist_ok=True)
             record_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
@@ -164,6 +181,23 @@ class ResultChecksMixin:
             self._log.warning("[execute] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
         self._log.warning(  # type: ignore[attr-defined]
             "[execute] %s. The paper does not use them and says so in its limitations.", record["note"])
+
+    def _marked_say(self) -> list[str]:
+        marked = getattr(self, "_result_marked", None) or []
+        if not marked:
+            return []
+        return ["The code marks " + "; ".join(marked) + ". Keep these values, and say plainly, in the limitations, that "
+                "they are constant by design and not measured."]
+
+    def _write_marked(self, record_path: Path) -> None:
+        """A quantity the code marks ``# constant by design`` is accepted and noted in the limitations, never dropped."""
+        record = {"removed_quantities": [], "removed_figures": [], "checks": [], "note": "; ".join(self._result_marked),
+                  "say": "\n\n".join(self._marked_say())}
+        try:
+            record_path.parent.mkdir(parents=True, exist_ok=True)
+            record_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+        except OSError as exc:
+            self._log.warning("[execute] could not write needs/%s (%r)", RECORD, exc)  # type: ignore[attr-defined]
 
     def _result_check_keys(self) -> set[str]:
         """The names the last run's results check took out of the results."""

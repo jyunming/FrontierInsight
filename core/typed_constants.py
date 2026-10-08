@@ -97,10 +97,34 @@ def simple(value: float) -> bool:
     return any(_close(v, u) for u in _UNIT_NUMBERS) or any(_close(v, c) for c in _CONSTANTS)
 
 
+_SCALES = [float(k) for k in range(1, 13)] + [10.0 ** j for j in range(-6, 7)]
+#: Plan numbers combined pairwise (ratios and products) are read from at most this many of them.
+_PAIR_LIMIT = 400
+
+
 def traceable(value: float, numbers: set[float]) -> bool:
-    """Whether the plan gives ``value`` (as written, or as a percent of what is written)."""
+    """Whether the plan gives ``value``: as written, as a percent of what is written, a written number times or divided by
+    a small integer (up to 12) or a power of ten, or the ratio or product of two written numbers (within 1e-6 relative)."""
     v = abs(float(value))
-    return any(_close(v, n) or _close(v * 100.0, n) or _close(v / 100.0, n) for n in numbers)
+    if v == 0.0:
+        return True
+
+    def near(a: float, b: float) -> bool:
+        return abs(a - b) <= 1e-6 * max(abs(a), abs(b))
+
+    given = sorted(numbers)[:_PAIR_LIMIT]
+    for n in given:
+        if n == 0.0:
+            continue
+        if any(near(v, n * k) or near(v, n / k) for k in _SCALES):
+            return True
+    for i, a in enumerate(given):
+        if a == 0.0:
+            continue
+        for b in given[i:]:
+            if b != 0.0 and (near(v, a * b) or near(v, a / b) or near(v, b / a)):
+                return True
+    return False
 
 
 def _model_functions(files: dict[str, str], protocol: dict[str, Any] | None) -> dict[tuple[str, str], str]:
@@ -224,8 +248,9 @@ def directive(found: list[Typed], protocol: dict[str, Any] | None) -> str:
         "FI read the code before running it, and the model's functions have numbers typed into them that the plan never "
         "gives:\n" + "\n".join(lines)
         + "\n\nThese look like a shape written into the code (a centre, a width, a decay length, a rolloff) rather than "
-        "computed. Compute each from the model's equations, or state it in the plan as a fixed setting with its source and "
-        "take it from there. Do not replace one typed number with another, and change nothing else."
+        "computed. Compute each from the model's equations; if it is a genuine constant of the study, define it once as a "
+        "named constant at the top of the module, with a comment naming its source in the plan or the topic. Do not replace "
+        "one typed number with another, and change nothing else."
     )
 
 
@@ -262,17 +287,19 @@ def _names_in(node: ast.AST) -> set[str]:
     return {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
 
 
-def tainted_outputs(files: dict[str, str], found: list[Typed]) -> set[str]:
-    """The keys ``run_cell`` / ``run_trial`` return whose value comes, through assignments and calls, from a function in
-    ``found``."""
+def tainted_outputs(files: dict[str, str], found: list[Typed]) -> set[str] | None:
+    """The keys ``run_cell`` / ``run_trial`` return, in a dictionary written in the ``return``, whose value comes through
+    assignments and calls from a function in ``found``. ``None`` when that cannot be read with confidence (a file that does
+    not parse, no entry function, or an entry function that returns anything but a dictionary written out)."""
     functions: dict[str, ast.AST] = {}
     for text in files.values():
         try:
-            for node in ast.walk(ast.parse(text)):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    functions.setdefault(node.name, node)
+            tree = ast.parse(text)
         except (SyntaxError, ValueError):
-            continue
+            return None
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions.setdefault(node.name, node)
     affected = {t.function.split(".")[-1] for t in found}
     grew = True
     while grew:
@@ -282,10 +309,10 @@ def tainted_outputs(files: dict[str, str], found: list[Typed]) -> set[str]:
                 affected.add(name)
                 grew = True
     keys: set[str] = set()
-    for entry in ("run_cell", "run_trial"):
-        fn = functions.get(entry)
-        if fn is None:
-            continue
+    entries = [functions[e] for e in ("run_cell", "run_trial") if e in functions]
+    if not entries:
+        return None
+    for fn in entries:
         tainted: set[str] = set()
         for _ in range(8):
             before = len(tainted)
@@ -294,26 +321,39 @@ def tainted_outputs(files: dict[str, str], found: list[Typed]) -> set[str]:
                     tainted |= {n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)}
             if len(tainted) == before:
                 break
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
-                for k, v in zip(node.value.keys, node.value.values):
-                    if isinstance(k, ast.Constant) and isinstance(k.value, str) and (
-                            _called(v) & affected or _names_in(v) & tainted):
-                        keys.add(k.value)
+        returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+        if not returns or not all(isinstance(r.value, ast.Dict) for r in returns):
+            return None
+        for node in returns:
+            for k, v in zip(node.value.keys, node.value.values):
+                if not (isinstance(k, ast.Constant) and isinstance(k.value, str)):
+                    return None
+                if _called(v) & affected or _names_in(v) & tainted:
+                    keys.add(k.value)
     return keys
+
+
+def _same_name(a: str, b: str) -> bool:
+    """The rule of :func:`core.code_review.in_results`: equal ignoring case, punctuation and underscores."""
+    na, nb = re.sub(r"[^a-z0-9]", "", a.lower()), re.sub(r"[^a-z0-9]", "", b.lower())
+    return bool(na) and na == nb
 
 
 def headline_hit(found: list[Typed], files: dict[str, str], protocol: dict[str, Any] | None,
                  design: dict[str, Any] | None = None) -> bool:
-    """Whether a quantity the plan calls the main one is computed through a function in ``found``."""
+    """Whether a quantity the plan calls the main one is, with confidence, computed through a function in ``found``: the
+    names match exactly (ignoring case and punctuation) and the entry function's returned dictionary is read in full.
+    Anything less is not a hit."""
     from . import code_review as _review
 
-    heads = {str(r.get("name") or "").strip().lower() for r in _review.requirements(design or {}, protocol or {})
+    heads = {str(r.get("name") or "").strip() for r in _review.requirements(design or {}, protocol or {})
              if r.get("headline") and str(r.get("name") or "").strip()}
     if not heads:
         return False
-    outputs = {k.lower() for k in tainted_outputs(files, found)}
-    return any(h in o or o in h for h in heads for o in outputs)
+    outputs = tainted_outputs(files, found)
+    if not outputs:
+        return False
+    return any(_same_name(h, o) for h in heads for o in outputs)
 
 
 code_files = _grid_keys.code_files

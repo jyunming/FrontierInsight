@@ -11,13 +11,16 @@ recorder wrote; never from the script's claims):
 
 Only what the analysis reports is judged (a quantity nobody reports is a diagnostic), a setting echoed back is not a
 result, and a value of exactly 0 or 1 is never read as stuck at a bound (an indicator or a probability is allowed to be
-there). The all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
+there). A quantity the plan expects to stay put (what an invariant, symmetry or second-implementation check measures, a declared
+bound) is exempt, and one whose line the code marks ``# constant by design: <reason>`` is accepted and noted in the
+limitations, never dropped. The all-identical case is :mod:`core.flat_output`'s; this is the quantity that is flat while others are not.
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -153,13 +156,53 @@ def quantity_problems(cells: list[dict[str, Any]], reported: set[str], exempt: s
     return out
 
 
+MARK = re.compile(r"#\s*constant by design\s*:?\s*(.*)$", re.IGNORECASE)
+#: The kinds of check whose measured quantity is expected to be the same everywhere (a worst violation of an invariant).
+_EXPECTED_KINDS = ("invariant", "symmetry", "second_implementation")
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+def expected_constants(protocol: dict[str, Any] | None) -> set[str]:
+    """Names the plan itself expects to stay put: what a check of an invariant, a symmetry or a second implementation measures,
+    and the keys of the plan's declared bounds or limits."""
+    from . import oracle_check as _oracle
+
+    out: set[str] = set()
+    for o in _oracle.declared(protocol):
+        if _oracle.kind_of(o) in _EXPECTED_KINDS:
+            out |= set(_IDENT.findall(str(o.get("measure") or "")))
+    for key in ("bounds", "limits"):
+        block = (protocol or {}).get(key) if isinstance(protocol, dict) else None
+        if isinstance(block, dict):
+            out |= {str(k) for k in block}
+    return out
+
+
+def marked_by_design(files: dict[str, str], names: list[str]) -> dict[str, str]:
+    """``{quantity: reason}`` for each of ``names`` that a line of the code names and marks ``# constant by design: <reason>``
+    (on the line itself or the line above). A mark is accepted, never dropped."""
+    out: dict[str, str] = {}
+    for text in files.values():
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            m = MARK.search(line)
+            if not m:
+                continue
+            near = "\n".join(lines[max(0, i - 1):i + 1])
+            for name in names:
+                if name not in out and re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", near):
+                    out[name] = m.group(1).strip() or "no reason given"
+    return out
+
+
 def directive(figures: list[FigureProblem], quantities: list[QuantityProblem]) -> str:
     """What to tell the repair: plain, naming each figure and quantity. The instruction is the last thing in it."""
     lines = [f"- {p.says()}" for p in (*quantities[:6], *figures[:6])]
     text = "FI looked at what the run produced, and some of it shows nothing:\n" + "\n".join(lines)
     if quantities:
-        text += ("\n\nA result must be computed from the values the simulation is given: compute each quantity named above "
-                 "from them, with no fixed number and no clamp, or do not return it.")
+        text += ("\n\nFor each quantity named above: if that is not what the model should give, compute it from the inputs "
+                 "(no fixed number, no clamp); if it is expected, keep it and mark the line with "
+                 "`# constant by design: <reason>`.")
     if figures:
         text += ("\n\nDraw each panel from the saved results (every panel needs data, each point at the setting it was run at); "
                  "a panel with nothing to show is removed, not left empty.")

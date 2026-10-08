@@ -151,7 +151,7 @@ def test_the_request_names_each_thing_and_ends_with_the_instruction() -> None:
     text = dr.directive(f, q)
     assert text.startswith("FI looked at what the run produced, and some of it shows nothing:")
     assert "`level` is 2.5" in text and "`a.png`, panel \"Trend\" draws no data" in text
-    assert "compute each quantity named above from them, with no fixed number and no clamp" in text
+    assert "if that is not what the model should give" in text
     assert text.rstrip().endswith("Change nothing else.")
     note = dr.writer_note(f, q)
     assert "`level`" in note and "`a.png`" in note and "limitations" in note and "left out" in note
@@ -220,3 +220,91 @@ async def test_a_figure_alone_goes_back_to_the_analysis(tmp_path: Path, monkeypa
     assert result.returncode == 1 and script == "experiment.py" and "draws no data" in result.stderr
     # once, the figures of the failed run are cleared like any failed run's
     assert not (eng.quest_root / "figures" / "fine.png").exists()
+
+
+# ---- a constant that is expected -----------------------------------------------------------------------------------------
+
+
+def test_the_directive_is_neutral_about_a_flat_quantity() -> None:
+    q = dr.quantity_problems(_cells(gain=lambda r: 3 * r, level=2.5), REPORTED, set())
+    text = dr.directive([], q)
+    assert "if that is not what the model should give, compute it from the inputs" in text
+    assert "if it is expected, keep it and mark the line with `# constant by design: <reason>`" in text
+    assert "or do not return it" not in text
+
+
+def test_what_the_plan_expects_to_stay_put_is_exempt() -> None:
+    protocol = {"oracles": [
+        {"name": "c", "kind": "invariant", "measure": "abs(total_out - total_in) / total_in", "expected": 0, "case": {"rate": 1}},
+        {"name": "l", "kind": "special_case", "measure": "gain", "expected": 1, "case": {"rate": 1}}], "limits": {"ceiling": 5}}
+    names = dr.expected_constants(protocol)
+    assert {"total_out", "total_in", "ceiling"} <= names and "gain" not in names
+    assert _flags(_cells(gain=lambda r: 3 * r, total_in=2.5), REPORTED | {"total_in"}, names) == []
+
+
+def test_a_line_marked_constant_by_design_is_found_for_the_quantity_it_names_only() -> None:
+    code = ('def run_cell(cell):\n'
+            '    # constant by design: the total is conserved\n'
+            '    return {"total": 1.0, "plateau": 2.0}  # constant by design: saturates at the cap\n')
+    got = dr.marked_by_design({"simulate.py": code}, ["total", "plateau", "other"])
+    assert got == {"total": "the total is conserved", "plateau": "saturates at the cap"}
+    assert dr.marked_by_design({"simulate.py": "x = 1  # constant\n"}, ["x"]) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_quantity_marked_by_design_is_accepted_and_noted_never_dropped_and_an_unmarked_one_still_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    (eng.quest_root / "code").mkdir(exist_ok=True)
+    (eng.quest_root / "code" / "simulate.py").write_text(
+        'def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": 2.5}  # constant by design: the total is conserved\n',
+        encoding="utf-8")
+    # only the quantity is flat here (the empty figure is not part of this case)
+    for stem in ("empty_one",):
+        (eng.quest_root / "figures" / f"{stem}.png").unlink()
+    result, script = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 0, "marked: nothing is sent back"
+    record = json.loads((eng.quest_root / "needs" / "RESULT_CHECK.json").read_text(encoding="utf-8"))
+    assert record["removed_quantities"] == [] and "`level` is the same at every setting by design (the total is conserved)" in record["note"]
+    assert "constant by design" in eng._run_checks_note() and "limitations" in eng._run_checks_note()
+    assert eng._left_out_quantities() == set()
+    # the same flat quantity without the mark is still caught
+    (eng.quest_root / "code" / "simulate.py").write_text(
+        'def run_cell(cell):\n    return {"gain": 3 * cell["rate"], "level": 2.5}\n', encoding="utf-8")
+    result, script = await eng._results_match_run({"iteration": 0}, _run(), None, True)
+    assert result.returncode == 1 and "# constant by design: <reason>" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_a_plateau_marked_by_design_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    record = {"cells": [{"cell": c["cell"], "metrics": {n: {"values": v} for n, v in c["metrics"].items()}}
+                        for c in _cells(gain=lambda r: r, capped=lambda r: min(r * 2.0, 6.0))]}
+    (eng.quest_root / "raw" / "trials.json").write_text(json.dumps(record), encoding="utf-8")
+    (eng.quest_root / "figures" / "empty_one.png").unlink()
+    run = ExecutionResult(0, "RESULT_JSON: " + json.dumps({"gain": 1.0, "capped": 6.0}), "", 1.0, False)
+    (eng.quest_root / "code").mkdir(exist_ok=True)
+    src = eng.quest_root / "code" / "simulate.py"
+    src.write_text('def run_cell(cell):\n    capped = min(cell["rate"] * 2.0, 6.0)  # constant by design: the cap\n    return {"gain": cell["rate"], "capped": capped}\n', encoding="utf-8")
+    result, _ = await eng._results_match_run({"iteration": 0}, run, None, True)
+    assert result.returncode == 0
+    src.write_text(src.read_text(encoding="utf-8").replace("  # constant by design: the cap", ""), encoding="utf-8")
+    result, _ = await eng._results_match_run({"iteration": 0}, run, None, True)
+    assert result.returncode == 1
+
+
+@pytest.mark.asyncio
+async def test_dropping_a_figure_removes_exactly_that_file_and_keeps_its_sibling_formats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng = _engine(tmp_path, monkeypatch)
+    folder = eng.quest_root / "figures"
+    (folder / "empty_one.svg").write_bytes(b"svg")
+    (folder / "empty_one_other.png").write_bytes(b"png")
+    eng._drop_figures(["empty_one.png"])
+    assert not (folder / "empty_one.png").exists()
+    assert (folder / "empty_one.svg").exists() and (folder / "empty_one_other.png").exists() and (folder / "fine.png").exists()
+    assert (eng.fi_dir / "figure_records" / "empty_one.json").exists(), "the record stays while another format needs it"
+    eng._drop_figures(["empty_one.svg"])
+    assert not (eng.fi_dir / "figure_records" / "empty_one.json").exists() and (folder / "empty_one_other.png").exists()
