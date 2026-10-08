@@ -514,10 +514,18 @@ same PR that adds, splits or renames one.
   cap). Called by `Engine._fill_model_functions` from `_node_implement`; `_split_block` then uses
   `code_layout.prefilled_block`. Prompts `agents/implement_function.md`, `agents/implement_function_repair.md`; record
   `.fi/function_steps.json` (per-function status, so a resume does not write a done function).
-- `core/code_review.py` — a different model reads the code against the plan's required outputs (`agents/code_review.md`,
-  node `oracle_review`'s routing): `requirements` (names only), `sources_text`, `version`, `parse`, `problems`,
-  `directive` (the repair's plain text), `script_for`, `not_computed` / `headline_missing` / `write_note` (what the paper
-  says), `.fi/code_review.json`. Called by `Engine._code_review_gate` in `_node_execute` before the equation gate; the
+- `core/review_pairs.py` — one model writes, a different model reviews: each reviewer's own step (`READER_STEP`:
+  `oracle_review` / `design_review` / `code_review`; `node_for` / `Engine._review_node` pick the node a call is made and
+  recorded under, `FALLBACK_NODE` when the step is not set), the structured finding (`finding` / `findings` / `checked`:
+  where, what, why, fix, severity), `said_nothing` + `REASK` (a reply with no finding and nothing checked is no review),
+  and `without_values` (no number a reviewer writes reaches a repair). Used by `core/oracle_review.py`, `core/code_review.py`,
+  `Engine._audit_design` and `core/quality_report.py`.
+- `core/code_review.py` — a different model reads the code against the plan's required outputs and its logic
+  (`agents/code_review.md`, step `code_review`, falling back to `oracle_review`'s routing as node `oracle_review.code`): `requirements`
+  (names only), `plan_view` (the equations, method, statistics and the checks' cases, never an expected value), `sources_text`,
+  `version`, `parse`, `parse_logic` / `merge_logic` / `reply_said_nothing`, `problems`, `directive` (the repair's plain
+  text), `script_for`, `not_computed` / `headline_missing` / `headline_constant` / `write_note` (what the paper says),
+  `constant_in` / `resolve_logic` (the run's results decide a "constant" finding), `.fi/code_review.json`. Called by `Engine._code_review_gate` in `_node_execute` before the equation gate; the
   headline stop goes through `_no_results_verdict` and `_node_stuck_no_findings` (reason `headline_missing`).
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in
   a package of their own (`code/<package>/`, name from the title via `package_name`, kept in `.fi/code_layout.json`),

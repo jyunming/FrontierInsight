@@ -285,6 +285,12 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
     final = bool(cr.get("final"))
     for p in _list(cr.get("problems")):
         p = _dict(p)
+        if p.get("kind") == "logic":
+            where = f" ({p['where']})" if p.get("where") else ""
+            out.append(_problem("code", f"{_one(p.get('text'), 140)}{where} [{p.get('severity') or 'medium'}]",
+                                f"{reviewer} (checks the code's logic)",
+                                "not fixed" if final else "fixed", ".fi/code_review.json"))
+            continue
         out.append(_problem("code", f"the plan's {p.get('kind') or 'requirement'} '{_one(p.get('text'), 100)}' is "
                             f"{p.get('status') or 'missing'} in the code", f"{reviewer} (reads the code)",
                             "not fixed" if final else "fixed", ".fi/code_review.json"))
@@ -525,6 +531,24 @@ def _stage_models(q: _Quest, stage: str) -> tuple[list[str], str, bool | None, s
     return wrote, reader, same, note
 
 
+def _review_cost(q: _Quest, stage: str) -> dict[str, Any] | None:
+    """What a stage's reading cost: the calls its reviewer made (``None`` for a stage no model reads), their tokens, and
+    their price when the cost record has one (``cost.summary.json``, per step). A person reads this beside who the reader
+    was to see which readings are worth a stronger model."""
+    if stage not in _READERS:
+        return None
+    rows = [r for r in q.calls if _reads(stage, r.get("node"))]
+    usd: float | None = None
+    for node, bucket in _dict(q.cost.get("by_node")).items():
+        price = _dict(bucket).get("cost_usd")
+        if _reads(stage, node) and isinstance(price, (int, float)):
+            usd = (usd or 0.0) + float(price)
+    return {"calls": len(rows), "failed_calls": sum(1 for r in rows if r.get("outcome") not in (None, "ok")),
+            "prompt_tokens": sum(_int(_dict(r.get("usage")).get("prompt_tokens")) for r in rows),
+            "completion_tokens": sum(_int(_dict(r.get("usage")).get("completion_tokens")) for r in rows),
+            "usd": round(usd, 4) if usd is not None else None}
+
+
 def _bare(who: str) -> str:
     # The provider is dropped on purpose: one model reached through two providers is still one model, and a reading by it
     # is not an independent one. FI's own check does the same (``oracle_review.same_model`` ignores the provider), so this
@@ -763,6 +787,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
             "prompt_tokens": sum(_int(_dict(r.get("usage")).get("prompt_tokens")) for r in calls),
             "completion_tokens": sum(_int(_dict(r.get("usage")).get("completion_tokens")) for r in calls),
             "seconds": round(seconds[stage]) if stage in seconds else None,
+            "review_cost": _review_cost(q, stage),
         }
     outcome = _outcome(q)
     if running:
@@ -813,8 +838,8 @@ def render(report: dict[str, Any]) -> str:
              f"Quest `{report['quest_id']}`" + (f" - {report['title']}" if report.get("title") else ""),
              "", "## Outcome", "", o["line"] + (f" Evidence: {o['evidence']}" if o.get("evidence") else ""), "",
              "## Stage by stage", "",
-             "| Stage | Written by | Read by | Problems found | Fixed / not fixed / left out | Calls | Tokens (prompt/completion) | Time |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| Stage | Written by | Read by | Reading cost | Problems found | Fixed / not fixed / left out | Calls | Tokens (prompt/completion) | Time |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for s in report["stages"]:
         p = s["problems"]
         reader = s["reviewed_by"] or "-"
@@ -824,7 +849,11 @@ def render(report: dict[str, Any]) -> str:
             reader = _one(s["review_note"], 60)
         first = "; ".join(f"{_one(i['text'], 90)} [{i['found_by']}]" for i in p["items"][:3])
         more = f" (+{p['total'] - 3} more)" if p["total"] > 3 else ""
-        lines.append(f"| {STAGE_NAME[s['stage']]} | {_cell(', '.join(s['wrote']) or '-')} | {_cell(reader)} | "
+        rc = s.get("review_cost")
+        cost = "-" if not rc or not rc["calls"] else (
+            f"{rc['calls']} call{'s' if rc['calls'] != 1 else ''}, {_n(rc['prompt_tokens'])} / {_n(rc['completion_tokens'])} tokens"
+            + (f", ${rc['usd']:.2f}" if rc.get("usd") is not None else ""))
+        lines.append(f"| {STAGE_NAME[s['stage']]} | {_cell(', '.join(s['wrote']) or '-')} | {_cell(reader)} | {_cell(cost)} | "
                      f"{p['total']}{(': ' + _cell(first) + more) if first else ''} | "
                      f"{p['fixed']} / {p['not_fixed']} / {p['left_out']} | {s['calls']}"
                      f"{(' (' + str(s['failed_calls']) + ' failed)') if s['failed_calls'] else ''} | "
