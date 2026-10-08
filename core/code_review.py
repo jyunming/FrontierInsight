@@ -29,7 +29,8 @@ ends in the honest stop after the run; every other open finding is said in the p
 * One reading per code version (:func:`version`), at most :data:`MAX_REVIEWS` in a quest, and the last of them is
   reserved for the version that will run the full study: an intermediate version never spends it. The final version is
   read, and the record says whether it was (``final_read``), the open findings per reading and whether the repairs
-  converged.
+  converged. A version that a repair of the run itself (a crash, a result the protocol's contract refuses) changed after
+  that reading is read again before its results are used, within :data:`RUN_REPAIR_READS` more readings.
 * What is still open afterwards is said in the paper's limitations (:func:`write_note`). A high-severity finding about
   a headline quantity (the first dependent variable, the metric the precision target is for) that is still open in the
   final version ends in the honest stop (``stuck_no_findings``, no paper) after the run, unless the run's own results
@@ -55,6 +56,10 @@ RECORD = Path(".fi") / "code_review.json"
 #: rounds of repair of what a review found, the findings in one repair request, and all repair requests in a quest.
 MAX_REVIEWS = 3
 RESERVED_FOR_FINAL = 1
+#: Further readings for the version that runs when a run that crashed or broke the protocol's contract was repaired by
+#: ``execute_reflect`` AFTER the reserved reading was spent: that script is the one whose results are reported, so it is
+#: read too (at most one per repair, and ``engine.exec_reflect_max_iterations`` bounds the repairs; 3 by default).
+RUN_REPAIR_READS = 3
 MAX_SEND_BACKS = 2
 BATCH = 6
 MAX_REPAIR_CALLS = 8
@@ -488,10 +493,18 @@ def may_repair(record: dict[str, Any]) -> str:
     return ""
 
 
-def may_read(record: dict[str, Any], *, final: bool) -> bool:
-    """Whether a reading is left: any but the reserved one for an intermediate version, all of them for the final one."""
-    spent = int(record.get("reviews_total") or 0)
-    return spent < MAX_REVIEWS - (0 if final else RESERVED_FOR_FINAL)
+def read_cap(*, final: bool, after_run_repair: bool = False) -> int:
+    """The most readings a quest may have spent for a read to be made now: all but the reserved one for an intermediate
+    version, all of them for the version about to run, and :data:`RUN_REPAIR_READS` more for a version a repair of the run
+    itself changed (its results are the ones reported, so it is read)."""
+    if not final:
+        return MAX_REVIEWS - RESERVED_FOR_FINAL
+    return MAX_REVIEWS + (RUN_REPAIR_READS if after_run_repair else 0)
+
+
+def may_read(record: dict[str, Any], *, final: bool, after_run_repair: bool = False) -> bool:
+    """Whether a reading is left (:func:`read_cap`)."""
+    return int(record.get("reviews_total") or 0) < read_cap(final=final, after_run_repair=after_run_repair)
 
 
 def note_reading(record: dict[str, Any], version_now: str, problems: list[dict[str, Any]]) -> None:

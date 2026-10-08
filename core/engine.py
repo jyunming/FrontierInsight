@@ -10511,6 +10511,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 why = "this is the version that will run" if final else _code_review.may_repair(record)
                 if why:
                     record["final"] = True
+                    record["repairs_stopped"] = why  # QUALITY.md says why the repairs ended
                     _code_review.save(self.quest_root, record)
                     self._log.warning("[code_review] %d finding(s) are open and are not repaired: %s", len(problems), why)
                     self._code_review_outcome(record)
@@ -10524,10 +10525,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 continue
             if record.get("version") == version and record.get("skipped"):
                 break  # the reader is the model that wrote the code (or FI cannot tell): nothing to read again
-            if not _code_review.may_read(record, final=final):
+            after_run_repair = final and int(state.get("exec_reflect_iter") or 0) > 0
+            if not _code_review.may_read(record, final=final, after_run_repair=after_run_repair):
                 if final:
+                    cap = _code_review.read_cap(final=True, after_run_repair=after_run_repair)
                     record = {**_code_review.carried(record), "version": version, "requirements": len(reqs),
-                              "skipped": f"the {_code_review.MAX_REVIEWS} readings of the code allowed in a quest are spent"}
+                              "skipped": f"the {cap} readings of the code allowed in a quest are spent"}
                     _code_review.save(self.quest_root, record)
                     self._log.warning("[code_review] %s%s", _code_review.plain_lines(record),
                                       "; the final version of the code was not read again by another model"

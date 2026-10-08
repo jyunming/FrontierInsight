@@ -773,7 +773,8 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "open_per_reading": [_int(r.get("open")) for r in readings],
             "open_high_per_reading": [_int(r.get("high")) for r in readings],
             "repairs_converged": cr.get("converged") if isinstance(cr.get("converged"), bool) else None,
-            "repair_requests": _int(cr.get("repair_calls"))}
+            "repair_requests": _int(cr.get("repair_calls")), "repair_rounds": _int(cr.get("send_backs")),
+            "repairs_stopped": str(cr.get("repairs_stopped") or "")}
 
 
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
@@ -891,7 +892,9 @@ def render(report: dict[str, Any]) -> str:
                   + ("" if code.get("repairs_converged") is None else
                      " The repairs " + ("converged." if code["repairs_converged"] else
                                         "did not converge (they were stopped when a round did not reduce the high-severity "
-                                        "findings)."))]
+                                        "findings)."))
+                  + (f" Repairs ended because {code['repairs_stopped']}; {code['repair_rounds']} round(s) and "
+                     f"{code['repair_requests']} request(s) were used." if code.get("repairs_stopped") else "")]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:
