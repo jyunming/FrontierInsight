@@ -150,12 +150,11 @@ async def test_a_high_severity_constant_the_results_confirm_is_the_honest_stop(t
     assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
     stuck = await engine._node_stuck_no_findings({**flat, "evidence_assessment": verdict})
     assert "is a constant in the run's results" in stuck["stuck"]["problem"]
-    # A result that cannot tell (the quantity appears once) does not contradict the finding either: it stands, and stops.
+    # A result that cannot tell (the quantity appears once) leaves the reviewer's word alone: no stop.
     alone = _engine(tmp_path / "b")
     alone._client = _Logic(CONSTANT, always=True)
     await alone._code_review_gate(STATE, final=True)
-    unsure = alone._no_results_verdict({**STATE, "result_json": {"quality_factor": 1.0}})
-    assert unsure and unsure["stuck"] and unsure["stuck_reason"] == "headline_missing"
+    assert alone._no_results_verdict({**STATE, "result_json": {"quality_factor": 1.0}}) is None
 
 
 def test_a_quantity_is_constant_only_when_the_results_hold_it_at_one_value_in_more_than_one_place() -> None:

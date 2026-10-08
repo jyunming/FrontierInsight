@@ -299,3 +299,19 @@ async def test_an_untestable_core_equation_nothing_checks_is_recorded_and_said_i
     assert await engine._equation_gate({"design": {"protocol": design["protocol"]}}, None, None) is None
     record = json.loads((engine.fi_dir / "equation_tests.json").read_text(encoding="utf-8"))
     assert record["untested_core"] == ["E2"]
+
+
+@pytest.mark.asyncio
+async def test_an_unprotected_core_equation_and_a_check_without_a_formula_are_asked_in_the_one_request(tmp_path: Path) -> None:
+    protocol = _untestable_protocol()
+    # The check names no formula for its expected value (FI computes it from one): that is asked in the same request.
+    protocol["oracles"] = [{k: v for k, v in o.items() if k != "expected_formula"} for o in protocol["oracles"]]
+    engine = Engine(_config(tmp_path))
+    review = {"checks": [{"name": "w_check", "appropriate": "yes", "discriminating": "yes", "well_defined": "yes"}],
+              "equations_tested": ["E1"], "equations_not_tested": [], "add": [], "summary": "fine"}
+    model = _PlanModel(protocol, review)
+    engine._client = model
+    await engine._node_plan({"topic": engine.config.topic, "literature": []})
+    both = [r for r in model.revisions if "nothing else checks it" in r and "expected_formula" in r]
+    assert len(both) == 1 and len(model.revisions) == 1, "one request carries both asks"
+    assert "w_check" in both[0] and "E2" in both[0]

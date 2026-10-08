@@ -529,8 +529,7 @@ same PR that adds, splits or renames one.
   repaired in) / `batches` / `findings_text` / `equations_view` / `parse_files` / `repair_problem` (the repair request of its own,
   `agents/code_review_repair.md`), `may_read` / `may_repair` / `note_reading` (the reserved last reading, no oscillation),
   `not_computed` / `headline_missing` / `headline_constant` / `write_note` (what the paper says),
-  `constant_in` / `resolve_logic` / `resolve_unsettled` (the run's results decide a "constant" finding; an open high-severity
-  finding about the main quantity they do not contradict is the honest stop), `.fi/code_review.json`. Called by
+  `constant_in` / `resolve_logic` (the run's results decide a "constant" finding; only a claim they confirm stops), `.fi/code_review.json`. Called by
   `Engine._code_review_gate` (reads, `_repair_review_findings`) in `_node_execute` before the equation gate (`final=False`) and just before the run (`final=True`); the
   headline stop goes through `_no_results_verdict` and `_node_stuck_no_findings` (reason `headline_missing`).
 - `core/code_layout.py` — the default shape of a simulation's `code/`, a small research tool: the model's equations in

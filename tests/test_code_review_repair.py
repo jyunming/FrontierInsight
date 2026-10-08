@@ -14,10 +14,11 @@ import pytest
 
 from core import code_review as cr
 from tests.test_code_review import (
-    ANALYSIS, REPAIR_HEAD, SIM_FULL, STATE, WITH_PLAN, _engine,
+    ANALYSIS, DESIGN, REPAIR_HEAD, SIM_FULL, STATE, WITH_PLAN, _engine,
 )
 
 MODEL = "# E1\ndef quality(m, w, c):\n    return m * w / c\n"
+DESIGN_WITH_HEADLINE = DESIGN
 HEADLINE_FINDING = {"where": "simulate.py:2", "what": "quality_factor ignores the damping", "why": "the plan's E1 divides by c",
                     "fix": "divide by cell['c']", "severity": "high", "quantity": "quality_factor"}
 
@@ -248,22 +249,42 @@ async def test_a_reader_that_fails_twice_is_recorded_and_the_final_version_is_sa
 
 
 @pytest.mark.asyncio
-async def test_an_open_high_finding_about_the_main_quantity_that_the_results_do_not_contradict_ends_in_the_honest_stop(
+async def test_a_high_finding_about_the_main_quantity_that_the_results_cannot_settle_is_a_limitation_never_a_stop(
         tmp_path: Path) -> None:
     engine = _engine(tmp_path)
-    script = _Script(lambda n, code: [HEADLINE_FINDING])
-    engine._client = script
+    engine._client = _Script(lambda n, code: [HEADLINE_FINDING])
     await engine._code_review_gate(WITH_PLAN, final=True)
-    code = engine.quest_root / "code"
-    assert cr.headline_unsettled(engine.quest_root, code) == ["quality_factor ignores the damping"]
     results = {**STATE, "result_json": {"cells": [{"c": 0.2, "quality_factor": 2.5}, {"c": 0.5, "quality_factor": 1.0}]}}
-    verdict = engine._no_results_verdict(results)
+    assert engine._no_results_verdict(results) is None
+    note = cr.write_note(engine.quest_root, engine.quest_root / "code")
+    assert "quality_factor ignores the damping" in note and "not resolved" in note and "[high]" in note
+
+
+@pytest.mark.asyncio
+async def test_a_constant_claim_the_results_cannot_settle_does_not_stop_but_one_they_confirm_does(tmp_path: Path) -> None:
+    constant = {**HEADLINE_FINDING, "what": "quality_factor does not depend on the damping", "constant": True}
+    engine = _engine(tmp_path)
+    engine._client = _Script(lambda n, code: [constant])
+    await engine._code_review_gate(WITH_PLAN, final=True)
+    assert engine._no_results_verdict({**STATE, "result_json": {"quality_factor": 1.0}}) is None, "it appears once: undecided"
+    flat = {**STATE, "result_json": {"cells": [{"quality_factor": 1.0}, {"quality_factor": 1.0}]}}
+    verdict = engine._no_results_verdict(flat)
     assert verdict and verdict["stuck"] and verdict["stuck_reason"] == "headline_missing"
-    stuck = await engine._node_stuck_no_findings({**results, "evidence_assessment": verdict})
-    problem = stuck["stuck"]["problem"]
-    assert "a fault in how the study's main quantity is computed" in problem and "quality_factor ignores" in problem
-    assert (engine.quest_root / "needs" / "STUCK.json").is_file()
-    assert "run the quest again" in "".join(stuck["stuck"].get("tried") or []) or stuck["stuck"]["tried"]
+
+
+@pytest.mark.asyncio
+async def test_a_finding_that_names_no_quantity_is_not_a_headline_finding_whatever_its_text_says() -> None:
+    reqs = cr.requirements(DESIGN_WITH_HEADLINE, None)
+    got = cr.parse_logic({"findings": [{"where": "simulate.py:2", "what": "quality_factor is wrong", "why": "quality_factor",
+                                        "fix": "f", "severity": "high"}]}, reqs)
+    assert got[0]["headline"] is False
+
+
+def test_the_directive_of_a_layout_problem_is_sent_whole_to_the_repair(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    message = "problem line. " * 400
+    patch = engine._code_review_failed_run(message)
+    assert patch["exec_result"]["stderr_tail"] == message and patch["exec_result"]["directive"] is True
 
 
 @pytest.mark.asyncio
@@ -277,7 +298,6 @@ async def test_a_finding_that_the_results_contradict_lets_the_paper_go_on_with_t
     assert engine._no_results_verdict(varies) is None, "the results show it varies: the reviewer was wrong"
     record = cr.load(engine.quest_root)
     assert record["disagreement"] == ["quality_factor does not depend on the damping"]
-    assert cr.headline_unsettled(engine.quest_root, engine.quest_root / "code") == []
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
 
 

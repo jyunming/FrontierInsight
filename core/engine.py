@@ -10285,7 +10285,7 @@ class Engine(RunChecksMixin):
         """A run that did not happen, for the repair path to take: the directive stands where a traceback would."""
         patch: QuestState = {
             "exec_result": {
-                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": message[-2500:],
+                "returncode": 1, "duration_s": 0.0, "timed_out": False, "stdout_tail": "", "stderr_tail": message, "directive": True,
                 "packages_note": getattr(self, "_packages_note", ""), "failed_script": script, "flat_output": "",
                 "numeric_warnings": [],
             },
@@ -15055,7 +15055,8 @@ class Engine(RunChecksMixin):
             previous_code=script_code,
             returncode=returncode_for_prompt,
             stdout_tail=stdout_for_prompt,
-            stderr_tail=exec_result.get("packages_note", "") + exec_result.get("stderr_tail", "")[-2000:],
+            stderr_tail=exec_result.get("packages_note", "") + (
+                exec_result.get("stderr_tail", "") if exec_result.get("directive") else exec_result.get("stderr_tail", "")[-2000:]),
             duration_s=f"{exec_result.get('duration_s', 0):.2f}",
             figures_count=str(len(state.get("figures") or [])),
             result_json_present=result_json_note,
@@ -16277,14 +16278,8 @@ class Engine(RunChecksMixin):
             # A second model compared the code with the plan and the main quantity is not in it, even after repairs.
             missing = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
             constant = [] if missing else _code_review.headline_constant(self.quest_root, self.quest_root / "code")
-            unsettled = [] if (missing or constant) else _code_review.headline_unsettled(
-                self.quest_root, self.quest_root / "code")
-            left = missing or constant or unsettled
-            if unsettled:
-                problem = ("a second model found a fault in how the study's main quantity is computed "
-                           f"({_one_line('; '.join(unsettled), 200)}), the repairs did not remove it and the run's results do "
-                           f"not show it false{', even after FI ' + after if after else ''}, so there is nothing FI can vouch for")
-            elif constant:
+            left = missing or constant
+            if constant:
                 problem = ("the study's main quantity is a constant in the run's results, as a second model found in the code"
                            f" ({_one_line('; '.join(constant), 200)}){', even after FI ' + after if after else ''}, so "
                            "there is nothing measured to write up")
@@ -16300,8 +16295,7 @@ class Engine(RunChecksMixin):
                         + (_code_review.metrics_line(review_record) or "the findings stood")] if rounds else []),
                      *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
                        if repairs else [])]
-            ended = ("the code still had a fault in the study's main quantity that the repairs did not remove" if unsettled
-                     else "the code still did not compute the study's main quantity")
+            ended = "the code still did not compute the study's main quantity"
         if reason == "not_run":
             said = str((state.get("exec_result") or {}).get("not_run") or "").strip().rstrip(".")
             problem = f"{said}, so nothing was run for the study"
@@ -16399,16 +16393,6 @@ class Engine(RunChecksMixin):
             # run's own results hold it at one value everywhere: the results confirm it (a reader's word alone never stops).
             why = ("the study's main quantity is a constant in the run's results, as a second model found in the code "
                    "(" + "; ".join(_constant)[:200] + ")")
-            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
-            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
-                    "stuck_reason": "headline_missing"}
-        if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
-                _unsettled := _code_review.resolve_unsettled(
-                    self.quest_root, self.quest_root / "code", state.get("result_json"))):
-            # A second model flagged, with high severity, a fault in how the study's main quantity is computed; the repairs
-            # did not remove it and the run's own results do not contradict it.
-            why = ("a second model found a fault in how the study's main quantity is computed that the repairs did not "
-                   "remove, and the run's results do not show it false (" + "; ".join(_unsettled)[:200] + ")")
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
             return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                     "stuck_reason": "headline_missing"}

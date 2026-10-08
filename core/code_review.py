@@ -13,10 +13,9 @@ what, why, how to fix and how serious): that each ``# E<n>`` function matches it
 factors), that a statistic is computed as the plan defines it, that a quantity the plan says depends on a setting uses that
 setting, that a step the plan's model names is not skipped, that nothing reported is a constant, and that a check's case
 is the plan's. Its findings go to a repair request of their own, each naming the place and the fault, never a value;
-whatever value of the plan's checks a reviewer quotes is replaced in the findings (:func:`core.review_pairs.without_values`). A high-severity
-finding about a headline quantity that is still there in the final version after the repairs ends in the honest stop after
-the run, unless the run's own results contradict it (a quantity the reviewer calls constant, :func:`constant_in`); every
-other open finding is said in the paper's limitations.
+whatever value of the plan's checks a reviewer quotes is replaced in the findings (:func:`core.review_pairs.without_values`). A finding the run's own results
+confirm (a quantity the reviewer calls constant that the results hold at one value, :func:`constant_in`) about a headline quantity
+ends in the honest stop after the run; every other open finding is said in the paper's limitations as unresolved.
 
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
@@ -239,9 +238,7 @@ def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | No
                     "line": int(match.group(2)) if match and match.group(2) else None,
                     "note": f["why"], "fix": f["fix"], "severity": f["severity"], "name": quantity,
                     "constant": bool(f.get("constant")), "where": f["where"],
-                    # About a headline quantity: it names one as the quantity, or (naming none) says one in what is wrong.
-                    "headline": (_norm(quantity) in headline) if quantity else any(
-                        len(h) >= 4 and h in _norm(f"{f['what']} {f['why']}") for h in headline)})
+                    "headline": bool(quantity) and _norm(quantity) in headline})
     return out
 
 
@@ -649,40 +646,6 @@ def resolve_logic(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
         record["disagreement"] = [v["text"] for v in record["problems"] if v.get("contradicted")]
         save(quest_root, record)
     return confirmed
-
-
-def _unsettled(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
-    """The open high-severity findings about a headline quantity of the final version that nothing in the run's results
-    contradicts (a requirement the reader calls missing is decided by :func:`resolve_headline`, a constant by
-    :func:`resolve_logic`; this is the rest)."""
-    return [v for v in not_computed(quest_root, code_dir)
-            if v.get("kind") == "logic" and v.get("headline") and v.get("severity") == "high"
-            and not v.get("contradicted") and not v.get("confirmed")]
-
-
-def headline_unsettled(quest_root: Path, code_dir: Path) -> list[str]:
-    """The texts of the findings :func:`resolve_unsettled` found standing."""
-    return [v["text"] for v in _unsettled(quest_root, code_dir)]
-
-
-def resolve_unsettled(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
-    """After a run: the high-severity findings about a headline quantity that are still open in the final version and that
-    the run's own results do not contradict (a finding that a quantity is constant is contradicted by results that show it
-    varying; nothing else in the results can show a fault of logic wrong). These end in the honest stop: the study's main
-    quantity is flagged as wrongly computed, the repairs did not remove it and nothing shows the flag false."""
-    record = load(quest_root)
-    if not record.get("final") or record.get("version") != version(code_dir):
-        return []
-    changed = False
-    for v in record.get("problems") or []:
-        if isinstance(v, dict) and v.get("kind") == "logic" and v.get("constant") and not v.get("contradicted"):
-            if constant_in(str(v.get("name") or ""), result) is False:
-                v["contradicted"] = True
-                changed = True
-    if changed:
-        record["disagreement"] = [v["text"] for v in record["problems"] if v.get("contradicted")]
-        save(quest_root, record)
-    return headline_unsettled(quest_root, code_dir)
 
 
 def write_note(quest_root: Path, code_dir: Path) -> str:
