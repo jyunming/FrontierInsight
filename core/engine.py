@@ -5555,7 +5555,16 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     def _topic_block(self) -> str:
         """The topic and the formulas it states, as every request that writes or repairs code is shown them
         (:func:`core.topic_requirements.code_block`): a sentence that states a result is left out."""
-        return _topic_req.code_block(self.config.topic, self._topic_requirements_read())
+        frozen = _frozen.load(self.quest_root)
+        protocol = frozen.get("protocol") if isinstance(frozen, dict) else None
+        if not isinstance(protocol, dict):
+            planned, _why = _plan.load_design(self.quest_root)
+            protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        # A number of the topic that is also a number of the plan's checks (an expected value, a tolerance, a worked
+        # example) is taken out whether or not the topic marked it as a result; formula constants and settings stay.
+        values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
+        return _topic_req.code_block(self.config.topic, self._topic_requirements_read(),
+                                     scrub=lambda text: _pairs.scrub(text, values))
 
     def _reader_and_planner(self, node: str) -> tuple[str, str, bool | None]:
         """``(reviewer, planner, same_model)`` for the last call under ``node``, as :meth:`_review_oracles` decides it."""

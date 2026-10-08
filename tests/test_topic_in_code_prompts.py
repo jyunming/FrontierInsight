@@ -97,3 +97,23 @@ async def test_a_whole_fake_quests_code_prompts_all_show_the_topic_and_none_a_ch
         assert "dT/dt = -k*(T - Tr)" in prompt, f"a {kind} request did not show the topic's formula"
         assert secret_check not in prompt and secret_example not in prompt, f"a {kind} request showed a check's expected value"
         assert "0.05 per minute" not in prompt, f"a {kind} request showed the topic's stated result"
+
+
+def test_every_place_that_renders_a_code_prompt_passes_the_topic() -> None:
+    """A request that writes or repairs code is rendered in several modules (the engine, the run checks, the static
+    checks); a new one that leaves the topic out would fail at run time with a KeyError, so each is held to it here."""
+    import re
+
+    core = Path(__file__).resolve().parent.parent / "core"
+    names = "execute_reflect|implement|implement_outline|improve"
+    missing = []
+    for path in core.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(r'_prompts\["(?:%s)"\]\.substitute\(' % names, text):
+            depth, i = 1, m.end()
+            while depth and i < len(text):
+                depth += (text[i] == "(") - (text[i] == ")")
+                i += 1
+            if "topic_block" not in text[m.end():i]:
+                missing.append(f"{path.name}:{text.count(chr(10), 0, m.start()) + 1}")
+    assert not missing, f"these requests to write or repair code do not pass the topic: {missing}"

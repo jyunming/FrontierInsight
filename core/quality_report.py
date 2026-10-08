@@ -541,6 +541,8 @@ def _review_cost(q: _Quest, stage: str) -> dict[str, Any] | None:
     if stage not in _READERS:
         return None
     rows = [r for r in q.calls if _reads(stage, r.get("node"))]
+    if stage == "plan" and not rows:
+        return None  # the plan is read only by the reading of the topic, which a quest may not have made
     usd: float | None = None
     for node, bucket in _dict(q.cost.get("by_node")).items():
         price = _dict(bucket).get("cost_usd")

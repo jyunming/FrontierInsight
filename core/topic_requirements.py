@@ -507,16 +507,24 @@ def topic_for_code(topic: Any, req: Any = None) -> str:
     return "\n".join(kept).strip()
 
 
-def code_block(topic: Any, req: Any = None, *, limit: int = 6000) -> str:
+def code_block(topic: Any, req: Any = None, *, limit: int = 6000, scrub: Any = None) -> str:
     """The text every request that writes or repairs code is shown about the topic: the topic itself (minus any result it
-    states) and the formulas it states, which are the specification the plan's equations are to agree with."""
+    states) and the formulas it states, which are the specification the plan's equations are to agree with. ``scrub(text)``
+    (when given) takes out the numbers the plan's checks hold. The size cap is for the whole block, formulas included: the
+    formulas are kept first (at most a third of it), the topic fills the rest."""
     body = topic_for_code(topic, req)
     if not body:
         return "(the topic is not available)"
-    if len(body) > limit:
-        body = body[:limit].rstrip() + "\n(the rest of the topic is not shown)"
     formulas = [f for f in (req.get("formulas") if isinstance(req, dict) else None) or [] if isinstance(f, dict)]
+    tail = ""
     if formulas:
-        body += ("\n\nFormulas the topic states (use exactly these, as the plan's equations do; a different formula is a "
-                 "different study):\n" + "\n".join(f"- {f.get('name')}: {f.get('text')}" for f in formulas))
-    return body
+        tail = ("\n\nFormulas the topic states (use exactly these, as the plan's equations do; a different formula is a "
+                "different study):\n" + "\n".join(f"- {f.get('name')}: {f.get('text')}" for f in formulas))
+        if len(tail) > limit // 3:
+            tail = tail[:limit // 3].rstrip() + "\n(more formulas are not shown)"
+    if callable(scrub):
+        body, tail = scrub(body), scrub(tail)
+    room = max(0, limit - len(tail))
+    if len(body) > room:
+        body = body[:max(0, room - 40)].rstrip() + "\n(the rest of the topic is not shown)"
+    return body + tail
