@@ -169,6 +169,7 @@ class _Quest:
         self.function_steps = _dict(_json(fi / "function_steps.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
+        self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
         self.cost = _dict(_json(fi / "cost.summary.json"))
@@ -335,6 +336,13 @@ def _design_problems(q: _Quest) -> list[dict[str, str]]:
             for part in parts:
                 out.append(_problem("design", part, "the design audit",
                                     "fixed" if q.design_acted else "not fixed", "needs/receipts/design_audit.json"))
+    substituted = [str(x) for x in _list(q.drafted_asked.get("substituted"))]
+    if substituted:
+        names = {"grid": "settings to vary", "metrics": "metrics", "runs_per_setting": "runs per setting"}
+        listed = ", ".join(names.get(x, x.replace("_", " ")) for x in substituted)
+        out.append(_problem("design", f"the redesign's {listed} could not be read, so FI ran the plan's own instead; "
+                                      "the results belong to the plan's settings, not to what the redesign meant",
+                            "FI's design check", "left out", ".fi/drafted_parts_asked.json"))
     return out
 
 

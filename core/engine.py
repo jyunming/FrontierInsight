@@ -5976,6 +5976,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return design
         unread = self._unread_parts(design)
         if not unread:
+            self._forget_drafted_parts_substituted()  # this round's design reads in full: an earlier round's note is stale
             return design
         base = design["protocol"] if isinstance(design.get("protocol"), dict) else {}
         protocol: dict[str, Any] = dict(base)
@@ -6025,6 +6026,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if not unread:
                 self._log.info("[design] the redesign's protocol parts are complete now (asked %d time(s))", count)
                 print("[FI] the settings of the redesign are complete now; going on")
+        used: list[str] = []
         if unread:
             planned, _sha = self._design_from_plan()
             planned_protocol = (planned.get("protocol") if isinstance(planned, dict)
@@ -6034,7 +6036,57 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self._log.warning("[design] the redesign's `protocol.%s` could not be read, even when the plan's model was "
                                       "asked; FI used the one in plan.md, which was read and settled at the plan step", part)
                     unread.pop(part)
+                    used.append(part)
+        if used:
+            self._record_drafted_parts_substituted(used, iteration)
         return {**design, "protocol": protocol} if protocol != base else design
+
+    def _record_drafted_parts_substituted(self, parts: list[str], iteration: int) -> None:
+        """Write down, next to the count of asks, which parts of a redesign's protocol FI took from the plan because the
+        redesign's own could not be read: the quest then runs what the plan settled, not what the redesign meant. Read back
+        by the quality report and by the note the writer receives (:meth:`_drafted_parts_note`), so the paper never describes
+        the redesign's intended settings as what ran. A record that cannot be written is said in the log."""
+        path = self.fi_dir / _DRAFTED_PARTS_ASKED
+        try:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                record = {}
+            record = record if isinstance(record, dict) else {}
+            record.setdefault("iteration", iteration)
+            record["substituted"] = sorted(set(parts))
+            record["substituted_at"] = _frozen.now()
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] FI could not write down that it used the plan's own %s for the redesign: %r",
+                              ", ".join(parts), e)
+
+    def _forget_drafted_parts_substituted(self) -> None:
+        """Drop the "used the plan's own" record when the design now running reads in full (it was an earlier round's)."""
+        path = self.fi_dir / _DRAFTED_PARTS_ASKED
+        record = _read_json_or_none_path(path)
+        if not isinstance(record, dict) or "substituted" not in record:
+            return
+        record.pop("substituted", None)
+        record.pop("substituted_at", None)
+        try:
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] FI could not update its record of the redesign's parts: %r", e)
+
+    def _drafted_parts_note(self) -> str:
+        """For the paper: the parts of the design that ran are the plan's, not the redesign's, because the redesign's could
+        not be read. Empty when FI substituted nothing."""
+        record = _read_json_or_none_path(self.fi_dir / _DRAFTED_PARTS_ASKED)
+        parts = record.get("substituted") if isinstance(record, dict) else None
+        if not isinstance(parts, list) or not parts:
+            return ""
+        names = {"grid": "settings to vary", "metrics": "metrics", "runs_per_setting": "runs per setting"}
+        listed = ", ".join(names.get(str(p), str(p).replace("_", " ")) for p in parts)
+        return (f"The redesign's {listed} could not be read, even when the model was asked to write them again, so FI ran the "
+                "plan's own instead. What ran is the plan's, not what the redesign meant: do NOT describe the redesign's "
+                f"intended {listed} as what was run, and say so plainly (in the limitations).")
 
     def _stop_if_no_settings_to_vary(self, state: QuestState, design: Any) -> None:
         """A study whose plan tried to list settings to vary (``protocol.grid`` was drafted and could not be read, even when
@@ -16970,6 +17022,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             evidence_note = f"{evidence_note}\n\n{core_note}".strip()
         if run_note := self._run_checks_note():
             evidence_note = f"{evidence_note}\n\n{run_note}".strip()
+        if drafted_note := self._drafted_parts_note():
+            evidence_note = f"{evidence_note}\n\n{drafted_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
         if missed:
             evidence_note = (

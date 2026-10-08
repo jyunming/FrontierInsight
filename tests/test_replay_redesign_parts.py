@@ -93,3 +93,37 @@ async def test_the_stop_only_comes_after_the_bounded_asks_fail_and_says_so(tmp_p
         eng._stop_if_no_settings_to_vary({"topic": "t"}, out)
     shown = " ".join(seen[0]["steps"])
     assert "asked the plan's model 2 time(s)" in shown and "did not ask" not in shown
+
+
+@pytest.mark.asyncio
+async def test_using_the_plans_settings_for_a_redesign_is_recorded_and_reaches_the_report_and_the_writer(tmp_path: Path) -> None:
+    from core import quality_report
+
+    mixed = json.dumps({"grid": {"axis_a": [1.0, "wide"]}})
+    eng, redesign, _asked = _setup(tmp_path, [mixed, mixed])
+    out = await eng._complete_drafted_parts({"topic": "t"}, redesign, iteration=1)
+    record = json.loads((eng.fi_dir / "drafted_parts_asked.json").read_text(encoding="utf-8"))
+    assert record["substituted"] == ["grid"] and record["count"] == 2 and "grid" in out["protocol"]
+    # the writer is told that what ran is the plan's, not the redesign's
+    note = eng._drafted_parts_note()
+    assert "settings to vary" in note and "plan's own" in note and "do NOT describe" in note
+    # the quality report lists it as a problem of the design that was not carried out
+    items = [p for st in quality_report.build(eng.quest_root, running=False)["stages"] if st["stage"] == "design"
+             for p in st["problems"]["items"]]
+    assert any("settings to vary" in p["text"] and p["status"] == "left out" for p in items), items
+    # a resume asks no more and keeps the record
+    await eng._complete_drafted_parts({"topic": "t"}, redesign, iteration=1)
+    assert json.loads((eng.fi_dir / "drafted_parts_asked.json").read_text(encoding="utf-8"))["substituted"] == ["grid"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_recorded_when_the_models_answer_is_used_and_an_old_record_is_dropped(tmp_path: Path) -> None:
+    eng, redesign, _asked = _setup(tmp_path, [json.dumps({"grid": GOOD_GRID})])
+    await eng._complete_drafted_parts({"topic": "t"}, redesign, iteration=1)
+    assert eng._drafted_parts_note() == ""
+    eng._record_drafted_parts_substituted(["grid"], 1)
+    assert eng._drafted_parts_note() != ""
+    complete = copy.deepcopy(redesign)
+    complete["protocol"]["grid"] = GOOD_GRID
+    await eng._complete_drafted_parts({"topic": "t"}, complete, iteration=2)  # a later round reads in full
+    assert eng._drafted_parts_note() == ""
