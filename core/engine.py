@@ -10341,8 +10341,8 @@ class Engine(RunChecksMixin):
             results = _equation_tests.parse_results(out)
             if results is None:
                 self._log.warning("[equations] the tests of the model's equations did not run (%s); going on without them",
-                                  (err or out).strip().splitlines()[-1][:160] if (err or out).strip() else f"exit code {rc}")
-                record["error"] = (err or out)[-400:]
+                                  _function_steps.exception_line(err or out, 160) if (err or out).strip() else f"exit code {rc}")
+                record["error"] = _function_steps.traceback_end(err or out, 400)
                 failures = []
                 break
             by_id = {c["id"]: c for c in case_list}
@@ -15551,7 +15551,7 @@ class Engine(RunChecksMixin):
             duration_s=f"{exec_result.get('duration_s', 0):.1f}",
             timed_out=str(exec_result.get("timed_out", False)),
             stdout_tail=stdout_for_analyze,
-            stderr_tail=exec_result.get("stderr_tail", "")[:1000],
+            stderr_tail=_function_steps.traceback_end(exec_result.get("stderr_tail", ""), 1000),
             result_json=result_json_block,
             user_data_block=user_data_block,
             figure_list=_figure_list_for_prompt(state),

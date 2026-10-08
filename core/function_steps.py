@@ -153,12 +153,38 @@ def spec_hash(specs: list[Spec], protocol: dict[str, Any] | None) -> str:
 
 
 def stub(spec: Spec) -> str:
-    return (f"{spec.signature.rstrip()}\n    \"\"\"{spec.purpose}\"\"\"\n    # {spec.equation}\n"
+    """A placeholder for a function not written yet. It is ALWAYS importable: the header keeps the parameter names (and
+    the defaults that are plain values) but no annotation and no default that names something (``np.ndarray``,
+    ``np.float64``), because those are evaluated when the module is imported, and a name the module does not have yet
+    would make the import check of every other function fail."""
+    node = ast.parse(spec.signature.rstrip().rstrip(":") + ":\n    pass").body[0]
+    assert isinstance(node, ast.FunctionDef)
+    args = node.args
+    for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
+        if arg is not None:
+            arg.annotation = None
+    node.returns = None
+
+    def plain(default: ast.expr | None) -> ast.expr | None:
+        if default is None:
+            return None
+        try:
+            ast.literal_eval(default)
+            return default
+        except (ValueError, SyntaxError, TypeError):
+            return ast.Constant(value=None)
+
+    args.defaults = [plain(d) for d in args.defaults]  # type: ignore[misc]
+    args.kw_defaults = [plain(d) for d in args.kw_defaults]
+    node.decorator_list = []
+    header = ast.unparse(node).splitlines()[0]
+    return (f"{header}\n    \"\"\"{spec.purpose}\"\"\"\n    # {spec.equation}\n"
             f"    raise NotImplementedError(\"{_STUB_MARK}\")\n")
 
 
 def initial_module(specs: list[Spec], summary: str = "") -> str:
-    head = '"""' + (summary or "The model's equations, one function each; no scenario values.") + '"""\n\n'
+    head = ('"""' + (summary or "The model's equations, one function each; no scenario values.")
+            + '"""\n\nfrom __future__ import annotations\n\n')
     return head + "\n\n".join(stub(s) for s in specs) + "\n"
 
 
@@ -311,6 +337,108 @@ def environment_problem(stderr: str, package: str) -> str:
     return ""
 
 
+def exception_line(text: str, limit: int = 300) -> str:
+    """The last non-empty line of an error text: the exception's type and message (the END of a traceback)."""
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return (lines[-1] if lines else "no message")[-limit:]
+
+
+def traceback_end(text: str, limit: int = 1500) -> str:
+    """At most ``limit`` characters of an error text, the END of it: a traceback ends with the exception (its type and
+    message) and the last frames, which is what a reader needs; its start is the frames of the machinery that called the
+    code. Cut at a line boundary, with ``...`` where the start was left out. The one helper for shortening a traceback."""
+    clean = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(clean) <= limit:
+        return clean
+    tail = clean[-limit:]
+    cut = tail.find("\n")
+    if 0 <= cut < len(tail) - 1:
+        tail = tail[cut + 1:]
+    return "...\n" + tail
+
+
+# Where an import failure is, by the traceback of the import check.
+_FRAME = re.compile(r'File "([^"]+)", line (\d+)')
+MODULE_LEVEL = "<module>"
+ELSEWHERE = "<elsewhere>"
+
+
+def _dumps(source: str) -> set[str]:
+    """One fingerprint per top-level statement of ``source`` (empty when it does not parse)."""
+    try:
+        return {ast.dump(n) for n in ast.parse(source).body}
+    except (SyntaxError, ValueError):
+        return set()
+
+
+def _span(node: ast.stmt) -> tuple[int, int]:
+    return min([node.lineno, *[d.lineno for d in getattr(node, "decorator_list", [])]]), node.end_lineno or node.lineno
+
+
+def _text_spans(text: str) -> list[tuple[int, int, str]]:
+    """``(first line, last line, name)`` of each top-level function and each other top-level statement (``name`` is
+    ``MODULE_LEVEL``) of a module that may not parse; read from the lines, not from the syntax tree."""
+    spans: list[list[Any]] = []
+    decorated: int | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line[0] in " \t#)]}":
+            continue
+        if line.startswith("@"):
+            decorated = decorated or number
+            continue
+        found = re.match(r"(?:async\s+)?def\s+(\w+)\s*\(", line)
+        spans.append([decorated or number, 0, found.group(1) if found else MODULE_LEVEL])
+        decorated = None
+    for i, span in enumerate(spans):
+        span[1] = (spans[i + 1][0] - 1) if i + 1 < len(spans) else len(text.splitlines())
+    return [(a, b, n) for a, b, n in spans]
+
+
+def who_at_line(source: str, line: int, name: str, known: set[str]) -> str:
+    """Whose line ``line`` of the module ``source`` is, for the function ``name`` being written: ``name`` for its own
+    function and for everything this attempt added to the module (a statement that was not in the module before:
+    ``known`` holds the fingerprints of what was), another function's name for that function, ``MODULE_LEVEL`` for any
+    other statement outside a function."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        for first, last, who in _text_spans(source):
+            if first <= line <= last:
+                return who
+        return MODULE_LEVEL
+    for node in tree.body:
+        first, last = _span(node)
+        if first <= line <= last:
+            if getattr(node, "name", None) == name or ast.dump(node) not in known:
+                return name
+            return node.name if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else MODULE_LEVEL
+    return MODULE_LEVEL
+
+
+def locate_failure(stderr: str, source: str, package: str, name: str, known: set[str]) -> tuple[str, int]:
+    """``(who, line)`` for a failed import of ``<package>.model`` while ``name`` is being written: where the error is.
+    ``who`` is ``name`` (its own function, or what this attempt added), another function's name, ``MODULE_LEVEL`` (a
+    statement outside any function that was there before) or ``ELSEWHERE`` (the traceback does not touch the module:
+    another file, the environment). The innermost frame inside the module's file decides."""
+    suffix = f"{package}/model.py"
+    lines = [int(n) for path, n in _FRAME.findall(stderr or "") if path.replace("\\", "/").endswith(suffix)]
+    if not lines:
+        if re.search(rf"has no attribute '{re.escape(name)}'|'{re.escape(name)}' is not a function", stderr or ""):
+            return name, 0  # the module imports, but the function is not in it
+        return ELSEWHERE, 0
+    return who_at_line(source, lines[-1], name, known), lines[-1]
+
+
+def place(who: str, line: int) -> str:
+    """Where an error is, in a plain phrase."""
+    at = f" (line {line})" if line else ""
+    if who == ELSEWHERE:
+        return "outside the model's module (another file, or the environment)"
+    if who == MODULE_LEVEL:
+        return f"in a statement of the module that is not in a function{at}"
+    return f"in the function `{who}`{at}"
+
+
 # --- the record -------------------------------------------------------------------------------------------------------
 
 
@@ -406,13 +534,19 @@ class FunctionFiller:
 
     # -- one function --
 
-    async def _check(self, spec: Spec, record: dict[str, Any]) -> str:
-        """``""`` when the function passes its checks, else what is wrong (never the expected value)."""
+    async def _check(self, spec: Spec, record: dict[str, Any], known: set[str] | None = None) -> tuple[str, str, str]:
+        """``(problem, who, trace)``. ``problem`` is ``""`` when the function passes its checks, else what is wrong (never
+        the expected value). ``who`` says whose fault it is: ``spec.name`` (the function being written, or what this
+        attempt added to the module), another function's name, ``MODULE_LEVEL`` or ``ELSEWHERE``. ``trace`` is the end of
+        the traceback when the import failed. ``known``: the fingerprints of the module's statements before this attempt."""
+        known = known if known is not None else set()
         text = self.model_path.read_text(encoding="utf-8")
         try:
             ast.parse(text)
         except SyntaxError as e:
-            return f"model.py is not valid Python ({e.msg}, line {e.lineno})"
+            who = who_at_line(text, e.lineno or 0, spec.name, known)
+            return (f"model.py is not valid Python ({e.msg}, line {e.lineno}, {place(who, 0)})", who,
+                    f"SyntaxError: {e.msg} (line {e.lineno})")
         module = f"{self.package}.model"
         rc, _out, err = await self.run(["-c", import_script("code", module, spec.name)])
         if rc != 0:
@@ -420,28 +554,115 @@ class FunctionFiller:
             if missing:
                 self.log.info("[implement] the import check of %s is skipped: this environment lacks %s", spec.name, missing)
             else:
-                return "importing it failed:\n" + (err or "")[-1500:]
+                who, line = locate_failure(err, text, self.package, spec.name, known)
+                end = traceback_end(err, 1500)
+                if who == spec.name:
+                    return "importing it failed" + (f" (line {line})" if line else "") + ":\n" + end, who, end
+                return (f"importing the module failed {place(who, line)}, not in `{spec.name}`:\n" + end), who, end
         rows = _eqt.example_rows(self.protocol)
         row = next((r for r in rows if r["id"] == spec.equation), None)
         if row is None or row["state"] != "ok":
             record.setdefault("untested", {})[spec.equation] = (row or {}).get("why") or "no worked example"
-            return ""
+            return "", "", ""
         case_list = _eqt.cases([row], {spec.equation: {"module": module, "function": spec.name, "file": f"{self.package}/model.py"}})
         _eqt.write(self.code, case_list)
         rc, out, err = await self.run(["code/" + _eqt.TEST_PATH, "--json", "--only", spec.equation])
         results = _eqt.parse_results(out)
         if results is None:
-            return "the equation test did not run:\n" + (err or out or "")[-800:]
+            return "the equation test did not run:\n" + traceback_end(err or out or "", 800), spec.name, ""
         bad = next((r for r in results if r.get("status") != _eqt.OK), None)
-        return _eqt.failure_message(bad, row["formula"]) if bad else ""
+        return (_eqt.failure_message(bad, row["formula"]), spec.name, "") if bad else ("", "", "")
+
+    def _drop_added_import(self, trace: str, own: set[str]) -> str:
+        """An import line this function's own attempt added to the module, and at which the import of the module failed,
+        is taken out (a repair adds imports but never removes one, so it could not mend it): the line, or ``""``."""
+        lines = [int(n) for path, n in _FRAME.findall(trace or "") if path.replace("\\", "/").endswith(f"{self.package}/model.py")]
+        if not lines:
+            return ""
+        text = self.model_path.read_text(encoding="utf-8")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            return ""
+        for node in tree.body:
+            first, last = _span(node)
+            if first <= lines[-1] <= last:
+                if isinstance(node, (ast.Import, ast.ImportFrom)) and ast.dump(node) in own:
+                    kept = text.splitlines(keepends=True)
+                    self.model_path.write_text("".join(kept[: first - 1] + kept[last:]), encoding="utf-8")
+                    return ast.unparse(node)
+                break
+        return ""
+
+    async def _fix_elsewhere(self, who: str, trace: str, specs: list[Spec], record: dict[str, Any],
+                             known: set[str]) -> bool:
+        """The import of the module fails inside ANOTHER function of the package (``who``): fix that, without spending the
+        repairs of the function being written. First (when the module parses and the function is written) one repair of
+        that function alone, with a plain directive; then, and when the module does not parse or the repair is unusable,
+        the function goes back to its stub, which always imports, and is written again later. At most twice per function.
+        ``False`` when nothing can be done (a statement outside any function, a cause outside the module)."""
+        other = next((s for s in specs if s.name == who), None)
+        fixes = record.setdefault("elsewhere", {})
+        if other is None or int(fixes.get(who, 0)) >= 2:
+            return False
+        fixes[who] = int(fixes.get(who, 0)) + 1
+        source = self.model_path.read_text(encoding="utf-8")
+        node = _find(source, who)
+        if fixes[who] == 1 and node is not None and not is_stub(source, who) and self._spend(record):
+            directive = (f"Importing the module `{self.package}.model` stops inside this function, so no function of the "
+                         "package can be used until it is fixed. The error ends:\n" + trace)
+            try:
+                new, _why = await repair_one(
+                    source=source, name=who, signature=other.signature, equation=other.equation,
+                    equation_block=self._equation_block(other.equation), problem=directive,
+                    prompt=self.prompts["repair"], chat=self.chat, package=self.package)
+            except Exception as e:  # noqa: BLE001 -- a repair that could not be asked for leaves the module as it was
+                new = None
+                self.log.warning("[implement] the repair of %s could not be asked for: %r", who, e)
+            if new is not None:
+                self.model_path.write_text(new, encoding="utf-8")
+                fixed = _find(new, who)
+                if fixed is not None:
+                    known.add(ast.dump(fixed))
+                still, _who, _trace = await self._check(other, record, known)
+                record["functions"][who]["status"] = PENDING if still else DONE  # passes: no need to write it again
+                self.log.info("[implement] importing the module failed inside %s, not in the function being written; "
+                              "%s was repaired alone", who, who)
+                return True
+        text = source
+        stubbed = stub(other)
+        if node is not None:
+            first, last = _span(node)
+            lines = source.splitlines(keepends=True)
+            text = "".join(lines[: first - 1]) + stubbed + "\n\n" + "".join(lines[last:])
+        else:
+            for first, last, name in _text_spans(source):
+                if name == who:
+                    lines = source.splitlines(keepends=True)
+                    text = "".join(lines[: first - 1]) + stubbed + "\n\n" + "".join(lines[last:])
+                    break
+            else:
+                return False
+        self.model_path.write_text(text, encoding="utf-8")
+        again = _find(text, who)
+        if again is not None:
+            known.add(ast.dump(again))
+        record["functions"][who]["status"] = PENDING
+        self.log.info("[implement] importing the module failed inside %s, not in the function being written; "
+                      "%s goes back to its placeholder and is written again", who, who)
+        return True
 
     async def _fill(self, spec: Spec, record: dict[str, Any], specs: list[Spec]) -> str:
-        """Fill ``spec`` and repair it alone until it passes or its repairs are spent. ``""`` when it passes, else why not."""
+        """Fill ``spec`` and repair it alone until it passes or its repairs are spent. ``""`` when it passes, else why not.
+        A failure that is not this function's (the import of the module fails inside another function, or in a statement
+        outside any function) spends none of its repairs: the cause is fixed first (:meth:`_fix_elsewhere`), and when it
+        cannot be, the step ends at once naming where the error is (``record["blamed"]``)."""
         entry = record["functions"][spec.name]
         source = self.model_path.read_text(encoding="utf-8")
         related = [f"{s.signature}   # {s.equation}: {s.purpose}" for s in specs
                    if s.name in spec.depends_on and s.name != spec.name]
         problem = ""
+        own: set[str] = set()
         for attempt in range(1 + self.repairs):
             if not self._spend(record):
                 return "the most requests the step may make in this quest are spent"
@@ -467,11 +688,25 @@ class FunctionFiller:
             if new is None:
                 problem = why
                 continue
+            # The module's statements before this attempt, without what this function itself added in earlier attempts: what
+            # is not among them is this function's (a statement it added, a helper it wrote).
+            known = _dumps(source) - own
+            own |= _dumps(new) - _dumps(source)
             self.model_path.write_text(new, encoding="utf-8")
-            problem = await self._check(spec, record)
+            problem, who, trace = await self._check(spec, record, known)
+            while problem and who and who != spec.name:
+                if not await self._fix_elsewhere(who, trace, specs, record, known):
+                    break
+                problem, who, trace = await self._check(spec, record, known)
             if not problem:
                 return ""
-            source = new
+            if who and who != spec.name:
+                record["blamed"] = who
+                return problem
+            dropped = self._drop_added_import(trace, own)
+            if dropped:
+                problem += f"\n(The line `{dropped}` was taken out of the module, because importing it failed.)"
+            source = self.model_path.read_text(encoding="utf-8")
         return problem
 
     async def run_all(self, specs: list[Spec]) -> Outcome:
@@ -498,6 +733,11 @@ class FunctionFiller:
             self.model_path.write_text(initial_module(specs, self.summary), encoding="utf-8")
         else:
             on_disk = self.model_path.read_text(encoding="utf-8")
+            if not _dumps(on_disk):  # a module that does not parse is written again from the placeholders
+                for entry in record["functions"].values():
+                    entry["status"] = PENDING
+                self.model_path.write_text(initial_module(specs, self.summary), encoding="utf-8")
+                on_disk = self.model_path.read_text(encoding="utf-8")
             for s in specs:
                 if record["functions"][s.name]["status"] == DONE and is_stub(on_disk, s.name):
                     record["functions"][s.name]["status"] = PENDING
@@ -505,30 +745,52 @@ class FunctionFiller:
                     self.model_path.write_text(on_disk.rstrip("\n") + "\n\n\n" + stub(s), encoding="utf-8")
                     on_disk = self.model_path.read_text(encoding="utf-8")
         save(self.root, record)
-        for spec in specs:
-            entry = record["functions"][spec.name]
-            if entry["status"] == DONE:
-                self.log.info("[implement] function %s (equation %s) is already written and checked", spec.name, spec.equation)
-                continue
-            self.log.info("[implement] writing function %s for equation %s", spec.name, spec.equation)
-            problem = await self._fill(spec, record, specs)
-            if problem:
-                entry.update(status=FAILED, error=problem[:400])
-                record.update(status="fell_back", reason=f"function {spec.name} (equation {spec.equation}) did not pass its checks")
+        for _pass in range(3):  # a function sent back to its placeholder while another was written is written in the next pass
+            for spec in specs:
+                entry = record["functions"][spec.name]
+                if entry["status"] == DONE:
+                    self.log.info("[implement] function %s (equation %s) is already written and checked", spec.name, spec.equation)
+                    continue
+                self.log.info("[implement] writing function %s for equation %s", spec.name, spec.equation)
+                problem = await self._fill(spec, record, specs)
+                if problem:
+                    return self._give_up(record, spec, problem)
+                entry.update(status=DONE, error="")
                 save(self.root, record)
-                self.log.warning("[implement] function %s for equation %s still fails after %d repair(s) (%s); "
-                                 "the code is written whole instead", spec.name, spec.equation, self.repairs,
-                                 problem.splitlines()[0][:160])
-                self._remove()
-                return Outcome("fell_back", int(record.get("calls") or 0), record["reason"], spec.name)
-            entry.update(status=DONE, error="")
-            save(self.root, record)
-            self.log.info("[implement] function %s passes its checks%s", spec.name,
-                          "" if spec.equation not in (record.get("untested") or {}) else
-                          f" (equation {spec.equation} has no worked example to test it with)")
+                self.log.info("[implement] function %s passes its checks%s", spec.name,
+                              "" if spec.equation not in (record.get("untested") or {}) else
+                              f" (equation {spec.equation} has no worked example to test it with)")
+            if all(record["functions"][s.name]["status"] == DONE for s in specs):
+                break
+        else:
+            left = next(s for s in specs if record["functions"][s.name]["status"] != DONE)
+            return self._give_up(record, left, "it could not be written again after the module's import failed inside another function")
         record["status"] = "done"
         save(self.root, record)
         return Outcome("done", int(record.get("calls") or 0))
+
+    def _give_up(self, record: dict[str, Any], spec: Spec, problem: str) -> Outcome:
+        """The step ends: the error is recorded where it is (the END of the traceback, and whose it is), the half-written
+        package is removed and the code is written whole."""
+        blamed = str(record.pop("blamed", "") or "")
+        target = spec
+        if blamed in record["functions"] and blamed != spec.name:
+            target = Spec(name=blamed, signature="", purpose="", equation=str(record["functions"][blamed].get("equation")))
+        entry = record["functions"][target.name]
+        entry.update(status=FAILED, error=traceback_end(problem, 800))
+        if blamed and blamed != spec.name:
+            where = (f"the import of the module failed inside function {blamed}" if blamed in record["functions"]
+                     else f"the import of the module failed {place(blamed, 0)}")
+            record.update(status="fell_back", reason=f"function {spec.name} (equation {spec.equation}) could not be checked: "
+                                                     f"{where}, not in {spec.name}")
+        else:
+            record.update(status="fell_back", reason=f"function {spec.name} (equation {spec.equation}) did not pass its checks")
+        save(self.root, record)
+        self.log.warning("[implement] function %s for equation %s still fails after %d repair(s) (%s ... %s); "
+                         "the code is written whole instead", spec.name, spec.equation, self.repairs,
+                         (problem.splitlines() or [""])[0][:120], exception_line(problem, 200))
+        self._remove()
+        return Outcome("fell_back", int(record.get("calls") or 0), record["reason"], target.name)
 
     def _remove(self) -> None:
         import shutil
