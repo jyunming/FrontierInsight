@@ -5466,9 +5466,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS):
             text = path.read_text(encoding="utf-8")
             sha_before = _plan.sha256(text)
-            self._log.warning("[plan] the plan's %s was missing %s; FI asked the plan to complete it (%d of %d)", what,
+            # `what` is a part of the plan ("settings the experiment needs") or, when it begins "what", the thing the plan lacks.
+            lacking = f"the plan lacks {what}" if what.startswith("what ") else f"the plan's {what} was missing"
+            self._log.warning("[plan] %s: %s; FI asked the plan to complete it (%d of %d)", lacking,
                               "; ".join(gaps), count + 1, _SEARCH_ASKS)
-            self._progress(f"Asking the model to complete the {what} in the plan")
+            self._progress(f"Asking the model to complete {what} in the plan" if what.startswith("what ")
+                           else f"Asking the model to complete the {what} in the plan")
             ask = request(design, text)
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
@@ -5510,8 +5513,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             if inspect.isawaitable(gaps):
                 gaps = await gaps
             if not gaps:
-                self._log.info("[plan] the plan's %s is complete now (asked %d time(s))", what, count)
-                print(f"[FI] the plan's {what} is complete now; going on")
+                whole = f"the plan now has {what}" if what.startswith("what ") else f"the plan's {what} is complete now"
+                self._log.info("[plan] %s (asked %d time(s))", whole, count)
+                print(f"[FI] {whole}; going on")
                 return design, plan_sha
         return design, plan_sha
 
@@ -5712,7 +5716,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         return await self._ask_plan_to_complete(
             design, plan_sha, lacks=lacks, request=request,
             keep=lambda before, revised: self._keep_only_what_the_topic_asked(before, revised, current["gaps"]),
-            file=_TOPIC_ASKED, what="plan, for what the topic asks for", short="what the topic asks for",
+            file=_TOPIC_ASKED, what="what the topic asks for", short="what the topic asks for",
             note="what the topic asks for and the plan lacked, written by the plan's model")
 
     async def _cover_the_topic_in_the_plan(self, state: QuestState) -> None:
