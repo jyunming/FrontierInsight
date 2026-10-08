@@ -157,11 +157,15 @@ def _top_functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
     return {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
 
 
-def splice(source: str, reply: str) -> tuple[str | None, list[str], str]:
+def splice(source: str, reply: str, scope: set[str] | None = None,
+           ignored: list[str] | None = None) -> tuple[str | None, list[str], str]:
     """``(the file with the reply's functions put in, the names it replaced, why not)``. The first fenced block of the
-    reply that holds a ``def`` is read: each function it defines that the file has replaces it (the parameter names must be
-    the same, in the same order; at most :data:`MAX_FUNCTIONS`); one the file has not is added at the end; imports it
-    brings are added; anything else in the block is ignored. ``(None, [], why)`` when nothing can be used."""
+    reply that holds a ``def`` is read: each function it defines that the file has AND that is in ``scope`` (the
+    function(s) the finding is about) replaces it (the parameter names must be the same, in the same order; at most
+    :data:`MAX_FUNCTIONS`); a definition of any other function the file already has is not spliced (its name is appended to
+    ``ignored``); a function the file has not is added at the end as a helper; imports it brings are added; anything else
+    in the block is ignored. ``(None, [], why)`` when nothing can be used. With no ``scope`` every function the file has
+    may be replaced."""
     block = next((m.group(1) for m in _FENCE.finditer(reply or "") if "def " in m.group(1)), "")
     if not block and "def " in (reply or ""):
         block = reply
@@ -178,7 +182,12 @@ def splice(source: str, reply: str) -> tuple[str | None, list[str], str]:
     old_funcs, new_funcs = _top_functions(old_tree), _top_functions(new_tree)
     if not new_funcs:
         return None, [], "the reply held no function"
-    replaced = [n for n in new_funcs if n in old_funcs]
+    existing = [n for n in new_funcs if n in old_funcs]
+    replaced = [n for n in existing if scope is None or n in scope]
+    if ignored is not None:
+        ignored.extend(n for n in existing if n not in replaced)
+    if scope is not None and not replaced:
+        return None, [], f"the reply does not define the function the finding is about ({', '.join(sorted(scope))})"
     if len(replaced) > MAX_FUNCTIONS:
         return None, [], f"the reply replaces {len(replaced)} functions; change only the ones the finding is about"
     for name in replaced:
@@ -213,6 +222,44 @@ def splice(source: str, reply: str) -> tuple[str | None, list[str], str]:
 
 
 # --- one issue's scope ---------------------------------------------------------------------------------------------------
+
+
+def _def_sources(source: str) -> dict[str, str]:
+    """``{qualified name: the text of that def}`` for every function and method of ``source``, nested ones included; the text
+    of a def leaves out the defs inside it (they have their own entry), so a change to a nested function is a change to it
+    alone."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    lines = source.splitlines()
+    out: dict[str, str] = {}
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                name = f"{prefix}{child.name}"
+                first = min([child.lineno, *[d.lineno for d in child.decorator_list]])
+                inner = [(min([c.lineno, *[d.lineno for d in c.decorator_list]]), c.end_lineno or c.lineno)
+                         for c in ast.walk(child) if c is not child and isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                kept = [text for n, text in enumerate(lines[first - 1:(child.end_lineno or child.lineno)], first)
+                        if not any(a <= n <= b for a, b in inner)]
+                out[name] = "\n".join(kept)
+                walk(child, name + ".")
+            elif isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return out
+
+
+def other_functions_changed(old: str, new: str, allowed: str) -> list[str]:
+    """The functions, methods and nested functions other than ``allowed`` (a qualified name) whose own text is not byte for
+    byte what it was, or that are gone."""
+    before, after = _def_sources(old), _def_sources(new)
+    return sorted(name for name, text in before.items() if name != allowed and after.get(name) != text)
 
 
 def target_file(issue: dict[str, Any], code_dir: Path) -> str:
@@ -428,13 +475,23 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
         test=_read(env.root / test) if test else "(none)", failure=failure or "(none)", code=code_block,
         package=env.package or "(none)", how=how, problem=detail or "(none: this is the first try)")
     reply = await _ask(env, prompt, who, "repair")
+    dotted = str(issue.get("function") or "")
     if scope:
-        new, names, why = splice(old, reply)
+        skipped: list[str] = []
+        new, names, why = splice(old, reply, {scope}, skipped)
+        if skipped:
+            env.log.warning("[code_review] %s: the reply also defined %s, which the finding is not about; not used",
+                            issue.get("id"), ", ".join(f"`{n}`" for n in skipped))
     else:
         from . import code_review as _review
 
         new = _review.parse_files(reply, [rel]).get(rel)
         names, why = [rel], "" if new else "the reply held no whole file"
+        if new and "." in dotted and not dotted.startswith("<"):
+            changed = other_functions_changed(old, new, dotted)
+            if changed:
+                new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
+                                  + f", which the finding is not about (only `{dotted}` may change)")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"
     if new == old:

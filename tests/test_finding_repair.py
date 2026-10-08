@@ -357,3 +357,58 @@ def test_the_accepted_state_is_the_baseline_for_the_next_issue(tmp_path: Path) -
     assert run.go() == ["spring.py"]
     assert run.record["accepted_tests"] == [i["test"] for i in run.record["issues"].values()]
     assert cf.FIXED == "fixed" and all(i["outcome"] == "fixed" for i in run.record["issues"].values())
+
+
+def test_a_reply_may_replace_only_the_function_the_finding_is_about_and_add_helpers() -> None:
+    skipped: list[str] = []
+    reply = _block("def quality(m, w, c):\n    return m * w / (c + 1)\n\n\ndef damping(m, k, c):\n    return 0\n\n\n"
+                   "def _extra(x):\n    return x\n")
+    new, names, why = fr.splice(SOURCE, reply, {"quality"}, skipped)
+    assert why == "" and names == ["quality", "_extra"] and skipped == ["damping"]
+    assert "(c + 1)" in new and "def _extra" in new
+    assert "return c / (2.0 * math.sqrt(m * k))" in new, "the unrelated function is as it was"
+    assert "return 0" not in new
+    # A reply that does not define the function the finding is about changes nothing.
+    none, _n, why = fr.splice(SOURCE, _block("def damping(m, k, c):\n    return 0\n"), {"quality"}, [])
+    assert none is None and "does not define the function the finding is about" in why
+
+
+METHODS = '''class Spring:
+    def stiffness(self, k):
+        return k
+
+    def damping(self, c):
+        return c
+
+    def total(self, k, c):
+        def inner(x):
+            return x
+        return inner(k) + c
+'''
+
+
+def test_the_other_functions_of_a_file_are_compared_one_by_one_including_methods_and_nested_ones() -> None:
+    assert fr.other_functions_changed(METHODS, METHODS, "Spring.stiffness") == []
+    edited = METHODS.replace("return k\n", "return k * 2\n", 1)
+    assert fr.other_functions_changed(METHODS, edited, "Spring.stiffness") == []
+    assert fr.other_functions_changed(METHODS, edited, "Spring.damping") == ["Spring.stiffness"]
+    nested = METHODS.replace("            return x\n", "            return x + 1\n")
+    assert fr.other_functions_changed(METHODS, nested, "Spring.total.inner") == []
+    assert fr.other_functions_changed(METHODS, nested, "Spring.total") == ["Spring.total.inner"]
+    gone = METHODS.replace("    def damping(self, c):\n        return c\n\n", "")
+    assert fr.other_functions_changed(METHODS, gone, "Spring.stiffness") == ["Spring.damping"]
+
+
+def test_a_repair_of_a_method_that_alters_another_function_is_rejected_and_one_that_does_not_is_kept(tmp_path: Path) -> None:
+    test = "import spring\n\ndef test_s():\n    assert spring.Spring().stiffness(1) == 2, 'doubled'\n"
+    run = Run(tmp_path, [{"id": "F-1", "function": "Spring.stiffness"}], {})
+    (run.code / "spring.py").write_text(METHODS, encoding="utf-8")
+    both = "# file: spring.py\n" + METHODS.replace("return k\n", "return k * 2\n", 1).replace("return c\n", "return c + 1\n", 1)
+    only = "# file: spring.py\n" + METHODS.replace("return k\n", "return k * 2\n", 1)
+    run.replies = {"code:test": [_block(test)], "code:repair": [_block(both), _block(only)]}
+    assert run.go() == ["spring.py"]
+    issue = run.record["issues"]["F-1"]
+    assert [r["outcome"] for r in issue["repairs"]] == ["rejected", "accepted"]
+    assert "which the finding is not about (only `Spring.stiffness` may change)" in issue["repairs"][0]["why"]
+    text = (run.code / "spring.py").read_text(encoding="utf-8")
+    assert "return k * 2" in text and "return c + 1" not in text

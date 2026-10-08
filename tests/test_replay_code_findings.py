@@ -191,7 +191,7 @@ async def test_a_finding_whose_test_passes_on_the_code_is_not_demonstrated_and_n
 
 
 @pytest.mark.asyncio
-async def test_a_repair_that_breaks_an_earlier_test_is_rejected_and_the_old_code_is_kept(tmp_path: Path) -> None:
+async def test_a_reply_that_also_redefines_an_earlier_fixed_function_does_not_undo_that_fix(tmp_path: Path) -> None:
     first = _finding(_logic(SMALL, FIRST["finding"]), severity="high")
     line = next(n for n, text in enumerate((SMALL / "code" / MODEL_PY).read_text(encoding="utf-8").splitlines(), 1)
                 if SECOND["line_marker"] in text)
@@ -220,10 +220,10 @@ async def test_a_repair_that_breaks_an_earlier_test_is_rejected_and_the_old_code
     first_issue = next(i for i in record["issues"].values() if i["function"] == FIRST["function"])
     other = next(i for i in record["issues"].values() if i["function"] == SECOND["function"])
     assert first_issue["outcome"] == "fixed" and other["outcome"] == "fixed"
-    assert [r["outcome"] for r in other["repairs"]] == ["rejected", "accepted"]
-    assert "it broke checks that passed before" in other["repairs"][0]["why"] and first_issue["test"] in other["repairs"][0]["why"]
+    assert [r["outcome"] for r in other["repairs"]] == ["accepted"]
+    assert "not used" in (engine.fi_dir / "run.log").read_text(encoding="utf-8"), "the out-of-scope definition is logged"
     text = model_py.read_text(encoding="utf-8")
-    assert FIRST["fixed_marker"] in text and FIRST["broken_marker"] not in text, "the rejected try was undone, nothing broke"
+    assert FIRST["fixed_marker"] in text and FIRST["broken_marker"] not in text, "the earlier fix was not undone"
     assert SECOND["fixed_marker"] in text
     assert len(record["accepted_tests"]) == 2
 
