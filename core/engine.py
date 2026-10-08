@@ -4996,6 +4996,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         path = _plan.plan_path(self.quest_root)
         if not path.is_file():
             return None, ""
+        if _frozen.load(self.quest_root) is None:
+            self._move_misplaced_parts()  # a part written beside `protocol` is put under it before the plan is read
         try:
             text = path.read_text(encoding="utf-8")
         except OSError as e:
@@ -5134,6 +5136,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # under ``pauses.plan: ask``) instead of the audit trace.
             design = self._pop_rationale_into_claims("plan", design)
         # A draft's study_type that cannot be read, or that contradicts its own block, is put right with a note.
+        moved_parts: list[str] = []
+        if isinstance(design, dict):
+            design, moved_parts = _plan.hoist_protocol_parts(design)  # a part written beside `protocol` belongs under it
+            if moved_parts:
+                self._log.warning("[plan] the draft wrote %s beside `protocol`; FI moved %s under it",
+                                  ", ".join(f"`{m}`" for m in moved_parts), "it" if len(moved_parts) == 1 else "them")
         study_repairs = _optim.repair_study_type(design)
         normalized, why = _plan.normalize_design(design)
         repaired_notes: list[str] = list(study_repairs)
@@ -5196,6 +5204,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         audit = [str(item) if not isinstance(item, dict) else "; ".join(str(v) for v in item.values() if v)
                  for item in (objections if isinstance(objections, list) else [])]
         audit += repaired_notes
+        audit += [f"{', '.join('`' + m + '`' for m in moved_parts)} was written beside `protocol` in the draft and FI moved "
+                  "it under `protocol`, where the plan is read" for _ in [0] if moved_parts]
         audit += study_notes
         audit += self._critique_summary()
         # What the topic sets and the protocol leaves out: said in the plan, where a person reads it before compute is spent.
@@ -5367,7 +5377,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         missing = _optim.missing_parts(design) if not asked else [
             "you answered that this study should find the best design, but the design is a measurement over chosen settings"]
         if block_why:
-            missing.append(f"its optimisation block cannot be used ({block_why})")
+            entry = _plan.offending_entry(design.get("protocol"), block_why)
+            missing.append(f"its optimisation block cannot be used ({block_why})"
+                           + (f"; the entry as written: {entry}" if entry else ""))
         return True, missing, block_why
 
     def _plan_model_name(self) -> str:
@@ -5389,6 +5401,17 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             except (TypeError, ValueError):
                 return 0, 0
         return 0, 0
+
+    def _search_problem(self, sha: str, file: str | None = None) -> str:
+        """Why the plan's model's last answer was not used, as the reader that refused it said (kept in the same record;
+        empty for another plan or model, and when the last answer was used)."""
+        try:
+            record = json.loads((self.fi_dir / (file or _SEARCH_ASKED)).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if isinstance(record, dict) and record.get("sha") == sha and record.get("model") == self._plan_model_name():
+            return str(record.get("problem") or "")
+        return ""
 
     def _search_asked(self, sha: str) -> int:
         """How many times FI has asked the plan's model to write the search (see :meth:`_search_record`)."""
@@ -5432,7 +5455,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
         def lacks(now: Any) -> list[str]:
             wanted, missing, why = self._search_problems(state, now)
-            return _optim.plain_gaps(now, why) if wanted and missing else []
+            if not (wanted and missing):
+                return []
+            # The plain words for the card, and the reader's exact reason for run.log (what the ask quotes to the model).
+            return [*_optim.plain_gaps(now, why), *([f"the block cannot be read: {why}"] if why else [])]
 
         def request(now: Any, text: str) -> str:
             _wanted, missing, _why = self._search_problems(state, now)
@@ -5444,6 +5470,62 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, plan_sha, lacks=lacks, request=request, keep=self._keep_only_the_search, file=_SEARCH_ASKED,
             what="search for the best design", short="the search",
             note="the search for the best design, written by the plan's model")
+
+    def _move_misplaced_parts(self) -> list[str]:
+        """A protocol part the plan's model wrote beside ``protocol`` (at the top level of the design block, as the search
+        block was in a real plan) is moved under it in plan.md, as a version FI wrote itself, and said in run.log: the
+        readers look only under ``protocol``, so a part left there read as absent. A moved part that cannot be read is
+        treated as the plan step treats one (:func:`core.plan.repair_protocol`): the unreadable piece is left out and plan.md
+        says why, quoting the entry as written, which is what the next request to the plan's model shows. Returns the
+        names moved (empty when none, or when plan.md cannot be rewritten)."""
+        path = _plan.plan_path(self.quest_root)
+        if not path.is_file():
+            return []
+        try:
+            text = path.read_text(encoding="utf-8")
+            written = _plan.raw_design_block(text, as_written=True)
+            moved = _plan.hoist_protocol_parts(written)[1]
+            if not moved:
+                return []
+            notes: list[str] = []
+
+            def change(design: dict[str, Any]) -> dict[str, Any]:
+                protocol = design.get("protocol")
+                if not isinstance(protocol, dict):
+                    return design
+                protocol = dict(protocol)
+                if "optimisation" in moved and isinstance(protocol.get("optimisation"), dict):
+                    # The search block on its own first: a block that cannot be read is left out with the reason and the
+                    # entry as written, and the plan's own `grid` stays (it is not merged into a block that is not kept).
+                    block, block_notes = _optim.repair(protocol["optimisation"])
+                    notes.extend(block_notes)
+                    if block is None:
+                        del protocol["optimisation"]
+                    else:
+                        protocol["optimisation"] = block
+                if _plan.normalize_protocol(protocol)[0] is None:
+                    fixed, notes_made = _plan.repair_protocol(protocol)
+                    notes.extend(notes_made)
+                    protocol = fixed or {k: v for k, v in protocol.items() if k not in moved}
+                return {**design, "protocol": protocol}
+
+            edited = _plan.edit_design_block(text, change)  # reads the block with the parts under `protocol`
+            if edited is None or edited == text or _plan.parse(edited).design is None:
+                return []
+            if notes:
+                edited = _plan.add_to_section(edited, _PART_HEADING, ["", *[f"- {n}" for n in notes]])
+            edited = _plan.refresh_optimisation_section(_plan.refresh_model_section(edited))
+            path.write_text(edited, encoding="utf-8")
+            _plan.record_version(self.quest_root, edited, by="engine",
+                                 note="a part of the protocol written beside `protocol` was moved under it")
+        except OSError as e:
+            self._log.warning("[plan] couldn't move %s under `protocol` in plan.md: %r", "the misplaced protocol part", e)
+            return []
+        self._log.warning("[plan] plan.md had %s beside `protocol:`; FI moved %s under `protocol` (the readers look there)",
+                          ", ".join(f"`{m}`" for m in moved), "it" if len(moved) == 1 else "them")
+        for note in notes:
+            self._log.warning("[plan] %s", note)
+        return moved
 
     async def _ask_plan_to_complete(
         self, design: Any, plan_sha: str, *, lacks: Any, request: Any, keep: Any, file: str, what: str, short: str,
@@ -5462,6 +5544,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if not gaps or not path.is_file():
             return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
+        last_problem = self._search_problem(plan_sha, file)  # why the last answer was not used (kept on disk)
         while (count < (_SEARCH_ASKS if ask_limit is None else min(_SEARCH_ASKS, ask_limit))
                and calls + _SEARCH_CALLS_PER_ASK <= _SEARCH_CALLS):
             text = path.read_text(encoding="utf-8")
@@ -5473,14 +5556,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._progress(f"Asking the model to complete {what} in the plan" if what.startswith("what ")
                            else f"Asking the model to complete the {what} in the plan")
             ask = request(design, text)
+            if last_problem:
+                # The reader's exact reason for refusing the last answer goes back to the model, not only what is missing.
+                ask += ("\n\nYour last answer was not used. The reason, exactly:\n" + last_problem
+                        + "\nFix that, and keep everything the plan already has.")
+            extra_now = {**(extra or {}), **({"problem": last_problem} if last_problem else {})}
             # Recorded BEFORE the call, with the most chat calls one request can make reserved: a call that fails, or a quest
             # killed during it, still counts, so a broken model is never asked again and again across resumes.
-            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra):
+            if not self._record_search_asked(count + 1, calls + _SEARCH_CALLS_PER_ASK, sha_before, "asking", file, extra_now):
                 # No durable count, no request: a request that could not be counted could be asked again on every resume.
                 self._log.warning("[plan] FI could not write down that it was asking the plan's model, so it did not ask")
                 return design, plan_sha
             used_before = getattr(self, "_plan_chat_calls", 0)
             outcome = "kept"
+            last_problem = ""
             try:
                 await self._rewrite_plan(
                     ask, path, by="engine", expect=text,
@@ -5495,13 +5584,15 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[plan] the plan step's answer to complete %s was not complete: %s", short, e)
             except ValueError as e:
                 outcome = "not usable"
+                last_problem = re.sub(r";? ?plan\.md is unchanged\.?$", "", " ".join(str(e).split()))[:1500]
                 self._log.warning("[plan] the plan step's answer to complete %s could not be used: %s", short, e)
             except Exception as e:  # noqa: BLE001 -- the stop that follows says what is missing
                 outcome = "no answer"
                 self._log.warning("[plan] the plan step could not be asked to complete %s: %s", short, e)
             count += 1
             calls += max(1, getattr(self, "_plan_chat_calls", 0) - used_before)  # the calls really made
-            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file, extra)
+            self._record_search_asked(count, calls, _plan.sha256(path.read_text(encoding="utf-8")), outcome, file,
+                                      {**(extra or {}), **({"problem": last_problem} if last_problem else {})})
             if outcome in ("no complete answer", "no answer", "plan changed meanwhile"):
                 again, sha = self._design_from_plan()
                 return (again, sha) if again is not None and outcome == "plan changed meanwhile" else (design, plan_sha)
@@ -5887,16 +5978,22 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         new_protocol = new.get("protocol") if isinstance(new.get("protocol"), dict) else {}
         merged = dict(old_protocol)
         taken: list[str] = []
+        reasons: list[str] = []
         for part in parts:
             if new_protocol.get(part) is None:
                 continue
             fixed, why = _plan.normalize_protocol({**merged, part: new_protocol[part]})
             if fixed is None or part not in fixed:
                 self._log.warning("[plan] the plan's model wrote `protocol.%s` again but it still cannot be read: %s", part, why)
+                entry = _plan.offending_entry({part: new_protocol[part]}, why)
+                reasons.append(f"`protocol.{part}` as you wrote it cannot be read: {why}"
+                               + (f" The entry as you wrote it: {entry}" if entry else ""))
                 continue
             merged[part] = fixed[part]
             taken.append(part)
         if not taken:
+            if reasons:  # the reader's exact reason goes back to the model with the next request
+                raise ValueError(" ".join(reasons))
             return None
         edited = _plan.edit_design_block(before_text, lambda design: {**design, "protocol": merged})
         if edited is None or _plan.parse(edited).design is None:
@@ -6232,8 +6329,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
         protocol = new.get("protocol") if isinstance(new, dict) else None
         block = protocol.get("optimisation") if isinstance(protocol, dict) else None
-        if not isinstance(old, dict) or not isinstance(block, dict):
+        if not isinstance(old, dict):
             return None
+        if not isinstance(block, dict):
+            raise ValueError("your answer has no `protocol.optimisation` block: write it as a mapping (`objective`, "
+                             "`design_variables`, `baseline`, `evaluation_budget`) under `protocol` in the design block")
         old_protocol = old.get("protocol") if isinstance(old.get("protocol"), dict) else {}
         old_block = old_protocol.get("optimisation")
         if isinstance(old_block, dict):
@@ -6257,8 +6357,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 self._log.warning("[plan] the plan's model also changed what the plan already said about %s; FI kept the "
                                   "plan's own", ", ".join(put_back))
             block = merged
-            if _optim.normalize(block)[0] is None:
-                return None
+        fixed_block, why_block = _optim.normalize(block)
+        if fixed_block is None:
+            entry = _plan.offending_entry({"optimisation": block}, why_block)
+            raise ValueError(f"the block you wrote cannot be read: {why_block}"
+                             + (f" The entry as you wrote it: {entry}" if entry else ""))
 
         def change(design: dict[str, Any]) -> dict[str, Any]:
             kept = {k: v for k, v in (design.get("protocol") or {}).items() if k != "grid"}
@@ -6267,8 +6370,11 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return out
 
         merged_text = _plan.edit_design_block(before_text, change)
-        if merged_text is None or _plan.parse(merged_text).design is None:
+        if merged_text is None:
             return None
+        parsed = _plan.parse(merged_text)
+        if parsed.design is None:
+            raise ValueError(f"the plan with your block in it cannot be read: {parsed.error}")
         return _plan.refresh_optimisation_section(_plan.refresh_model_section(merged_text))
 
     def _drafted_search_record(self) -> tuple[int, str, int]:
@@ -6386,17 +6492,49 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 break
         return design
 
+    def _search_cannot_start_stop(self, state: QuestState, design: Any) -> QuestState | None:
+        """The honest stop (no paper) for a design that is a search for the best design whose search FI could not make:
+        the plan's model was asked, within its bound, to write the part that is missing or cannot be read, quoting the
+        reader's exact reason each time, and the search is still not there. Nothing is run and nobody is asked to pick
+        another model or to write any of it. ``None`` when the design is not a search, the search can start, or the quest
+        runs no experiment of its own. A search is never run as a plain sweep instead."""
+        if not self._runs_code(state):
+            return None
+        wanted, missing, block_why = self._search_problems(state, design)
+        if not (wanted and missing):
+            return None
+        path = _plan.plan_path(self.quest_root)
+        tried_plan = self._search_asked(_plan.sha256(path.read_text(encoding="utf-8"))) if path.is_file() else 0
+        drafted = self._drafted_search_record()[0]
+        asked = tried_plan or drafted
+        said = "; ".join(_one_line(m, 500) for m in missing[:3])
+        lacks = "; ".join(_optim.plain_gaps(design, block_why)) or "a search description FI can read"
+        text = (f"the plan is a search for the best design, but FI could not make a search of it: it still lacks {lacks}"
+                + (f" ({_one_line(block_why, 300)})" if block_why else ""))
+        tried = [
+            (f"asked the {'plan' if tried_plan else 'design step'}'s model {asked} time(s) to write the search, each time "
+             "quoting what could not be read and why") if asked else
+            "had no model to ask for the search (or the plan was already settled)",
+            *[_one_line(m, 400) for m in missing[:3]],
+            "did not run the plan as a plain sweep: that would answer a different question",
+        ]
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping, nothing "
+                          "was run", said)
+        print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but FI could not make the search "
+              f"({_one_line(missing[0], 200)}); nothing was run (see needs/STUCK.json)")
+        return self._stop_before_run(text, "no_search", tried=tried)
+
     def _stop_if_the_search_cannot_start(self, state: QuestState, design: Any) -> None:
-        """Stop before anything runs when the design is a search for the best design that FI cannot start: the plan lacks
-        what a search needs (the ``optimisation`` block, its budget), the simulation is not a script of its own
-        (``execution.split_analysis: false``), or the trials go to a cluster (``execution.background_jobs``: the search
-        runs here, one design after another). Such a plan is never run as a plain sweep instead. Every resume checks
-        again (no once-only marker). A no-op for a measurement, for a search that can start (the engine runs it:
-        :mod:`core.optimise`), and for a quest that runs no experiment of its own. What the plan lacks has first been
-        asked of the plan's model (:meth:`_ask_plan_for_the_search`), so the stop never asks a person to write it."""
+        """Pause for a person only when the quest's setup stops a search for the best design: the simulation is not a
+        script of its own (``execution.split_analysis: false``), or the trials go to a cluster (``execution.background_jobs``:
+        the search runs here, one design after another). A plan whose search block is missing or cannot be read is not a
+        setup problem: it was asked of the plan's model (:meth:`_ask_plan_for_the_search`) and, if it is still not there,
+        ends in the honest stop (:meth:`_search_cannot_start_stop`, reached when the code would be written and again when it
+        would run). A no-op for a measurement, for a search that can start (:mod:`core.optimise`), and for a quest that
+        runs no experiment of its own."""
         if not self._runs_code(state):
             return
-        wanted, missing, block_why = self._search_problems(state, design)
+        wanted, _missing, _block_why = self._search_problems(state, design)
         if not wanted:
             return
         path = _plan.plan_path(self.quest_root)
@@ -6413,52 +6551,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         if self.config.execution.background_jobs:
             setup.append("the search runs here, one design after another, not as a job array on a cluster "
                          "(`execution.background_jobs` is on): turn it off in the quest's config and resume")
-        if not missing and not setup:
+        if not setup:
             return
-        gaps = _optim.plain_gaps(design, block_why) if missing else []
         steps = [
             f"Nothing was run. This quest is a search for the best design{goal}, and the search cannot start yet. "
             "Running the plan as a plain sweep over fixed settings would answer a different question, so the quest "
             "stops here.",
+            *[f"In the quest's setup: {s}." for s in setup],
         ]
-        recommended = "Complete the quest's setup as the steps below say, then resume."
-        alternatives = ["Ask for a change in words: `--revise-plan \"<what to change>\"`."]
-        if missing:
-            tried = self._search_asked(_plan.sha256(path.read_text(encoding="utf-8"))) if path.is_file() else 0
-            drafted = self._drafted_search_record()[0]
-            steps.append(f"Still missing from the plan: {'; '.join(gaps)}.")
-            steps.append(
-                (f"FI asked the plan's model {tried} time(s) to write it from your topic, and it still could not."
-                 if tried else
-                 f"FI asked the design step's model {drafted} time(s) to write it for the redesign, and it still could not."
-                 if drafted else "FI did not ask the plan's model to write it (no model was available to ask, or the plan "
-                 "was already settled).")
-                if path.is_file() else
-                "This quest has no plan file (its plan could not be written), so FI had nothing to ask the model to complete.")
-            can_measure = path.is_file() and self._measure_instead_possible(path.read_text(encoding="utf-8"))
-            steps.append("You do not need to write any of it yourself. " + ("Choose one:" if can_measure else "What to do:"))
-            model = ("Try another model for the plan step: give `provider.node_models.plan_revise` (or `provider.model`) "
-                     f"another model in the quest's config.yaml, then `python launch.py --update {self.quest_id}`. FI "
-                     "asks that model to write the search.")
-            measure = ("Measure over the settings the plan already lists instead of searching (this answers a different "
-                       f"question than the best design): `--resume {self.quest_id} --revise-plan "
-                       f"\"{_optim.MEASURE_INSTEAD}\"` (the quest page's Plan box on the web, `@fi /plan` in VS Code).")
-            steps += [f"1. {model}"] + ([f"2. {measure}"] if can_measure else [])
-            recommended = "Try another model for the plan step."
-            alternatives = [measure] if can_measure else []
-        steps += [f"In the quest's setup: {s}." for s in setup]
-        reason = gaps[0] if missing else setup[0].split(" (`")[0]
-        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping",
-                          "; ".join(missing) if missing else setup[0].split(" (`")[0])
+        reason = setup[0].split(" (`")[0]
+        self._log.warning("[design] the design is a search for the best design that cannot start (%s); stopping", reason)
         print(f"[FI] quest {self.quest_id}: the plan is a search for the best design, but the search cannot start "
-              f"({'the plan does not say ' + reason if missing else reason}); nothing was run (see NEXT_STEP.md)")
+              f"({reason}); nothing was run (see NEXT_STEP.md)")
         self._pause_for_human(
             kind="plan",
             interaction="supply",
             headline="the search for the best design cannot start",
             steps=steps,
-            recommended=recommended,
-            alternatives=alternatives,
+            recommended="Complete the quest's setup as the steps below say, then resume.",
+            alternatives=["Ask for a change in words: `--revise-plan \"<what to change>\"`."],
             payload={"quest_id": self.quest_id, "plan_file": str(path), "best_design_stage": True},
         )
 
@@ -7168,6 +7279,10 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design, plan_sha = await self._ask_plan_for_the_parts(state, design, plan_sha)
         else:
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
+            design, moved_parts = _plan.hoist_protocol_parts(design)
+            if moved_parts:
+                self._log.warning("[design] the redesign wrote %s beside `protocol`; FI moved %s under it",
+                                  ", ".join(f"`{m}`" for m in moved_parts), "it" if len(moved_parts) == 1 else "them")
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
             design = self._inherit_plan_parts(state, design, iteration=iteration)
@@ -8935,6 +9050,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
 
     async def _node_implement(self, state: QuestState) -> QuestState:
         self._forget_cannot_repair()  # the code is written again: an earlier problem does not stop the new code
+        if (search_stop := self._search_cannot_start_stop(state, state.get("design"))) is not None:
+            return search_stop  # no code is written for a search FI could not make (the run step stops the same way)
         await self._shadow("implement", state, taken="implemented the design")
         kept = self._adopt_scripts_fixed_by_hand(state)
         if kept is not None:
@@ -14245,6 +14362,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             design_now = {**(design_now if isinstance(design_now, dict) else {}),
                           "protocol": {**((design_now or {}).get("protocol") or {}), "optimisation": frozen_block}}
         self._stop_if_the_search_cannot_start(state, design_now)
+        if (search_stop := self._search_cannot_start_stop(state, design_now)) is not None:
+            return search_stop
         if _phased.enabled(self.config):
             # Explore, then confirm: before any code reads the data for the first time, which rows are held back is
             # decided (or, in a research quest that cannot tell which rows belong together, the person is asked).
@@ -17000,6 +17119,12 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             tried = ["timed a few real trials of the experiment and added them up",
                      said or "the total is more than the time allowed"]
             ended = "the experiment would still take longer than the time allowed"
+        if reason == "no_search":
+            # The plan is a search for the best design and the plan's model could not write a search FI can run.
+            said = str((state.get("exec_result") or {}).get("no_search") or "").strip().rstrip(".")
+            problem = f"{_one_line(said, 500)}, so nothing was run for the study"
+            tried = [str(t) for t in (state.get("exec_result") or {}).get("no_search_tried") or []] or [said]
+            ended = "the plan's model could not write a search FI can run"
         if reason == "cannot_repair":
             said = str((state.get("exec_result") or {}).get("cannot_repair") or "").strip().rstrip(".")
             problem = f"{_one_line(said, 400)}, and FI's repairs did not remove it, so there is nothing it can vouch for"
@@ -17054,6 +17179,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                or reason == "flat" or headline_missing else
                "or allow more time (`execution.timeout_s`), or a smaller study in the plan." if reason == "too_long" else
                "or try another model for the code (`provider.node_models.implement`)." if reason == "cannot_repair" else
+               "or ask for a change in words (`--revise-plan \"<what to change>\"`)." if reason == "no_search" else
                "or try another model for the design (`provider.node_models.design`)." if reason == "not_run" else
                "or ask for the paper again with another model for `write` (`provider.node_models.write`)." if claims else
                "or ask for the analysis again with another model for `analyze` (`provider.node_models.analyze`).")))
@@ -23139,7 +23265,7 @@ _FILL_MARKER = "plan_sources_asked.json"
 # The kinds of stop before the study (``Engine._stop_before_run``): the key in ``exec_result`` that holds the plain text.
 # ``cannot_repair``: FI's repairs of the code ended and the problem stands (the run record differs from the protocol, the
 # numerics still warn, the code still lacks what the plan requires ...): the quest ends without a paper, nobody debugs.
-_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair")
+_STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair", "no_search")
 _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 #: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by

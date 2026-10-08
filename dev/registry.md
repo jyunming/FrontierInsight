@@ -197,14 +197,12 @@ same PR that adds, splits or renames one.
   (`plan_lines`), the topic's numbers in the block (`numbers`, read by `protocol_check.plan_notes`), and the one
   clarify question for an ambiguous topic (`classify_topic`, `add_study_type_question`, `resolve_answer`; added in
   `Engine._node_clarify_questions`, the plan prompt's `_STUDY_TYPE_DIRECTIVE` and `Engine._settle_study_type`).
-  `Engine._stop_if_the_search_cannot_start` (in `_node_design`) stops a search that cannot start (no block or budget,
-  `split_analysis: false`, `background_jobs`) before anything is implemented or run. Before it stops for a missing or
+  `Engine._search_cannot_start_stop` (called at the start of `_node_implement` and of `_node_execute`) ends a search whose block or budget is missing or unreadable, after the bounded asks, in the honest stop (`exec_result.no_search`, `stuck_reason: no_search`, `needs/STUCK.json`, no paper; nobody is asked to pick another model). `Engine._stop_if_the_search_cannot_start` (in `_node_design`) pauses only for the quest's setup (`split_analysis: false`, `background_jobs`), before anything is implemented or run. Before it stops for a missing or
   unreadable block, `Engine._ask_plan_for_the_search` (called at the plan step, before the person reads the plan, and again
   in `_node_design`) asks the plan's model to write the block (`optimisation_plan.ask_request`; at most twice and six chat calls per plan and
   per model, recorded in `.fi/search_block_asked.json`; only `study_type` and `protocol.optimisation` are kept from the
   rewrite, `Engine._keep_only_the_search`, which also keeps every part of the plan's own block that was readable; a plan saved meanwhile is not overwritten, `_PlanEditedMeanwhile`; "measure instead" is checked by `Engine._check_measure_instead`; `plan.refresh_optimisation_section` shows the section again). The stop speaks in
-  plain words (`optimisation_plan.plain_gaps`) and offers another model for the plan step or
-  `optimisation_plan.MEASURE_INSTEAD` as a `--revise-plan` request; it never asks a person to write the block.
+  plain words (`optimisation_plan.plain_gaps`) plus the reader's exact reason; `optimisation_plan.MEASURE_INSTEAD` remains a `--revise-plan` request a person may make. Every ask quotes the exact reason: `plan.offending_entry` (the entry a reason names, as written), `Engine._search_problems`, and the reason a rewrite was refused (`Engine._ask_plan_to_complete` keeps it in the record as `problem` and puts it in the next ask; `_keep_only_the_search` / `_keep_only_the_parts` raise it). `plan.hoist_protocol_parts` / `plan.raw_design_block` / `Engine._move_misplaced_parts` move a protocol part written beside `protocol:` under it (`plan.PROTOCOL_PARTS`). `optimisation_plan.read_kind` reads a `kind` sentence that names exactly one allowed word, and refuses one that says the variable is an array (`optimisation_plan.SCALAR_NOTE` is what the ask tells the model: the search takes scalar variables).
   `Engine._ask_plan_to_complete` is the bounded request itself (counted in the record BEFORE each call; the search block
   and the protocol parts share it). A protocol part that changes what is measured and could not be read (`plan.ASKED_PARTS`:
   grid, metrics, runs_per_setting, precision; FI's own note in plan.md names it, `plan.ASK_MARK`) is asked the same way by

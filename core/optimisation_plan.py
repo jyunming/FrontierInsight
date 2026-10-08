@@ -130,6 +130,38 @@ def kind_of(variable: dict[str, Any]) -> str:
     return "choice" if isinstance(variable.get("values"), list) else "continuous"
 
 
+#: A kind written as a sentence that says the variable is a set of values, not one number.
+_ARRAY_WORDS = re.compile(
+    r"\b(?:array|vector|matrix|tensor|pixels?|pixelated)\b|\b\d+\s*[x×]\s*\d+\b|\b(?:list|set|sequence|collection) of\b"
+    r"|\bper[- ](?:pixel|element|cell|entry|sample)\b", re.IGNORECASE)
+
+#: What to tell the plan's model when the search is asked to change a set of values: the search takes one number each.
+SCALAR_NOTE = ("The search changes ONE number per design variable (`continuous` or `integer`), or picks one of a list of "
+               "`values` (`choice`). It cannot change an array, vector or image of values. When the design is such a "
+               "set, describe it with a few scalar design variables (the few numbers that shape it, each with its own "
+               "`low` and `high`) and let the simulation build the full set from them.")
+
+
+def read_kind(value: Any) -> tuple[str | None, str | None]:
+    """``(kind, None)`` when ``value`` is one of :data:`KINDS` or a sentence that names exactly one of them and says
+    nothing of a set of values; else ``(None, why)`` with the exact reason, which is what the plan's model is shown."""
+    text = " ".join(str(value).split())
+    shown = text if len(text) <= 160 else text[:160] + " ..."
+    if text.lower() in KINDS:
+        return text.lower(), None
+    named = [k for k in KINDS if re.search(rf"\b{k}\b", text, re.IGNORECASE)]
+    if _ARRAY_WORDS.search(text):
+        return None, (f"`kind` is “{shown}”, which says the variable is an array of values; the search changes one "
+                      "number per variable, so FI does not read it as `" + (named[0] if named else "continuous")
+                      + "` (that would search a single number in place of the array). " + SCALAR_NOTE)
+    if len(named) == 1:
+        return named[0], None
+    if not named:
+        return None, f"`kind` is “{shown}”; it must be exactly `continuous`, `integer` or `choice`"
+    return None, (f"`kind` is “{shown}”, which names more than one of `continuous`, `integer`, `choice`; "
+                  "it must be exactly one of them")
+
+
 def _variable(item: Any, index: int) -> tuple[dict[str, Any] | None, str | None]:
     where = f"{_P}.design_variables` entry {index}"
     if not isinstance(item, dict):
@@ -141,9 +173,13 @@ def _variable(item: Any, index: int) -> tuple[dict[str, Any] | None, str | None]
     out["name"] = name
     where = f"{_P}.design_variables` `{name}`"
     if out.get("kind") is not None:
-        kind = str(out["kind"]).strip().lower()
-        if kind not in KINDS:
-            return None, f"{where}: `kind` must be `continuous`, `integer` or `choice`"
+        kind, kind_why = read_kind(out["kind"])
+        if kind is None:
+            return None, f"{where}: {kind_why}"
+        if kind != str(out["kind"]).strip().lower():
+            # A sentence that names one kind and says nothing of a set of values: the word is the kind, and the sentence stays.
+            said = " ".join(str(out["kind"]).split())
+            out["meaning"] = f"{out['meaning']} ({said})" if out.get("meaning") else said
         out["kind"] = kind
     kind = kind_of(out)
     for key in ("unit", "meaning"):
@@ -432,7 +468,11 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
         why = why or ""
         part = re.match(r"`protocol\.optimisation\.?(\w*)", why)
         key = part.group(1) if part else ""
-        cannot = f"the optimisation block was left out because it cannot drive a search ({why})"
+        from . import plan as _plan_module
+
+        written = _plan_module.offending_entry({"optimisation": out}, why)
+        shown = f"; the entry as written: {written}" if written else ""
+        cannot = f"the optimisation block was left out because it cannot drive a search ({why}{shown})"
         if key in ("", "objective"):
             return None, notes + [cannot]
         if key == "design_variables":
@@ -464,7 +504,7 @@ def repair(block: Any) -> tuple[dict[str, Any] | None, list[str]]:
                 if out["grid"] is None:
                     del out["grid"]
             notes.append(f"a design variable ({name or f'entry {drop + 1}'}) was left out of the optimisation because it "
-                         f"could not be read ({why}); put it right in the plan if the search should change it")
+                         f"could not be read ({why}{shown}); put it right in the plan if the search should change it")
             continue
         if key == "fixed" and isinstance(out.get("fixed"), dict) and "also a design variable" in why:
             clash = [k for k in out["fixed"] if _text(k) in {_text(v.get("name")) for v in out.get("design_variables") or []
@@ -681,13 +721,17 @@ def ask_request(topic: str, problems: list[str], left_out: list[str] | None = No
         "`direction` (`minimise` or `maximise`), and optionally `unit` and `meaning`. A second goal becomes a limit "
         "under `constraints`.\n"
         "- `design_variables`: what the search may change: a list, each with `name`, `low` and `high` (the range it may "
-        "use), optionally `unit` and `kind` (`continuous`, `integer`, or `choice` with `values`).\n"
+        "use), optionally `unit` and `kind` (exactly one word: `continuous`, `integer`, or `choice` with `values`).\n"
         "- `baseline`: the design to beat: `values` (one value for each design variable, inside its range) and `source` "
         "(where it comes from: the topic, or a source in the plan's list).\n"
         "- `evaluation_budget`: how many designs the search may try: `starts` (starting points) and `per_start` "
         "(evaluations from each), whole numbers.")
-    parts.append("Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion. A plain `grid` "
-                 "beside the block may be removed.")
+    if not any(SCALAR_NOTE in p for p in problems):
+        parts.append(SCALAR_NOTE)
+    parts.append("Write the block under `protocol` (as `protocol.optimisation`), not at the top level of the design block. "
+                 "If the plan has a plain `protocol.grid`, remove it: a plan cannot hold both a sweep and a search (the "
+                 "search's own coarse scan is `protocol.optimisation.grid`). "
+                 "Change nothing else in the plan: not a check, a threshold, a tolerance or a criterion.")
     return "\n\n".join(parts)
 
 
