@@ -13,3 +13,4 @@ FI's code, and nothing under `core/` or `agents/` may take a word from it.
 | `undefined_trials/` | a metric had fewer per-trial values than the manifest's successful trials | `tests/test_replay_undefined_trials.py` |
 | `run_count_lost/` | a redesign wrote no run count, so one trial per setting ran where the plan said 2500, the analysis script hard-coded 1000, and a paper with no results was delivered | `tests/test_replay_run_count_lost.py` |
 | `quantity_other_than_planned/` | the code computed a quantity as something other than the plan defined (a second model said so and the repairs did not change it) and the paper reported it under the plan's name | `tests/test_replay_quantity_other_than_planned.py` |
+| `expected_moved/` | a rewrite of the plan about one check moved another check's expected value away from the plan's own formula, and the right result was reported as failing it | `tests/test_replay_expected_moved.py` |

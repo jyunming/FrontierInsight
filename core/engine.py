@@ -13193,6 +13193,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except (FileNotFoundError, ValueError) as e:
             self._log.warning("[oracle] the plan could not be rewritten with an oracle: %s", e)
             return False
+        self._put_back_moved_expected(before)
         # An oracle this rewrite added, or whose numbers it changed, is the engine's, not what a person read at the plan
         # stop: it is recorded, so the freeze never says a person approved it unless they were shown it.
         after = self._planned_oracles()
@@ -13401,7 +13402,55 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return "the plan's rewrite of the checks could not be read"
         path.write_text(kept, encoding="utf-8")
         _plan.record_version(self.quest_root, kept, by="engine", note="the plan's changes to its checks")
+        self._put_back_moved_expected(old_checks)
         return ""
+
+    def _put_back_moved_expected(self, before: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        """After the plan was rewritten for its checks: a check whose expected value the rewrite moved away from its own
+        formula, when the earlier number agreed with that formula, gets the earlier number back (:func:`core.oracle_forms.moved_expected`;
+        pure computation, no model, no measured value). Only before the protocol is frozen. Said in ``run.log`` and in plan.md,
+        and recorded as the engine's change."""
+        if _frozen.load(self.quest_root) is not None:
+            return []
+        try:
+            path = _plan.plan_path(self.quest_root)
+            text = path.read_text(encoding="utf-8")
+            design, _why = _plan.load_design(self.quest_root)
+            protocol = design.get("protocol") if isinstance(design, dict) else None
+            if not isinstance(protocol, dict):
+                return []
+            moved = _forms.moved_expected(list(before.values()), _oracle.declared(protocol),
+                                          _forms.fixed_settings_of_design(design))
+            if not moved:
+                return []
+            wanted = {m["name"]: m["now"] for m in moved}
+
+            def change(block: dict[str, Any]) -> dict[str, Any] | None:
+                prot = block.get("protocol")
+                if not isinstance(prot, dict) or not isinstance(prot.get("oracles"), list):
+                    return None
+                items = [{**o, "expected": wanted[str(o.get("name") or "").strip()]}
+                         if isinstance(o, dict) and str(o.get("name") or "").strip() in wanted else o for o in prot["oracles"]]
+                return {**block, "protocol": {**prot, "oracles": items}}
+
+            edited = _plan.edit_design_block(text, change)
+            if edited is None or _plan.parse(edited).design is None:
+                return []
+            new_text = _plan.refresh_model_section(edited)
+            path.write_text(new_text, encoding="utf-8")
+            _plan.record_version(self.quest_root, new_text, by="engine",
+                                 note="expected values the rewrite moved away from their own formula, put back")
+            lines = [f"the rewrite of the plan moved the expected value of {m['name']!r} from {m['now']:.10g} to {m['was']:.10g}, "
+                     f"but its own formula `{m['formula']}` computes {m['value']:.10g}; the check keeps {m['now']:.10g}, "
+                     "which agrees with the formula" for m in moved]
+            for line in lines:
+                self._log.warning("[oracle] %s", line)
+            self._write_plan_section(path, ["", *[f"- {line[0].upper()}{line[1:]}." for line in lines]],
+                                     note="expected values put back after a rewrite of the plan")
+            return moved
+        except Exception as exc:  # noqa: BLE001 -- a convenience guard, never a reason to stop
+            self._log.warning("[oracle] could not compare the rewritten checks with their own formulas (%r)", exc)
+            return []
 
     async def _hidden_check(self, state: QuestState, python: Path | str, env: dict[str, str] | None) -> None:
         """Under ``rigor_profile: research``, after a run: FI's own check at a setting the code never saw

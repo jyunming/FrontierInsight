@@ -59,7 +59,7 @@ def _variadic(fn: Callable[..., float]) -> Callable[..., float]:
 #: The functions a formula may call, and nothing else.
 FUNCTIONS: dict[str, Callable[..., float]] = {
     "abs": abs, "min": _variadic(min), "max": _variadic(max), "sum": _variadic(math.fsum),
-    "sqrt": math.sqrt, "exp": math.exp, "log": math.log, "log10": math.log10, "log2": math.log2,
+    "sqrt": math.sqrt, "exp": math.exp, "log": math.log, "ln": math.log, "log10": math.log10, "log2": math.log2,
     "sin": math.sin, "cos": math.cos, "tan": math.tan, "asin": math.asin, "acos": math.acos, "atan": math.atan,
     "atan2": math.atan2, "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh, "hypot": math.hypot,
     "floor": math.floor, "ceil": math.ceil,
@@ -648,6 +648,56 @@ def formula_findings(protocol: dict[str, Any] | None, fixed: dict[str, float] | 
         else:
             found.append({"name": name, "state": "agrees", "value": value, "expected": expected})
     return found
+
+
+def moved_expected(before: list[dict[str, Any]], after: list[dict[str, Any]],
+                   fixed: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    """The checks whose ``expected`` a rewrite of the plan moved away from what the check's own ``expected_formula`` computes,
+    when the number it had before agreed with that formula: ``{"name", "was" (the rewrite's number), "now" (the earlier
+    one), "formula", "value" (what the formula computes)}``.
+
+    A plan asked to change one check is rewritten whole, and its model can change another check's number on the way (a real
+    plan went from 2.97934584 to 2.9803286656 for a check nobody asked about, the formula unchanged). The earlier number
+    agreed with the plan's own formula, so it comes back. Only a check whose formula, case and measure are the same before and
+    after is looked at (a changed definition is a change of the check, not a slip), and only where FI's own computation of the
+    formula was usable both times; no measured value is read. Nothing here changes a tolerance."""
+    def key(o: Any) -> str:
+        return str(o.get("name") or "").strip() if isinstance(o, dict) else ""
+
+    def read(o: Any) -> Any:
+        # A rewrite by a model is raw text: `tolerance: 1e-06` is a string to YAML (a float is `1.0e-06`).
+        if not isinstance(o, dict):
+            return o
+        out_o = dict(o)
+        for k in ("expected", "tolerance"):
+            if isinstance(out_o.get(k), str):
+                try:
+                    out_o[k] = float(out_o[k])
+                except ValueError:
+                    pass
+        return out_o
+
+    earlier = {key(o): read(o) for o in before if key(o)}
+    out: list[dict[str, Any]] = []
+    for o in (read(x) for x in after):
+        b = earlier.get(key(o))
+        if b is None or not isinstance(o, dict):
+            continue
+        if any(b.get(k) != o.get(k) for k in ("expected_formula", "case", "measure")) or not o.get("expected_formula"):
+            continue
+        exp_b, lim_b, _mode_b = _oracle.limit_of(b)
+        exp_a, lim_a, _mode_a = _oracle.limit_of(o)
+        if exp_b is None or exp_a is None or lim_a is None or lim_b is None or exp_a == exp_b:
+            continue
+        value_b, _why_b = formula_value(b, fixed)
+        value_a, _why_a = formula_value(o, fixed)
+        if value_b is None or value_a is None:
+            continue
+        agreed = abs(value_b - exp_b) <= lim_b or math.isclose(value_b, exp_b, rel_tol=1e-12, abs_tol=0.0)
+        agrees = abs(value_a - exp_a) <= lim_a or math.isclose(value_a, exp_a, rel_tol=1e-12, abs_tol=0.0)
+        if agreed and not agrees:
+            out.append({"name": key(o), "was": exp_a, "now": exp_b, "formula": str(o["expected_formula"]), "value": value_a})
+    return out
 
 
 def _digits(value: float) -> str:

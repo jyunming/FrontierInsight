@@ -1,0 +1,79 @@
+oracles:
+- name: concentration_closed_form
+  kind: special_case
+  check: c_val
+  expected: 0.36787944117144233
+  expected_formula: exp(-1)
+  tolerance: 1.0e-06
+  tolerance_mode: absolute
+  reference: 'derivation: c=c0*exp(-k*t) with c0=1, k=1, t=1'
+  case:
+    c0: 1
+    k: 1
+    t: 1
+  measure: c_val
+- name: concentration_nonunit_initial
+  kind: special_case
+  check: c_val
+  expected: 0.7357588823428847
+  expected_formula: c0 * exp(-k * t)
+  tolerance: 1e-06
+  tolerance_mode: relative
+  reference: 'derivation: substitute c0=2, k=2, and t=0.5 into c=c0*exp(-k*t) => c
+    = 2 * exp(-2 * 0.5)'
+  case:
+    c0: 2
+    k: 2
+    t: 0.5
+  measure: c_val
+- name: arrhenius_closed_form
+  kind: special_case
+  check: k_val
+  expected: 19.7
+  expected_formula: 1e10 * exp(-50000 / (8.314 * 300))
+  tolerance: 0.005
+  tolerance_mode: relative
+  reference: 'derivation: k=A*exp(-Ea/(R*T)); expected rounded to three significant
+    figures'
+  case:
+    A: 10000000000.0
+    Ea: 50000
+    R: 8.314
+    T: 300
+  measure: k_val
+- name: arrhenius_log_relation
+  kind: special_case
+  check: ln_k_val
+  expected: 2.97934584
+  expected_formula: log(A) - (Ea / (R * T))
+  tolerance: 1e-06
+  tolerance_mode: relative
+  reference: E3
+  case:
+    A: 10000000000.0
+    Ea: 50000
+    R: 8.314
+    T: 300
+  measure: ln_k_val
+- name: noise_free_ea_recovery
+  kind: special_case
+  check: Ea_fit
+  expected: 50000
+  expected_formula: Ea_true
+  tolerance: 0.1
+  tolerance_mode: absolute
+  reference: 'derivation: slope = -Ea/R => Ea = -R * slope'
+  case:
+    c0: 1
+    A: 10000000000.0
+    Ea: 50000
+    R: 8.314
+    T_low: 300
+    T_high_formula: 1/(1/300-8.314*ln(10)/50000)
+    num_temperatures: 5
+    num_time_points: 10
+    sampling_horizon_factor: 3
+    noise_ratio: 0
+    Ea_true: 50000
+    use_equal_weights: true
+  measure: Ea_fit
