@@ -106,6 +106,8 @@ from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
 from .run_checks import RunChecksMixin
+from .result_checks import ResultChecksMixin
+from .static_checks import StaticChecksMixin
 from . import record_claims as _record_claims
 from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
@@ -656,7 +658,7 @@ from core.config import ProviderName as _ProviderName  # noqa: E402
 #: which reports the vendor that answered (copilot, customendpoint, ollama-models).
 _FI_PROVIDER_NAMES = frozenset(get_args(_ProviderName)) - {"vscode_extension"}
 
-class Engine(RunChecksMixin):
+class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
     """Owns one quest's research graph, executor, knowledge layer, and LLM client."""
 
     def __init__(
@@ -10384,7 +10386,8 @@ class Engine(RunChecksMixin):
             return None
         protocol = self._protocol_block(state)
         design = state.get("design") if isinstance(state.get("design"), dict) else {}
-        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None)
+        reqs = _code_review.requirements(design, protocol if isinstance(protocol, dict) else None,
+                                        marks=_code_review.constant_marks(code))
         if not reqs:
             return None
         review_node = self._review_node("code_review")
@@ -11108,6 +11111,7 @@ class Engine(RunChecksMixin):
                 self._log.warning("[evidence] whether the checks are independent of their writer could not be checked: %r", e)
                 independence_gaps = [f"whether the checks are independent of the model that wrote them could not be "
                                      f"checked ({type(e).__name__})"]
+            independence_gaps = [*independence_gaps, *self._static_check_gaps()]  # core/static_checks.py
             record = _evidence.assess(
                 self.quest_root, dict(state), precision_missed=missed, statistics_gaps=statistics_gaps,
                 oracle_source_gaps=oracle_source_gaps, equation_label_gaps=label_gaps,
@@ -14158,6 +14162,9 @@ class Engine(RunChecksMixin):
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
         await self._results_from_computation(state)
+        # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
+        if (static_stop := await self._static_gate(state)) is not None:
+            return static_stop
         # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
         # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
         stop = self._cannot_repair_stop() or self._code_problems_stop(state)
@@ -14172,6 +14179,8 @@ class Engine(RunChecksMixin):
         # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
         # text is never read twice), before the oracle gate tests it.
         await self._results_from_computation(state)
+        if (static_stop := await self._static_gate(state)) is not None:
+            return static_stop
         before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
         package_before_gate = self._package_snapshot()
         oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
@@ -14432,6 +14441,9 @@ class Engine(RunChecksMixin):
             # The rejected run's figures go, as when it is sent back: a stopped quest shows none of its output.
             self._clear_stale_figures()
             return self._manifest_stop(manifest_found, manifest_attempts_next or manifest_attempts)
+        # What the run reports is compared with what ran; a fault is sent back like a failed run, and what stays is left out
+        # (core/result_checks.py).
+        result, failed_script = await self._results_match_run(state, result, failed_script, split)
         figures = sorted(
             p.name for p in (self.quest_root / "figures").iterdir()
             if p.is_file() and p.suffix.lower() in _FIGURE_SUFFIXES

@@ -208,7 +208,7 @@ class RunChecksMixin:
 
     def _left_out_quantities(self) -> set[str]:
         """The quantities this pass's analysis and results must not use (still typed into the code after the repairs)."""
-        return set(getattr(self, "_typed_result_keys", None) or ())
+        return set(getattr(self, "_typed_result_keys", None) or ()) | self._result_check_keys()  # type: ignore[attr-defined]
 
     def _without_typed_results(self, result_json: Any) -> Any:
         """``result_json`` without the left-out quantities."""
@@ -227,6 +227,10 @@ class RunChecksMixin:
             names = ", ".join(f"`{k}`" for k in record.get("removed_quantities") or [])
             parts.append(f"{note} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
                          "limitations, that this quantity was not computed by the simulation and is left out.")
+        if checked := self._result_checks_note():  # type: ignore[attr-defined]  # core/result_checks.py
+            parts.append(checked)
+        if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
+            parts.append(static)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
