@@ -226,6 +226,8 @@ class RunChecksMixin:
             names = ", ".join(f"`{k}`" for k in record.get("removed_quantities") or [])
             parts.append(f"{note} Do not report, describe or quote any value for {names or 'them'}: say plainly, in the "
                          "limitations, that this quantity was not computed by the simulation and is left out.")
+        if static := self._static_checks_note():  # type: ignore[attr-defined]  # core/static_checks.py
+            parts.append(static)
         sized = _read_json(self.quest_root / _estimate.RECORD)  # type: ignore[attr-defined]
         reduced = sized.get("reduced")
         if isinstance(reduced, dict) and reduced.get("note"):
