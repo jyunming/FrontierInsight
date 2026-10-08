@@ -270,6 +270,10 @@ def _controls_trial_records(tree: ast.Module, name: str) -> bool:
     for n in ast.walk(tree):
         if isinstance(n, (ast.For, ast.AsyncFor)) and _mentions(n.iter, name) and any(_calls_runner(b) for b in n.body):
             return True
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)) and any(
+                _mentions(g.iter, name) for g in n.generators) and _calls_runner(
+                    n.elt if not isinstance(n, ast.DictComp) else ast.Tuple(elts=[n.key, n.value], ctx=ast.Load())):
+            return True  # the same loop written as a comprehension
         if isinstance(n, ast.Compare):
             parts = [n.left, *n.comparators]
             if any(isinstance(p, ast.Name) and p.id == name for p in parts) and any(_is_length(p) for p in parts):

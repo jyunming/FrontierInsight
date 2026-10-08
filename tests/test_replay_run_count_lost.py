@@ -230,7 +230,11 @@ def test_a_count_used_only_to_resample_or_for_seeds_is_not_the_trial_count() -> 
     looped = "N_RUNS = 200\ndef go(cell):\n    return [run_trial(cell, i, i) for i in range(N_RUNS)]\n" \
              "def go2(cell):\n    out = []\n    for i in range(N_RUNS):\n        out.append(run_trial(cell, i, i))\n"
     assert len(grid_keys.problems({"experiment.py": looped, "simulate.py": sim}, protocol)) == 1
-    passed = "N_TRIALS = 200\nrunner(runs_per_setting=N_TRIALS)\n"
+    comprehension = "N_TRIALS = 200\ndef go(cell):\n    return [run_trial(cell, i, i) for i in range(N_TRIALS)]\n"
+    assert len(grid_keys.problems({"experiment.py": comprehension, "simulate.py": sim}, protocol)) == 1
+    generator = "N_TRIALS = 200\ndef go(cell):\n    return list(run_trial(cell, i, i) for i in range(N_TRIALS))\n"
+    assert len(grid_keys.problems({"experiment.py": generator, "simulate.py": sim}, protocol)) == 1
+    passed ="N_TRIALS = 200\nrunner(runs_per_setting=N_TRIALS)\n"
     assert len(grid_keys.problems({"experiment.py": passed, "simulate.py": sim}, protocol)) == 1
 
 
