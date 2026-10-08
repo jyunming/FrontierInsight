@@ -5973,9 +5973,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return design
         protocol: dict[str, Any] = dict(base)
         taken: list[str] = []
-        for part, value in planned_protocol.items():
+        # The criteria go last: one that names a check is only kept with that check.
+        for part, value in sorted(planned_protocol.items(), key=lambda kv: kv[0] == "criteria"):
             if part in _REDESIGN_OWNED_PARTS or part in protocol or value in (None, "", [], {}):
                 continue
+            if part == "oracles" and isinstance(value, list):
+                value, left_out = self._oracles_of_this_model(value, protocol, planned_protocol)
+                if left_out:
+                    self._log.warning("[design] the redesign's model changed or left out the equation(s) these checks rest on, "
+                                      "so FI did not keep them from the plan: %s", ", ".join(repr(n) for n in left_out))
+                if not value:
+                    continue
+            elif part == "criteria" and isinstance(value, list):
+                kept_names = {str(o.get("name") or "").strip().lower() for o in protocol.get("oracles") or [] if isinstance(o, dict)}
+                dropped = [c for c in value if isinstance(c, dict) and str(c.get("oracle") or "").strip()
+                           and str(c["oracle"]).strip().lower() not in kept_names]
+                if dropped:
+                    self._log.warning("[design] FI did not keep these criteria from the plan, because the check they read is not "
+                                      "in the redesign: %s", ", ".join(repr(c.get("name")) for c in dropped))
+                value = [c for c in value if c not in dropped]
+                if not value:
+                    continue
             fixed, _problem = _plan.normalize_protocol({**protocol, part: value})
             if fixed is not None and part in fixed:
                 protocol[part] = fixed[part]
@@ -5995,6 +6013,27 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[design] FI could not write down which protocol parts the redesign kept from the plan: %r", e)
         return {**design, "protocol": protocol}
+
+    @staticmethod
+    def _oracles_of_this_model(oracles: list[Any], protocol: dict[str, Any],
+                               planned_protocol: dict[str, Any]) -> tuple[list[Any], list[str]]:
+        """``(the checks, the names left out)``: a check of the plan's is kept for a redesign only when every equation it names
+        (:func:`core.oracle_check.equation_ids_in`) is in the redesign's model with the same formula as in the plan's; a check
+        that names none is kept. A check written for a model the redesign changed would be judged against another model."""
+        def formulas(p: dict[str, Any]) -> dict[str, str]:
+            return {str(e.get("id")).strip().upper(): " ".join(str(e.get("formula") or "").split())
+                    for e in _review.equations_of(p)}
+
+        have, was = formulas(protocol), formulas(planned_protocol)
+        kept: list[Any] = []
+        left_out: list[str] = []
+        for o in oracles:
+            needs = _oracle.equation_ids_in(o) if isinstance(o, dict) else set()
+            if all(i in have and have[i] == was.get(i) for i in needs):
+                kept.append(o)
+            else:
+                left_out.append(str(o.get("name") or "?"))
+        return kept, left_out
 
     def _drafted_parts_record(self) -> tuple[int, str, int]:
         """``(requests, model, iteration)`` of the last time FI asked the plan's model to write the protocol parts a

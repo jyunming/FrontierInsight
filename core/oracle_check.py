@@ -716,6 +716,22 @@ def equation_problem(eq: dict[str, Any], sources: list[dict[str, str]]) -> str |
             "from memory does not count; cite a retrieved source by its [n], or write the derivation")
 
 
+_EQUATION_FIELDS = ("reference", "derivation", "measure", "equation", "equations", "check")
+
+
+def equation_ids_in(oracle: dict[str, Any]) -> set[str]:
+    """The ids of the model's equations (``E1``, ``E2`` ...) a check names in its reference, derivation, measure or equation
+    fields, as upper-case ids. Empty when it names none: such a check does not rest on the model."""
+    found: set[str] = set()
+    for key in _EQUATION_FIELDS:
+        value = oracle.get(key)
+        values = value if isinstance(value, (list, tuple)) else [value]
+        for v in values:
+            if isinstance(v, str):
+                found.update(f"E{n}" for n in re.findall(r"(?<![\w.])E(\d+)(?!\w|\.\d)", v))
+    return found
+
+
 def reference_problem(oracle: dict[str, Any], protocol: dict[str, Any] | None,
                       sources: list[dict[str, str]]) -> str | None:
     """Why the oracle's expected value has no source a reader can check, or ``None`` when it has one."""

@@ -232,3 +232,32 @@ def test_a_count_used_only_to_resample_or_for_seeds_is_not_the_trial_count() -> 
     assert len(grid_keys.problems({"experiment.py": looped, "simulate.py": sim}, protocol)) == 1
     passed = "N_TRIALS = 200\nrunner(runs_per_setting=N_TRIALS)\n"
     assert len(grid_keys.problems({"experiment.py": passed, "simulate.py": sim}, protocol)) == 1
+
+
+def test_checks_tied_to_an_equation_the_redesign_changed_are_not_kept(tmp_path: Path) -> None:
+    engine, plan_protocol = _quest(tmp_path)
+    plan_protocol = dict(plan_protocol)
+    equations = plan_protocol["model"]["equations"]
+    oracles = [dict(o) for o in plan_protocol["oracles"]]
+    tied, free = {**oracles[0], "name": "tied_check", "reference": f"{equations[0]['id']} gives it"}, {
+        **oracles[1], "name": "free_check", "reference": "derivation: by hand, x = 2"}
+    for o in (tied, free):
+        o.pop("expected_formula", None)
+    plan_protocol["oracles"] = [tied, free]
+    plan_protocol["criteria"] = [{"name": "c_tied", "what": "w", "oracle": "tied_check", "use": "error",
+                                  "direction": "target", "target": 0, "tolerance": 0.1},
+                                 {"name": "c_free", "what": "w", "oracle": "free_check", "use": "error",
+                                  "direction": "target", "target": 0, "tolerance": 0.1}]
+    text = plan.render(engine.config.topic, {}, {**DESIGN, "protocol": plan_protocol})
+    plan.plan_path(engine.quest_root).write_text(text, encoding="utf-8")
+    changed_model = {**plan_protocol["model"], "equations": [
+        {**equations[0], "formula": equations[0]["formula"] + " + 1"}, *equations[1:]]}
+    redesign = {k: v for k, v in _load("redesign_protocol.json").items() if k != "model"}
+    design = {**DESIGN, "protocol": {**redesign, "model": changed_model}}
+    kept = engine._inherit_plan_parts({"design": design, "iteration": 1}, design, iteration=1)["protocol"]
+    assert [o["name"] for o in kept["oracles"]] == ["free_check"]
+    assert [c["name"] for c in kept["criteria"]] == ["c_free"]
+    # The same model: both checks come across.
+    same = {**DESIGN, "protocol": {**redesign, "model": plan_protocol["model"]}}
+    both = engine._inherit_plan_parts({"design": same, "iteration": 1}, same, iteration=1)["protocol"]
+    assert [o["name"] for o in both["oracles"]] == ["tied_check", "free_check"]
