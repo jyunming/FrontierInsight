@@ -16838,15 +16838,21 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         again = ", even after the design was asked for again" if redesigned else ""
         repaired = f"repaired the script {repairs} time{'s' if repairs != 1 else ''}" if repairs else ""
         after = " and ".join(x for x in (repaired, "asked for the design again" if redesigned else "") if x)
-        problem = (f"the experiment ran, but its result has no number in it{again}, so FI has nothing measured to write up"
+        # A result that holds numbers, but none of the study's quantities and says it failed (see _reports_no_quantity).
+        bare = self._reports_no_quantity(state, state.get("result_json")) if no_numbers else ""
+        problem = ((f"the experiment ran, but its result holds none of the study's quantities ({bare}){again}, so FI has "
+                    "nothing measured to write up" if bare else
+                    f"the experiment ran, but its result has no number in it{again}, so FI has nothing measured to write up")
                    if no_numbers else
                    f"the experiment could not run to the end{', even after FI ' + after if after else ''}, "
                    "so FI has nothing measured to write up" if crashed else
                    "the experiment ran, but the model's reading of its results could not be read, even when asked twice, "
                    "so FI has no findings to write up")
         redo = (["sent the quest back to the design once, so the script was written again"] if redesigned else [])
-        tried = (["ran the experiment and read the result it printed: no number in it", *redo,
-                  *(["ran it again: the result still has no number in it"] if redesigned else [])] if no_numbers else
+        tried = ([("ran the experiment and read the result it printed: it says it failed and has no number for the study's "
+                   "quantities" if bare else "ran the experiment and read the result it printed: no number in it"), *redo,
+                  *([("ran it again: the result still holds none of the study's quantities" if bare else
+                      "ran it again: the result still has no number in it")] if redesigned else [])] if no_numbers else
                  [*(["asked the model to repair the script when it failed"
                      + (f" ({repairs} repair{'s' if repairs != 1 else ''})" if repairs else "")] if repairs else
                     ["ran the experiment: it stopped with an error"]), *redo,
@@ -16854,7 +16860,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                  ["asked the model to analyse the results",
                   "read its reply as written, then again with the backslashes of formulas kept as written",
                   "asked the model a second time for one short answer; that reply could not be read either"])
-        ended = ("the run gave no result with a number in it" + again if no_numbers else
+        ended = (("the run gave no result with a number for the study's quantities" if bare else
+                  "the run gave no result with a number in it") + again if no_numbers else
                  "the script could not run to the end" + again if crashed else "the analysis could not be read twice")
         if claims and reason not in ("flat", "no_numbers", "crashed"):
             # The paper claimed what FI's own records contradict, even after it was written again (core/record_claims.py).
@@ -16960,6 +16967,20 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         self._audit("stuck", problem=problem, repairs=len(tried))
         return {"stuck": record}
 
+    def _reports_no_quantity(self, state: QuestState, result: Any) -> str:
+        """When the run's result says it failed (``errors`` text, a ``status`` of invalid or failed) and holds a number for
+        none of the quantities the protocol measures (``protocol.metrics``), a sentence saying so; else ``""``. A protocol
+        with no metrics, or a result that does not say it failed, is not judged here."""
+        protocol = self._protocol_block(state)
+        metrics = protocol.get("metrics") if isinstance(protocol, dict) else None
+        ids = [str(m.get("id")).strip() for m in metrics or [] if isinstance(m, dict) and str(m.get("id") or "").strip()]
+        if not ids or not isinstance(result, dict):
+            return ""
+        said = _code_review.reports_failure(result)
+        if not said or len(_code_review.absent_from_results(ids, result)) != len(ids):
+            return ""
+        return f"it says {said[:100]}, and has no number for {', '.join(ids[:4])}"
+
     def _no_results_verdict(self, state: QuestState) -> dict[str, Any] | None:
         """The gate's verdict for a simulation whose experiment produced no results, else ``None``.
 
@@ -16993,8 +17014,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # A result with no number in it (the script printed its RESULT_JSON line with nothing measured) is no result.
         # A run whose result has no number in it (none printed, `{}`, `[]`, only words) is no result; a `0` is a number.
         no_numbers = not any(True for _ in _numeric_oracle.flatten_numbers(result, keep_zero=True))
+        # A number that is not one of the study's own quantities (a count of the records it refused, the trials it
+        # required) does not make a result: a script that says it failed, and holds none of the quantities the protocol
+        # measures, produced none. Its own word about itself, and every quantity missing (a name written another way
+        # still counts), are both needed.
+        failed_itself = "" if no_numbers else self._reports_no_quantity(state, result)
         if (
-            not no_numbers
+            not (no_numbers or failed_itself)
             or not isinstance(exec_result, dict) or not exec_result  # no experiment has run: not this case
             or state.get("no_simulation_resolved")
             or state.get("survey_mode_resolved")
@@ -17010,6 +17036,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         flat = str(exec_result.get("flat_output") or "")
         why = (f"the experiment's result has no number in it (exit code {exec_result.get('returncode')!s}"
                if result else f"the experiment produced no results (exit code {exec_result.get('returncode')!s}")
+        if failed_itself:
+            why = (f"the experiment's result holds none of the study's quantities ({failed_itself}; exit code "
+                   f"{exec_result.get('returncode')!s}")
         if flat:
             why = f"the simulation's result does not depend on what it is given (exit code {exec_result.get('returncode')!s}"
         if state.get("exec_give_up_reason"):

@@ -628,6 +628,97 @@ def in_results(name: str, result: Any) -> bool:
     return walk(result)
 
 
+def _holds_numbers(value: Any) -> bool:
+    """Whether ``value`` is a number, or a list or mapping with a number somewhere in it (a flag, null and text are not)."""
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, dict):
+        return any(_holds_numbers(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_numbers(v) for v in value)
+    return False
+
+
+def _keys_with_numbers(result: Any) -> list[str]:
+    """Every key, at any depth, whose value holds a number."""
+    out: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if _holds_numbers(v):
+                    out.append(str(k))
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return out
+
+
+def named_in_results(name: str, result: Any) -> set[str]:
+    """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``: the
+    same name, a name that begins with it (``ea_spread_J_per_mol``, ``ea_spread_bootstrap_95``), a name the plan's is a
+    longer form of (``k_relative_spread`` for ``k_relative_spread_by_temperature``), and what begins with a key found that
+    way (the interval of the same quantity). Case, punctuation and underscores are ignored. A key of fewer than six
+    characters is never the plan's name written longer."""
+    want = _norm(name)
+    if len(want) < 2:
+        return set()
+    keys = {k: _norm(k) for k in _keys_with_numbers(result)}
+    base = {k for k, n in keys.items() if n and (n.startswith(want) or (len(n) >= 6 and want.startswith(n)))}
+    stems = {keys[k] for k in base if len(keys[k]) >= 4}
+    return base | {k for k, n in keys.items() if any(n.startswith(stem) for stem in stems)}
+
+
+def absent_from_results(names: list[str], result: Any) -> list[str]:
+    """Of the plan's quantities ``names``, those the run's results hold no number for under any key that contains the name
+    (case, punctuation and underscores ignored). Containment, not equality: an analysis that writes ``uncorrected_power``
+    for ``power`` has the quantity, and a stop must never rest on a name written another way."""
+    keys = [_norm(k) for k in _keys_with_numbers(result)]
+    out = []
+    for name in names:
+        want = _norm(name)
+        if want and not any(want in k or (len(k) >= 6 and k in want) for k in keys):
+            out.append(name)
+    return out
+
+
+_FAILURE_KEYS = frozenset({"error", "errors", "failure", "failures", "failed", "exception"})
+_FAILURE_WORDS = re.compile(r"invalid|fail|error|incomplete|abort|not[_ ]?run|no[_ ]?data", re.IGNORECASE)
+
+
+def reports_failure(result: Any) -> str:
+    """What the run's own result says about itself when it reports it did not produce its results (a key such as ``errors``
+    holding something, or a ``status`` that says invalid, failed or incomplete), else ``""``. The script's word about its
+    own failure; the engine does not guess one."""
+    found = ""
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if found:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                n = _norm(k)
+                if n in _FAILURE_KEYS and v not in (None, False, "", [], {}, 0) and not _holds_numbers(v):  # text, not error statistics
+                    found = f"{k}: {str(v)[:120]}"
+                    return
+                if n == "status" and isinstance(v, str) and _FAILURE_WORDS.search(v):
+                    found = f"{k}: {v[:120]}"
+                    return
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(result)
+    return found
+
+
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
     either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
