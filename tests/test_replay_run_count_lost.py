@@ -110,3 +110,42 @@ def test_a_protocol_with_no_run_count_leaves_the_study_file_alone(tmp_path: Path
     (code / "study.json").write_text(json.dumps({"entry": "run_trial", "grid": {"a": [1, 2]}, "runs_per_setting": 1}),
                                      encoding="utf-8")
     assert cp.study_differences(code, protocol) == []
+
+
+# --- an analysis that fixes its own number of runs -------------------------------------------------------------------
+
+def _real_files() -> dict[str, str]:
+    return {"experiment.py": (FIXTURE / "experiment.py").read_text(encoding="utf-8"),
+            "simulate.py": "def run_trial(cell, trial, seed):\n    return {'x': 1.0}\n"}
+
+
+def test_an_analysis_that_fixes_a_count_the_protocol_sets_otherwise_is_found() -> None:
+    from core import grid_keys
+
+    protocol = _load("plan_protocol.yaml")
+    found = grid_keys.problems(_real_files(), protocol)
+    counted = [r for r in found if r.planned is not None]
+    assert [(r.script, r.keys, r.default, r.planned) for r in counted] == [("experiment.py", ("N_TRIALS",), "1000", 2500)]
+    note = grid_keys.plain_note(counted, protocol)
+    assert "1000" in note and "2500" in note
+    assert "count them" in grid_keys.directive(counted, protocol)
+    assert grid_keys.record(counted, protocol)["reads"][0]["protocol_runs"] == 2500
+
+
+def test_before_the_fix_a_protocol_with_no_run_count_made_the_same_script_pass() -> None:
+    from core import grid_keys
+
+    frozen_as_it_was = {"grid": _load("plan_protocol.yaml")["grid"]}  # no runs_per_setting: nothing to compare with
+    assert [r for r in grid_keys.problems(_real_files(), frozen_as_it_was) if r.planned is not None] == []
+
+
+def test_a_count_equal_to_the_protocols_or_with_no_trial_contract_is_not_a_fault() -> None:
+    from core import grid_keys
+
+    protocol = {**_load("plan_protocol.yaml"), "runs_per_setting": 1000}
+    assert [r for r in grid_keys.problems(_real_files(), protocol) if r.planned is not None] == []
+    only_cells = {**_real_files(), "simulate.py": "def run_cell(cell):\n    return {'x': 1.0}\n"}
+    assert [r for r in grid_keys.problems(only_cells, _load("plan_protocol.yaml")) if r.planned is not None] == []
+    other_names = {"experiment.py": "N_BOOTSTRAP = 2000\nBATCH = 7\nrun_label = 3\n",
+                   "simulate.py": _real_files()["simulate.py"]}
+    assert [r for r in grid_keys.problems(other_names, _load("plan_protocol.yaml")) if r.planned is not None] == []

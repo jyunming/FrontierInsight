@@ -49,8 +49,12 @@ class Read:
     keys: tuple[str, ...]
     default: str
     fallback: bool = False
+    planned: int | None = None  # set for a fixed count of runs per setting (:func:`counts`): what the protocol says
 
     def says(self, supplied: list[str]) -> str:
+        if self.planned is not None:
+            return (f"{self.script} line {self.line}: fixes the number of runs per setting at {self.default} "
+                    f"(`{self.keys[0]}`); the protocol runs {self.planned}")
         named = " or ".join(f"`{k}`" for k in self.keys)
         fallback = f" (and gives {self.default} when it is not there)" if self.default else ""
         have = ", ".join(f"`{n}`" for n in supplied[:8]) or "none"
@@ -228,13 +232,55 @@ def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
     return list(dict.fromkeys([*contained, *shared, *close]))
 
 
-def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[Read]:
-    """The reads, in ``files`` (``{script name: text}``), of a setting the study does not have. Nothing when the plan has
-    no grid (there is nothing to compare with)."""
-    axes, allowed = supplied_names(protocol, design)
-    if not axes:
+#: A name that says it counts trials or runs (``N_TRIALS``, ``num_runs``, ``TRIALS_PER_SETTING``, ``n_replicates``).
+_COUNT_NAME = re.compile(
+    r"^(?:(?:n|num|number)_?(?:of_)?)?(?:trials|runs|replicates|replications|repeats|repetitions)(?:_per_(?:setting|cell|condition))?$",
+    re.IGNORECASE)
+
+
+def counts(source: str, script: str, planned: int) -> list[Read]:
+    """The module-level whole-number literals in ``source`` that a name saying it counts trials or runs holds, other than
+    ``planned``. Never raises: a script that does not parse has none to report."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
         return []
     out: list[Read] = []
+    for node in tree.body:
+        targets: list[ast.expr] = []
+        value: ast.AST | None = None
+        if isinstance(node, ast.Assign):
+            targets, value = list(node.targets), node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        if not (isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(value.value, bool)):
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name) and _COUNT_NAME.match(target.id) and value.value != planned:
+                out.append(Read(script=script, line=int(node.lineno), keys=(target.id,), default=str(value.value),
+                                planned=planned))
+    return out
+
+
+def _planned_runs(protocol: dict[str, Any] | None) -> int | None:
+    runs = protocol.get("runs_per_setting") if isinstance(protocol, dict) else None
+    if isinstance(runs, bool) or not isinstance(runs, (int, float)) or runs != int(runs) or runs < 1:
+        return None
+    return int(runs)
+
+
+def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[Read]:
+    """The reads, in ``files`` (``{script name: text}``), of a setting the study does not have, and each number of runs per
+    setting a script fixes that the protocol sets otherwise. Nothing about the first when the plan has no grid (there is
+    nothing to compare with)."""
+    out: list[Read] = []
+    planned = _planned_runs(protocol)
+    if planned is not None and any(re.search(r"^\s*def\s+run_trial\s*\(", text, re.MULTILINE) for text in files.values()):
+        for script, text in files.items():
+            out.extend(counts(text, script, planned))
+    axes, allowed = supplied_names(protocol, design)
+    if not axes:
+        return out
     for script, text in files.items():
         for r in reads(text, script):
             if set(r.keys) & allowed:
@@ -254,13 +300,28 @@ def directive(found: list[Read], protocol: dict[str, Any] | None) -> str:
     axes, _allowed = supplied_names(protocol)
     lines = []
     for r in found[:8]:
+        if r.planned is not None:
+            lines.append(f"- {r.says(axes)}")
+            continue
         hint = [h for h in _near(r.keys[0], axes)][:2]
         lines.append(f"- {r.says(axes)}" + (f" (did you mean {' or '.join(f'`{h}`' for h in hint)}?)" if hint else ""))
+    tail = []
+    if any(r.planned is None for r in found):
+        tail.append(
+            "A read of a setting that is not there silently gives its default, so every row would carry the same value "
+            "and no error would show. Read each setting by the name the study gives it, with no fallback value")
+    if any(r.planned is not None for r in found):
+        tail.append(
+            "FI runs the trials the protocol states and hands the analysis every one of them; a number fixed in the code "
+            "makes the analysis reject the record. Take the number of runs from the trials FI supplies (count them), "
+            "not from a constant")
     return (
-        "FI read the code before running it, and it reads a setting the study does not have:\n" + "\n".join(lines)
-        + "\n\nA read of a setting that is not there silently gives its default, so every row would carry the same value "
-        "and no error would show. Read each setting by the name the study gives it, with no fallback value, and change "
-        "nothing else."
+        "FI read the code before running it, and "
+        + ("it fixes a number of runs that the protocol sets otherwise" if all(r.planned is not None for r in found)
+           else "it reads a setting the study does not have" if all(r.planned is None for r in found)
+           else "it does not match the study")
+        + ":" + chr(10) + chr(10).join(lines)
+        + chr(10) * 2 + ". ".join(tail) + ", and change nothing else."
     )
 
 
@@ -268,13 +329,17 @@ def plain_note(found: list[Read], protocol: dict[str, Any] | None) -> str:
     """One sentence for the stop and for run.log."""
     axes, _allowed = supplied_names(protocol)
     names = "; ".join(r.says(axes) for r in found[:3])
+    if all(r.planned is not None for r in found):
+        return f"the code fixes a number of runs that the protocol sets otherwise, so its analysis would not accept the trials ({names})"
     return f"the code reads a setting the study does not have, so a whole axis would not vary ({names})"
 
 
 def record(found: list[Read], protocol: dict[str, Any] | None) -> dict[str, Any]:
     axes, _allowed = supplied_names(protocol)
     return {"settings_of_the_study": axes, "reads": [{"script": r.script, "line": r.line, "names": list(r.keys),
-                                                      "default": r.default} for r in found]}
+                                                      "default": r.default,
+                                                      **({"protocol_runs": r.planned} if r.planned is not None else {})}
+                                                     for r in found]}
 
 
 def code_files(code_dir: Path) -> dict[str, str]:
