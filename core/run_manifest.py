@@ -818,6 +818,23 @@ def _value_count_findings(
                     "never dropped",
                     True,
                 ))
+            elif (listed_defined > defined or listed_undefined > undefined
+                  or listed_defined + listed_undefined > measured):
+                # The record is exact: a count above it (a values list longer than the trials that returned a value, an
+                # undefined count above the trials that returned none) is a number FI never recorded, whatever it is for.
+                too_many = []
+                if listed_defined > defined:
+                    too_many.append(f"{listed_defined} value(s) where FI's record has {defined:g} trial(s) with a value")
+                if listed_undefined > undefined:
+                    too_many.append(f"{listed_undefined} undefined where FI's record has {undefined:g} trial(s) with none")
+                if listed_defined + listed_undefined > measured:
+                    too_many.append(f"{listed_defined + listed_undefined} in all where {measured:g} trial(s) measured it")
+                out.append((
+                    f"the metric `{metric}` is measured {made}; the analysis reports more than that: "
+                    + "; ".join(too_many) + ". The values and the undefined ones must be what the trials returned, no "
+                    "more: copy the lists FI_TRIALS holds, never add to them",
+                    True,
+                ))
             continue
         if not _values_listed(result_json, metric):
             out.append((

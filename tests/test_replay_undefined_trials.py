@@ -104,3 +104,34 @@ def test_a_thin_list_is_still_a_mismatch() -> None:
     found = rm._value_count_findings(PROTOCOL, MANIFEST, _analysis(nulls=False, undefined_count=True, keep=0.1),
                                      trial_mode=True, recorded=recorded)
     assert found and "accounts for" in found[0][0]
+
+
+def test_an_undefined_count_above_FIs_record_is_flagged() -> None:
+    recorded = _recorded()
+    analysis = _analysis(nulls=False, undefined_count=True)
+    first = next(iter(analysis["per_setting"].values()))
+    first["ler_undefined"] += 1_000_000  # the honest count plus a million that no trial returned
+    found = rm._value_count_findings(PROTOCOL, MANIFEST, analysis, trial_mode=True, recorded=recorded)
+    assert found and all(analysis_fix for _, analysis_fix in found), "the analysis's to fix"
+    assert "reports more than that" in found[0][0] and "undefined where FI's record has 23011" in found[0][0]
+    # the same lie as a bare top-level count beside the honest nulls
+    analysis = _analysis()
+    analysis["ler_undefined"] = 1_000_000
+    assert rm._value_count_findings(PROTOCOL, MANIFEST, analysis, trial_mode=True, recorded=recorded)
+
+
+def test_a_values_list_longer_than_the_trials_with_a_value_is_flagged() -> None:
+    recorded = _recorded()
+    found = rm._value_count_findings(PROTOCOL, MANIFEST, _analysis(keep=1.5), trial_mode=True, recorded=recorded)
+    assert found and "reports more than that" in found[0][0] and "value(s) where FI's record has 16989" in found[0][0]
+    # one extra value anywhere is above the record: counts are integers, there is no slack above it
+    analysis = _analysis()
+    next(iter(analysis["per_setting"].values()))["ler_values"].append(1.0)
+    assert rm._value_count_findings(PROTOCOL, MANIFEST, analysis, trial_mode=True, recorded=recorded)
+
+
+def test_the_honest_report_is_not_flagged_by_the_upper_bound() -> None:
+    recorded = _recorded()
+    assert rm._value_count_findings(PROTOCOL, MANIFEST, _analysis(), trial_mode=True, recorded=recorded) == []
+    assert rm._value_count_findings(PROTOCOL, MANIFEST, _analysis(nulls=False, undefined_count=True),
+                                    trial_mode=True, recorded=recorded) == []
