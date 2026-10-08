@@ -176,6 +176,7 @@ class _Quest:
         self.stuck = _dict(_json(root / "needs" / "STUCK.json"))
         self.critique = [x for x in _list(_json(root / "needs" / "DESIGN_CRITIQUE.json")) if isinstance(x, dict)]
         self.oracle_check = _dict(_json(root / "needs" / "ORACLE_CHECK.json"))
+        self.result_check = _dict(_json(root / "needs" / "RESULT_CHECK.json"))
         self.evidence = _dict(_json(root / "needs" / "EVIDENCE.json"))
         self.summary = _dict(_json(root / "frontier_insight_summary.json"))
         self.numeric_audit = _dict(_json(root / "paper" / "numeric_audit.json"))
@@ -287,8 +288,14 @@ def _code_problems(q: _Quest) -> list[dict[str, str]]:
     cr = q.code_review
     reviewer = str(cr.get("reviewer") or "a second model")
     final = bool(cr.get("final"))
+    taken_out = {str(c.get("quantity")) for c in map(_dict, _list(q.result_check.get("checks"))) if c.get("quantity")}
     for p in _list(cr.get("problems")):
         p = _dict(p)
+        if p.get("kind") in ("dependent variable", "metric") and str(p.get("name") or "") in taken_out:
+            out.append(_problem("code", f"the plan's {p.get('kind')} '{_one(p.get('text'), 100)}' is "
+                                f"{p.get('status') or 'missing'} in the code; the paper leaves it out",
+                                f"{reviewer} (reads the code)", "left out", "needs/RESULT_CHECK.json"))
+            continue
         if p.get("kind") == "logic":
             where = f" ({p['where']})" if p.get("where") else ""
             out.append(_problem("code", f"{_one(p.get('text'), 140)}{where} [{p.get('severity') or 'medium'}]",
@@ -785,6 +792,22 @@ def _code_metrics(q: _Quest) -> dict[str, Any]:
             "repairs_stopped": str(cr.get("repairs_stopped") or "")}
 
 
+def _left_out_of_paper(q: _Quest) -> list[dict[str, Any]]:
+    """The quantities FI took out of the results the paper may use, and why (``needs/RESULT_CHECK.json``): one entry per
+    quantity, with the names it was found under in the results."""
+    out: list[dict[str, Any]] = []
+    record = q.result_check
+    named = {str(k) for c in map(_dict, _list(record.get("checks"))) for k in _list(c.get("keys"))}
+    for c in map(_dict, _list(record.get("checks"))):
+        if c.get("quantity"):
+            out.append({"quantity": str(c["quantity"]), "why": _one(c.get("note"), 300),
+                        "names_in_results": [str(k) for k in _list(c.get("keys"))]})
+    rest = [str(k) for k in _list(record.get("removed_quantities")) if str(k) not in named]
+    if rest:
+        out.append({"quantity": ", ".join(rest[:6]), "why": _one(record.get("note"), 300), "names_in_results": rest})
+    return out
+
+
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
     """The report of one quest, from its records. Never raises for a missing or old-format record.
 
@@ -834,6 +857,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
+        "left_out_of_paper": _left_out_of_paper(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
@@ -911,6 +935,10 @@ def render(report: dict[str, Any]) -> str:
     else:
         lines.append("Nothing was left unfixed that stopped the quest." if o["kind"] == "finished"
                      else "The records name no stage where the quest could not go on.")
+    if report.get("left_out_of_paper"):
+        lines += ["", "## Left out of the paper", "",
+                  "These quantities are not in the paper's results, and the paper says so:", ""]
+        lines += [f"- `{_cell(x['quantity'])}`: {_cell(x['why'])}" for x in report["left_out_of_paper"]]
     lines += ["", "## What to try", ""]
     if report["suggestions"]:
         lines += [f"- {s['text']} (from {s['source']})" for s in report["suggestions"]]

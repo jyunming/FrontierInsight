@@ -719,6 +719,26 @@ def reports_failure(result: Any) -> str:
     return found
 
 
+#: The kinds of requirement that name one quantity of the plan (a dependent variable, a metric).
+QUANTITY_KINDS = ("dependent variable", "metric")
+
+
+def differing_quantities(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
+    """The quantities the plan names that a second model found the final version of the code computes differently (or not
+    at all) and that the repairs did not change: ``{"name", "kind", "status", "text", "note"}``, one per name. Only a finding
+    of the version that ran (:func:`not_computed`), only one the run's results did not contradict, and only a requirement
+    that names a quantity. A problem of logic is not one (its ``name`` lists several things)."""
+    seen: dict[str, dict[str, Any]] = {}
+    for v in not_computed(quest_root, code_dir):
+        name = str(v.get("name") or "").strip()
+        if (v.get("kind") not in QUANTITY_KINDS or v.get("status") not in (DIFFERENT, MISSING) or not name
+                or v.get("contradicted") or name in seen):
+            continue
+        seen[name] = {"name": name, "kind": v.get("kind"), "status": v.get("status"), "text": str(v.get("text") or ""),
+                      "note": str(v.get("note") or "")}
+    return list(seen.values())
+
+
 def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
     """After a run: of the headline requirements a reader still called missing, those the run's results do not hold
     either (the quest then stops, honestly). The ones the results do hold are recorded as a disagreement between the
@@ -732,6 +752,8 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
         if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic":
             continue
         if in_results(str(v.get("name") or ""), result):
+            if v.get("status") == DIFFERENT:
+                continue  # computed under another definition: the results holding a value does not say the reader was wrong
             v["contradicted"] = True
             changed = True
         else:

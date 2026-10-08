@@ -13,6 +13,12 @@ with none of the words that hedge or deny it, and only when the record says the 
 * the paper calls a result validated or confirmed against known answers while those checks are recorded as unconfirmed
   or failed.
 
+A fourth kind is not about a sentence: the paper may not quote a value of a quantity FI left out of the results because a
+second model found the code computes it differently from the plan's definition (``needs/RESULT_CHECK.json``,
+``removed_values``). A number is flagged when it equals such a value as the paper writes it (rounded to the digits it
+shows, at least three significant ones), whatever else the sentence says: the number is the plan's quantity under the plan's
+name or it is not in the paper.
+
 When unsure, nothing is flagged: a missing record, an unreadable one or a sentence with any hedge in it gives no hit.
 """
 
@@ -102,8 +108,40 @@ def search_not_better(best_design: Any, optimum_check: Any) -> str:
     return ""
 
 
+def quoted_left_out(paper_md: str, left_out: Any) -> list[str]:
+    """The must-fix hits for each number of ``paper_md`` that is a value of a quantity FI left out (``left_out``:
+    ``{the key left out of the results: its values}``). One hit per distinct number."""
+    from .number_provenance import _carries_enough_precision, _decimals, paper_numbers
+
+    if not isinstance(left_out, dict) or not left_out:
+        return []
+    hits: list[str] = []
+    seen: set[str] = set()
+    try:
+        numbers = paper_numbers(paper_md)
+    except Exception:  # noqa: BLE001 -- a paper that cannot be read for numbers is not judged here
+        return []
+    for value, token, _context in numbers:
+        token = str(token).strip()
+        if token in seen or not _carries_enough_precision(token):
+            continue
+        digits = _decimals(token)
+        for key, values in left_out.items():
+            if not isinstance(values, list):
+                continue
+            if any(isinstance(w, (int, float)) and abs(abs(round(float(w), digits)) - abs(float(value))) < 1e-9 * max(1.0, abs(value))
+                   for w in values):
+                seen.add(token)
+                hits.append(f"{HIT}: the paper quotes {token}, which is a value of `{key}`, a quantity FI left out because a "
+                            "second model found the code computes it differently from the plan's definition "
+                            "(needs/RESULT_CHECK.json). Take the number out and say in the limitations that the quantity is "
+                            "left out; do not give it under the plan's name.")
+                break
+    return hits
+
+
 def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any = None, oracle: Any = None,
-                   figures_on_disk: set[str] | None = None) -> list[str]:
+                   figures_on_disk: set[str] | None = None, left_out: Any = None) -> list[str]:
     """The must-fix hits for what ``paper_md`` claims against FI's records, each starting ``record_contradiction:`` and
     saying in plain words what the paper says, what the record says and what to do. Empty when nothing is contradicted.
     ``figures_on_disk``: the file names of the figures the run drew (``None``: not known, so no figure is judged)."""
@@ -145,4 +183,7 @@ def contradictions(paper_md: str, *, best_design: Any = None, optimum_check: Any
                             "were unconfirmed or failed (needs/ORACLE_CHECK.json). Do not call the result validated or "
                             "confirmed against known answers; say plainly that those checks did not pass.")
                 break
+
+    # (d) a value of a quantity FI left out of the results.
+    hits.extend(quoted_left_out(paper_md, left_out))
     return hits
