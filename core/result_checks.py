@@ -117,10 +117,14 @@ class ResultChecksMixin:
             return []
         found: list[Found] = []
         for q in differing:
+            # Only "computed differently": a quantity called missing that the results hold is one the reader got wrong
+            # (:func:`core.code_review.resolve_headline` says so for the headline; the writer's note covers the rest).
+            if q["status"] != _code_review.DIFFERENT:
+                continue
             keys = sorted(_code_review.named_in_results(q["name"], result_json))
             if not keys:
                 continue
-            what = "not computed" if q["status"] == _code_review.MISSING else "computed differently from the plan"
+            what = "computed differently from the plan"
             why = q["note"].rstrip(".") or what
             note = f"the plan's {q['kind']} `{q['name']}` is {what} in the code ({why})"
             say = (f"A second model compared the code with the plan and found that `{q['name']}` is {what} ({why}); the "

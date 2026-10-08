@@ -168,3 +168,14 @@ def test_the_quality_report_says_what_was_left_out_and_why(tmp_path: Path) -> No
     statuses = {p["status"] for s in report["stages"] if s["stage"] == "code" for p in s["problems"]["items"]
                 if first in p["text"]}
     assert statuses == {"left out"}
+
+
+def test_a_quantity_the_reader_called_missing_that_the_results_hold_is_not_left_out(tmp_path: Path) -> None:
+    engine = _quest(tmp_path)
+    record = cr.load(engine.quest_root)
+    for p in record["problems"]:
+        if p.get("kind") in cr.QUANTITY_KINDS:
+            p["status"] = cr.MISSING  # the reader said "not computed", but the results hold it: the reader was wrong
+    cr.save(engine.quest_root, record)
+    assert {f["status"] for f in cr.differing_quantities(engine.quest_root, engine.quest_root / "code")} == {cr.MISSING}
+    assert engine._code_reader_findings(_result()) == []

@@ -61,6 +61,8 @@ def test_the_redesign_keeps_the_plans_run_count_and_checks(tmp_path: Path) -> No
     protocol = kept["protocol"]
     assert protocol["runs_per_setting"] == 2500 and protocol["precision"] == plan_protocol["precision"]
     assert [o["name"] for o in protocol["oracles"]] == [o["name"] for o in plan_protocol["oracles"]]
+    assert [c["name"] for c in protocol["criteria"]] == [c["name"] for c in plan_protocol["criteria"]]  # (after the oracles they read)
+    assert set(plan_protocol) - {"grid", "metrics", "model", "topic_map"} <= set(protocol)  # every other part came across
     # What the redesign wrote itself is untouched.
     assert protocol["grid"] == redesign["grid"] and protocol["metrics"] == redesign["metrics"]
     # The protocol FI would freeze is now the one with the run count.
@@ -146,7 +148,7 @@ def test_a_count_equal_to_the_protocols_or_with_no_trial_contract_is_not_a_fault
     assert [r for r in grid_keys.problems(_real_files(), protocol) if r.planned is not None] == []
     only_cells = {**_real_files(), "simulate.py": "def run_cell(cell):\n    return {'x': 1.0}\n"}
     assert [r for r in grid_keys.problems(only_cells, _load("plan_protocol.yaml")) if r.planned is not None] == []
-    other_names = {"experiment.py": "N_BOOTSTRAP = 2000\nBATCH = 7\nrun_label = 3\n",
+    other_names = {"experiment.py": "N_BOOTSTRAP = 2000\nN_REPLICATES = 2000\nN_REPEATS = 5\nBATCH = 7\nrun_label = 3\n",
                    "simulate.py": _real_files()["simulate.py"]}
     assert [r for r in grid_keys.problems(other_names, _load("plan_protocol.yaml")) if r.planned is not None] == []
 

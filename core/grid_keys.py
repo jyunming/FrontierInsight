@@ -232,10 +232,9 @@ def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
     return list(dict.fromkeys([*contained, *shared, *close]))
 
 
-#: A name that says it counts trials or runs (``N_TRIALS``, ``num_runs``, ``TRIALS_PER_SETTING``, ``n_replicates``).
-_COUNT_NAME = re.compile(
-    r"^(?:(?:n|num|number)_?(?:of_)?)?(?:trials|runs|replicates|replications|repeats|repetitions)(?:_per_(?:setting|cell|condition))?$",
-    re.IGNORECASE)
+#: A name that says it counts trials or runs (``N_TRIALS``, ``num_runs``, ``TRIALS_PER_SETTING``). Replicates, repeats and
+#: repetitions are what an analysis counts for its own resampling or seeds, so they are not read as the protocol's count.
+_COUNT_NAME = re.compile(r"^(?:(?:n|num|number)_?(?:of_)?)?(?:trials|runs)(?:_per_(?:setting|cell|condition))?$", re.IGNORECASE)
 
 
 def counts(source: str, script: str, planned: int) -> list[Read]:
