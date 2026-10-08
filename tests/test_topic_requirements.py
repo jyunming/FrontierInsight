@@ -75,10 +75,11 @@ class Reader:
     match could not find, and rewrites the plan when asked (only what ``adds`` names)."""
 
     def __init__(self, eng: Any, draft: dict[str, Any], *, adds: set[str] = frozenset(), extraction: dict[str, Any] | None = EXTRACTION,
-                 judge: Any = None) -> None:
+                 judge: Any = None, judge_fails: bool = False) -> None:
         self.eng, self.draft, self.adds = eng, draft, set(adds)
         self.extraction = extraction
         self.judge_override = judge
+        self.judge_fails = judge_fails
         self.prompts: list[str] = []
         self.asked: list[str] = []
         self.judged = 0
@@ -89,6 +90,8 @@ class Reader:
 
     def _judge(self, prompt: str) -> str:
         self.judged += 1
+        if self.judge_fails:
+            raise RuntimeError("no answer")
         items, shown = _items_and_plan(prompt)
         settings = " ".join(shown["settings_swept"]).lower()
         metrics = " ".join(m["id"] + " " + m["text"] for m in shown["metrics"]).lower()
@@ -181,6 +184,24 @@ def test_a_reply_that_names_nothing_is_no_reading_and_a_search_variable_counts_a
     assert tr.match(req, tr.view({"protocol": {"optimisation": block}})) == ([], [])
 
 
+def test_named_levels_held_as_numbers_are_left_to_a_reader_not_passed() -> None:
+    req = tr.parse({"factors": [{"name": "lid material", "levels": ["paper", "foam", "steel"], "main": True}]})
+    coded = tr.view({"protocol": {"grid": {"lid_material": [1, 2, 3]}}})
+    assert tr.match(req, coded) == ([], ["F1"])
+    gaps, unjudged = tr.gaps_from(req, coded, {})
+    assert gaps == [] and unjudged == ["lid material"], "no judgement is not a pass: it is named as unchecked"
+    assert tr.gaps_from(req, coded, {"F1": "missing"})[0][0]["kind"] == "factor"
+    assert tr.gaps_from(req, coded, {"F1": "covered"}) == ([], [])
+
+
+def test_the_topic_reading_is_a_reading_of_the_plan_not_of_the_checks_in_the_quality_report() -> None:
+    from core import quality_report as qr
+
+    assert qr._stage_of("oracle_review.topic") == "plan"
+    assert qr._reads("plan", "oracle_review.topic") and not qr._reads("checks", "oracle_review.topic")
+    assert qr._reads("checks", "oracle_review") and not qr._reads("plan", "oracle_review")
+
+
 # --- Part 1: what the topic asks for, read once and shown ----------------------------------------------------------
 
 
@@ -208,13 +229,33 @@ async def test_a_reading_that_could_not_be_had_is_said_and_never_stops_the_quest
     eng = _engine(tmp_path, [])
     Reader(eng, _draft(), extraction=None)
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
-    assert "could not read the topic for what it asks for" in _plan_text(eng)
+    assert "What the topic asks for" not in _plan_text(eng), "a plan a person reads is not changed by a reading that failed"
+    assert not any("what the topic asks for" in str(h.get("note") or "") for h in plan.history(eng.quest_root))
     seen = _stop(eng)
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [] and "design" in patch
+    note = tr.write_note(eng.quest_root)
+    assert "could not read the topic for what it explicitly asks for" in note and "not checked" in note
 
 
 # --- Part 2: every requirement maps to something runnable ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_what_could_not_be_judged_is_never_passed_in_silence(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(), judge_fails=True)
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    shown = _plan_text(eng).split("## What the topic asks for")[1].split("##")[0]
+    assert "To vary or compare: lid material (paper, foam, steel) - could not be checked against the plan." in shown
+    assert "To report: heat lost per minute - could not be checked against the plan." in shown
+    assert model.asked == [], "nothing is asked of the plan for what nobody found missing"
+    seen = _stop(eng)
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [] and "design" in patch, "an unchecked item is not a stop"
+    note = tr.write_note(eng.quest_root)
+    assert "could not check whether the plan includes what the topic asks for about" in note and "lid material" in note
+    assert "Say plainly in the limitations that this was not checked" in note
 
 
 @pytest.mark.asyncio

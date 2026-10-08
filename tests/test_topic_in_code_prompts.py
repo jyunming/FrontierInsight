@@ -62,8 +62,8 @@ async def test_a_whole_fake_quests_code_prompts_all_show_the_topic_and_none_a_ch
              "example": {"inputs": {"Tr": 20, "T0": 90, "k": 0.05, "t": 10},
                          "expected_formula": f"{secret_example} + 0*exp(0)"}}]},
     }
-    crash_first = ("import os, sys\nif not os.path.exists('crashed_once'):\n    open('crashed_once', 'w').write('1')\n"
-                   "    sys.exit(3)\n" + _FAKE_EXPERIMENT_CODE)
+    grid = "GRID = {'room_temperature_C': [10, 20, 30], 'lid_material': ['paper', 'foam', 'steel']}\n"
+    crash_first = grid + "raise RuntimeError('the first draft is wrong')\n" + _FAKE_EXPERIMENT_CODE
     seen: list[tuple[str, str]] = []
 
     async def fake_chat(self, messages, **kw):  # noqa: ANN001
@@ -79,14 +79,15 @@ async def test_a_whole_fake_quests_code_prompts_all_show_the_topic_and_none_a_ch
         if kind == "Implementation":
             return json.dumps({"code": crash_first, "deps": ["matplotlib"]})
         if kind == "ExecuteReflect":
-            return json.dumps({"code": _FAKE_EXPERIMENT_CODE, "deps": ["matplotlib"], "patch_summary": "fixed"})
+            return json.dumps({"code": grid + _FAKE_EXPERIMENT_CODE, "deps": ["matplotlib"], "patch_summary": "fixed"})
         return _fake_response_for(prompt)
 
     monkeypatch.setattr("core.engine.LLMClient.chat", fake_chat)
     cfg = _cfg(tmp_path, split=False)
     cfg.topic = TOPIC
     engine = Engine(cfg)
-    await engine.run()
+    artifacts = await engine.run()
+    assert artifacts.paper_md is not None and artifacts.paper_md.exists(), "the fake quest should reach its paper"
     code_prompts = [(k, p) for k, p in seen if k in ("Implementation", "ExecuteReflect")
                     or p.lstrip().startswith(("You are the **Function Body**", "You are repairing", "# Code That Does Not Do"))]
     kinds = {k for k, _p in code_prompts}

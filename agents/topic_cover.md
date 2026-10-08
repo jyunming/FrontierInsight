@@ -22,7 +22,7 @@ $plan
 
 # What to decide, for each item
 
-- A `factor` is **covered** when one of the `settings_swept` is that factor under another name or a part of one (a setting that carries it, such as a kind plus its parameters), so that varying that setting varies the factor. It is **missing** when no setting varies it, even when the plan's prose mentions it.
+- A `factor` is **covered** when one of the `settings_swept` is that factor under another name or a part of one (a setting that carries it, such as a kind plus its parameters), so that varying that setting varies the factor; when the item gives `levels` or a `range`, the setting's values must also include them (a level may be coded by a number; say which value stands for it in `where`). It is **missing** when no setting varies it, or its values leave a stated level or part of the range out, even when the plan's prose mentions it.
 - A `quantity` is **covered** when a metric reports it (under another name or as part of one). Otherwise **missing**.
 - A `formula` is **covered** when an equation states the same relation, up to notation: other symbol names, a rearrangement, an equivalent form. It is **replaced** when no equation states it but the plan says in an equation's `source` or in the assumptions that it uses another formula in its place, and why. Otherwise **missing**. A formula that looks like it but differs in a term, a factor or an argument is not the same: say **missing**.
 

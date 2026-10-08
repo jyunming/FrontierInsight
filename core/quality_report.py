@@ -39,6 +39,7 @@ _NODE_STAGE = {
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
     "implement_function_repair": "code", "implement_module_repair": "code", "code_review_repair": "code",
     "code_review": "code", "oracle_review.code": "code",
+    "oracle_review.topic": "plan",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
     "write": "paper", "figures": "paper", "claim_check": "paper",
@@ -51,8 +52,9 @@ _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "d
                      "implement_function_repair", "implement_module_repair", "code_review_repair"),
             "run": ("execute_reflect", "improve"), "analysis": ("analyze",), "paper": ("write", "figures"),
             "review": ("review",)}
-_READERS = {"checks": ("oracle_review", "oracle_recompute"), "design": ("design_review", "design_self_critique"),
-            "code": ("code_review", "oracle_review.code"), "analysis": ("cross_check",), "paper": ("claim_check",)}
+_READERS = {"plan": ("oracle_review.topic",), "checks": ("oracle_review", "oracle_recompute"),
+            "design": ("design_review", "design_self_critique"), "code": ("code_review", "oracle_review.code"),
+            "analysis": ("cross_check",), "paper": ("claim_check",)}
 #: A stage's step to name when a person asks for another model to write (or read) it.
 _KEY = {"plan": "plan", "checks": "oracle_review", "design": "design", "code": "implement", "run": "execute_reflect",
         "analysis": "analyze", "paper": "write", "review": "review"}

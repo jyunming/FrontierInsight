@@ -110,8 +110,10 @@ def _no_clean_venv_check(request, monkeypatch):
 def _no_topic_reading(request, monkeypatch):
     """At the plan step the engine reads what the topic asks for (one call) and looks for it in the plan (up to a few
     more); tests that count or order the model's replies at the plan step are about something else and would each have
-    to script those calls. They run without the reading; tests/test_topic_requirements.py and tests/test_topic_in_code_prompts.py run it for real."""
-    if request.module.__name__.endswith(("test_topic_requirements", "test_topic_in_code_prompts")):
+    to script those calls. They run without the reading; those two end-to-end quests, tests/test_topic_requirements.py and tests/test_topic_in_code_prompts.py run it for real
+    (the end-to-end fakes answer an unknown prompt with `{}`, which the reading takes as "named nothing" and goes on)."""
+    if request.module.__name__.endswith(("test_topic_requirements", "test_topic_in_code_prompts", "test_engine_smoke",
+                                         "test_research_acceptance")):
         return
     from core.engine import Engine
 

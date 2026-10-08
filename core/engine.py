@@ -5644,10 +5644,12 @@ class Engine(RunChecksMixin):
         self._topic_covered_write(judged={**judged, key: verdicts})
         return verdicts
 
-    async def _topic_gaps(self, req: dict[str, Any], design: Any, protocol: Any = None) -> list[dict[str, Any]]:
-        """What the topic asks for that ``design`` (with ``protocol``, the one that runs, when that is another) lacks."""
+    async def _topic_gaps(self, req: dict[str, Any], design: Any,
+                          protocol: Any = None) -> tuple[list[dict[str, Any]], list[str]]:
+        """``(gaps, unjudged)``: what the topic asks for that ``design`` (with ``protocol``, the one that runs, when that is
+        another) lacks, and the names of what nobody could check against it (the plan and the paper say so)."""
         if _topic_req.is_empty(req):
-            return []
+            return [], []
         plan = _topic_req.view(design, protocol)
         _gaps, unresolved = _topic_req.match(req, plan)
         verdicts = await self._judge_topic_items(req, plan, unresolved)
@@ -5679,7 +5681,7 @@ class Engine(RunChecksMixin):
         current: dict[str, list[dict[str, Any]]] = {"gaps": []}
 
         async def lacks(now: Any) -> list[str]:
-            current["gaps"] = await self._topic_gaps(req, now)
+            current["gaps"] = (await self._topic_gaps(req, now))[0]
             return [g["sentence"] for g in current["gaps"]]
 
         def request(_now: Any, _text: str) -> str:
@@ -5704,19 +5706,20 @@ class Engine(RunChecksMixin):
         if design is None or not sha or not path.is_file():
             return
         req = await self._read_topic_requirements()
-        if req.get("error") or _topic_req.is_empty(req):
-            lines = _topic_req.plan_lines(req, [], reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"),
-                                          error=str(req.get("error") or "")) if req.get("error") else []
-            if lines:
-                updated = _plan.add_to_section(path.read_text(encoding="utf-8"), _topic_req.HEADING, lines)
-                path.write_text(updated, encoding="utf-8")
-                _plan.record_version(self.quest_root, updated, by="engine", note="what the topic asks for could not be read")
+        if req.get("error"):
+            # Never a stop, and plan.md is not touched (a plan a person reads changes only for what is in it): the record,
+            # run.log and the paper's limitations say the plan was not held against the topic.
+            print("[FI] the topic could not be read for what it asks for; the plan was not held against it (see .fi/run.log)")
+            self._topic_covered_write(plan_done=True, unreadable=str(req["error"]))
+            return
+        if _topic_req.is_empty(req):
             self._topic_covered_write(plan_done=True)
             return
         design, sha = await self._ask_plan_for_the_topic(state, design, sha, req)
-        gaps = await self._topic_gaps(req, design)
+        gaps, unjudged = await self._topic_gaps(req, design)
         text = path.read_text(encoding="utf-8")
-        lines = _topic_req.plan_lines(req, gaps, reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"))
+        lines = _topic_req.plan_lines(req, gaps, reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"),
+                                      unjudged=unjudged)
         asked, calls = self._search_record(sha, _TOPIC_ASKED)
         if asked:
             lines += ["", "- FI asked the plan's model to add what was missing" + (
@@ -5731,7 +5734,7 @@ class Engine(RunChecksMixin):
         _plan.record_version(self.quest_root, updated, by="engine", note="what the topic asks for, and whether the plan has it")
         if asked:  # the record names the plan it was made on: the plan as FI wrote its note on it
             self._record_search_asked(asked, calls, _plan.sha256(updated), "told in the plan", _TOPIC_ASKED)
-        self._topic_covered_write(plan_done=True, left=gaps, asked=asked)
+        self._topic_covered_write(plan_done=True, left=gaps, unjudged=unjudged, asked=asked)
 
     async def _ask_design_for_the_topic(self, state: QuestState, design: dict[str, Any], req: dict[str, Any],
                                         gaps: list[dict[str, Any]], *, iteration: int) -> dict[str, Any]:
@@ -5807,15 +5810,15 @@ class Engine(RunChecksMixin):
         def running(now: dict[str, Any]) -> Any:
             return self._protocol_block({**state, "design": now})
 
-        gaps = await self._topic_gaps(req, design, running(design))
+        gaps, unjudged = await self._topic_gaps(req, design, running(design))
         if gaps and not frozen:
             if plan_sha:
                 design, plan_sha = await self._ask_plan_for_the_topic(state, design, plan_sha, req)
             elif self._client is not None:
                 design = await self._ask_design_for_the_topic(state, design, req, gaps,
                                                               iteration=int(state.get("iteration", 0) or 0))
-            gaps = await self._topic_gaps(req, design, running(design))
-        self._topic_covered_write(left=gaps, checked_at_design=True)
+            gaps, unjudged = await self._topic_gaps(req, design, running(design))
+        self._topic_covered_write(left=gaps, unjudged=unjudged, checked_at_design=True)
         if gaps:
             self._log.warning("[design] the design that will run still lacks what the topic asks for: %s",
                               "; ".join(g["sentence"] for g in gaps)[:400])

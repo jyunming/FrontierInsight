@@ -186,24 +186,27 @@ def _norm_formula(text: Any) -> str:
     return re.sub(r"[\s*`$\\{}]+", "", str(text or "").lower())
 
 
-def _covers(values: list[Any], factor: dict[str, Any]) -> str:
-    """Why the values of a setting do not cover the levels or range the topic states for it, or ``""``."""
+def _covers(values: list[Any], factor: dict[str, Any]) -> str | None:
+    """Why the values of a setting do not cover the levels or range the topic states for it, ``""`` when they do, and
+    ``None`` when a name match cannot tell (named levels held as numbers, numbers held as names): a reader judges those."""
     wanted = factor.get("levels") or []
     numbers = [n for n in (_number(v) for v in values) if n is not None]
     if wanted and all(isinstance(w, (int, float)) for w in wanted):
         if not numbers:
-            return ""
+            return None
         missing = [w for w in wanted if not any(math.isclose(w, n, rel_tol=1e-6, abs_tol=1e-12) for n in numbers)]
         return f"the values {', '.join(f'{m:g}' for m in missing[:6])} are not among its settings" if missing else ""
     if wanted:  # named levels
         have = {" ".join(str(v).lower().split()) for v in values if isinstance(v, str)}
         if not have:
-            return ""  # numbers standing for named levels: not settled here
+            return None  # numbers standing for named levels: a reader judges them
         have_tokens = [_tokens(h) for h in have]
         missing = [w for w in wanted if not any(_tokens(w) <= t or t <= _tokens(w) for t in have_tokens if t)]
         return f"the levels {', '.join(str(m) for m in missing[:6])} are not among its settings" if missing else ""
     rng = factor.get("range") or []
-    if len(rng) == 2 and numbers:
+    if len(rng) == 2 and not numbers:
+        return None
+    if len(rng) == 2:
         lo, hi = min(numbers), max(numbers)
         slack = 0.02 * max(abs(rng[0]), abs(rng[1]), 1e-12)
         if lo > rng[0] + slack or hi < rng[1] - slack:
@@ -228,7 +231,9 @@ def match(req: dict[str, Any], plan: dict[str, Any]) -> tuple[list[dict[str, Any
             unresolved.append(_item_id("factors", i))
             continue
         why = _covers(plan["axes"][axis], factor)
-        if why:
+        if why is None:
+            unresolved.append(_item_id("factors", i))
+        elif why:
             gaps.append(gap("level", factor, why=why, axis=axis))
     for i, quantity in enumerate(req.get("quantities") or []):
         wanted = _tokens(quantity["name"])
@@ -307,18 +312,22 @@ def parse_judgement(obj: Any, unresolved: list[str]) -> dict[str, str]:
     return out
 
 
-def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str]) -> list[dict[str, Any]]:
-    """All the gaps: those a name match settled, and the unresolved items the judgement called missing. An item nobody could
-    judge is not a gap."""
+def gaps_from(req: dict[str, Any], plan: dict[str, Any], verdicts: dict[str, str]) -> tuple[list[dict[str, Any]], list[str]]:
+    """``(gaps, unjudged)``: the gaps a name match settled plus the unresolved items the judgement called missing, and the
+    names of the items nobody could judge (no answer, a failed call, the calls spent). An item nobody judged is not
+    called a gap, and is never passed in silence: plan.md and the paper's limitations say it was not checked."""
     gaps, unresolved = match(req, plan)
+    unjudged: list[str] = []
     for ident in unresolved:
-        if verdicts.get(ident) != "missing":
-            continue
         found = item_of(req, ident)
-        if found is not None:
-            kind, item = found
+        if found is None:
+            continue
+        kind, item = found
+        if ident not in verdicts:
+            unjudged.append(str(item.get("name") or item.get("text") or ident))
+        elif verdicts[ident] == "missing":
             gaps.append(gap({"factors": "factor", "quantities": "quantity", "formulas": "formula"}[kind], item))
-    return gaps
+    return gaps, unjudged
 
 
 def main_gaps(gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -414,23 +423,25 @@ def merge(old: dict[str, Any], new: dict[str, Any], gaps: list[dict[str, Any]]) 
 # ---------------------------------------------------------------------------------------------------------------------
 
 def plan_lines(req: dict[str, Any], gaps: list[dict[str, Any]], *, reviewer: str, same_model: bool | None,
-               error: str = "") -> list[str]:
+               unjudged: list[str] | None = None) -> list[str]:
     """What plan.md says in *What the topic asks for*, in plain words."""
-    if error:
-        return [f"- FI could not read the topic for what it asks for ({error}); the plan was not held against it."]
     who = ("another model than the plan's" if same_model is False else
            "the plan's own model (no other model is named for `oracle_review`)" if same_model else "a model")
     lines = [f"> Read from the topic by {who}{f' ({reviewer})' if reviewer else ''}, then looked for in the plan.", ""]
     open_names = {g["name"] for g in gaps}
+    unchecked = set(unjudged or [])
     for factor in req.get("factors") or []:
         levels = factor.get("levels") or ([f"{factor['range'][0]:g} to {factor['range'][1]:g}"] if factor.get("range") else [])
         lines.append(f"- To vary or compare: {factor['name']}" + (f" ({', '.join(str(x) for x in levels[:8])})" if levels else "")
-                     + ("" if factor["name"] not in open_names else " - NOT in the plan's settings") + ".")
+                     + (" - NOT in the plan's settings" if factor["name"] in open_names else
+                        " - could not be checked against the plan" if factor["name"] in unchecked else "") + ".")
     for quantity in req.get("quantities") or []:
-        lines.append(f"- To report: {quantity['name']}" + (" - NOT measured in the plan" if quantity["name"] in open_names else "") + ".")
+        lines.append(f"- To report: {quantity['name']}" + (" - NOT measured in the plan" if quantity["name"] in open_names else
+                                                                " - could not be checked against the plan" if quantity["name"] in unchecked else "") + ".")
     for formula in req.get("formulas") or []:
         lines.append(f"- Formula the topic states: `{formula['text']}`"
-                     + (" - NOT in the plan's model" if formula["name"] in open_names else "") + ".")
+                     + (" - NOT in the plan's model" if formula["name"] in open_names else
+                      " - could not be checked against the plan" if formula["name"] in unchecked else "") + ".")
     for comparison in req.get("comparisons") or []:
         lines.append(f"- To compare: {comparison['what']}")
     for constraint in req.get("constraints") or []:
@@ -447,11 +458,20 @@ def write_note(quest_root: Any) -> str:
     except (OSError, ValueError):
         return ""
     left = record.get("left") if isinstance(record, dict) else None
-    if not isinstance(left, list) or not left:
-        return ""
-    sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
-    return (f"The topic asked for more than this study did: {sentences}. Say plainly in the limitations that these were not "
-            "studied, and do not write a result for them.")
+    left = left if isinstance(left, list) else []
+    unjudged = [str(n) for n in (record.get("unjudged") if isinstance(record, dict) else None) or [] if str(n).strip()]
+    parts: list[str] = []
+    if isinstance(record, dict) and record.get("unreadable"):
+        parts.append("FI could not read the topic for what it explicitly asks for (the factors to vary, the quantities and the "
+                     "formulas), so the plan was not held against it. Say plainly in the limitations that this was not checked.")
+    if left:
+        sentences = "; ".join(str(g.get("sentence") or "").rstrip(".") for g in left if isinstance(g, dict))
+        parts.append(f"The topic asked for more than this study did: {sentences}. Say plainly in the limitations that these "
+                     "were not studied, and do not write a result for them.")
+    if unjudged:
+        parts.append(f"FI could not check whether the plan includes what the topic asks for about {', '.join(unjudged)}. Say "
+                     "plainly in the limitations that this was not checked.")
+    return " ".join(parts)
 
 
 def stop_steps(quest_id: str, gaps: list[dict[str, Any]], asked: int) -> list[str]:
