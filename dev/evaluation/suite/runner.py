@@ -180,38 +180,145 @@ def _refresh(entry: dict[str, Any], handle: Any, alive: Callable[[int], bool]) -
         entry.update(state="done", ended_at=now())
 
 
+LOCK = "driver.lock"
+#: A lock file younger than this with no readable pid is a driver between creating it and writing its pid, not a stale one.
+_LOCK_GRACE_SECONDS = 10.0
+
+
+def lock_path(round_dir: Path) -> Path:
+    return Path(round_dir) / LOCK
+
+
+def _lock_owner(path: Path) -> int | None:
+    """The pid written in a lock file, or ``None`` when it holds none that can be read."""
+    try:
+        return int(path.read_text(encoding="utf-8").strip().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def acquire_lock(round_dir: Path, *, pid: int | None = None, alive: Callable[[int], bool] = default_alive) -> Path:
+    """Take the round's exclusive driver lock: a file created with ``O_CREAT | O_EXCL`` (atomic on Windows and POSIX) that
+    holds the driver's pid. A second driver of the same round refuses with a plain message; a lock whose process is gone
+    is taken over. Two drivers reading the same queued state would otherwise start the same topic twice."""
+    path, me = lock_path(round_dir), int(pid if pid is not None else os.getpid())
+    for _ in range(5):
+        try:
+            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            owner = _lock_owner(path)
+            if owner is None:
+                try:
+                    young = time.time() - path.stat().st_mtime < _LOCK_GRACE_SECONDS
+                except OSError:
+                    continue  # it went away between the two looks: try again
+                if young:
+                    raise SuiteError(f"round {Path(round_dir).name} is being started by another driver right now; "
+                                     "wait a moment and look at its status") from None
+            elif alive(owner):
+                raise SuiteError(f"round {Path(round_dir).name} is already being driven by process {owner}: "
+                                 f"follow it with `status`, or stop that process first ({path})") from None
+            # stale: take it over by moving it aside (one mover wins), and make sure it was the stale file that was moved
+            moved = path.with_name(f"{LOCK}.stale.{me}")
+            try:
+                os.replace(path, moved)
+            except OSError:
+                continue
+            if _lock_owner(moved) != owner:  # a fresh lock was moved by mistake: put it back if the place is free
+                try:
+                    os.link(moved, path)
+                except OSError:
+                    pass
+                finally:
+                    try:
+                        os.unlink(moved)
+                    except OSError:
+                        pass
+                raise SuiteError(f"round {Path(round_dir).name} is being started by another driver right now; "
+                                 "wait a moment and look at its status")
+            try:
+                os.unlink(moved)
+            except OSError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(f"{me}\n")
+        return path
+    raise SuiteError(f"could not take the driver lock of round {Path(round_dir).name} ({path})")
+
+
+def release_lock(round_dir: Path, *, pid: int | None = None) -> None:
+    """Remove the lock if it is this driver's (never another driver's)."""
+    path = lock_path(round_dir)
+    if _lock_owner(path) == int(pid if pid is not None else os.getpid()):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def drive(suite: Suite, round_dir: Path, *, spawn: Callable[..., Any] = default_spawn,
           alive: Callable[[int], bool] = default_alive, sleep: Callable[[float], None] = time.sleep,
-          interval: float = 20.0, max_loops: int | None = None) -> dict[str, Any]:
+          interval: float = 20.0, max_loops: int | None = None, pid: int | None = None) -> dict[str, Any]:
     """Start the queued topics, never more than ``max_parallel`` live at once, until every topic has ended.
 
-    Safe to call again after this process died: topics that were started are followed by pid, queued ones are started."""
+    Safe to call again after this process died: topics that were started are followed by pid, queued ones are started.
+    Only one driver may drive a round: it holds ``driver.lock`` for as long as it runs (a second one refuses with a
+    ``SuiteError``). Each queued topic is claimed (``starting``, written to the manifest through a temporary file and
+    ``os.replace``) from the manifest as it is on disk now, before its process is launched, so a topic is never launched
+    twice; a topic left ``starting`` by a driver that died is ended as ``failed_to_start`` rather than risk a second run."""
     rdir = Path(round_dir)
+    me = int(pid if pid is not None else os.getpid())
+    acquire_lock(rdir, pid=me, alive=alive)
+    try:
+        return _drive_locked(suite, rdir, spawn=spawn, alive=alive, sleep=sleep, interval=interval, max_loops=max_loops)
+    finally:
+        release_lock(rdir, pid=me)
+
+
+def _patch(rdir: Path, name: str, **fields: Any) -> dict[str, Any]:
+    """Read the manifest as it is on disk, change one topic's entry and write it back through a temporary file and
+    ``os.replace``: nothing another writer changed in between (an adopted topic, say) is lost."""
     manifest = load_manifest(rdir)
+    manifest["topics"][name].update(fields)
+    save_manifest(rdir, manifest)
+    return manifest
+
+
+def _drive_locked(suite: Suite, rdir: Path, *, spawn: Callable[..., Any], alive: Callable[[int], bool],
+                  sleep: Callable[[float], None], interval: float, max_loops: int | None) -> dict[str, Any]:
     handles: dict[str, Any] = {}
     loops = 0
     while True:
-        topics = manifest["topics"]
-        for name, entry in topics.items():
+        manifest = load_manifest(rdir)  # as it is on disk now, not as an earlier look left it
+        for name, entry in manifest["topics"].items():
+            before = dict(entry)
+            if entry["state"] == "starting" and name not in handles:
+                entry.update(state="failed_to_start", ended_at=now(), error="the driver stopped while starting it")
             _refresh(entry, handles.get(name), alive)
-        live = sum(1 for e in topics.values() if e["state"] == "running")
-        for name, entry in topics.items():
-            if entry["state"] != "queued" or live >= manifest["max_parallel"]:
+            if entry != before:
+                _patch(rdir, name, **entry)
+        for name in list(manifest["topics"]):
+            fresh = load_manifest(rdir)  # claim from the state on disk, one topic at a time
+            entry = fresh["topics"][name]
+            live = sum(1 for e in fresh["topics"].values() if e["state"] in ("running", "starting"))
+            if entry["state"] != "queued" or live >= fresh["max_parallel"]:
                 continue
             tdir = Path(entry["dir"])
-            cmd = [manifest["python"], "launch.py", "--config", entry["config"]]
+            cmd = [fresh["python"], "launch.py", "--config", entry["config"]]
+            _patch(rdir, name, state="starting")  # the claim is on disk before the process exists
             try:
-                h = spawn(cmd, cwd=Path(manifest["fi"]), env=child_env(suite, manifest["round"], name, tdir),
+                h = spawn(cmd, cwd=Path(fresh["fi"]), env=child_env(suite, fresh["round"], name, tdir),
                           stdout=tdir / "stdout.log", stderr=tdir / "stderr.log")
             except OSError as exc:
-                entry.update(state="failed_to_start", ended_at=now(), error=type(exc).__name__)
+                _patch(rdir, name, state="failed_to_start", ended_at=now(), error=type(exc).__name__)
                 continue
             handles[name] = h
-            entry.update(state="running", pid=int(h.pid), started_at=now(), quest_root=str(tdir / "out"))
-            (tdir / "start.txt").write_text(f"{name} pid {h.pid} started {entry['started_at']} fi {manifest['fi_git']['short']}\n",
+            started = now()
+            _patch(rdir, name, state="running", pid=int(h.pid), started_at=started, quest_root=str(tdir / "out"))
+            (tdir / "start.txt").write_text(f"{name} pid {h.pid} started {started} fi {fresh['fi_git']['short']}\n",
                                             encoding="utf-8")
-            live += 1
-        save_manifest(rdir, manifest)
+        manifest = load_manifest(rdir)
         if all(e["state"] in ENDED for e in manifest["topics"].values()):
             manifest["ended_at"] = now()
             save_manifest(rdir, manifest)

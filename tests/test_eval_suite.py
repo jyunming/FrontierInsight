@@ -466,3 +466,132 @@ def test_the_criterion_is_not_reported_not_met_before_the_missing_grades_decide_
     done = [{"outcome": "paper", "paper_status": "trustworthy"} for _ in range(7)]
     done += [{"outcome": "honest_stop", "stop_status": "correct"} for _ in range(3)]
     assert trend.criteria(collect.metrics(done))["trustworthy"] == "met"
+
+
+# ------------------------------------------------------------------------------------- one driver per round
+
+def _queued(tmp_path: Path, max_parallel: int = 3) -> tuple[Suite, Path]:
+    suite = _suite(tmp_path)
+    rdir = runner.prepare_round(suite, "dev", "r1", _fi(tmp_path), max_parallel=max_parallel,
+                                git=lambda p: {"sha": "a", "short": "a", "dirty": None})
+    return suite, rdir
+
+
+def test_a_second_driver_refuses_while_the_first_holds_the_lock(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
+    runner.acquire_lock(rdir, pid=4242, alive=lambda pid: True)
+    launched: list[list[str]] = []
+
+    def spawn(cmd: list[str], **kw: Any) -> _Proc:
+        launched.append(cmd)
+        return _Proc(cmd, kw["cwd"], kw["env"])
+
+    with pytest.raises(SuiteError, match="already being driven by process 4242"):
+        runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: True, sleep=lambda s: None, max_loops=1, pid=77)
+    assert launched == [] and {e["state"] for e in runner.load_manifest(rdir)["topics"].values()} == {"queued"}
+    assert runner.lock_path(rdir).read_text(encoding="utf-8").strip() == "4242", "the first driver's lock is untouched"
+    runner.release_lock(rdir, pid=77)  # not this driver's: left alone
+    assert runner.lock_path(rdir).is_file()
+    runner.release_lock(rdir, pid=4242)
+    assert not runner.lock_path(rdir).exists()
+
+
+def test_a_stale_lock_is_taken_over_and_the_lock_is_released_at_the_end(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
+    runner.lock_path(rdir).write_text("999999\n", encoding="utf-8")  # a driver that is gone
+    procs: list[_Proc] = []
+
+    def spawn(cmd: list[str], **kw: Any) -> _Proc:
+        procs.append(_Proc(cmd, kw["cwd"], kw["env"]))
+        assert runner.lock_path(rdir).read_text(encoding="utf-8").strip() == "77"  # held while it runs
+        return procs[-1]
+
+    def sleep(_s: float) -> None:
+        for p in procs:
+            p.code = 0
+
+    m = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: pid != 999999, sleep=sleep, interval=0, pid=77)
+    assert len(procs) == 3 and all(e["state"] == "done" for e in m["topics"].values())
+    assert not runner.lock_path(rdir).exists()
+    assert not list(rdir.glob("driver.lock.stale.*"))
+
+
+def test_the_lock_is_released_when_the_driver_fails(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
+
+    def sleep(_s: float) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        runner.drive(suite, rdir, spawn=lambda cmd, **kw: _Proc(cmd, kw["cwd"], kw["env"]), alive=lambda pid: True,
+                     sleep=sleep, pid=77)
+    assert not runner.lock_path(rdir).exists()
+
+
+def test_a_lock_being_written_is_not_taken_over(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
+    runner.lock_path(rdir).write_text("", encoding="utf-8")  # created, pid not written yet
+    with pytest.raises(SuiteError, match="another driver right now"):
+        runner.acquire_lock(rdir, pid=77, alive=lambda pid: False)
+
+
+def test_no_topic_is_launched_twice_when_a_second_driver_starts_in_the_middle(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path, max_parallel=1)
+    procs: list[_Proc] = []
+    refused: list[str] = []
+
+    def spawn(cmd: list[str], **kw: Any) -> _Proc:
+        # a second driver (the manual `drive`) starts while the first is launching: it sees the topic claimed, then refuses
+        claimed = [n for n, e in runner.load_manifest(rdir)["topics"].items() if e["state"] == "starting"]
+        assert len(claimed) == 1, "the claim is on disk before the process is launched"
+        try:
+            runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: True, sleep=lambda s: None, max_loops=1, pid=88)
+        except SuiteError as exc:
+            refused.append(str(exc))
+        procs.append(_Proc(cmd, kw["cwd"], kw["env"]))
+        return procs[-1]
+
+    def sleep(_s: float) -> None:  # the running topic ends at every tick
+        for p in procs:
+            p.code = 0
+
+    m = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: pid == 77, sleep=sleep, interval=0, pid=77)
+    assert len(refused) == 3 and all("already being driven" in r for r in refused)
+    assert len(procs) == 3 and len({tuple(p.cmd) for p in procs}) == 3, "each topic once"
+    assert all(e["state"] == "done" for e in m["topics"].values())
+
+
+def test_a_topic_left_starting_by_a_dead_driver_is_not_launched_again(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
+    m = runner.load_manifest(rdir)
+    first = next(iter(m["topics"]))
+    m["topics"][first]["state"] = "starting"  # claimed, and the driver died before it recorded the process
+    runner.save_manifest(rdir, m)
+    procs: list[_Proc] = []
+
+    def spawn(cmd: list[str], **kw: Any) -> _Proc:
+        procs.append(_Proc(cmd, kw["cwd"], kw["env"]))
+        return procs[-1]
+
+    out = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: False, sleep=lambda s: [setattr(p, "code", 0) for p in procs],
+                       interval=0, pid=77)
+    assert out["topics"][first]["state"] == "failed_to_start" and len(procs) == 2
+    assert all(first not in " ".join(p.cmd) for p in procs)
+
+
+def test_the_manifest_is_read_again_so_another_writers_change_is_kept(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path, max_parallel=1)
+    procs: list[_Proc] = []
+    names = list(runner.load_manifest(rdir)["topics"])
+
+    def spawn(cmd: list[str], **kw: Any) -> _Proc:
+        if not procs:  # while the first topic starts, another tool ends the second one on disk
+            other = runner.load_manifest(rdir)
+            other["topics"][names[1]].update(state="adopted", ended_at="x")
+            runner.save_manifest(rdir, other)
+        procs.append(_Proc(cmd, kw["cwd"], kw["env"]))
+        return procs[-1]
+
+    out = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: pid == 77, sleep=lambda s: [setattr(p, "code", 0) for p in procs],
+                       interval=0, pid=77)
+    assert len(procs) == 2 and out["topics"][names[1]]["state"] == "adopted"

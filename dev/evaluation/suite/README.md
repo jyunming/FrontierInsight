@@ -29,7 +29,7 @@ python -m dev.evaluation.suite collect --suite S/suite.yaml --round r7        # 
 
 `--fi` is a worktree you do not edit during the round; its commit is recorded. A topic runs as `launch.py --config ...` in
 its own detached process (it survives the command), with its own Axon store. The key file is read into the process
-environment only. `run` starts a detached driver that keeps up to N topics running; `drive` re-attaches if it died.
+environment only. `run` starts a detached driver that keeps up to N topics running; `drive` re-attaches if it died. Only one driver runs a round at a time (it holds `driver.lock` in the round folder): a second `drive` says which process has it and stops; a lock left by a driver that is gone is taken over.
 
 ## What the files mean
 
