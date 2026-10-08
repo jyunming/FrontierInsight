@@ -61,10 +61,11 @@ A single \`/start\` or \`/new\` quest made **23–28 LLM calls** in 17 complete 
 | `source_router` | 0, or 1 per literature pass + 1 per cross-check lookup | Only with `knowledge.source_routing: auto` (the default); `manual` makes no routing call. |
 | `select_skills` | 0–1 | Picks the skills the quest carries; no call when no skill is a candidate. |
 | `plan` | 1 | Writes `plan.md` (the literature read as a reviewer would, the gap, the design). It is the design call of the first pass with a plan directive appended, so `design` makes no call that pass; the counts above were measured before this step existed. |
-| `oracle_review` | 0–1 | Once per quest, right after the plan is written, when its protocol has checks against known answers: a second model reads them as a referee would (does each test the model, would a plausible bug make it fail, is its number well defined, is there a better one, which equations no check tests). Its findings go back to the plan in the same one request as the checks not in their kind's form (`plan_revise`). Set its model with `provider.node_models.oracle_review`. Under `rigor_profile: research` the result reaches *independently validated* only when this review gave a usable answer and the record of the calls shows another model gave it than the one that wrote the checks (a connection that does not name the answering model cannot show that). |
+| `oracle_review` | 0–1 | Once per quest, right after the plan is written, when its protocol has checks against known answers: a second model reads them as a referee would (does each test the model, would a plausible bug make it fail, is its number well defined, is there a better one, which equations no check tests). Its findings go back to the plan in the same one request as the checks not in their kind's form (`plan_revise`). Set its model with `provider.node_models.oracle_review`. A reviewer's job is to find problems: each finding says where, what is wrong, why and how to fix it, and the reply also lists what it checked and found no problem with. A reply with neither is asked once more (one more call) and then recorded as not reviewed. Under `rigor_profile: research` the result reaches *independently validated* only when this review gave a usable answer and the record of the calls shows another model gave it than the one that wrote the checks (a connection that does not name the answering model cannot show that). |
 | `plan_revise` | 0–4 | One call per `--revise-plan` request (two if the first reply's design block cannot be read). FI itself asks at most one request at the plan step, only when a check against a known answer is not in its kind's numeric form and cannot be put right without the plan, or when the second reading of the checks (`oracle_review`) found something to change, and at most one at the test run of the checks before the study, only when a measured number says the plan and the simulation mean different things by a check (each request can take a second call when its reply cannot be read); these come on top of the oracle requests counted under `implement_oracle`. |
 | `design` | 1 per later design pass | Runs again when the cross-check or the review sends the quest back; the first pass adopts the design block of `plan.md`. |
-| `design_self_critique` | 1 per design pass | Audits the drafted methodology against twelve checks (precision, the estimand and its interval, thresholds, random streams, convergence, an oracle, failed runs among them) and keeps what it found and changed in `needs/DESIGN_CRITIQUE.json`. |
+| `design_self_critique` | 1 per design pass | Audits the drafted methodology against twelve checks (precision, the estimand and its interval, thresholds, random streams, convergence, an oracle, failed runs among them) and keeps what it found and changed in `needs/DESIGN_CRITIQUE.json`. Named `design_review` in `provider.node_providers` / `provider.node_models`, it is read by another model than the one that wrote the design (the same checks, the same rules for what is taken); `needs/DESIGN_CRITIQUE.json` and the quality report then say it was an independent review, and, when no `design_review` is set, a self-review. A different model that lists no objection and does not say what it checked is asked once more (one more call) and then recorded as not having reviewed the design. |
+| `code_review` | 0–2 per code version, at most 3 readings in a quest | After the code is written and before the equation tests and the checks run: another model reads the code against the plan's required outputs (implemented, missing, different) and against its logic (each `# E<n>` function against its equation, the statistics as the plan defines them, a setting the plan says matters really used, no step skipped, nothing reported a constant, each check's case). What it finds goes to the existing repair as a plain directive without any value; a high-severity finding still there afterwards never stops the quest on the reviewer's word. Set its model with `provider.node_providers.code_review` (or `node_models`); until it is set, the code is read by the model named for `oracle_review`. |
 | `implement_outline` | 1 | |
 | `implement_oracle` | 0–3 (+1 per disputed check) | One repair per attempt (`engine.oracle_repair_attempts`), only when a check of the plan's oracles is missing or fails before the main run (`engine.oracle_check`; FI runs the simulation on each oracle's case itself, and a one-script quest answers them when run with `FI_ORACLE=1`), plus one retry of a repair call that got no answer (a provider timeout) and one more for each check a repair says is itself wrong (that answer is set aside and not counted); a protocol with no oracle, or one without numbers, first makes `plan_revise` calls (up to the same number, counted apart). None when the oracles pass or the plan has no protocol. |
 | `implement_protocol` | 0–3 | One repair per attempt (`engine.protocol_repair_attempts`), only when the written script differs from the protocol in the plan (`engine.protocol_check`), plus one retry of a repair call that got no answer (a provider timeout); none when it agrees or the plan has no protocol. |
@@ -313,6 +314,7 @@ This changes the title line of the paper, the `title` in the quest's `config.yam
 | `--critique <quest_id>` | one quest_id | adversarial second-pass review | **1** |
 | `--rename <quest_id> <new title>` | quest_id, then the title | change a finished or paused quest's title (paper, config, summary, saved state); also `fi tools rename` | 0 |
 | `--why <quest_id> [stop\|review\|evidence\|reasons\|<step>]` | quest_id, then what to ask | why the quest stopped, why the review asked for a revision, why the evidence is at its level, why one step decided what it did, or (`reasons`) the reasons the model gave at every step. A step's answer also says whether `.fi/thinking.jsonl` holds the model's reasoning for it and how many characters (the text stays in the file). A reason the model wrote, and a reasoning summary it returned, are its own account of itself, not its hidden reasoning. Web: **Why?** and **Model's reasons** on the quest page; VS Code: `@fi /why`. See [docs/trace.md](trace.md) | 0 |
+| `--quality <quest_or_folder>...` | one or more quest ids or folders | where a quest went wrong, who caught it, what was fixed, what to try and what it cost (also written as `QUALITY.md` at every stop); several quests or a folder of quests give a comparison table (`quality_table.md` / `.csv`, into the first folder or `--quality-out DIR`). Reads records only, asks no model. Web: **Quality report** on the quest page; VS Code: `@fi /quality`. Also `fi tools quality` | 0 |
 | `--install-tectonic` | none | downloads tectonic to `tools/` for no-admin LaTeX | **0** (network download only) |
 
 | Flag | Mode | What it does |
@@ -1028,6 +1030,23 @@ provider:
     write:  claude-3-5-sonnet
     review: gpt-5
 ```
+
+### One model writes, another model reviews
+
+At the plan, the design and the code, the main model writes and a different model can read what it wrote and look for problems (each one with where it is, what is wrong, why and how to fix it). Each reader is its own step, so you can route them separately; name one other provider for all three:
+
+```yaml
+provider:
+  name: openai
+  model: main-model                     # writes the plan, the design and the code
+  node_providers:
+    oracle_review: &reviewer            # reads the plan's checks
+      {name: openai, model: reviewer-model, base_url: "https://reviewer.example/v1", api_key_env: REVIEWER_API_KEY}
+    design_review: *reviewer            # reads the design
+    code_review: *reviewer              # reads the code against the plan
+```
+
+A step you leave out stays as it was: the design is then audited by the main model and `QUALITY.md` calls that a self-review, and the code is read by whatever reads the checks. `QUALITY.md` shows, for each stage, who wrote it, who read it, what the reading found and what the reading cost (calls and tokens), so you can see which reviews are worth a stronger model.
 
 ### Let a local model think
 

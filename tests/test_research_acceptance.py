@@ -87,7 +87,7 @@ def _fake(protocol: dict[str, Any], simulate: str, analysis: str, calls: list[st
             return _FAKE_RESPONSES["review"]
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the plan's checks
             return json.dumps({"checks": [{"name": o["name"], "appropriate": "yes", "discriminating": "yes",
-                                           "well_defined": "yes"} for o in protocol.get("oracles") or []],
+                                           "well_defined": "yes", "why": "it tests the model"} for o in protocol.get("oracles") or []],
                                "summary": "the checks test the model"})
         return _fake_response_for(prompt)
 

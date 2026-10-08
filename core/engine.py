@@ -112,6 +112,8 @@ from . import oracle_forms as _forms
 from . import oracle_review as _review
 from . import equation_tests as _equation_tests
 from . import code_review as _code_review
+from . import review_pairs as _pairs
+from . import quality_report as _quality_report
 from . import function_steps as _function_steps
 from . import hidden_check as _hidden
 from . import accepted_checks as _accepted
@@ -237,7 +239,10 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "figures",
     "write.trim",
     "oracle_review",  # a referee's verdict on the plan's checks
+    "design_review",  # the design audit, when another step reads the design than the one that wrote it
+    "code_review",  # the code read against the plan, when it has a step of its own
     "oracle_review.recompute",  # a failing check's expected value worked out again (core/oracle_triage.py)
+    "oracle_review.code",  # the code read against the plan, while no step of its own is set for it
 })
 
 
@@ -1709,6 +1714,10 @@ class Engine(RunChecksMixin):
                 self._emit_source_failure_summary(started_at=_run_started_at)
             except Exception:  # noqa: BLE001 - reporting must not mask the outcome
                 pass
+            # The quality report (QUALITY.md, .fi/quality.json): where the quest went wrong, who caught it, what was
+            # fixed and what it cost, read from the records above. Every way a run ends passes here: finished, an
+            # honest stop, a pause, a crash. Never in the way of the outcome.
+            _quality_report.write_quietly(self.quest_root)
             try:
                 _source_failures.current_quest.reset(_quest_ctx)
             except ValueError:
@@ -4770,11 +4779,16 @@ class Engine(RunChecksMixin):
         )
 
     async def _audit_design(
-        self, state: QuestState, design: dict[str, Any], *, adopt: bool = True,
+        self, state: QuestState, design: dict[str, Any], *, adopt: bool = True, writer: str = "design",
     ) -> tuple[dict[str, Any], Any]:
         """The second-pass methodology audit of a drafted design: ``(design, objections addressed)``. With
         ``adopt=False`` it only checks a design that is already settled (one a person edited in plan.md, or an amended
-        one): nothing it proposes is taken, and the receipt passes only when it had no objection."""
+        one): nothing it proposes is taken, and the receipt passes only when it had no objection.
+
+        It is the design's reviewer (core/review_pairs.py): the step ``design_review`` when a person set a model or a
+        provider for it, else the main model's own audit as before. ``writer`` is the step that wrote the design (the
+        plan step, or the design step). What the reviewer is, against that writer, is recorded with the audit: a
+        different model is an independent review, the same model a self-review, and never the one as the other."""
         iteration = state.get("iteration", 0)
         # The design's ``rationale`` is the model's own account for the audit trace, not part of what the audit reviews or
         # what its amended design must repeat (its reply shape does not list it): it is set aside here and put back after.
@@ -4798,6 +4812,7 @@ class Engine(RunChecksMixin):
         # quest. Parse failures and shape drift on the response are
         # also non-fatal — the original draft survives in those
         # cases. The audit is strictly advisory.
+        review_node = self._review_node("design_review")
         critique_prompt = self._prompts["design_self_critique"].substitute(
             topic=state["topic"],
             chosen_idea=json.dumps(state.get("chosen_idea") or {}, indent=2),
@@ -4806,14 +4821,30 @@ class Engine(RunChecksMixin):
         )
         critique: dict[str, Any] = {}
         failure = ""
+        not_reviewed = False
+        # A reviewer that is shown to be another model than the design's writer must find problems or say what it
+        # checked: a reply with neither is no review (asked once more, then recorded as not reviewed).
+        strict = self._reader_vs_planner(review_node, after_call=False, writer=writer)[0] is False
+
+        def _nothing_said(p: dict[str, Any]) -> bool:
+            return _pairs.said_nothing(_pairs.findings(p.get("objections_addressed")), _pairs.checked(p.get("checked_no_problem")))
+
         audit_started = _receipts.now()
         before = json.loads(json.dumps(design, default=str))
         try:
             # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
             _, critique = await self._chat_json(
-                critique_prompt, node="design_self_critique", want=("objections_addressed",),
-                usable=lambda p: isinstance(p.get("objections_addressed"), list),
+                critique_prompt, node=review_node, want=("objections_addressed",),
+                usable=lambda p: isinstance(p.get("objections_addressed"), list) and not (strict and _nothing_said(p)),
+                why_unusable=lambda p: ("it listed no objection and did not say what it checked: put every problem under "
+                                        "objections_addressed, and what you checked and found no problem with under "
+                                        "checked_no_problem") if strict and isinstance(p.get("objections_addressed"), list)
+                and _nothing_said(p) else "",
             )
+            if strict and isinstance(critique, dict) and isinstance(critique.get("objections_addressed"), list)                     and _nothing_said(critique):
+                failure = f"the design was not reviewed: {_pairs.NOT_A_REVIEW}"
+                not_reviewed = True
+                critique = {}
         except Exception as e:  # noqa: BLE001 — see "Failure isolation" above
             failure = f"the audit call or its reply could not be used: {e!r}"
             self._log.warning(
@@ -4857,7 +4888,18 @@ class Engine(RunChecksMixin):
             "[design_self_critique] iteration=%d objections_addressed=%d",
             iteration, n_addressed,
         )
-        self._record_design_critique(iteration, before, design, objections, failure)
+        same, reviewer, writer_model, named = self._reader_vs_planner(review_node, after_call=True, writer=writer)
+        review_info = {"kind": "not_reviewed" if not_reviewed else "independent_review" if same is False
+                       else "self_review" if same else "unclear",
+                       "reviewer": reviewer, "writer": writer_model, "same_model": same, "reported": named,
+                       "step": review_node}
+        self._record_design_critique(iteration, before, design, objections, failure, node=review_node, review=review_info)
+        if not failure:
+            self._log.info(
+                "[design_self_critique] the design was read by %s: %s", reviewer,
+                "a different model than the one that wrote it" if same is False else
+                "the model that wrote it (a self-review, not an independent one)" if same else
+                f"FI cannot tell whether it is another model than the one that wrote it ({writer_model})")
         objected = [o.get("objection") if isinstance(o, dict) else o for o in objections or []] if not adopt else []
         if not adopt and not failure and proposed_change and not objected:
             objected = ["it proposed a different design without naming why"]
@@ -4866,7 +4908,10 @@ class Engine(RunChecksMixin):
             inputs={"design": before}, output=_receipts.design_core(design), error=failure,
             detail=("it objected to the design that ran: " + "; ".join(str(o)[:160] for o in objected[:3])) if objected else "",
         )
-        if failure:
+        if failure and not_reviewed:
+            # The reviewer answered but did not review: a gap the evidence level records, not a stop for a person.
+            self._log.warning("[design_self_critique] %s; the receipt records it as a gap", failure)
+        elif failure:
             self._stop_once_for_check(
                 "design_audit", failure, look="needs/DESIGN_CRITIQUE.json and the [design_self_critique] entry in .fi/run.log",
                 inputs={"design": before},
@@ -4887,15 +4932,21 @@ class Engine(RunChecksMixin):
             return []
         if last.get("status") == "failed":
             return [f"The methodology audit did not complete: {last.get('failure')} (see needs/DESIGN_CRITIQUE.json)."]
+        review = last.get("review") if isinstance(last.get("review"), dict) else {}
+        who = {"independent_review": f"The design was read by a different model ({review.get('reviewer')}), not the one "
+                                     f"that wrote it ({review.get('writer')}).",
+               "self_review": "The design was read again by the model that wrote it: a self-review, not an independent "
+                              "one."}.get(str(review.get("kind")), "")
         if last.get("changed_keys"):
             return [
                 "The methodology audit amended the design: " + ", ".join(last["changed_keys"])
-                + " (before and after are in needs/DESIGN_CRITIQUE.json)."
+                + " (before and after are in needs/DESIGN_CRITIQUE.json)." + (f" {who}" if who else "")
             ]
-        return []
+        return [who] if who else []
 
     def _record_design_critique(
         self, iteration: int, before: dict[str, Any], after: dict[str, Any], objections: Any, failure: str,
+        *, node: str = "design_self_critique", review: dict[str, Any] | None = None,
     ) -> None:
         """Keep what the methodology audit said and did in ``needs/DESIGN_CRITIQUE.json``, one entry per pass: the
         objections in full, the design before and after and the keys that changed, and whether the audit ran at all. Until
@@ -4910,6 +4961,7 @@ class Engine(RunChecksMixin):
                 "status": "failed" if failure else "ok",
                 "failure": failure,
                 "objections": objections if isinstance(objections, list) else [],
+                **({"review": review} if review else {}),
                 "changed_keys": changed,
                 "before": before,
                 "after": after_plain,
@@ -4923,7 +4975,7 @@ class Engine(RunChecksMixin):
                 "design_self_critique", path, status=entry["status"],
                 summary="changed " + (", ".join(changed) or "nothing") if not failure else failure,
             )
-            prov = self._chat_provenance("design_self_critique")
+            prov = self._chat_provenance(node)
             for o in entry["objections"]:
                 o = o if isinstance(o, dict) else {"objection": o}
                 self._audit(
@@ -5068,7 +5120,7 @@ class Engine(RunChecksMixin):
         obj = await self._design_reply(prompt, node="plan")
         extra = obj.pop("plan", None)
         design = obj
-        design, objections = await self._audit_design(state, design)
+        design, objections = await self._audit_design(state, design, writer="plan")
         if isinstance(design, dict):
             # ``plan`` asks the same design prompt as ``design`` (``_design_prompt`` + ``_PLAN_DIRECTIVE``) and can get
             # the same ``rationale`` block back. Unlike ``design``, this node writes straight to ``plan.md`` and never
@@ -9561,18 +9613,19 @@ class Engine(RunChecksMixin):
         for the design that runs. Returns the design to run."""
         if self.config.engine.analyze_local_first or not isinstance(design, dict):
             return design
+        writer = "plan" if _plan.plan_path(self.quest_root).is_file() else "design"  # the step that wrote the design
         _status, record, problem = _receipts.read(self.quest_root, "design_audit")
         key = _receipts.sha256(_receipts.design_core(design))
         if not problem and record is not None and record.get("output_hash") == key:
             return design
         if self._design_audit_acted_on(key) or not self._fi_wrote_the_plan_unfrozen(design):
             self._log.info("[design] the design that will run is not the one the methodology audit saw; auditing it (no change taken)")
-            await self._audit_design(state, design, adopt=False)
+            await self._audit_design(state, design, adopt=False, writer=writer)
             return design
         self._log.info("[design] the design that will run is not the one the methodology audit saw; FI rewrote it "
                        "itself and nothing has run, so the audit may change it once")
         self._mark_design_audit_acted(key)
-        amended, objections = await self._audit_design(state, design, adopt=True)
+        amended, objections = await self._audit_design(state, design, adopt=True, writer=writer)
         kept_checks = False
         if isinstance(amended, dict):
             amended, kept_checks = self._keep_what_the_results_are_judged_by(design, amended)
@@ -9589,7 +9642,7 @@ class Engine(RunChecksMixin):
         if kept_checks:
             self._log.info("[design] the audit also suggested changing the checks the results are judged by; FI kept "
                            "them as they were")
-        await self._audit_design(state, design, adopt=False)
+        await self._audit_design(state, design, adopt=False, writer=writer)
         if kept_checks:
             _receipts.add_detail(self.quest_root, "design_audit",
                                  "The audit also suggested changing the checks the results are judged by (the protocol's "
@@ -9970,21 +10023,21 @@ class Engine(RunChecksMixin):
 
     # --- a different model reads the code against the plan's required outputs (core/code_review.py)
 
-    def _reader_vs_planner(self, node: str, *, after_call: bool) -> tuple[bool | None, str, str, bool]:
-        """``(same model?, reader, planner, the connection named the reader)`` for the step ``node`` against the plan
-        step, as :meth:`_review_oracles` decides it: from the models the connections named after a call, else the ones
-        asked for. ``None`` when it cannot be told."""
+    def _reader_vs_planner(self, node: str, *, after_call: bool, writer: str = "plan") -> tuple[bool | None, str, str, bool]:
+        """``(same model?, reader, writer's model, the connection named the reader)`` for the step ``node`` against the
+        step that wrote what it reads (``writer``: the plan by default), as :meth:`_review_oracles` decides it: from the
+        models the connections named after a call, else the ones asked for. ``None`` when it cannot be told."""
         answered = self._chat_provenance(node) if after_call else {}
-        planned = self._chat_provenance("plan")
+        planned = self._chat_provenance(writer)
         reader_asked = self._model_for_node(node) or self.config.provider.model or ""
-        planner_asked = self._model_for_node("plan") or self.config.provider.model or ""
+        planner_asked = self._model_for_node(writer) or self.config.provider.model or ""
         reader = str(answered.get("model") if answered.get("reported") else reader_asked or "")
         planner = str(planned.get("model") if planned.get("reported") else planner_asked or "")
         if answered.get("reported") and planned.get("reported"):
             same: bool | None = _review.same_model(answered.get("model"), planned.get("model"))
         elif reader_asked and planner_asked:
             same = _review.same_model(reader_asked, planner_asked)
-        elif not self._model_for_node(node) and not self._model_for_node("plan"):
+        elif not self._model_for_node(node) and not self._model_for_node(writer):
             same = True
         else:
             same = None
@@ -10020,7 +10073,8 @@ class Engine(RunChecksMixin):
         if record.get("read_version"):
             counters["read_version"] = record["read_version"]  # the last version a second model really read
         record = {"version": version, **counters, "requirements": len(reqs)}
-        same, reader, planner, _named = self._reader_vs_planner(_review.NODE, after_call=False)
+        review_node = self._review_node("code_review")
+        same, reader, planner, _named = self._reader_vs_planner(review_node, after_call=False, writer="implement")
         if same is True:
             record["skipped"] = f"the reader is the model that wrote the code ({planner})"
             _code_review.save(self.quest_root, record)
@@ -10037,26 +10091,47 @@ class Engine(RunChecksMixin):
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
         sources, _partial = _code_review.sources_text(code)
         topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
+        values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
+        plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None)
         verdicts: list[dict[str, Any]] | None = None
+        logic: list[dict[str, Any]] = []
+        listed: list[str] = []
+        asked_again = False
         try:
-            # One request, and one more for the requirements a reply left unanswered (never a third).
+            # At most two requests: one, and one more for the requirements a reply left unanswered, or, when the first
+            # answered every requirement but named no problem and said nothing it checked, for a review (never a third).
             for _ask in range(2):
                 left = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts or []}]
+                again = ""
                 if not left:
-                    break
+                    if asked_again or verdicts is None or not _code_review.reply_said_nothing(verdicts, logic, listed):
+                        break
+                    self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
+                                      "asking once more")
+                    again, left, asked_again = _pairs.REASK, list(reqs), True
                 prompt = self._prompts["code_review"].substitute(
                     topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
-                    code=sources)
-                reply = await self._chat(prompt, node=_review.NODE)
-                got = _code_review.parse(_parse_json_lenient(reply, node=_review.NODE), left)
-                verdicts = [*(verdicts or []), *(got or [])] or None
+                    plan=plan_text, code=sources) + again
+                reply = await self._chat(prompt, node=review_node)
+                parsed = _parse_json_lenient(reply, node=review_node)
+                got = _code_review.parse(parsed, left, values)
+                if again:
+                    kept = [v for v in verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
+                    verdicts = [*kept, *(got or [])] or None
+                else:
+                    verdicts = [*(verdicts or []), *(got or [])] or None
+                logic = _code_review.merge_logic(logic, _code_review.parse_logic(parsed, reqs, values))
+                listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
+                                     if c not in listed)]
             if verdicts is None:
                 record["error"] = "its answer named none of the plan's requirements"
+            elif _code_review.reply_said_nothing(verdicts, logic, listed):
+                verdicts, record["error"] = None, _pairs.NOT_A_REVIEW
         except _ModelAnswerProblem as e:
             record["error"] = f"the provider withheld or cut off its answer ({str(e)[:120] or type(e).__name__})"
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
             record["error"] = f"the call failed ({str(e)[:120] or type(e).__name__})"
-        same, reader, planner, named = self._reader_vs_planner(_review.NODE, after_call=True)
+        same, reader, planner, named = self._reader_vs_planner(review_node, after_call=True, writer="implement")
         record.update(reviewer=reader, planner=planner, reported=named, same_model=same)
         if verdicts is not None and same is False:
             unanswered = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts}]
@@ -10077,7 +10152,9 @@ class Engine(RunChecksMixin):
             return None
         record["verdicts"] = verdicts
         record["read_version"] = version
-        record["problems"] = _code_review.problems(verdicts)
+        record["logic"] = logic
+        record["checked"] = listed[:40]
+        record["problems"] = [*_code_review.problems(verdicts), *logic]
         self._log.info("[code_review] %s", _code_review.plain_lines(record))
         if not record["problems"]:
             record["final"] = True
@@ -10120,6 +10197,7 @@ class Engine(RunChecksMixin):
         problems = [v for v in record.get("problems") or [] if isinstance(v, dict)]
         for v in problems:
             self._log.warning("[code_review] still %s after the repairs: %s%s",
+                              "flagged" if v.get("kind") == "logic" else
                               "missing" if v.get("status") == _code_review.MISSING else "implemented differently", v["text"],
                               " (the run's results decide whether the study stops)" if v.get("headline") else "")
         return None
@@ -12724,7 +12802,15 @@ class Engine(RunChecksMixin):
             try:
                 reply = await self._chat(prompt, node=_review.NODE)
                 review = _review.parse(_parse_json_lenient(reply, node=_review.NODE), protocol, partial=partial)
-                if review is None:
+                if review is not None and review.said_nothing:
+                    # No problem named and nothing said to be checked is no review: asked once more, then not reviewed.
+                    self._log.warning("[oracle] the second reader of the checks named no problem and did not say what "
+                                      "it checked; asking once more")
+                    reply = await self._chat(prompt + _pairs.REASK, node=_review.NODE)
+                    review = _review.parse(_parse_json_lenient(reply, node=_review.NODE), protocol, partial=partial)
+                    if review is not None and review.said_nothing:
+                        review, error = None, _pairs.NOT_A_REVIEW
+                if review is None and not error:
                     error = "it named none of the plan's checks"
             except _ModelAnswerProblem as e:
                 error = f"the provider withheld or cut off its answer ({str(e)[:160] or type(e).__name__})"
@@ -16058,10 +16144,17 @@ class Engine(RunChecksMixin):
             ended = "the paper still claimed what FI's records contradict"
         if headline_missing:
             # A second model compared the code with the plan and the main quantity is not in it, even after repairs.
-            left = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
-            problem = ("the code does not compute the study's main quantity"
-                       f"{' (' + _one_line('; '.join(left), 200) + ')' if left else ''}"
-                       f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
+            missing = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
+            constant = [] if missing else _code_review.headline_constant(self.quest_root, self.quest_root / "code")
+            left = missing or constant
+            if constant:
+                problem = ("the study's main quantity is a constant in the run's results, as a second model found in the code"
+                           f" ({_one_line('; '.join(constant), 200)}){', even after FI ' + after if after else ''}, so "
+                           "there is nothing measured to write up")
+            else:
+                problem = ("the code does not compute the study's main quantity"
+                           f"{' (' + _one_line('; '.join(left), 200) + ')' if left else ''}"
+                           f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
             tried = ["asked a second model to read the code against what the plan requires it to compute",
                      *[_one_line(x, 300) for x in left[:3]],
                      *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
@@ -16155,6 +16248,15 @@ class Engine(RunChecksMixin):
             # run's own results do not hold it either (a reviewer's word alone never stops a quest).
             why = ("the code does not compute the study's main quantity, and the run's results do not hold it "
                    "(" + "; ".join(_missing_headline)[:200] + ")")
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                    "stuck_reason": "headline_missing"}
+        if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
+                _constant := _code_review.resolve_logic(self.quest_root, self.quest_root / "code", state.get("result_json"))):
+            # A second model found, with high severity, that the study's main quantity is a constant in the code, and the
+            # run's own results hold it at one value everywhere: the results confirm it (a reader's word alone never stops).
+            why = ("the study's main quantity is a constant in the run's results, as a second model found in the code "
+                   "(" + "; ".join(_constant)[:200] + ")")
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
             return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                     "stuck_reason": "headline_missing"}
@@ -18989,6 +19091,7 @@ class Engine(RunChecksMixin):
 
     async def _chat_json(
         self, prompt: str, *, node: str, want: tuple[str, ...], usable: Callable[[dict[str, Any]], bool] | None = None,
+        why_unusable: Callable[[dict[str, Any]], str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """A call whose answer is one JSON object carrying ``want`` (a required check's: the design audit, the
         evidence gate, the claim check). When the reply cannot be used (no such object in it, or ``usable`` says it
@@ -19012,6 +19115,8 @@ class Engine(RunChecksMixin):
             wrong = f"it was {len(text):,} characters and its {', '.join(want)} was not one of the values asked for"
         else:
             wrong = f"it was {len(text):,} characters and its JSON object did not carry {', '.join(want)} as asked"
+        if isinstance(parsed, dict) and parsed and why_unusable is not None and (reason := why_unusable(parsed)):
+            wrong = reason  # a reply that is an object of the right shape but says nothing: the caller names why
         self._log.warning("[%s] the reply could not be used (%s); asking once more for one short JSON object", node,
                           wrong)
         echo = (f"\nYour previous reply, for reference (say the same things, in the asked-for shape):\n\n{text}\n"
@@ -20174,6 +20279,17 @@ class Engine(RunChecksMixin):
                                       or _attempts.last_id(self.fi_dir, _attempts.ATTEMPTS, ("run",))),
                     "answered_by": self._answering_model(), "context": context}
         self._record(_attempts.ATTEMPTS, build)
+
+    def _step_is_set(self, step: str) -> bool:
+        """Whether a model or a provider is set for ``step`` (``provider.node_models`` / ``provider.node_providers``)."""
+        provider = self.config.provider
+        return bool(node_provider_for(getattr(provider, "node_providers", None), step)
+                    or model_for_node(provider.node_models, step))
+
+    def _review_node(self, step: str) -> str:
+        """The node a reviewer's calls are made under: its own step (``design_review``, ``code_review``) when a person set
+        a model or provider for it, else the step it falls back to (core/review_pairs.py)."""
+        return _pairs.node_for(step, self._step_is_set)
 
     def _model_for_node(self, node: str | None) -> str | None:
         """Resolve the effective model for a node via the shared
