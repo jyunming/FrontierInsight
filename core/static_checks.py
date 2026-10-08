@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from . import grid_keys as _grid_keys
+from . import independent_check as _independent
 
 #: How many times, in all, one text of the code is sent back for the checks of this module.
 REPAIRS = 2
@@ -42,7 +43,7 @@ class StaticChecksMixin:
     #: ``note`` is recorded for the evidence and the paper, ``headline`` stops only when the module says a headline
     #: result rests on it (and is a note otherwise).
     def _static_checks(self) -> list[tuple[str, Any, str]]:
-        return [("grid_keys", _grid_keys, "stop")]
+        return [("grid_keys", _grid_keys, "stop"), ("independent_check", _independent, "note")]
 
     def _static_files(self) -> dict[str, str]:
         return _grid_keys.code_files(self.quest_root / "code")  # type: ignore[attr-defined]
@@ -198,6 +199,10 @@ class StaticChecksMixin:
             if record:
                 out[name] = record
         return out
+
+    def _static_check_gaps(self) -> list[str]:
+        """Why the evidence ladder cannot count a check this pass found to prove nothing (one sentence each)."""
+        return [str(r["gap"]) for r in self._static_check_records().values() if r.get("gap")]
 
     def _static_checks_note(self) -> str:
         """For the writer: what the checks of the code found that the repairs did not remove, so the limitations say so."""
