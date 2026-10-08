@@ -1,0 +1,3 @@
+235:2026-10-08 22:45:24,720 [WARNING] [protocol] the script differs from the plan's protocol (2): the protocol fixes noise_fraction at [0, 0.025, 0.05, 0.1]; CUTOFFS in experiment.py, line 18 is [0.025, 0.05, 0.1]: it leaves out 0; the protocol fixes temperature_index at [0, 1, 2, 3, 4]; multiplier in simulate.py, line 175 is [0, 1, 2, 3]: it leaves out 4; asking for a repair (1 of 2)
+239:2026-10-08 22:46:24,194 [INFO] [protocol] rewrote experiment.py (12006 bytes): 0 difference(s) left in it (Added the protocol’s zero cutoff to CUTOFFS while preserving all existing script behavior and output handling.)
+244:2026-10-08 22:48:33,041 [WARNING] [protocol] the repair of simulate.py did not remove the differences; keeping it as written

@@ -1,0 +1,2 @@
+219:2026-10-08 23:20:41,373 [WARNING] [protocol] the script differs from the plan's protocol (1): the protocol fixes alpha at 0.05; PI1_VALUES in experiment.py, line 17 is [0, 0.05, 0.2]: it adds [0, 0.2]; asking for a repair (1 of 2)
+223:2026-10-08 23:21:45,705 [WARNING] [protocol] the repair of experiment.py did not remove the differences; keeping it as written
