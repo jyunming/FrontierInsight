@@ -1,0 +1,87 @@
+{
+ "metrics": [
+  {
+   "id": "power",
+   "kind": "mean",
+   "estimand": "mean trial-level power (true positives / mπ1) for π1 > 0",
+   "unit": "one trial"
+  },
+  {
+   "id": "realized_fdr",
+   "kind": "mean",
+   "estimand": "mean trial-level false-discovery proportion (V/R) for π1 > 0",
+   "unit": "one trial"
+  },
+  {
+   "id": "fwer",
+   "kind": "proportion",
+   "estimand": "proportion of trials with at least one false discovery when π1 = 0",
+   "unit": "one trial"
+  }
+ ],
+ "grid": {
+  "m": [
+   20.0,
+   200.0,
+   2000.0
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ],
+  "procedure": [
+   "uncorrected",
+   "Bonferroni",
+   "Benjamini-Hochberg"
+  ]
+ },
+ "topic_map": [
+  {
+   "item": "m",
+   "by": "setting:m"
+  },
+  {
+   "item": "pi1",
+   "by": "setting:pi1"
+  },
+  {
+   "item": "procedure",
+   "by": "setting:procedure"
+  },
+  {
+   "item": "pi0 * 0.05",
+   "by": "equation:eq_bh_ref"
+  },
+  {
+   "item": "the expected share of false positives among the positives found (the false discovery rate)",
+   "by": "equation:eq_fdr_def"
+  },
+  {
+   "item": "realised false discovery rate",
+   "by": "metric:realized_fdr"
+  },
+  {
+   "item": "power",
+   "by": "metric:power"
+  },
+  {
+   "item": "chance of any false discovery",
+   "by": "metric:fwer"
+  }
+ ],
+ "model": {
+  "equations": [
+   {
+    "id": "eq_bh_ref",
+    "formula": "pi0 * 0.05",
+    "source": "topic"
+   },
+   {
+    "id": "eq_fdr_def",
+    "formula": "the expected share of false positives among the positives found (the false discovery rate)",
+    "source": "topic"
+   }
+  ]
+ }
+}

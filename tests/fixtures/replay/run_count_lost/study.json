@@ -1,0 +1,24 @@
+{
+ "entry": "run_trial",
+ "grid": {
+  "m": [
+   20.0,
+   200.0,
+   2000.0
+  ],
+  "pi1": [
+   0.0,
+   0.05,
+   0.2
+  ],
+  "procedure": [
+   "uncorrected",
+   "Bonferroni",
+   "Benjamini-Hochberg"
+  ]
+ },
+ "runs_per_setting": 1,
+ "base_seed": 0,
+ "paired": false,
+ "thresholds": {}
+}

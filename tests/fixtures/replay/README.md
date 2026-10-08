@@ -11,3 +11,4 @@ FI's code, and nothing under `core/` or `agents/` may take a word from it.
 | `redesign_sweep_unread/` | a redesign's settings to vary could not be read and the quest paused without asking the plan's model | `tests/test_replay_redesign_parts.py` |
 | `final_code_unread/` | the code version that produced the results was never read by the different-model reviewer | `tests/test_replay_final_code_read.py` |
 | `undefined_trials/` | a metric had fewer per-trial values than the manifest's successful trials | `tests/test_replay_undefined_trials.py` |
+| `run_count_lost/` | a redesign wrote no run count, so one trial per setting ran where the plan said 2500, the analysis script hard-coded 1000, and a paper with no results was delivered | `tests/test_replay_run_count_lost.py` |

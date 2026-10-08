@@ -5949,6 +5949,49 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 _plan.record_version(self.quest_root, updated, by="engine", note="what FI did about protocol parts that could not be read")
         return design, plan_sha
 
+    def _inherit_plan_parts(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+        """A redesign (a design drafted at this step, not read from ``plan.md``) keeps every part of the plan's protocol that it
+        does not write itself: the runs per setting, the precision, the thresholds, the checks against known answers, the
+        criteria, the seed policy. A redesign that leaves one out did not decide to drop it: a real redesign wrote only the
+        grid, the metrics and the model, the frozen protocol then had no run count, and the engine ran one trial per setting
+        where the plan said 2500. Nothing is asked of a model, so this is bounded and the same on a resume. A part is taken
+        only when it reads as part of the redesign's protocol (:func:`core.plan.normalize_protocol`); the parts the redesign
+        owns (settings to vary, metrics, the model behind the numbers, a search for the best design) are never taken here.
+        Said in ``run.log`` and kept in ``.fi/drafted_parts_asked.json`` (``inherited``)."""
+        if not isinstance(design, dict) or not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
+            return design
+        base = design.get("protocol")
+        if not isinstance(base, dict) or not base:
+            return design  # no protocol of its own: the plan's is the one in use (:meth:`_draft_protocol`)
+        planned, _why = _plan.load_design(self.quest_root)
+        planned_protocol = planned.get("protocol") if isinstance(planned, dict) else None
+        if not isinstance(planned_protocol, dict) or not planned_protocol:
+            return design
+        protocol: dict[str, Any] = dict(base)
+        taken: list[str] = []
+        for part, value in planned_protocol.items():
+            if part in _REDESIGN_OWNED_PARTS or part in protocol or value in (None, "", [], {}):
+                continue
+            fixed, _problem = _plan.normalize_protocol({**protocol, part: value})
+            if fixed is not None and part in fixed:
+                protocol[part] = fixed[part]
+                taken.append(part)
+        if not taken:
+            return design
+        self._log.warning("[design] the redesign's protocol leaves out %s, which the plan's protocol has; FI kept the plan's "
+                          "(nothing is asked of a model for this)", ", ".join(f"`protocol.{p}`" for p in taken))
+        path = self.fi_dir / _DRAFTED_PARTS_ASKED
+        try:
+            record = _read_json_or_none_path(path)
+            record = dict(record) if isinstance(record, dict) else {}
+            record.setdefault("iteration", iteration)
+            record["inherited"] = taken
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] FI could not write down which protocol parts the redesign kept from the plan: %r", e)
+        return {**design, "protocol": protocol}
+
     def _drafted_parts_record(self) -> tuple[int, str, int]:
         """``(requests, model, iteration)`` of the last time FI asked the plan's model to write the protocol parts a
         redesign drafted that could not be read (``.fi/drafted_parts_asked.json``); zeros when it never did."""
@@ -7084,6 +7127,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
             design = await self._complete_drafted_parts(state, design, iteration=iteration)
+            design = self._inherit_plan_parts(state, design, iteration=iteration)
         self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
         audited = await self._audit_the_design_that_runs(state, design)
@@ -9088,6 +9132,24 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             # after it is still checked for the number asked for.
             out["extend_check"], out["extend_unreported"] = {}, []
         return out
+
+    async def _study_follows_protocol(self, state: QuestState) -> None:
+        """Before any trial runs: the settings in ``code/study.json`` (the runs per setting and the settings to vary) are the
+        protocol's. The protocol is the source of truth, so a study that differs is written again from it (a file a person
+        edited is left, and said). Never stops a quest: FI's own run reads the protocol, not this file."""
+        try:
+            protocol = self._protocol_block(state)
+            found = _code_project.study_differences(self.quest_root / "code", protocol, split=self._split_on(state))
+            if not found:
+                return
+            self._log.warning("[execute] code/study.json is not what the protocol says (%s); writing it again from the protocol",
+                              "; ".join(found)[:400])
+            await self._refresh_code_project(state, list(state.get("deps") or []))
+            if _code_project.study_differences(self.quest_root / "code", protocol, split=self._split_on(state)):
+                self._log.warning("[execute] code/study.json still differs from the protocol (you edited it, so FI left it); "
+                                  "the study FI runs follows the protocol, not that file")
+        except Exception as exc:  # noqa: BLE001 -- a convenience file, never a reason to stop
+            self._log.warning("[execute] could not compare code/study.json with the protocol: %r", exc)
 
     async def _refresh_code_project(self, state: QuestState, deps: list[str], note: str = "", *,
                                     category: str = "changed") -> None:
@@ -14406,6 +14468,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return too_long
         # From here on the protocol is what the record says (core/frozen_protocol.py).
         self._freeze_protocol_if_due(state)
+        # What `code/study.json` (the project's own `run.py`) will run is what the protocol says, before any trial runs.
+        await self._study_follows_protocol(state)
         # A figure is drawn from what the run computed, never from numbers typed into the plotting code: the scripts are
         # read (not run) and sent back to draw it from the saved results, a bounded number of times
         # (core/figure_data_check.py).
@@ -22956,6 +23020,9 @@ _FILL_MARKER = "plan_sources_asked.json"
 _STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair")
 _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
+#: The parts of a protocol that a redesign writes itself: it is never given the plan's in their place by
+#: :meth:`Engine._inherit_plan_parts` (a search for the best design is a different kind of study, not a missing part).
+_REDESIGN_OWNED_PARTS = frozenset({"grid", "metrics", "model", "topic_map", "optimisation"})
 _DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"

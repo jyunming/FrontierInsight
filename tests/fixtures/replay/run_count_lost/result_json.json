@@ -1,0 +1,9 @@
+{
+ "errors": [
+  "m=20,pi1=0.0/uncorrected_fwer: expected 1000 complete trial values, got 1",
+  "m=20,pi1=0.0/Bonferroni_fwer: expected 1000 complete trial values, got 1",
+  "m=20,pi1=0.0/Benjamini_Hochberg_fwer: expected 1000 complete trial values, got 1"
+ ],
+ "required_trials_per_cell": 1000,
+ "status": "invalid_trial_record"
+}

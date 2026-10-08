@@ -1,0 +1,156 @@
+grid:
+  m:
+  - 20
+  - 200
+  - 2000
+  pi1:
+  - 0.0
+  - 0.05
+  - 0.2
+  correction_method:
+  - uncorrected
+  - Bonferroni
+  - Benjamini-Hochberg
+runs_per_setting: 2500
+thresholds:
+  alpha: 0.05
+  effect_size: 2.5
+seed_policy: Use numpy SeedSequence(20261008), spawning one independent child stream
+  for each grid setting and then one independent child stream for each trial in fixed
+  grid order. Apply all three methods to the same p-values within a trial; method
+  comparisons are paired. Use SeedSequence(20261009) for the separate oracle case.
+failure_policy: Count and report every exception and nonfinite statistic, p-value,
+  or metric. If any occurs, report no headline estimate for that setting; fix the
+  cause and rerun all its predetermined trials from the stated streams.
+ci_method: For each setting, resample the 2500 complete trials with replacement 2000
+  times and use percentile 95% intervals for the mean trial-level power or false-discovery
+  proportion and for paired method differences. For null-case FWER, use a 95% Wilson
+  interval from the count of trials with V > 0. Theory references are deterministic
+  formulas, reported with numerical evaluation error rather than stochastic intervals.
+acceptance:
+- For every setting, report the BH estimate and 95% interval beside the setting-specific
+  π0 × 0.05 reference; do not use an arbitrary realized-FDR cutoff as a pass/fail
+  conclusion.
+- For the all-null setting, show the observed FWER and 95% interval beside the exact
+  method-specific FWER formula.
+precision:
+  target_half_width: 0.02
+  metric: trial-level power and realized_fdr means
+  reason: At 2500 independent trials, the approximate worst-case 95% half-width for
+    a bounded trial-level mean is 1.96 × 0.5/√2500 = 0.0196; observed intervals may
+    differ, so their actual widths will be reported. The same trial count gives an
+    approximate 0.0085 half-width for an FWER near 0.05.
+oracles:
+- name: bonferroni_fwer_check
+  kind: special_case
+  check: bonferroni_fwer
+  expected: 0.048782
+  expected_formula: 1 - (1 - 0.05/m)**m
+  tolerance: 0.01
+  tolerance_mode: absolute
+  reference: 'derivation: with 100 independent uniform null p-values, P(at least one
+    p ≤ α/100) = 1 - (1 - 0.05/100)**100 => 0.048782'
+  case:
+    m: 100
+    pi1: 0.0
+    runs_per_setting: 10000
+  measure: bonferroni_fwer
+- name: power_accuracy_check
+  kind: special_case
+  check: power
+  expected: 0.8038
+  expected_formula: 0.8038
+  tolerance: 0.01
+  tolerance_mode: absolute
+  reference: 'derivation: for a shift of 2.5, power = P(Z > 1.64485 | Z ~ N(2.5, 1))
+    = 1 - Phi(1.64485 - 2.5) => 0.8038'
+  case:
+    m: 100
+    pi1: 0.2
+    runs_per_setting: 10000
+  measure: uncorrected_power
+criteria:
+- name: fwer_accuracy
+  what: Does the independent all-null simulation reproduce the exact Bonferroni FWER
+    for m = 100?
+  oracle: bonferroni_fwer_check
+  use: error
+  direction: target
+  target: 0
+  tolerance: 0.01
+- name: power_accuracy
+  what: Does the simulation reproduce the expected uncorrected power for a shift of
+    2.5?
+  oracle: power_accuracy_check
+  use: error
+  direction: target
+  target: 0
+  tolerance: 0.01
+metrics:
+- id: power
+  kind: mean
+  estimand: mean trial-level power (true positives / mπ1) for π1 > 0
+  unit: one trial
+- id: realized_fdr
+  kind: mean
+  estimand: mean trial-level false-discovery proportion (V/R) for π1 > 0
+  unit: one trial
+- id: fwer
+  kind: proportion
+  estimand: proportion of trials with at least one false discovery when π1 = 0
+  unit: one trial
+topic_map:
+- item: m
+  by: setting:m
+- item: pi1
+  by: setting:pi1
+- item: procedure
+  by: setting:correction_method
+- item: realised false discovery rate
+  by: metric:realized_fdr
+- item: power
+  by: metric:power
+- item: chance of any false discovery
+  by: metric:fwer
+- item: pi0 * 0.05
+  by: equation:E3
+- item: the expected share of false positives among the positives found (the false
+    discovery rate)
+  by: equation:E4
+model:
+  summary: Simulation of independent one-sided z-tests with known mean shifts and
+    standard normal noise.
+  assumptions:
+  - Test statistics are independent, with standard normal noise
+  - One-sided alternative hypothesis
+  - Exactly mπ1 effects are real in each trial
+  holds_for: Positive integer m and 0 ≤ π1 ≤ 1 with integer mπ1, under independent
+    standard normal test statistics
+  equations:
+  - id: E1
+    formula: p = 1 - Phi(z)
+    role: generates
+    source: 'derivation: standard one-sided z-test p-value calculation'
+    example:
+      inputs:
+        z: 1.64485
+      expected_formula: '0.05'
+  - id: E2
+    formula: alpha_bonf = alpha / m
+    role: analyses
+    source: 'derivation: Bonferroni allocates the family significance level equally
+      across m tests'
+    example:
+      inputs:
+        alpha: 0.05
+        m: 100
+      expected_formula: '0.0005'
+  - id: E3
+    formula: pi0 * 0.05
+    role: analyses
+    source: 'topic: reference for Benjamini-Hochberg'
+  - id: E4
+    formula: the expected share of false positives among the positives found (the
+      false discovery rate)
+    role: analyses
+    source: 'topic: definition of false discovery rate'
