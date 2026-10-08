@@ -266,3 +266,51 @@ async def test_an_honest_record_with_some_undefined_values_goes_on_and_is_record
     before = ex.calls
     assert await eng._size_the_run({"iteration": 0, "exec_reflect_iter": 0}, runner, "python", None) is None
     assert ex.calls == before
+
+
+@pytest.mark.asyncio
+async def test_the_confirmation_is_made_once_per_version_of_the_code_and_counts_against_the_sizing_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _honest(_record())
+    eng, runner, ex = _engine_and_runner(tmp_path, record)
+    seen: list[float] = []
+    real = est.pilot
+
+    async def watching(*a: Any, **kw: Any) -> Any:
+        seen.append(float(kw["budget_s"]))
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(est, "pilot", watching)
+    state = {"iteration": 0, "exec_reflect_iter": 0}
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    assert len(seen) == 1 and eng._pilot_spent > 0
+    # the run is made smaller (the same code): it is timed again, but the correctness reading is reused, not made again
+    protocol = eng._protocol_block(state)
+    protocol["runs_per_setting"] = 500
+    before = ex.calls
+    assert await eng._size_the_run(state, runner, "python", None) is None
+    assert len(seen) == 1, "the confirmation is not run again for the same code"
+    assert ex.calls - before <= 6, "only the timing trials ran"
+    # a changed version of the code is read again, with what is left of the sizing's budget (the time already spent is deducted)
+    code = eng.quest_root / "code" / "simulate.py"
+    code.write_text(code.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
+    grid, runs, thresholds = eng._grid_and_runs(state)
+    probes, _why = await est.measure(ex, "python", eng.quest_root, runner.simulate, grid, runs=runs, deterministic=False,
+                                     limit_s=8 * 3600, budget_s=600)
+    eng._pilot_spent = 100.0
+    assert await eng._pilot_gate(state, runner, "python", None, grid, probes, thresholds, 8 * 3600, 600.0) is None
+    assert len(seen) == 2 and seen[1] == 300.0 - 100.0, seen
+    assert est.read_pilot_record(eng.quest_root)["code_key"].split("|")[0]
+
+
+@pytest.mark.asyncio
+async def test_a_finding_for_unchanged_code_is_reused_without_new_trials(tmp_path: Path) -> None:
+    eng, runner, ex = _engine_and_runner(tmp_path, _record())
+    state: dict[str, Any] = {"iteration": 0, "exec_reflect_iter": 0}
+    first = await eng._size_the_run(state, runner, "python", None)
+    assert first is not None
+    before = ex.calls
+    second = await eng._size_the_run(state, runner, "python", None)  # the repair changed nothing
+    assert second is not None and est.read_pilot_record(eng.quest_root)["repairs"] == 2
+    assert ex.calls - before <= 6, "the extra trials are not run again for the same code"

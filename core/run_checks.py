@@ -268,6 +268,7 @@ class RunChecksMixin:
         Only the trial contract is timed, and only before the first freeze: a frozen protocol cannot be changed, a search for
         the best design or a cluster job has its own limits, and a resume of a run that already fits is not timed again."""
         self._sized_protocol: dict[str, Any] | None = None
+        self._pilot_spent = 0.0  # seconds the pilot's extra trials took in this sizing: they count against the same budget
         if (not isinstance(runner, _trial_runner.TrialsRunner) or self.config.execution.background_jobs  # type: ignore[attr-defined]
                 or _frozen.load(self.quest_root) is not None or int(state.get("iteration", 0) or 0) > 0):  # type: ignore[attr-defined]
             return None
@@ -291,7 +292,8 @@ class RunChecksMixin:
                 return self._stop_too_long(str(record["stopped"]))
             probes, why = await _estimate.measure(
                 self.executor, python, self.quest_root, runner.simulate.relative_to(self.quest_root).as_posix(), grid,  # type: ignore[attr-defined]
-                runs=runs, deterministic=runner.deterministic, limit_s=limit_s, budget_s=budget_s, env=env,
+                runs=runs, deterministic=runner.deterministic, limit_s=limit_s,
+                budget_s=max(0.0, budget_s - self._pilot_spent), env=env,
                 thresholds=thresholds, cached=cached)
             if probes is None:
                 # A setting that fails when timed is a setting the simulation fails at: the same repair as a failed run, naming
@@ -342,6 +344,7 @@ class RunChecksMixin:
         simulation, with the exact finding (at most ``engine.exec_reflect_max_iterations`` repairs, counted in the record
         BEFORE the run goes back); what the repairs leave ends in the honest stop. Nobody is asked to debug."""
         from . import degenerate_results as _degenerate
+        from . import hidden_check as _hidden
 
         protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
         kinds = {str(m.get("id")): str(m.get("kind") or "") for m in protocol.get("metrics") or []
@@ -352,15 +355,34 @@ class RunChecksMixin:
         _grid, runs, _t = self._grid_and_runs(state)
         total_trials = _estimate.trial_count(grid, runs, runner.deterministic)
         allowance = max(60.0, 3.0 * limit_s / max(1, total_trials))
-        result = await _estimate.pilot(
-            self.executor, python, self.quest_root,  # type: ignore[attr-defined]
-            runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
-            grid, probes, kinds, deterministic=runner.deterministic, budget_s=max(30.0, budget_s / 2.0),
-            allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol))
         record = _estimate.read_pilot_record(self.quest_root)  # type: ignore[attr-defined]
         repairs = int(record.get("repairs") or 0)
+        # Once per version of the code: resizing the run does not change what the simulation does, so a reading already made
+        # of this code (and these metrics) is reused, and its extra trials are not run again.
+        code_key = _hidden.code_sha(self.quest_root) + "|" + ",".join(f"{k}:{v}" for k, v in sorted(kinds.items()))  # type: ignore[attr-defined]
+        if code_key[0] != "|" and record.get("code_key") == code_key and record.get("outcome") == "passed":
+            self._log.info("[execute] the pilot has read this version of the simulation already: nothing was wrong")  # type: ignore[attr-defined]
+            return None
+        if code_key[0] != "|" and record.get("code_key") == code_key and record.get("problem_items"):
+            result = _estimate.Pilot(
+                trials=int(record.get("trials") or 0), settings=int(record.get("settings") or 0),
+                checked=[str(x) for x in record.get("metrics_read") or []],
+                problems=[_estimate.PilotProblem(str(d.get("metric")), str(d.get("kind")), str(d.get("says")))
+                          for d in record["problem_items"] if isinstance(d, dict)],
+                unsure=[str(x) for x in record.get("not_ruled_out") or []])
+        else:
+            # The extra trials come out of the sizing's own budget (at most half of it in all, across the rounds).
+            left = max(0.0, budget_s / 2.0 - self._pilot_spent)
+            began = time.monotonic()
+            result = await _estimate.pilot(
+                self.executor, python, self.quest_root,  # type: ignore[attr-defined]
+                runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+                grid, probes, kinds, deterministic=runner.deterministic, budget_s=left,
+                allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol))
+            self._pilot_spent += time.monotonic() - began
         base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
-                "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total}
+                "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total, "code_key": code_key,
+                "problem_items": [{"metric": p.metric, "kind": p.kind, "says": p.says} for p in result.problems]}
         if result.unsure:
             self._log.info("[execute] the pilot could not try every combination of the small settings, so it says nothing of "  # type: ignore[attr-defined]
                            "%s", ", ".join(f"`{n}`" for n in result.unsure))
