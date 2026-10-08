@@ -686,6 +686,16 @@ same PR that adds, splits or renames one.
   answer from `raw/trials.json` checked against `.fi/trials/run.json`'s hashes, "would be published", gates, the
   metrics with Wilson intervals), `report.py`, `reference.py`, `cli.py`. README there; end-to-end on fake-model
   quests in `tests/test_self_benchmark_e2e.py` (slow).
+- `dev/evaluation/suite/` — the evaluation suite (`python -m dev.evaluation.suite`; dev-only): one fixed set of topics run
+  on every FI change with the same settings, failure causes added up across topics, a version-over-version table.
+  `suite.py` (`Suite`: loads a `suite.yaml` kept OUTSIDE the repo, makes each topic's config from the topic file plus one
+  shared template so the model block cannot drift, the `acceptance_only` group guard), `runner.py` (start topics as
+  detached `launch.py` processes, at most N at once, `round.manifest.json`, `status` / `wait`, env file read into the
+  child only), `collect.py` (rebuilds `core/quality_report.py` per quest into `round.json` / `round.md`, trustworthy /
+  fake paper and false-stop status), `taxonomy.py` (stage x cause class, rules R0-R8, "unclassified" when no rule fits),
+  `trend.py` (`trend.md` with the done criteria decided only when the data decide them, `pareto.md`), `grade.py` (the
+  grader prompt per delivered paper from `benchmark/rubric.md`, reading a grader's table row into `grades.json`),
+  `adopt.py` (bring existing runs in as rounds), `cli.py`. README there; `tests/test_eval_suite.py`.
 
 ## Prompts (`agents/*.md`)
 
