@@ -80,6 +80,7 @@ class Reader:
         self.extraction = extraction
         self.judge_override = judge
         self.judge_fails = judge_fails
+        self.confirmed: list[str] = []
         self.prompts: list[str] = []
         self.asked: list[str] = []
         self.judged = 0
@@ -101,6 +102,9 @@ class Reader:
             name = str(item.get("name") or item.get("text") or "").lower()
             if self.judge_override is not None:
                 verdict = self.judge_override(item, shown)
+            elif "plan_says_it_is_covered_by" in item:
+                self.confirmed.append(item["plan_says_it_is_covered_by"])
+                verdict = "covered"
             elif item["kind"] == "factor":
                 verdict = "covered" if name.split()[0] in settings else "missing"
             elif item["kind"] == "quantity":
@@ -378,7 +382,7 @@ async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_i
 
 
 @pytest.mark.asyncio
-async def test_a_reader_s_missing_is_overruled_by_a_mapping_the_plan_gives_and_fi_checked(tmp_path: Path) -> None:
+async def test_a_mapping_to_an_axis_with_another_name_counts_when_the_reader_confirms_it(tmp_path: Path) -> None:
     eng = _engine(tmp_path, [])
     model = Reader(eng, _draft(), adds={"map_cover", "heat", "newton"})
     await eng._node_plan({"topic": TOPIC, "iteration": 0})
@@ -386,9 +390,9 @@ async def test_a_reader_s_missing_is_overruled_by_a_mapping_the_plan_gives_and_f
     patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
     assert seen == [], "the plan named a setting that exists and covers the levels: the reader's word does not stop the quest"
     assert patch["design"]["protocol"]["grid"]["cover_kind"] == ["paper", "foam", "steel"]
-    assert "request" in model.asked[0] or "protocol.topic_map" in model.asked[0]
+    assert "protocol.topic_map" in model.asked[0]
+    assert model.confirmed == ["cover_kind"], "an axis with an unrelated name is a cover only because the reader confirmed it"
     covered = json.loads((eng.fi_dir / "topic_covered.json").read_text(encoding="utf-8"))
-    assert covered["mapped"]["lid material"] == "cover_kind" and covered["overruled"] == ["lid material"]
     assert covered["left"] == [], "nothing is left open"
 
 
@@ -410,6 +414,40 @@ def test_a_mapping_is_checked_for_the_levels_it_must_cover() -> None:
     full = tr.view(_draft(grid={"cover_kind": ["paper", "foam", "steel"]},
                           topic_map=[{"item": "lid material", "by": "setting:cover_kind"},
                                      {"item": "dT/dt = -k*(T - Tr)", "by": "equation:E1"}]))
-    assert tr.mapping_of(req, full, "factors", req["factors"][0]) == ("ok", "cover_kind")
-    assert tr.mapping_of(req, full, "formulas", req["formulas"][0]) == ("ok", "E1")
+    assert tr.mapping_of(req, full, "factors", req["factors"][0]) == ("judge", "cover_kind")
+    assert tr.mapping_of(req, full, "formulas", req["formulas"][0]) == ("judge", "E1")
+    named = tr.view(_draft(grid={"lid_material": ["paper", "foam", "steel"]}, topic_map=[{"item": "lid material", "by": "setting:lid_material"}]))
+    assert tr.mapping_of(req, named, "factors", req["factors"][0]) == ("ok", "lid_material"), "a related name needs no reader"
     assert tr.mapping_of(req, full, "quantities", req["quantities"][1]) is None
+
+
+def test_an_axis_whose_values_merely_fit_is_not_a_cover_and_a_formula_needs_the_reader_too() -> None:
+    req = tr.parse({"factors": [{"name": "room temperature", "range": [10, 20], "main": True}],
+                    "formulas": [{"name": "cooling law", "text": "dT/dt = -k*(T - Tr)", "main": False}]})
+    view = tr.view(_draft(grid={"batch_size": [10, 15, 20]}, topic_map=[
+        {"item": "room temperature", "by": "setting:batch_size"}, {"item": "dT/dt = -k*(T - Tr)", "by": "equation:E1"}]))
+    assert tr.mapping_of(req, view, "factors", req["factors"][0]) == ("judge", "batch_size")
+    assert tr.mapping_of(req, view, "formulas", req["formulas"][0]) == ("judge", "E1")
+    gaps, unresolved = tr.match(req, view)
+    assert gaps == [] and unresolved == ["F1", "M1"], "neither is covered until a reader says so"
+    items = json.loads(tr.judge_parts(req, view, unresolved)[0])
+    assert items[0]["plan_says_it_is_covered_by"] == "batch_size" and items[1]["plan_says_it_is_covered_by"] == "E1"
+    rejected, _ = tr.gaps_from(req, view, {"F1": "missing", "M1": "missing"})
+    assert [(g["kind"], g["main"]) for g in rejected] == [("factor", True), ("formula", False)]
+    assert tr.main_gaps(rejected)[0]["name"] == "room temperature", "the main factor stops the quest"
+    assert tr.gaps_from(req, view, {"F1": "covered", "M1": "covered"}) == ([], [])
+    unread, unjudged = tr.gaps_from(req, view, {})
+    assert unread == [] and unjudged == ["room temperature", "cooling law"], "no answer is named as unchecked, never a pass"
+
+
+@pytest.mark.asyncio
+async def test_a_formula_mapped_to_an_unrelated_equation_that_the_reader_rejects_is_a_limitation_not_a_stop(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                       topic_map=[{"item": "dT/dt = -k*(T - Tr)", "by": "equation:E1"}]),
+           judge=lambda item, shown: "missing" if item["kind"] == "formula" else "covered")
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [] and "design" in patch
+    assert "states the formula `dT/dt = -k*(T - Tr)`" in tr.write_note(eng.quest_root)

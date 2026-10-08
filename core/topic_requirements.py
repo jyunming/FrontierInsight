@@ -227,8 +227,10 @@ def _name_key(text: Any) -> str:
 def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[str, Any]) -> tuple[str, str] | None:
     """What the plan itself says covers a topic item (``protocol.topic_map``: ``item`` = the item's name or formula, ``by`` =
     ``setting:<name>`` / ``metric:<id>`` / ``equation:<id>``), checked here and not taken on trust: ``("ok", element)`` when
-    the named element exists in the plan (for a factor with stated levels or a range, its values cover them), ``("bad",
-    why)`` when it does not, ``None`` when the plan maps nothing for the item."""
+    the named element exists, its name relates to the item's own words (as the name matcher judges) and, for a factor with
+    stated levels or a range, its values cover them; ``("judge", element)`` when it exists and covers them but its name is
+    unrelated (an axis whose values merely happen to fit): only a reader's confirmation makes that a cover; ``("bad",
+    why)`` when it does not exist or does not cover; ``None`` when the plan maps nothing for the item."""
     wanted = {_name_key(item.get("name")), _name_key(item.get("text"))} - {""}
     entries = [m for m in plan.get("topic_map") or [] if _name_key(m.get("item")) in wanted]
     if not entries:
@@ -247,16 +249,20 @@ def mapping_of(req: dict[str, Any], plan: dict[str, Any], kind: str, item: dict[
             if reach and not coded:
                 why = f"{reach}"
                 continue
-            return "ok", axis
+            wanted_tokens, axis_tokens = _tokens(item.get("name")), _tokens(axis)
+            related = bool(axis_tokens and wanted_tokens) and (axis_tokens <= wanted_tokens or wanted_tokens <= axis_tokens)
+            return ("ok" if related else "judge"), axis
         if kind == "quantities" and head == "metric":
             found = next((i for i, _t in plan["metrics"] if _name_key(i) == _name_key(name)), None)
             if found is not None:
-                return "ok", found
+                wanted_tokens = _tokens(item.get("name"))
+                text = next((t for i, t in plan["metrics"] if i == found), found)
+                return ("ok" if wanted_tokens and wanted_tokens <= _tokens(text) else "judge"), found
             why = f"the metric {name} is not among the plan's metrics"
         if kind == "formulas" and head == "equation":
             found = next((e["id"] for e in plan["equations"] if _name_key(e["id"]) == _name_key(name) and e["formula"].strip()), None)
             if found is not None:
-                return "ok", found
+                return "judge", found  # an equation id says nothing about the formula: a reader confirms it implements it
             why = f"the equation {name} is not among the plan's equations"
     return "bad", why
 
@@ -338,8 +344,12 @@ def judge_parts(req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]
         if found is None:
             continue
         kind, item = found
-        items.append({"id": ident, "kind": kind[:-1] if kind != "quantities" else "quantity",
-                      **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated") and v}})
+        row = {"id": ident, "kind": kind[:-1] if kind != "quantities" else "quantity",
+               **{k: v for k, v in item.items() if k in ("name", "levels", "range", "text", "stated") and v}}
+        mapped = mapping_of(req, plan, kind, item)
+        if mapped is not None and mapped[0] == "judge":
+            row["plan_says_it_is_covered_by"] = mapped[1]
+        items.append(row)
     shown = {
         "settings_swept": {a: v[:40] for a, v in plan["axes"].items()},
         "metrics": [{"id": i, "text": " ".join(t.split())[:200]} for i, t in plan["metrics"]][:60],

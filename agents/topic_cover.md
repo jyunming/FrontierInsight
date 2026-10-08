@@ -26,6 +26,8 @@ $plan
 - A `quantity` is **covered** when a metric reports it (under another name or as part of one). Otherwise **missing**.
 - A `formula` is **covered** when an equation states the same relation, up to notation: other symbol names, a rearrangement, an equivalent form. It is **replaced** when no equation states it but the plan says in an equation's `source` or in the assumptions that it uses another formula in its place, and why. Otherwise **missing**. A formula that looks like it but differs in a term, a factor or an argument is not the same: say **missing**.
 
+- An item may carry `plan_says_it_is_covered_by`: the plan names that setting, metric or equation as covering it. Say **covered** only if that element really represents the item (the setting is the factor itself, or carries it; the equation implements the formula up to notation). Values or an id that merely fit are not enough: say **missing** and give the reason.
+
 # What to return
 
 Return ONE JSON object and nothing else:
