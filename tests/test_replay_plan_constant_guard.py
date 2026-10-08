@@ -169,3 +169,39 @@ async def test_the_repair_of_a_readers_finding_may_not_overwrite_the_plans_const
     (issue,) = record["issues"].values()
     assert issue["demonstrated"] is True and issue["outcome"] == "not repaired"
     assert all(r["outcome"] == "rejected" and "replaced a constant the plan defines" in r["why"] for r in issue["repairs"])
+
+
+_ALLOWED = set(PROTOCOL["grid"])
+_WORDS = " ".join(gk._distinct_words(CONST, _ALLOWED))
+
+
+@pytest.mark.parametrize("text", [
+    f"the {_WORDS} is compared across conditions, with 80 trials per run",    # the number belongs to something else
+    f"the {_WORDS} is compared across conditions and 80 trials are run",
+    f"a {_WORDS} is chosen. 80 trials are run",                                # a sentence break between them
+    f"the {_WORDS} is 75, the other setting is 80",                            # another number between / other value
+    f"the {_WORDS} of 75 and 80 runs",                                         # another number in the clause
+])
+def test_a_number_that_merely_stands_near_the_words_is_not_the_plans_constant(text: str) -> None:
+    assert _flagged_keys(BEFORE, {"_text": text}) == [CONST_KEYS]
+
+
+@pytest.mark.parametrize("text", [
+    f"a declared {_WORDS} of 80 is used",
+    f"the {_WORDS} = 80",
+    f"the {_WORDS} is 80",
+    f"the {_WORDS}: 80",
+    f"80 units {_WORDS}",
+])
+def test_a_number_stated_as_the_value_of_the_name_in_one_clause_is_the_plans_constant(text: str) -> None:
+    assert _flagged_keys(BEFORE, {"_text": text}) == []
+
+
+def test_a_structured_field_of_the_plan_that_gives_the_name_a_value_is_the_plans_constant() -> None:
+    for protocol in ({**PROTOCOL, "fixed": {CONST: 80}}, {**PROTOCOL, "constants": {CONST.upper(): {"value": 80}}},
+                     {**PROTOCOL, "thresholds": [{"name": CONST, "value": 80.0}]}):
+        assert [r.keys for r in gk.problems({"simulate.py": BEFORE}, protocol, {})] == []
+    other = {**PROTOCOL, "notes": {CONST: 75}}
+    assert [r.keys for r in gk.problems({"simulate.py": BEFORE}, other, {})] == [CONST_KEYS]
+    elsewhere = {**PROTOCOL, "constants": {"unrelated_setting": 80}}
+    assert [r.keys for r in gk.problems({"simulate.py": BEFORE}, elsewhere, {})] == [CONST_KEYS]

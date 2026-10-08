@@ -22,8 +22,8 @@ is conservative: a read with a fallback value of a name that is like none of the
 the study never sets, and is left alone; a computed key, ``in`` tests, ``**`` spreads and a setting passed on to a function are not followed.
 
 A constant the plan itself defines is not a setting the study lacks. ``cell.get("baseline_rate", 80.0)`` reads a name the grid does
-not have, and its only likeness to the swept ``rate`` is a shared word; when the plan states that very number next to the
-distinguishing words of the name (``a declared baseline rate of 80``), the fallback IS the plan's constant (:func:`plan_defined`)
+not have, and its only likeness to the swept ``rate`` is a shared word; when the plan states that very number as the value of that name (a structured field, or one short clause such as
+the name's words "of 80") (``a declared baseline rate of 80``), the fallback IS the plan's constant (:func:`plan_defined`)
 and is left alone. A name spelt almost like a swept setting (``rat``) is still a collapsed axis, whatever the plan says. And a repair
 never turns the plan's constant into the swept setting: :func:`substituted` finds that, and a repair that does it is not kept.
 """
@@ -334,7 +334,7 @@ def _planned_runs(protocol: dict[str, Any] | None) -> int | None:
 
 
 _NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
-_WINDOW = 90
+_WINDOW = 60
 
 
 def _number(text: str) -> float | None:
@@ -353,30 +353,81 @@ def _distinct_words(key: str, supplied: list[str] | set[str]) -> list[str]:
     return sorted(_tokens(key) - have)
 
 
-def plan_defined(r: Read, allowed: set[str], plan_text: str) -> bool:
+_BREAK = re.compile(r"[;,\n()\[\]{}]|\.(?:\s|$)|\b(?:but|while|whereas|and|with|which|when|where)\b")
+_BINDER = re.compile(r"(?:\b(?:of|is|are|at|to|equals|equal to|set to|fixed at)\b|=|:)\s*(?:about\s+|approximately\s+)?$")
+_UNIT = re.compile(r"^\s*([A-Za-z%/][\w/%.^*-]*)\s+")
+
+
+def _structured_value(node: Any, key: str, value: float, allowed: set[str]) -> bool:
+    """Whether the plan's structured fields (the protocol, the design) hold ``key: value``: a mapping whose key is the name
+    (case and punctuation ignored) and whose value is that number, or an entry that names it (``name`` / ``id``) and gives
+    it as its ``value``."""
+    want = re.sub(r"[^a-z0-9]", "", key.lower())
+
+    def same(x: Any) -> bool:
+        return isinstance(x, (int, float)) and not isinstance(x, bool) and abs(float(x) - value) <= 1e-9 * max(1.0, abs(value))
+
+    def walk(n: Any) -> bool:
+        if isinstance(n, dict):
+            for k, v in n.items():
+                if re.sub(r"[^a-z0-9]", "", str(k).lower()) == want and (same(v) or (
+                        isinstance(v, dict) and same(v.get("value")))):
+                    return True
+            label = re.sub(r"[^a-z0-9]", "", str(n.get("name") or n.get("id") or "").lower())
+            if label == want and same(n.get("value")):
+                return True
+            return any(walk(v) for v in n.values())
+        if isinstance(n, (list, tuple)):
+            return any(walk(v) for v in n)
+        return False
+
+    return walk(node)
+
+
+def _stated_as_value(low: str, words: list[str], value: float) -> bool:
+    """Whether the prose states ``value`` AS the value of the thing the ``words`` name, in one short clause: ``<words> of 80``,
+    ``<words> = 80``, ``<words> is 80``, or ``80 <unit> <words>``; no other number between them and no clause break
+    (a comma, a semicolon, a bracket, ``with`` / ``and`` / ``but`` ...)."""
+    for m in _NUMBER.finditer(low):
+        n = _number(m.group(0))
+        if n is None or abs(n - value) > 1e-9 * max(1.0, abs(value)):
+            continue
+        before = low[max(0, m.start() - _WINDOW): m.start()]
+        cuts = list(_BREAK.finditer(before))
+        clause = before[cuts[-1].end():] if cuts else before
+        if (all(w in clause for w in words) and _BINDER.search(clause.rstrip() + " ")
+                and not _NUMBER.search(clause)):
+            return True
+        after = low[m.end(): m.end() + _WINDOW]
+        cut = _BREAK.search(after)
+        tail = after[:cut.start()] if cut else after
+        unit = _UNIT.match(tail + " ")
+        if unit and all(w in tail[unit.end():] for w in words) and not _NUMBER.search(tail) and len(tail.split()) <= 6:
+            return True
+    return False
+
+
+def plan_defined(r: Read, allowed: set[str], plan_text: str, structured: Any = None) -> bool:
     """Whether a read with a fixed fallback is the plan's own constant: the fallback is a plain number, no name read is spelt
-    like a setting of the study, and the plan states that same number within a few words of every distinguishing word of one
-    of the names (a word the study's settings do not have). Only then is the fallback the plan's constant and not a
-    swept setting under another name."""
+    like a setting of the study, and the plan states that number AS the value of that name, either (a) in a structured field
+    whose key is the name (the protocol's fixed settings, constants or thresholds, an optimisation ``fixed`` block, an
+    assumption given as ``key: value``) or (b) in prose, the name's distinguishing words (words the study's settings do
+    not have) and the number bound in one short clause (:func:`_stated_as_value`). A number that merely stands near
+    those words is not enough. Only then is the fallback the plan's constant and not a swept setting under another name."""
     if not r.fallback:
         return False
     value = _number(r.default)
-    if value is None or not plan_text:
+    if value is None:
         return False
-    low = plan_text.lower()
+    low = (plan_text or "").lower()
     for key in r.keys:
         if _alike(key, allowed):
             continue
+        if structured is not None and _structured_value(structured, key, value, allowed):
+            return True
         words = _distinct_words(key, allowed)
-        if not words:
-            continue
-        for m in _NUMBER.finditer(low):
-            n = _number(m.group(0))
-            if n is None or abs(n - value) > 1e-9 * max(1.0, abs(value)):
-                continue
-            window = low[max(0, m.start() - _WINDOW): m.end() + _WINDOW]
-            if all(w in window for w in words):
-                return True
+        if words and low and _stated_as_value(low, words, value):
+            return True
     return False
 
 
@@ -440,7 +491,7 @@ def substituted(old_files: dict[str, str], new_files: dict[str, str], protocol: 
             continue
         after = _setting_assigns(new_files[script])
         for (fn, name), (keys, default, line) in _setting_assigns(text).items():
-            if set(keys) & allowed or not plan_defined(Read(script, line, keys, default, fallback=bool(default)), allowed, plan_text):
+            if set(keys) & allowed or not plan_defined(Read(script, line, keys, default, fallback=bool(default)), allowed, plan_text, (protocol, design)):
                 continue
             new = after.get((fn, name))
             if new is not None and set(new[0]) & set(axes) and not (set(new[0]) - allowed):
@@ -475,7 +526,7 @@ def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dic
         for r in reads(text, script):
             if set(r.keys) & allowed:
                 continue
-            if plan_defined(r, allowed, plan_text):
+            if plan_defined(r, allowed, plan_text, (protocol, design)):
                 continue  # the plan's own constant, with its fallback: not a setting the study lacks
             # A name with a fallback value that is like none of the study's is an optional setting the study never
             # sets, not a misspelt one: only a read that cannot be answered, or one that looks like a study setting
