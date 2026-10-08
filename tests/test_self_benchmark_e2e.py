@@ -90,7 +90,7 @@ def _fake(calls: list[str]):
             return _FAKE_RESPONSES["review"]
         if prompt.lstrip().startswith("# Second Opinion on the Checks"):  # the second reading of the checks
             return json.dumps({"checks": [{"name": o["name"], "appropriate": "yes", "discriminating": "yes",
-                                           "well_defined": "yes"} for o in PROTO["oracles"]],
+                                           "well_defined": "yes", "why": "it tests the model"} for o in PROTO["oracles"]],
                                "summary": "the checks test the model"})
         return _fake_response_for(prompt)
 

@@ -1,12 +1,22 @@
 """A different model reads the generated code against the plan's required outputs, before the study runs.
 
 A script can run to the end, print a plausible ``RESULT_JSON`` and still leave out a quantity the plan requires (a
-dependent variable, a metric, a planned figure, a swept parameter, the equation a function was meant to compute). The
-model that wrote the code reads its own code as the plan says; nothing else checks it. Here, after the code is written
-(and the model's functions are checked one at a time) and before the equation tests and the oracle gate, the model
-named for ``oracle_review`` (the same routing as the second reading of the plan's checks, so it is the other provider
-when one is configured) reads the plan's required outputs against the scripts and says, per requirement, whether it is
-**implemented**, **missing** or **implemented differently**, with the file and line.
+dependent variable, a metric, a planned figure, a swept parameter, the equation a function was meant to compute), or
+compute it wrongly. The model that wrote the code reads its own code as the plan says; nothing else checks it. Here,
+after the code is written (and the model's functions are checked one at a time) and before the equation tests and the
+oracle gate, the model named for ``code_review`` (while no model is set for it, the one named for ``oracle_review``, so it
+is the other provider when one is configured) reads the plan's required outputs against the scripts and says, per
+requirement, whether it is **implemented**, **missing** or **implemented differently**, with the file and line.
+
+The same reading also checks the LOGIC against the plan (core/review_pairs.py: a reviewer finds problems, each with where,
+what, why, how to fix and how serious): that each ``# E<n>`` function matches its equation (normalisations, units,
+factors), that a statistic is computed as the plan defines it, that a quantity the plan says depends on a setting uses that
+setting, that a step the plan's model names is not skipped, that nothing reported is a constant, and that a check's case
+is the plan's. Its findings go to the same repair as a plain directive naming the place and the fault, never a value;
+whatever number a reviewer writes is left out of the directive (:func:`core.review_pairs.without_values`). A high-severity
+finding that is still there after the repairs never stops the quest on the reviewer's word: where the run's own results can
+tell (a quantity the reviewer calls constant, :func:`constant_in`) they decide; otherwise the paper's limitations say that
+a second model flagged it and it was not resolved.
 
 * A reader that is the model that wrote the code is not a second reader: nothing is asked, and ``.fi/code_review.json``
   and ``run.log`` say that the code was not read by another model.
@@ -28,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import oracle_check as _oracle
+from . import review_pairs as _pairs
 
 RECORD = Path(".fi") / "code_review.json"
 #: Reviews of the code in a whole quest (one per code version), and the times a review sends the code back for repair.
@@ -152,6 +163,78 @@ def problems(verdicts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [v for v in verdicts if v["status"] in (MISSING, DIFFERENT)]
 
 
+#: How much of the plan the reader is shown for the logic checks.
+_MAX_PLAN_CHARS = 12000
+_WHERE_RE = re.compile(r"([\w./\-]+\.py)(?:\s*[:,]?\s*(?:lines?\s*)?(\d+))?", re.I)
+
+
+def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) -> str:
+    """What the logic checks are made against, as JSON text: the plan's model (its equations as written), the method, the
+    statistics it names, the grid, and the checks' cases and measures. Never an expected value, a tolerance or a worked
+    example: the reader is asked what is wrong, not what a number should be."""
+    design = design if isinstance(design, dict) else {}
+    protocol = protocol if isinstance(protocol, dict) else {}
+    model = protocol.get("model") if isinstance(protocol.get("model"), dict) else {}
+    equations = [{k: e.get(k) for k in ("id", "formula", "role", "source") if e.get(k)}
+                 for e in (model.get("equations") if isinstance(model.get("equations"), list) else []) if isinstance(e, dict)]
+    metrics = [{k: m.get(k) for k in ("id", "estimand", "kind") if m.get(k)}
+               for m in (protocol.get("metrics") if isinstance(protocol.get("metrics"), list) else []) if isinstance(m, dict)]
+    precision = protocol.get("precision") if isinstance(protocol.get("precision"), dict) else {}
+    variables = design.get("variables") if isinstance(design.get("variables"), dict) else {}
+    view = {
+        "model": _text(model.get("summary"), 600), "equations": equations,
+        "method": _text(design.get("method"), 1500),
+        "settings_varied": variables.get("independent") if isinstance(variables.get("independent"), list) else [],
+        "grid": protocol.get("grid") if isinstance(protocol.get("grid"), dict) else {},
+        "metrics": metrics, "headline_metric": _text(precision.get("metric"), 80),
+        "ci_method": _text(protocol.get("ci_method"), 200), "seed_policy": _text(protocol.get("seed_policy"), 200),
+        "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
+                    "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
+    }
+    text = json.dumps({k: v for k, v in view.items() if v not in ("", [], {}, None)}, indent=2, default=str)
+    return text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
+
+
+def parse_logic(reply: Any, reqs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The problems the reader found in how the code computes what the plan says (``findings`` of its reply), as
+    problems like a requirement's: ``{"id": "L1", "kind": "logic", "text", "status": "different", "file", "line", "note",
+    "fix", "severity", "name" (the quantity), "constant", "headline"}``. Every number a reader wrote is left out
+    (:func:`core.review_pairs.without_values`): a finding says what is wrong and where, never what a value should be."""
+    if not isinstance(reply, dict):
+        return []
+    headline = {_norm(r["name"]) for r in reqs if r.get("headline") and r.get("name")}
+    out: list[dict[str, Any]] = []
+    for f in _pairs.findings(reply.get("findings"), limit=12):
+        f = _pairs.without_values(f)
+        match = _WHERE_RE.search(f["where"])
+        quantity = f["quantity"]
+        out.append({"id": f"L{len(out) + 1}", "kind": "logic", "text": f["what"], "status": DIFFERENT,
+                    "file": match.group(1).replace("\\", "/").split("/")[-1] if match else "",
+                    "line": int(match.group(2)) if match and match.group(2) else None,
+                    "note": f["why"], "fix": f["fix"], "severity": f["severity"], "name": quantity,
+                    "constant": bool(f.get("constant")), "where": f["where"],
+                    "headline": bool(quantity) and _norm(quantity) in headline})
+    return out
+
+
+def merge_logic(old: list[dict[str, Any]], new: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``old`` with the findings of ``new`` that say something it does not (one finding is one place and one fault)."""
+    out = list(old)
+    seen = {(v["where"], v["text"]) for v in out}
+    for v in new:
+        if (v["where"], v["text"]) not in seen:
+            out.append({**v, "id": f"L{len(out) + 1}"})
+            seen.add((v["where"], v["text"]))
+    return out
+
+
+def reply_said_nothing(verdicts: list[dict[str, Any]] | None, logic: list[dict[str, Any]], listed: list[str]) -> bool:
+    """Whether the reader's answers add up to no review: no requirement is missing or different, no problem of logic is
+    named, nothing it checked is listed, and no requirement it calls implemented says where (file or line) or why."""
+    shown = any(v["file"] or v["line"] or v["note"] for v in verdicts or [] if v["status"] == IMPLEMENTED)
+    return _pairs.said_nothing(logic, listed, other_problem=bool(problems(verdicts or [])), evidence=shown)
+
+
 def script_for(problems: list[dict[str, Any]], code_dir: Path) -> str | None:
     """The script a repair should rewrite for these problems: ``simulate.py`` when the reader pointed there, or all of
     them are about the simulation (a swept parameter, a check's measure, an equation); else the analysis (``None``)."""
@@ -167,8 +250,13 @@ def directive(items: list[dict[str, Any]]) -> str:
     """What stands where a traceback would in the repair request: plain, naming each requirement, never a number."""
     lines = []
     for v in items:
-        what = "is missing from the code" if v["status"] == MISSING else "is implemented differently from the plan"
         where = f" (see {v['file']}" + (f", line {v['line']}" if v["line"] else "") + ")" if v["file"] else ""
+        if v.get("kind") == "logic":
+            # A fault in how something is computed: where, what, why and how to fix, without any value.
+            fix = f" Fix: {v['fix']}" if v.get("fix") else ""
+            lines.append(f"- {v['text'].rstrip('.')}{where}" + (f". Why: {v['note']}" if v["note"] else "") + f".{fix}")
+            continue
+        what = "is missing from the code" if v["status"] == MISSING else "is implemented differently from the plan"
         lines.append(f"- {v['text']}: this {what}{where}" + (f". {v['note']}" if v["note"] else "."))
     return ("This code has NOT been run, and it has not failed: the account of a crash above does not apply. FI "
             "compared it with what the plan requires it to compute, and these requirements are not met:\n"
@@ -204,7 +292,16 @@ def not_computed(quest_root: Path, code_dir: Path) -> list[dict[str, Any]]:
 
 
 def headline_missing(quest_root: Path, code_dir: Path) -> list[str]:
-    return [v["text"] for v in not_computed(quest_root, code_dir) if v.get("headline") and not v.get("contradicted")]
+    """The headline requirements the code is still said to miss. (A problem of logic is not a missing quantity: see
+    :func:`headline_constant`.)"""
+    return [v["text"] for v in not_computed(quest_root, code_dir)
+            if v.get("headline") and not v.get("contradicted") and v.get("kind") != "logic"]
+
+
+def headline_constant(quest_root: Path, code_dir: Path) -> list[str]:
+    """The headline quantities a high-severity finding calls constant and the run's own results confirm are constant
+    (:func:`resolve_logic`)."""
+    return [v["text"] for v in not_computed(quest_root, code_dir) if v.get("confirmed") and v.get("headline")]
 
 
 def _norm(text: Any) -> str:
@@ -246,7 +343,7 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
     absent: list[str] = []
     changed = False
     for v in record.get("problems") or []:
-        if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted"):
+        if not isinstance(v, dict) or not v.get("headline") or v.get("contradicted") or v.get("kind") == "logic":
             continue
         if in_results(str(v.get("name") or ""), result):
             v["contradicted"] = True
@@ -257,6 +354,77 @@ def resolve_headline(quest_root: Path, code_dir: Path, result: Any) -> list[str]
         record["disagreement"] = [v["text"] for v in record["problems"] if v.get("contradicted")]
         save(quest_root, record)
     return absent
+
+
+def _numbers(value: Any) -> list[float]:
+    """Every number in a value (a number, or a list or mapping of them), booleans left out."""
+    if isinstance(value, bool) or value is None:
+        return []
+    if isinstance(value, (int, float)):
+        return [float(value)]
+    if isinstance(value, (list, tuple)):
+        return [n for x in value for n in _numbers(x)]
+    if isinstance(value, dict):
+        return [n for x in value.values() for n in _numbers(x)]
+    return []
+
+
+def constant_in(name: str, result: Any) -> bool | None:
+    """Whether the run's results hold ``name`` (ignoring case and punctuation) at the same value everywhere it appears:
+    ``True`` when it does (at least two values, all equal), ``False`` when they differ, ``None`` when the results cannot
+    tell (the name is absent, or it appears once). This is the one claim of a reader about the logic that the results can
+    confirm or rule out."""
+    want = _norm(name)
+    if not want:
+        return None
+    values: list[float] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if _norm(k) == want:
+                    values.extend(_numbers(v))
+                else:
+                    walk(v)
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                walk(x)
+
+    walk(result)
+    if len(values) < 2:
+        return None
+    return all(abs(x - values[0]) <= 1e-12 * max(1.0, abs(values[0])) for x in values)
+
+
+def resolve_logic(quest_root: Path, code_dir: Path, result: Any) -> list[str]:
+    """After a run: of the problems of logic a reader still names after the repairs, those that say a quantity is a
+    constant are decided by the run's results. A quantity the results hold at differing values contradicts the reader (a
+    disagreement, recorded, and the paper is not told); one they hold at one value everywhere confirms it. Returns the
+    texts of the confirmed ones that are about a headline quantity and were called high severity: only then does the
+    quest stop. A finding the results cannot decide (a normalisation, a statistic, a skipped step) never stops the
+    quest on the reader's word: the limitations say that a second model flagged it and it was not resolved."""
+    record = load(quest_root)
+    if not record.get("final") or record.get("version") != version(code_dir):
+        return []
+    confirmed: list[str] = []
+    changed = False
+    for v in record.get("problems") or []:
+        if not isinstance(v, dict) or v.get("kind") != "logic" or not v.get("constant") or v.get("contradicted"):
+            continue
+        verdict = constant_in(str(v.get("name") or ""), result)
+        if verdict is False:
+            v["contradicted"] = True
+            changed = True
+        elif verdict is True:
+            if not v.get("confirmed"):
+                v["confirmed"] = True
+                changed = True
+            if v.get("headline") and v.get("severity") == "high":
+                confirmed.append(v["text"])
+    if changed:
+        record["disagreement"] = [v["text"] for v in record["problems"] if v.get("contradicted")]
+        save(quest_root, record)
+    return confirmed
 
 
 def write_note(quest_root: Path, code_dir: Path) -> str:
@@ -277,7 +445,17 @@ def write_note(quest_root: Path, code_dir: Path) -> str:
         notes.append("A second model was asked to compare the code with the plan, and did not check these requirements: "
                      f"{names}. Say plainly (in the limitations) that they were not checked against the code by another model"
                      + (", the study's main quantity among them." if record.get("not_reviewed_headline") else "."))
-    left = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
+    still = [v for v in not_computed(quest_root, code_dir) if not v.get("contradicted")]
+    flagged = [v for v in still if v.get("kind") == "logic"]
+    left = [v for v in still if v.get("kind") != "logic"]
+    if flagged:
+        listed = "; ".join(f"{v['text']}" + (f" (in {v['file']}" + (f", line {v['line']}" if v.get("line") else "") + ")"
+                                             if v.get("file") else "") + f" [{v.get('severity', 'medium')}]"
+                           for v in flagged[:8])
+        notes.append("A second model read how the code computes what the plan says, and the code was sent back to be "
+                     f"repaired; it still flags: {listed}. The run's results cannot settle this, and the reader can be wrong: "
+                     "say plainly in the limitations that a second model flagged these and they were not resolved, and do "
+                     "not present the quantities they concern as established.")
     if not left:
         return " ".join(notes)
     names = "; ".join(f"{v['text']} ({'not computed' if v['status'] == MISSING else 'computed differently from the plan'})"
@@ -293,8 +471,13 @@ def plain_lines(record: dict[str, Any]) -> str:
         return f"the code was not read by another model ({record['skipped']})"
     if record.get("error"):
         return f"the code could not be compared with the plan ({record['error']})"
-    n = len(record.get("problems") or [])
+    items = [v for v in record.get("problems") or [] if isinstance(v, dict)]
+    n = sum(1 for v in items if v.get("kind") != "logic")
+    m = len(items) - n
     return f"the code was read by {record.get('reviewer') or 'another model'}: " + (
-        f"{n} requirement(s) of the plan are missing or implemented differently" if n else "every requirement is met")
+        (f"{n} requirement(s) of the plan are missing or implemented differently" if n else "")
+        + (" and " if n and m else "")
+        + (f"{m} problem(s) in how it computes what the plan says" if m else "")
+        if items else "every requirement is met and no problem was found")
 
 

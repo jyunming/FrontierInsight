@@ -67,7 +67,7 @@ def severity_of(value: Any) -> str:
 
 
 def finding(item: Any) -> dict[str, Any] | None:
-    """One finding as ``{where, what, why, fix, severity, quantity}``, or ``None`` when it does not say what is wrong.
+    """One finding as ``{where, what, why, fix, severity, quantity, constant}``, or ``None`` when it does not say what is wrong.
     The keys a reviewer is likely to use for the same thing are read as one (``problem`` / ``issue`` for ``what``)."""
     if isinstance(item, str):
         item = {"what": item}
@@ -83,6 +83,7 @@ def finding(item: Any) -> dict[str, Any] | None:
         "fix": _first(item, "fix", "how_to_fix", "suggestion", "how"),
         "severity": severity_of(item.get("severity")),
         "quantity": _first(item, "quantity", "name", limit=80),
+        "constant": str(item.get("constant") if item.get("constant") is not None else "").strip().lower() in ("true", "yes", "y", "1"),
     }
 
 

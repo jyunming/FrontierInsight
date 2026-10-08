@@ -4821,14 +4821,30 @@ class Engine(RunChecksMixin):
         )
         critique: dict[str, Any] = {}
         failure = ""
+        not_reviewed = False
+        # A reviewer that is shown to be another model than the design's writer must find problems or say what it
+        # checked: a reply with neither is no review (asked once more, then recorded as not reviewed).
+        strict = self._reader_vs_planner(review_node, after_call=False, writer=writer)[0] is False
+
+        def _nothing_said(p: dict[str, Any]) -> bool:
+            return _pairs.said_nothing(_pairs.findings(p.get("objections_addressed")), _pairs.checked(p.get("checked_no_problem")))
+
         audit_started = _receipts.now()
         before = json.loads(json.dumps(design, default=str))
         try:
             # An unreadable reply is asked for once more, short (_chat_json); a second unreadable one is a failure.
             _, critique = await self._chat_json(
                 critique_prompt, node=review_node, want=("objections_addressed",),
-                usable=lambda p: isinstance(p.get("objections_addressed"), list),
+                usable=lambda p: isinstance(p.get("objections_addressed"), list) and not (strict and _nothing_said(p)),
+                why_unusable=lambda p: ("it listed no objection and did not say what it checked: put every problem under "
+                                        "objections_addressed, and what you checked and found no problem with under "
+                                        "checked_no_problem") if strict and isinstance(p.get("objections_addressed"), list)
+                and _nothing_said(p) else "",
             )
+            if strict and isinstance(critique, dict) and isinstance(critique.get("objections_addressed"), list)                     and _nothing_said(critique):
+                failure = f"the design was not reviewed: {_pairs.NOT_A_REVIEW}"
+                not_reviewed = True
+                critique = {}
         except Exception as e:  # noqa: BLE001 — see "Failure isolation" above
             failure = f"the audit call or its reply could not be used: {e!r}"
             self._log.warning(
@@ -4873,7 +4889,8 @@ class Engine(RunChecksMixin):
             iteration, n_addressed,
         )
         same, reviewer, writer_model, named = self._reader_vs_planner(review_node, after_call=True, writer=writer)
-        review_info = {"kind": "independent_review" if same is False else "self_review" if same else "unclear",
+        review_info = {"kind": "not_reviewed" if not_reviewed else "independent_review" if same is False
+                       else "self_review" if same else "unclear",
                        "reviewer": reviewer, "writer": writer_model, "same_model": same, "reported": named,
                        "step": review_node}
         self._record_design_critique(iteration, before, design, objections, failure, node=review_node, review=review_info)
@@ -4891,7 +4908,10 @@ class Engine(RunChecksMixin):
             inputs={"design": before}, output=_receipts.design_core(design), error=failure,
             detail=("it objected to the design that ran: " + "; ".join(str(o)[:160] for o in objected[:3])) if objected else "",
         )
-        if failure:
+        if failure and not_reviewed:
+            # The reviewer answered but did not review: a gap the evidence level records, not a stop for a person.
+            self._log.warning("[design_self_critique] %s; the receipt records it as a gap", failure)
+        elif failure:
             self._stop_once_for_check(
                 "design_audit", failure, look="needs/DESIGN_CRITIQUE.json and the [design_self_critique] entry in .fi/run.log",
                 inputs={"design": before},
@@ -10069,21 +10089,41 @@ class Engine(RunChecksMixin):
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
         sources, _partial = _code_review.sources_text(code)
         topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
+        plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None)
         verdicts: list[dict[str, Any]] | None = None
+        logic: list[dict[str, Any]] = []
+        listed: list[str] = []
+        asked_again = False
         try:
-            # One request, and one more for the requirements a reply left unanswered (never a third).
+            # At most two requests: one, and one more for the requirements a reply left unanswered, or, when the first
+            # answered every requirement but named no problem and said nothing it checked, for a review (never a third).
             for _ask in range(2):
                 left = [r for r in reqs if r["id"] not in {v["id"] for v in verdicts or []}]
+                again = ""
                 if not left:
-                    break
+                    if asked_again or verdicts is None or not _code_review.reply_said_nothing(verdicts, logic, listed):
+                        break
+                    self._log.warning("[code_review] the reader named no problem and did not say what it checked; "
+                                      "asking once more")
+                    again, left, asked_again = _pairs.REASK, list(reqs), True
                 prompt = self._prompts["code_review"].substitute(
                     topic=topic, requirements=json.dumps([{k: r[k] for k in ("id", "kind", "text")} for r in left], indent=2),
-                    code=sources)
+                    plan=plan_text, code=sources) + again
                 reply = await self._chat(prompt, node=review_node)
-                got = _code_review.parse(_parse_json_lenient(reply, node=review_node), left)
-                verdicts = [*(verdicts or []), *(got or [])] or None
+                parsed = _parse_json_lenient(reply, node=review_node)
+                got = _code_review.parse(parsed, left)
+                if again:
+                    kept = [v for v in verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
+                    verdicts = [*kept, *(got or [])] or None
+                else:
+                    verdicts = [*(verdicts or []), *(got or [])] or None
+                logic = _code_review.merge_logic(logic, _code_review.parse_logic(parsed, reqs))
+                listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
+                                     if c not in listed)]
             if verdicts is None:
                 record["error"] = "its answer named none of the plan's requirements"
+            elif _code_review.reply_said_nothing(verdicts, logic, listed):
+                verdicts, record["error"] = None, _pairs.NOT_A_REVIEW
         except _ModelAnswerProblem as e:
             record["error"] = f"the provider withheld or cut off its answer ({str(e)[:120] or type(e).__name__})"
         except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
@@ -10109,7 +10149,9 @@ class Engine(RunChecksMixin):
             return None
         record["verdicts"] = verdicts
         record["read_version"] = version
-        record["problems"] = _code_review.problems(verdicts)
+        record["logic"] = logic
+        record["checked"] = listed[:40]
+        record["problems"] = [*_code_review.problems(verdicts), *logic]
         self._log.info("[code_review] %s", _code_review.plain_lines(record))
         if not record["problems"]:
             record["final"] = True
@@ -10152,6 +10194,7 @@ class Engine(RunChecksMixin):
         problems = [v for v in record.get("problems") or [] if isinstance(v, dict)]
         for v in problems:
             self._log.warning("[code_review] still %s after the repairs: %s%s",
+                              "flagged" if v.get("kind") == "logic" else
                               "missing" if v.get("status") == _code_review.MISSING else "implemented differently", v["text"],
                               " (the run's results decide whether the study stops)" if v.get("headline") else "")
         return None
@@ -12756,7 +12799,15 @@ class Engine(RunChecksMixin):
             try:
                 reply = await self._chat(prompt, node=_review.NODE)
                 review = _review.parse(_parse_json_lenient(reply, node=_review.NODE), protocol, partial=partial)
-                if review is None:
+                if review is not None and review.said_nothing:
+                    # No problem named and nothing said to be checked is no review: asked once more, then not reviewed.
+                    self._log.warning("[oracle] the second reader of the checks named no problem and did not say what "
+                                      "it checked; asking once more")
+                    reply = await self._chat(prompt + _pairs.REASK, node=_review.NODE)
+                    review = _review.parse(_parse_json_lenient(reply, node=_review.NODE), protocol, partial=partial)
+                    if review is not None and review.said_nothing:
+                        review, error = None, _pairs.NOT_A_REVIEW
+                if review is None and not error:
                     error = "it named none of the plan's checks"
             except _ModelAnswerProblem as e:
                 error = f"the provider withheld or cut off its answer ({str(e)[:160] or type(e).__name__})"
@@ -16084,10 +16135,17 @@ class Engine(RunChecksMixin):
             ended = "the paper still claimed what FI's records contradict"
         if headline_missing:
             # A second model compared the code with the plan and the main quantity is not in it, even after repairs.
-            left = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
-            problem = ("the code does not compute the study's main quantity"
-                       f"{' (' + _one_line('; '.join(left), 200) + ')' if left else ''}"
-                       f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
+            missing = _code_review.headline_missing(self.quest_root, self.quest_root / "code")
+            constant = [] if missing else _code_review.headline_constant(self.quest_root, self.quest_root / "code")
+            left = missing or constant
+            if constant:
+                problem = ("the study's main quantity is a constant in the run's results, as a second model found in the code"
+                           f" ({_one_line('; '.join(constant), 200)}){', even after FI ' + after if after else ''}, so "
+                           "there is nothing measured to write up")
+            else:
+                problem = ("the code does not compute the study's main quantity"
+                           f"{' (' + _one_line('; '.join(left), 200) + ')' if left else ''}"
+                           f"{', even after FI ' + after if after else ''}, so there is nothing measured to write up")
             tried = ["asked a second model to read the code against what the plan requires it to compute",
                      *[_one_line(x, 300) for x in left[:3]],
                      *(["asked the model to repair the script" + (f" ({repairs} repair{'s' if repairs != 1 else ''})")]
@@ -16174,6 +16232,15 @@ class Engine(RunChecksMixin):
             # run's own results do not hold it either (a reviewer's word alone never stops a quest).
             why = ("the code does not compute the study's main quantity, and the run's results do not hold it "
                    "(" + "; ".join(_missing_headline)[:200] + ")")
+            self._log.warning("[evidence_gate] %s; stopping without a paper", why)
+            return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
+                    "stuck_reason": "headline_missing"}
+        if isinstance(exec_result, dict) and exec_result and not state.get("no_simulation_resolved") and (
+                _constant := _code_review.resolve_logic(self.quest_root, self.quest_root / "code", state.get("result_json"))):
+            # A second model found, with high severity, that the study's main quantity is a constant in the code, and the
+            # run's own results hold it at one value everywhere: the results confirm it (a reader's word alone never stops).
+            why = ("the study's main quantity is a constant in the run's results, as a second model found in the code "
+                   "(" + "; ".join(_constant)[:200] + ")")
             self._log.warning("[evidence_gate] %s; stopping without a paper", why)
             return {"verdict": "insufficient", "rationale": why, "gaps": [why], "stuck": True,
                     "stuck_reason": "headline_missing"}
@@ -19008,6 +19075,7 @@ class Engine(RunChecksMixin):
 
     async def _chat_json(
         self, prompt: str, *, node: str, want: tuple[str, ...], usable: Callable[[dict[str, Any]], bool] | None = None,
+        why_unusable: Callable[[dict[str, Any]], str] | None = None,
     ) -> tuple[str, dict[str, Any]]:
         """A call whose answer is one JSON object carrying ``want`` (a required check's: the design audit, the
         evidence gate, the claim check). When the reply cannot be used (no such object in it, or ``usable`` says it
@@ -19031,6 +19099,8 @@ class Engine(RunChecksMixin):
             wrong = f"it was {len(text):,} characters and its {', '.join(want)} was not one of the values asked for"
         else:
             wrong = f"it was {len(text):,} characters and its JSON object did not carry {', '.join(want)} as asked"
+        if isinstance(parsed, dict) and parsed and why_unusable is not None and (reason := why_unusable(parsed)):
+            wrong = reason  # a reply that is an object of the right shape but says nothing: the caller names why
         self._log.warning("[%s] the reply could not be used (%s); asking once more for one short JSON object", node,
                           wrong)
         echo = (f"\nYour previous reply, for reference (say the same things, in the asked-for shape):\n\n{text}\n"

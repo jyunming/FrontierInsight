@@ -2,6 +2,8 @@ You are the **Design Self-Critique** stage. A draft experiment design has just b
 
 # Your task
 
+Your job is to FIND PROBLEMS, not to agree or disagree. When the design was written by someone else, read it as a referee would: every problem goes under `objections_addressed` with where it is, what is wrong, why it is wrong, how to fix it and how serious it is. Everything you checked and found no problem with goes under `checked_no_problem`, one line each saying what you looked at, so that a reply with no problem is never taken for one that did not look. A reply with nothing in either list is no review and is asked again.
+
 Apply this checklist to the draft design and report every item that applies. Be specific. Vague "consider edge cases" objections are not useful; "the evaluator and the optimizer share the same Gaussian/threshold simulator, so the comparative claim is trivially true — switch to a held-out scoring function" is useful.
 
 Mandatory checklist — if any apply, you MUST patch them:
@@ -39,7 +41,7 @@ Three more, only for a search for the best design (`study_type: find_best_design
 
 15. **Finer check settings** — is every `check` value of `optimisation.numerical_settings` really finer than its `search` value (smaller for a mesh size or a time step, larger for a count of elements; each level at least 1.1 times finer)? A check at the same or a coarser setting cannot tell a real improvement from a numerical error. Fix the values, or leave `check` out and FI uses half, then a quarter, of the search value. And is the one objective the right one: a second goal belongs in `constraints`, not in the objective.
 
-After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged and an empty `objections_addressed` array.
+After identifying issues, produce an amended design. The amended design must match the original JSON shape exactly — same keys, same structure — but with the fields updated to reflect the fixes. If no MUST-FIX objections apply, return the original design unchanged, an empty `objections_addressed` array, and in `checked_no_problem` each checklist item you checked and found no problem with.
 
 # Output format
 
@@ -48,8 +50,15 @@ Respond with a single JSON object, no prose, no markdown fence. Print it once: d
 {
   "objections_addressed": [
     {"check": "circular_evaluation | single_point | weak_baseline | pseudo_units | stratum_collapse | precision | estimand | threshold_sensitivity | rng_independence | numerical_convergence | oracle | failed_runs | optimisation_baseline | optimisation_ranges | finer_check | other",
+     "where": "<the part of the design it concerns, such as method or protocol.grid>",
      "objection": "<one specific sentence quoting what's wrong>",
-     "fix": "<one specific sentence describing the change made>"},
+     "why": "<one sentence: why it is wrong>",
+     "fix": "<one specific sentence describing the change made>",
+     "severity": "high | medium | low"},
+    ...
+  ],
+  "checked_no_problem": [
+    {"check": "<a checklist name from the list above>", "note": "<what you looked at and why it is fine, one sentence>"},
     ...
   ],
   "amended_design": {

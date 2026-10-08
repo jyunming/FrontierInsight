@@ -464,6 +464,7 @@ async def test_a_reader_with_no_objection_to_any_equation_makes_no_request(tmp_p
     # An answer with no verdict on the equations is a reading of the checks only; the equations are said not to be read.
     engine = Engine(_config(tmp_path / "b", research=True, node_models={"oracle_review": "reviewer-model"}))
     old_style = {k: v for k, v in _cup_review().items() if k != "equations"}
+    old_style["checks"] = [{**old_style["checks"][0], "why": "it tests the model"}]  # a reading gives its reasons
     engine._client = _Model(CUP_PROTOCOL, old_style)
     await engine._node_plan({"topic": engine.config.topic, "literature": []})
     assert "no verdict on 'E1', 'E2'" in _section(engine)
