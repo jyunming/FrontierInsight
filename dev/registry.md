@@ -510,9 +510,11 @@ same PR that adds, splits or renames one.
 - `core/function_steps.py` — the model's package written one function at a time: `model_functions` (the outline's
   `implements` / `depends_on`, dependency order), `replace_function` (splice one function, its imports and helpers into
   `model.py`, parameters and `# E<n>` label kept), `FunctionFiller` (fill, import-check, equation test, repair alone,
-  bounded; `fell_back` removes the package so the code is written whole), `repair_one`, `spend` (the quest-wide request
-  cap). Called by `Engine._fill_model_functions` from `_node_implement`; `_split_block` then uses
-  `code_layout.prefilled_block`. Prompts `agents/implement_function.md`, `agents/implement_function_repair.md`; record
+  bounded; a failed function is left failed while the others go on, then `_repair_module` repairs the whole module naming
+  the functions that pass; `partial` keeps the package, `fell_back` (a function with no code) removes it so the code is written
+  whole; a missing package goes through `install`, a harness fault is never charged to a function), `repair_one`, `spend` (the
+  quest-wide request cap). Called by `Engine._fill_model_functions` from `_node_implement`; `_split_block` then uses
+  `code_layout.prefilled_block`. Prompts `agents/implement_function.md`, `agents/implement_function_repair.md`, `agents/implement_module_repair.md`; record
   `.fi/function_steps.json` (per-function status, so a resume does not write a done function).
 - `core/review_pairs.py` — one model writes, a different model reviews: each reviewer's own step (`READER_STEP`:
   `oracle_review` / `design_review` / `code_review`; `node_for` / `Engine._review_node` pick the node a call is made and

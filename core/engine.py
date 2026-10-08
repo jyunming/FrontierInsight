@@ -10217,6 +10217,16 @@ class Engine(RunChecksMixin):
             return -1, "", repr(e)
         return ran.returncode, ran.stdout or "", (ran.stderr or "") + ("\n(timed out)" if ran.timed_out else "")
 
+    def _function_steps_partial_note(self) -> str:
+        """For the code-writing prompt when the package was kept with functions that still fail their check."""
+        record = _function_steps.load(self.quest_root)
+        names = _function_steps.failing(record) if record.get("status") == _function_steps.PARTIAL else []
+        if not names:
+            return ""
+        return ("\nThe function" + ("s " if len(names) > 1 else " ") + ", ".join(f"`{n}`" for n in names)
+                + (" do" if len(names) > 1 else " does") + " not yet pass FI's check against the plan's equation (FI tests "
+                "it again before the run). Call the package's functions as they are; do not copy an equation into simulate.py.\n")
+
     def _function_steps_note(self, package: str) -> str:
         """For the code-writing prompt when the function-by-function attempt ended: which function it could not get right
         (its name and equation, nothing else)."""
@@ -10285,13 +10295,19 @@ class Engine(RunChecksMixin):
             filler = _function_steps.FunctionFiller(
                 quest_root=self.quest_root, package=package, protocol=protocol if isinstance(protocol, dict) else None,
                 summary=str(view.get("summary") or ""),
-                prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"]},
+                prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"],
+                         "module": self._prompts["implement_module_repair"]},
                 chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
-                max_calls=_function_steps.MAX_CALLS, constants=constants)
+                max_calls=_function_steps.MAX_CALLS, constants=constants, install=self._install_packages)
             outcome = await filler.run_all(specs)
             if outcome.status == "done":
                 self._log.info("[implement] the model's package is written: %d function(s), each checked "
                                "(%d request(s) to the model in this quest)", len(specs), outcome.calls)
+                return True
+            if outcome.status == _function_steps.PARTIAL:
+                self._log.info("[implement] the model's package is written with %d of %d function(s) passing their checks "
+                               "(%d request(s) to the model in this quest)",
+                               *_function_steps.counts(_function_steps.load(self.quest_root)), outcome.calls)
                 return True
             return False
         except _ModelAnswerProblem:
@@ -10316,7 +10332,8 @@ class Engine(RunChecksMixin):
             return None
         ex = self.config.execution
         rows = _equation_tests.example_rows(protocol)
-        record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows}}
+        record: dict[str, Any] = {"equations": {r["id"]: {"state": r["state"], "why": r["why"]} for r in rows},
+                                  "untested_core": [r["id"] for r in rows if r["state"] == "unprotected"]}
         env = {**(exec_env or os.environ)}
         raw_dir = self._raw_root() / "equation_tests"
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -12933,7 +12950,8 @@ class Engine(RunChecksMixin):
             # missing or cannot be used goes into the SAME request, never guessed.
             if fi_runs:
                 example_asks = [r for r in _equation_tests.example_rows(
-                    protocol_now if isinstance(protocol_now, dict) else None) if r["state"] in ("missing", "unusable")]
+                    protocol_now if isinstance(protocol_now, dict) else None)
+                    if r["state"] in ("missing", "unusable", "unprotected")]
         if (rewrites or requests or review.get("lines") or formula_asks or example_asks) and not progress.get("written"):
             # What FI did and what the reviewer said are written before the plan is asked anything, so a failed request
             # never leaves them unexplained.
@@ -13001,7 +13019,7 @@ class Engine(RunChecksMixin):
                 protocol_after = design_after.get("protocol") if isinstance(design_after, dict) else None
                 still_untested = _equation_tests.untested_notes(
                     [r for r in _equation_tests.example_rows(protocol_after if isinstance(protocol_after, dict) else None)
-                     if r["state"] in ("missing", "unusable")], {})
+                     if r["state"] in ("missing", "unusable", "unprotected")], {})
                 for note in still_untested:
                     self._log.warning("[plan] after the plan was asked once, %s", note)
             if len(after) < len(before):
@@ -16366,6 +16384,8 @@ class Engine(RunChecksMixin):
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
             evidence_note = f"{evidence_note}\n\n{code_note}".strip()
+        if core_note := _equation_tests.write_note(self._protocol_block(state)):
+            evidence_note = f"{evidence_note}\n\n{core_note}".strip()
         if run_note := self._run_checks_note():
             evidence_note = f"{evidence_note}\n\n{run_note}".strip()
         missed = [str(p) for p in state.get("extend_missed") or [] if str(p).strip()]
@@ -20595,6 +20615,7 @@ class Engine(RunChecksMixin):
                 # FI wrote and checked the package function by function: only the two scripts are asked for.
                 block += _code_layout.prefilled_block(
                     package, (self.quest_root / "code" / package / _code_layout.MODEL_NAME).read_text(encoding="utf-8"))
+                block += self._function_steps_partial_note()
             else:
                 block += _code_layout.prompt_block(package, _oracle.generating_equations(self._protocol_block(state)))
                 block += self._function_steps_note(package)
@@ -21199,6 +21220,7 @@ def _load_prompts() -> dict[str, string.Template]:
         "implement_body",                   # two-stage implement: fills bodies
         "implement_function",               # the model's package: ONE function body for ONE equation
         "implement_function_repair",        # ONE function repaired alone (never the whole script)
+        "implement_module_repair",          # the failing functions of the model's package, with the passing ones named
         "execute_reflect", "analyze",
         "improve",              # one change to the simulation against its checks of correctness
         "cross_check",

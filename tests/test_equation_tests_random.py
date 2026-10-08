@@ -62,7 +62,11 @@ def test_a_random_equation_without_a_usable_mean_is_not_tested_this_way_and_is_n
     assert notes and "not tested before the run" in notes[0]
     assert eqt.cases([row], {"E1": {"module": "m", "function": "f", "file": "m.py"}}) == []
     stated = _protocol("N = Poisson(rate * t)", {"untestable": "no mean in closed form"})
-    assert eqt.example_rows(stated)[0]["state"] == "untestable"
+    assert eqt.example_rows(stated)[0]["state"] == "unprotected", "untestable with no other check of the equation"
+    covered = {**stated, "oracles": [{"name": "rate_limit", "kind": "special_case", "check": "E1 at t=0 gives 0",
+                                      "expected": 0.0, "reference": "derivation: N = 0 when t = 0"}]}
+    row = eqt.example_rows(covered)[0]
+    assert row["state"] == "untestable" and row["covered_by"] == "rate_limit"
 
 
 def test_a_correct_sampler_passes_whether_it_takes_a_generator_or_a_seed(tmp_path: Path) -> None:

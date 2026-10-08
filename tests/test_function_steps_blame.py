@@ -163,6 +163,7 @@ async def test_a_function_that_is_wrong_itself_still_spends_its_own_repairs_and_
     bad_import = "from math import not_there_at_all\n\n\n# E1\ndef frequency(k, m):\n    return 1.0\n"
     model = _Model({"frequency": [bad_import], "quality": [GOOD["quality"]], "decay": [GOOD["decay"]]})
     outcome = await _filler(tmp_path, model, repairs=2).run_all(_specs())
-    assert outcome.status == "fell_back" and len(model.prompts) == 3, "an import this function added is its own fault"
+    assert outcome.status == "fell_back"
+    assert len(model.prompts) == 5, "its own fault: one fill and two repairs, and the other two functions are still written"
     error = fs.load(tmp_path)["functions"]["frequency"]["error"]
     assert "ImportError" in error and "not_there_at_all" in error

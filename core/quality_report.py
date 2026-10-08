@@ -37,7 +37,8 @@ _NODE_STAGE = {
     "oracle_review": "checks", "implement_oracle": "checks", "oracle_recompute": "checks",
     "design": "design", "design_self_critique": "design", "design_review": "design",
     "implement_outline": "code", "implement": "code", "implement_body": "code", "implement_function": "code",
-    "implement_function_repair": "code", "code_review": "code", "oracle_review.code": "code",
+    "implement_function_repair": "code", "implement_module_repair": "code",
+    "code_review": "code", "oracle_review.code": "code",
     "execute_reflect": "run", "improve": "run",
     "analyze": "analysis", "cross_check": "analysis",
     "write": "paper", "figures": "paper", "claim_check": "paper",
@@ -47,7 +48,7 @@ _NODE_STAGE = {
 #: ``provider.node_models.<step>``).
 _WRITERS = {"plan": ("plan", "plan_revise"), "checks": ("implement_oracle",), "design": ("design",),
             "code": ("implement", "implement_outline", "implement_body", "implement_function",
-                     "implement_function_repair"),
+                     "implement_function_repair", "implement_module_repair"),
             "run": ("execute_reflect", "improve"), "analysis": ("analyze",), "paper": ("write", "figures"),
             "review": ("review",)}
 _READERS = {"checks": ("oracle_review", "oracle_recompute"), "design": ("design_review", "design_self_critique"),
@@ -755,6 +756,13 @@ def _day(iso: Any) -> str:
     return str(iso or "an unknown time").replace("T", " ")[:16]
 
 
+def _code_metrics(q: _Quest) -> dict[str, Any]:
+    """What the code step measured about itself: how many functions of the model's package were written and passed their
+    check, from ``.fi/function_steps.json``."""
+    functions = [f for f in _dict(q.function_steps.get("functions")).values() if isinstance(f, dict)]
+    return {"functions_done": sum(1 for f in functions if f.get("status") == "done"), "functions_total": len(functions)}
+
+
 def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, Any]:
     """The report of one quest, from its records. Never raises for a missing or old-format record.
 
@@ -803,7 +811,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
     return {
         "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
-        "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure,
+        "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
                      "left_out": totals["left_out"],
@@ -858,6 +866,9 @@ def render(report: dict[str, Any]) -> str:
                      f"{p['fixed']} / {p['not_fixed']} / {p['left_out']} | {s['calls']}"
                      f"{(' (' + str(s['failed_calls']) + ' failed)') if s['failed_calls'] else ''} | "
                      f"{_n(s['prompt_tokens'])} / {_n(s['completion_tokens'])} | {_span(s['seconds'])} |")
+    code = report.get("code") or {}
+    if code.get("functions_total"):
+        lines += ["", f"Functions written and tested: {code['functions_done']} of {code['functions_total']}."]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:

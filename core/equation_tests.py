@@ -36,6 +36,13 @@ says so; it is not failed.
 
 A failed test is reported by its function and equation only (:func:`failure_message`): the expected value is never put
 into a request to the model that writes code.
+
+**``untestable`` is not a way out.** The equation the simulation generates its data with (``role`` ``generates``) may be
+declared ``untestable`` only when something else checks it: an entry of the protocol's ``oracles`` of kind
+``special_case`` (a limit), ``invariant`` (a conservation), ``symmetry`` or ``second_implementation`` whose ``check`` or
+``reference`` names the equation (:func:`property_check_for`). Without one the equation is ``unprotected``: the plan is
+asked once (in its one request about the checks) for a worked example or such a check, and when none comes the record
+says plainly that the core equation is not tested at all (:func:`write_note`), which the paper's limitations repeat.
 """
 
 from __future__ import annotations
@@ -70,6 +77,8 @@ TEST_PATH = f"{TESTS_DIR}/{TEST_NAME}"
 MARK = "EQUATION_TESTS:"
 
 OK, MISMATCH, CONTRACT, ERROR = "ok", "mismatch", "contract", "error"
+#: The kinds of check of the protocol that count as another check of an equation declared untestable.
+PROPERTY_KINDS = ("special_case", "invariant", "symmetry", "second_implementation")
 
 #: What the plan is told about the example (the design prompt, and the one request to the plan).
 EXAMPLE_RULE = (
@@ -156,11 +165,25 @@ def _stated_variance(example: dict[str, Any], inputs: dict[str, Any]) -> float |
     return float(value) if value is not None and math.isfinite(float(value)) and float(value) > 0 else None
 
 
+def property_check_for(eid: str, protocol: dict[str, Any] | None) -> str:
+    """The name of a check of the protocol that is another check of equation ``eid``: an entry of ``oracles`` of kind
+    special case (a limit), invariant (a conservation), symmetry or second implementation whose name, check or reference
+    names the equation. ``""`` when there is none."""
+    for o in _oracle.declared(protocol):
+        if _oracle.kind_of(o) not in PROPERTY_KINDS:
+            continue
+        text = " ".join(_text(x) for x in (o.get("name"), o.get("check"), _oracle.reference_of(o)))
+        if _oracle._labelled_in(eid, text):
+            return _text(o.get("name"))[:80] or "a check of the plan"
+    return ""
+
+
 def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
     """One row per equation that should have a worked example: ``{"id", "formula", "state", "why", "inputs",
     "expected", "rel", "abs", "method", "random", "variance"}``. ``state``: ``ok`` (FI computed the output), ``missing`` (no example),
-    ``unusable`` (``why``: the example cannot be used, never repaired by guessing) or ``untestable`` (the plan says
-    the equation has no closed form for its output, and why)."""
+    ``unusable`` (``why``: the example cannot be used, never repaired by guessing), ``untestable`` (the plan says
+    the equation has no closed form for its output, and why; for an equation the simulation generates its data with
+    another check of it must exist: ``covered_by`` names it) or ``unprotected`` (untestable, and nothing else checks it)."""
     rows: list[dict[str, Any]] = []
     for eq in eligible(protocol):
         row = {"id": _text(eq["id"]), "formula": _text(eq["formula"]), "state": "missing",
@@ -176,6 +199,12 @@ def example_rows(protocol: dict[str, Any] | None) -> list[dict[str, Any]]:
         reason = _text(example.get("untestable"))
         if reason:
             row.update(state="untestable", why=reason)
+            if _text(eq.get("role")).lower() == "generates":
+                covered = property_check_for(row["id"], protocol)
+                if covered:
+                    row["covered_by"] = covered
+                else:
+                    row["state"] = "unprotected"
             continue
         inputs = example.get("inputs")
         good = {str(k).strip(): _number(v) for k, v in inputs.items()} if isinstance(inputs, dict) else {}
@@ -218,6 +247,12 @@ def request(rows: list[dict[str, Any]], *, last: bool = True) -> str:
             lines.append(f"- {r['id']} (`{r['formula']}`): give its `example`.")
         elif r["state"] == "unusable":
             lines.append(f"- {r['id']} (`{r['formula']}`): its `example` cannot be used: {r['why']}.")
+        elif r["state"] == "unprotected":
+            lines.append(f"- {r['id']} (`{r['formula']}`): the plan says it has no closed form for its output ({r['why']}), "
+                         "and nothing else checks it. Either give it a worked example, or add to the protocol's `oracles` "
+                         f"a check against a known answer that names {r['id']} in its `check` or `reference`: a limit "
+                         "(`special_case`), a conserved quantity (`invariant`), a `symmetry` or an independent second "
+                         "implementation (`second_implementation`).")
     if not lines:
         return ""
     return ("FI tests each equation of the model before the study runs, from a worked example the plan gives. "
@@ -234,9 +269,13 @@ def untested_notes(rows: list[dict[str, Any]], located: dict[str, dict[str, str]
         elif r["state"] == "unusable":
             notes.append(f"equation {r['id']} is not tested before the run: its worked example cannot be used "
                          f"({r['why']})")
+        elif r["state"] == "unprotected":
+            notes.append(f"equation {r['id']} is not tested at all: the plan says it has no closed form for its output "
+                         f"({r['why']}) and no limit, symmetry, conservation or second implementation checks it")
         elif r["state"] == "untestable":
             notes.append(f"equation {r['id']} is not tested before the run: the plan says it has no closed form "
-                         f"for its output ({r['why']})")
+                         f"for its output ({r['why']})"
+                         + (f"; the check '{r['covered_by']}' tests it instead" if r.get("covered_by") else ""))
         elif not located.get(r["id"]):
             notes.append(f"equation {r['id']} is not tested before the run: no function of the code that can be "
                          "imported is labelled with it (`# " + r["id"] + "`)")
@@ -478,3 +517,21 @@ def write(code_dir: Path, case_list: list[dict[str, Any]]) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(test_source(case_list), encoding="utf-8")
     return path
+
+
+def untested_core(protocol: dict[str, Any] | None) -> list[str]:
+    """The ids of the equations the simulation generates its data with that nothing tests (an untestable equation with no
+    other check), as the plan stands now."""
+    return [r["id"] for r in example_rows(protocol) if r["state"] == "unprotected"]
+
+
+def write_note(protocol: dict[str, Any] | None) -> str:
+    """For the write prompt: the core equations nothing tests, to be said plainly in the limitations. ``""`` when none."""
+    ids = untested_core(protocol)
+    if not ids:
+        return ""
+    return ("The equation" + ("s " if len(ids) > 1 else " ") + ", ".join(ids) + (" that generate" if len(ids) > 1 else " that generates")
+            + " the study's data " + ("are" if len(ids) > 1 else "is")
+            + " not tested at all: the plan says it has no closed form for its output and gave no limit, symmetry, "
+              "conservation or second implementation to check it with. Say so plainly in the limitations, and do not "
+              "present the quantities that depend on it as verified.")

@@ -41,22 +41,6 @@ async def test_the_package_is_written_one_function_at_a_time_and_the_code_reques
 
 
 @pytest.mark.asyncio
-async def test_a_function_that_stays_wrong_falls_back_to_writing_the_code_whole(tmp_path: Path) -> None:
-    engine = _engine(tmp_path)
-    _plan_md(engine)
-    writer = _Writer({"frequency": [GOOD["frequency"]], "quality": [WRONG_Q]})
-    engine._client = writer
-    assert await engine._fill_model_functions(STATE, OUTLINE) is False
-    assert writer.seen["quality"] == 3, "one request and the two repairs of a function, never more"
-    assert not (engine.quest_root / "code" / "spring").exists()
-    block = engine._split_block(STATE)
-    assert "# file: spring/model.py" in block, "the code request asks for the package as it always did"
-    assert "`quality` (equation E2) still failed its checks" in block
-    # The fallback is the old path: a reply that holds the package is used as before.
-    assert not fs.is_ready(engine.quest_root, "spring")
-
-
-@pytest.mark.asyncio
 async def test_a_quest_whose_outline_names_no_function_per_equation_or_with_one_script_is_unchanged(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     _plan_md(engine)
@@ -210,3 +194,61 @@ async def test_no_request_that_writes_or_repairs_code_holds_an_example_or_an_exp
             assert secret not in prompt, f"{secret!r} reached a request of the step {node!r}"
     outline = next(p for n, p in prompts if n == "implement_outline")
     assert '"input_names"' in outline and '"k"' in outline, "the outline may know the NAMES of an example's inputs"
+
+
+class _WriterWithModule(_Writer):
+    """The fake code-writing model, also answering the repair of the whole module."""
+
+    def __init__(self, replies: dict[str, list[str]], module: str) -> None:
+        super().__init__(replies)
+        self.module, self.module_prompts = module, []
+
+    async def chat(self, messages, **kw):  # noqa: ANN001
+        prompt = messages[-1]["content"]
+        if prompt.lstrip().startswith("You are repairing the model package"):
+            self.prompts.append(prompt)
+            self.module_prompts.append(prompt)
+            return "```python\n" + self.module + "\n```"
+        return await super().chat(messages, **kw)
+
+
+@pytest.mark.asyncio
+async def test_a_function_that_stays_wrong_keeps_the_package_and_the_module_is_repaired_with_the_others_named(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _plan_md(engine)
+    good_module = GOOD["frequency"] + "\n\n" + GOOD["quality"]
+    writer = _WriterWithModule({"frequency": [GOOD["frequency"]], "quality": [WRONG_Q]}, good_module)
+    engine._client = writer
+    assert await engine._fill_model_functions(STATE, OUTLINE) is True
+    assert writer.seen["quality"] == 3, "one request and the two repairs of a function, never more"
+    assert len(writer.module_prompts) == 1, "the module repair fixed it; no second one"
+    assert "`frequency`" in writer.module_prompts[0].split("# The functions to fix")[0]
+    record = fs.load(engine.quest_root)
+    assert record["status"] == "done" and record["functions_done"] == 2 and record["functions_total"] == 2
+    assert fs.is_ready(engine.quest_root, "spring")
+    assert "return m * w / c" in (engine.quest_root / "code" / "spring" / "model.py").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_function_still_wrong_after_the_module_repair_is_kept_failing_and_the_code_request_says_which(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    _plan_md(engine)
+    wrong_module = GOOD["frequency"] + "\n\n" + WRONG_Q
+    writer = _WriterWithModule({"frequency": [GOOD["frequency"]], "quality": [WRONG_Q]}, wrong_module)
+    engine._client = writer
+    assert await engine._fill_model_functions(STATE, OUTLINE) is True
+    assert len(writer.module_prompts) == fs.MODULE_REPAIRS
+    record = fs.load(engine.quest_root)
+    assert record["status"] == "partial" and fs.failing(record) == ["quality"] and record["functions_done"] == 1
+    assert (engine.quest_root / "code" / "spring" / "model.py").is_file() and fs.is_ready(engine.quest_root, "spring")
+    block = engine._split_block(STATE)
+    assert "ALREADY WRITTEN" in block and "The function `quality` does not yet pass" in block
+    log = (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "1 of 2 function(s) passing their checks" in log
+    # The tests before the run catch the failing function, and the existing repair and stop apply to it.
+    _write = engine.quest_root / "code" / "simulate.py"
+    _write.write_text("from spring import model\n\n\ndef run_cell(cell):\n    return {'q': model.quality(2.0, 3.0, cell['c'])}\n",
+                      encoding="utf-8")
+    engine._client = _Writer({"quality": [WRONG_Q]})
+    patch = await engine._equation_gate(STATE, None, None)
+    assert patch is not None and "`quality`" in patch["exec_result"]["stderr_tail"]

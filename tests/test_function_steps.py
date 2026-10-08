@@ -187,16 +187,20 @@ async def test_a_function_written_wrong_is_repaired_alone_and_the_next_function_
 
 
 @pytest.mark.asyncio
-async def test_a_function_that_stays_wrong_ends_the_step_within_its_bound_and_the_code_is_written_whole(tmp_path: Path) -> None:
+async def test_a_function_that_stays_wrong_is_left_failed_and_the_package_with_the_others_is_kept(tmp_path: Path) -> None:
     model = _Model({"frequency": [BAD["frequency"]], "quality": [GOOD["quality"]], "decay": [GOOD["decay"]]})
     outcome = await _filler(tmp_path, model, repairs=2).run_all(_specs())
-    assert outcome.status == "fell_back" and outcome.failed == "frequency"
-    assert outcome.calls == 3 and len(model.prompts) == 3, "one fill and two repairs, then the step ends"
-    assert not (tmp_path / "code" / "spring").exists(), "the half-written package is removed"
-    assert fs.load(tmp_path)["status"] == "fell_back" and not fs.is_ready(tmp_path, "spring")
+    assert outcome.status == "partial" and outcome.failed == "frequency"
+    assert [_which(p) for p in model.prompts] == ["frequency"] * 3 + ["quality", "decay"], (
+        "one fill and two repairs of the failing function, then the others are written")
+    assert (tmp_path / "code" / "spring").is_dir(), "the package with the functions that pass is kept"
+    record = fs.load(tmp_path)
+    assert record["status"] == "partial" and fs.counts(record) == (2, 3) and fs.failing(record) == ["frequency"]
+    assert record["functions_done"] == 2 and record["functions_total"] == 3
+    assert fs.is_ready(tmp_path, "spring")
     again = _Model({k: [v] for k, v in GOOD.items()})
-    assert (await _filler(tmp_path, again).run_all(_specs())).status == "skipped" and again.prompts == [], (
-        "a step that fell back is not tried again for the same plan")
+    assert (await _filler(tmp_path, again).run_all(_specs())).status == "partial" and again.prompts == [], (
+        "a step that ended partial is not tried again for the same plan")
 
 
 @pytest.mark.asyncio
@@ -237,13 +241,19 @@ async def test_a_different_plan_writes_the_functions_again(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_missing_third_party_module_is_the_environment_s_problem_not_the_function_s(tmp_path: Path) -> None:
+async def test_a_module_that_is_missing_and_cannot_be_installed_is_the_function_s_own_fault(tmp_path: Path) -> None:
     uses = "import not_installed_anywhere\n\n\n# E1\ndef frequency(k, m):\n    return 2.0\n"
     only = [s for s in _specs() if s.name == "frequency"]
+    asked: list[list[str]] = []
+
+    async def install(packages: list[str]) -> list[tuple[str, str]]:
+        asked.append(packages)
+        return [(p, "no matching distribution") for p in packages]
+
     model = _Model({"frequency": [uses]})
-    outcome = await _filler(tmp_path, model).run_all(only)
-    # The import check skips the missing module; the equation test (which imports it too) then reports the error.
-    assert outcome.status == "fell_back" and len(model.prompts) == 3
+    outcome = await _filler(tmp_path, model, install=install).run_all(only)
+    assert asked == [["not_installed_anywhere"]], "asked once, through the installer"
+    assert outcome.status == "fell_back" and len(model.prompts) == 3, "a function that asks for what is not there pays for it"
 
 
 def test_the_two_prompts_are_templates_with_their_parts() -> None:

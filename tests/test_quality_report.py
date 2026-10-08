@@ -343,3 +343,18 @@ def test_a_running_quest_is_not_shown_with_an_earlier_runs_outcome(tmp_path: Pat
     # Stopped for a person: not running.
     _w(root / ".fi" / "pause.json", {"kind": "plan", "headline": "h"})
     assert qr.build(root)["outcome"]["kind"] == "paused"
+
+
+def test_the_report_says_how_many_functions_were_written_and_tested(tmp_path: Path) -> None:
+    root = tmp_path / "q-fn"
+    _calls(root, [_call("implement", "model-a")])
+    _w(root / ".fi" / "function_steps.json", {"status": "partial", "functions": {
+        "f1": {"equation": "E1", "status": "done", "attempts": 1},
+        "f2": {"equation": "E2", "status": "failed", "attempts": 3, "error": "TypeError"},
+        "f3": {"equation": "E3", "status": "done", "attempts": 1}}})
+    _w(root / "paper" / "paper.md", "x")
+    r = qr.build(root)
+    assert r["code"]["functions_done"] == 2 and r["code"]["functions_total"] == 3
+    assert "Functions written and tested: 2 of 3." in qr.render(r)
+    none = qr.build(tmp_path / "q-none")
+    assert none["code"]["functions_total"] == 0 and "Functions written and tested" not in qr.render(none)
