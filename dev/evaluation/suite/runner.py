@@ -181,8 +181,8 @@ def _refresh(entry: dict[str, Any], handle: Any, alive: Callable[[int], bool]) -
 
 
 LOCK = "driver.lock"
-#: A lock file younger than this with no readable pid is a driver between creating it and writing its pid, not a stale one.
-_LOCK_GRACE_SECONDS = 10.0
+#: Where the Windows byte lock sits: far past the pid text, so a second driver can still read the pid it refuses with.
+_LOCK_OFFSET = 1 << 20
 
 
 def lock_path(round_dir: Path) -> Path:
@@ -190,71 +190,77 @@ def lock_path(round_dir: Path) -> Path:
 
 
 def _lock_owner(path: Path) -> int | None:
-    """The pid written in a lock file, or ``None`` when it holds none that can be read."""
+    """The pid written in a lock file, or ``None`` when it holds none that can be read (for the refusal message only)."""
     try:
         return int(path.read_text(encoding="utf-8").strip().split()[0])
     except (OSError, ValueError, IndexError):
         return None
 
 
-def acquire_lock(round_dir: Path, *, pid: int | None = None, alive: Callable[[int], bool] = default_alive) -> Path:
-    """Take the round's exclusive driver lock: a file created with ``O_CREAT | O_EXCL`` (atomic on Windows and POSIX) that
-    holds the driver's pid. A second driver of the same round refuses with a plain message; a lock whose process is gone
-    is taken over. Two drivers reading the same queued state would otherwise start the same topic twice."""
+def _os_lock(fd: int) -> bool:
+    """Try to take the operating system's exclusive advisory lock on ``fd`` without waiting; False when held elsewhere."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _os_unlock(fd: int) -> None:
+    try:
+        if os.name == "nt":
+            import msvcrt
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+class DriverLock:
+    """The round's exclusive driver lock: an OS-level advisory lock on ``driver.lock`` that the operating system drops
+    when the holding process ends, however it ends, so there is no stale lock to detect or take over. The file is kept
+    (never deleted: removing it would let a second driver lock a new file while the first still holds the old one)."""
+
+    def __init__(self, path: Path, fd: int) -> None:
+        self.path, self._fd = path, fd
+
+    def release(self) -> None:
+        if self._fd is not None:
+            _os_unlock(self._fd)
+            try:
+                os.close(self._fd)
+            finally:
+                self._fd = None  # type: ignore[assignment]
+
+
+def acquire_lock(round_dir: Path, *, pid: int | None = None) -> DriverLock:
+    """Take the round's exclusive driver lock, or refuse with a plain message when another driver holds it. Two drivers
+    reading the same queued state would otherwise start the same topic twice. The pid is written after the lock is held,
+    for the refusal message only; the lock is held until :meth:`DriverLock.release` or the process ends."""
     path, me = lock_path(round_dir), int(pid if pid is not None else os.getpid())
-    for _ in range(5):
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            owner = _lock_owner(path)
-            if owner is None:
-                try:
-                    young = time.time() - path.stat().st_mtime < _LOCK_GRACE_SECONDS
-                except OSError:
-                    continue  # it went away between the two looks: try again
-                if young:
-                    raise SuiteError(f"round {Path(round_dir).name} is being started by another driver right now; "
-                                     "wait a moment and look at its status") from None
-            elif alive(owner):
-                raise SuiteError(f"round {Path(round_dir).name} is already being driven by process {owner}: "
-                                 f"follow it with `status`, or stop that process first ({path})") from None
-            # stale: take it over by moving it aside (one mover wins), and make sure it was the stale file that was moved
-            moved = path.with_name(f"{LOCK}.stale.{me}")
-            try:
-                os.replace(path, moved)
-            except OSError:
-                continue
-            if _lock_owner(moved) != owner:  # a fresh lock was moved by mistake: put it back if the place is free
-                try:
-                    os.link(moved, path)
-                except OSError:
-                    pass
-                finally:
-                    try:
-                        os.unlink(moved)
-                    except OSError:
-                        pass
-                raise SuiteError(f"round {Path(round_dir).name} is being started by another driver right now; "
-                                 "wait a moment and look at its status")
-            try:
-                os.unlink(moved)
-            except OSError:
-                pass
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(f"{me}\n")
-        return path
-    raise SuiteError(f"could not take the driver lock of round {Path(round_dir).name} ({path})")
-
-
-def release_lock(round_dir: Path, *, pid: int | None = None) -> None:
-    """Remove the lock if it is this driver's (never another driver's)."""
-    path = lock_path(round_dir)
-    if _lock_owner(path) == int(pid if pid is not None else os.getpid()):
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+    fd = os.open(str(path), os.O_RDWR | os.O_CREAT)
+    if not _os_lock(fd):
+        os.close(fd)
+        owner = _lock_owner(path)
+        who = f"process {owner}" if owner else "another process"
+        raise SuiteError(f"round {Path(round_dir).name} is already being driven by {who}: "
+                         f"follow it with `status`, or stop that process first ({path})")
+    try:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{me}\n".encode("utf-8"))
+    except OSError:
+        pass  # the pid is only for the refusal message: the lock itself is held
+    return DriverLock(path, fd)
 
 
 def drive(suite: Suite, round_dir: Path, *, spawn: Callable[..., Any] = default_spawn,
@@ -263,17 +269,17 @@ def drive(suite: Suite, round_dir: Path, *, spawn: Callable[..., Any] = default_
     """Start the queued topics, never more than ``max_parallel`` live at once, until every topic has ended.
 
     Safe to call again after this process died: topics that were started are followed by pid, queued ones are started.
-    Only one driver may drive a round: it holds ``driver.lock`` for as long as it runs (a second one refuses with a
-    ``SuiteError``). Each queued topic is claimed (``starting``, written to the manifest through a temporary file and
+    Only one driver may drive a round: it holds an operating-system lock on ``driver.lock`` for as long as it runs (a second one
+    refuses with a ``SuiteError``; the system drops the lock if the process dies). Each queued topic is claimed (``starting``, written to the manifest through a temporary file and
     ``os.replace``) from the manifest as it is on disk now, before its process is launched, so a topic is never launched
     twice; a topic left ``starting`` by a driver that died is ended as ``failed_to_start`` rather than risk a second run."""
     rdir = Path(round_dir)
     me = int(pid if pid is not None else os.getpid())
-    acquire_lock(rdir, pid=me, alive=alive)
+    lock = acquire_lock(rdir, pid=me)
     try:
         return _drive_locked(suite, rdir, spawn=spawn, alive=alive, sleep=sleep, interval=interval, max_loops=max_loops)
     finally:
-        release_lock(rdir, pid=me)
+        lock.release()
 
 
 def _patch(rdir: Path, name: str, **fields: Any) -> dict[str, Any]:

@@ -477,43 +477,81 @@ def _queued(tmp_path: Path, max_parallel: int = 3) -> tuple[Suite, Path]:
     return suite, rdir
 
 
+_HOLD = ("import sys, time; sys.path.insert(0, sys.argv[1]); from pathlib import Path; "
+         "from dev.evaluation.suite import runner; lock = runner.acquire_lock(Path(sys.argv[2]), pid=4242); "
+         "print('held', flush=True); time.sleep(float(sys.argv[3]))")
+
+
+def _hold_in_another_process(rdir: Path, seconds: float) -> Any:
+    import subprocess
+    import sys
+    root = str(Path(runner.__file__).resolve().parents[3])
+    proc = subprocess.Popen([sys.executable, "-c", _HOLD, root, str(rdir), str(seconds)], stdout=subprocess.PIPE, text=True)
+    assert proc.stdout is not None and proc.stdout.readline().strip() == "held"
+    return proc
+
+
 def test_a_second_driver_refuses_while_the_first_holds_the_lock(tmp_path: Path) -> None:
     suite, rdir = _queued(tmp_path)
-    runner.acquire_lock(rdir, pid=4242, alive=lambda pid: True)
+    holder = _hold_in_another_process(rdir, 60)  # a real second process: Windows locks belong to the process
     launched: list[list[str]] = []
 
     def spawn(cmd: list[str], **kw: Any) -> _Proc:
         launched.append(cmd)
         return _Proc(cmd, kw["cwd"], kw["env"])
 
-    with pytest.raises(SuiteError, match="already being driven by process 4242"):
-        runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: True, sleep=lambda s: None, max_loops=1, pid=77)
-    assert launched == [] and {e["state"] for e in runner.load_manifest(rdir)["topics"].values()} == {"queued"}
-    assert runner.lock_path(rdir).read_text(encoding="utf-8").strip() == "4242", "the first driver's lock is untouched"
-    runner.release_lock(rdir, pid=77)  # not this driver's: left alone
-    assert runner.lock_path(rdir).is_file()
-    runner.release_lock(rdir, pid=4242)
-    assert not runner.lock_path(rdir).exists()
+    try:
+        with pytest.raises(SuiteError, match="already being driven by process 4242"):
+            runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: True, sleep=lambda s: None, max_loops=1, pid=77)
+        assert launched == [] and {e["state"] for e in runner.load_manifest(rdir)["topics"].values()} == {"queued"}
+    finally:
+        holder.kill()
+        holder.wait()
 
 
-def test_a_stale_lock_is_taken_over_and_the_lock_is_released_at_the_end(tmp_path: Path) -> None:
+def test_a_second_lock_in_the_same_process_is_refused_too(tmp_path: Path) -> None:
     suite, rdir = _queued(tmp_path)
-    runner.lock_path(rdir).write_text("999999\n", encoding="utf-8")  # a driver that is gone
+    first = runner.acquire_lock(rdir, pid=4242)
+    try:
+        with pytest.raises(SuiteError, match="already being driven by process 4242"):
+            runner.acquire_lock(rdir, pid=77)
+    finally:
+        first.release()
+    runner.acquire_lock(rdir, pid=77).release()  # free again once released
+
+
+def test_a_lock_left_by_a_process_that_exited_is_acquirable(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
+    holder = _hold_in_another_process(rdir, 60)
+    with pytest.raises(SuiteError):
+        runner.acquire_lock(rdir, pid=77)
+    holder.kill()  # it dies without releasing anything: the operating system drops its lock
+    holder.wait()
+    assert runner.lock_path(rdir).is_file(), "the file it left behind is still there"
+    lock = runner.acquire_lock(rdir, pid=77)
+    try:
+        assert runner.lock_path(rdir).read_text(encoding="utf-8").strip() == "77"
+    finally:
+        lock.release()
+
+
+def test_the_lock_is_held_while_the_driver_runs_and_released_at_the_end(tmp_path: Path) -> None:
+    suite, rdir = _queued(tmp_path)
     procs: list[_Proc] = []
 
     def spawn(cmd: list[str], **kw: Any) -> _Proc:
         procs.append(_Proc(cmd, kw["cwd"], kw["env"]))
-        assert runner.lock_path(rdir).read_text(encoding="utf-8").strip() == "77"  # held while it runs
+        with pytest.raises(SuiteError, match="already being driven"):
+            runner.acquire_lock(rdir, pid=88)  # held while it runs
         return procs[-1]
 
     def sleep(_s: float) -> None:
         for p in procs:
             p.code = 0
 
-    m = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: pid != 999999, sleep=sleep, interval=0, pid=77)
+    m = runner.drive(suite, rdir, spawn=spawn, alive=lambda pid: True, sleep=sleep, interval=0, pid=77)
     assert len(procs) == 3 and all(e["state"] == "done" for e in m["topics"].values())
-    assert not runner.lock_path(rdir).exists()
-    assert not list(rdir.glob("driver.lock.stale.*"))
+    runner.acquire_lock(rdir, pid=88).release()
 
 
 def test_the_lock_is_released_when_the_driver_fails(tmp_path: Path) -> None:
@@ -525,14 +563,7 @@ def test_the_lock_is_released_when_the_driver_fails(tmp_path: Path) -> None:
     with pytest.raises(KeyboardInterrupt):
         runner.drive(suite, rdir, spawn=lambda cmd, **kw: _Proc(cmd, kw["cwd"], kw["env"]), alive=lambda pid: True,
                      sleep=sleep, pid=77)
-    assert not runner.lock_path(rdir).exists()
-
-
-def test_a_lock_being_written_is_not_taken_over(tmp_path: Path) -> None:
-    suite, rdir = _queued(tmp_path)
-    runner.lock_path(rdir).write_text("", encoding="utf-8")  # created, pid not written yet
-    with pytest.raises(SuiteError, match="another driver right now"):
-        runner.acquire_lock(rdir, pid=77, alive=lambda pid: False)
+    runner.acquire_lock(rdir, pid=88).release()
 
 
 def test_no_topic_is_launched_twice_when_a_second_driver_starts_in_the_middle(tmp_path: Path) -> None:
