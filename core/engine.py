@@ -5949,6 +5949,93 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                 _plan.record_version(self.quest_root, updated, by="engine", note="what FI did about protocol parts that could not be read")
         return design, plan_sha
 
+    def _drafted_parts_record(self) -> tuple[int, str, int]:
+        """``(requests, model, iteration)`` of the last time FI asked the plan's model to write the protocol parts a
+        redesign drafted that could not be read (``.fi/drafted_parts_asked.json``); zeros when it never did."""
+        try:
+            record = json.loads((self.fi_dir / _DRAFTED_PARTS_ASKED).read_text(encoding="utf-8"))
+            return max(0, int(record.get("count") or 0)), str(record.get("model") or ""), int(record.get("iteration") or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            return 0, "", 0
+
+    def _drafted_parts_asked(self, iteration: int) -> int:
+        """How many times FI has asked about a redesign's unreadable parts, on the model and design round asked now."""
+        count, model, at = self._drafted_parts_record()
+        return count if model == self._plan_model_name() and at == iteration else 0
+
+    async def _complete_drafted_parts(self, state: QuestState, design: Any, *, iteration: int) -> Any:
+        """A design drafted at this step (a redesign: it did not come from ``plan.md``) whose protocol lacks a part that
+        plan.md says could not be read (the settings to sweep, the metrics ...) is completed here, the way the plan's own
+        parts are (:meth:`_ask_plan_for_the_parts`), before the quest may stop for it. In this order: (1) the plan's model
+        is asked to write just those parts for the redesign (at most ``_SEARCH_ASKS`` requests of one chat call each per
+        design round and model, counted in ``.fi/drafted_parts_asked.json`` BEFORE each call so a resume never asks
+        again; only a part that passes the same reading as the plan's is kept, the rest of the design is untouched);
+        (2) a part still missing is taken from the plan's own design block when that block holds it readable, since the
+        plan step already settled it. After the freeze the frozen protocol is the one that runs: nothing is asked."""
+        if not isinstance(design, dict) or not self._runs_code(state) or _frozen.load(self.quest_root) is not None:
+            return design
+        unread = self._unread_parts(design)
+        if not unread:
+            return design
+        base = design["protocol"] if isinstance(design.get("protocol"), dict) else {}
+        protocol: dict[str, Any] = dict(base)
+
+        def take(part: str, value: Any) -> bool:
+            fixed, why = _plan.normalize_protocol({**protocol, part: value})
+            if fixed is None or part not in fixed:
+                self._log.warning("[design] the redesign's `protocol.%s` still cannot be read: %s", part, why)
+                return False
+            protocol[part] = fixed[part]
+            return True
+
+        model = self._plan_model_name()
+        while unread and self._client is not None and self._drafted_parts_asked(iteration) < _SEARCH_ASKS:
+            count = self._drafted_parts_asked(iteration) + 1
+            try:
+                self.fi_dir.mkdir(parents=True, exist_ok=True)
+                (self.fi_dir / _DRAFTED_PARTS_ASKED).write_text(json.dumps(
+                    {"count": count, "model": model, "iteration": iteration, "parts": sorted(unread), "at": _frozen.now()}
+                ) + "\n", encoding="utf-8")
+            except OSError as e:
+                self._log.warning("[design] FI could not write down that it was asking for the protocol parts, so it did "
+                                  "not ask: %r", e)
+                break
+            self._log.warning("[design] the redesign lacks %s; FI asked the plan's model to write %s (%d of %d)",
+                              ", ".join(f"`protocol.{p}`" for p in unread), "it" if len(unread) == 1 else "them",
+                              count, _SEARCH_ASKS)
+            self._progress("Asking the model to complete the settings of the redesign")
+            ask = (_plan.part_request(state.get("topic") or self.config.topic, unread)
+                   + "\n\nThe protocol drafted so far (keep what is usable in it):\n"
+                   + json.dumps(base, ensure_ascii=False, default=str)[:4000]
+                   + "\n\nAnswer with the asked parts alone, as one JSON object whose keys are their names "
+                   + "(for example {\"grid\": {...}}).")
+            try:
+                obj = _parse_json_lenient(await self._chat(ask, node="plan_revise"))
+            except Exception as e:  # noqa: BLE001 -- the next ask, the plan's own part, or the stop says what is missing
+                self._log.warning("[design] the plan's model could not be asked for the redesign's parts: %s", e)
+                continue
+            if isinstance(obj, dict) and isinstance(obj.get("protocol"), dict):
+                obj = obj["protocol"]
+            if not isinstance(obj, dict):
+                self._log.warning("[design] the plan's model's answer for the redesign's parts was not a JSON object")
+                continue
+            for part in list(unread):
+                if obj.get(part) is not None and take(part, obj[part]):
+                    unread.pop(part)
+            if not unread:
+                self._log.info("[design] the redesign's protocol parts are complete now (asked %d time(s))", count)
+                print("[FI] the settings of the redesign are complete now; going on")
+        if unread:
+            planned, _sha = self._design_from_plan()
+            planned_protocol = (planned.get("protocol") if isinstance(planned, dict)
+                                and isinstance(planned.get("protocol"), dict) else {})
+            for part in list(unread):
+                if planned_protocol.get(part) is not None and take(part, planned_protocol[part]):
+                    self._log.warning("[design] the redesign's `protocol.%s` could not be read, even when the plan's model was "
+                                      "asked; FI used the one in plan.md, which was read and settled at the plan step", part)
+                    unread.pop(part)
+        return {**design, "protocol": protocol} if protocol != base else design
+
     def _stop_if_no_settings_to_vary(self, state: QuestState, design: Any) -> None:
         """A study whose plan tried to list settings to vary (``protocol.grid`` was drafted and could not be read, even when
         the plan's model was asked to write it again) must not run one setting and call it a sweep: stop plainly, with no
@@ -5960,6 +6047,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             return
         path = _plan.plan_path(self.quest_root)
         tried = self._search_record(_plan.sha256(path.read_text(encoding="utf-8")), _PART_ASKED)[0] if path.is_file() else 0
+        tried = tried or self._drafted_parts_record()[0]  # a redesign is asked about its own parts (not keyed to plan.md)
         steps = [
             "Nothing was run. The plan lists settings to vary, but FI could not read them, so the experiment would have run "
             "one setting only and called it a study of several.",
@@ -6931,6 +7019,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         else:
             # A design drafted here (a redesign) did not come from plan.md: its search block is completed the same way.
             design = await self._complete_a_drafted_search(state, design, iteration=iteration)
+            design = await self._complete_drafted_parts(state, design, iteration=iteration)
         self._stop_if_no_settings_to_vary(state, design)
         self._stop_if_the_search_cannot_start(state, design)
         audited = await self._audit_the_design_that_runs(state, design)
@@ -22789,6 +22878,7 @@ _FILL_MARKER = "plan_sources_asked.json"
 _STOPPED_BEFORE_THE_STUDY = ("too_long", "not_run", "cannot_repair")
 _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
+_DRAFTED_PARTS_ASKED = "drafted_parts_asked.json"  # the same bound, for protocol parts a redesign drafted that could not be read
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
 _TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks

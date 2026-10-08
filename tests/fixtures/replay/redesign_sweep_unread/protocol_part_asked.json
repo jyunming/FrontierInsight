@@ -1,0 +1,1 @@
+{"count": 1, "calls": 1, "sha": "7439680943d6187af9ea6d23b62d7d0369b964095b796c3c10c1a4bc4743f319", "model": "gemma4:31b", "outcome": "told in the plan", "at": "2026-10-08T09:44:26+00:00", "parts": ["grid", "runs_per_setting", "metrics"]}
