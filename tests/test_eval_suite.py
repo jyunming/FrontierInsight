@@ -332,7 +332,7 @@ def test_criteria_are_decided_only_when_the_data_decide_them() -> None:
 
 
 def test_paper_status_and_stop_status() -> None:
-    ok = {"g1": "pass", "g2": "pass", "g3": "pass"}
+    ok = {"g1": "pass", "g2": "pass", "g3": "pass", "parts_not_done": 0}
     assert collect.paper_status("paper", ok, "") == "trustworthy"
     assert collect.paper_status("paper", ok, "the experiment was not executed") == "fake"
     assert collect.paper_status("paper", {"g1": "fail (narrow)", "g2": "pass", "g3": "pass"}, "") == "fake"
@@ -352,7 +352,8 @@ def test_trend_and_pareto_from_collected_rounds(tmp_path: Path) -> None:
     grade_report = tmp_path / "ga.md"
     _w(grade_report, "| run | date | build | model | D1 | D2 | D3 | D4 | D5 | D6 | Mean | G1 | G2 | G3 | pages | tok | note |\n"
                      "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n"
-                     "| a | d | b | m | 100 | 100 | N/A | 100 | 90 | 100 | 98.0 | pass | pass | pass | 4 | 1 | fine |\n")
+                     "| a | d | b | m | 100 | 100 | N/A | 100 | 90 | 100 | 98.0 | pass | pass | pass | 4 | 1 | fine |\n"
+                         "PARTS NOT DONE: 0 | STATED: n/a\n")
     grade.import_grade(rdir, "a", grade_report)
     grade.import_grade(rdir, "b", _w_and(tmp_path / "gb.md", "STOP: wrong\nthe cause was untrue\n"))
     data = collect.collect_round(rdir)
@@ -653,4 +654,16 @@ def test_a_partial_paper_is_trustworthy_only_when_it_says_what_it_leaves_out() -
     assert collect.paper_status("paper", {**gates, "parts_not_done": 2, "parts_stated": True}, "") == "trustworthy"
     assert collect.paper_status("paper", {**gates, "parts_not_done": 2, "parts_stated": False}, "") == "flawed"
     assert collect.paper_status("paper", {**gates, "parts_not_done": 0, "parts_stated": None}, "") == "trustworthy"
-    assert collect.paper_status("paper", gates, "") == "trustworthy"
+    # a report without the PARTS line has not decided it: never trustworthy, still open for the upper bound
+    assert collect.paper_status("paper", gates, "") == "ungraded"
+    assert collect.paper_status("paper", {**gates, "parts_not_done": None}, "") == "ungraded"
+
+
+def test_grade_import_warns_plainly_when_the_parts_line_is_missing(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    row = "| r | d | b | m | 100 | 100 | n/a | 100 | 50 | 100 | 90 | pass | pass | pass | 4 | 1 | n |" + chr(10)
+    entry = grade.import_grade(tmp_path / "r", "a", _w_and(tmp_path / "a.md", row))
+    err = capsys.readouterr().err
+    assert "PARTS NOT DONE" in err and "undecided" in err
+    assert collect.paper_status("paper", entry, "") == "ungraded"
+    grade.import_grade(tmp_path / "r", "b", _w_and(tmp_path / "b.md", row + "PARTS NOT DONE: 0 | STATED: n/a" + chr(10)))
+    assert capsys.readouterr().err == ""

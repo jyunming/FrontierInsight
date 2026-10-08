@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,9 @@ def import_grade(round_dir: Path, topic: str, report_file: Path, *, stop_correct
     if pm:
         entry["parts_not_done"] = int(pm.group(1))
         entry["parts_stated"] = {"yes": True, "no": False}.get(pm.group(2).lower())
+    if entry.get("g1") and not pm:
+        print(f"WARNING: {report_file} has no `PARTS NOT DONE: n | STATED: yes|no|n/a` line, so the paper for '{topic}' stays "
+              "undecided (never trustworthy) until the grader adds it.", file=sys.stderr)
     if cause_class:
         entry["class"] = cause_class
         entry["stage"] = stage or ""

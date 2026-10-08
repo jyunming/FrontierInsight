@@ -40,7 +40,7 @@ environment only. `run` starts a detached driver that keeps up to N topics runni
   pass on what it does (the grader judges the gates on what the paper does). The grader records the parts not done and
   whether the paper states them (`PARTS NOT DONE: n | STATED: yes|no|n/a`, kept in `grades.json` as `parts_not_done` /
   `parts_stated`). A paper that leaves parts out without saying so, or presents itself as complete, fails D5 and is
-  `flawed`, never trustworthy, even when G1-G3 read pass.
+  `flawed`, never trustworthy, even when G1-G3 read pass. A report without the `PARTS NOT DONE` line has not decided it: the paper stays ungraded (never trustworthy), and `grade-import` warns.
 * The done criteria (trustworthy >= 70%, fake = 0, false stops <= 10%) read **met** or **not met** only when the data decide
   them whatever the ungraded papers and unjudged stops turn out to be; else **not yet known**.
 * The taxonomy and its rules are documented at the top of `taxonomy.py`. A run no rule fits is `unclassified`; `fi_bug` is

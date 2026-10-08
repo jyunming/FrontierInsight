@@ -144,7 +144,10 @@ def paper_status(outcome: str, grade: dict[str, Any] | None, contradiction: str)
     if is_fail(g.get("g1")) or contradiction:
         return "fake"
     if all(is_pass(g.get(k)) for k in _PASS):
-        # a paper may do part of the topic, but only if it says plainly which parts it does not do
+        # a paper may do part of the topic, but only if it says plainly which parts it does not do; a report that does not
+        # say how many parts were left out (no `PARTS NOT DONE` line) has not decided it yet
+        if g.get("parts_not_done") is None:
+            return "ungraded"
         if (g.get("parts_not_done") or 0) > 0 and g.get("parts_stated") is False:
             return "flawed"
         return "trustworthy"
