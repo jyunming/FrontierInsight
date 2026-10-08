@@ -40,6 +40,7 @@ ends in the honest stop after the run; every other open finding is said in the p
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -368,6 +369,51 @@ def parse_files(reply: str, allowed: list[str]) -> dict[str, str]:
     return out
 
 
+_MARK = "RESULT_JSON:"
+
+
+def _starts_with_mark(node: ast.AST, names: dict[str, list[ast.AST]], depth: int = 0) -> bool:
+    """Whether an expression is, statically, a text that begins with ``RESULT_JSON:`` (a literal, an f-string, a
+    concatenation or ``%`` on one, a ``.format`` of one, or a name assigned one)."""
+    if depth > 4:
+        return False
+    if isinstance(node, ast.Constant):
+        return isinstance(node.value, str) and node.value.lstrip().startswith(_MARK)
+    if isinstance(node, ast.JoinedStr):
+        first = node.values[0] if node.values else None
+        return isinstance(first, ast.Constant) and isinstance(first.value, str) and first.value.lstrip().startswith(_MARK)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        return _starts_with_mark(node.left, names, depth + 1)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+        return _starts_with_mark(node.func.value, names, depth + 1)
+    if isinstance(node, ast.Name):
+        return any(_starts_with_mark(v, names, depth + 1) for v in names.get(node.id, []))
+    return False
+
+
+def prints_result_json(source: str) -> bool:
+    """Whether the script has an executable statement that writes a line beginning ``RESULT_JSON:`` (``print(...)`` or a
+    ``.write(...)``), the line FI reads the result from: not a comment, not a string that is never printed."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return False
+    names: dict[str, list[ast.AST]] = {}
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    names.setdefault(t.id, []).append(n.value)
+    for n in ast.walk(tree):
+        if not isinstance(n, ast.Call) or not n.args:
+            continue
+        f = n.func
+        if (isinstance(f, ast.Name) and f.id == "print") or (isinstance(f, ast.Attribute) and f.attr == "write"):
+            if _starts_with_mark(n.args[0], names):
+                return True
+    return False
+
+
 def repair_problem(old: str, new: str, rel: str, *, equations: list[str], package: str = "") -> str:
     """Why a repaired file cannot replace the file (``""`` when it can): the repair changes what the findings name and
     nothing else, so it must keep every top-level function and constant the file had, every equation label, and (for the
@@ -381,8 +427,8 @@ def repair_problem(old: str, new: str, rel: str, *, equations: list[str], packag
         if _oracle._labelled_in(eid, old) and not _oracle._labelled_in(eid, new):
             return f"it lost the label `# {eid}`"
     if Path(rel).name == "experiment.py":
-        if "RESULT_JSON" in old and "RESULT_JSON" not in new:
-            return "it dropped the RESULT_JSON line"
+        if prints_result_json(old) and not prints_result_json(new):
+            return "it no longer prints the RESULT_JSON line"
         if package and _layout.imports(new, package) and not _layout.imports(old, package):
             return f"it made experiment.py import the package `{package}`"
     return ""

@@ -8879,7 +8879,8 @@ class Engine(RunChecksMixin):
             # The same script, redrawn: one that lost what FI reads from it (its result line, the oracle branch, the
             # seed, the simulation's entry points) is another script and is not used.
             usable = bool(new_code.strip()) and all(
-                mark in new_code for mark in _figdata.KEEP_MARKS if mark in code)
+                mark in new_code for mark in _figdata.KEEP_MARKS if mark in code) and (
+                not _code_review.prints_result_json(code) or _code_review.prints_result_json(new_code))
         except (SyntaxError, ValueError):
             usable = False
         if not usable:
@@ -10406,7 +10407,8 @@ class Engine(RunChecksMixin):
                 prompts={"fill": self._prompts["implement_function"], "repair": self._prompts["implement_function_repair"],
                          "module": self._prompts["implement_module_repair"]},
                 chat=chat, run=self._run_in_env, log=self._log, repairs=_function_steps.REPAIRS,
-                max_calls=_function_steps.MAX_CALLS, constants=constants, install=self._install_packages)
+                max_calls=_function_steps.MAX_CALLS, constants=constants, install=self._install_packages,
+                declared=deps)
             outcome = await filler.run_all(specs)
             if outcome.status == "done":
                 self._log.info("[implement] the model's package is written: %d function(s), each checked "

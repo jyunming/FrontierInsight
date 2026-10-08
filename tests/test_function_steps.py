@@ -252,7 +252,7 @@ async def test_a_module_that_is_missing_and_cannot_be_installed_is_the_function_
 
     model = _Model({"frequency": [uses]})
     outcome = await _filler(tmp_path, model, install=install).run_all(only)
-    assert asked == [["not_installed_anywhere"]], "asked once, through the installer"
+    assert asked == [], "a name only the generated code imports is never installed"
     assert outcome.status == "fell_back" and len(model.prompts) == 3, "a function that asks for what is not there pays for it"
 
 

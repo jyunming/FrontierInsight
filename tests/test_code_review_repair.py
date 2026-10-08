@@ -331,3 +331,16 @@ def test_the_quality_report_shows_whether_the_final_version_was_read_and_whether
     assert "The final version of the code was read by a second model." in text
     assert "Open findings per reading: 31 (9 high-severity), 30 (9 high-severity)." in text
     assert "The repairs did not converge" in text
+
+
+def test_the_result_line_must_still_be_printed_by_an_executable_statement(tmp_path: Path) -> None:
+    printed = "import json\nr = {}\nprint('RESULT_JSON: ' + json.dumps(r))\n"
+    assert cr.prints_result_json(printed)
+    assert cr.prints_result_json("import json\nr = {}\nprint(f'RESULT_JSON: {json.dumps(r)}')\n")
+    assert cr.prints_result_json("line = 'RESULT_JSON: ' + '{}'\nimport sys\nsys.stdout.write(line)\n")
+    assert not cr.prints_result_json("import json\nr = {}\n# print('RESULT_JSON: ' + json.dumps(r))\n")
+    assert not cr.prints_result_json("note = 'RESULT_JSON: is printed elsewhere'\n")
+    assert not cr.prints_result_json("print('done')  # RESULT_JSON\n")
+    assert cr.repair_problem(printed, printed + "x = 1\n", "experiment.py", equations=[]) == ""
+    commented = "import json\nr = {}\n# print('RESULT_JSON: ' + json.dumps(r))\nTEXT = 'RESULT_JSON: '\n"
+    assert "RESULT_JSON" in cr.repair_problem(printed, commented, "experiment.py", equations=[])

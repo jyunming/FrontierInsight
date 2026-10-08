@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from core import function_steps as fs
+from core.experiment_deps import IMPORT_TO_PIP
 from tests.test_function_steps import BAD, GOOD, OUTLINE, PROMPTS, PROTOCOL, _Model, _run, _specs, _which
 
 AGENTS = Path(__file__).resolve().parents[1] / "agents"
@@ -112,11 +113,11 @@ async def test_a_missing_package_is_installed_by_the_dependency_path_and_costs_n
         return []
 
     model = _ModuleModel({"frequency": [uses], "quality": [GOOD["quality"]], "decay": [GOOD["decay"]]}, module_replies=[""])
-    outcome = await _filler(tmp_path, model, install=install).run_all(_specs())
-    assert outcome.status == "done" and asked == [["fakepkg_ok"]]
+    outcome = await _filler(tmp_path, model, install=install, declared=["fakepkg_ok>=1"]).run_all(_specs())
+    assert outcome.status == "done" and asked == [["fakepkg_ok>=1"]]
     assert len(model.prompts) == 3, "one fill each: the missing package cost no repair"
     record = fs.load(tmp_path)
-    assert record["functions"]["frequency"]["attempts"] == 1 and record["installed"] == ["fakepkg_ok"]
+    assert record["functions"]["frequency"]["attempts"] == 1 and record["installed"] == ["fakepkg_ok>=1"]
 
 
 @pytest.mark.asyncio
@@ -176,3 +177,21 @@ async def test_a_function_left_as_its_placeholder_is_never_promoted_to_done_by_t
     assert outcome.status == "fell_back" and outcome.failed == "decay", "a function with no code is not written"
     assert len(model.module_prompts) == fs.MODULE_REPAIRS
     assert fs.load(tmp_path)["functions"]["decay"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_only_a_known_or_declared_package_is_installed_an_unknown_import_never_is(tmp_path: Path) -> None:
+    asked: list[list[str]] = []
+
+    async def install(packages: list[str]) -> list[tuple[str, str]]:
+        asked.append(packages)
+        return [(p, "not installed here") for p in packages]
+
+    uses = "import skfuzzy\n\n\n# E1\ndef frequency(k, m):\n    return 2.0\n"
+    unknown = "import some_unlisted_module\n\n\n# E1\ndef frequency(k, m):\n    return 2.0\n"
+    only = [s for s in _specs() if s.name == "frequency"]
+    await _filler(tmp_path / "a", _ModuleModel({"frequency": [uses]}, [""]), install=install).run_all(only)
+    assert asked and asked[0] == [IMPORT_TO_PIP["skfuzzy"]], "a name FI knows is installed under its pip name"
+    asked.clear()
+    await _filler(tmp_path / "b", _ModuleModel({"frequency": [unknown]}, [""]), install=install).run_all(only)
+    assert asked == [], "an unknown name is not installed"

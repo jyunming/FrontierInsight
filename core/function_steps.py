@@ -549,11 +549,12 @@ class FunctionFiller:
     def __init__(self, *, quest_root: Path, package: str, protocol: dict[str, Any] | None, summary: str,
                  prompts: dict[str, string.Template], chat: ChatFn, run: RunFn, log: Any, repairs: int = 2,
                  max_calls: int = 30, constants: str = "", install: InstallFn | None = None,
-                 module_repairs: int = MODULE_REPAIRS) -> None:
+                 module_repairs: int = MODULE_REPAIRS, declared: list[str] | None = None) -> None:
         self.root, self.package, self.protocol, self.summary = Path(quest_root), package, protocol, summary
         self.prompts, self.chat, self.run, self.log = prompts, chat, run, log
         self.install, self.module_repairs = install, max(0, int(module_repairs))
         self._tried_installs: set[str] = set()
+        self.declared = [str(d) for d in declared or []]
         self.repairs, self.max_calls, self.constants = max(0, int(repairs)), int(max_calls), constants
         self.code = self.root / "code"
         self.model_path = self.code / package / "model.py"
@@ -663,7 +664,19 @@ class FunctionFiller:
         there now."""
         from . import experiment_deps as _deps
 
-        pip = _deps.pip_name(module) or module
+        # The policy of FI's own dependency install (core/experiment_deps.py): a package whose import name FI knows
+        # (IMPORT_TO_PIP), or one the plan or the design declares. A name the generated code merely imports is never
+        # installed: the function asked for something that is not available.
+        pip = _deps.pip_name(module)
+        if pip is None:
+            for dep in self.declared:
+                if _deps.normalize(_deps.requirement_name(dep) or dep) == _deps.normalize(module):
+                    pip = dep
+                    break
+        if pip is None:
+            self.log.info("[implement] %s is not installed, and neither FI's known packages nor the plan's dependencies "
+                          "name it; not installing it", module)
+            return False
         try:
             failed = await self.install([pip]) if self.install is not None else [(pip, "no installer")]
         except Exception as e:  # noqa: BLE001 -- an install that could not be asked for leaves the package missing
