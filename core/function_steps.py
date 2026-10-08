@@ -987,7 +987,9 @@ class FunctionFiller:
             for s in specs:
                 entry = record["functions"][s.name]
                 if entry["status"] == FAILED:
-                    if verdicts[s.name]:
+                    if is_stub(new, s.name):
+                        entry["error"] = entry.get("error") or "it has no code"  # a placeholder imports; it is not written
+                    elif verdicts[s.name]:
                         entry["error"] = traceback_end(verdicts[s.name], 800)
                     else:
                         entry.update(status=DONE, error="")

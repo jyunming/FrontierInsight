@@ -161,3 +161,18 @@ async def test_an_example_whose_inputs_are_not_the_outline_s_parameters_is_fi_s_
     outcome = await _filler(tmp_path, model, protocol=protocol).run_all(specs)
     assert outcome.status == "done" and len(model.prompts) == 3
     assert "does not fit the outline's function" in fs.load(tmp_path)["unchecked"]["frequency"]
+
+
+@pytest.mark.asyncio
+async def test_a_function_left_as_its_placeholder_is_never_promoted_to_done_by_the_module_repair(tmp_path: Path) -> None:
+    # decay (an equation with no worked example, so a placeholder passes its import check) never imports, by its own fault;
+    # the module reply gives its placeholder back untouched.
+    bad_import = "from math import not_there_at_all\n\n\n# E3\ndef decay(x0, g, t):\n    return 1.0\n"
+    stub_back = ("import math\n\n\n" + GOOD["frequency"].replace("import math\n\n\n", "") + "\n\n" + GOOD["quality"]
+                 + "\n\n\n# E3\ndef decay(x0, g, t):\n    raise NotImplementedError(\"not written yet\")\n")
+    model = _ModuleModel({"frequency": [GOOD["frequency"]], "quality": [GOOD["quality"]], "decay": [bad_import]},
+                         module_replies=[stub_back])
+    outcome = await _filler(tmp_path, model).run_all(_specs())
+    assert outcome.status == "fell_back" and outcome.failed == "decay", "a function with no code is not written"
+    assert len(model.module_prompts) == fs.MODULE_REPAIRS
+    assert fs.load(tmp_path)["functions"]["decay"]["status"] == "failed"
