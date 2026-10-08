@@ -179,3 +179,16 @@ def test_a_quantity_the_reader_called_missing_that_the_results_hold_is_not_left_
     cr.save(engine.quest_root, record)
     assert {f["status"] for f in cr.differing_quantities(engine.quest_root, engine.quest_root / "code")} == {cr.MISSING}
     assert engine._code_reader_findings(_result()) == []
+
+
+def test_a_distinct_quantity_that_begins_with_the_planned_name_stays() -> None:
+    result = {"metric": 0.9, "metric_bias": 0.1, "metric_ci95": [0.8, 0.95], "metric_lo": 0.8, "metric_coverage": 0.95,
+              "other": {"metric_se": 0.01, "metric_bootstrap_95": [0.7, 0.99]}}
+    assert cr.named_in_results("metric", result) == {"metric", "metric_ci95", "metric_lo", "metric_se", "metric_bootstrap_95"}
+    # With no key of the name itself, one unit-suffixed key stands for it, with its intervals; a distinct quantity stays.
+    unit = {"metric_unit": 3.0, "metric_unit_ci": [1.0, 2.0]}
+    assert cr.named_in_results("metric", unit) == {"metric_unit", "metric_unit_ci"}
+    assert cr.named_in_results("metric", {**unit, "metric_bias": 0.2}) == set()  # which of them is it? none is taken
+    # Several candidates with no shortest one: none is taken for the quantity.
+    several = {"metric_aa": 1.0, "metric_bb": 2.0, "metric_ci": [1, 2]}
+    assert cr.named_in_results("metric", several) == {"metric_ci"}

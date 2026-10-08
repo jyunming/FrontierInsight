@@ -659,19 +659,66 @@ def _keys_with_numbers(result: Any) -> list[str]:
     return out
 
 
+#: Words that make a key the interval or uncertainty of the quantity before them (``_ci95``, ``_lo``, ``_bootstrap_95``,
+#: ``_se``); any other word after a quantity's name makes another quantity of its own (``_bias``, ``_coverage``).
+_INTERVAL_WORDS = frozenset({"ci", "lo", "hi", "low", "high", "lower", "upper", "se", "stderr", "interval", "intervals",
+                             "bound", "bounds", "bootstrap", "wilson", "student", "t", "percentile", "band"})
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", str(text)).lower()) if t]
+
+
+def _interval_remainder(key: str, stem_tokens: list[str]) -> bool:
+    """Whether ``key`` is ``stem_tokens`` followed only by interval or uncertainty words (and numbers: ``_95``)."""
+    toks = _tokens(key)
+    if toks[:len(stem_tokens)] != stem_tokens or len(toks) == len(stem_tokens):
+        return False
+    rest = toks[len(stem_tokens):]
+    return all(t in _INTERVAL_WORDS or re.fullmatch(r"ci?\d*|\d+", t) for t in rest)
+
+
 def named_in_results(name: str, result: Any) -> set[str]:
-    """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``: the
-    same name, a name that begins with it (``metric_a_unit``, ``metric_a_interval``), a name the plan's is a
-    longer form of (``metric_b`` for ``metric_b_by_setting``), and what begins with a key found that
-    way (the interval of the same quantity). Case, punctuation and underscores are ignored. A key of fewer than six
-    characters is never the plan's name written longer."""
+    """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``, and its
+    intervals. Case, punctuation and underscores are ignored.
+
+    * When a key is the quantity itself (the same name, or a shorter key the plan's name is a longer form of, at least six
+      characters), those keys are it, and a key that only begins with the name goes with it only when what follows is an
+      interval or uncertainty form (``_ci95``, ``_lo``, ``_bootstrap_95``, ``_se``). Another quantity's word after the name
+      (``accuracy_bias`` beside ``accuracy``) stays.
+    * When no key is the quantity itself, a key that begins with the name stands for it when it is the one such key whose
+      remainder is not an interval form (a unit-suffixed name); with several, the one with the shortest remainder if that is
+      unique, else none. Keys that are intervals of the name go too."""
     want = _norm(name)
     if len(want) < 2:
         return set()
-    keys = {k: _norm(k) for k in _keys_with_numbers(result)}
-    base = {k for k, n in keys.items() if n and (n.startswith(want) or (len(n) >= 6 and want.startswith(n)))}
-    stems = {keys[k] for k in base if len(keys[k]) >= 4}
-    return base | {k for k, n in keys.items() if any(n.startswith(stem) for stem in stems)}
+    keys = _keys_with_numbers(result)
+    normed = {k: _norm(k) for k in keys}
+    own = {k for k, n in normed.items() if n and (n == want or (len(n) >= 6 and want.startswith(n)))}
+    stems: list[list[str]] = []
+    if own:
+        found = set(own)
+        stems = [_tokens(k) for k in own]
+    else:
+        prefixed = [k for k, n in normed.items() if n.startswith(want) and n != want]
+        wt = _tokens(name)
+        plain = [k for k in prefixed if not _interval_remainder(k, wt)]
+        found = {k for k in prefixed if _interval_remainder(k, wt)}
+        pick = None
+        if len(plain) == 1:
+            pick = plain[0]
+        elif plain:
+            shortest = min(len(normed[k]) for k in plain)
+            ties = [k for k in plain if len(normed[k]) == shortest]
+            pick = ties[0] if len(ties) == 1 else None
+        if pick is not None:
+            found.add(pick)
+            stems = [_tokens(pick)]
+        stems.append(wt)
+    for k in keys:
+        if any(_interval_remainder(k, st) for st in stems if st):
+            found.add(k)
+    return found
 
 
 def absent_from_results(names: list[str], result: Any) -> list[str]:
