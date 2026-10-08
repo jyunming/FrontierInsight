@@ -661,8 +661,8 @@ def _keys_with_numbers(result: Any) -> list[str]:
 
 def named_in_results(name: str, result: Any) -> set[str]:
     """The keys of the run's results (at any depth, holding a number) that are the quantity the plan calls ``name``: the
-    same name, a name that begins with it (``ea_spread_J_per_mol``, ``ea_spread_bootstrap_95``), a name the plan's is a
-    longer form of (``k_relative_spread`` for ``k_relative_spread_by_temperature``), and what begins with a key found that
+    same name, a name that begins with it (``metric_a_unit``, ``metric_a_interval``), a name the plan's is a
+    longer form of (``metric_b`` for ``metric_b_by_setting``), and what begins with a key found that
     way (the interval of the same quantity). Case, punctuation and underscores are ignored. A key of fewer than six
     characters is never the plan's name written longer."""
     want = _norm(name)
@@ -676,8 +676,8 @@ def named_in_results(name: str, result: Any) -> set[str]:
 
 def absent_from_results(names: list[str], result: Any) -> list[str]:
     """Of the plan's quantities ``names``, those the run's results hold no number for under any key that contains the name
-    (case, punctuation and underscores ignored). Containment, not equality: an analysis that writes ``uncorrected_power``
-    for ``power`` has the quantity, and a stop must never rest on a name written another way."""
+    (case, punctuation and underscores ignored). Containment, not equality: an analysis that writes ``variant_metric_c``
+    for ``metric_c`` has the quantity, and a stop must never rest on a name written another way."""
     keys = [_norm(k) for k in _keys_with_numbers(result)]
     out = []
     for name in names:

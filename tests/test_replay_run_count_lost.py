@@ -153,6 +153,10 @@ def test_a_count_equal_to_the_protocols_or_with_no_trial_contract_is_not_a_fault
 
 # --- a result that holds none of the study's quantities ends in the honest stop ------------------------------------------
 
+def _ids() -> list[str]:
+    return [m["id"] for m in _load("plan_protocol.yaml")["metrics"]]
+
+
 def _stuck_state(retries: int = 0, iteration: int = 0, result: Any = None) -> dict[str, Any]:
     return {"design": {**DESIGN, "protocol": _load("plan_protocol.yaml")}, "iteration": iteration,
             "result_json": _load("result_json.json") if result is None else result,
@@ -172,7 +176,7 @@ def test_the_failed_result_goes_back_to_design_once_and_then_stops_without_a_pap
     assert first is not None and first.get("redesign") is True and not first.get("stuck")
     second = engine._no_results_verdict(_stuck_state(retries=1, iteration=0))
     assert second is not None and second["stuck"] is True and second["stuck_reason"] == "no_numbers"
-    assert "none of the study's quantities" in second["rationale"] and "fwer" in second["rationale"]
+    assert "none of the study's quantities" in second["rationale"] and _ids()[0] in second["rationale"]
     # No second design left: the same stop at once.
     assert engine._no_results_verdict(_stuck_state(retries=0, iteration=1))["stuck"] is True
 
@@ -190,16 +194,22 @@ def test_the_stop_writes_the_plain_record_and_no_paper(tmp_path: Path) -> None:
     assert not (engine.quest_root / "paper.md").exists()
 
 
-@pytest.mark.parametrize("result", [
-    # the quantities are there, under names that contain the plan's
-    {"status": "ok", "by_cell": {"a": {"uncorrected_power": 0.8, "fwer_ci95": [0.01, 0.07], "realized_fdr": 0.04}}},
-    # it reports a problem, but the study's quantities are in it all the same
-    {"errors": ["one cell was thin"], "power": 0.8, "realized_fdr": 0.05, "fwer": 0.04},
-    # no word of failure: a result under other names is left to the checks that already read it
-    {"required_trials_per_cell": 10, "rate_a": 0.5},
-    # `errors` holding error statistics is not a failure
-    {"errors": {"max_abs": 0.01}, "rate_a": 0.5},
-])
-def test_an_honest_result_is_not_stopped(tmp_path: Path, result: Any) -> None:
+def _honest_results() -> list[dict[str, Any]]:
+    a, b, c = _ids()[:3]
+    return [
+        # the quantities are there, under names that contain the plan's
+        {"status": "ok", "by_cell": {"x": {f"mean_{a}": 0.8, f"{c}_ci95": [0.01, 0.07], b: 0.04}}},
+        # it reports a problem, but the study's quantities are in it all the same
+        {"errors": ["one cell was thin"], a: 0.8, b: 0.05, c: 0.04},
+        # no word of failure: a result under other names is left to the checks that already read it
+        {"required_trials_per_cell": 10, "rate_a": 0.5},
+        # `errors` holding error statistics is not a failure
+        {"errors": {"max_abs": 0.01}, "rate_a": 0.5},
+    ]
+
+
+@pytest.mark.parametrize("n", range(4))
+def test_an_honest_result_is_not_stopped(tmp_path: Path, n: int) -> None:
+    result = _honest_results()[n]
     engine, _ = _quest(tmp_path)
     assert engine._no_results_verdict(_stuck_state(retries=1, result=result)) is None
