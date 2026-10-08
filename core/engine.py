@@ -17,6 +17,7 @@ import fnmatch
 import concurrent.futures
 import functools
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -110,6 +111,7 @@ from . import numeric_warnings as _numeric
 from . import oracle_check as _oracle
 from . import oracle_forms as _forms
 from . import oracle_review as _review
+from . import topic_requirements as _topic_req
 from . import equation_tests as _equation_tests
 from . import code_review as _code_review
 from . import review_pairs as _pairs
@@ -243,6 +245,7 @@ _DETERMINISTIC_GATE_NODES = frozenset({
     "code_review",  # the code read against the plan, when it has a step of its own
     "oracle_review.recompute",  # a failing check's expected value worked out again (core/oracle_triage.py)
     "oracle_review.code",  # the code read against the plan, while no step of its own is set for it
+    "oracle_review.topic",  # what the topic asks for, read from its text and looked for in the plan (core/topic_requirements.py)
 })
 
 
@@ -5452,6 +5455,8 @@ class Engine(RunChecksMixin):
         asked part (``None`` or ``ValueError``: the answer is not used). Returns the design to use and its plan's hash."""
         path = _plan.plan_path(self.quest_root)
         gaps = lacks(design)
+        if inspect.isawaitable(gaps):
+            gaps = await gaps
         if not gaps or not path.is_file():
             return design, plan_sha
         count, calls = self._search_record(plan_sha, file)
@@ -5500,6 +5505,8 @@ class Engine(RunChecksMixin):
                 return design, plan_sha
             design, plan_sha = again, sha
             gaps = lacks(design)
+            if inspect.isawaitable(gaps):
+                gaps = await gaps
             if not gaps:
                 self._log.info("[plan] the plan's %s is complete now (asked %d time(s))", what, count)
                 print(f"[FI] the plan's {what} is complete now; going on")
@@ -5509,11 +5516,311 @@ class Engine(RunChecksMixin):
     async def _complete_the_search_in_the_plan(self, state: QuestState) -> None:
         """At the plan step, before a person reads the plan: a search for the best design whose block is missing is
         asked of the plan's model (:meth:`_ask_plan_for_the_search`), and so is a protocol part that could not be read
-        (:meth:`_ask_plan_for_the_parts`), so the plan a person reads is complete."""
+        (:meth:`_ask_plan_for_the_parts`), so the plan a person reads is complete. Then the plan is held against what the
+        topic asks for (:meth:`_cover_the_topic_in_the_plan`)."""
         design, sha = self._design_from_plan()
         if design is not None and sha:
             design, sha = await self._ask_plan_for_the_search(state, design, sha)
-            await self._ask_plan_for_the_parts(state, design, sha)
+            design, sha = await self._ask_plan_for_the_parts(state, design, sha)
+            await self._cover_the_topic_in_the_plan(state)
+
+    # -- what the topic asks for (core/topic_requirements.py) ------------------------------------------------------
+
+    def _topic_requirements_read(self) -> dict[str, Any] | None:
+        """``.fi/topic_requirements.json`` (what the topic asks for, or the error that kept it from being read), or ``None``
+        when it was not made."""
+        try:
+            record = json.loads((self.fi_dir / _topic_req.FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def _topic_covered_read(self) -> dict[str, Any]:
+        try:
+            record = json.loads((self.fi_dir / _topic_req.COVERED_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return record if isinstance(record, dict) else {}
+
+    def _topic_covered_write(self, **changes: Any) -> None:
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _topic_req.COVERED_FILE).write_text(
+                json.dumps({**self._topic_covered_read(), **changes}, indent=2, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't record how far the plan covers the topic: %r", e)
+
+    def _reader_and_planner(self, node: str) -> tuple[str, str, bool | None]:
+        """``(reviewer, planner, same_model)`` for the last call under ``node``, as :meth:`_review_oracles` decides it."""
+        answered, planned = self._chat_provenance(node), self._chat_provenance("plan")
+        reviewer_asked = self._model_for_node(node) or self.config.provider.model or ""
+        planner_asked = self._model_for_node("plan") or self.config.provider.model or ""
+        reviewer = str(answered.get("model") if answered.get("reported") else reviewer_asked or "")
+        planner = str(planned.get("model") if planned.get("reported") else planner_asked or "")
+        if answered.get("reported") and planned.get("reported"):
+            same: bool | None = _review.same_model(answered.get("model"), planned.get("model"))
+        elif reviewer_asked and planner_asked:
+            same = _review.same_model(reviewer_asked, planner_asked)
+        elif not self._model_for_node(node) and not self._model_for_node("plan"):
+            same = True
+        else:
+            same = None
+        return reviewer, planner, same
+
+    async def _read_topic_requirements(self) -> dict[str, Any]:
+        """What the topic asks for, read once (one call, node ``oracle_review.topic``) and kept in
+        ``.fi/topic_requirements.json`` as soon as it is had, so a resume never asks again. A reading that could not be had is
+        kept as ``{"error": ...}`` and never stops the quest."""
+        kept = self._topic_requirements_read()
+        if kept is not None:
+            return kept
+        topic = str(self.config.topic or "").strip()
+        req: dict[str, Any] | None = None
+        error = ""
+        if not topic:
+            error = "the quest has no topic text"
+        else:
+            prompt = self._prompts["topic_requirements"].substitute(topic=topic[:8000])
+            try:
+                reply = await self._chat(prompt, node=_topic_req.NODE)
+                req = _topic_req.parse(_parse_json_lenient(reply, node=_topic_req.NODE))
+                if req is None:
+                    error = "the reply named nothing the topic asks for"
+            except _ModelAnswerProblem as e:
+                error = f"the provider withheld or cut off its answer ({str(e)[:160] or type(e).__name__})"
+            except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
+                error = f"the call failed ({str(e)[:160] or type(e).__name__})"
+        reviewer, planner, same = self._reader_and_planner(_topic_req.NODE)
+        record: dict[str, Any] = {**(req or {"factors": [], "quantities": [], "formulas": [], "comparisons": [],
+                                             "constraints": [], "stated_results": []}),
+                                  "reviewer": reviewer, "planner": planner, "same_model": same, "at": _frozen.now(),
+                                  **({"error": error} if error else {})}
+        if error:
+            self._log.warning("[plan] what the topic asks for could not be read: %s", error)
+        else:
+            self._log.info("[plan] the topic asks for %d factor(s), %d quantity(ies), %d formula(s)%s",
+                           len(record["factors"]), len(record["quantities"]), len(record["formulas"]),
+                           "; read by the plan's own model" if same else "")
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            (self.fi_dir / _topic_req.FILE).write_text(json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[plan] couldn't record what the topic asks for: %r", e)
+        return record
+
+    async def _judge_topic_items(self, req: dict[str, Any], plan: dict[str, Any], unresolved: list[str]) -> dict[str, str]:
+        """The verdicts (``covered`` / ``replaced`` / ``missing``) on the items a name match could not settle: ONE call, node
+        ``oracle_review.topic``, kept by the items and the plan it saw (so it is not asked again for the same), and at most
+        :data:`core.topic_requirements.MAX_JUDGE_CALLS` calls in a quest (counted before each). ``{}`` when nothing could
+        be judged; an item nobody judged is never a gap."""
+        if not unresolved:
+            return {}
+        items_text, plan_text = _topic_req.judge_parts(req, plan, unresolved)
+        key = hashlib.sha256((items_text + plan_text).encode("utf-8")).hexdigest()[:20]
+        record = self._topic_covered_read()
+        judged = record.get("judged") if isinstance(record.get("judged"), dict) else {}
+        if isinstance(judged.get(key), dict):
+            return {str(k): str(v) for k, v in judged[key].items()}
+        calls = int(record.get("judge_calls") or 0)
+        if self._client is None or calls >= _topic_req.MAX_JUDGE_CALLS:
+            return {}
+        self._topic_covered_write(judge_calls=calls + 1)  # counted before the call: a resume never asks again for it
+        prompt = self._prompts["topic_cover"].substitute(
+            topic=" ".join(str(self.config.topic or "").split())[:3000], items=items_text, plan=plan_text)
+        try:
+            reply = await self._chat(prompt, node=_topic_req.NODE)
+            verdicts = _topic_req.parse_judgement(_parse_json_lenient(reply, node=_topic_req.NODE), unresolved)
+        except _ModelAnswerProblem as e:
+            self._log.warning("[plan] the plan could not be held against the topic (the provider withheld its answer: %s)", e)
+            return {}
+        except Exception as e:  # noqa: BLE001 -- a reading that could not be had never stops a quest
+            self._log.warning("[plan] the plan could not be held against the topic: %s", e)
+            return {}
+        self._topic_covered_write(judged={**judged, key: verdicts})
+        return verdicts
+
+    async def _topic_gaps(self, req: dict[str, Any], design: Any, protocol: Any = None) -> list[dict[str, Any]]:
+        """What the topic asks for that ``design`` (with ``protocol``, the one that runs, when that is another) lacks."""
+        if _topic_req.is_empty(req):
+            return []
+        plan = _topic_req.view(design, protocol)
+        _gaps, unresolved = _topic_req.match(req, plan)
+        verdicts = await self._judge_topic_items(req, plan, unresolved)
+        return _topic_req.gaps_from(req, plan, verdicts)
+
+    def _keep_only_what_the_topic_asked(self, before_text: str, after_text: str, gaps: list[dict[str, Any]]) -> str:
+        """``before_text`` with only what the topic asked for taken from ``after_text`` (:func:`core.topic_requirements.merge`);
+        everything else is the plan's as it was. ``ValueError`` when none of it came back in a form that can be read."""
+        old, new = _plan.raw_design_block(before_text), _plan.raw_design_block(after_text)
+        merged = _topic_req.merge(old, new, gaps) if isinstance(old, dict) and isinstance(new, dict) else None
+        if merged is None:
+            raise ValueError("the revised plan has none of what was asked in a form that can be read; plan.md is unchanged")
+        fixed, why = _plan.normalize_protocol(merged.get("protocol"))
+        if fixed is None:
+            raise ValueError(f"what the plan added cannot be read ({why}); plan.md is unchanged")
+        edited = _plan.edit_design_block(before_text, lambda _design: {**merged, "protocol": fixed})
+        if edited is None or _plan.parse(edited).design is None:
+            raise ValueError("the revised plan cannot be read; plan.md is unchanged")
+        return _plan.refresh_model_section(edited)
+
+    async def _ask_plan_for_the_topic(self, state: QuestState, design: Any, plan_sha: str,
+                                      req: dict[str, Any]) -> tuple[Any, str]:
+        """What the topic asks for and the plan lacks is asked of the plan's model, in place of asking a person: the same
+        bounded request as the other missing parts (:meth:`_ask_plan_to_complete`, counted in ``.fi/topic_asked.json``).
+        Only what was asked is kept from the rewrite. Returns the design to use and its plan's hash."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or not plan_sha or _topic_req.is_empty(req)):
+            return design, plan_sha
+        current: dict[str, list[dict[str, Any]]] = {"gaps": []}
+
+        async def lacks(now: Any) -> list[str]:
+            current["gaps"] = await self._topic_gaps(req, now)
+            return [g["sentence"] for g in current["gaps"]]
+
+        def request(_now: Any, _text: str) -> str:
+            return _topic_req.request(self.config.topic, current["gaps"])
+
+        return await self._ask_plan_to_complete(
+            design, plan_sha, lacks=lacks, request=request,
+            keep=lambda before, revised: self._keep_only_what_the_topic_asked(before, revised, current["gaps"]),
+            file=_TOPIC_ASKED, what="plan, for what the topic asks for", short="what the topic asks for",
+            note="what the topic asks for and the plan lacked, written by the plan's model")
+
+    async def _cover_the_topic_in_the_plan(self, state: QuestState) -> None:
+        """At the plan step: read what the topic asks for (:meth:`_read_topic_requirements`), look for each in the plan, ask the
+        plan's model for what is missing (:meth:`_ask_plan_for_the_topic`), and say in plan.md, in plain words, what the
+        topic asks for and whether the plan has it. Once per plan: a resume does not do it again. It stops nothing: what
+        is still missing is decided at the design step, on the design that will run (:meth:`_hold_the_design_to_the_topic`)."""
+        if (not self._runs_code(state) or self._client is None or _frozen.load(self.quest_root) is not None
+                or self._topic_covered_read().get("plan_done")):
+            return
+        design, sha = self._design_from_plan()
+        path = _plan.plan_path(self.quest_root)
+        if design is None or not sha or not path.is_file():
+            return
+        req = await self._read_topic_requirements()
+        if req.get("error") or _topic_req.is_empty(req):
+            lines = _topic_req.plan_lines(req, [], reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"),
+                                          error=str(req.get("error") or "")) if req.get("error") else []
+            if lines:
+                updated = _plan.add_to_section(path.read_text(encoding="utf-8"), _topic_req.HEADING, lines)
+                path.write_text(updated, encoding="utf-8")
+                _plan.record_version(self.quest_root, updated, by="engine", note="what the topic asks for could not be read")
+            self._topic_covered_write(plan_done=True)
+            return
+        design, sha = await self._ask_plan_for_the_topic(state, design, sha, req)
+        gaps = await self._topic_gaps(req, design)
+        text = path.read_text(encoding="utf-8")
+        lines = _topic_req.plan_lines(req, gaps, reviewer=str(req.get("reviewer") or ""), same_model=req.get("same_model"))
+        asked, calls = self._search_record(sha, _TOPIC_ASKED)
+        if asked:
+            lines += ["", "- FI asked the plan's model to add what was missing" + (
+                "; it is still missing" if gaps else "; it is in the plan now") + "."]
+        if gaps:
+            lines += ["", "- Still missing (the paper will say it was not studied"
+                          + ("; the quest stops before anything runs, because the topic's question cannot be answered "
+                             "without it" if _topic_req.main_gaps(gaps) else "") + "):",
+                      *[f"  - {g['sentence']}" for g in gaps]]
+        updated = _plan.add_to_section(text, _topic_req.HEADING, lines)
+        path.write_text(updated, encoding="utf-8")
+        _plan.record_version(self.quest_root, updated, by="engine", note="what the topic asks for, and whether the plan has it")
+        if asked:  # the record names the plan it was made on: the plan as FI wrote its note on it
+            self._record_search_asked(asked, calls, _plan.sha256(updated), "told in the plan", _TOPIC_ASKED)
+        self._topic_covered_write(plan_done=True, left=gaps, asked=asked)
+
+    async def _ask_design_for_the_topic(self, state: QuestState, design: dict[str, Any], req: dict[str, Any],
+                                        gaps: list[dict[str, Any]], *, iteration: int) -> dict[str, Any]:
+        """A design drafted at the design step (a redesign, not from plan.md) that lacks what the topic asks for: the design
+        step's model is asked once per design round (one chat call, counted in ``.fi/topic_design_asked.json`` BEFORE the
+        call) to add it; only what was asked is kept (:func:`core.topic_requirements.merge`)."""
+        path = self.fi_dir / _TOPIC_DESIGN_ASKED
+        try:
+            done = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            done = {}
+        if isinstance(done, dict) and int(done.get("iteration", -1)) == iteration:
+            return design
+        try:
+            self.fi_dir.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"iteration": iteration, "at": _frozen.now()}) + "\n", encoding="utf-8")
+        except OSError as e:
+            self._log.warning("[design] FI could not write down that it was asking for what the topic asks, so it did not ask: %r", e)
+            return design
+        self._log.warning("[design] the redesign lacks what the topic asks for (%s); FI asked the design step's model to add it",
+                          "; ".join(g["sentence"] for g in gaps)[:300])
+        self._progress("Asking the model to add what the topic asks for to the design")
+        ask = (_topic_req.request(self.config.topic, gaps)
+               + "\n\nThe design drafted so far:\n" + json.dumps(design, ensure_ascii=False, default=str)[:8000]
+               + "\n\nAnswer with the whole design as one JSON object, with what was asked added.")
+        try:
+            reply = await self._chat(ask, node="design")
+            obj = _parse_json_lenient(reply)
+        except _ModelAnswerProblem:
+            raise
+        except Exception as e:  # noqa: BLE001 -- what is still missing is decided after this
+            self._log.warning("[design] the design step could not be asked to add what the topic asks for: %s", e)
+            return design
+        merged = _topic_req.merge(design, obj, gaps) if isinstance(obj, dict) else None
+        fixed, why = _plan.normalize_protocol(merged.get("protocol")) if merged is not None else (None, "nothing came back")
+        if merged is None or fixed is None:
+            self._log.warning("[design] the design step's answer to add what the topic asks for could not be used: %s", why)
+            return design
+        return {**merged, "protocol": fixed}
+
+    def _stop_for_the_topic(self, gaps: list[dict[str, Any]], asked: int) -> None:
+        """Nothing is run: the topic asks for something its question cannot be answered without, and the plan could not
+        include it even when the plan's model was asked. Ends without a paper; the card says what to do in plain words."""
+        path = _plan.plan_path(self.quest_root)
+        steps = _topic_req.stop_steps(self.quest_id, gaps, asked)
+        self._log.warning("[design] the plan leaves out what the topic's question needs (%s); stopping, nothing was run",
+                          "; ".join(g["sentence"] for g in gaps)[:400])
+        print(f"[FI] quest {self.quest_id}: the plan leaves out something the topic asks for; nothing was run "
+              "(see NEXT_STEP.md)")
+        self._pause_for_human(
+            kind="plan",
+            interaction="supply",
+            headline="the plan leaves out what the topic asks for",
+            steps=steps,
+            recommended="Try another model for the plan step.",
+            alternatives=[steps[-1][3:]],
+            payload={"quest_id": self.quest_id, "plan_file": str(path), "topic_stage": True},
+        )
+
+    async def _hold_the_design_to_the_topic(self, state: QuestState, design: Any, plan_sha: str) -> tuple[Any, str]:
+        """At the design step, on the design that will RUN (the frozen protocol once there is one, else the design with the
+        protocol the gates will hold it to): every factor, quantity and formula the topic asks for is looked for again, so
+        a redesign or an amendment that drops a setting is caught, and a design a person edited is held to the topic too.
+        What is missing is asked of the model once more (the plan's, within its bound; a redesign's, once per round). What
+        is still missing stops the quest before anything runs when it is what the question is about; the rest is kept
+        for the paper's limitations. Returns the design to run and its plan's hash."""
+        req = self._topic_requirements_read()
+        if (not self._runs_code(state) or not isinstance(design, dict) or req is None or req.get("error")
+                or _topic_req.is_empty(req)):
+            return design, plan_sha
+        frozen = _frozen.load(self.quest_root) is not None
+
+        def running(now: dict[str, Any]) -> Any:
+            return self._protocol_block({**state, "design": now})
+
+        gaps = await self._topic_gaps(req, design, running(design))
+        if gaps and not frozen:
+            if plan_sha:
+                design, plan_sha = await self._ask_plan_for_the_topic(state, design, plan_sha, req)
+            elif self._client is not None:
+                design = await self._ask_design_for_the_topic(state, design, req, gaps,
+                                                              iteration=int(state.get("iteration", 0) or 0))
+            gaps = await self._topic_gaps(req, design, running(design))
+        self._topic_covered_write(left=gaps, checked_at_design=True)
+        if gaps:
+            self._log.warning("[design] the design that will run still lacks what the topic asks for: %s",
+                              "; ".join(g["sentence"] for g in gaps)[:400])
+        main = _topic_req.main_gaps(gaps)
+        if main and not frozen:
+            path = _plan.plan_path(self.quest_root)
+            asked = self._search_record(plan_sha, _TOPIC_ASKED)[0] if plan_sha and path.is_file() else (
+                1 if (self.fi_dir / _TOPIC_DESIGN_ASKED).is_file() else 0)
+            self._stop_for_the_topic(main, asked)
+        return design, plan_sha
 
     def _unread_parts(self, design: Any) -> dict[str, str]:
         """``{part: the sentence of plan.md that says it could not be read}`` for each protocol part that changes what is
@@ -6602,6 +6909,9 @@ class Engine(RunChecksMixin):
             design = audited
             plan_sha = _plan.sha256(_plan.plan_path(self.quest_root).read_text(encoding="utf-8"))
             self._stop_if_the_search_cannot_start(state, design)
+        # The design that will run is held to what the topic asks for (a redesign or an amendment that dropped a setting
+        # is caught here); what is still missing and is the question's own stops the quest before anything runs.
+        design, plan_sha = await self._hold_the_design_to_the_topic(state, design, plan_sha)
         out: dict[str, Any] = {"design": design}
         # Provenance for the hypothesis itself. The DAG lets `review` and
         # `cross_check` route back here, so a design CAN be rewritten after
@@ -16504,6 +16814,8 @@ class Engine(RunChecksMixin):
             evidence_note = f"{evidence_note}\n\n{typed_note}".strip()
         if code_note := _code_review.write_note(self.quest_root, self.quest_root / "code"):
             evidence_note = f"{evidence_note}\n\n{code_note}".strip()
+        if topic_note := _topic_req.write_note(self.quest_root):
+            evidence_note = f"{evidence_note}\n\n{topic_note}".strip()
         if core_note := _equation_tests.write_note(self._protocol_block(state)):
             evidence_note = f"{evidence_note}\n\n{core_note}".strip()
         if run_note := self._run_checks_note():
@@ -21332,6 +21644,8 @@ def _load_prompts() -> dict[str, string.Template]:
         "plan_criteria",                    # the plan named no check of correctness: ask once more
         "json_reanswer",                    # a required check's reply could not be read: one short JSON re-answer
         "oracle_review",                    # a second model reads the plan's checks against known answers
+        "topic_requirements",               # a second model lists what the topic asks for, from its text alone
+        "topic_cover",                      # ... and judges the items a name match could not find in the plan
         "code_review",                      # a second model reads the code against the plan's required outputs
         "oracle_recompute",                 # a failing check's expected value worked out again, blind to the measurement
         "implement",                      # legacy one-shot (resume fallback)
@@ -22427,6 +22741,8 @@ _SEARCH_ASKED = "search_block_asked.json"
 _DRAFTED_SEARCH_ASKED = "drafted_search_asked.json"  # the same bound, for a design drafted at the design step
 _PART_ASKED = "protocol_part_asked.json"  # the same bounds, for the protocol parts that could not be read
 _PART_HEADING = "Checks already made"
+_TOPIC_ASKED = "topic_asked.json"  # the same bounds, for what the topic asks for and the plan lacks
+_TOPIC_DESIGN_ASKED = "topic_design_asked.json"  # one request per redesign, for a design drafted at the design step
 _SEARCH_ASKS = 2
 _SEARCH_CALLS_PER_ASK = 3  # one request can make up to three chat calls (two whole-file tries and one for the block alone)
 _SEARCH_CALLS = 6  # at most this many chat calls in all, per plan and model

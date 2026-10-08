@@ -1,0 +1,331 @@
+"""What the topic asks for: read once from the topic text, held against the plan and the design that will run, asked of the
+plan's model when the plan lacks it, a stop before anything runs when it is the question's own, a line in the paper's
+limitations when it is not; and the code-writing requests are shown the topic and its stated formulas. Fake models only,
+neutral topics (a cup of coffee cooling under different lids)."""
+from __future__ import annotations
+
+import copy
+import json
+import re
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+
+from core import plan
+from core import topic_requirements as tr
+from tests.test_plan_optimisation import EXTRA, HEAT_SINK, Paused, _engine, _NO_OBJECTIONS
+
+TOPIC = (
+    "Compare how a cup of coffee cools under three lid materials (paper, foam, steel) at room temperatures from 10 to 30 "
+    "degrees. Report the time to reach 60 degrees and the heat lost per minute. The cup follows Newton's law of cooling, "
+    "dT/dt = -k*(T - Tr), with Tr the room temperature. The expected value of the cooling constant k is 0.05 per minute. "
+    "Run on a CPU."
+)
+
+EXTRACTION: dict[str, Any] = {
+    "factors": [
+        {"name": "lid material", "levels": ["paper", "foam", "steel"], "range": [],
+         "stated": "three lid materials (paper, foam, steel)", "main": True},
+        {"name": "room temperature", "levels": [], "range": [10, 30],
+         "stated": "room temperatures from 10 to 30 degrees", "main": False},
+    ],
+    "quantities": [
+        {"name": "time to reach 60 degrees", "stated": "the time to reach 60 degrees", "main": True},
+        {"name": "heat lost per minute", "stated": "the heat lost per minute", "main": False},
+    ],
+    "formulas": [{"name": "Newton's law of cooling", "text": "dT/dt = -k*(T - Tr)", "main": False}],
+    "comparisons": [{"what": "how the cooling differs between the lid materials", "between": ["paper", "foam", "steel"]}],
+    "constraints": ["Run on a CPU."],
+    "stated_results": ["0.05 per minute"],
+}
+
+MODEL = {
+    "summary": "A lumped cup cooling in a room.",
+    "assumptions": ["uniform temperature in the cup"],
+    "equations": [{"id": "E1", "formula": "T(t) = Tr + (T0 - Tr)*exp(-k*t)", "role": "generates",
+                   "source": "derivation: the solution of the cooling law",
+                   "example": {"inputs": {"Tr": 20, "T0": 90, "k": 0.05, "t": 10},
+                               "expected_formula": "20 + (90 - 20)*exp(-0.05*10)"}}],
+}
+METRIC_TIME = {"id": "time_to_60_degrees", "kind": "mean", "estimand": "mean time to reach 60 degrees", "unit": "minute"}
+METRIC_HEAT = {"id": "heat_lost_per_minute", "kind": "mean", "estimand": "mean heat lost per minute", "unit": "joule"}
+LID_AXIS = {"lid_material": ["paper", "foam", "steel"]}
+NEWTON = {"id": "E2", "formula": "dT/dt = -k*(T - Tr)", "role": "analyses",
+          "source": "derivation: Newton's law of cooling, as the topic states it",
+          "example": {"inputs": {"T": 80, "Tr": 20, "k": 0.05}, "expected_formula": "-0.05*(80 - 20)"}}
+
+
+def _draft(**protocol: Any) -> dict[str, Any]:
+    draft = copy.deepcopy(HEAT_SINK)
+    draft["study_type"] = "measure"
+    draft["protocol"] = {"oracles": copy.deepcopy(HEAT_SINK["protocol"]["oracles"]), "grid": {"room_temperature_C": [10, 20, 30]},
+                         "metrics": [METRIC_TIME], "model": copy.deepcopy(MODEL), **protocol}
+    return draft
+
+
+def _items_and_plan(prompt: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    blocks = re.findall(r"```json\n(.*?)\n```", prompt, re.DOTALL)
+    return json.loads(blocks[0]), json.loads(blocks[1])
+
+
+class Reader:
+    """The model, in every part it plays: it drafts and audits the plan, lists what the topic asks for, judges what a name
+    match could not find, and rewrites the plan when asked (only what ``adds`` names)."""
+
+    def __init__(self, eng: Any, draft: dict[str, Any], *, adds: set[str] = frozenset(), extraction: dict[str, Any] | None = EXTRACTION,
+                 judge: Any = None) -> None:
+        self.eng, self.draft, self.adds = eng, draft, set(adds)
+        self.extraction = extraction
+        self.judge_override = judge
+        self.prompts: list[str] = []
+        self.asked: list[str] = []
+        self.judged = 0
+        self.extracted = 0
+        self.drafted = False
+        eng.config.topic = TOPIC
+        eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=self.chat)})()
+
+    def _judge(self, prompt: str) -> str:
+        self.judged += 1
+        items, shown = _items_and_plan(prompt)
+        settings = " ".join(shown["settings_swept"]).lower()
+        metrics = " ".join(m["id"] + " " + m["text"] for m in shown["metrics"]).lower()
+        equations = " ".join(e["formula"] for e in shown["equations"])
+        out = []
+        for item in items:
+            name = str(item.get("name") or item.get("text") or "").lower()
+            if self.judge_override is not None:
+                verdict = self.judge_override(item, shown)
+            elif item["kind"] == "factor":
+                verdict = "covered" if name.split()[0] in settings else "missing"
+            elif item["kind"] == "quantity":
+                verdict = "covered" if name.split()[0] in metrics else "missing"
+            else:
+                verdict = "covered" if item["text"].replace(" ", "") in equations.replace(" ", "") else "missing"
+            out.append({"id": item["id"], "verdict": verdict, "where": "", "why": "x"})
+        return json.dumps({"items": out})
+
+    def _rewrite(self, text: str) -> str:
+        def change(design: dict[str, Any]) -> dict[str, Any]:
+            protocol = dict(design["protocol"])
+            if "lid" in self.adds:
+                protocol["grid"] = {**protocol.get("grid", {}), **LID_AXIS}
+            if "heat" in self.adds:
+                protocol["metrics"] = [*protocol.get("metrics", []), METRIC_HEAT]
+            if "newton" in self.adds:
+                model = dict(protocol.get("model") or {})
+                model["equations"] = [*model.get("equations", []), NEWTON]
+                protocol["model"] = model
+            return {**design, "protocol": protocol, "tolerance_changed": True}
+
+        out = plan.edit_design_block(text, change)
+        assert out is not None
+        return out
+
+    async def chat(self, messages: list[dict[str, str]], **kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        self.prompts.append(prompt)
+        if prompt.lstrip().startswith("# What a Research Topic Asks For"):
+            self.extracted += 1
+            if self.extraction is None:
+                raise RuntimeError("no answer")
+            return json.dumps(self.extraction)
+        if prompt.lstrip().startswith("# Is It In The Plan?"):
+            return self._judge(prompt)
+        if "The topic asks for things this plan does not yet include" in prompt:
+            self.asked.append(prompt)
+            return self._rewrite(plan.plan_path(self.eng.quest_root).read_text(encoding="utf-8"))
+        if not self.drafted:
+            self.drafted = True
+            return json.dumps({**self.draft, "plan": EXTRA})
+        return _NO_OBJECTIONS
+
+
+def _stop(eng: Any) -> list[dict[str, Any]]:
+    seen: list[dict[str, Any]] = []
+    eng._pause_for_human = lambda **kw: seen.append(kw) or (_ for _ in ()).throw(Paused("plan"))  # type: ignore[method-assign]
+    return seen
+
+
+def _stored(eng: Any) -> dict[str, Any]:
+    return json.loads((eng.fi_dir / "topic_requirements.json").read_text(encoding="utf-8"))
+
+
+def _plan_text(eng: Any) -> str:
+    return plan.plan_path(eng.quest_root).read_text(encoding="utf-8")
+
+
+# --- the matching that needs no model --------------------------------------------------------------------------------
+
+
+def test_a_setting_that_does_not_cover_the_stated_levels_or_range_is_a_gap_and_a_name_match_settles_the_rest() -> None:
+    req = tr.parse(EXTRACTION)
+    assert req is not None
+    plan_view = tr.view(_draft(grid={"room_temperature_C": [10, 20], "lid_material": ["paper", "foam"]}))
+    gaps, unresolved = tr.match(req, plan_view)
+    by_kind = {(g["kind"], g["name"]) for g in gaps}
+    assert ("level", "room temperature") in by_kind and ("level", "lid material") in by_kind
+    assert "its settings run from 10 to 20, not 10 to 30" in [g["sentence"] for g in gaps if g["name"] == "room temperature"][0]
+    assert "steel" in [g["sentence"] for g in gaps if g["name"] == "lid material"][0]
+    assert unresolved == ["Q2", "M1"], "the heat quantity and the formula need a reader; the rest a name settles"
+    full = tr.view(_draft(grid={"room_temperature_C": [10, 20, 30], **LID_AXIS}, model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    assert tr.match(req, full)[0] == [] and tr.match(req, full)[1] == ["Q2"]
+
+
+def test_a_reply_that_names_nothing_is_no_reading_and_a_search_variable_counts_as_a_setting() -> None:
+    assert tr.parse({"factors": [], "quantities": [], "formulas": []}) is None and tr.parse("x") is None
+    req = tr.parse({"factors": [{"name": "fin spacing", "range": [1, 6], "main": True}]})
+    block = {"objective": {"quantity": "base_temperature"}, "design_variables": [{"name": "fin_spacing", "low": 1.0, "high": 6.0}]}
+    assert tr.match(req, tr.view({"protocol": {"optimisation": block}})) == ([], [])
+
+
+# --- Part 1: what the topic asks for, read once and shown ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_what_the_topic_asks_for_is_read_once_stored_and_shown_in_plain_words(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    kept = _stored(eng)
+    assert [f["name"] for f in kept["factors"]] == ["lid material", "room temperature"]
+    assert kept["factors"][0]["levels"] == ["paper", "foam", "steel"] and kept["factors"][1]["range"] == [10.0, 30.0]
+    assert kept["formulas"][0]["text"] == "dT/dt = -k*(T - Tr)" and "same_model" in kept and "error" not in kept
+    text = _plan_text(eng)
+    assert "## What the topic asks for" in text
+    assert "To vary or compare: lid material (paper, foam, steel)." in text
+    assert "To report: heat lost per minute." in text and "NOT" not in text.split("## What the topic asks for")[1].split("##")[0]
+    assert model.extracted == 1 and model.asked == [], "a plan that has everything is not asked for anything"
+    await eng._cover_the_topic_in_the_plan({})  # a resume does not read the topic again
+    assert model.extracted == 1
+
+
+@pytest.mark.asyncio
+async def test_a_reading_that_could_not_be_had_is_said_and_never_stops_the_quest(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Reader(eng, _draft(), extraction=None)
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    assert "could not read the topic for what it asks for" in _plan_text(eng)
+    seen = _stop(eng)
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [] and "design" in patch
+
+
+# --- Part 2: every requirement maps to something runnable ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_topic_factor_missing_from_the_grid_is_asked_of_the_plan_added_and_runs(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(), adds={"lid", "heat", "newton"})
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    protocol = patch["design"]["protocol"]
+    assert seen == [], "the plan was completed, so nothing stops"
+    assert protocol["grid"]["lid_material"] == ["paper", "foam", "steel"] and protocol["grid"]["room_temperature_C"] == [10, 20, 30]
+    assert [m["id"] for m in protocol["metrics"]] == ["time_to_60_degrees", "heat_lost_per_minute"]
+    assert [e["id"] for e in protocol["model"]["equations"]] == ["E1", "E2"]
+    assert len(model.asked) == 1 and "lid material" in model.asked[0] and "heat lost per minute" in model.asked[0]
+    assert "tolerance_changed" not in _plan_text(eng), "only what was asked is kept from the rewrite"
+    assert "FI asked the plan's model to add what was missing; it is in the plan now" in _plan_text(eng)
+    assert json.loads((eng.fi_dir / "topic_asked.json").read_text(encoding="utf-8"))["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_stated_formula_is_carried_into_the_equations(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT]),
+                   adds={"newton"})
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    equations = [e["formula"] for e in plan.parse(_plan_text(eng)).design["protocol"]["model"]["equations"]]
+    assert "dT/dt = -k*(T - Tr)" in equations
+    assert len(model.asked) == 1 and "states the formula `dT/dt = -k*(T - Tr)`" in model.asked[0]
+
+
+@pytest.mark.asyncio
+async def test_a_formula_the_plan_replaces_and_says_why_is_not_a_gap(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT]),
+                   judge=lambda item, shown: "replaced" if item["kind"] == "formula" else "covered")
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    assert model.asked == [] and "NOT" not in _plan_text(eng).split("## What the topic asks for")[1].split("##")[0]
+
+
+@pytest.mark.asyncio
+async def test_a_main_factor_still_missing_after_the_bound_stops_before_anything_runs(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(), adds=set())  # the plan's model never adds anything
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    with pytest.raises(Paused):
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert 1 <= len(model.asked) <= 2
+    shown = " ".join(seen[0]["steps"])
+    assert "Nothing was run" in shown and "lid material" in shown and "You do not need to write it yourself" in shown
+    assert "heat lost per minute" not in shown, "a secondary item does not stop the quest"
+    assert not (eng.quest_root / "paper.md").exists()
+    asked_before = len(model.asked)
+    with pytest.raises(Paused):  # a resume stops again and asks no more
+        await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert len(model.asked) == asked_before
+    assert "the quest stops before anything runs" in _plan_text(eng)
+
+
+@pytest.mark.asyncio
+async def test_a_secondary_item_still_missing_is_said_in_the_limitations_and_the_quest_goes_on(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    Reader(eng, _draft(), adds={"lid"})  # the main factor is added; the heat and the formula are not
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    seen = _stop(eng)
+    patch = await eng._node_design({"topic": TOPIC, "iteration": 0})
+    assert seen == [] and "lid_material" in patch["design"]["protocol"]["grid"]
+    note = tr.write_note(eng.quest_root)
+    assert "The topic asked for more than this study did" in note and "heat lost per minute" in note
+    assert "Say plainly in the limitations that these were not studied" in note
+    assert tr.write_note(tmp_path / "nowhere") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_that_drops_an_axis_is_caught_and_asked_once(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    redesign = copy.deepcopy(plan.parse(_plan_text(eng)).design)
+    del redesign["protocol"]["grid"]["lid_material"]
+    state = {"topic": TOPIC, "iteration": 1, "design": redesign}
+    # The design step's model puts the axis back when asked.
+    original = model.chat
+
+    async def chat(messages: list[dict[str, str]], **kw: Any) -> str:
+        prompt = messages[-1]["content"]
+        if "The topic asks for things this plan does not yet include" in prompt:
+            model.asked.append(prompt)
+            return json.dumps({**redesign, "protocol": {**redesign["protocol"], "grid": {**redesign["protocol"]["grid"], **LID_AXIS}}})
+        return await original(messages, **kw)
+
+    eng._client = type("Stub", (), {"chat": AsyncMock(side_effect=chat)})()
+    design, _sha = await eng._hold_the_design_to_the_topic(state, redesign, "")
+    assert design["protocol"]["grid"]["lid_material"] == ["paper", "foam", "steel"]
+    assert len(model.asked) == 1 and "lid material" in model.asked[0]
+
+
+@pytest.mark.asyncio
+async def test_a_redesign_that_stays_without_the_axis_stops_before_the_run_and_is_asked_only_once(tmp_path: Path) -> None:
+    eng = _engine(tmp_path, [])
+    model = Reader(eng, _draft(grid={**LID_AXIS, "room_temperature_C": [10, 20, 30]}, metrics=[METRIC_TIME, METRIC_HEAT],
+                               model={**MODEL, "equations": [*MODEL["equations"], NEWTON]}))
+    await eng._node_plan({"topic": TOPIC, "iteration": 0})
+    redesign = copy.deepcopy(plan.parse(_plan_text(eng)).design)
+    del redesign["protocol"]["grid"]["lid_material"]
+    seen = _stop(eng)
+    state = {"topic": TOPIC, "iteration": 1, "design": redesign}
+    for _ in range(2):
+        with pytest.raises(Paused):
+            await eng._hold_the_design_to_the_topic(state, redesign, "")
+    assert len([p for p in model.prompts if "The topic asks for things this plan does not yet include" in p]) == 1
+    assert "lid material" in " ".join(seen[0]["steps"])
