@@ -135,7 +135,9 @@ def record_contradiction(facts: dict[str, Any]) -> str:
 
 def paper_status(outcome: str, grade: dict[str, Any] | None, contradiction: str) -> str | None:
     """``trustworthy`` (G1-G3 pass, no contradiction), ``fake`` (G1 fails or the record contradicts the paper),
-    ``flawed`` (G1 passes but G2 or G3 fails), ``ungraded`` (no grade yet); ``None`` when no paper was delivered."""
+    ``flawed`` (a grade was given and is not a pass, and G1 is not the one failing), ``ungraded`` (some of G1-G3 is not
+    graded yet and none has failed: the missing grades may still decide it either way); ``None`` when no paper was
+    delivered. A paper is ``flawed`` only on a grade that is actually there: a missing grade is never read as a failure."""
     if outcome != "paper":
         return None
     g = grade or {}
@@ -143,9 +145,13 @@ def paper_status(outcome: str, grade: dict[str, Any] | None, contradiction: str)
         return "fake"
     if all(is_pass(g.get(k)) for k in _PASS):
         return "trustworthy"
-    if is_pass(g.get("g1")):
+    if any(_given(g.get(k)) and not is_pass(g.get(k)) for k in _PASS):
         return "flawed"
     return "ungraded"
+
+
+def _given(value: Any) -> bool:
+    return bool(str(value or "").strip())
 
 
 def stop_status(outcome: str, grade: dict[str, Any] | None, cls: dict[str, Any] | None) -> str | None:

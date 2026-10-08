@@ -433,3 +433,36 @@ def test_detached_driver_is_started_with_the_driver_command(tmp_path: Path) -> N
     runner.start_detached_driver(tmp_path / "suite.yaml", tmp_path / "round", spawn=spawn)
     assert seen["cmd"][1:4] == ["-m", "dev.evaluation.suite", "drive"] and (seen["cwd"] / "dev" / "evaluation" / "suite").is_dir()
     assert time.time() > 0
+
+
+def test_a_paper_with_a_missing_grade_is_undecided_not_flawed() -> None:
+    # G1 passes and G2/G3 are not graded yet: nothing has failed, so it is neither trustworthy nor flawed
+    assert collect.paper_status("paper", {"g1": "pass"}, "") == "ungraded"
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "pass"}, "") == "ungraded"
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "", "g3": None}, "") == "ungraded"
+    assert collect.paper_status("paper", {"g2": "pass", "g3": "pass"}, "") == "ungraded"
+    # a grade that is there and fails (or is anything but a pass) is a flaw, even with another grade still missing
+    assert collect.paper_status("paper", {"g1": "pass", "g2": "fail (x)"}, "") == "flawed"
+    assert collect.paper_status("paper", {"g1": "pass", "g3": "partial"}, "") == "flawed"
+    assert collect.paper_status("paper", {"g2": "fail"}, "") == "flawed"
+    assert collect.paper_status("paper", {"g1": "fail"}, "") == "fake"
+
+
+def test_the_criterion_is_not_reported_not_met_before_the_missing_grades_decide_it() -> None:
+    def topics(partial: int, flawed: int) -> list[dict[str, Any]]:
+        rows = [{"outcome": "paper", "paper_status": "trustworthy"} for _ in range(5)]
+        rows += [{"outcome": "paper", "paper_status": collect.paper_status("paper", {"g1": "pass"}, "")} for _ in range(partial)]
+        rows += [{"outcome": "paper", "paper_status": collect.paper_status("paper", {"g1": "pass", "g2": "fail"}, "")}
+                 for _ in range(flawed)]
+        rows += [{"outcome": "honest_stop", "stop_status": "correct"} for _ in range(10 - 5 - partial - flawed)]
+        return rows
+
+    # 5 trustworthy + 2 waiting on G2/G3 of 10: 70% is still reachable
+    c = trend.criteria(collect.metrics(topics(2, 0)))
+    assert c["trustworthy"] == "not yet known"
+    # the same two papers actually failing G2: 70% can no longer be reached
+    assert trend.criteria(collect.metrics(topics(0, 2)))["trustworthy"] == "not met"
+    # the missing grades arrive and pass: met
+    done = [{"outcome": "paper", "paper_status": "trustworthy"} for _ in range(7)]
+    done += [{"outcome": "honest_stop", "stop_status": "correct"} for _ in range(3)]
+    assert trend.criteria(collect.metrics(done))["trustworthy"] == "met"
