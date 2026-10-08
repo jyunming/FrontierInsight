@@ -237,9 +237,54 @@ def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
 _COUNT_NAME = re.compile(r"^(?:(?:n|num|number)_?(?:of_)?)?(?:trials|runs)(?:_per_(?:setting|cell|condition))?$", re.IGNORECASE)
 
 
+_RUNNER_WORDS = ("run_trial", "run_cell", "simulate")
+_RUNNER_KEYWORDS = frozenset({"runs_per_setting", "n_trials", "num_trials", "trials", "n_runs", "num_runs", "runs"})
+
+
+def _mentions(node: ast.AST, name: str) -> bool:
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(node))
+
+
+def _is_length(node: ast.AST) -> bool:
+    """``len(x)``, ``x.shape[0]``, ``x.size``: the number of items something holds."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "len":
+        return True
+    if isinstance(node, ast.Attribute) and node.attr in ("size", "shape"):
+        return True
+    return isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute) and node.value.attr == "shape"
+
+
+def _calls_runner(node: ast.AST) -> bool:
+    for n in ast.walk(node):
+        if isinstance(n, ast.Call):
+            f = n.func.id if isinstance(n.func, ast.Name) else n.func.attr if isinstance(n.func, ast.Attribute) else ""
+            if any(w in f.lower() for w in _RUNNER_WORDS):
+                return True
+    return False
+
+
+def _controls_trial_records(tree: ast.Module, name: str) -> bool:
+    """Whether the constant ``name`` decides how many trial records are produced or expected: the bound of a loop whose body
+    calls the simulation, a length compared with it (an assertion or a check of the records received), or the count passed
+    to a runner by keyword. Used only as the size of a resample, a count of seeds or an inner iteration count, it is not."""
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.For, ast.AsyncFor)) and _mentions(n.iter, name) and any(_calls_runner(b) for b in n.body):
+            return True
+        if isinstance(n, ast.Compare):
+            parts = [n.left, *n.comparators]
+            if any(isinstance(p, ast.Name) and p.id == name for p in parts) and any(_is_length(p) for p in parts):
+                return True
+        if isinstance(n, ast.Call):
+            for kw in n.keywords:
+                if kw.arg and kw.arg.lower() in _RUNNER_KEYWORDS and _mentions(kw.value, name):
+                    return True
+    return False
+
+
 def counts(source: str, script: str, planned: int) -> list[Read]:
     """The module-level whole-number literals in ``source`` that a name saying it counts trials or runs holds, other than
-    ``planned``. Never raises: a script that does not parse has none to report."""
+    ``planned``, and that the script uses to decide how many trial records are produced or expected (see
+    :func:`_controls_trial_records`). Never raises: a script that does not parse has none to report."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError):
@@ -255,7 +300,8 @@ def counts(source: str, script: str, planned: int) -> list[Read]:
         if not (isinstance(value, ast.Constant) and isinstance(value.value, int) and not isinstance(value.value, bool)):
             continue
         for target in targets:
-            if isinstance(target, ast.Name) and _COUNT_NAME.match(target.id) and value.value != planned:
+            if (isinstance(target, ast.Name) and _COUNT_NAME.match(target.id) and value.value != planned
+                    and _controls_trial_records(tree, target.id)):
                 out.append(Read(script=script, line=int(node.lineno), keys=(target.id,), default=str(value.value),
                                 planned=planned))
     return out

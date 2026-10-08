@@ -215,3 +215,20 @@ def test_an_honest_result_is_not_stopped(tmp_path: Path, n: int) -> None:
     result = _honest_results()[n]
     engine, _ = _quest(tmp_path)
     assert engine._no_results_verdict(_stuck_state(retries=1, result=result)) is None
+
+
+def test_a_count_used_only_to_resample_or_for_seeds_is_not_the_trial_count() -> None:
+    from core import grid_keys
+
+    sim = "def run_trial(cell, trial, seed):\n    return {'x': 1.0}\n"
+    protocol = {"runs_per_setting": 1000}
+    resample = ("import numpy as np\nN_TRIALS = 200\nrng = np.random.default_rng(0)\n"
+                "def boot(values):\n    return [rng.choice(values, size=N_TRIALS).mean() for _ in range(N_TRIALS)]\n")
+    assert grid_keys.problems({"experiment.py": resample, "simulate.py": sim}, protocol) == []
+    checked = "N_TRIALS = 200\ndef check(records):\n    assert len(records) == N_TRIALS\n"
+    assert len(grid_keys.problems({"experiment.py": checked, "simulate.py": sim}, protocol)) == 1
+    looped = "N_RUNS = 200\ndef go(cell):\n    return [run_trial(cell, i, i) for i in range(N_RUNS)]\n" \
+             "def go2(cell):\n    out = []\n    for i in range(N_RUNS):\n        out.append(run_trial(cell, i, i))\n"
+    assert len(grid_keys.problems({"experiment.py": looped, "simulate.py": sim}, protocol)) == 1
+    passed = "N_TRIALS = 200\nrunner(runs_per_setting=N_TRIALS)\n"
+    assert len(grid_keys.problems({"experiment.py": passed, "simulate.py": sim}, protocol)) == 1
