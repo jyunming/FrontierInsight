@@ -9585,7 +9585,7 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                     self._log.info("[run_manifest] %s", self._manifest_note)
             found = (row_problems + altered + ([random_run_cell] if random_run_cell else [])
                      + _run_manifest.problems(counted, manifest, result_json=result_json, trial_mode=True,
-                                              recorded=recorded) + not_run
+                                              recorded=recorded, recorded_by_cell=per_cell) + not_run
                      + row_sim)
             derived = _run_manifest.derived_metrics(counted, recorded)
             if derived:
@@ -9602,7 +9602,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                       if self.config.rigor_profile == "research" else [])
             found = found + no_ids
             self._manifest_analysis_problems = (
-                _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True, recorded=recorded)
+                _run_manifest.analysis_output_problems(counted, manifest, result_json, trial_mode=True, recorded=recorded,
+                                                     recorded_by_cell=per_cell)
                 + not_run + no_ids
             )
             return ("differs" if found else "ok"), found

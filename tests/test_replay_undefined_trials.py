@@ -41,6 +41,20 @@ def _recorded() -> dict[str, Counter]:
     return out
 
 
+def _recorded_by_cell() -> dict[str, dict[str, Counter]]:
+    """The same record per setting (the cell key of each setting), as FI keeps it."""
+    out: dict[str, dict[str, Counter]] = {}
+    n = 0
+    for cell in RECORD["cells"]:
+        for name, (defined, undefined) in cell["metrics"].items():
+            counts = out.setdefault(cell["key"], {}).setdefault(name, Counter())
+            for _ in range(defined):
+                n += 1
+                counts[f"{n}.5"] += 1
+            counts["nan"] += undefined
+    return out
+
+
 def _analysis(*, nulls: bool = True, undefined_count: bool = False, keep: float = 1.0) -> dict[str, Any]:
     """The RESULT_JSON the analysis printed: per-setting lists of the metrics the trials returned, the rest as numbers."""
     per_setting: dict[str, Any] = {}
@@ -135,3 +149,54 @@ def test_the_honest_report_is_not_flagged_by_the_upper_bound() -> None:
     assert rm._value_count_findings(PROTOCOL, MANIFEST, _analysis(), trial_mode=True, recorded=recorded) == []
     assert rm._value_count_findings(PROTOCOL, MANIFEST, _analysis(nulls=False, undefined_count=True),
                                     trial_mode=True, recorded=recorded) == []
+
+
+def _findings(analysis: dict[str, Any]) -> list[tuple[str, bool]]:
+    return rm._value_count_findings(PROTOCOL, MANIFEST, analysis, trial_mode=True, recorded=_recorded(),
+                                    recorded_by_cell=_recorded_by_cell())
+
+
+def _pooled_copy(analysis: dict[str, Any], keep: float = 1.0) -> None:
+    """The same lists once more, pooled over the settings, beside the per-setting ones."""
+    for name in ("ler", "lwr"):
+        values: list[Any] = []
+        for entry in analysis["per_setting"].values():
+            values += entry.get(f"{name}_values", [])
+        analysis[f"{name}_values"] = values[: int(len(values) * keep)] if keep < 1 else values
+
+
+def test_per_setting_lists_beside_an_honest_pooled_copy_are_not_flagged() -> None:
+    analysis = _analysis()
+    _pooled_copy(analysis)
+    assert _findings(analysis) == []
+    # and without the per-setting record the totals alone agree too
+    assert rm._value_count_findings(PROTOCOL, MANIFEST, analysis, trial_mode=True, recorded=_recorded()) == []
+
+
+def test_a_half_length_list_copied_to_reach_the_bound_is_still_flagged() -> None:
+    analysis = _analysis(keep=0.5)
+    assert _findings(analysis), "half of the values alone is short"
+    copy = {k: dict(v) for k, v in analysis["per_setting"].items()}
+    analysis["per_setting_again"] = copy  # the same half once more, under another name
+    _pooled_copy(analysis, keep=0.5)  # and a pooled copy of the half
+    found = _findings(analysis)
+    assert found and "accounts for" in found[0][0], found
+    assert all(analysis_fix for _, analysis_fix in found)
+    # the same setting listed twice inside one report counts once
+    twice = _analysis(keep=0.5)
+    twice["per_setting"] = {**twice["per_setting"], **{f"{k} ": v for k, v in twice["per_setting"].items()}}
+    assert _findings(twice)
+
+
+def test_an_inflated_pooled_list_is_flagged_beside_honest_per_setting_ones() -> None:
+    analysis = _analysis()
+    _pooled_copy(analysis)
+    analysis["ler_values"] = analysis["ler_values"] + [1.0] * 5000
+    found = _findings(analysis)
+    assert found and "reports more than that" in found[0][0], found
+    # an inflated list for one setting is held to that setting's own trials
+    analysis = _analysis()
+    first = next(iter(analysis["per_setting"]))
+    analysis["per_setting"][first]["ler_values"] = analysis["per_setting"][first]["ler_values"] + [1.0]
+    found = _findings(analysis)
+    assert found and f"`{first}`" in found[0][0]
