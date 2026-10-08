@@ -24000,7 +24000,8 @@ def _strip_plan_numbers(protocol: dict[str, Any], *, names_only: bool = False) -
             example = eq.pop("example")
             inputs = example.get("inputs") if isinstance(example, dict) else None
             if names_only and isinstance(inputs, dict):
-                eq["example"] = {"input_names": list(inputs)}
+                eq["example"] = {"input_names": list(inputs), **({"random": True} if _equation_tests.is_random(
+                    {**eq, "example": example}) else {})}
     for oracle in protocol.get("oracles") if isinstance(protocol.get("oracles"), list) else []:
         if isinstance(oracle, dict):
             oracle.pop("expected", None)
