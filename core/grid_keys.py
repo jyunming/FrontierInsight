@@ -20,6 +20,12 @@ satisfied by any one of them, so a code that accepts several spellings is flagge
 the study has. The fields of FI's per-cell record itself (``cell``, ``key``, ``metrics`` ...) are not settings. The check
 is conservative: a read with a fallback value of a name that is like none of the study's settings is an optional setting
 the study never sets, and is left alone; a computed key, ``in`` tests, ``**`` spreads and a setting passed on to a function are not followed.
+
+A constant the plan itself defines is not a setting the study lacks. ``cell.get("baseline_rate", 80.0)`` reads a name the grid does
+not have, and its only likeness to the swept ``rate`` is a shared word; when the plan states that very number next to the
+distinguishing words of the name (``a declared baseline rate of 80``), the fallback IS the plan's constant (:func:`plan_defined`)
+and is left alone. A name spelt almost like a swept setting (``rat``) is still a collapsed axis, whatever the plan says. And a repair
+never turns the plan's constant into the swept setting: :func:`substituted` finds that, and a repair that does it is not kept.
 """
 
 from __future__ import annotations
@@ -221,6 +227,15 @@ def _tokens(name: str) -> set[str]:
     return {t for t in re.split(r"[^a-z0-9]+", re.sub(r"(?<=[a-z])(?=[A-Z])", "_", name).lower()) if len(t) >= 3}
 
 
+def _alike(key: str, supplied: list[str] | set[str]) -> bool:
+    """Whether ``key`` is spelt like a supplied name: one contains the other, or they differ by a letter or two. Sharing a
+    word is not enough (``baseline_rate`` and ``rate`` are two quantities)."""
+    low = key.lower()
+    pool = sorted(supplied)
+    return (any((len(s) >= 3 and s.lower() in low) or (len(low) >= 3 and low in s.lower()) for s in pool)
+            or bool(difflib.get_close_matches(key, pool, n=1, cutoff=0.75)))
+
+
 def _near(key: str, supplied: list[str] | set[str]) -> list[str]:
     """The supplied names that look like ``key``: one contains the other, they share a word of three letters or more
     (``rate`` and ``rate_hz``), or they are spelt alike."""
@@ -318,6 +333,129 @@ def _planned_runs(protocol: dict[str, Any] | None) -> int | None:
     return int(runs)
 
 
+_NUMBER = re.compile(r"(?<![\w.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
+_WINDOW = 90
+
+
+def _number(text: str) -> float | None:
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _distinct_words(key: str, supplied: list[str] | set[str]) -> list[str]:
+    """The words of ``key`` that no supplied name has: what makes it another quantity (``baseline`` of
+    ``baseline_rate``, beside ``rate``)."""
+    have: set[str] = set()
+    for name in supplied:
+        have |= _tokens(name)
+    return sorted(_tokens(key) - have)
+
+
+def plan_defined(r: Read, allowed: set[str], plan_text: str) -> bool:
+    """Whether a read with a fixed fallback is the plan's own constant: the fallback is a plain number, no name read is spelt
+    like a setting of the study, and the plan states that same number within a few words of every distinguishing word of one
+    of the names (a word the study's settings do not have). Only then is the fallback the plan's constant and not a
+    swept setting under another name."""
+    if not r.fallback:
+        return False
+    value = _number(r.default)
+    if value is None or not plan_text:
+        return False
+    low = plan_text.lower()
+    for key in r.keys:
+        if _alike(key, allowed):
+            continue
+        words = _distinct_words(key, allowed)
+        if not words:
+            continue
+        for m in _NUMBER.finditer(low):
+            n = _number(m.group(0))
+            if n is None or abs(n - value) > 1e-9 * max(1.0, abs(value)):
+                continue
+            window = low[max(0, m.start() - _WINDOW): m.end() + _WINDOW]
+            if all(w in window for w in words):
+                return True
+    return False
+
+
+def _unwrap(node: ast.AST) -> ast.AST:
+    """``float(x)`` / ``int(x)`` / ``np.float64(x)`` -> ``x`` (one level)."""
+    if isinstance(node, ast.Call) and len(node.args) == 1 and not node.keywords:
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
+        if name in ("float", "int", "float64", "float32", "int64", "abs"):
+            return node.args[0]
+    return node
+
+
+def _setting_assigns(source: str) -> dict[tuple[str, str], tuple[tuple[str, ...], str, int]]:
+    """``{(function, name): (the setting names it reads, the fallback, line)}`` for each ``name = setting.get(...)`` /
+    ``setting["k"]`` assignment (a chain of fallbacks is one read; the fallback is its last default)."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    out: dict[tuple[str, str], tuple[tuple[str, ...], str, int]] = {}
+    for scope, names in _scopes(tree):
+        names = set(names)
+        label = getattr(scope, "name", "<module>")
+        for node in sorted(_own_nodes(scope), key=lambda n: (getattr(n, "lineno", 0), getattr(n, "col_offset", 0))):
+            if isinstance(node, ast.Assign) and _setting_like(node.value, names):
+                names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+                continue
+            if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)):
+                continue
+            keys: list[str] = []
+            cur: ast.AST | None = _unwrap(node.value)
+            default = ""
+            while cur is not None:
+                hit = _read_of(cur, names)
+                if hit is None:
+                    default = _text(cur) if keys else ""
+                    break
+                keys.append(hit[0])
+                cur = _unwrap(hit[1]) if hit[1] is not None else None
+            if keys:
+                out[(label, node.targets[0].id)] = (tuple(dict.fromkeys(keys)), default, int(node.lineno))
+    return out
+
+
+def substituted(old_files: dict[str, str], new_files: dict[str, str], protocol: dict[str, Any] | None,
+                design: dict[str, Any] | None = None) -> list[str]:
+    """What a repair did that it must not: where ``old_files`` read a constant the plan itself defines (a fixed reference
+    value with a fallback, :func:`plan_defined`) into a name, ``new_files`` read a setting the study sweeps into the same
+    name of the same function. The plan's constant is not the swept setting; the fault is the fallback, and it is mended by
+    keeping the constant (read from the plan, or defined once under its own name). One sentence each; empty when none."""
+    from . import typed_constants as _constants
+
+    axes, allowed = supplied_names(protocol, design)
+    if not axes:
+        return []
+    plan_text = _constants.plan_text_of(protocol, design)
+    found: list[str] = []
+    for script, text in old_files.items():
+        if script not in new_files:
+            continue
+        after = _setting_assigns(new_files[script])
+        for (fn, name), (keys, default, line) in _setting_assigns(text).items():
+            if set(keys) & allowed or not plan_defined(Read(script, line, keys, default, fallback=bool(default)), allowed, plan_text):
+                continue
+            new = after.get((fn, name))
+            if new is not None and set(new[0]) & set(axes) and not (set(new[0]) - allowed):
+                found.append(f"{script} line {line}: `{name}` was the plan's constant ({default}) and now reads the swept setting "
+                             + " or ".join(f"`{k}`" for k in new[0]))
+    return found
+
+
+def rejects(old_files: dict[str, str], new_files: dict[str, str], protocol: dict[str, Any] | None,
+            design: dict[str, Any] | None = None) -> str:
+    """Why a repair of these files is not kept (:func:`substituted`), else ``""``."""
+    got = substituted(old_files, new_files, protocol, design)
+    return ("it replaced a constant the plan defines with a setting the study sweeps (" + "; ".join(got[:2]) + ")") if got else ""
+
+
 def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dict[str, Any] | None = None) -> list[Read]:
     """The reads, in ``files`` (``{script name: text}``), of a setting the study does not have, and each number of runs per
     setting a script fixes that the protocol sets otherwise. Nothing about the first when the plan has no grid (there is
@@ -330,10 +468,15 @@ def problems(files: dict[str, str], protocol: dict[str, Any] | None, design: dic
     axes, allowed = supplied_names(protocol, design)
     if not axes:
         return out
+    from . import typed_constants as _constants
+
+    plan_text = _constants.plan_text_of(protocol, design)
     for script, text in files.items():
         for r in reads(text, script):
             if set(r.keys) & allowed:
                 continue
+            if plan_defined(r, allowed, plan_text):
+                continue  # the plan's own constant, with its fallback: not a setting the study lacks
             # A name with a fallback value that is like none of the study's is an optional setting the study never
             # sets, not a misspelt one: only a read that cannot be answered, or one that looks like a study setting
             # spelt another way, is a fault.
@@ -358,7 +501,10 @@ def directive(found: list[Read], protocol: dict[str, Any] | None) -> str:
     if any(r.planned is None for r in found):
         tail.append(
             "A read of a setting that is not there silently gives its default, so every row would carry the same value "
-            "and no error would show. Read each setting by the name the study gives it, with no fallback value")
+            "and no error would show. Read each setting by the name the study gives it, with no fallback value. If the "
+            "name is a fixed value the PLAN itself defines (a reference value, not a setting the study varies), it is not "
+            "a setting: define it once under its own name in the code with the value the plan gives, and never replace it "
+            "with a setting the study sweeps")
     if any(r.planned is not None for r in found):
         tail.append(
             "FI runs the trials the protocol states and hands the analysis every one of them; a number fixed in the code "

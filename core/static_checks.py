@@ -186,6 +186,12 @@ class StaticChecksMixin:
                 "[execute] the rewrite of %s is not the same code with the fault repaired; keeping it as written", script)
             return False
         files = self._static_files()
+        refuse = getattr(module, "rejects", None)
+        why = refuse(files, {**files, script: new_code}, protocol, design) if refuse else ""
+        if why:
+            self._log.warning(  # type: ignore[attr-defined]
+                "[execute] the rewrite of %s is not used: %s; keeping it as written", script, why)
+            return False
         before = len([f for f in module.problems(files, protocol, design) if f.script == script])
         path.write_text(new_code, encoding="utf-8")
         after = len([f for f in module.problems(self._static_files(), protocol, design) if f.script == script])
