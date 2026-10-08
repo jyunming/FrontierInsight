@@ -21,6 +21,7 @@ from typing import Any
 
 from . import grid_keys as _grid_keys
 from . import independent_check as _independent
+from . import typed_constants as _constants
 
 #: How many times, in all, one text of the code is sent back for the checks of this module.
 REPAIRS = 2
@@ -43,7 +44,8 @@ class StaticChecksMixin:
     #: ``note`` is recorded for the evidence and the paper, ``headline`` stops only when the module says a headline
     #: result rests on it (and is a note otherwise).
     def _static_checks(self) -> list[tuple[str, Any, str]]:
-        return [("grid_keys", _grid_keys, "stop"), ("independent_check", _independent, "note")]
+        return [("grid_keys", _grid_keys, "stop"), ("typed_constants", _constants, "headline"),
+                ("independent_check", _independent, "note")]
 
     def _static_files(self) -> dict[str, str]:
         return _grid_keys.code_files(self.quest_root / "code")  # type: ignore[attr-defined]
@@ -71,7 +73,14 @@ class StaticChecksMixin:
 
     def _static_inputs(self, state: Any) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         protocol = self._protocol_block(state)  # type: ignore[attr-defined]
-        design = state.get("design") if isinstance(state.get("design"), dict) else None
+        design = dict(state.get("design")) if isinstance(state.get("design"), dict) else {}
+        # The text the plan's numbers are read from (typed_constants): the plan as written and the topic.
+        try:
+            plan_text = (self.quest_root / "plan.md").read_text(encoding="utf-8")  # type: ignore[attr-defined]
+        except OSError:
+            plan_text = ""
+        topic = str(getattr(self.config, "topic", ""))  # type: ignore[attr-defined]
+        design["_text"] = plan_text + "\n" + topic
         return protocol, design
 
     async def _static_gate(self, state: Any) -> dict[str, Any] | None:
