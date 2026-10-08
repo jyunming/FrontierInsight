@@ -127,3 +127,24 @@ async def test_nothing_is_recorded_when_the_models_answer_is_used_and_an_old_rec
     complete["protocol"]["grid"] = GOOD_GRID
     await eng._complete_drafted_parts({"topic": "t"}, complete, iteration=2)  # a later round reads in full
     assert eng._drafted_parts_note() == ""
+
+
+@pytest.mark.asyncio
+async def test_a_substitution_that_cannot_be_written_down_is_not_run_the_quest_stops(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mixed = json.dumps({"grid": {"axis_a": [1.0, "wide"]}})
+    eng, redesign, _asked = _setup(tmp_path, [mixed, mixed])
+    real_write = Path.write_text
+
+    def failing_write(self: Path, data: str, *a: Any, **kw: Any) -> int:
+        if self.name == "drafted_parts_asked.json" and "substituted" in data:
+            raise PermissionError("disk")
+        return real_write(self, data, *a, **kw)
+
+    monkeypatch.setattr(Path, "write_text", failing_write)
+    out = await eng._complete_drafted_parts({"topic": "t"}, redesign, iteration=1)
+    assert "grid" not in out["protocol"], "the plan's settings were not used: nobody would have been told"
+    record = json.loads((eng.fi_dir / "drafted_parts_asked.json").read_text(encoding="utf-8"))
+    assert "substituted" not in record and eng._drafted_parts_note() == ""
+    with pytest.raises(Paused):
+        eng._stop_if_no_settings_to_vary({"topic": "t"}, out)

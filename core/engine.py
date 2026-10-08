@@ -6037,15 +6037,25 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
                                       "asked; FI used the one in plan.md, which was read and settled at the plan step", part)
                     unread.pop(part)
                     used.append(part)
-        if used:
-            self._record_drafted_parts_substituted(used, iteration)
+        if used and not self._record_drafted_parts_substituted(used, iteration):
+            # A substitution that was not written down would reach neither the quality report nor the writer: it does
+            # not happen. The parts stay as the redesign had them (unread), and the quest stops or goes on as it does
+            # for any part that could not be read.
+            self._log.warning("[design] the plan's own %s was not used for the redesign, because FI could not write down "
+                              "that it was", ", ".join(f"`protocol.{p}`" for p in used))
+            for part in used:
+                if part in base:
+                    protocol[part] = base[part]
+                else:
+                    protocol.pop(part, None)
         return {**design, "protocol": protocol} if protocol != base else design
 
-    def _record_drafted_parts_substituted(self, parts: list[str], iteration: int) -> None:
+    def _record_drafted_parts_substituted(self, parts: list[str], iteration: int) -> bool:
         """Write down, next to the count of asks, which parts of a redesign's protocol FI took from the plan because the
         redesign's own could not be read: the quest then runs what the plan settled, not what the redesign meant. Read back
         by the quality report and by the note the writer receives (:meth:`_drafted_parts_note`), so the paper never describes
-        the redesign's intended settings as what ran. A record that cannot be written is said in the log."""
+        the redesign's intended settings as what ran. Returns False (and says so in the log) when the record cannot be
+        written: the caller then does not substitute."""
         path = self.fi_dir / _DRAFTED_PARTS_ASKED
         try:
             try:
@@ -6061,6 +6071,8 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         except OSError as e:
             self._log.warning("[design] FI could not write down that it used the plan's own %s for the redesign: %r",
                               ", ".join(parts), e)
+            return False
+        return True
 
     def _forget_drafted_parts_substituted(self) -> None:
         """Drop the "used the plan's own" record when the design now running reads in full (it was an earlier round's)."""
