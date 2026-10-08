@@ -116,6 +116,11 @@ def test_other_protocol_parts_written_beside_protocol_are_moved_too() -> None:
     assert sorted(moved) == ["metrics", "runs_per_setting"], "a part the protocol already has stays as the protocol has it"
     assert out["protocol"]["grid"] == {"a": [9]} and out["protocol"]["runs_per_setting"] == 5
     assert "metrics" not in out and design["metrics"] == [{"id": "m"}], "the input is not changed"
+    # every part normalize_protocol reads can be hoisted, and the protocol's own still wins
+    out, moved = plan.hoist_protocol_parts({"hypothesis": "h", "model": {"summary": "s"}, "protocol": {"model": {"summary": "own"}}})
+    assert moved == [] and out["protocol"]["model"] == {"summary": "own"}
+    out, moved = plan.hoist_protocol_parts({"hypothesis": "h", "model": {"summary": "s"}})
+    assert moved == ["model"] and out["protocol"]["model"] == {"summary": "s"} and "model" not in out
     assert plan.hoist_protocol_parts({"hypothesis": "h"}) == ({"hypothesis": "h"}, [])
 
 

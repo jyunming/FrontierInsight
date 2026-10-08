@@ -84,7 +84,7 @@ def _as_list(value: Any) -> list[str]:
 #: block) instead of under it; the plan's readers look only under ``protocol``, so the part read as absent.
 PROTOCOL_PARTS = (
     "optimisation", "grid", "runs_per_setting", "min_runs_per_setting", "numerical_axes", "thresholds", "metrics",
-    "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map",
+    "oracles", "criteria", "precision", "seed_policy", "ci_method", "failure_policy", "acceptance", "topic_map", "model",
 )
 
 
