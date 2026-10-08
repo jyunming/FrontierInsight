@@ -10089,6 +10089,7 @@ class Engine(RunChecksMixin):
         _code_review.save(self.quest_root, record)  # counted before the request: a resume does not ask again
         sources, _partial = _code_review.sources_text(code)
         topic = " ".join(str(state.get("topic") or self.config.topic or "").split())[:1500]
+        values = _pairs.plan_values(protocol if isinstance(protocol, dict) else None)
         plan_text = _code_review.plan_view(design, protocol if isinstance(protocol, dict) else None)
         verdicts: list[dict[str, Any]] | None = None
         logic: list[dict[str, Any]] = []
@@ -10111,13 +10112,13 @@ class Engine(RunChecksMixin):
                     plan=plan_text, code=sources) + again
                 reply = await self._chat(prompt, node=review_node)
                 parsed = _parse_json_lenient(reply, node=review_node)
-                got = _code_review.parse(parsed, left)
+                got = _code_review.parse(parsed, left, values)
                 if again:
                     kept = [v for v in verdicts or [] if v["id"] not in {g["id"] for g in got or []}]
                     verdicts = [*kept, *(got or [])] or None
                 else:
                     verdicts = [*(verdicts or []), *(got or [])] or None
-                logic = _code_review.merge_logic(logic, _code_review.parse_logic(parsed, reqs))
+                logic = _code_review.merge_logic(logic, _code_review.parse_logic(parsed, reqs, values))
                 listed = [*listed, *(c for c in _pairs.checked(parsed.get("checked") if isinstance(parsed, dict) else None)
                                      if c not in listed)]
             if verdicts is None:

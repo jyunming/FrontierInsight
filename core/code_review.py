@@ -13,7 +13,7 @@ what, why, how to fix and how serious): that each ``# E<n>`` function matches it
 factors), that a statistic is computed as the plan defines it, that a quantity the plan says depends on a setting uses that
 setting, that a step the plan's model names is not skipped, that nothing reported is a constant, and that a check's case
 is the plan's. Its findings go to the same repair as a plain directive naming the place and the fault, never a value;
-whatever number a reviewer writes is left out of the directive (:func:`core.review_pairs.without_values`). A high-severity
+whatever value of the plan's checks a reviewer quotes is replaced in the directive (:func:`core.review_pairs.without_values`). A high-severity
 finding that is still there after the repairs never stops the quest on the reviewer's word: where the run's own results can
 tell (a quantity the reviewer calls constant, :func:`constant_in`) they decide; otherwise the paper's limitations say that
 a second model flagged it and it was not resolved.
@@ -136,7 +136,7 @@ def version(code_dir: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def parse(reply: Any, reqs: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+def parse(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = None) -> list[dict[str, Any]] | None:
     """The reader's verdict per requirement the plan has, or ``None`` when the answer names none of them. A requirement it
     does not mention is not judged (and so is never repaired); an id the plan does not have is dropped."""
     items = reply.get("requirements") if isinstance(reply, dict) else None
@@ -155,7 +155,7 @@ def parse(reply: Any, reqs: list[dict[str, Any]]) -> list[dict[str, Any]] | None
         out.append({"id": req["id"], "kind": req["kind"], "text": req["text"], "headline": req["headline"],
                     "name": req.get("name", ""), "status": status, "file": _text(item.get("file"), 80),
                     "line": line if isinstance(line, int) and not isinstance(line, bool) else None,
-                    "note": _text(item.get("note"))})
+                    "note": _pairs.scrub(_text(item.get("note")), values)})
     return out or None
 
 
@@ -191,21 +191,33 @@ def plan_view(design: dict[str, Any] | None, protocol: dict[str, Any] | None) ->
         "checks": [{"name": _text(o.get("name"), 60), "kind": _text(o.get("kind"), 30), "check": _text(o.get("check"), 200),
                     "case": o.get("case"), "measure": _text(o.get("measure"), 160)} for o in _oracle.declared(protocol)],
     }
-    text = json.dumps({k: v for k, v in view.items() if v not in ("", [], {}, None)}, indent=2, default=str)
+    values = _pairs.plan_values(protocol)
+
+    def clean(node: Any) -> Any:
+        """The free text the reader is shown, without the plan's values (it could echo them into a finding)."""
+        if isinstance(node, str):
+            return _pairs.scrub(node, values)
+        if isinstance(node, list):
+            return [clean(x) for x in node]
+        if isinstance(node, dict):
+            return {k: clean(v) for k, v in node.items()}
+        return node
+
+    text = json.dumps(clean({k: v for k, v in view.items() if v not in ("", [], {}, None)}), indent=2, default=str)
     return text if len(text) <= _MAX_PLAN_CHARS else text[:_MAX_PLAN_CHARS] + "\n(the rest of the plan is not shown)"
 
 
-def parse_logic(reply: Any, reqs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def parse_logic(reply: Any, reqs: list[dict[str, Any]], values: list[float] | None = None) -> list[dict[str, Any]]:
     """The problems the reader found in how the code computes what the plan says (``findings`` of its reply), as
     problems like a requirement's: ``{"id": "L1", "kind": "logic", "text", "status": "different", "file", "line", "note",
-    "fix", "severity", "name" (the quantity), "constant", "headline"}``. Every number a reader wrote is left out
-    (:func:`core.review_pairs.without_values`): a finding says what is wrong and where, never what a value should be."""
+    "fix", "severity", "name" (the quantity), "constant", "headline"}``. A value of the plan's checks or equation
+    examples a reader quoted is replaced (:func:`core.review_pairs.without_values`); the other numbers stay."""
     if not isinstance(reply, dict):
         return []
     headline = {_norm(r["name"]) for r in reqs if r.get("headline") and r.get("name")}
     out: list[dict[str, Any]] = []
     for f in _pairs.findings(reply.get("findings"), limit=12):
-        f = _pairs.without_values(f)
+        f = _pairs.without_values(f, values)
         match = _WHERE_RE.search(f["where"])
         quantity = f["quantity"]
         out.append({"id": f"L{len(out) + 1}", "kind": "logic", "text": f["what"], "status": DIFFERENT,

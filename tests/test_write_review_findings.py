@@ -31,13 +31,29 @@ def test_a_finding_says_where_what_why_how_to_fix_and_how_serious() -> None:
     assert not pairs.said_nothing([], [], evidence=True) and not pairs.said_nothing([], [], other_problem=True)
 
 
-def test_a_number_a_reviewer_writes_never_reaches_a_repair() -> None:
-    assert pairs.has_value("it should be 0.25") and pairs.has_value("divide by 2") and pairs.has_value("use 3 steps")
-    assert not pairs.has_value("see line 12 and E3, R2 and x**2 and sqrt(2)")
-    f = pairs.without_values({"where": "simulate.py:9", "what": "the factor is wrong. It should come out at 0.159.",
-                              "why": "the plan divides by the area", "fix": "divide by the area. The value is 3.5."})
-    assert "0.159" not in f["what"] and "3.5" not in f["fix"] and f["fix"] == "divide by the area."
-    assert pairs.without_values({"what": "equals 4", "why": "", "fix": ""})["what"] == "this is not computed as the plan defines it"
+def test_only_the_plans_own_values_are_taken_out_of_what_a_reviewer_says() -> None:
+    values = [0.25, 3.0e-6, 42.0]
+    f = pairs.without_values(
+        {"where": "simulate.py:9", "what": "E2 divides by the wrong length and uses 1 sigma instead of 3 sigma",
+         "why": "the expected value 0.25 (that is 25%, or 2.5e-1) is not reached; see lines 12-14 of R2",
+         "fix": "divide by the cell area, a factor of 2 on line 9; the tolerance 3e-6 is fine"}, values)
+    assert f["what"] == "E2 divides by the wrong length and uses 1 sigma instead of 3 sigma"
+    assert f["why"] == f"the expected value {pairs.PLACEHOLDER} (that is {pairs.PLACEHOLDER}, or {pairs.PLACEHOLDER}) is not reached; see lines 12-14 of R2"
+    assert f["fix"] == f"divide by the cell area, a factor of 2 on line 9; the tolerance {pairs.PLACEHOLDER} is fine"
+    assert pairs.scrub("a result of 0.2500001 and of 4.2e1", values) == f"a result of {pairs.PLACEHOLDER} and of {pairs.PLACEHOLDER}"
+    assert pairs.scrub("E42 on line 42 stays", values) == "E42 on line 42 stays"
+    assert pairs.scrub("anything 0.25", None) == "anything 0.25"
+
+
+def test_the_plans_values_are_its_checks_expected_values_and_tolerances_and_its_examples() -> None:
+    from tests.test_oracle_review import PROTOCOL
+
+    protocol = {**PROTOCOL, "oracles": [{**PROTOCOL["oracles"][0], "expected": 0.123456789, "tolerance": 3e-6,
+                                         "expected_formula": "7.5 * 2"}]}
+    values = pairs.plan_values(protocol)
+    assert 0.123456789 in values and 3e-6 in values and 15.0 in values       # a check and its formula's result
+    assert 2.0 in values and 4.0 in values or 2.0 in values                   # an equation example's input
+    assert 0 not in values and 1 not in values and pairs.plan_values(None) == []
 
 
 # --- the plan's checks -------------------------------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from core import code_review as cr
 from core import review_pairs as pairs
 from tests.test_code_review import DESIGN, PROTOCOL, STATE, _engine
 
+WITH_PLAN = {**STATE, "design": {**DESIGN, "protocol": PROTOCOL}}
 WRONG = "# E1\ndef run_cell(cell):\n    return {'quality': cell['m'] * cell['w'] / cell['length']}\n"
 RIGHT = "# E1\ndef run_cell(cell):\n    return {'quality': cell['m'] * cell['w'] / cell['c']}\n"
 
@@ -45,7 +46,7 @@ class _Logic:
 
 
 NORMALISATION = {"where": "simulate.py:3", "what": "E1 divides by the length where the plan divides by the damping",
-                 "why": "the plan's equation E1 normalises by c", "fix": "divide by cell['c']. The value should come out at 0.5.",
+                 "why": "the plan's equation E1 normalises by c", "fix": "divide by cell['c']. The value should come out at 0.123456789.",
                  "severity": "high"}
 
 
@@ -55,6 +56,11 @@ def test_the_reviewer_is_shown_the_plans_equations_and_cases_but_never_an_expect
     assert data["equations"][0]["formula"] == "Q = m * w / c" and data["settings_varied"] == ["c"]
     assert data["checks"][0]["measure"] == "quality" and data["checks"][0]["case"] == {"c": 0.5}
     assert "0.123456789" not in view and "tolerance" not in view and "expected" not in view
+    # free text the reader sees is scrubbed too, so it cannot echo a value of the plan's checks
+    leaky = {**PROTOCOL, "model": {"summary": "a spring whose result should be 0.123456789",
+                                   "equations": [{"id": "E1", "formula": "Q = m * w / c", "source": "gives 0.123456789 at c=0.5"}]}}
+    shown = cr.plan_view({**DESIGN, "method": "check against 0.123456789 first"}, leaky)
+    assert "0.123456789" not in shown and pairs.PLACEHOLDER in shown and "Q = m * w / c" in shown
 
 
 def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
@@ -64,9 +70,11 @@ def test_findings_are_read_as_problems_of_logic_without_any_value() -> None:
     got = cr.parse_logic(reply, reqs)
     assert [(v["id"], v["kind"], v["file"], v["line"], v["severity"]) for v in got] == [
         ("L1", "logic", "simulate.py", 3, "high"), ("L2", "logic", "experiment.py", 10, "low")]
-    assert got[0]["headline"] is True and got[0]["constant"] is True and "0.5" not in got[0]["fix"]
+    assert cr.parse_logic(reply, reqs, pairs.plan_values(PROTOCOL))[0]["fix"].endswith(pairs.PLACEHOLDER + ".")
+    got = cr.parse_logic(reply, reqs, pairs.plan_values(PROTOCOL))
+    assert got[0]["headline"] is True and got[0]["constant"] is True and "0.123456789" not in got[0]["fix"]
     text = cr.directive(got)
-    assert "E1 divides by the length" in text and "divide by cell['c']" in text and "0.5" not in text
+    assert "E1 divides by the length" in text and "divide by cell['c']" in text and "0.123456789" not in text
     assert "simulate.py, line 3" in text
     assert cr.merge_logic(got, cr.parse_logic(reply, reqs)) == got   # the same finding twice is one
 
@@ -77,18 +85,18 @@ async def test_a_wrong_normalisation_is_sent_to_the_repair_without_a_value_and_i
     (engine.quest_root / "code" / "simulate.py").write_text(WRONG, encoding="utf-8")
     reader = _Logic(NORMALISATION)
     engine._client = reader
-    patch = await engine._code_review_gate(STATE)
+    patch = await engine._code_review_gate(WITH_PLAN)
     assert "0.123456789" not in reader.prompts[0], "the plan's expected value is never shown to the reviewer"
     assert patch is not None and patch["exec_result"]["returncode"] == 1
     said = patch["exec_result"]["stderr_tail"]
     assert "E1 divides by the length" in said and "divide by cell['c']" in said and "simulate.py" in said
-    assert "0.5" not in said and "0.123456789" not in said, "no expected value reaches the repair"
+    assert "0.123456789" not in said and pairs.PLACEHOLDER in said, "no value of the plan's reaches the repair"
     assert patch["exec_result"]["failed_script"] == "simulate.py"
     record = cr.load(engine.quest_root)
     assert [v["kind"] for v in record["problems"]] == ["logic"] and record["send_backs"] == 1
     # The repair changed the code: it is read again and nothing is left.
     (engine.quest_root / "code" / "simulate.py").write_text(RIGHT, encoding="utf-8")
-    assert await engine._code_review_gate(STATE) is None
+    assert await engine._code_review_gate(WITH_PLAN) is None
     assert cr.load(engine.quest_root)["final"] is True and cr.not_computed(engine.quest_root, engine.quest_root / "code") == []
     assert cr.write_note(engine.quest_root, engine.quest_root / "code") == ""
     assert len(reader.prompts) == 2

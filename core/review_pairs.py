@@ -138,28 +138,72 @@ def sentence(f: dict[str, Any]) -> str:
     return f"{where}{f['what'].rstrip('.')}{why}.{fix}"
 
 
-# --- no expected value in a repair ------------------------------------------------------------------------------------
+# --- no value of the plan's in a repair ------------------------------------------------------------------------------------
 
+PLACEHOLDER = "[a value from the plan's checks]"
 _ID_RE = re.compile(r"(?<![A-Za-z_\d])(?:lines?|l|e|r|eq|equation|step)\s*\.?\s*#?\s*\d+(?:\s*[-,]\s*\d+)*(?![A-Za-z_\d.])", re.I)
-#: A power, a root or a multiple of pi names an operation, not a value.
-_OPERATION_RE = re.compile(r"(?:\*\*|\^)\s*[-+]?\d+|sqrt\(\s*\d+\s*\)|\d+\s*\*?\s*pi|pi\s*\*\s*\d+", re.I)
-_NUMBER_RE = re.compile(r"(?<![A-Za-z_\d])\.?\d")
+_TOKEN_RE = re.compile(r"(?<![A-Za-z_\d.])[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?%?")
+#: Compared as numbers, so 0.25, 2.5e-1 and 25% are one value.
+_REL = 1e-6
 
 
-def has_value(text: str) -> bool:
-    """Whether ``text`` carries a number a quantity could be written to equal (not a line number, an id such as E3 or R2,
-    or a power or root): a reviewer who writes "it should be 0.25" is giving an expected value, and that never goes into
-    a repair."""
-    return bool(_NUMBER_RE.search(_OPERATION_RE.sub(" ", _ID_RE.sub(" ", text or ""))))
+def plan_values(protocol: dict[str, Any] | None) -> list[float]:
+    """Every number of the plan that must not reach code-writing: each check's expected value, tolerance and the result of
+    its ``expected_formula``, and each equation example's inputs and computed output. Other numbers (a multiplier, a unit
+    factor, an id, a line) are not among them. 0 and +-1 are left out: they are in every sentence and name no result."""
+    out: list[float] = []
 
+    def add(v: Any) -> None:
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or abs(v) == float("inf"):
+            return
+        if abs(v) not in (0, 1):
+            out.append(float(v))
 
-def _without_value_sentences(text: str) -> str:
-    return " ".join(s for s in re.split(r"(?<=[.;])\s+", text or "") if s and not has_value(s))
+    try:
+        from . import equation_tests as _eqt
+        from . import oracle_check as _oracle
+        from . import oracle_forms as _forms
 
-
-def without_values(f: dict[str, Any]) -> dict[str, Any]:
-    """``f`` with every sentence that carries a number a quantity could equal left out; the finding stays, with the rest
-    of what it says (and, when nothing of ``what`` is left, a pointer to the plan)."""
-    out = {**f, "why": _without_value_sentences(f.get("why", "")), "fix": _without_value_sentences(f.get("fix", ""))}
-    out["what"] = _without_value_sentences(f["what"]) or "this is not computed as the plan defines it"
+        for o in _oracle.declared(protocol if isinstance(protocol, dict) else None):
+            add(_oracle._num(o.get("expected")))
+            add(_oracle._num(o.get("tolerance")))
+            if o.get("expected_formula"):
+                add(_forms.formula_value(o)[0])
+        for row in _eqt.example_rows(protocol if isinstance(protocol, dict) else None):
+            for v in (row.get("inputs") or {}).values():
+                add(v)
+            add(row.get("expected"))
+    except Exception:  # noqa: BLE001 -- a plan that cannot be read gives no values; the reviewer is still told not to write any
+        pass
     return out
+
+
+def scrub(text: str, values: list[float] | None) -> str:
+    """``text`` with every number equal (to a small relative tolerance, in plain, scientific or percent form) to one of
+    ``values`` replaced by :data:`PLACEHOLDER`. Equation ids, line numbers and every other number stay."""
+    if not text or not values:
+        return text
+    protected = [m.span() for m in _ID_RE.finditer(text)]
+
+    def hit(m: re.Match[str]) -> str:
+        if any(a <= m.start() < b for a, b in protected):
+            return m.group(0)
+        raw = m.group(0)
+        try:
+            n = float(raw.rstrip("%"))
+        except ValueError:
+            return raw
+        seen = [n / 100.0, n] if raw.endswith("%") else [n]
+        for v in values:
+            if any(abs(x - v) <= _REL * max(abs(x), abs(v)) for x in seen):
+                return PLACEHOLDER
+        return raw
+
+    return _TOKEN_RE.sub(hit, text)
+
+
+def without_values(f: dict[str, Any], values: list[float] | None) -> dict[str, Any]:
+    """``f`` with the plan's values (:func:`plan_values`) taken out of what it says, so a finding that quotes one cannot
+    carry it into a repair. The finding keeps everything else it says."""
+    return {**f, "what": scrub(f.get("what", ""), values), "why": scrub(f.get("why", ""), values),
+            "fix": scrub(f.get("fix", ""), values)}
