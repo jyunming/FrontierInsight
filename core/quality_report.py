@@ -169,6 +169,7 @@ class _Quest:
         self.function_steps = _dict(_json(fi / "function_steps.json"))
         self.search_asked = _dict(_json(fi / "search_block_asked.json"))
         self.protocol_asked = _dict(_json(fi / "protocol_part_asked.json"))
+        self.pilot = _dict(_json(fi / "pilot_check.json"))
         self.drafted_asked = _dict(_json(fi / "drafted_parts_asked.json"))
         self.design_acted = _list(_json(fi / "design_audit_acted.json"))
         self.pause = _dict(_json(fi / "pause.json"))
@@ -387,11 +388,33 @@ def _run_problems(q: _Quest) -> list[dict[str, str]]:
         out.append(_problem("run", _one((_list(first.get("problems")) or ["the run did not report what the protocol fixed"])[0], 200),
                             "FI's run-record check", "fixed" if last in ("ok", "pass", "not_applicable") else "not fixed",
                             f".fi/audit.jsonl seq {first.get('seq')}"))
+    pilot = q.pilot
+    if _list(pilot.get("problems")):
+        out.append(_problem("run", _one(str(_list(pilot["problems"])[0]), 200), "FI's pilot check",
+                            "fixed" if pilot.get("outcome") == "passed" else "not fixed", ".fi/pilot_check.json"))
     stop = _dict(_json(q.root / ".fi" / "run_manifest_stop.json"))
     if stop and not any(p["found_by"] == "FI's run-record check" for p in out):
         out.append(_problem("run", stop.get("headline") or stop.get("problem") or "the run did not report what the protocol fixed",
                             "FI's run-record check", "not fixed", ".fi/run_manifest_stop.json"))
     return out
+
+
+def _pilot_summary(q: _Quest) -> dict[str, Any] | None:
+    """What the pilot before the full run showed and how many repairs it caused, or ``None`` when no pilot ran."""
+    p = q.pilot
+    if not p or not p.get("outcome"):
+        return None
+    repairs = _int(p.get("repairs"))
+    trials, settings = _int(p.get("trials")), _int(p.get("settings"))
+    read = f"{trials} trial(s) at {settings} setting(s) were read before the full run"
+    if p["outcome"] == "passed":
+        said = f"{read}; nothing was wrong" + (f" once the simulation was repaired" if repairs else "")
+    elif p["outcome"] == "stopped":
+        said = f"{read}; they showed the simulation does not measure what the protocol names, and its repairs did not remove it"
+    else:
+        said = f"{read}; they showed the simulation does not measure what the protocol names, and it was sent back to be repaired"
+    return {"outcome": p["outcome"], "trials": trials, "settings": settings, "repairs": repairs,
+            "problems": [str(x) for x in _list(p.get("problems"))], "says": said}
 
 
 def _analysis_problems(q: _Quest) -> list[dict[str, str]]:
@@ -857,6 +880,7 @@ def build(quest_root: Path | str, *, running: bool | None = None) -> dict[str, A
         "schema": SCHEMA, "written_at": _stamp(time.time()), "run_started_at": _stamp(started), "running": bool(running),
         "quest_id": quest_id, "title": str(q.summary.get("title") or q.config.get("title") or ""),
         "outcome": outcome, "stages": [stages[s] for s in STAGES], "failure": failure, "code": _code_metrics(q),
+        "pilot": _pilot_summary(q),
         "left_out_of_paper": _left_out_of_paper(q),
         "suggestions": _suggestions(q, stages, outcome, failure), "cost": _cost(q), "config": _config(q, stages),
         "problems": {"total": total, "fixed": totals["fixed"], "not_fixed": totals["not_fixed"],
@@ -927,6 +951,9 @@ def render(report: dict[str, Any]) -> str:
                                         "findings)."))
                   + (f" Repairs ended because {code['repairs_stopped']}; {code['repair_rounds']} round(s) and "
                      f"{code['repair_requests']} request(s) were used." if code.get("repairs_stopped") else "")]
+    pilot = report.get("pilot")
+    if pilot:
+        lines += ["", f"Pilot check: {pilot['says']}. Repairs it caused: {pilot['repairs']}."]
     lines += ["", "## Where it failed", ""]
     f = report.get("failure")
     if f:

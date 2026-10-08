@@ -7,6 +7,11 @@
   added up; a study that would not finish is shrunk by the plan's model (fewer runs per setting, fewer or coarser
   settings, with the measured numbers in the request; nothing that decides whether a result is right may change), at most
   twice; one that still would not fit stops the quest plainly with no paper.
+* **The simulation measures what the protocol names** (the same trials, ``RunChecksMixin._pilot_gate``): what the timed trials
+  returned is read before the full run; a metric that is not a number in any pilot trial at any pilot setting (after the
+  settings with few values were tried in every combination), one that never moves while others do, or an output that is the
+  same everywhere goes to the existing repair of the simulation with the exact finding, and what the repairs leave ends in
+  the honest stop in minutes instead of after the study.
 
 They live here and not in ``engine.py`` so the node only calls them. Every method uses the engine's own attributes
 (``quest_root``, ``fi_dir``, ``config``, ``_log``, ``_chat`` ...).
@@ -32,6 +37,11 @@ from . import typed_results as _typed
 TYPED_RESULT_REPAIRS = 2
 TYPED_RECORD = "TYPED_RESULTS_CHECK.json"
 _COUNTER = "typed_results.json"
+
+
+def _one(text: str, limit: int = 400) -> str:
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit - 3] + "..."
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -290,6 +300,8 @@ class RunChecksMixin:
                 return self._sizing_failed(why)
             for p in probes:
                 cached[_estimate.probe_key(p.cell, runs)] = p
+            if (broken := await self._pilot_gate(state, runner, python, env, grid, probes, thresholds, limit_s, budget_s)) is not None:
+                return broken
             est = _estimate.estimate(grid, runs, runner.deterministic, probes)
             if est is None:
                 return None
@@ -321,6 +333,65 @@ class RunChecksMixin:
                     self.quest_root, {**base, "fits": False, "asks": asks, "reduced": reduced})
                 await self._settle_plan_sources(state, protocol=self._draft_protocol(state))  # type: ignore[attr-defined]
         return None
+
+    async def _pilot_gate(self, state: Any, runner: Any, python: Any, env: Any, grid: dict[str, list[Any]],
+                          probes: list[_estimate.Probe], thresholds: dict[str, Any], limit_s: float,
+                          budget_s: float) -> dict[str, Any] | None:
+        """Read what the timed trials returned (:func:`core.run_estimate.pilot`). Nothing wrong: one line in run.log and the
+        record in ``.fi/pilot_check.json`` (which QUALITY.md shows). Something wrong: a failed run for the existing repair of the
+        simulation, with the exact finding (at most ``engine.exec_reflect_max_iterations`` repairs, counted in the record
+        BEFORE the run goes back); what the repairs leave ends in the honest stop. Nobody is asked to debug."""
+        from . import degenerate_results as _degenerate
+
+        protocol = self._protocol_block(state) or {}  # type: ignore[attr-defined]
+        kinds = {str(m.get("id")): str(m.get("kind") or "") for m in protocol.get("metrics") or []
+                 if isinstance(m, dict) and str(m.get("id") or "").strip()}
+        total = sum(len(p.trials) for p in probes)
+        if not total:
+            return None  # nothing came back to read (a timed trial ran past its allowance)
+        _grid, runs, _t = self._grid_and_runs(state)
+        total_trials = _estimate.trial_count(grid, runs, runner.deterministic)
+        allowance = max(60.0, 3.0 * limit_s / max(1, total_trials))
+        result = await _estimate.pilot(
+            self.executor, python, self.quest_root,  # type: ignore[attr-defined]
+            runner.simulate.relative_to(self.quest_root).as_posix(),  # type: ignore[attr-defined]
+            grid, probes, kinds, deterministic=runner.deterministic, budget_s=max(30.0, budget_s / 2.0),
+            allowance_s=allowance, env=env, thresholds=thresholds, exempt=_degenerate.expected_constants(protocol))
+        record = _estimate.read_pilot_record(self.quest_root)  # type: ignore[attr-defined]
+        repairs = int(record.get("repairs") or 0)
+        base = {"trials": result.trials, "settings": result.settings, "metrics_read": result.checked,
+                "not_ruled_out": result.unsure, "at": time.time(), "trial_count_read": total}
+        if result.unsure:
+            self._log.info("[execute] the pilot could not try every combination of the small settings, so it says nothing of "  # type: ignore[attr-defined]
+                           "%s", ", ".join(f"`{n}`" for n in result.unsure))
+        if not result.problems:
+            self._log.info("[execute] the pilot read %d trial(s) at %d setting(s): %d metric(s) of the protocol checked, nothing "  # type: ignore[attr-defined]
+                           "wrong%s", result.trials, result.settings, len(result.checked),
+                           f" (after {repairs} repair(s))" if repairs else "")
+            _estimate.write_pilot_record(self.quest_root, {**base, "outcome": "passed", "repairs": repairs, "problems": []})  # type: ignore[attr-defined]
+            return None
+        says = [p.says for p in result.problems]
+        iters = int(state.get("exec_reflect_iter") or 0)
+        for line in says:
+            self._log.warning("[execute] the pilot found: %s", line)  # type: ignore[attr-defined]
+        if iters < self.config.engine.exec_reflect_max_iterations:  # type: ignore[attr-defined]
+            # Counted BEFORE the run goes back: a quest killed here never repairs more often than it may.
+            _estimate.write_pilot_record(  # type: ignore[attr-defined]
+                self.quest_root, {**base, "outcome": "repairing", "repairs": repairs + 1, "problems": says})
+            print("[FI] a small trial run before the study shows the simulation does not measure what the protocol names; "
+                  "sending it back to be repaired")
+            return self._code_review_failed_run(  # type: ignore[attr-defined]
+                _estimate.directive(result), script=_split_run.SIMULATE_NAME)
+        _estimate.write_pilot_record(  # type: ignore[attr-defined]
+            self.quest_root, {**base, "outcome": "stopped", "repairs": repairs, "problems": says})
+        return self._stop_before_run(  # type: ignore[attr-defined]
+            "a small trial run before the study (" + f"{result.trials} trial(s) at {result.settings} setting(s)) showed: "
+            + "; ".join(says),
+            "cannot_repair",
+            tried=[f"ran {result.trials} trial(s) of the simulation at {result.settings} setting(s) before the full study "
+                   "and read what they returned",
+                   *[_one(s) for s in says[:3]],
+                   f"sent the simulation back to be repaired {iters} time(s) with this named; it still showed it"])
 
     def _design_after_sizing(self, state: Any) -> dict[str, Any] | None:
         """The state's design with the protocol parts the plan's model made smaller, or ``None`` when none were."""
