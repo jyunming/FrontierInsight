@@ -24,10 +24,12 @@ import json
 import shutil
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from core import run_estimate as est
+from core.engine import Engine
 from core import typed_results
 from tests.test_flat_output import SWEEP_ANALYSIS, _quest, _sweep_runner
 
@@ -279,3 +281,240 @@ def test_the_analysis_prompt_has_one_projection_of_the_results(tmp_path: Path, m
     assert f'"{key}": 1.0' not in captured[0] and "RESULT_JSON: {" not in captured[0]
     assert "73.25" in captured[0], "the accepted results are there, once"
     assert "RESULT_JSON line is not repeated here" in captured[0]
+
+
+# ---- the version that runs is the version the checks were made for -----------------------------------------------------
+
+from core import gate_receipt, plot_scope  # noqa: E402
+
+GOOD_PLOTTED = ('import matplotlib.pyplot as plt\n'
+                'def run_cell(cell):\n    return {"output": cell["x"] ** 2}\n'
+                'def plot_result(res):\n'
+                '    plt.plot([1, 2, 3], [4, 5, 6])\n'
+                '    plt.savefig("figures/a.png")\n')
+#: A reply that draws from the results AND changes what the simulation computes.
+BAD_REPLY = GOOD_PLOTTED.replace('cell["x"] ** 2', "999.0").replace('plt.plot([1, 2, 3], [4, 5, 6])', 'plt.plot(res["x"], res["y"])')
+#: A reply that changes only the drawing.
+DRAWING_ONLY_REPLY = GOOD_PLOTTED.replace('plt.plot([1, 2, 3], [4, 5, 6])',
+                                          'import json\n    res = json.load(open("r.json"))\n    plt.plot(res["x"], res["y"])')
+
+
+def test_the_plot_scope_tells_drawing_from_computation() -> None:
+    assert plot_scope.computation_changes(GOOD_PLOTTED, DRAWING_ONLY_REPLY) == []
+    assert plot_scope.computation_changes(GOOD_PLOTTED, BAD_REPLY) == ["function run_cell was changed or removed"]
+    # A script: the lists the drawing reads are plot data, so building them from the results is a drawing change; the line
+    # that prints the results is not.
+    script = ('import json, os\nimport matplotlib.pyplot as plt\nd = json.load(open(os.environ["FI_TRIALS"]))\n'
+              'xs = [1, 2, 3]\nys = [4, 5, 6]\nfig, ax = plt.subplots()\nax.plot(xs, ys)\nfig.savefig("a.png")\n'
+              'print("RESULT_JSON: " + json.dumps({"m": max(d)}))\n')
+    redrawn = script.replace("xs = [1, 2, 3]\nys = [4, 5, 6]\n", "xs = list(range(len(d)))\nys = [c['v'] for c in d]\n")
+    assert plot_scope.computation_changes(script, redrawn) == []
+    assert plot_scope.computation_changes(script, redrawn.replace("max(d)", "5.0"))
+    # Mixed function (computes and draws): the drawing is free, the computation is not.
+    mixed = 'import matplotlib.pyplot as plt\ndef main():\n    e = 2.0 * 3\n    plt.plot([e])\n    plt.savefig("a.png")\n    return e\n'
+    assert plot_scope.computation_changes(mixed, mixed.replace("plt.plot([e])", "plt.plot([e, e, e])")) == []
+    assert plot_scope.computation_changes(mixed, mixed.replace("2.0 * 3", "9.0")) == ["function main was changed or removed"]
+    # Additions are not changes; a rebinding of an existing import is.
+    assert plot_scope.computation_changes(mixed, mixed + "def helper():\n    return 1\n") == []
+    assert plot_scope.computation_changes("import json\nx = 1\n", "import json as j\nx = 1\n")
+    assert plot_scope.computation_changes("x = 1\n", "x = (") == ["the script does not parse"]
+
+
+def _figure_engine(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replies: list[str], files: dict[str, str]):
+    from tests.test_run_checks import _typed_engine
+
+    eng, asked = _typed_engine(tmp_path, monkeypatch, replies)
+    code = eng.quest_root / "code"
+    (code / "simulate.py").unlink(missing_ok=True)
+    for name, text in files.items():
+        target = code / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return eng, asked
+
+
+@pytest.mark.asyncio
+async def test_a_figure_repair_that_also_changes_the_simulation_is_refused_single_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng, asked = _figure_engine(tmp_path, monkeypatch, [json.dumps({"code": BAD_REPLY})], {"simulate.py": GOOD_PLOTTED})
+    path = eng.quest_root / "code" / "simulate.py"
+    used, rewrote = await eng._figures_from_results({})
+    assert rewrote is False and used == Engine._FIGURE_DATA_REPAIRS == len(asked)
+    assert path.read_text(encoding="utf-8") == GOOD_PLOTTED, "the simulation FI checked is the one that stays"
+    log = (eng.fi_dir / "run.log").read_text(encoding="utf-8")
+    assert "also changes what it computes" in log and "run_cell" in log
+
+
+@pytest.mark.asyncio
+async def test_a_figure_repair_that_changes_only_the_drawing_is_kept_single_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    eng, _asked = _figure_engine(tmp_path, monkeypatch, [json.dumps({"code": DRAWING_ONLY_REPLY})], {"simulate.py": GOOD_PLOTTED})
+    used, rewrote = await eng._figures_from_results({})
+    assert (used, rewrote) == (1, True)
+    assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == DRAWING_ONLY_REPLY
+
+
+ANALYSIS_TYPED = ('import json, os\nimport matplotlib.pyplot as plt\n'
+                  'def summarize(values):\n    return sum(values) / len(values)\n'
+                  'def draw():\n    plt.plot([1, 2, 3], [4, 5, 6])\n    plt.savefig("figures/b.png")\n'
+                  'draw()\n')
+SIM_TWO = 'def run_cell(cell):\n    return {"output": cell["x"] ** 2}\n'
+
+
+@pytest.mark.asyncio
+async def test_a_figure_repair_of_the_second_script_that_changes_its_computation_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed = ANALYSIS_TYPED.replace("sum(values) / len(values)", "max(values)").replace(
+        "plt.plot([1, 2, 3], [4, 5, 6])", 'plt.plot(*json.load(open("r.json")))')
+    drawing = ANALYSIS_TYPED.replace("plt.plot([1, 2, 3], [4, 5, 6])", 'plt.plot(*json.load(open("r.json")))')
+    eng, _ = _figure_engine(tmp_path / "a", monkeypatch, [json.dumps({"code": changed})],
+                            {"simulate.py": SIM_TWO, "experiment.py": ANALYSIS_TYPED})
+    used, rewrote = await eng._figures_from_results({})
+    assert rewrote is False and (eng.quest_root / "code" / "experiment.py").read_text(encoding="utf-8") == ANALYSIS_TYPED
+    assert (eng.quest_root / "code" / "simulate.py").read_text(encoding="utf-8") == SIM_TWO
+    eng2, _ = _figure_engine(tmp_path / "b", monkeypatch, [json.dumps({"code": drawing})],
+                             {"simulate.py": SIM_TWO, "experiment.py": ANALYSIS_TYPED})
+    assert await eng2._figures_from_results({}) == (1, True)
+
+
+# ---- the receipt: what changed after the checks is checked again, or the run does not start ----------------------------
+
+PACKAGE = 'def energy(x):\n    return x ** 2\n\ndef label():\n    return "a"\n'
+
+
+def _code(tmp_path: Path) -> Path:
+    root = tmp_path / "quest"
+    (root / "code" / "pkg").mkdir(parents=True)
+    (root / "code" / "simulate.py").write_text(
+        "from pkg.model import energy\ndef run_cell(cell):\n    return {'e': energy(cell['x'])}\n", encoding="utf-8")
+    (root / "code" / "experiment.py").write_text("print('RESULT_JSON: {}')\n", encoding="utf-8")
+    (root / "code" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "code" / "pkg" / "model.py").write_text(PACKAGE, encoding="utf-8")
+    return root
+
+
+def test_the_receipt_sees_a_change_in_any_script_helper_or_package(tmp_path: Path) -> None:
+    root = _code(tmp_path)
+    assert gate_receipt.verdict(root) == gate_receipt.NONE
+    gate_receipt.write(root)
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+    # FI's own files and notes are not the study's code.
+    (root / "code" / "run.py").write_text("print(1)\n", encoding="utf-8")
+    (root / "code" / "README.md").write_text("notes\n", encoding="utf-8")
+    (root / "code" / "__pycache__").mkdir()
+    (root / "code" / "__pycache__" / "x.pyc").write_bytes(b"x")
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+    # A comment in a helper: the same computation, the receipt is renewed.
+    (root / "code" / "pkg" / "model.py").write_text(PACKAGE + "\n# a comment\n", encoding="utf-8")
+    assert gate_receipt.verdict(root) == gate_receipt.DRAWING_ONLY and gate_receipt.verdict(root) == gate_receipt.SAME
+    # Each way the computation can change: the simulation, the second script, the helper, a parameter file.
+    for rel, text in (("simulate.py", "def run_cell(cell):\n    return {'e': 1.0}\n"),
+                      ("experiment.py", "print('RESULT_JSON: {\"a\": 1}')\n"),
+                      ("pkg/model.py", PACKAGE.replace("x ** 2", "x ** 3")),
+                      ("params.json", '{"k": 2}')):
+        gate_receipt.write(root)
+        target = root / "code" / rel
+        before = target.read_text(encoding="utf-8") if target.exists() else None
+        target.write_text(text, encoding="utf-8")
+        assert gate_receipt.verdict(root) == gate_receipt.CHANGED, rel
+        if before is None:
+            target.unlink()
+        else:
+            target.write_text(before, encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_a_computation_change_after_the_checks_makes_them_again_and_a_stop_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.test_run_checks import _typed_engine
+
+    eng, _ = _typed_engine(tmp_path, monkeypatch, ["{}"])
+    root = eng.quest_root
+    shutil.rmtree(root / "code")
+    shutil.copytree(_code(tmp_path / "src") / "code", root / "code")
+    calls: list[str] = []
+    verdict_stop: list[Any] = [None]
+
+    async def gate(state, py, env, seed):  # noqa: ANN001
+        calls.append("gate")
+        return verdict_stop[0], None, True
+
+    monkeypatch.setattr(eng, "_gate_pass", gate)
+    gate_receipt.write(root)
+    # Nothing changed: no second pass.
+    assert await eng._verify_gated_code({}, "py", None, root / "code" / "simulate.py") == (None, None, False)
+    assert calls == []
+    # The helper's computation changed after the checks: the checks are made again, and the receipt follows.
+    (root / "code" / "pkg" / "model.py").write_text(PACKAGE.replace("x ** 2", "999.0 + 0 * x"), encoding="utf-8")
+    assert await eng._verify_gated_code({}, "py", None, root / "code" / "simulate.py") == (None, None, True)
+    assert calls == ["gate"] and gate_receipt.verdict(root) == gate_receipt.SAME
+    # When the second pass stops the quest, the run does not start and the receipt is not renewed.
+    (root / "code" / "pkg" / "model.py").write_text(PACKAGE.replace("x ** 2", "0.5 + 0 * x"), encoding="utf-8")
+    verdict_stop[0] = {"stopped": True}
+    stop, repaired, _ = await eng._verify_gated_code({}, "py", None, root / "code" / "simulate.py")
+    assert stop == {"stopped": True} and repaired is None
+    assert gate_receipt.verdict(root) == gate_receipt.CHANGED
+
+
+@pytest.mark.asyncio
+async def test_a_rewrite_between_the_checks_and_the_run_is_checked_again_in_the_real_node(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole node: the figure step is made to rewrite the simulation's computation after the checks passed (the injected
+    "fixed the figure but changed an equation" reply, here bypassing the refusal); the checks run a second time before
+    anything is run."""
+    from tests import test_engine_callable_simulation as cs
+
+    passes: list[str] = []
+    real_gate = Engine._gate_pass
+
+    async def spying_gate(self, *args, **kwargs):  # noqa: ANN001
+        passes.append((self.quest_root / "code" / "simulate.py").read_text(encoding="utf-8"))
+        return await real_gate(self, *args, **kwargs)
+
+    async def rewriting_figures(self, state):  # noqa: ANN001
+        path = self.quest_root / "code" / "simulate.py"
+        path.write_text(path.read_text(encoding="utf-8").replace("y = 1.0\n", "y = 1.0 + 0.0\n"), encoding="utf-8")
+        return 0, True
+
+    monkeypatch.setattr(Engine, "_gate_pass", spying_gate)
+    monkeypatch.setattr(Engine, "_figures_from_results", rewriting_figures)
+    monkeypatch.setattr("core.engine.LLMClient.chat", cs._fake([], cs.SIMULATE))
+    engine = Engine(cs._cfg(tmp_path))
+    await engine.run()
+    assert len(passes) == 2, "the checks ran before the rewrite and again on the rewritten version"
+    assert "y = 1.0 + 0.0" not in passes[0] and "y = 1.0 + 0.0" in passes[1]
+    assert (engine.fi_dir / "run.log").read_text(encoding="utf-8").count("making the checks again") == 1
+
+
+@pytest.mark.asyncio
+async def test_a_run_nobody_changed_after_its_checks_makes_them_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No cost without cause: with nothing rewritten between the checks and the run, the checks are made once."""
+    from tests import test_engine_callable_simulation as cs
+
+    passes: list[int] = []
+    real_gate = Engine._gate_pass
+
+    async def spying_gate(self, *args, **kwargs):  # noqa: ANN001
+        passes.append(1)
+        return await real_gate(self, *args, **kwargs)
+
+    monkeypatch.setattr(Engine, "_gate_pass", spying_gate)
+    monkeypatch.setattr("core.engine.LLMClient.chat", cs._fake([], cs.SIMULATE))
+    engine = Engine(cs._cfg(tmp_path))
+    await engine.run()
+    assert len(passes) == 1
+    assert "making the checks again" not in (engine.fi_dir / "run.log").read_text(encoding="utf-8")
+
+
+def test_the_node_makes_the_receipt_check_before_the_pilot_and_the_run() -> None:
+    import inspect
+
+    body = inspect.getsource(Engine._node_execute)
+    before_run = body.split("await self._figures_from_results(state)", 1)[1]
+    assert before_run.index("await self._verify_gated_code(") < before_run.index("runner.execute(")
+    assert "_gate_receipt.write(self.quest_root)" in body.split("await self._figures_from_results(state)", 1)[0]

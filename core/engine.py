@@ -106,6 +106,8 @@ from . import receipts as _receipts
 from . import source_text as _source_text
 from . import experiment_deps as _experiment_deps
 from . import figure_data_check as _figdata
+from . import gate_receipt as _gate_receipt
+from . import plot_scope as _plot_scope
 from .run_checks import RunChecksMixin
 from .result_checks import ResultChecksMixin
 from .static_checks import StaticChecksMixin
@@ -9665,6 +9667,13 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
             self._log.warning("[execute] the rewritten %s still draws %d figure series from typed-in numbers; keeping it "
                               "as written", path.name, len(left))
             return False
+        # A figure repair changes how a figure is drawn, never what the study computes: the checks were made on that
+        # computation (core/plot_scope.py). A reply that changed any of it is not used.
+        changed = _plot_scope.computation_changes(code, new_code)
+        if changed:
+            self._log.warning("[execute] the redraw of %s also changes what it computes (%s); keeping it as written",
+                              path.name, "; ".join(changed[:4]))
+            return False
         path.write_text(new_code, encoding="utf-8")
         self._log.info("[execute] rewrote %s so its figures come from the run's results (%d typed-in series left): %s",
                        path.name, len(left), str(parsed.get("patch_summary") or "no summary")[:120])
@@ -14498,6 +14507,73 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         )
         return new_code, sorted({*deps, *new_deps})
 
+    async def _gate_pass(self, state: QuestState, py: Any, exec_env: Any, seed_path: Path) -> tuple[
+            QuestState | None, str | None, bool]:
+        """The checks made on the code before it runs, in order: typed-in results, the cheap static faults, the equations'
+        labels, the code review, one small test per equation, the known-answer (oracle) checks, each repair of one read again by
+        the checks before it. ``(a stop for the quest or None, the script as the oracle gate repaired it or None, whether FI
+        rewrote the code)``. Run once before the sizing and the freeze, and again by :meth:`_verify_gated_code` when the code
+        was changed afterwards."""
+        await self._results_from_computation(state)
+        # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
+        if (static_stop := await self._static_gate(state)) is not None:
+            return static_stop, None, False
+        # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
+        # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
+        stop = self._cannot_repair_stop() or self._code_problems_stop(state)
+        if stop is not None:
+            return stop, None, False
+        # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
+        # function that computes another equation than the plan's is found here, not after the study.
+        await self._code_review_gate(state)
+        failed_equations = await self._equation_gate(state, py, exec_env)
+        if failed_equations is not None:
+            return failed_equations, None, False
+        # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
+        # text is never read twice), before the oracle gate tests it.
+        await self._results_from_computation(state)
+        if (static_stop := await self._static_gate(state)) is not None:
+            return static_stop, None, False
+        before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
+        package_before_gate = self._package_snapshot()
+        oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
+        # FI's own repair: of either script or of the model's package (a script found changed on disk below may be a
+        # person's edit during a stop, so it is not counted here).
+        gate_rewrote = (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (
+            self._package_snapshot() != package_before_gate)
+        gate_repaired = oracle_code is not None or gate_rewrote
+        if gate_rewrote:
+            # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
+            # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
+            # the gate tests the text that will run.
+            oracle_code, unchecked = await self._typed_results_stable(state, py, exec_env, seed_path, oracle_code)
+            if unchecked is not None:
+                return unchecked, None, False
+            stop = self._code_problems_stop(state)
+            if stop is not None:
+                return stop, None, False
+        return None, oracle_code, gate_repaired
+
+    async def _verify_gated_code(self, state: QuestState, py: Any, exec_env: Any, seed_path: Path) -> tuple[
+            QuestState | None, str | None, bool]:
+        """Before the run: the code is the version the checks were made for (core/gate_receipt.py). Only the drawing changed:
+        the receipt is renewed. The computation changed (a rewrite after the checks, a person's edit): the checks are made
+        again on this version, and the run starts only on a version they passed. ``(a stop, the repaired script or None,
+        whether the checks rewrote the code)``."""
+        said = _gate_receipt.verdict(self.quest_root)
+        if said in (_gate_receipt.SAME, _gate_receipt.DRAWING_ONLY):
+            if said == _gate_receipt.DRAWING_ONLY:
+                self._log.info("[execute] only the drawing of the figures changed since the checks: the checks stand")
+            return None, None, False
+        self._log.warning(
+            "[execute] the code that would run is not the version the checks were made for (%s): making the checks again on it "
+            "before it runs", "no record of the checks" if said == _gate_receipt.NONE else "its computation changed")
+        stop, repaired, rewrote = await self._gate_pass(state, py, exec_env, seed_path)
+        if stop is not None:
+            return stop, None, rewrote
+        _gate_receipt.write(self.quest_root)
+        return None, repaired, rewrote
+
     async def _node_execute(self, state: QuestState) -> QuestState:
         # Unconditional tamper check (the re-audit's P1-6): every other frozen-protocol reader
         # (_protocol_of, _run_manifest_problems, the oracle gate) returns early -- skipping
@@ -14781,44 +14857,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # A number the simulation returns must be computed, never typed into its code (core/typed_results.py): sent back
         # to be computed, a bounded number of times, before any check tests the code; what is still typed in is left out.
-        await self._results_from_computation(state)
-        # Cheap faults a person finds in a minute, read before anything runs (core/static_checks.py).
-        if (static_stop := await self._static_gate(state)) is not None:
-            return static_stop
-        # Where the simulation implements each equation the plan's model computes the data with (`# E1`): read before
-        # anything runs, so a stop for it spends nothing and a resume reads the script a person labelled.
-        stop = self._cannot_repair_stop() or self._code_problems_stop(state)
+        stop, oracle_code, gate_repaired = await self._gate_pass(state, py, exec_env, seed_path)
         if stop is not None:
             return stop
-        # One small test per equation of the model, from the plan's own worked example, before anything else runs: a
-        # function that computes another equation than the plan's is found here, not after the study.
-        await self._code_review_gate(state)
-        failed_equations = await self._equation_gate(state, py, exec_env)
-        if failed_equations is not None:
-            return failed_equations
-        # A repair of one equation's function is a new text of the simulation: read again for typed-in results (the same
-        # text is never read twice), before the oracle gate tests it.
-        await self._results_from_computation(state)
-        if (static_stop := await self._static_gate(state)) is not None:
-            return static_stop
-        before_gate = seed_path.read_text(encoding="utf-8") if seed_path.is_file() else ""
-        package_before_gate = self._package_snapshot()
-        oracle_code = await self._oracle_gate(state, py, exec_env, seed_path)
-        # FI's own repair: of either script or of the model's package (a script found changed on disk below may be a
-        # person's edit during a stop, so it is not counted here).
-        gate_rewrote = (seed_path.is_file() and seed_path.read_text(encoding="utf-8") != before_gate) or (
-            self._package_snapshot() != package_before_gate)
-        gate_repaired = oracle_code is not None or gate_rewrote
-        if gate_rewrote:
-            # An oracle repair rewrote the simulation or the model's package: its labels and layout are read again.
-            # ... and the oracle gate's own repair is read for typed-in results too; if that rewrote the simulation again,
-            # the gate tests the text that will run.
-            oracle_code, unchecked = await self._typed_results_stable(state, py, exec_env, seed_path, oracle_code)
-            if unchecked is not None:
-                return unchecked
-            stop = self._code_problems_stop(state)
-            if stop is not None:
-                return stop
         if oracle_code is None and seed_path == code_path and state.get("code"):
             # A repair the gate wrote before an earlier stop (the oracle stop, or the one below) is on disk but never
             # reached the state, and the resumed gate passes without repairing again: the script on disk is what runs,
@@ -14834,6 +14875,9 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         await self._settle_plan_sources(state, protocol=self._draft_protocol(state))
         # An oracle the gate had added to the plan is read by the person before the freeze (pauses.plan: ask).
         self._hold_added_oracles()
+        # The checks passed on this version of the code: the receipt the run is held to (core/gate_receipt.py). A rewrite
+        # after this point that changes what the code computes is checked again before the run, or the run does not start.
+        _gate_receipt.write(self.quest_root)
         # The whole run is timed on a few real trials and made smaller by the plan's model when it would not fit the time
         # allowed (core/run_estimate.py); one that still would not fit stops the quest here, with no paper.
         too_long = await self._size_the_run(state, runner, py, exec_env)
@@ -14851,6 +14895,14 @@ class Engine(RunChecksMixin, StaticChecksMixin, ResultChecksMixin):
         # that will run is read now, with the reading the early call keeps for it (at most code_review.MAX_REVIEWS in a
         # quest). Nothing is repaired here: a repaired version would be one nobody has read.
         await self._code_review_gate(state, final=True)
+        # The version that runs is the version the checks were made for: a figure repair may change only the drawing, and
+        # anything else that changed the computation since the checks (a person's edit, a rewrite) is checked again here.
+        stop, regated, regate_rewrote = await self._verify_gated_code(state, py, exec_env, seed_path)
+        if stop is not None:
+            return stop
+        if regated is not None:
+            oracle_code = regated
+        gate_repaired = gate_repaired or regate_rewrote
 
         # Pilot pass: run the experiment small before running it for real.
         #
