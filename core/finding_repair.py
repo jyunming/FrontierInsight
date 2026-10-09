@@ -25,6 +25,7 @@ Nothing here knows the engine: the model, the test runs and the regression snaps
 from __future__ import annotations
 
 import ast
+import copy
 import json
 import re
 import string
@@ -210,8 +211,11 @@ def splice(source: str, reply: str, scope: set[str] | None = None,
     if added:
         out = out.rstrip("\n") + "\n\n\n" + "\n\n".join(_steps._segment(block_lines, new_funcs[n]).rstrip("\n") + "\n" for n in added)
     have = {ast.dump(n) for n in old_tree.body if isinstance(n, (ast.Import, ast.ImportFrom))}
+    taken: set[str] = set()
+    for n in old_tree.body:
+        taken |= _bound_names(n)
     imports = [_steps._segment(block_lines, n).rstrip("\n") for n in new_tree.body
-               if isinstance(n, (ast.Import, ast.ImportFrom)) and ast.dump(n) not in have]
+               if isinstance(n, (ast.Import, ast.ImportFrom)) and ast.dump(n) not in have and not (_bound_names(n) & taken)]
     if imports:
         out = _steps._with_imports(out, imports)
     try:
@@ -253,6 +257,72 @@ def _def_sources(source: str) -> dict[str, str]:
 
     walk(tree, "")
     return out
+
+
+def _bound_names(node: ast.stmt) -> set[str]:
+    """The names a top-level statement binds."""
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in node.names}
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name}
+    names: set[str] = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            names.add(n.id)
+    return names
+
+
+def _frame(tree: ast.Module) -> list[tuple[str, str]]:
+    """Every statement that is not a function, as ``(where, ast.dump)``: the module's own statements (constants, imports,
+    guards) and those in the body of a class (its header and its class-level assignments); the methods and functions are
+    compared apart (:func:`other_functions_changed`)."""
+    out: list[tuple[str, str]] = []
+
+    def walk(body: list[ast.stmt], where: str) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if isinstance(node, ast.ClassDef):
+                bare = copy.copy(node)
+                bare.body = []
+                header = ast.dump(bare)
+                out.append((where, header))
+                walk(node.body, f"{where}{node.name}.")
+            else:
+                out.append((where, ast.dump(node)))
+
+    walk(tree.body, "")
+    return out
+
+
+def frame_changes(old: str, new: str) -> list[str]:
+    """What a repair changed outside the functions: a module-level or class-level statement of ``old`` that is not in ``new``
+    as it was, or one that ``new`` adds. Allowed additions, which are not listed: a new top-level function or class (a
+    helper), and a new import that binds only names the file did not bind before (it brings a module in, and changes no
+    name that exists). Everything else, a constant given another value included, is a change."""
+    try:
+        before, after = ast.parse(old), ast.parse(new)
+    except SyntaxError:
+        return ["the file does not parse"]
+    taken: set[str] = set()
+    for node in before.body:
+        taken |= _bound_names(node)
+    skip: set[str] = set()  # new classes (with their class-level statements) and new imports that change no name
+    new_classes: set[str] = set()
+    for node in after.body:
+        if isinstance(node, ast.ClassDef) and node.name not in taken:
+            new_classes.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)) and not (_bound_names(node) & taken):
+            skip.add(ast.dump(node))
+    new_frame = [(w, d) for w, d in _frame(after) if d not in skip and w.split(".")[0] not in new_classes
+                 and not any(f"ClassDef(name='{c}'" in d for c in new_classes)]
+    changed = []
+    for item in _frame(before):
+        if item in new_frame:
+            new_frame.remove(item)
+        else:
+            changed.append(item)
+    return [f"{where or 'the module'}: {text[:60]}" for where, text in changed + new_frame]
 
 
 def other_functions_changed(old: str, new: str, allowed: str) -> list[str]:
@@ -487,10 +557,14 @@ async def _attempt(env: Env, issue: dict[str, Any], rel: str, who: str, detail: 
 
         new = _review.parse_files(reply, [rel]).get(rel)
         names, why = [rel], "" if new else "the reply held no whole file"
-        if new and "." in dotted and not dotted.startswith("<"):
+        if new and dotted and not dotted.startswith("<"):
             changed = other_functions_changed(old, new, dotted)
+            outside = frame_changes(old, new)
             if changed:
                 new, why = None, ("it changed " + ", ".join(f"`{n}`" for n in changed[:4])
+                                  + f", which the finding is not about (only `{dotted}` may change)")
+            elif outside:
+                new, why = None, ("it changed " + "; ".join(outside[:3])
                                   + f", which the finding is not about (only `{dotted}` may change)")
     if new is None or not new.strip():
         return False, why or "the reply held no usable code"

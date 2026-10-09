@@ -412,3 +412,51 @@ def test_a_repair_of_a_method_that_alters_another_function_is_rejected_and_one_t
     assert "which the finding is not about (only `Spring.stiffness` may change)" in issue["repairs"][0]["why"]
     text = (run.code / "spring.py").read_text(encoding="utf-8")
     assert "return k * 2" in text and "return c + 1" not in text
+
+
+FRAMED = "import math\n\nTHRESHOLD = 0.5\n\n\n" + METHODS.replace("class Spring:\n", "class Spring:\n    LIMIT = 3\n\n")
+
+
+def test_what_a_repair_changes_outside_the_functions_is_found() -> None:
+    assert fr.frame_changes(FRAMED, FRAMED) == []
+    assert fr.frame_changes(FRAMED, FRAMED.replace("THRESHOLD = 0.5", "THRESHOLD = 0.8"))  # a module constant
+    assert fr.frame_changes(FRAMED, FRAMED.replace("LIMIT = 3", "LIMIT = 4"))  # a class-level assignment
+    assert fr.frame_changes(FRAMED, FRAMED.replace("import math\n", "import cmath\n"))  # an import taken out
+    assert fr.frame_changes(FRAMED, FRAMED + "\nTHRESHOLD2 = 1\n")  # a new top-level statement
+    # Allowed: a new import of a module that binds no name the file has, a new helper function, a new class.
+    assert fr.frame_changes(FRAMED, "import os\n" + FRAMED + "\n\ndef _help(x):\n    return x\n") == []
+    assert fr.frame_changes(FRAMED, FRAMED + "\n\nclass Extra:\n    SIZE = 1\n") == []
+    # Not allowed: an import that rebinds a name the file already has.
+    assert fr.frame_changes(FRAMED, FRAMED + "\nfrom os import path as THRESHOLD\n")
+    assert fr.frame_changes(FRAMED, "import numpy as math\n" + FRAMED.replace("import math\n", ""))
+
+
+def test_a_repair_of_a_method_that_changes_a_module_constant_or_a_class_attribute_is_rejected(tmp_path: Path) -> None:
+    test = "import spring\n\ndef test_s():\n    assert spring.Spring().stiffness(1) == 2, 'doubled'\n"
+    run = Run(tmp_path, [{"id": "F-1", "function": "Spring.stiffness"}], {})
+    (run.code / "spring.py").write_text(FRAMED, encoding="utf-8")
+    fixed = FRAMED.replace("return k\n", "return k * 2\n", 1)
+    bad = ["# file: spring.py\n" + fixed.replace("THRESHOLD = 0.5", "THRESHOLD = 0.8"),
+           "# file: spring.py\n" + fixed.replace("LIMIT = 3", "LIMIT = 4"),
+           "# file: spring.py\n" + fixed.replace("import math\n", "import cmath as math\n")]
+    good = "# file: spring.py\n" + "import os\n" + fixed
+    run.replies = {"code:test": [_block(test)], "code:repair": [_block(b) for b in bad] + [_block(good)]}
+    run.env.other = "the-other"
+    run.replies["other:repair"] = [_block(good)]
+    assert run.go() == ["spring.py"]
+    issue = run.record["issues"]["F-1"]
+    assert [r["outcome"] for r in issue["repairs"]] == ["rejected"] * 3 + ["accepted"]
+    assert all("which the finding is not about" in r["why"] for r in issue["repairs"][:3])
+    text = (run.code / "spring.py").read_text(encoding="utf-8")
+    assert "THRESHOLD = 0.5" in text and "LIMIT = 3" in text and "return k * 2" in text and "import os" in text
+
+
+def test_a_reply_that_changes_a_module_constant_has_it_ignored_when_one_function_is_spliced() -> None:
+    source = "import math\n\nTHRESHOLD = 0.5\n\n\ndef quality(m, w, c):\n    return m * w / c\n"
+    reply = _block("import math\nimport cmath as math\nimport os\n\nTHRESHOLD = 0.8\n\n\n"
+                   "def quality(m, w, c):\n    return m * w / (c + 1)\n")
+    new, names, why = fr.splice(source, reply, {"quality"}, [])
+    assert why == "" and names == ["quality"]
+    assert "THRESHOLD = 0.5" in new and "0.8" not in new, "a statement that is not a function is never applied"
+    assert "import os" in new and "cmath" not in new, "a new module is brought in; an import that rebinds a name is not"
+    assert "(c + 1)" in new
