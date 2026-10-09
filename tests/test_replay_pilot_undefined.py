@@ -118,8 +118,9 @@ def test_the_pilot_reads_the_real_trials_and_names_the_metric_the_settings_and_t
     pilot = est.pilot_problems(_observations(record), _kinds(record), tried_all="; FI also tried every value of every setting")
     found = {p.metric: p for p in pilot.problems}
     assert set(facts.broken) <= set(found) and all(found[m].kind == "undefined" for m in facts.broken)
-    # this simulation also gave the same outcome in every trial for its proportions: found by the stuck-proportion rule
-    assert {p.kind for p in pilot.problems} == {"undefined", "stuck"}
+    # its proportions sit at opposite bounds (one always 1, another always 0): not the stuck-proportion rule, which
+    # needs two at the SAME bound; the record is still sent back for the metric no trial measured
+    assert {p.kind for p in pilot.problems} == {"undefined"}
     first = facts.broken[0]
     text = found[first].says
     assert text.startswith(f"the metric `{first}` was not a number in any of the 8 pilot trials, at any of the 4 settings tried")

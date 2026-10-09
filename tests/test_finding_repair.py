@@ -480,3 +480,11 @@ def test_a_finding_that_names_no_function_may_change_one_function_and_only_the_v
     assert "does not speak of" in repairs[1]["why"]
     text = (run.code / "spring.py").read_text(encoding="utf-8")
     assert "SCALE = 3.0" in text and "OFFSET = 1.0" in text and "return x\n" in text
+
+
+def test_only_code_names_of_a_finding_count_never_the_plain_words_of_its_prose() -> None:
+    issue = {"quantity": "SCALE", "function": "", "wordings": [
+        "the simulation data is missing and the value of `OFFSET` is wrong; max_dose is unused, see E5"]}
+    names = fr.issue_names(issue)
+    assert {"SCALE", "OFFSET", "max_dose", "E5"} <= names
+    assert not names & {"data", "is", "the", "value", "missing", "simulation"}

@@ -345,10 +345,19 @@ def frame_altered(old: str, new: str) -> list[tuple[str, set[str]]]:
 
 
 def issue_names(issue: dict[str, Any]) -> set[str]:
-    """The identifiers a finding speaks of: its quantity and the code names in its wording."""
-    text = " ".join(str(issue.get(k) or "") for k in ("quantity", "function", "headline", "summary", "detail", "claim"))
-    text += " " + " ".join(str(w) for w in issue.get("wordings") or [])
-    return set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text))
+    """The code names a finding speaks of: its quantity and function, the parts of a dotted name, and in its wording only
+    what reads as a name in code (quoted in backticks, or with an underscore or a digit in it), never a plain word such
+    as "data" or "value" that the prose happens to use."""
+    names: set[str] = set()
+    for key in ("quantity", "function"):
+        names |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(issue.get(key) or "")))
+    texts = [str(issue.get(k) or "") for k in ("headline", "summary", "detail", "claim")]
+    texts += [str(w) for w in issue.get("wordings") or []]
+    for text in texts:
+        for quoted in re.findall(r"`([^`]+)`", text):
+            names |= set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", quoted))
+        names |= {w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", text) if "_" in w.strip("_") or re.search(r"\d", w)}
+    return names
 
 
 def other_functions_changed(old: str, new: str, allowed: str) -> list[str]:

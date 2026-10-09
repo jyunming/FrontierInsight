@@ -525,6 +525,10 @@ def pilot_problems(obs: list[tuple[dict[str, Any], dict[str, float]]], kinds: di
             if (len(own) >= MIN_STUCK_TRIALS and _setting_count(own_obs) >= MIN_STUCK_SETTINGS
                     and all(_finite(x) for x in own) and (all(float(x) == 0.0 for x in own) or all(float(x) == 1.0 for x in own))):
                 stuck.append((name, float(own[0]), own_obs))
+    # Only proportions stuck at the SAME bound count together: one at 1 beside its complement at 0 (a success and a
+    # failure fraction) is what a deterministic study gives, not a sign that the simulated object is degenerate.
+    by_bound = {b: [t for t in stuck if t[1] == b] for b in (0.0, 1.0)}
+    stuck = max(by_bound.values(), key=len)
     if len(stuck) >= 2:
         names = ", ".join(f"`{n}`" for n, _b, _o in stuck)
         for name, bound, own_obs in stuck:

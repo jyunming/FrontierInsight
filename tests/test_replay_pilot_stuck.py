@@ -63,12 +63,14 @@ def test_one_proportion_at_a_bound_is_never_a_finding_and_nor_is_an_expected_con
     obs = _observations(record)
     kinds = _kinds(record)
     stuck = [p.metric for p in est.pilot_problems(obs, kinds).problems if p.kind == "stuck"]
-    # leave only one of them stuck: the others are sampled
+    # leave only one of them stuck at each bound: the rare event `_sampled` keeps at 0, and one other at 1
     one = _sampled(record)
+    rare = next(m for m in _proportions(record) if any(m in t for c in one["cells"] for t in c["trials"]))
+    other = next(m for m in stuck if m != rare)
     for c in one["cells"]:
         for t in c["trials"]:
-            if stuck[0] in t:
-                t[stuck[0]] = 0.0
+            if other in t:
+                t[other] = 1.0
     assert [p for p in est.pilot_problems(_observations(one), kinds).problems if p.kind == "stuck"] == []
     # all stuck, but the plan expects them all to stay put
     exempt = est.pilot_problems(obs, kinds, exempt=set(stuck))
@@ -92,6 +94,21 @@ def test_proportions_at_opposite_bounds_that_only_flip_between_settings_are_not_
     pilot = est.pilot_problems(obs, {"x": "mean", "p": "proportion", "q": "proportion"})
     assert pilot.problems == []
 
+
+
+def test_a_proportion_at_one_beside_its_complement_at_zero_is_not_a_finding() -> None:
+    """A deterministic study: a success fraction always 1 and its failure fraction always 0 are two proportions, but
+    at opposite bounds; only proportions stuck at the SAME bound count together."""
+    obs = []
+    for a in (1, 2, 3):
+        for t in range(2):
+            obs.append(({"a": a}, {"x": float(a) + 0.1 * t, "ok": 1.0, "fail": 0.0}))
+    pilot = est.pilot_problems(obs, {"x": "mean", "ok": "proportion", "fail": "proportion"})
+    assert [p for p in pilot.problems if p.kind == "stuck"] == []
+    # two at the same bound still are
+    obs2 = [(c, {**v, "fail2": 0.0}) for c, v in obs]
+    pilot2 = est.pilot_problems(obs2, {"x": "mean", "ok": "proportion", "fail": "proportion", "fail2": "proportion"})
+    assert sorted(p.metric for p in pilot2.problems if p.kind == "stuck") == ["fail", "fail2"]
 
 @pytest.mark.asyncio
 async def test_the_engine_sends_the_real_record_back_and_lets_the_sampled_one_go_on(tmp_path: Path) -> None:
