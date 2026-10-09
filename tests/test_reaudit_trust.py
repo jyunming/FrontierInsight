@@ -593,6 +593,54 @@ def test_a_literal_naming_a_missing_file_is_ignored(tmp_path: Path) -> None:
     assert gate_receipt.verdict(root) == gate_receipt.SAME
 
 
+def _script_body(root: Path, body: str) -> None:
+    (root / "code" / "simulate.py").write_text(
+        "from pkg.model import energy\n" + body +
+        "def run_cell(cell):\n    return {'e': energy(cell['x'])}\n", encoding="utf-8")
+
+
+def test_a_file_the_code_writes_is_an_output_and_a_rerun_does_not_change_the_version(tmp_path: Path) -> None:
+    root = _code(tmp_path)
+    _script_body(root, "import pandas as pd\npd.DataFrame({'a': [1]}).to_csv('output.csv')\n")
+    (root / "output.csv").write_text("a\n1\n", encoding="utf-8")
+    gate_receipt.write(root)
+    (root / "output.csv").write_text("a\n9\n", encoding="utf-8")  # what the next run leaves behind
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+    assert "output.csv" not in gate_receipt.fingerprint(root)["files"]
+
+
+def test_a_file_the_code_opens_for_writing_is_an_output(tmp_path: Path) -> None:
+    root = _code(tmp_path)
+    _script_body(root, 'with open("data/clean.csv", "w") as handle:\n    handle.write("x,y\\n")\n')
+    (root / "data").mkdir()
+    (root / "data" / "clean.csv").write_text("x,y\n1,2\n", encoding="utf-8")
+    gate_receipt.write(root)
+    (root / "data" / "clean.csv").write_text("x,y\n3,4\n", encoding="utf-8")
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+
+
+def test_a_parameter_file_in_a_binary_format_the_code_loads_is_part_of_the_checked_version(tmp_path: Path) -> None:
+    root = _code(tmp_path)
+    _script_body(root, 'import pickle\nMODEL = pickle.load(open("inputs/model.pkl", "rb"))\n')
+    (root / "inputs").mkdir()
+    (root / "inputs" / "model.pkl").write_bytes(b"\x80\x04one")
+    gate_receipt.write(root)
+    assert gate_receipt.verdict(root) == gate_receipt.SAME
+    (root / "inputs" / "model.pkl").write_bytes(b"\x80\x04two")
+    assert gate_receipt.verdict(root) == gate_receipt.CHANGED
+    assert "inputs/model.pkl" in gate_receipt.fingerprint(root)["files"]
+
+
+def test_a_file_the_code_both_reads_and_writes_is_an_input(tmp_path: Path) -> None:
+    root = _code(tmp_path)
+    _script_body(root, 'import json\nSTATE = json.load(open("state.json"))\n'
+                       'json.dump(STATE, open("state.json", "w"))\n')
+    (root / "state.json").write_text('{"n": 1}', encoding="utf-8")
+    gate_receipt.write(root)
+    (root / "state.json").write_text('{"n": 2}', encoding="utf-8")
+    assert gate_receipt.verdict(root) == gate_receipt.CHANGED
+
+
 def test_the_node_makes_the_receipt_check_before_the_pilot_and_the_run() -> None:
     import inspect
 

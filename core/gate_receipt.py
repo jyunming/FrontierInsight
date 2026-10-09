@@ -28,10 +28,12 @@ RECEIPT = Path(".fi") / "gate_receipt.json"
 GENERATED = frozenset({"web_plots.py", "replot_figures.py", "replot_figures.json", "replot_layout.py", "run.py", "submit.py",
                        "fi_search.py", "study.json"})
 SKIPPED_DIRS = ("__pycache__", ".git", ".pytest_cache")
-#: File types a script can name by a literal path. A literal counts only when it resolves to an existing file.
-REFERENCE_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".csv", ".txt", ".npy", ".npz", ".py", ".ini", ".cfg")
 #: Folders under quest_root that hold outputs and records, not inputs: a literal naming them is not part of the version.
 OUTPUT_DIRS = (".fi", "raw", "data/results", "figures", "paper")
+#: Calls whose first path argument is written to (a table, array, figure, json or image writer).
+WRITE_CALLS = frozenset({"to_csv", "to_json", "to_parquet", "to_excel", "to_pickle", "to_hdf", "savefig", "save", "savez",
+                         "savez_compressed", "savetxt", "dump", "write_text", "write_bytes", "imwrite", "imsave"})
+WRITE_KEYWORDS = ("path_or_buf", "fname", "file")
 
 
 def _files(code: Path) -> list[Path]:
@@ -45,11 +47,58 @@ def _files(code: Path) -> list[Path]:
     return out
 
 
+def _call_name(func: ast.expr) -> str | None:
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return None
+
+
+def _keyword(call: ast.Call, names: tuple[str, ...]) -> ast.expr | None:
+    for kw in call.keywords:
+        if kw.arg in names:
+            return kw.value
+    return None
+
+
+def _is_text(node: ast.expr | None) -> bool:
+    return isinstance(node, ast.Constant) and isinstance(node.value, str)
+
+
+def _write_targets(tree: ast.AST) -> set[int]:
+    """ids of the string constants a script uses as the file it writes to: the path of ``open(..., "w"/"a"/"x")``, the
+    first path argument of a writer call, and the ``Path("...")`` whose ``write_text``/``write_bytes`` is called."""
+    targets: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node.func)
+        if name == "open" and isinstance(node.func, ast.Name):
+            mode = node.args[1] if len(node.args) > 1 else _keyword(node, ("mode",))
+            path = node.args[0] if node.args else None
+            if isinstance(mode, ast.Constant) and isinstance(mode.value, str) and any(c in mode.value for c in "wax") \
+                    and _is_text(path):
+                targets.add(id(path))
+        elif name in WRITE_CALLS:
+            path = node.args[0] if node.args else _keyword(node, WRITE_KEYWORDS)
+            if _is_text(path):
+                targets.add(id(path))
+        if name in ("write_text", "write_bytes") and isinstance(node.func, ast.Attribute):
+            recv = node.func.value
+            if isinstance(recv, ast.Call) and _call_name(recv.func) == "Path" and recv.args and _is_text(recv.args[0]):
+                targets.add(id(recv.args[0]))
+    return targets
+
+
 def _referenced(code: Path, root: Path) -> dict[str, Path]:
-    """Files outside ``code/`` (inside ``root``) that a script names by a literal path, keyed by their path relative to
-    ``root``. The scripts are read with :mod:`ast`, never run. Outputs and records are left out."""
+    """Files outside ``code/`` (inside ``root``) that a script reads by a literal path, keyed by their path relative to
+    ``root``. The scripts are read with :mod:`ast`, never run. A literal used only as a write target is an output and is
+    left out, as are outputs and records (``OUTPUT_DIRS``) and a literal that names no existing file. Any other use of a
+    literal (a read, or a use that cannot be told apart) keeps it."""
     code_r, root_r = code.resolve(), root.resolve()
     found: dict[str, Path] = {}
+    literals: set[str] = set()
     for script in _files(code):
         if script.suffix != ".py":
             continue
@@ -57,24 +106,25 @@ def _referenced(code: Path, root: Path) -> dict[str, Path]:
             tree = ast.parse(script.read_bytes().decode("utf-8", errors="replace"))
         except (OSError, SyntaxError, ValueError):
             continue
+        writes = _write_targets(tree)
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            if _is_text(node) and id(node) not in writes:
+                literals.add(node.value.strip())
+    for literal in sorted(literals):
+        if not literal or len(literal) > 512 or "\0" in literal:
+            continue
+        for base in (code_r, root_r):
+            try:
+                target = (base / literal).resolve()
+                if target.is_relative_to(code_r) or not target.is_relative_to(root_r) or not target.is_file():
+                    continue  # a code file is hashed already; anything outside quest_root is not ours to check
+                rel = target.relative_to(root_r).as_posix()
+            except (OSError, ValueError):
                 continue
-            literal = node.value.strip()
-            if not literal or len(literal) > 512 or "\0" in literal or not literal.lower().endswith(REFERENCE_SUFFIXES):
+            if any(rel == d or rel.startswith(d + "/") for d in OUTPUT_DIRS) \
+                    or any(part in SKIPPED_DIRS for part in rel.split("/")):
                 continue
-            for base in (code_r, root_r):
-                try:
-                    target = (base / literal).resolve()
-                    if target.is_relative_to(code_r) or not target.is_relative_to(root_r) or not target.is_file():
-                        continue  # a code file is hashed already; anything outside quest_root is not ours to check
-                    rel = target.relative_to(root_r).as_posix()
-                except (OSError, ValueError):
-                    continue
-                if any(rel == d or rel.startswith(d + "/") for d in OUTPUT_DIRS) \
-                        or any(part in SKIPPED_DIRS for part in rel.split("/")):
-                    continue
-                found.setdefault(rel, target)
+            found.setdefault(rel, target)
     return found
 
 
