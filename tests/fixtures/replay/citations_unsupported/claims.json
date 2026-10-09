@@ -1,0 +1,118 @@
+{
+  "claims": [
+    {
+      "claim": "parameter bias and spread increase significantly with noise",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "Ea bias increases from 1.76 J/mol (noise 0.001, n=10) to -89.70 J/mol (noise 0.1, n=10), and spread increases from 22.2 to 4824.8 J/mol across settings as seen in accuracy_vs_noise.png."
+    },
+    {
+      "claim": "Ea spread reaching 4824.8 J/mol at a 0.1 noise ratio for n=5",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_num_time_points:5] ... at noise 0.1, the mean absolute error (spread) for n=5 is 4824.8 J/mol"
+    },
+    {
+      "claim": "the operational 95% confidence interval coverage remains remarkably stable and consistent with the 0.95 target across all tested settings",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "Across all noise ratios (0.001 to 0.1) and sampling densities (n=5 to 20), the operational coverage for Ea and ln A remained consistent with the 0.95 target, with Wilson intervals typically containing 0.95."
+    },
+    {
+      "claim": "temperature dependence of k is typically described by the Arrhenius equation: k = A exp(-Ea / RT) [1]",
+      "basis": "unsupported",
+      "citation_index": 1,
+      "quote": "",
+      "evidence": "The source text for [1] discusses the relationship between reaction speed and electrical conductivity in German; it does not state the Arrhenius equation."
+    },
+    {
+      "claim": "recovery of Ea often involves linearizing the Arrhenius equation into ln k = ln A - (Ea/R)(1/T) [2]",
+      "basis": "unsupported",
+      "citation_index": 2,
+      "quote": "",
+      "evidence": "The source text for [2] is only a table of contents and does not contain the linearized Arrhenius equation."
+    },
+    {
+      "claim": "linearization can introduce bias or misrepresent uncertainty if not handled carefully [3]",
+      "basis": "citation",
+      "citation_index": 3,
+      "quote": "It is because the linearization and the inverse transformation to the original space in the linear least square method that give rise to the uncertainty.",
+      "evidence": "The source explicitly links linearization to uncertainty in non-linear model prediction."
+    },
+    {
+      "claim": "the operational 95% coverage for both Ea and ln A remained consistent with the 0.95 target across all noise ratios and sampling densities",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "Across all noise ratios (0.001 to 0.1) and sampling densities (n=5 to 20), the operational coverage for Ea and ln A remained consistent with the 0.95 target"
+    },
+    {
+      "claim": "For n=10 and σ/c₀ = 0.001, the Ea bias was negligible at 1.76 J/mol (95% CI -0.12 to 3.64)",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_noise_ratio:0.001] Ea recovery exhibits negligible bias; for n=10, the bias is 1.76 J/mol (95% CI -0.12 to 3.64, n=1200)."
+    },
+    {
+      "claim": "At σ/c₀ = 0.1 and n=10, the bias increased to −89.70 J/mol (95% CI −272.23 to 92.83)",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_noise_ratio:0.1] Ea bias increases in magnitude (e.g., -89.70 J/mol for n=10, 95% CI -272.23 to 92.83, n=1200)"
+    },
+    {
+      "claim": "the spread (mean absolute error) for Ea at a noise ratio of 0.1 was 4824.8 J/mol for n=5, decreasing to 2236.4 J/mol for n=20",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_num_time_points:5] ... at noise 0.1, the mean absolute error (spread) for n=5 is 4824.8 J/mol ... vs 2236.4 J/mol for n=20"
+    },
+    {
+      "claim": "very strong positive correlation between recovered Ea and ln A, consistently measured at approximately 0.999 across all settings",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_noise_ratio:all] A very strong positive correlation exists between recovered Ea and ln A, consistently measured at approximately 0.999 across all settings."
+    },
+    {
+      "claim": "relative bias in k remained uniform across the temperature range for any given noise level",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_temperature_K:all] Relative bias in k increases with noise ratio but remains uniform across the temperature range"
+    },
+    {
+      "claim": "For n=10 at σ/c₀ = 0.1, the relative k bias ranged from 0.0078 to 0.0163 across the five temperatures",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "[by_temperature_K:all] ... at noise 0.1 (n=10), relative k bias ranges from 0.0078 to 0.0163 across the five temperatures."
+    },
+    {
+      "claim": "the weighting scheme effectively accounts for the variance introduced by noise in the first-stage nonlinear fit",
+      "basis": "experiment",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "The finding that operational coverage remained consistent with 0.95 even as noise ratios increased supports the conclusion that the weighting (inverse variance of ln k) captured the increased uncertainty."
+    },
+    {
+      "claim": "By using a two-stage approach... the method avoids some of the bias issues associated with the direct linearization of concentration data mentioned in prior work [3]",
+      "basis": "unsupported",
+      "citation_index": null,
+      "quote": "",
+      "evidence": "The study demonstrates its own results, but the evidence block contains no comparison trials using 'direct linearization of concentration data' to prove it avoids those specific bias issues."
+    }
+  ],
+  "summary": "The paper is exceptionally well-grounded regarding its internal experimental results; every numerical value and trend reported for bias, spread, correlation, and coverage is directly traced to the evidence block. However, it is poorly grounded in its basic theoretical citations: the fundamental Arrhenius equation and its linearization are attributed to sources [1] and [2], but the provided text for those sources does not contain the equations. The claim that the method 'avoids' bias compared to direct linearization is an inference and lacks a corresponding comparative baseline in the results.",
+  "total": 15,
+  "grounded": 12,
+  "unsupported": [
+    "temperature dependence of k is typically described by the Arrhenius equation: k = A exp(-Ea / RT) [1]",
+    "recovery of Ea often involves linearizing the Arrhenius equation into ln k = ln A - (Ea/R)(1/T) [2]",
+    "By using a two-stage approach... the method avoids some of the bias issues associated with the direct linearization of concentration data mentioned in prior work [3]"
+  ],
+  "status": "ok"
+}
